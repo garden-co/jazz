@@ -60,6 +60,7 @@ impl Transport for QueueTransport {
 }
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     if std::env::var("JAZZ_SMOKE").is_ok() {
         smoke();
         return;

@@ -20,6 +20,7 @@ use support::{emit_json_line, insert_node_metrics, phase_fields, reset_phase_cou
 const TABLE: &str = "items";
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     let config = Config::from_env();
     let mut bench = ValidationBench::new(config);
     bench.seed();

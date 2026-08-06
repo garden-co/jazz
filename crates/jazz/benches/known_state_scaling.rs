@@ -22,6 +22,7 @@ use support::{csv_usizes, emit_json_line, env_usize, phase_fields};
 const TABLE: &str = "documents";
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     let rows = env_usize("JAZZ_KNOWN_STATE_ROWS", 1_000).max(1);
     let coverage_percentages = csv_usizes("JAZZ_KNOWN_STATE_COVERAGE", "0,25,50,75,100");
     assert!(

@@ -210,12 +210,17 @@ fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
+fn guarded_benches(c: &mut Criterion) {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
+    bench_native_storage(c);
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .sample_size(10)
         .warm_up_time(Duration::from_millis(500))
         .measurement_time(Duration::from_secs(3));
-    targets = bench_native_storage
+    targets = guarded_benches
 }
 criterion_main!(benches);

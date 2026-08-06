@@ -3,7 +3,11 @@ use crate::ids::{NodeUuid, SchemaVersionId};
 use crate::schema::ColumnSchema;
 use crate::time::{GlobalSeq, TxTime};
 use crate::tx::Snapshot;
+use groove::db::Database;
+use groove::ivm::MAX_COLLECT_BY_TREE_DEPTH;
 use groove::records::ValueType;
+use groove::schema::DatabaseSchema;
+use groove::storage::MemoryStorage;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -614,6 +618,173 @@ impl SourceResolver for FakeSourceResolver {
             deletion_register,
         })
     }
+}
+
+/// Executes lowered collector terminals against inline source rows. This stays
+/// at the compiler boundary because the current public result-tree receiver
+/// still intentionally consumes relation-edge facts; the structured carrier
+/// is explicitly out of scope for this change.
+struct InlineCollectorResolver {
+    requests: Vec<SourceRequest>,
+    denied_child_title: Option<&'static str>,
+}
+
+impl InlineCollectorResolver {
+    fn new(denied_child_title: Option<&'static str>) -> Self {
+        Self {
+            requests: Vec::new(),
+            denied_child_title,
+        }
+    }
+}
+
+impl SourceResolver for InlineCollectorResolver {
+    fn resolve_source(
+        &mut self,
+        request: &SourceRequest,
+    ) -> Result<ResolvedSource, SourceResolutionError> {
+        self.requests.push(request.clone());
+        let descriptor = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            (
+                "user_title",
+                ValueType::Nullable(Box::new(ValueType::String)),
+            ),
+            ("user_todo", ValueType::Nullable(Box::new(ValueType::Uuid))),
+        ]);
+        let parent = row(0xd1).0;
+        let rows = match request.source.table.as_str() {
+            "todos" => vec![
+                descriptor
+                    .create(&[
+                        Value::Uuid(parent),
+                        Value::Nullable(Some(Box::new(Value::String("parent".to_owned())))),
+                        Value::Nullable(None),
+                    ])
+                    .expect("inline parent"),
+            ],
+            "todo_tags" => [(0xd2, "allowed"), (0xd3, "denied")]
+                .into_iter()
+                .filter(|(_, title)| {
+                    !matches!(
+                        (&request.authorization, self.denied_child_title),
+                        (SourceAuthorizationRequest::PolicyFiltered { .. }, Some(denied))
+                            if denied == "*" || *title == denied
+                    )
+                })
+                .map(|(id, title)| {
+                    descriptor
+                        .create(&[
+                            Value::Uuid(row(id).0),
+                            Value::Nullable(Some(Box::new(Value::String(title.to_owned())))),
+                            Value::Nullable(Some(Box::new(Value::Uuid(parent)))),
+                        ])
+                        .expect("inline child")
+                })
+                .collect(),
+            "todo_labels" => vec![
+                descriptor
+                    .create(&[
+                        Value::Uuid(row(0xd4).0),
+                        Value::Nullable(Some(Box::new(Value::String("label".to_owned())))),
+                        Value::Nullable(Some(Box::new(Value::Uuid(parent)))),
+                    ])
+                    .expect("inline sibling child"),
+            ],
+            "tag_notes" => vec![
+                descriptor
+                    .create(&[
+                        Value::Uuid(row(0xd5).0),
+                        Value::Nullable(Some(Box::new(Value::String("note".to_owned())))),
+                        Value::Nullable(Some(Box::new(Value::Uuid(row(0xd2).0)))),
+                    ])
+                    .expect("inline grandchild"),
+            ],
+            other => panic!("unexpected inline collector source {other}"),
+        };
+        Ok(ResolvedSource {
+            table_schema: TableSchema::new(
+                request.source.table.clone(),
+                [
+                    ColumnSchema::new("title", ColumnType::String),
+                    ColumnSchema::new("todo", ColumnType::Nullable(Box::new(ColumnType::Uuid))),
+                ],
+            ),
+            graph: GraphBuilder::inline_records(descriptor.clone(), rows),
+            row_shape: SourceRowShape {
+                source: request.source.clone(),
+                descriptor,
+                row_uuid_field: "row_uuid".to_owned(),
+                metadata: BTreeMap::new(),
+            },
+            routing_fields: BTreeSet::new(),
+            content_version: None,
+            deletion_register: None,
+        })
+    }
+}
+
+fn app_path_projection(
+    owner: SourceId,
+    child: SourceId,
+    field: &str,
+    children: Vec<AppPathProjection>,
+) -> AppPathProjection {
+    AppPathProjection {
+        path: ProgramPathId { owner, child },
+        field: field.to_owned(),
+        cardinality: PathCardinality::Many,
+        fields: FieldProjection::Fields(BTreeSet::from(["title".to_owned()])),
+        children,
+        hole_policy: PathHolePolicy::KeepParentWithHoles,
+        large_values: Vec::new(),
+    }
+}
+
+fn collector_path_projection(children: Vec<AppPathProjection>) -> AppProjectionTree {
+    let parent_source = source("todos", SourceRole::Root);
+    let child_source = source("todo_tags", SourceRole::CorrelatedChild("tags".to_owned()));
+    AppProjectionTree {
+        fields: FieldProjection::All,
+        paths: vec![app_path_projection(
+            parent_source,
+            child_source,
+            "tags",
+            children,
+        )],
+    }
+}
+
+fn clear_path_fields(paths: &mut [AppPathProjection]) {
+    for path in paths {
+        path.fields = FieldProjection::Fields(BTreeSet::new());
+        clear_path_fields(&mut path.children);
+    }
+}
+
+fn collector_request(policy: PolicyContext) -> QueryProgramRequest {
+    let mut request = correlated_path_request(
+        CorrelationRequirement::Optional,
+        row_set_output(BTreeSet::new()),
+    );
+    request.policy = policy;
+    request
+        .output
+        .app_rows
+        .as_mut()
+        .expect("app rows")
+        .projection = PayloadProjection::Tree(collector_path_projection(Vec::new()));
+    request
+}
+
+fn run_collector_graph(graph: GraphBuilder) -> Vec<(Vec<Value>, i64)> {
+    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
+        .expect("inline collector database");
+    database
+        .query_graph(graph)
+        .expect("execute collector graph")
+        .to_values()
+        .expect("decode collector rows")
 }
 
 /// Internal lowering tests are kept here because the required behavior is
@@ -1836,6 +2007,274 @@ fn correlated_path_optional_app_rows_materialize_parent_rows() {
             .any(|terminal| matches!(terminal, OutputTerminalSchema::AppRows(_)))
     );
     assert_eq!(terminals.len(), 1);
+}
+
+#[test]
+fn collector_tree_projects_authorized_child_rows_and_keeps_empty_optional_slots() {
+    // Internal execution test: public result-tree delivery still deliberately
+    // consumes relation-edge facts, so the new collector terminal is only
+    // observable at the compiler/Groove boundary until the later carrier cut.
+    let request = collector_request(policy_context());
+    let mut resolver = InlineCollectorResolver::new(Some("denied"));
+    let program = lower_query_program(request, &mut resolver).expect("collector lowers");
+    let terminal = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "app_rows")
+        .expect("app rows collector");
+    assert!(matches!(terminal.graph, GraphBuilder::CollectBy { .. }));
+    assert!(resolver.requests.iter().any(|request| {
+        request.source.table == "todo_tags"
+            && matches!(
+                request.authorization,
+                SourceAuthorizationRequest::PolicyFiltered { .. }
+            )
+            && matches!(
+                &request.requirements.app_fields,
+                FieldRequirement::Fields(fields) if fields.contains("title")
+            )
+    }));
+
+    let rows = run_collector_graph(terminal.graph.clone());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1, 1);
+    let Value::Array(tags) = &rows[0].0[3] else {
+        panic!("collector must render the named tags slot");
+    };
+    assert_eq!(tags.len(), 1, "denied child must not reach the tree");
+    let Value::Record(tag) = &tags[0] else {
+        panic!("tags slot must contain child records");
+    };
+    assert_eq!(
+        tag.to_values().expect("child values")[1],
+        Value::Nullable(Some(Box::new(Value::String("allowed".to_owned()))))
+    );
+
+    let empty_request = collector_request(policy_context());
+    let mut empty_resolver = InlineCollectorResolver::new(Some("*"));
+    let program =
+        lower_query_program(empty_request, &mut empty_resolver).expect("empty collector lowers");
+    let terminal = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "app_rows")
+        .expect("empty app rows collector");
+    let rows = run_collector_graph(terminal.graph.clone());
+    assert_eq!(rows.len(), 1, "the childless parent must remain");
+    let Value::Array(tags) = &rows[0].0[3] else {
+        panic!("collector must render the named tags slot");
+    };
+    assert!(tags.is_empty(), "childless parent must render tags: []");
+}
+
+#[test]
+fn collector_tree_keeps_sibling_slots_distinct_and_nests_grandchildren_by_path() {
+    // Internal execution test for the terminal descriptor: the public tree
+    // receiver has not been switched to this carrier in this PR.
+    let mut request = collector_request(system_policy_context());
+    let parent = source("todos", SourceRole::Root);
+    let tags = source("todo_tags", SourceRole::CorrelatedChild("tags".to_owned()));
+    let labels = source(
+        "todo_labels",
+        SourceRole::CorrelatedChild("labels".to_owned()),
+    );
+    let notes = source("tag_notes", SourceRole::CorrelatedChild("notes".to_owned()));
+    let sibling_node = RowSetNodeId("labels".to_owned());
+    let nested_node = RowSetNodeId("notes".to_owned());
+    let sibling_path = RowSetNodeId("labels_path".to_owned());
+    let nested_path = RowSetNodeId("notes_path".to_owned());
+    request.reads.primary.sources.insert(
+        labels.clone(),
+        requested_current_source(DurabilityTier::Global),
+    );
+    request.reads.primary.sources.insert(
+        notes.clone(),
+        requested_current_source(DurabilityTier::Global),
+    );
+    request.input.shape.nodes.insert(
+        sibling_node.clone(),
+        RowSetExpr::Source {
+            source: labels.clone(),
+            visibility: RowVisibility::Visible,
+        },
+    );
+    request.input.shape.nodes.insert(
+        sibling_path,
+        RowSetExpr::CorrelatedPathProjection {
+            input: RowSetNodeId("parent".to_owned()),
+            child_input: sibling_node,
+            path: ProgramPathId {
+                owner: parent.clone(),
+                child: labels.clone(),
+            },
+            correlation: PredicateExpr::Compare {
+                left: NormalizedValueRef::RowId(RowIdRef::Source(parent.clone())),
+                op: ComparisonOp::Eq,
+                right: NormalizedValueRef::SourceField {
+                    source: labels.clone(),
+                    field: "todo".to_owned(),
+                },
+            },
+            requirement: CorrelationRequirement::Optional,
+        },
+    );
+    request.input.shape.nodes.insert(
+        nested_node.clone(),
+        RowSetExpr::Source {
+            source: notes.clone(),
+            visibility: RowVisibility::Visible,
+        },
+    );
+    request.input.shape.nodes.insert(
+        nested_path,
+        RowSetExpr::CorrelatedPathProjection {
+            input: RowSetNodeId("child".to_owned()),
+            child_input: nested_node,
+            path: ProgramPathId {
+                owner: tags.clone(),
+                child: notes.clone(),
+            },
+            correlation: PredicateExpr::Compare {
+                left: NormalizedValueRef::RowId(RowIdRef::Source(tags.clone())),
+                op: ComparisonOp::Eq,
+                right: NormalizedValueRef::SourceField {
+                    source: notes.clone(),
+                    field: "todo".to_owned(),
+                },
+            },
+            requirement: CorrelationRequirement::Optional,
+        },
+    );
+    request
+        .output
+        .app_rows
+        .as_mut()
+        .expect("app rows")
+        .projection = PayloadProjection::Tree(AppProjectionTree {
+        fields: FieldProjection::All,
+        paths: vec![
+            app_path_projection(
+                parent.clone(),
+                tags.clone(),
+                "tags",
+                vec![app_path_projection(tags, notes, "notes", Vec::new())],
+            ),
+            app_path_projection(parent, labels, "labels", Vec::new()),
+        ],
+    });
+
+    let program = lower_query_program(request, &mut InlineCollectorResolver::new(None))
+        .expect("nested collector lowers");
+    let graph = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "app_rows")
+        .expect("app collector")
+        .graph
+        .clone();
+    let rows = run_collector_graph(graph);
+    let Value::Array(tags) = &rows[0].0[3] else {
+        panic!("expected tags slot");
+    };
+    let Value::Array(labels) = &rows[0].0[4] else {
+        panic!("expected sibling labels slot");
+    };
+    assert_eq!(tags.len(), 2);
+    assert_eq!(labels.len(), 1);
+    let Value::Record(tag) = &tags[0] else {
+        panic!("expected tag record");
+    };
+    let Value::Array(notes) = &tag.to_values().expect("tag values")[2] else {
+        panic!("expected nested notes slot");
+    };
+    assert_eq!(notes.len(), 1);
+}
+
+#[test]
+fn collector_tree_depth_limit_is_a_lowering_diagnostic() {
+    let mut request = collector_request(system_policy_context());
+    let mut owner = source("todo_tags", SourceRole::CorrelatedChild("tags".to_owned()));
+    let mut parent_node = RowSetNodeId("child".to_owned());
+    let mut nested_projection = Vec::new();
+    for depth in (0..MAX_COLLECT_BY_TREE_DEPTH).rev() {
+        let child = source(
+            &format!("depth_{depth}"),
+            SourceRole::CorrelatedChild(format!("depth_{depth}")),
+        );
+        nested_projection = vec![app_path_projection(
+            owner.clone(),
+            child.clone(),
+            &format!("depth_{depth}"),
+            nested_projection,
+        )];
+        owner = child;
+    }
+    // Rebuild in forward order so the normalized relation graph has every
+    // nested path, while the projection reaches depth 17 (root + 16 children).
+    owner = source("todo_tags", SourceRole::CorrelatedChild("tags".to_owned()));
+    for depth in 0..MAX_COLLECT_BY_TREE_DEPTH {
+        let child = source(
+            &format!("depth_{depth}"),
+            SourceRole::CorrelatedChild(format!("depth_{depth}")),
+        );
+        let child_node = RowSetNodeId(format!("depth_{depth}_source"));
+        request.input.shape.nodes.insert(
+            child_node.clone(),
+            RowSetExpr::Source {
+                source: child.clone(),
+                visibility: RowVisibility::Visible,
+            },
+        );
+        request.input.shape.nodes.insert(
+            RowSetNodeId(format!("depth_{depth}_path")),
+            RowSetExpr::CorrelatedPathProjection {
+                input: parent_node.clone(),
+                child_input: child_node.clone(),
+                path: ProgramPathId {
+                    owner: owner.clone(),
+                    child: child.clone(),
+                },
+                correlation: PredicateExpr::Compare {
+                    left: NormalizedValueRef::RowId(RowIdRef::Source(owner.clone())),
+                    op: ComparisonOp::Eq,
+                    right: NormalizedValueRef::SourceField {
+                        source: child.clone(),
+                        field: "todo".to_owned(),
+                    },
+                },
+                requirement: CorrelationRequirement::Optional,
+            },
+        );
+        request.reads.primary.sources.insert(
+            child.clone(),
+            requested_current_source(DurabilityTier::Global),
+        );
+        owner = child;
+        parent_node = child_node;
+    }
+    let mut projection = collector_path_projection(nested_projection);
+    clear_path_fields(&mut projection.paths);
+    request
+        .output
+        .app_rows
+        .as_mut()
+        .expect("app rows")
+        .projection = PayloadProjection::Tree(projection);
+
+    let err = lower_query_program(request, &mut FakeSourceResolver::default())
+        .expect_err("over-depth collector must fail during lowering");
+    assert!(
+        matches!(
+            err.gaps.as_slice(),
+            [UnsupportedReason::Operator(message)]
+                if message.contains("association projection depth")
+                    && message.contains("MAX_COLLECT_BY_TREE_DEPTH")
+        ),
+        "unexpected lowering error: {err:?}"
+    );
 }
 
 #[test]

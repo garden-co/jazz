@@ -1,0 +1,9 @@
+[package]
+name = "jazz-benchmark-guard"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Shared precondition for trustworthy Jazz benchmark and receipt measurements."
+
+[lib]
+path = "src/lib.rs"

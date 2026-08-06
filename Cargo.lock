@@ -1407,6 +1407,7 @@ dependencies = [
  "bytes",
  "hdrhistogram",
  "internment",
+ "jazz-benchmark-guard",
  "opfs-btree",
  "paste",
  "postcard",
@@ -1950,6 +1951,7 @@ dependencies = [
  "hex",
  "insta",
  "internment",
+ "jazz-benchmark-guard",
  "jsonschema",
  "jsonwebtoken",
  "libc",
@@ -1988,6 +1990,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-benchmark-guard"
+version = "0.1.0"
+
+[[package]]
 name = "jazz-napi"
 version = "0.1.0"
 dependencies = [
@@ -2016,6 +2022,7 @@ dependencies = [
  "diamond-types",
  "hdrhistogram",
  "jazz",
+ "jazz-benchmark-guard",
  "libc",
  "postcard",
  "pprof",
@@ -2778,6 +2785,7 @@ name = "opfs-btree"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "jazz-benchmark-guard",
  "js-sys",
  "rustc-hash",
  "serde",

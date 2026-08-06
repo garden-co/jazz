@@ -242,6 +242,9 @@ pub struct CollectByBuilder {
     pub parent_fields: Vec<CollectByField>,
     pub child_fields: Vec<CollectByField>,
     pub collection_field: String,
+    /// Recursive collect-mode slots.  Empty preserves the original one-slot
+    /// `collect_by` shape.
+    pub slots: Vec<CollectBySlotBuilder>,
     /// Flat output projection used by [`CollectByMode::Expand`].
     pub tuple_fields: Vec<CollectByField>,
     /// Ordered source-row identity fields used by [`CollectByMode::Expand`].
@@ -250,6 +253,62 @@ pub struct CollectByBuilder {
     pub tie_cols: Vec<FieldRef>,
     pub offset: u64,
     pub limit: TopByLimit,
+}
+
+/// Public descriptor for one named child array of a tree `CollectBy`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CollectBySlotBuilder {
+    /// Source fields identifying the parent record that owns this slot.
+    pub group_cols: Vec<FieldRef>,
+    pub child_fields: Vec<CollectByField>,
+    pub collection_field: String,
+    pub slots: Vec<CollectBySlotBuilder>,
+    pub order_cols: Vec<TopByOrder>,
+    pub tie_cols: Vec<FieldRef>,
+    /// Optional boolean input field marking records that contribute a real
+    /// child to this slot. This lets callers retain parent anchor records for
+    /// empty collections without treating the anchor as a null child.
+    pub presence_col: Option<FieldRef>,
+    pub offset: u64,
+    pub limit: TopByLimit,
+}
+
+/// Descriptor recursion is bounded independently of Jazz's wire receiver:
+/// Groove validates executable graph shape before it can allocate runtime
+/// state, whereas the v4 receiver validates untrusted decoded bytes.
+pub const MAX_COLLECT_BY_TREE_DEPTH: usize = 16;
+
+impl CollectBySlotBuilder {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        group_cols: impl IntoIterator<Item = impl Into<String>>,
+        child_fields: impl IntoIterator<Item = CollectByField>,
+        collection_field: impl Into<String>,
+        slots: impl IntoIterator<Item = CollectBySlotBuilder>,
+        order_cols: impl IntoIterator<Item = TopByOrder>,
+        tie_cols: impl IntoIterator<Item = impl Into<String>>,
+        offset: u64,
+        limit: TopByLimit,
+    ) -> Self {
+        Self {
+            group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
+            child_fields: child_fields.into_iter().collect(),
+            collection_field: collection_field.into(),
+            slots: slots.into_iter().collect(),
+            order_cols: order_cols.into_iter().collect(),
+            tie_cols: tie_cols.into_iter().map(FieldRef::name).collect(),
+            presence_col: None,
+            offset,
+            limit,
+        }
+    }
+
+    /// Require a true boolean marker before an input record contributes to
+    /// this slot. Unmarked records still may serve as parent anchors.
+    pub fn with_presence_col(mut self, presence_col: impl Into<String>) -> Self {
+        self.presence_col = Some(FieldRef::name(presence_col));
+        self
+    }
 }
 
 /// Field reference carried by graph builders.
@@ -492,12 +551,40 @@ impl GraphBuilder {
                 parent_fields: parent_fields.into_iter().collect(),
                 child_fields: child_fields.into_iter().collect(),
                 collection_field: collection_field.into(),
+                slots: Vec::new(),
                 tuple_fields: Vec::new(),
                 occurrence_id_cols: Vec::new(),
                 order_cols: order_cols.into_iter().collect(),
                 tie_cols: tie_cols.into_iter().map(FieldRef::name).collect(),
                 offset,
                 limit,
+            }),
+        }
+    }
+
+    /// Render one parent with a recursive tree of named child arrays.
+    #[allow(clippy::too_many_arguments)]
+    pub fn collect_by_tree(
+        input: GraphBuilder,
+        group_cols: impl IntoIterator<Item = impl Into<String>>,
+        parent_fields: impl IntoIterator<Item = CollectByField>,
+        slots: impl IntoIterator<Item = CollectBySlotBuilder>,
+    ) -> Self {
+        Self::CollectBy {
+            input: Box::new(input),
+            collect: Box::new(CollectByBuilder {
+                mode: CollectByMode::Collect,
+                group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
+                parent_fields: parent_fields.into_iter().collect(),
+                child_fields: Vec::new(),
+                collection_field: String::new(),
+                slots: slots.into_iter().collect(),
+                tuple_fields: Vec::new(),
+                occurrence_id_cols: Vec::new(),
+                order_cols: Vec::new(),
+                tie_cols: Vec::new(),
+                offset: 0,
+                limit: TopByLimit::Finite(0),
             }),
         }
     }
@@ -527,6 +614,7 @@ impl GraphBuilder {
                 parent_fields: Vec::new(),
                 child_fields: Vec::new(),
                 collection_field: String::new(),
+                slots: Vec::new(),
                 tuple_fields: tuple_fields.into_iter().collect(),
                 occurrence_id_cols: occurrence_id_cols.into_iter().map(FieldRef::name).collect(),
                 order_cols: order_cols.into_iter().collect(),
@@ -1067,6 +1155,50 @@ impl NodeDescriptor {
                         );
                         if !scalar || value_type.contains_record() {
                             return Err(GraphValidationError::CollectByKeyFieldMustBeScalar);
+                        }
+                    }
+                    return Ok(());
+                }
+                if !collect_by.slots.is_empty() {
+                    if self.output.fields().len()
+                        != collect_by.parent_fields.len() + collect_by.slots.len()
+                    {
+                        return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
+                    }
+                    for (output_field, projection) in self
+                        .output
+                        .fields()
+                        .iter()
+                        .take(collect_by.parent_fields.len())
+                        .zip(&collect_by.parent_fields)
+                    {
+                        let input_field = input_outputs[0]
+                            .fields()
+                            .get(projection.field_idx)
+                            .ok_or(GraphValidationError::FieldIndexOutOfBounds {
+                                index: projection.field_idx,
+                                len: input_outputs[0].fields().len(),
+                            })?;
+                        if output_field.name.as_deref() != Some(projection.output_name.as_str())
+                            || output_field.value_type != input_field.value_type
+                        {
+                            return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
+                        }
+                    }
+                    for (output_field, slot) in self
+                        .output
+                        .fields()
+                        .iter()
+                        .skip(collect_by.parent_fields.len())
+                        .zip(&collect_by.slots)
+                    {
+                        if output_field.name.as_deref() != Some(slot.collection_field.as_str())
+                            || output_field.value_type
+                                != ValueType::Array(Box::new(ValueType::Record(Box::new(
+                                    slot.child_descriptor,
+                                ))))
+                        {
+                            return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
                         }
                     }
                     return Ok(());
@@ -1706,6 +1838,7 @@ mod tests {
                     child_descriptor: child,
                     collection_field: "children".to_owned(),
                     collection_field_index: 1,
+                    slots: Vec::new(),
                     tuple_fields: Vec::new(),
                     occurrence_id_fields: Vec::new(),
                     occurrence_id_field_indices: Vec::new(),

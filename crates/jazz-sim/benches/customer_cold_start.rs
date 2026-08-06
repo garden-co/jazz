@@ -298,6 +298,7 @@ const RESOURCE_SPECS: [ResourceSpec; 14] = [
 ];
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     let config = Config::from_env();
     let schema = schema();
     let seeded = seed_core(&schema, &config);

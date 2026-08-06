@@ -10,6 +10,7 @@ name = "native_storage_engines"
 harness = false
 
 [dev-dependencies]
+jazz-benchmark-guard = { path = "../../../../crates/benchmark-guard" }
 bench-core = { package = "jazz-storage-bench-core", path = "../bench-core" }
 criterion = "0.5"
 redb = "4.1"

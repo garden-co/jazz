@@ -12,7 +12,7 @@ use crate::serving::{
     AbiBytes, InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession,
     StorageConfig,
 };
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc as tokio_mpsc, oneshot, watch};
 
 /// Sendable handle for the thread that owns the in-memory server shell.
 ///
@@ -171,24 +171,39 @@ impl ServerShellHandle {
         result
     }
 
-    pub(crate) async fn receive_tick_take(
+    /// Service one WebSocket message as ordered frame-sized shell ticks.
+    ///
+    /// Results become available as each frame has completed its tick while the
+    /// shell thread keeps ingesting later frames. This is intentionally a
+    /// streaming operation rather than one large `run` job so a route can
+    /// publish a durability fate as soon as it is true.
+    pub(crate) fn receive_tick_stream(
         &self,
         session: ServerSession,
         frames: Vec<AbiBytes>,
-    ) -> Result<Vec<AbiBytes>, String> {
+    ) -> Result<tokio_mpsc::UnboundedReceiver<Result<Vec<AbiBytes>, String>>, String> {
         let activity_tx = self.activity_tx.clone();
-        self.run(move |shell| {
-            let result = shell
-                .receive_frames(session, frames)
-                .and_then(|()| shell.tick())
-                .and_then(|()| shell.take_frames(session))
-                .map_err(|error| error.to_string());
-            if result.is_ok() {
-                notify_shell_activity(&activity_tx);
-            }
-            result
-        })
-        .await
+        let (outbound_tx, outbound_rx) = tokio_mpsc::unbounded_channel();
+        self.jobs
+            .send(Box::new(move |shell| {
+                for frame in frames {
+                    let result = shell
+                        .receive_frames(session, [frame])
+                        .and_then(|()| shell.tick())
+                        .and_then(|()| shell.take_frames(session))
+                        .map_err(|error| error.to_string());
+                    let keep_streaming = result.is_ok();
+                    if outbound_tx.send(result).is_err() {
+                        return;
+                    }
+                    if !keep_streaming {
+                        return;
+                    }
+                    notify_shell_activity(&activity_tx);
+                }
+            }))
+            .map_err(|_| "server shell thread is not running".to_owned())?;
+        Ok(outbound_rx)
     }
 
     pub(crate) async fn tick_take(&self, session: ServerSession) -> Result<Vec<AbiBytes>, String> {

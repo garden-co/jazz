@@ -24,12 +24,12 @@ use rustc_hash::FxHashMap as HashMap;
 use crate::ivm::{
     AggregateExpr, AggregateFunction, AggregateOp, ArgMaxByOp, ArgMinByOp, BindingSourceOp,
     CollectByBuilder, CollectByField, CollectByMode, CollectByOp, CollectByProjection,
-    DurableStorage, FieldRef, FilterOp, FrontierName, FrontierSourceOp, GraphBuilder, IndexByOp,
-    IndexSourceOp, InlineRecordsOp, IvmGraph, JoinOp, JoinOpKind, LiteralValue, MapProjectOp,
-    NodeDescriptor, NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr,
-    ProjectExpr, ProjectField, ProjectionExpr, RecursiveOp, Retainer, StaticScanSpec,
-    TableSourceOp, TopByDirection, TopByLimit, TopByOp, TopByOrderField, UnnestOp,
-    UnwrapNullableOp, ValueComparison,
+    CollectBySlot, CollectBySlotBuilder, DurableStorage, FieldRef, FilterOp, FrontierName,
+    FrontierSourceOp, GraphBuilder, IndexByOp, IndexSourceOp, InlineRecordsOp, IvmGraph, JoinOp,
+    JoinOpKind, LiteralValue, MAX_COLLECT_BY_TREE_DEPTH, MapProjectOp, NodeDescriptor,
+    NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField,
+    ProjectionExpr, RecursiveOp, Retainer, StaticScanSpec, TableSourceOp, TopByDirection,
+    TopByLimit, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp, ValueComparison,
 };
 use crate::records::{
     self, BorrowedRecord, OwnedRecord, RawProjectionField, RawProjectionScratch, RecordDescriptor,
@@ -1306,15 +1306,21 @@ impl IvmRuntime {
             GraphBuilder::CollectBy { input, collect, .. } => {
                 let input = self.infer_builder_output_cached(input, output_memo)?;
                 match collect.mode {
-                    CollectByMode::Collect => collect_by_descriptor(
+                    CollectByMode::Collect if collect.slots.is_empty() => collect_by_descriptor(
                         &input,
                         &collect.parent_fields,
                         &collect.child_fields,
                         &collect.collection_field,
                     ),
-                    CollectByMode::Expand => {
+                    CollectByMode::Collect => {
+                        collect_by_tree_descriptor(&input, &collect.parent_fields, &collect.slots)
+                    }
+                    CollectByMode::Expand if collect.slots.is_empty() => {
                         collect_by_expand_descriptor(&input, &collect.tuple_fields)
                     }
+                    CollectByMode::Expand => Err(IvmRuntimeError::InvalidCollectBy(
+                        "expand mode does not accept recursive collection slots".into(),
+                    )),
                 }
             }
             GraphBuilder::Aggregate {
@@ -2460,6 +2466,48 @@ impl IvmRuntime {
             .map(|field| resolve_field_ref(&input_output, field))
             .collect::<Result<Vec<_>, _>>()?;
         let parent_fields = collect_by_projections(&input_output, &collect.parent_fields)?;
+        if collect.mode == CollectByMode::Collect && !collect.slots.is_empty() {
+            if parent_fields.is_empty() {
+                return Err(IvmRuntimeError::InvalidCollectBy(
+                    "tree collect requires a parent projection".into(),
+                ));
+            }
+            validate_collect_by_key_types(&input_output, &group_field_indices)?;
+            let slots = collect_by_slots(&input_output, &collect.slots, &group_field_indices, 1)?;
+            let group_fields = group_field_indices
+                .iter()
+                .map(|field| field_name_at(&input_output, *field))
+                .collect::<Result<Vec<_>, _>>()?;
+            let node = self.graph.dedup_node(
+                NodeDescriptor::new(
+                    OpType::CollectBy(Box::new(CollectByOp {
+                        mode: collect.mode,
+                        group_fields,
+                        group_field_indices,
+                        parent_fields,
+                        child_fields: Vec::new(),
+                        child_descriptor: RecordDescriptor::new(Vec::<(String, ValueType)>::new()),
+                        collection_field: String::new(),
+                        collection_field_index: 0,
+                        slots,
+                        tuple_fields: Vec::new(),
+                        occurrence_id_fields: Vec::new(),
+                        occurrence_id_field_indices: Vec::new(),
+                        order_fields: Vec::new(),
+                        tie_fields: Vec::new(),
+                        sort_field_indices: Vec::new(),
+                        sort_directions: Vec::new(),
+                        offset: 0,
+                        limit: TopByLimit::Unbounded,
+                    })),
+                    [compiled_input.node],
+                    output,
+                ),
+                NodeDurability::Ephemeral,
+            );
+            self.initialize_node_runtime(node);
+            return Ok(CompiledNode { output, node });
+        }
         let child_fields = collect_by_projections(&input_output, &collect.child_fields)?;
         let tuple_fields = collect_by_projections(&input_output, &collect.tuple_fields)?;
         let occurrence_id_field_indices = collect
@@ -2553,6 +2601,7 @@ impl IvmRuntime {
                     child_descriptor,
                     collection_field: collect.collection_field.clone(),
                     collection_field_index,
+                    slots: Vec::new(),
                     tuple_fields,
                     occurrence_id_fields: occurrence_id_field_indices
                         .iter()
@@ -6244,18 +6293,25 @@ where
             let before_records = records_before_deltas(after_records.clone(), &group_deltas);
             match collect_by.mode {
                 CollectByMode::Collect => {
-                    let before = collect_by_parent_from_records(
-                        input_desc,
-                        output_desc,
-                        collect_by,
-                        &before_records,
-                    )?;
-                    let after = collect_by_parent_from_records(
-                        input_desc,
-                        output_desc,
-                        collect_by,
-                        &after_records,
-                    )?;
+                    let render = |records: &[(Bytes, i64)]| {
+                        if collect_by.slots.is_empty() {
+                            collect_by_parent_from_records(
+                                input_desc,
+                                output_desc,
+                                collect_by,
+                                records,
+                            )
+                        } else {
+                            collect_by_tree_parent_from_records(
+                                input_desc,
+                                output_desc,
+                                collect_by,
+                                records,
+                            )
+                        }
+                    };
+                    let before = render(&before_records)?;
+                    let after = render(&after_records)?;
                     if before == after {
                         continue;
                     }
@@ -6795,6 +6851,216 @@ fn collect_by_descriptor(
         )))),
     ));
     Ok(RecordDescriptor::new(output))
+}
+
+fn collect_by_tree_descriptor(
+    input: &RecordDescriptor,
+    parent_fields: &[CollectByField],
+    slots: &[CollectBySlotBuilder],
+) -> Result<RecordDescriptor, IvmRuntimeError> {
+    if parent_fields.is_empty() || slots.is_empty() {
+        return Err(IvmRuntimeError::InvalidCollectBy(
+            "tree collect requires a parent projection and at least one collection slot".into(),
+        ));
+    }
+    let mut names = HashSet::new();
+    let mut output = Vec::with_capacity(parent_fields.len() + slots.len());
+    for field in parent_fields {
+        if !names.insert(field.output_name.clone()) {
+            return Err(IvmRuntimeError::InvalidCollectBy(
+                "output field names must be unique".into(),
+            ));
+        }
+        let index = resolve_field_ref(input, &field.field)?;
+        output.push((
+            field.output_name.clone(),
+            input.fields()[index].value_type.clone(),
+        ));
+    }
+    for slot in slots {
+        if !names.insert(slot.collection_field.clone()) {
+            return Err(IvmRuntimeError::InvalidCollectBy(
+                "output field names must be unique".into(),
+            ));
+        }
+        output.push((
+            slot.collection_field.clone(),
+            ValueType::Array(Box::new(ValueType::Record(Box::new(
+                collect_by_slot_descriptor(input, slot, 1)?,
+            )))),
+        ));
+    }
+    Ok(RecordDescriptor::new(output))
+}
+
+fn collect_by_slot_descriptor(
+    input: &RecordDescriptor,
+    slot: &CollectBySlotBuilder,
+    depth: usize,
+) -> Result<RecordDescriptor, IvmRuntimeError> {
+    if depth > MAX_COLLECT_BY_TREE_DEPTH {
+        return Err(IvmRuntimeError::InvalidCollectBy(format!(
+            "tree collect depth exceeds MAX_COLLECT_BY_TREE_DEPTH ({MAX_COLLECT_BY_TREE_DEPTH})"
+        )));
+    }
+    if slot.group_cols.is_empty()
+        || slot.child_fields.is_empty()
+        || slot.collection_field.is_empty()
+        || slot.order_cols.is_empty()
+        || slot.tie_cols.is_empty()
+    {
+        return Err(IvmRuntimeError::InvalidCollectBy(
+            "each tree collection slot requires group, child, name, order, and tie fields".into(),
+        ));
+    }
+    let mut names = HashSet::new();
+    let mut output = Vec::with_capacity(slot.child_fields.len() + slot.slots.len());
+    for field in &slot.child_fields {
+        if !names.insert(field.output_name.clone()) {
+            return Err(IvmRuntimeError::InvalidCollectBy(
+                "child output field names must be unique".into(),
+            ));
+        }
+        let index = resolve_field_ref(input, &field.field)?;
+        output.push((
+            field.output_name.clone(),
+            input.fields()[index].value_type.clone(),
+        ));
+    }
+    for nested in &slot.slots {
+        if !names.insert(nested.collection_field.clone()) {
+            return Err(IvmRuntimeError::InvalidCollectBy(
+                "child output field names must be unique".into(),
+            ));
+        }
+        output.push((
+            nested.collection_field.clone(),
+            ValueType::Array(Box::new(ValueType::Record(Box::new(
+                collect_by_slot_descriptor(input, nested, depth + 1)?,
+            )))),
+        ));
+    }
+    Ok(RecordDescriptor::new(output))
+}
+
+fn collect_by_slots(
+    input: &RecordDescriptor,
+    builders: &[CollectBySlotBuilder],
+    owner_indices: &[usize],
+    depth: usize,
+) -> Result<Vec<CollectBySlot>, IvmRuntimeError> {
+    if depth > MAX_COLLECT_BY_TREE_DEPTH {
+        return Err(IvmRuntimeError::InvalidCollectBy(format!(
+            "tree collect depth exceeds MAX_COLLECT_BY_TREE_DEPTH ({MAX_COLLECT_BY_TREE_DEPTH})"
+        )));
+    }
+    let mut names = HashSet::new();
+    builders
+        .iter()
+        .enumerate()
+        .map(|(slot_index, builder)| {
+            if !names.insert(builder.collection_field.clone()) {
+                return Err(IvmRuntimeError::InvalidCollectBy(
+                    "sibling collection slot names must be unique".into(),
+                ));
+            }
+            let group_field_indices = builder
+                .group_cols
+                .iter()
+                .map(|field| resolve_field_ref(input, field))
+                .collect::<Result<Vec<_>, _>>()?;
+            if group_field_indices.is_empty()
+                || group_field_indices
+                    .iter()
+                    .any(|field| !owner_indices.contains(field))
+            {
+                return Err(IvmRuntimeError::InvalidCollectBy(
+                    "a slot group must be available on its owning record".into(),
+                ));
+            }
+            validate_collect_by_key_types(input, &group_field_indices)?;
+            let child_fields = collect_by_projections(input, &builder.child_fields)?;
+            let order_field_indices = builder
+                .order_cols
+                .iter()
+                .map(|order| resolve_field_ref(input, &order.field))
+                .collect::<Result<Vec<_>, _>>()?;
+            let tie_field_indices = builder
+                .tie_cols
+                .iter()
+                .map(|field| resolve_field_ref(input, field))
+                .collect::<Result<Vec<_>, _>>()?;
+            let presence_field_index = builder
+                .presence_col
+                .as_ref()
+                .map(|field| resolve_field_ref(input, field))
+                .transpose()?;
+            if let Some(index) = presence_field_index
+                && input.fields()[index].value_type != ValueType::Bool
+            {
+                return Err(IvmRuntimeError::InvalidCollectBy(
+                    "a tree collection presence field must be boolean".into(),
+                ));
+            }
+            if order_field_indices.is_empty() || tie_field_indices.is_empty() {
+                return Err(IvmRuntimeError::InvalidCollectBy(
+                    "order and tie fields must both be complete and non-empty".into(),
+                ));
+            }
+            validate_collect_by_key_types(input, &order_field_indices)?;
+            validate_collect_by_key_types(input, &tie_field_indices)?;
+            let child_descriptor = collect_by_slot_descriptor(input, builder, depth)?;
+            let child_indices = child_fields
+                .iter()
+                .map(|field| field.field_idx)
+                .collect::<Vec<_>>();
+            let slots = collect_by_slots(input, &builder.slots, &child_indices, depth + 1)?;
+            Ok(CollectBySlot {
+                group_fields: group_field_indices
+                    .iter()
+                    .map(|field| field_name_at(input, *field))
+                    .collect::<Result<Vec<_>, _>>()?,
+                group_field_indices,
+                child_fields,
+                child_descriptor,
+                collection_field: builder.collection_field.clone(),
+                collection_field_index: builder.child_fields.len() + slot_index,
+                slots,
+                order_fields: builder
+                    .order_cols
+                    .iter()
+                    .zip(&order_field_indices)
+                    .map(|(order, field)| {
+                        Ok(TopByOrderField {
+                            field: field_name_at(input, *field)?,
+                            direction: order.direction,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, IvmRuntimeError>>()?,
+                tie_fields: tie_field_indices
+                    .iter()
+                    .map(|field| field_name_at(input, *field))
+                    .collect::<Result<Vec<_>, _>>()?,
+                presence_field_index,
+                sort_field_indices: order_field_indices
+                    .iter()
+                    .chain(&tie_field_indices)
+                    .copied()
+                    .collect(),
+                sort_directions: builder
+                    .order_cols
+                    .iter()
+                    .map(|order| order.direction)
+                    .chain(std::iter::repeat_n(
+                        TopByDirection::Asc,
+                        tie_field_indices.len(),
+                    ))
+                    .collect(),
+                offset: builder.offset,
+                limit: builder.limit,
+            })
+        })
+        .collect()
 }
 
 fn collect_by_expand_descriptor(
@@ -8736,6 +9002,160 @@ fn collect_by_parent_from_records(
     Ok(Some(output_desc.create(&values)?.into()))
 }
 
+fn collect_by_tree_parent_from_records(
+    input_desc: RecordDescriptor,
+    output_desc: RecordDescriptor,
+    collect_by: &CollectByOp,
+    records: &[(Bytes, i64)],
+) -> Result<Option<Bytes>, IvmRuntimeError> {
+    let Some((parent_record, _)) = records.iter().find(|(_, weight)| *weight > 0) else {
+        return Ok(None);
+    };
+    let parent_values = BorrowedRecord::new(parent_record, &input_desc)
+        .to_values()
+        .map_err(IvmRuntimeError::RecordEncoding)?;
+    let mut values = collect_by
+        .parent_fields
+        .iter()
+        .map(|field| {
+            parent_values
+                .get(field.field_idx)
+                .cloned()
+                .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    values.extend(render_collect_by_slots(
+        input_desc,
+        records,
+        parent_record,
+        &collect_by.slots,
+    )?);
+    Ok(Some(output_desc.create(&values)?.into()))
+}
+
+fn render_collect_by_slots(
+    input_desc: RecordDescriptor,
+    records: &[(Bytes, i64)],
+    owner_record: &Bytes,
+    slots: &[CollectBySlot],
+) -> Result<Vec<Value>, IvmRuntimeError> {
+    slots
+        .iter()
+        .map(|slot| {
+            if slot.limit == TopByLimit::Finite(0) {
+                return Ok(Value::Array(Vec::new()));
+            }
+            let owner_key =
+                encoded_record_key_part(input_desc, owner_record, &slot.group_field_indices)?;
+            // A nested flat association can repeat its owning child once for
+            // every grandchild. Collapse those repetitions by the rendered
+            // child projection before applying this slot's order/window.
+            let child_key_descriptor =
+                RecordDescriptor::new(slot.child_fields.iter().map(|field| {
+                    (
+                        field.output_name.clone(),
+                        input_desc.fields()[field.field_idx].value_type.clone(),
+                    )
+                }));
+            let mut candidates = BTreeMap::<Bytes, Bytes>::new();
+            for (record, weight) in records {
+                if *weight <= 0
+                    || encoded_record_key_part(input_desc, record, &slot.group_field_indices)?
+                        != owner_key
+                {
+                    continue;
+                }
+                if let Some(presence_field_index) = slot.presence_field_index
+                    && !BorrowedRecord::new(record, &input_desc).get_bool(presence_field_index)?
+                {
+                    continue;
+                }
+                let source_values = BorrowedRecord::new(record, &input_desc)
+                    .to_values()
+                    .map_err(IvmRuntimeError::RecordEncoding)?;
+                let child_values = slot
+                    .child_fields
+                    .iter()
+                    .map(|field| {
+                        source_values
+                            .get(field.field_idx)
+                            .cloned()
+                            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                candidates
+                    .entry(child_key_descriptor.create(&child_values)?.into())
+                    .or_insert_with(|| record.clone());
+            }
+            let selected = collect_by_slot_window_from_records(
+                input_desc,
+                candidates.into_values().collect(),
+                slot,
+            )?;
+            let mut children = Vec::with_capacity(selected.len());
+            for record in selected {
+                let source_values = BorrowedRecord::new(&record, &input_desc)
+                    .to_values()
+                    .map_err(IvmRuntimeError::RecordEncoding)?;
+                let mut child_values = slot
+                    .child_fields
+                    .iter()
+                    .map(|field| {
+                        source_values
+                            .get(field.field_idx)
+                            .cloned()
+                            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                child_values.extend(render_collect_by_slots(
+                    input_desc,
+                    records,
+                    &record,
+                    &slot.slots,
+                )?);
+                children.push(Value::Record(OwnedRecord::new(
+                    slot.child_descriptor.create(&child_values)?,
+                    slot.child_descriptor,
+                )));
+            }
+            Ok(Value::Array(children))
+        })
+        .collect()
+}
+
+fn collect_by_slot_window_from_records(
+    descriptor: RecordDescriptor,
+    records: Vec<Bytes>,
+    slot: &CollectBySlot,
+) -> Result<Vec<Bytes>, IvmRuntimeError> {
+    let mut ranked = records
+        .into_iter()
+        .map(|record| {
+            Ok((
+                collect_by_sort_key_for_fields(
+                    descriptor,
+                    &record,
+                    &slot.sort_field_indices,
+                    &slot.sort_directions,
+                )?,
+                record,
+            ))
+        })
+        .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+    ranked.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    let skip = usize::try_from(slot.offset).unwrap_or(usize::MAX);
+    let take = match slot.limit {
+        TopByLimit::Finite(limit) => usize::try_from(limit).unwrap_or(usize::MAX),
+        TopByLimit::Unbounded => usize::MAX,
+    };
+    Ok(ranked
+        .into_iter()
+        .skip(skip)
+        .take(take)
+        .map(|(_, record)| record)
+        .collect())
+}
+
 /// Render the selected expand window keyed by its ordered contributing source
 /// ids. Keeping the key separate from the rendered bytes is what lets expand
 /// suppress only a byte-equal occurrence without collapsing equal tuples from
@@ -8823,10 +9243,23 @@ fn collect_by_sort_key(
     record: &[u8],
     collect_by: &CollectByOp,
 ) -> Result<Vec<TopBySortPart>, IvmRuntimeError> {
-    collect_by
-        .sort_field_indices
+    collect_by_sort_key_for_fields(
+        descriptor,
+        record,
+        &collect_by.sort_field_indices,
+        &collect_by.sort_directions,
+    )
+}
+
+fn collect_by_sort_key_for_fields(
+    descriptor: RecordDescriptor,
+    record: &[u8],
+    sort_field_indices: &[usize],
+    sort_directions: &[TopByDirection],
+) -> Result<Vec<TopBySortPart>, IvmRuntimeError> {
+    sort_field_indices
         .iter()
-        .zip(&collect_by.sort_directions)
+        .zip(sort_directions)
         .map(|(field_idx, direction)| {
             Ok(TopBySortPart {
                 key: encoded_record_key_part(descriptor, record, &[*field_idx])?,

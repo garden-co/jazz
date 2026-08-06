@@ -275,7 +275,34 @@ pub struct CollectByProjection {
     pub output_name: String,
 }
 
-/// Terminal collector for one `Array<Record>` field on a rendered parent.
+/// One named, ordered child array rendered by a [`CollectByOp`].
+///
+/// A slot's group fields identify the record that owns this array.  They are
+/// compared against the source record from which that owner was rendered;
+/// nested slots therefore stay inside one terminal rather than becoming graph
+/// nodes.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CollectBySlot {
+    pub group_fields: Vec<String>,
+    pub group_field_indices: Vec<usize>,
+    pub child_fields: Vec<CollectByProjection>,
+    pub child_descriptor: RecordDescriptor,
+    pub collection_field: String,
+    pub collection_field_index: usize,
+    pub slots: Vec<CollectBySlot>,
+    pub order_fields: Vec<TopByOrderField>,
+    pub tie_fields: Vec<String>,
+    /// Optional boolean field that distinguishes a real association row from
+    /// a parent anchor retained solely to render an empty collection.
+    pub presence_field_index: Option<usize>,
+    pub sort_field_indices: Vec<usize>,
+    pub sort_directions: Vec<TopByDirection>,
+    pub offset: u64,
+    pub limit: TopByLimit,
+}
+
+/// Terminal collector for one rendered parent and, optionally, a tree of
+/// named `Array<Record>` slots.
 ///
 /// This descriptor intentionally contains all of the flat input projections
 /// and ranking data needed to render its output. No planner-side state is
@@ -290,6 +317,9 @@ pub struct CollectByOp {
     pub child_descriptor: RecordDescriptor,
     pub collection_field: String,
     pub collection_field_index: usize,
+    /// Recursive collect-mode slots.  An empty vector denotes the legacy
+    /// single-slot descriptor retained for API compatibility.
+    pub slots: Vec<CollectBySlot>,
     /// Flat output projection used only in [`CollectByMode::Expand`].
     pub tuple_fields: Vec<CollectByProjection>,
     /// Ordered contributing source-row ids used to address expanded tuples.

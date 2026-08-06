@@ -26,6 +26,7 @@ rustc-hash.workspace = true
 opfs-btree = { path = "../opfs-btree" }
 
 [dev-dependencies]
+jazz-benchmark-guard = { path = "../benchmark-guard" }
 hdrhistogram = "7.5.4"
 rusqlite = { version = "0.34", features = ["bundled"] }
 tempfile = "3.27.0"

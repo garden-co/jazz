@@ -19,7 +19,7 @@ use jazz::wire::{
     FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireEnvelope, WireFrame,
     decode_sync_message, encode_frame, encode_sync_message,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -43,6 +43,25 @@ struct Fixture {
     frame_base64: String,
     payload_hex: String,
     decoded_debug: String,
+}
+
+#[derive(Deserialize)]
+struct NativeRowCodecFixture {
+    cases: Vec<NativeRowCodecCase>,
+}
+
+#[derive(Deserialize)]
+struct NativeRowCodecCase {
+    name: String,
+    descriptor_hex: Vec<String>,
+    record_hex: Vec<String>,
+    fields: Vec<NativeRowCodecField>,
+}
+
+#[derive(Deserialize)]
+struct NativeRowCodecField {
+    name: String,
+    encoded_hex: String,
 }
 
 fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
@@ -443,6 +462,209 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
         assert_eq!(envelope.session, None);
         assert_eq!(decode_sync_message(&envelope.payload).unwrap(), expected);
     }
+}
+
+// This is intentionally a codec-level integration fixture: TypeScript creates
+// and reads these exact records, while this Rust test independently creates and
+// decodes them. That is the narrowest useful cross-language test for a raw
+// record-layout contract, which is not observable through the public API.
+#[test]
+fn native_row_codec_fixture_round_trips_every_groove_value_type() {
+    let fixture: NativeRowCodecFixture =
+        serde_json::from_str(include_str!("../fixtures/native_row_codec.json"))
+            .expect("native row codec fixture parses");
+    let (descriptor, values) = exhaustive_native_row_codec_case();
+    let case = fixture
+        .cases
+        .iter()
+        .find(|case| case.name == "all_value_types_depth_three")
+        .expect("all ValueType fixture is present");
+    let descriptor_fields = descriptor
+        .fields()
+        .iter()
+        .map(|field| (field.name.clone(), field.value_type.clone()))
+        .collect::<Vec<_>>();
+    let descriptor_bytes = postcard::to_allocvec(&descriptor_fields).expect("descriptor encodes");
+    let record = descriptor.create(&values).expect("record encodes");
+
+    assert_eq!(hex(&descriptor_bytes), case.descriptor_hex.concat());
+    assert_eq!(hex(&record), case.record_hex.concat());
+    assert_eq!(
+        descriptor
+            .bind(&record)
+            .to_values()
+            .expect("record decodes"),
+        values
+    );
+
+    for (index, field) in case.fields.iter().enumerate() {
+        assert_eq!(
+            descriptor.fields()[index].name.as_deref(),
+            Some(field.name.as_str())
+        );
+        let span = descriptor
+            .field_span(&record, index)
+            .expect("field span resolves");
+        assert_eq!(
+            hex(&record[span]),
+            field.encoded_hex,
+            "{} encoded",
+            field.name
+        );
+        assert_eq!(
+            descriptor
+                .bind(&record)
+                .get_idx(index)
+                .expect("field decodes"),
+            values[index],
+            "{} decoded",
+            field.name
+        );
+    }
+}
+
+fn exhaustive_native_row_codec_case() -> (
+    groove::records::RecordDescriptor,
+    Vec<groove::records::Value>,
+) {
+    use groove::records::{EnumSchema, OwnedRecord, RecordDescriptor, Value, ValueType};
+
+    let mode = EnumSchema::new("mode", ["low", "high"]).expect("enum schema is valid");
+    let child = RecordDescriptor::new([
+        ("child_count", ValueType::I32),
+        (
+            "child_label",
+            ValueType::Nullable(Box::new(ValueType::String)),
+        ),
+    ]);
+    let child_record = |count, label: Option<&str>| {
+        OwnedRecord::new(
+            child
+                .create(&[
+                    Value::I32(count),
+                    Value::Nullable(label.map(|label| Box::new(Value::String(label.to_owned())))),
+                ])
+                .expect("child record encodes"),
+            child,
+        )
+    };
+    let descriptor = RecordDescriptor::new([
+        ("u8_value", ValueType::U8),
+        ("u16_value", ValueType::U16),
+        ("u32_value", ValueType::U32),
+        ("u64_value", ValueType::U64),
+        ("f64_value", ValueType::F64),
+        ("bool_value", ValueType::Bool),
+        ("string_value", ValueType::String),
+        ("bytes_value", ValueType::Bytes),
+        ("uuid_value", ValueType::Uuid),
+        ("enum_value", ValueType::Enum(mode)),
+        (
+            "mixed_tuple",
+            ValueType::Tuple(vec![
+                ValueType::U8,
+                ValueType::I64,
+                ValueType::Nullable(Box::new(ValueType::Bool)),
+                ValueType::I32,
+            ]),
+        ),
+        ("fixed_array", ValueType::Array(Box::new(ValueType::I32))),
+        (
+            "variable_array",
+            ValueType::Array(Box::new(ValueType::String)),
+        ),
+        (
+            "nullable_array_depth_three",
+            ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::Nullable(
+                Box::new(ValueType::I32),
+            ))))),
+        ),
+        ("inline_record", ValueType::Record(Box::new(child))),
+        (
+            "record_array",
+            ValueType::Array(Box::new(ValueType::Record(Box::new(child)))),
+        ),
+        (
+            "empty_fixed_array",
+            ValueType::Array(Box::new(ValueType::U16)),
+        ),
+        (
+            "empty_variable_array",
+            ValueType::Array(Box::new(ValueType::String)),
+        ),
+        (
+            "null_fixed_i32",
+            ValueType::Nullable(Box::new(ValueType::I32)),
+        ),
+        ("i64_value", ValueType::I64),
+        ("i32_value", ValueType::I32),
+        ("i32_min", ValueType::I32),
+        ("i32_negative_one", ValueType::I32),
+        ("i32_zero", ValueType::I32),
+        ("i32_max", ValueType::I32),
+        ("i64_min", ValueType::I64),
+        ("i64_negative_one", ValueType::I64),
+        ("i64_zero", ValueType::I64),
+        ("i64_max", ValueType::I64),
+        (
+            "nullable_negative_i32",
+            ValueType::Nullable(Box::new(ValueType::I32)),
+        ),
+        ("i64_negatives", ValueType::Array(Box::new(ValueType::I64))),
+    ]);
+    let values = vec![
+        Value::U8(0xa1),
+        Value::U16(0xb2c3),
+        Value::U32(0xd4e5_f607),
+        Value::U64(0x1020_3040_5060_7080),
+        Value::F64(12.5),
+        Value::Bool(false),
+        Value::String("synthetic".to_owned()),
+        Value::Bytes(vec![0xde, 0xad]),
+        Value::Uuid(uuid::Uuid::from_bytes([0x11; 16])),
+        Value::Enum(1),
+        Value::Tuple(vec![
+            Value::U8(9),
+            Value::I64(-3),
+            Value::Nullable(None),
+            Value::I32(-17),
+        ]),
+        Value::Array(vec![Value::I32(-3), Value::I32(5)]),
+        Value::Array(vec![
+            Value::String("x".to_owned()),
+            Value::String("yz".to_owned()),
+        ]),
+        Value::Nullable(Some(Box::new(Value::Array(vec![
+            Value::Nullable(None),
+            Value::Nullable(Some(Box::new(Value::I32(-7)))),
+        ])))),
+        Value::Record(child_record(4, Some("one"))),
+        Value::Array(vec![
+            Value::Record(child_record(5, Some("two"))),
+            Value::Record(child_record(6, None)),
+        ]),
+        Value::Array(Vec::new()),
+        Value::Array(Vec::new()),
+        Value::Nullable(None),
+        Value::I64(-42),
+        Value::I32(-13),
+        Value::I32(i32::MIN),
+        Value::I32(-1),
+        Value::I32(0),
+        Value::I32(i32::MAX),
+        Value::I64(i64::MIN),
+        Value::I64(-1),
+        Value::I64(0),
+        Value::I64(i64::MAX),
+        Value::Nullable(Some(Box::new(Value::I32(-42)))),
+        Value::Array(vec![
+            Value::I64(i64::MIN),
+            Value::I64(-1),
+            Value::I64(0),
+            Value::I64(i64::MAX),
+        ]),
+    ];
+    (descriptor, values)
 }
 
 fn hex(bytes: &[u8]) -> String {

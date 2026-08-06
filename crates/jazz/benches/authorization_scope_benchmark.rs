@@ -198,9 +198,16 @@ fn many_initial_authorized_scopes_share_schema_context(c: &mut Criterion) {
     group.finish();
 }
 
+fn guarded_benches(c: &mut Criterion) {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
+    initial_authorized_scope(c);
+    initial_authorized_scope_with_wide_schema(c);
+    many_initial_authorized_scopes_share_schema_context(c);
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = initial_authorized_scope, initial_authorized_scope_with_wide_schema, many_initial_authorized_scopes_share_schema_context
+    targets = guarded_benches
 }
 criterion_main!(benches);

@@ -1,6 +1,7 @@
 use jazz_sim::{PeerProfile, run_echo_deterministic, run_echo_threaded};
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     let seed = env_u64("JAZZ_SEED", 1);
     let rounds = env_u64("JAZZ_ECHO_ROUNDS", 100);
     let one_way_ms = env_u64("JAZZ_LINK_ONE_WAY_MS", 1);

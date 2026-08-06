@@ -20,6 +20,7 @@ use support::{
 const TABLE: &str = "todos";
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     for depth in depths() {
         for ahead in pending_sizes() {
             let mut bench = ColdSubscriptionBench::new();

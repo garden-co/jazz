@@ -13,6 +13,7 @@ use support::{
 };
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     let depth = support::env_usize("JAZZ_LV_DEPTH", 300);
     for interval in csv_usizes("JAZZ_LV_INTERVALS", "64")
         .into_iter()
