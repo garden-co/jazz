@@ -332,5 +332,12 @@ fn insert_batch(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, insert_own_folder, insert_team_folder, insert_batch);
+fn guarded_benches(c: &mut Criterion) {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
+    insert_own_folder(c);
+    insert_team_folder(c);
+    insert_batch(c);
+}
+
+criterion_group!(benches, guarded_benches);
 criterion_main!(benches);

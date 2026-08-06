@@ -50,6 +50,7 @@ const PROFILE_REVOKE_SIZES: &[usize] = &[1, 10, 50];
 const FAST_REVOKE_SIZES: &[usize] = &[1, 3];
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     if std::env::var("JAZZ_SMOKE").is_ok() {
         smoke();
         return;

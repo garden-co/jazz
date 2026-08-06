@@ -23,6 +23,7 @@ const ISSUES: &str = "issues";
 const ISSUE_MEMBERS: &str = "issue_members";
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     let seed = env_u64("JAZZ_SEED", 0x000f_17c7_51e5);
     let profile_name = std::env::var("JAZZ_PROFILE").unwrap_or_else(|_| "fixture-local".into());
     let profile = PeerProfile::new(profile_name.clone(), 0, 0, 0);

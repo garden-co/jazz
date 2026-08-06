@@ -54,6 +54,7 @@ const DEFAULT_SAMPLES: usize = 3;
 const DEFAULT_MAX_RATIO: f64 = 1.025;
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     let scales = csv_usizes("JAZZ_INC_DELIVERY_SCALES", DEFAULT_SCALES);
     assert!(
         scales.len() >= 3,

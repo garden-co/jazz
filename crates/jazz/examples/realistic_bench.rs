@@ -942,6 +942,7 @@ fn maybe_write_seed_state(path: Option<&Path>, seed: &SeedState) -> Result<(), D
 
 #[tokio::main]
 async fn main() -> Result<(), DynError> {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     let args = parse_args()?;
     let scenario: ScenarioConfig = load_json(&args.scenario_path)?;
     let profile: DatasetProfile = load_json(&args.profile_path)?;

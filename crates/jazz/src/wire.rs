@@ -1156,6 +1156,7 @@ mod tests {
     ))]
     #[test]
     fn synthetic_small_delta_streaming_compression_receipt() {
+        jazz_benchmark_guard::refuse_contaminated_measurement();
         let shape_id = ShapeId(uuid::Uuid::from_bytes([0x22; 16]));
         let binding_id = BindingId(uuid::Uuid::from_bytes([0x33; 16]));
         let subscription = crate::protocol::SubscriptionKey {

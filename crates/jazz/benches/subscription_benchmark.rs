@@ -332,12 +332,14 @@ fn batch_insert_subscription_latency(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    single_subscription_latency,
-    fanout_latency,
-    cold_start_latency,
-    filtered_subscription_latency,
-    batch_insert_subscription_latency
-);
+fn guarded_benches(c: &mut Criterion) {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
+    single_subscription_latency(c);
+    fanout_latency(c);
+    cold_start_latency(c);
+    filtered_subscription_latency(c);
+    batch_insert_subscription_latency(c);
+}
+
+criterion_group!(benches, guarded_benches);
 criterion_main!(benches);

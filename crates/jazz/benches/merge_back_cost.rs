@@ -16,6 +16,7 @@ use support::{emit_json_line, env_usize, insert_node_metrics, phase_fields, rese
 const TABLE: &str = "todos";
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     let writes = env_usize("JAZZ_MERGE_BACK_WRITES", 1_000).max(1);
     let (dir, mut node) = open_node(node_uuid(1), schema());
     let branch_id = branch(0x51);

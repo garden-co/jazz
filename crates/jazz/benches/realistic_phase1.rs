@@ -1956,9 +1956,22 @@ fn r13_permission_filtered_resume(c: &mut Criterion) {
     group.finish();
 }
 
+fn guarded_benches(c: &mut Criterion) {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
+    r1_crud(c);
+    r2_reads(c);
+    r3_rocksdb_cold_load(c);
+    r4_hot_task_history(c);
+    r9_subscribed_write(c);
+    r10_sync_fanout(c);
+    r11_byte_wire_resume(c);
+    r12_recursive_permissions(c);
+    r13_permission_filtered_resume(c);
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = r1_crud, r2_reads, r3_rocksdb_cold_load, r4_hot_task_history, r9_subscribed_write, r10_sync_fanout, r11_byte_wire_resume, r12_recursive_permissions, r13_permission_filtered_resume
+    targets = guarded_benches
 }
 criterion_main!(benches);

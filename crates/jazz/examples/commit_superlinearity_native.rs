@@ -108,6 +108,7 @@ fn run_case(max_rows: usize, subscribed: bool) -> Result<(), Box<dyn std::error:
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     let max_rows = std::env::args()
         .nth(1)
         .map(|arg| arg.parse::<usize>())

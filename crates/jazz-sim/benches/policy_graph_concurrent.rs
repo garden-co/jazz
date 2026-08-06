@@ -33,6 +33,7 @@ const SEED_CACHE_VERSION: &str = "policy-graph-concurrent-seed-v14-env-fixture";
 const SEED_CACHE_READY: &str = ".jazz_policy_graph_seed_ready";
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     let session_id = std::env::var("CODEX_SESSION_ID")
         .or_else(|_| std::env::var("JAZZ_CODEX_SESSION_ID"))
         .unwrap_or_else(|_| format!("pid-{}", std::process::id()));

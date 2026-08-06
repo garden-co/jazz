@@ -4331,6 +4331,7 @@ fn unwrap_nullable_graph_drops_none_and_unwraps_present_values() {
 #[test]
 #[ignore = "receipt-only timing for batch-general schema index maintenance"]
 fn indexed_batch_commit_timing_receipt_20k_and_single_row() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     const ROWS: u64 = 20_000;
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["tracks", "indices"]).unwrap();

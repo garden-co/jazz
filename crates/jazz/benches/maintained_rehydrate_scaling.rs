@@ -23,18 +23,7 @@ const ACTIVE: &str = "active";
 const INACTIVE: &str = "inactive";
 
 fn main() {
-    // JAZZ_REHYDRATE_TRACE makes the traced path call reset_storage_read_metrics()
-    // and add timing plus formatting inside the measured region (peer.rs:644).
-    // Storage-read counters and timings reported here would be wrong, so refuse
-    // to produce a receipt that silently understates its own instrumentation.
-    if std::env::var_os("JAZZ_REHYDRATE_TRACE").is_some() {
-        eprintln!(
-            "refusing to run: JAZZ_REHYDRATE_TRACE is set. It resets storage read \
-             metrics and adds timing inside the measured path, so the reported \
-             reads and durations would be contaminated. Unset it and re-run."
-        );
-        std::process::exit(2);
-    }
+    jazz_benchmark_guard::refuse_contaminated_measurement();
 
     for source_rows in csv_usizes("JAZZ_PERF5_ROWS", "100,1000,10000") {
         assert!(source_rows >= 2, "PERF-5 rungs require at least two rows");

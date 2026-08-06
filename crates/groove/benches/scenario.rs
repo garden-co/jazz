@@ -17,6 +17,7 @@ use hdrhistogram::Histogram;
 use rusqlite::{Connection, params};
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     let scenario = env::var("GROOVE_SCENARIO").unwrap_or_else(|_| "social_feed".to_owned());
     let engine = env::var("GROOVE_ENGINE").unwrap_or_else(|_| "groove".to_owned());
     match (scenario.as_str(), engine.as_str()) {
