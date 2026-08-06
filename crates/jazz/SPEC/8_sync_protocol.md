@@ -478,6 +478,35 @@ network wire-frame batches.
 
 ### Open questions
 
+- 🔶 **Pending catalogue admission should park, not reject.** `SubscribeRejected`
+  is specified for a **permanent** capability gap, and states that after it the
+  subscription is not active and the requester must not expect `ViewUpdate`s.
+  The implementation also emits `ShapeRegistrationPendingCatalogueAdmission`,
+  which is **transient**: the serving peer parks the shape when its catalogue
+  schema is absent and admits it later, but it drops the accompanying
+  `Subscribe`. Only a new `Subscribe` re-registers, and the requester does not
+  retry, so nothing re-drives admission and delivery never begins.
+
+  The parking machinery already exists — the serving peer parks the *shape*. The
+  proposed direction is to park the *subscription* alongside it and activate it
+  when admission completes, so this case stops being a rejection at all and
+  `SubscribeRejected` keeps its permanent-only meaning untouched. Two riders
+  the design must answer:
+
+  - **Restart.** Parking is in-memory (see _Parked-unit persistence_ below), so
+    a serving-peer restart drops parked subscriptions. Requester retry is then
+    still needed as a recovery path, even though it is no longer the normal
+    path. Decide whether that is stated as an implementation limitation or
+    resolved by persisting parked units.
+  - **Bound.** A subscription parked for a shape that is never admitted must not
+    accumulate indefinitely. Decide the bound and what the requester observes
+    when it is reached — that outcome may legitimately be a rejection, at which
+    point the permanent/transient distinction in the reason vocabulary becomes
+    meaningful again.
+
+  Observed against a two-client browser scenario where the local client
+  recovers but cross-client delivery never starts.
+
 - 🔶 **Transport state.** The current binding-facing send/poll surface can
   express "send" and "no message staged"; it cannot express closed/error/
   backpressure, auth expiry, protocol-version mismatch, or resume-cursor
