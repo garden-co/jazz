@@ -1825,6 +1825,9 @@ pub struct ArraySubquery {
     /// Child-local row limit.
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Child-local rows to skip after ordering.
+    #[serde(default)]
+    pub offset: usize,
     /// Parent membership requirement for this relation.
     #[serde(default)]
     pub requirement: ArraySubqueryRequirement,
@@ -1850,6 +1853,7 @@ impl ArraySubquery {
             select: None,
             order_by: Vec::new(),
             limit: None,
+            offset: 0,
             requirement: ArraySubqueryRequirement::Optional,
             nested_arrays: Vec::new(),
         }
@@ -1879,6 +1883,12 @@ impl ArraySubquery {
     /// Limit child rows after filtering and ordering.
     pub fn limit(mut self, limit: usize) -> Self {
         self.limit = Some(limit);
+        self
+    }
+
+    /// Skip child rows after filtering and ordering.
+    pub fn offset(mut self, offset: usize) -> Self {
+        self.offset = offset;
         self
     }
 

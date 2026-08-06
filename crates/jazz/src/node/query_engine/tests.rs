@@ -860,7 +860,7 @@ fn current_source_filter_order_slice_chain_lowers_to_groove_graph() {
 }
 
 #[test]
-fn current_source_select_projection_and_unordered_slice_lower() {
+fn current_source_select_projection_and_default_ordered_slice_lower() {
     let root = RowSetNodeId("root".to_owned());
     let slice = RowSetNodeId("slice".to_owned());
     let root_source = source("todos", SourceRole::Root);
@@ -946,7 +946,10 @@ fn current_source_select_projection_and_unordered_slice_lower() {
             limit: groove::ivm::TopByLimit::Finite(3),
         } if matches!(input.as_ref(), GraphBuilder::Table { table, .. } if table == "resolved_todos")
             && group_cols.is_empty()
-            && order_cols.is_empty()
+            && matches!(order_cols.as_slice(), [groove::ivm::TopByOrder {
+                field: groove::ivm::FieldRef::Name(field),
+                direction: groove::ivm::TopByDirection::Asc,
+            }] if field == "row_uuid")
             && matches!(tie_cols.as_slice(), [groove::ivm::FieldRef::Name(field)]
                 if field == "row_uuid")
     ));
@@ -1671,6 +1674,62 @@ fn correlated_path_projection_lowers_with_relation_fact_schemas() {
             })
         )
     }));
+}
+
+#[test]
+fn unordered_bounded_correlated_child_window_defaults_to_child_row_id_order() {
+    // Internal lowering test: the public Db relation stream carries flat
+    // relation edges, whose per-parent row-id comparator is materialized at
+    // the terminal rather than reimplemented in the test.
+    let child_node = RowSetNodeId("child".to_owned());
+    let child_slice = RowSetNodeId("child_slice".to_owned());
+    let path_node = RowSetNodeId("path".to_owned());
+    let child_source = source("todo_tags", SourceRole::CorrelatedChild("tags".to_owned()));
+    let mut request = correlated_path_request(
+        CorrelationRequirement::Optional,
+        row_set_output(BTreeSet::from([
+            ProgramFactKey::ResultMembership,
+            ProgramFactKey::RelationEdges,
+        ])),
+    );
+    request.input.shape.nodes.insert(
+        child_slice.clone(),
+        RowSetExpr::Slice {
+            input: child_node.clone(),
+            partition_by: vec![NormalizedValueRef::SourceField {
+                source: child_source.clone(),
+                field: "todo".to_owned(),
+            }],
+            limit: Some(2),
+            offset: 1,
+            tie_breaker: vec![NormalizedValueRef::RowId(RowIdRef::Source(
+                child_source.clone(),
+            ))],
+            rank_output: None,
+        },
+    );
+    let RowSetExpr::CorrelatedPathProjection { child_input, .. } = request
+        .input
+        .shape
+        .nodes
+        .get_mut(&path_node)
+        .expect("correlated path node")
+    else {
+        panic!("path node must remain a correlated path projection");
+    };
+    *child_input = child_slice;
+
+    let mut resolver = FakeSourceResolver::default();
+    let program = lower_query_program(request, &mut resolver)
+        .expect("unordered bounded child window should lower");
+
+    assert!(program.lowered.terminals.iter().any(|terminal| matches!(
+        terminal.output,
+        OutputTerminalSchema::Fact(ProgramFactOutput {
+            key: ProgramFactKey::RelationEdges,
+            ..
+        })
+    )));
 }
 
 fn correlated_path_request(

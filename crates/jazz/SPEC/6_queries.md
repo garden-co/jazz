@@ -550,7 +550,12 @@ where it appears. Ordered row-valued results remain total and replay-stable:
 after the user-declared order terms, ties are broken by ascending row id unless
 the query surface later exposes an explicit, stable tie policy. Child-local
 `order_by` overrides only that child relation's ordering and does not reorder
-parents or sibling relation payloads.
+parents or sibling relation payloads. A child relation's default and tie row id
+is the child source row id, and its ordering is independently evaluated within
+each parent/correlation group before that child's `offset` and `limit`; it never
+uses parent order or another group’s child rows. This same comparator is required
+for one-shot snapshots, maintained hydration, resets, and whole-parent
+replacements.
 
 For a flat joined result, `order_by` is the only cross-source ordering contract:
 its qualified fields order output occurrences and the complete occurrence id is
