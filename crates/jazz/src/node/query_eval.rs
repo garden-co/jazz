@@ -6180,16 +6180,14 @@ where
                 .to_owned();
             let mut sources = BTreeMap::from([(root_name, root_source.clone())]);
             let mut tuple_sources = vec![root_source.clone()];
-            let mut output_sources = vec![
-                ((
-                    flat_join
-                        .root_alias
-                        .as_deref()
-                        .unwrap_or(query.table.as_str())
-                        .to_owned(),
-                    root_source.clone(),
-                )),
-            ];
+            let mut output_sources = vec![(
+                flat_join
+                    .root_alias
+                    .as_deref()
+                    .unwrap_or(query.table.as_str())
+                    .to_owned(),
+                root_source.clone(),
+            )];
 
             for (index, join) in flat_join.sources.iter().enumerate() {
                 let name = join

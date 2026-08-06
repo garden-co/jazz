@@ -4930,9 +4930,21 @@ fn lowered_terminals(
                 resolved_sources,
                 routing_param_fields.clone(),
             )?;
+            // Closure membership is a root-row projection: it may discard
+            // output-only columns while constructing the root closure. A
+            // flat join instead needs its complete already-policy-filtered
+            // tuple here, including the internal contributor ids used by the
+            // occurrence address. This matters when a joined source resolves
+            // through a lens (for example a renamed table on an old branch),
+            // where that projection otherwise loses `__flat_join_row_N`.
+            let result_membership_input = if flat_join_payload_fields(plan).is_empty() {
+                visible_root_with_routes.clone()
+            } else {
+                graph.clone()
+            };
             let result_graph = fact_terminal_graph(
                 fact,
-                visible_root_with_routes.clone(),
+                result_membership_input,
                 plan,
                 source,
                 resolved_sources,
