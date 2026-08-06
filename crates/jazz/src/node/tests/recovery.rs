@@ -96,11 +96,8 @@ fn opening_defers_malformed_current_row_to_read() {
     assert!(
         matches!(
             error,
-            Error::MalformedCurrentRow {
-                ref table,
-                row_uuid,
-                ..
-            } if table == "todos" && row_uuid == row(0xff)
+            Error::MalformedCurrentRow(ref details)
+                if details.table == "todos" && details.row_uuid == row(0xff)
         ),
         "unexpected current-row read error: {error}"
     );
