@@ -1765,28 +1765,6 @@ fn direct_record_store_rejects_record_containing_durable_keys_at_schema_admissio
 }
 
 #[test]
-fn direct_record_store_rejects_record_valued_durable_keys() {
-    let child = RecordDescriptor::new([("id", ValueType::U64)]);
-    let schema = DatabaseSchema::new([]).with_direct_record_store(DirectRecordStoreSchema::new(
-        "rendered_results",
-        RecordDescriptor::new([("result", ValueType::Record(Box::new(child)))]),
-        RecordDescriptor::new([("payload", ValueType::Bytes)]),
-    ));
-    let storage = MemoryStorage::new(&schema.column_families());
-    let database = Database::new(schema, storage).unwrap();
-    let store = database.direct_record_store("rendered_results").unwrap();
-    let child = crate::records::OwnedRecord::new(child.create(&[Value::U64(1)]).unwrap(), child);
-
-    assert!(matches!(
-        store.set(
-            &[Value::Record(child)],
-            &[Value::Bytes(b"not-a-key".to_vec())],
-        ),
-        Err(Error::InvalidDirectRecordStoreKey(_))
-    ));
-}
-
-#[test]
 fn commit_metrics_split_storage_and_tick_work() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
