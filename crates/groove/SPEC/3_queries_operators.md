@@ -251,9 +251,9 @@ Use a finite limit when the consumer only needs a bounded window.
 output-shaping operator. It consumes one ordinary flat weighted record stream
 and has two descriptor-selected modes:
 
-- **Collect** renders one output record per group with an `Array<Record>`
-  field. Parent/child associations remain scalar fields on flat input rows; the
-  nested array exists only in the terminal's output.
+- **Collect** renders one output record per group as a recursive tree of named
+  `Array<Record>` slots. Parent/child associations remain scalar fields on flat
+  input rows; nested arrays exist only in the terminal's output.
 - **Expand** renders the selected flat input rows as output tuples. A wide join
   has already carried every source column into this one unary input, so expand
   neither reads multiple sinks nor reconstructs a tuple from arrangements.
@@ -266,11 +266,22 @@ modes.
 The `CollectBy` descriptor MUST include every output-affecting input:
 
 - the grouping fields, terminal mode, and output occurrence-id source fields;
-- in collect mode, the output parent-field sources, child projection, and
-  output collection slot; in expand mode, the tuple projection;
-- the complete scalar order and tie fields, direction, offset, and limit; and
-- the parent/child presence rules needed to render an empty collection in
-  collect mode.
+- in collect mode, the output parent-field sources and a tree of collection
+  slots; a slot is addressed by its unique output field name within its owner
+  and carries its owner-group fields, child projection, scalar order and tie
+  fields, direction, offset, limit, and nested slots. Siblings are distinct
+  named slots on one record; descendants are slots on a child record. A slot's
+  group fields are source fields available on its owner, so it selects its own
+  owner-correlated flat rows; in expand mode, the tuple projection;
+- the parent/child presence rules needed to render empty arrays in collect mode.
+
+Descriptor recursion is limited by Groove's own
+`MAX_COLLECT_BY_TREE_DEPTH` validation (currently 16). It intentionally does
+not share Jazz's future `MAX_STRUCTURED_RESULT_DEPTH`/
+`MAX_STRUCTURED_RESULT_WIDTH`: this validates trusted executable graph shape
+before runtime allocation, while those are receiver limits for untrusted wire
+values. Width is bounded at the receiver boundary in PR 4; slot names are
+unique at every descriptor level here.
 
 This is an application of `INV-QUERY-1A`: descriptors, not external planner
 state, define output identity and sharing. Validation MUST require a complete,
@@ -300,26 +311,28 @@ because their tuple bytes match. A finite limit bounds each selected window;
 an unbounded terminal's rendered work and bytes scale with its whole selected
 group.
 
-For `INV-INC-2`, let `D_g` be a touched group's input delta, `G_g` its retained
-flat state, and `W_g^-`/`W_g^+` its old/new selected windows. Define
-`R_g(limit)` as the larger row-and-byte footprint of those windows; for a finite
-limit it contains at most `limit` output occurrences (plus their encoded
-payload). Indexed state maintenance MAY cost `O(|D_g| log(1 + |G_g|))`.
+For `INV-INC-2`, let `D_g` be a touched root group's input delta, `G_g` its
+retained flat state, and `T_g^-`/`T_g^+` its old/new rendered selected trees.
+Define `R_g(limit)` as the larger row-and-byte footprint of the selected windows
+at **every slot in those trees**, including encoded parent/child records. For
+finite slots it is the sum of their selected bounded windows, not merely the
+root window. Indexed state maintenance MAY cost `O(|D_g| log(1 + |G_g|))`.
 Everything after that index maintenance — selecting, rendering, comparing, and
-delivering — MUST be bounded by `O(|D_g| + R_g(limit))` and MUST inspect only
-the deltas and the old/new selected windows, never scan, re-materialize, or diff
-the rest of `G_g` or unrelated groups. Collect mode uses that allowance to emit
-at most one whole-group replacement. Expand mode uses it to emit the actual
-selected occurrence diff, at most the old/new window footprint, rather than one
-fictional group row. This is the same meaningful finite-window bound in both
-modes, not permission to do work proportional to accumulated state.
+delivering — MUST be bounded by `O(|D_g| + R_g(limit))` and inspect only `D_g`
+and the old/new selected tree windows, never scan, re-materialize, or diff the
+rest of `G_g` or unrelated groups. Collect mode emits at most one whole-root
+parent replacement, even for a descendant change. Expand uses the flat selected
+occurrence diff. This is not weaker: unbounded descendants make `R_g` unbounded
+by their actual selected output, but never license accumulated-state work.
 
 `CollectBy` MUST NOT compose as a graph node. Node validation and terminal
 preparation MUST reject a collector as an input to every other node, including a
 second collector (`INV-QUERY-27`); planner convention is insufficient. A nested
 structured result is rendered by one terminal-owned internal collector tree that
 consumes flat associations and writes directly into its final output, never by
-flowing an inner collection update through an ordinary graph edge. This
+flowing an inner collection update through an ordinary graph edge. Nested slots
+are descriptor data within the one terminal, not composed graph nodes, so this
+does not weaken `INV-QUERY-27`. This
 restriction keeps the graph's deltas flat and prevents mode-specific terminals
 from drifting.
 
