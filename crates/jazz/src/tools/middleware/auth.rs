@@ -26,7 +26,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
-    async_trait,
     extract::FromRequestParts,
     http::{HeaderMap, StatusCode, header::AUTHORIZATION, request::Parts},
 };
@@ -542,7 +541,6 @@ fn read_auth_token_from_cookie<'a>(headers: &'a HeaderMap, config: &AuthConfig) 
 #[allow(dead_code)]
 pub struct JwtAuth(pub Option<Session>);
 
-#[async_trait]
 impl FromRequestParts<Arc<ServerState>> for JwtAuth {
     type Rejection = (StatusCode, String);
 
@@ -596,7 +594,6 @@ impl FromRequestParts<Arc<ServerState>> for JwtAuth {
 #[allow(dead_code)]
 pub struct BackendAuth(pub Option<String>);
 
-#[async_trait]
 impl<S> FromRequestParts<S> for BackendAuth
 where
     S: Send + Sync,
@@ -617,7 +614,6 @@ where
 #[allow(dead_code)]
 pub struct AdminAuth(pub Option<String>);
 
-#[async_trait]
 impl<S> FromRequestParts<S> for AdminAuth
 where
     S: Send + Sync,
@@ -643,7 +639,6 @@ where
 #[allow(dead_code)]
 pub struct RequestSession(pub Option<Session>);
 
-#[async_trait]
 impl FromRequestParts<Arc<ServerState>> for RequestSession {
     type Rejection = (StatusCode, String);
 

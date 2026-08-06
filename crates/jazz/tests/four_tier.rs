@@ -274,7 +274,7 @@ fn four_tier_topology_relays_pending_units_and_core_fates() {
 
     let mut core_to_edge = PeerState::new();
     let mut edge_to_worker = PeerState::new();
-    let mut worker_to_ui = PeerState::for_author(ui_author);
+    let mut worker_to_ui = PeerState::client_link(ui_author);
 
     let owned_row = row(1);
     let other_row = row(2);
@@ -421,7 +421,7 @@ fn edge_peer_terminates_client_identity_and_relays_upstream() {
     assert_eq!(core_to_edge.role(), PeerRole::Relay);
     assert_eq!(
         edge_to_client.role(),
-        PeerRole::EdgeClient {
+        PeerRole::ClientLink {
             identity: client_author
         }
     );

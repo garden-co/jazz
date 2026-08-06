@@ -9,6 +9,7 @@ use super::*;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
+use std::time::Instant;
 
 use groove::ivm::{LiteralValue, RoutedMultisinkTerminal, StaticScanSpec};
 use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas};
@@ -58,6 +59,12 @@ use crate::schema::{ColumnSchema, branch_metadata_table_schema, global_current_i
 
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
+
+#[derive(Clone, Copy)]
+struct RelationSnapshotWindow {
+    offset: usize,
+    limit: Option<usize>,
+}
 
 pub(crate) struct LocalMaintainedViewSubscription {
     subscription: MultisinkSubscription,
@@ -294,6 +301,13 @@ fn fact_public_fields(
         }
         ProgramFactSchema::ResultMembership(schema) => {
             let mut fields = vec![schema.table_field.clone(), schema.row_field.clone()];
+            fields.extend(
+                schema
+                    .occurrence_id_fields
+                    .iter()
+                    .filter(|field| **field != schema.row_field)
+                    .cloned(),
+            );
             fields.extend(schema.branch_or_prefix_field.clone());
             fields.extend(result_membership_version_fields(&schema.version));
             fields.extend(schema.settle_position_field.clone());
@@ -3245,7 +3259,7 @@ fn normalize_array_subquery(
         child_current = order_node;
     }
 
-    if subquery.limit.is_some() {
+    if subquery.limit.is_some() || subquery.offset != 0 {
         let slice_node = RowSetNodeId(format!("array_subquery:{path_id}:slice"));
         nodes.insert(
             slice_node.clone(),
@@ -3258,7 +3272,7 @@ fn normalize_array_subquery(
                 limit: subquery
                     .limit
                     .map(|limit| limit.min(u32::MAX as usize) as u32),
-                offset: 0,
+                offset: subquery.offset.min(u32::MAX as usize) as u32,
                 tie_breaker: vec![NormalizedValueRef::RowId(RowIdRef::Source(
                     child_source.clone(),
                 ))],
@@ -5116,13 +5130,14 @@ where
             return Ok(None);
         };
         let content_record = content_raw.record();
-        let content_tx = self.current_record_sort_key(content_record)?;
+        let content_tx = self.current_record_sort_key(table_name, row_uuid, content_record)?;
         if let Some(deletion_raw) = self
             .database
             .primary_key_get_raw(&global_tables[1].name, &[Value::Uuid(row_uuid.0)])?
         {
             let deletion_record = deletion_raw.record();
-            let deletion_tx = self.current_record_sort_key(deletion_record)?;
+            let deletion_tx =
+                self.current_record_sort_key(table_name, row_uuid, deletion_record)?;
             let deletion = deletion_event_from_value(
                 deletion_record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
             )?;
@@ -5201,9 +5216,23 @@ where
             return Ok(None);
         }
         if let Some(position) = self.settled_through_for_binding_view(binding_view_key) {
-            return Ok(Some(KnownStateDeclaration::Fast {
-                completeness: KnownStateCompleteness::FastCurrentMembership,
-                position,
+            let authorization_progress = self
+                .query
+                .authorization_progress_by_binding_view
+                .get(&binding_view_key)
+                .copied();
+            return Ok(Some(match authorization_progress {
+                Some(authorization_progress) => {
+                    KnownStateDeclaration::FastWithAuthorizationProgress {
+                        completeness: KnownStateCompleteness::FastCurrentMembership,
+                        position,
+                        authorization_progress,
+                    }
+                }
+                None => KnownStateDeclaration::Fast {
+                    completeness: KnownStateCompleteness::FastCurrentMembership,
+                    position,
+                },
             }));
         }
         if let Some(position) = self.load_known_state_fact(binding_view_key)? {
@@ -5596,7 +5625,11 @@ where
             reads: current_query_read_set(
                 &input.shape,
                 shape.schema_version(),
-                self.read_policy_schema_for_table_name(&shape.query().table),
+                self.read_policy_schema_for_table_name(
+                    &shape.query().table,
+                    shape.schema_version(),
+                    &input.shape,
+                ),
                 tier,
                 None,
             ),
@@ -5941,7 +5974,11 @@ where
             reads: query_read_set_for_read_view(
                 &input.shape,
                 shape.schema_version(),
-                self.read_policy_schema_for_table_name(&shape.query().table),
+                self.read_policy_schema_for_table_name(
+                    &shape.query().table,
+                    shape.schema_version(),
+                    &input.shape,
+                ),
                 tier,
                 read_view,
                 settled_binding_view,
@@ -6552,6 +6589,21 @@ where
         self.query_rows_with_prepared_plan(shape, binding, DurabilityTier::Local, prepared_plan)
     }
 
+    pub(crate) fn query_rows_local_preview_profiled(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        prepared_plan: Option<&PreparedQueryPlanHandle>,
+    ) -> Result<(Vec<CurrentRow>, QueryReadProfile), Error> {
+        self.query_rows_with_options_for_identity_profiled(
+            shape,
+            binding,
+            DurabilityTier::Local,
+            prepared_plan,
+            AuthorId::SYSTEM,
+        )
+    }
+
     pub(crate) fn query_rows_including_deleted_for_identity(
         &mut self,
         shape: &ValidatedQuery,
@@ -6705,6 +6757,159 @@ where
         self.finish_engine_query_rows(query, &mut rows)?;
         self.apply_projection(query, &mut rows)?;
         Ok(rows)
+    }
+
+    fn query_rows_with_options_for_identity_profiled(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        prepared_plan: Option<&PreparedQueryPlanHandle>,
+        identity: AuthorId,
+    ) -> Result<(Vec<CurrentRow>, QueryReadProfile), Error> {
+        let total_started = Instant::now();
+        let phase_started = Instant::now();
+        let settled_binding_view = (tier == DurabilityTier::Global)
+            .then(|| self.settled_binding_view_key_for_query(shape, binding))
+            .transpose()?
+            .flatten();
+        // A concrete one-shot access path is binding-specific. Inline that
+        // binding so execution keeps the selected graph instead of replacing it
+        // with the generic cached parameterized plan.
+        let inline_query = if prepared_plan.is_none()
+            && settled_binding_view.is_none()
+            && !self.one_shot_access_paths(shape, binding, tier)?.is_empty()
+        {
+            let schema = self
+                .catalogue
+                .catalogue_schemas
+                .get(&shape.schema_version())
+                .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
+            let inline_shape =
+                inline_snapshot_bind_filter_literals(shape, binding, &schema.schema)?;
+            let inline_binding = inline_shape.bind(BTreeMap::new())?;
+            Some((inline_shape, inline_binding))
+        } else {
+            None
+        };
+        let (shape, binding) = inline_query
+            .as_ref()
+            .map(|(shape, binding)| (shape, binding))
+            .unwrap_or((shape, binding));
+        let prepared_plan = prepared_plan
+            .filter(|plan| !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker));
+        let mut profile = QueryReadProfile {
+            resolve_view: phase_started.elapsed(),
+            ..Default::default()
+        };
+
+        let phase_started = Instant::now();
+        let program = if prepared_plan.is_some() {
+            None
+        } else {
+            Some(self.compile_current_query_program_for_one_shot_read(
+                shape,
+                binding,
+                tier,
+                identity,
+                settled_binding_view,
+            )?)
+        };
+        profile.compile_program = phase_started.elapsed();
+
+        let phase_started = Instant::now();
+        let needs_binding = || {
+            let parameters = &program
+                .as_ref()
+                .expect("program is compiled when no prepared plan is supplied")
+                .lowered
+                .parameters;
+            !parameters.user_params.is_empty() || !parameters.claim_params.is_empty()
+        };
+        let plan = match prepared_plan {
+            Some(plan) if settled_binding_view.is_none() => Some(plan.clone()),
+            Some(_) => None,
+            None if settled_binding_view.is_none()
+                && self.can_use_prepared_current_query_plan(shape)
+                && needs_binding() =>
+            {
+                Some(self.prepared_query_plan(shape, binding, tier, identity)?)
+            }
+            None if settled_binding_view.is_none() && needs_binding() => Some(std::sync::Arc::new(
+                self.prepared_query_plan_from_program(
+                    program
+                        .as_ref()
+                        .expect("program is compiled when no prepared plan is supplied"),
+                    shape,
+                    binding,
+                )?,
+            )),
+            None => None,
+        };
+        let policy = self.query_program_policy_context(identity);
+        let table_schema = self.query_output_table(shape.query(), shape.schema_version())?;
+        profile.select_plan = phase_started.elapsed();
+
+        let phase_started = Instant::now();
+        let deltas_result = match plan {
+            None => self
+                .database
+                .query_graph(lowered_app_rows_graph(
+                    &program.expect("program is compiled when no prepared plan is supplied"),
+                )?)
+                .map_err(Error::Groove),
+            Some(plan) => match plan.as_ref() {
+                PreparedQueryPlan::Prepared { shape, params } => {
+                    let values = binding_values_for_plan(binding, params, &policy)?;
+                    self.database
+                        .bind_shape(*shape, &values)
+                        .map_err(Error::Groove)
+                        .and_then(|subscription| {
+                            subscription
+                                .recv()
+                                .map_err(|_| Error::SubscriptionClosed)
+                                .and_then(|deltas| {
+                                    take_required_sink_deltas(deltas, JAZZ_APP_ROWS_SINK)
+                                })
+                        })
+                }
+                PreparedQueryPlan::Graph(graph) => self
+                    .database
+                    .query_graph(graph.clone())
+                    .map_err(Error::Groove),
+                PreparedQueryPlan::PeerMaintainedMarker => {
+                    unreachable!("peer maintained markers are filtered before query execution")
+                }
+            },
+        };
+        let deltas = deltas_result?;
+        profile.execute_plan = phase_started.elapsed();
+
+        let phase_started = Instant::now();
+        let mut rows = if shape.query().aggregate.is_some() {
+            self.materialize_aggregate_query_rows(shape.query(), &table_schema, deltas)?
+        } else {
+            let mut rows = Vec::new();
+            for (record, weight) in deltas.iter() {
+                if weight > 0 {
+                    let row = decode_current_row(&table_schema, record)?;
+                    rows.push(self.materialize_current_row(&table_schema, row)?);
+                }
+            }
+            rows
+        };
+        profile.decode_materialize = phase_started.elapsed();
+
+        let query = shape.query();
+        let phase_started = Instant::now();
+        self.finish_engine_query_rows(query, &mut rows)?;
+        profile.finish_rows = phase_started.elapsed();
+
+        let phase_started = Instant::now();
+        self.apply_projection(query, &mut rows)?;
+        profile.apply_projection = phase_started.elapsed();
+        profile.total = total_started.elapsed();
+        Ok((rows, profile))
     }
 
     fn settled_binding_view_key_for_query(
@@ -8064,7 +8269,7 @@ where
             target_tx_node: NodeAlias,
         }
 
-        let limits = Self::relation_snapshot_no_order_limits(&shape.query().array_subqueries);
+        let windows = Self::relation_snapshot_no_order_windows(&shape.query().array_subqueries);
         let descriptor = &edges.descriptor;
         let source_table_idx = required_field_idx(descriptor, "source_table")?;
         let source_row_idx = required_field_idx(descriptor, "source_row")?;
@@ -8112,6 +8317,7 @@ where
                 ))
         });
         let mut counts = BTreeMap::<(String, RowUuid, String), usize>::new();
+        let mut target_tables = BTreeMap::<String, TableSchema>::new();
         for candidate in candidates {
             let group = (
                 candidate.edge.source_table.clone(),
@@ -8119,23 +8325,34 @@ where
                 candidate.edge.relation.clone(),
             );
             let count = counts.entry(group).or_default();
-            if limits
-                .get(&candidate.edge.relation)
-                .is_some_and(|limit| *count >= *limit)
-            {
-                continue;
-            }
+            let window = windows.get(&candidate.edge.relation).copied();
+            let ordinal = *count;
             *count += 1;
+            if let Some(window) = window {
+                if ordinal < window.offset
+                    || window
+                        .limit
+                        .is_some_and(|limit| ordinal >= window.offset.saturating_add(limit))
+                {
+                    continue;
+                }
+            }
             if row_keys.insert((
                 candidate.edge.target_table.clone(),
                 candidate.edge.target_row,
             )) {
-                let target_table = self
-                    .table_in_schema(&candidate.edge.target_table, shape.schema_version())?
-                    .clone();
+                if !target_tables.contains_key(&candidate.edge.target_table) {
+                    let target_table = self
+                        .table_in_schema(&candidate.edge.target_table, shape.schema_version())?
+                        .clone();
+                    target_tables.insert(candidate.edge.target_table.clone(), target_table);
+                }
+                let target_table = target_tables
+                    .get(&candidate.edge.target_table)
+                    .expect("target table was inserted");
                 let row = self.materialize_relation_edge_target_row(
                     read_view,
-                    &target_table,
+                    target_table,
                     &candidate.edge.target_table,
                     candidate.edge.target_row,
                     candidate.target_tx_time,
@@ -8188,19 +8405,25 @@ where
             ))
     }
 
-    fn relation_snapshot_no_order_limits(subqueries: &[ArraySubquery]) -> BTreeMap<String, usize> {
-        let mut limits = BTreeMap::new();
+    fn relation_snapshot_no_order_windows(
+        subqueries: &[ArraySubquery],
+    ) -> BTreeMap<String, RelationSnapshotWindow> {
+        let mut windows = BTreeMap::new();
         for subquery in subqueries {
-            if subquery.order_by.is_empty()
-                && let Some(limit) = subquery.limit
-            {
-                limits.insert(subquery.column_name.clone(), limit);
+            if subquery.order_by.is_empty() && (subquery.limit.is_some() || subquery.offset != 0) {
+                windows.insert(
+                    subquery.column_name.clone(),
+                    RelationSnapshotWindow {
+                        offset: subquery.offset,
+                        limit: subquery.limit,
+                    },
+                );
             }
-            limits.extend(Self::relation_snapshot_no_order_limits(
+            windows.extend(Self::relation_snapshot_no_order_windows(
                 &subquery.nested_arrays,
             ));
         }
-        limits
+        windows
     }
 
     fn materialize_relation_snapshot_root_rows(
@@ -8519,6 +8742,11 @@ where
         identity: AuthorId,
         read_view: &ReadViewSpec,
     ) -> Result<(), Error> {
+        // `JoinVia` is an existential constraint on this query's root-row
+        // result, not flat joined output: maintained membership and delivery
+        // remain addressed by the selected root row. Flat public join output,
+        // which can contain several occurrences for one root, remains rejected
+        // at the public-client boundary until it supplies source tuples.
         self.compile_current_query_program_for_read_view(
             shape,
             binding,
@@ -11339,12 +11567,28 @@ mod tests {
         SchemaVersion, ShapeAst, Subscribe, SyncMessage, TableLens,
     };
     use crate::query::{
-        Aggregate, JoinSourceLookup, OrderDirection, Query, claim, col, contains, eq, gt, in_list,
-        lit, lte, param,
+        Aggregate, ArraySubquery, JoinSourceLookup, OrderDirection, Query, claim, col, contains,
+        eq, gt, in_list, lit, lte, param,
     };
     use crate::schema::{JazzSchema, TableSchema};
 
     use super::*;
+
+    #[test]
+    fn unordered_array_windows_materialize_per_parent_row_id_order() {
+        let windows =
+            NodeState::<RocksDbStorage>::relation_snapshot_no_order_windows(&[ArraySubquery::new(
+                "comments", "comments", "todo_id", "id",
+            )
+            .offset(1)
+            .limit(2)]);
+        assert_eq!(
+            windows
+                .get("comments")
+                .map(|window| (window.offset, window.limit)),
+            Some((1, Some(2)))
+        );
+    }
 
     #[test]
     fn chained_renames_preserve_the_original_projection_source() {

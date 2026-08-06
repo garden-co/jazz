@@ -705,13 +705,9 @@ fn assert_settled_result_sets_unique(
     let Some(result_set) = node.query.settled_result_sets.get(&binding_view_key) else {
         return;
     };
-    let row_result_set = result_set
-        .iter()
-        .filter_map(crate::protocol::ResultMemberEntry::as_row)
-        .collect::<BTreeSet<_>>();
-    if let Some((table, row_uuid, first, second)) = duplicate_row_result_set(&row_result_set) {
+    if let Some((occurrence_id, first, second)) = duplicate_output_occurrence_result_set(result_set) {
         panic!(
-            "seed {seed}: subscription {subscription_ordinal} has multiple content versions for {table}.{row_uuid:?}: {first:?} and {second:?}"
+            "seed {seed}: subscription {subscription_ordinal} has multiple content versions for output occurrence {occurrence_id:?}: {first:?} and {second:?}"
         );
     }
 }
@@ -881,7 +877,7 @@ fn assert_view_update_result_set_matches_current_rows(node: &mut NodeState<Rocks
     let update = node.view_update_for_current_rows("todos").unwrap();
     let SyncMessage::ViewUpdate {
         version_bundles: _,
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         result_member_adds,
         result_member_removes,
         ..
@@ -1367,8 +1363,8 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
     let (core_dir, mut core) = open_node_with_schema(node(9), harness_schema.clone());
     let (reader_a_dir, mut reader_a) = open_node_with_schema(node(3), harness_schema.clone());
     let (reader_b_dir, mut reader_b) = open_node_with_schema(node(4), harness_schema.clone());
-    let mut link_a = PeerState::for_author(author_a);
-    let mut link_b = PeerState::for_author(author_b);
+    let mut link_a = PeerState::client_link(author_a);
+    let mut link_b = PeerState::client_link(author_b);
     let owner_shape = crate::query::Query::from("todos")
         .filter(eq(col("owner"), param("owner")))
         .validate(&harness_schema)

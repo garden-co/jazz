@@ -24,6 +24,7 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse, Response},
 };
+use futures::SinkExt as _;
 use tokio::sync::mpsc;
 
 use crate::tools::public_schema::AuthMode;
@@ -765,7 +766,7 @@ async fn send_ws_encoded_frames(
             "server websocket send batch bytes={}",
             batch.len()
         ));
-        socket.send(Message::Binary(batch)).await?;
+        socket.send(Message::Binary(batch.into())).await?;
     }
     Ok(())
 }
@@ -845,8 +846,8 @@ mod tests {
     use crate::wire::FEATURE_STRUCTURED_ERRORS;
     use crate::wire::decode_frame;
     use crate::wire::{TransportError, WireTransport};
+    use futures::StreamExt as _;
     use futures::stream::FuturesUnordered;
-    use futures::{SinkExt as _, StreamExt as _};
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
     use crate::tools::AppId;

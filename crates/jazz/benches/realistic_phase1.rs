@@ -8,8 +8,16 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 #[cfg(feature = "rocksdb")]
+use std::env;
+#[cfg(all(feature = "rocksdb", target_os = "linux"))]
+use std::fs;
+#[cfg(all(feature = "rocksdb", target_os = "linux"))]
+use std::os::fd::AsRawFd;
+#[cfg(feature = "rocksdb")]
 use std::path::Path;
 use std::rc::Rc;
+#[cfg(feature = "rocksdb")]
+use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use jazz::db::{
@@ -58,6 +66,26 @@ const CI_S_PROFILE: SmallProfile = SmallProfile {
     comments: 360,
     watchers_per_task: 1,
     activity_events: 240,
+};
+
+const S_PROFILE: SmallProfile = SmallProfile {
+    users: 10,
+    organizations: 3,
+    projects: 30,
+    tasks: 3_000,
+    comments: 12_000,
+    watchers_per_task: 1,
+    activity_events: 9_000,
+};
+
+const M_PROFILE: SmallProfile = SmallProfile {
+    users: 100,
+    organizations: 20,
+    projects: 500,
+    tasks: 100_000,
+    comments: 400_000,
+    watchers_per_task: 2,
+    activity_events: 250_000,
 };
 
 fn schema() -> JazzSchema {
@@ -932,7 +960,7 @@ fn drain_permission_resume_delta(event: Option<SubscriptionEvent>) -> (usize, us
             assert!(!removed.iter().any(|row| row.row_uuid == RESUME_DOC_NEVER));
             (added.len(), updated.len(), removed.len())
         }
-        None => (0, 0, 0),
+        None => panic!("permission-filtered resume emitted no delta event"),
         other => panic!("expected permission-filtered resume delta event, got {other:?}"),
     }
 }
@@ -1046,28 +1074,313 @@ fn r2_reads(c: &mut Criterion) {
 }
 
 #[cfg(feature = "rocksdb")]
+#[derive(Clone, Copy)]
+struct R3Profile {
+    id: &'static str,
+    profile: SmallProfile,
+}
+
+#[cfg(feature = "rocksdb")]
+fn r3_profiles() -> Vec<R3Profile> {
+    let requested = env::var("JAZZ_R3_PROFILES").unwrap_or_else(|_| "ci".to_owned());
+    requested
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| match value {
+            "ci" => R3Profile {
+                id: "ci",
+                profile: CI_S_PROFILE,
+            },
+            "s" => R3Profile {
+                id: "s",
+                profile: S_PROFILE,
+            },
+            "m" => R3Profile {
+                id: "m",
+                profile: M_PROFILE,
+            },
+            other => panic!(
+                "unknown JAZZ_R3_PROFILES entry {other:?}; expected a comma-separated subset of ci,s,m"
+            ),
+        })
+        .collect()
+}
+
+#[cfg(feature = "rocksdb")]
+#[derive(Debug)]
+struct R3PhaseSample {
+    storage_open: Duration,
+    jazz_open: Duration,
+    prepare: Duration,
+    first_read: Duration,
+    first_read_resolve_view: Duration,
+    first_read_compile_program: Duration,
+    first_read_select_plan: Duration,
+    first_read_execute_plan: Duration,
+    first_read_decode_materialize: Duration,
+    first_read_finish_rows: Duration,
+    first_read_apply_projection: Duration,
+    first_read_unattributed: Duration,
+    rows: usize,
+}
+
+#[cfg(feature = "rocksdb")]
+#[derive(Clone, Copy)]
+enum R3CacheMode {
+    Warm,
+    Evicted,
+}
+
+#[cfg(feature = "rocksdb")]
+impl R3CacheMode {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Warm => "os_page_cache_uncontrolled_after_seed",
+            Self::Evicted => "linux_posix_fadvise_dontneed",
+        }
+    }
+
+    fn phase(self) -> &'static str {
+        match self {
+            Self::Warm => "reopen_warm_cache",
+            Self::Evicted => "reopen_evicted_cache",
+        }
+    }
+}
+
+#[cfg(feature = "rocksdb")]
+fn r3_cache_modes() -> Vec<R3CacheMode> {
+    let requested = env::var("JAZZ_R3_CACHE_MODES").unwrap_or_else(|_| "warm".to_owned());
+    requested
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| match value {
+            "warm" => R3CacheMode::Warm,
+            "evicted" => R3CacheMode::Evicted,
+            other => panic!(
+                "unknown JAZZ_R3_CACHE_MODES entry {other:?}; expected a comma-separated subset of warm,evicted"
+            ),
+        })
+        .collect()
+}
+
+#[cfg(all(feature = "rocksdb", target_os = "linux"))]
+fn evict_path_from_linux_page_cache(path: &Path) {
+    for entry in fs::read_dir(path).expect("read R3 RocksDB directory for cache eviction") {
+        let entry = entry.expect("read R3 RocksDB cache eviction entry");
+        let file_type = entry
+            .file_type()
+            .expect("read R3 RocksDB cache eviction file type");
+        if file_type.is_dir() {
+            evict_path_from_linux_page_cache(&entry.path());
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let file = fs::File::open(entry.path()).expect("open R3 RocksDB file for cache eviction");
+        file.sync_all()
+            .expect("flush R3 RocksDB file before cache eviction");
+        let result =
+            unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
+        assert_eq!(
+            result,
+            0,
+            "posix_fadvise(DONTNEED) failed for {:?}: errno {result}",
+            entry.path()
+        );
+    }
+}
+
+#[cfg(all(feature = "rocksdb", not(target_os = "linux")))]
+fn evict_path_from_linux_page_cache(_path: &Path) {
+    panic!("JAZZ_R3_CACHE_MODES=evicted is currently supported only on Linux");
+}
+
+#[cfg(feature = "rocksdb")]
+fn open_rocks_db_with_phases(
+    seed: u64,
+    author: AuthorId,
+    history_complete: bool,
+    path: &Path,
+) -> (RocksBenchDb, Duration, Duration) {
+    let schema = schema();
+    let column_families = schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+
+    let storage_started = Instant::now();
+    let storage =
+        RocksDbStorage::open(path, &refs).expect("open realistic RocksDB phase receipt storage");
+    let storage_open = storage_started.elapsed();
+
+    let config = DbConfig::new(
+        schema,
+        storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([seed as u8; 16]),
+            author,
+        },
+    )
+    .with_id_source(SeededRowIdSource::new(seed));
+
+    let jazz_started = Instant::now();
+    let opened = if history_complete {
+        block_on(Db::open_history_complete(config))
+    } else {
+        block_on(Db::open(config))
+    };
+    let db = opened.expect("open core realistic RocksDB phase receipt db");
+    let jazz_open = jazz_started.elapsed();
+
+    (db, storage_open, jazz_open)
+}
+
+#[cfg(feature = "rocksdb")]
+fn measure_r3_phase_sample(
+    path: &Path,
+    project: RowUuid,
+    expected_rows: usize,
+    sample: usize,
+    cache_mode: R3CacheMode,
+) -> R3PhaseSample {
+    if matches!(cache_mode, R3CacheMode::Evicted) {
+        evict_path_from_linux_page_cache(path);
+    }
+    let (db, storage_open, jazz_open) =
+        open_rocks_db_with_phases(31 + sample as u64, AUTHOR, false, path);
+
+    let prepare_started = Instant::now();
+    let query = project_board_query(&db, project);
+    let prepare = prepare_started.elapsed();
+
+    let read_started = Instant::now();
+    let (rows, read_profile) = db
+        .read_profiled(&query)
+        .expect("read warm-cache project board");
+    let first_read = read_started.elapsed();
+    assert_eq!(
+        rows.len(),
+        expected_rows,
+        "R3 project-board result count changed"
+    );
+
+    R3PhaseSample {
+        storage_open,
+        jazz_open,
+        prepare,
+        first_read,
+        first_read_resolve_view: read_profile.resolve_view,
+        first_read_compile_program: read_profile.compile_program,
+        first_read_select_plan: read_profile.select_plan,
+        first_read_execute_plan: read_profile.execute_plan,
+        first_read_decode_materialize: read_profile.decode_materialize,
+        first_read_finish_rows: read_profile.finish_rows,
+        first_read_apply_projection: read_profile.apply_projection,
+        first_read_unattributed: first_read.saturating_sub(read_profile.total),
+        rows: rows.len(),
+    }
+}
+
+#[cfg(feature = "rocksdb")]
+fn median_us(samples: &[R3PhaseSample], phase: impl Fn(&R3PhaseSample) -> Duration) -> u64 {
+    let mut values = samples
+        .iter()
+        .map(|sample| phase(sample).as_micros().min(u64::MAX as u128) as u64)
+        .collect::<Vec<_>>();
+    values.sort_unstable();
+    values[values.len() / 2]
+}
+
+#[cfg(feature = "rocksdb")]
+fn emit_r3_phase_receipts(path: &Path, project: RowUuid, selected: R3Profile) {
+    let sample_count = env::var("JAZZ_R3_PHASE_SAMPLES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(3)
+        .max(1);
+    let expected_rows = selected.profile.tasks.div_ceil(selected.profile.projects);
+    for cache_mode in r3_cache_modes() {
+        let samples = (0..sample_count)
+            .map(|sample| measure_r3_phase_sample(path, project, expected_rows, sample, cache_mode))
+            .collect::<Vec<_>>();
+
+        println!(
+            "{}",
+            serde_json::json!({
+                "scenario": "r3_rocksdb_cold_load",
+                "phase": cache_mode.phase(),
+                "cache_mode": cache_mode.id(),
+                "profile": selected.id,
+                "users": selected.profile.users,
+                "organizations": selected.profile.organizations,
+                "tasks": selected.profile.tasks,
+                "projects": selected.profile.projects,
+                "comments": selected.profile.comments,
+                "watchers_per_task": selected.profile.watchers_per_task,
+                "activity_events": selected.profile.activity_events,
+                "result_rows": samples[0].rows,
+                "samples": sample_count,
+                "durability": "wal_no_sync",
+                "total_p50_us": median_us(&samples, |sample| {
+                    sample.storage_open + sample.jazz_open + sample.prepare + sample.first_read
+                }),
+                "storage_open_p50_us": median_us(&samples, |sample| sample.storage_open),
+                "jazz_open_p50_us": median_us(&samples, |sample| sample.jazz_open),
+                "prepare_p50_us": median_us(&samples, |sample| sample.prepare),
+                "first_read_p50_us": median_us(&samples, |sample| sample.first_read),
+                "first_read_resolve_view_p50_us": median_us(&samples, |sample| sample.first_read_resolve_view),
+                "first_read_compile_program_p50_us": median_us(&samples, |sample| sample.first_read_compile_program),
+                "first_read_select_plan_p50_us": median_us(&samples, |sample| sample.first_read_select_plan),
+                "first_read_execute_plan_p50_us": median_us(&samples, |sample| sample.first_read_execute_plan),
+                "first_read_decode_materialize_p50_us": median_us(&samples, |sample| sample.first_read_decode_materialize),
+                "first_read_finish_rows_p50_us": median_us(&samples, |sample| sample.first_read_finish_rows),
+                "first_read_apply_projection_p50_us": median_us(&samples, |sample| sample.first_read_apply_projection),
+                "first_read_unattributed_p50_us": median_us(&samples, |sample| sample.first_read_unattributed),
+            })
+        );
+    }
+}
+
+#[cfg(feature = "rocksdb")]
 fn r3_rocksdb_cold_load(c: &mut Criterion) {
     let mut group = c.benchmark_group("realistic_phase1/r3_rocksdb_cold_load");
 
-    for profile in [CI_S_PROFILE] {
+    for selected in r3_profiles() {
+        let profile = selected.profile;
+        let tempdir = TempDir::new().expect("create tempdir for RocksDB cold-load bench");
+        let db_path = tempdir.path().join("realistic_phase1.rocksdb");
+        let project = {
+            let db = open_rocks_db_with_author(30, AUTHOR, false, &db_path);
+            let fixture = seed_fixture(&db, profile);
+            fixture.projects[0]
+        };
+        let expected_rows = profile.tasks.div_ceil(profile.projects);
+        emit_r3_phase_receipts(&db_path, project, selected);
+
+        if env::var_os("JAZZ_R3_PHASE_ONLY").is_some() {
+            continue;
+        }
+
         group.throughput(Throughput::Elements(profile.tasks as u64));
         group.bench_with_input(
             BenchmarkId::new("project_board_s", profile.tasks),
             &profile,
-            |b, &profile| {
-                let tempdir = TempDir::new().expect("create tempdir for RocksDB cold-load bench");
-                let db_path = tempdir.path().join("realistic_phase1.rocksdb");
-                let project = {
-                    let db = open_rocks_db_with_author(30, AUTHOR, false, &db_path);
-                    let fixture = seed_fixture(&db, profile);
-                    fixture.projects[0]
-                };
-
+            |b, &_profile| {
                 b.iter(|| {
                     let db = open_rocks_db_with_author(31, AUTHOR, false, &db_path);
                     let query = project_board_query(&db, project);
                     let rows = db.read(&query).expect("read cold project board");
-                    assert!(!rows.is_empty());
+                    assert_eq!(
+                        rows.len(),
+                        expected_rows,
+                        "R3 project-board result count changed"
+                    );
                     black_box(rows.len())
                 });
             },
@@ -1474,8 +1787,11 @@ fn r12_recursive_permissions(c: &mut Criterion) {
                     updated,
                     ..
                 }) => {
-                    let mut rows = added;
-                    rows.extend(updated);
+                    let mut rows = added
+                        .into_iter()
+                        .map(|output| output.row)
+                        .collect::<Vec<_>>();
+                    rows.extend(updated.into_iter().map(|output| output.row));
                     assert_recursive_docs_visible(&rows);
                 }
                 other => panic!("expected recursive docs reset event, got {other:?}"),
@@ -1626,14 +1942,12 @@ fn r13_permission_filtered_resume(c: &mut Criterion) {
 
             let (added, updated, removed) =
                 drain_permission_resume_delta(subscription.try_next_event());
-            if added + updated + removed > 0 {
-                assert_eq!(added + updated, 1);
-                assert_eq!(removed, 1);
-            }
-            let rows = client
-                .read(&prepared)
-                .expect("read final permission-filtered docs");
-            assert_permission_resume_docs(&rows, &[RESUME_DOC_DIRECT, RESUME_DOC_GRANTED]);
+            assert_eq!(added + updated, 1);
+            assert_eq!(removed, 1);
+            // `Db::read` is intentionally a local-preview read; it may still
+            // see retained row bodies after upstream membership is revoked.
+            // The authoritative reconnect contract is the subscription delta
+            // asserted above.
 
             black_box((resume_bytes, full_bytes, added, updated, removed))
         });

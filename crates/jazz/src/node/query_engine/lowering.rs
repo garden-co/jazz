@@ -254,6 +254,14 @@ pub(crate) fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTree
                 }))
                 .collect(),
         ),
+        GraphBuilder::CollectBy { collect, .. } => Some(
+            collect
+                .parent_fields
+                .iter()
+                .map(|field| field.output_name.clone())
+                .chain(std::iter::once(collect.collection_field.clone()))
+                .collect(),
+        ),
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
@@ -534,6 +542,7 @@ fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDom
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::CollectBy { input, .. }
         | GraphBuilder::Aggregate { input, .. } => collect_binding_source_params(input, domain),
         GraphBuilder::Union { inputs } => {
             for input in inputs {
@@ -575,6 +584,11 @@ fn column_type_from_value_type(value_type: &ValueType) -> ColumnType {
         }
         ValueType::Nullable(inner) => {
             ColumnType::Nullable(Box::new(column_type_from_value_type(inner)))
+        }
+        ValueType::Record(_) => {
+            panic!(
+                "record-valued Groove outputs are not part of the Jazz query schema in this stage"
+            )
         }
     }
 }
@@ -784,6 +798,7 @@ fn analyze_query_plan(
         gaps.push(analyzed.unwrap_err());
         return Err(gaps);
     };
+    let plan = plan_with_default_result_order(plan, request);
     validate_output_capabilities(request, &plan, &mut gaps);
 
     for plan_source in analyzed_plan_sources(&plan) {
@@ -840,8 +855,79 @@ fn validate_output_capabilities(
     ));
 }
 
+/// Row-valued root windows have a public default order when callers do not
+/// spell `order_by`: ascending source row id. Make that order part of each
+/// root window's executable plan so `limit`/`offset` is a real `TopBy` window
+/// instead of depending on source scan order.
+///
+/// Relation-edge materialization applies the equivalent child-local comparator
+/// per correlation group; recursive closures intentionally have no injected
+/// order (SPEC/16_maintained_subscription_views.md).
+fn plan_with_default_result_order(
+    mut plan: AnalyzedQueryPlan,
+    request: &QueryProgramRequest,
+) -> AnalyzedQueryPlan {
+    let produces_root_rows = request.output.app_rows.is_some()
+        || request
+            .output
+            .facts
+            .contains(&ProgramFactKey::ResultMembership);
+    if !produces_root_rows {
+        return plan;
+    }
+
+    match &mut plan {
+        AnalyzedQueryPlan::Linear(linear) => {
+            inject_default_root_order(&linear.root, &mut linear.steps);
+        }
+        AnalyzedQueryPlan::CorrelatedPath(path) => {
+            // For a correlated root, parent eligibility is established before
+            // `output_steps`; the root order/window must therefore be applied
+            // in that output tail, not to the parent input.
+            inject_default_root_order(&path.parent.root, &mut path.output_steps);
+        }
+        AnalyzedQueryPlan::Union(_) => {}
+        AnalyzedQueryPlan::RecursiveRelation(_) => {}
+    }
+    plan
+}
+
+fn inject_default_root_order(root: &LinearRoot, steps: &mut Vec<LinearStep>) {
+    let Some(source) = root.source().cloned() else {
+        return;
+    };
+    let Some(first_terminal) = steps.iter().position(|step| {
+        matches!(
+            step,
+            LinearStep::OrderBy(_) | LinearStep::Slice { .. } | LinearStep::Aggregate { .. }
+        )
+    }) else {
+        return;
+    };
+
+    // Explicit order and aggregate output own their order semantics.
+    if matches!(
+        steps.get(first_terminal),
+        Some(LinearStep::OrderBy(_) | LinearStep::Aggregate { .. })
+    ) {
+        return;
+    }
+    steps.insert(first_terminal, default_root_order(source));
+}
+
+fn default_root_order(source: SourceId) -> LinearStep {
+    LinearStep::OrderBy(vec![OrderKey {
+        value: NormalizedValueRef::RowId(RowIdRef::Source(source)),
+        direction: SortDirection::Asc,
+    }])
+}
+
 fn maintained_result_membership_window_supported(plan: &AnalyzedQueryPlan) -> bool {
-    collect_plan_fragments(plan)
+    let fragments = collect_plan_fragments(plan);
+    !fragments.recursives.iter().any(|recursive| {
+        recursive.seed.steps.iter().any(is_slice_step)
+            || recursive.step.steps.iter().any(is_slice_step)
+    }) && fragments
         .linears
         .iter()
         .all(|fragment| linear_window_supported(fragment.steps))
@@ -868,23 +954,15 @@ fn root_aggregate_step(
     }
 }
 
-fn linear_window_supported(steps: &[LinearStep]) -> bool {
-    let mut has_order = false;
-    for step in steps {
-        match step {
-            LinearStep::OrderBy(_) => has_order = true,
-            LinearStep::Slice { limit, offset, .. } => {
-                if !has_order && (*offset != 0 || !matches!(limit, None | Some(1))) {
-                    return false;
-                }
-            }
-            LinearStep::Filter(_)
-            | LinearStep::Join { .. }
-            | LinearStep::Project(_)
-            | LinearStep::Aggregate { .. } => {}
-        }
-    }
+fn linear_window_supported(_steps: &[LinearStep]) -> bool {
+    // Relation-local slices use their declared row-id tie-breaker as the
+    // default ascending comparator within the edge materializer. Root slices
+    // have an explicit row-id OrderBy injected above.
     true
+}
+
+fn is_slice_step(step: &LinearStep) -> bool {
+    matches!(step, LinearStep::Slice { .. })
 }
 
 fn analyze_root_node(
@@ -5569,6 +5647,7 @@ fn fact_output_with_terminal(
             ProgramFactSchema::ResultMembership(ResultMembershipSchema {
                 table_field: "table_name".to_owned(),
                 row_field: source.row_shape.row_uuid_field.clone(),
+                occurrence_id_fields: vec![source.row_shape.row_uuid_field.clone()],
                 branch_or_prefix_field: version.branch_or_prefix_field.clone(),
                 version: ResultMembershipVersionSchema::Content(ContentVersionFields {
                     tx_time_field: "content_tx_time".to_owned(),

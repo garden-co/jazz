@@ -28,6 +28,7 @@ pub enum FieldKind {
     Tuple,
     Array,
     Nullable,
+    Record,
 }
 
 impl FieldKind {
@@ -48,6 +49,7 @@ impl FieldKind {
                 | (Self::Tuple, ValueType::Tuple(_))
                 | (Self::Array, ValueType::Array(_))
                 | (Self::Nullable, ValueType::Nullable(_))
+                | (Self::Record, ValueType::Record(_))
         )
     }
 }

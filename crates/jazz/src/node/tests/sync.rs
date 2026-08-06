@@ -491,6 +491,7 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
             version_carriers: Vec::new(),
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+            authorization_progress: None,
             result_member_adds,
             result_member_removes,
             program_fact_adds,
@@ -555,6 +556,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                 version_carriers: Vec::new(),
                 version_bundles: Vec::new(),
                 peer_complete_tx_payload_refs: Vec::new(),
+            authorization_progress: None,
                 result_member_adds: vec![ResultMemberEntry::row((
                     "todos".to_owned().into(),
                     row_uuid,
@@ -578,6 +580,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                     durability,
                 }],
                 peer_complete_tx_payload_refs: vec![tx_id],
+            authorization_progress: None,
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
                 program_fact_adds: Vec::new(),
@@ -638,6 +641,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                     durability: DurabilityTier::Global,
                 }],
                 peer_complete_tx_payload_refs: Vec::new(),
+            authorization_progress: None,
                 result_member_adds: vec![ResultMemberEntry::row((
                     "todos".to_owned().into(),
                     row(1),
@@ -661,6 +665,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                     durability: DurabilityTier::Global,
                 }],
                 peer_complete_tx_payload_refs: Vec::new(),
+            authorization_progress: None,
                 result_member_adds: vec![ResultMemberEntry::row((
                     "todos".to_owned().into(),
                     row(2),
@@ -688,6 +693,138 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
     assert_eq!(reader.sync_metrics().receiver_bulk_ingest_commits, 1);
     assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 1);
     assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 0);
+}
+
+// This stays internal because it directly exercises the protocol receiver's
+// single-message fragment assembly boundary.
+#[test]
+fn sequential_partial_exclusive_bundles_index_the_complete_transaction() {
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let tx_id = TxId::new(TxTime::from(10), node(1));
+    let tx = Transaction {
+        tx_id,
+        kind: TxKind::Exclusive,
+        n_total_writes: 2,
+        made_by: AuthorId::SYSTEM,
+        permission_subject: None,
+        base_snapshot: None,
+        row_read_set: None,
+        absent_read_set: None,
+        predicate_read_set: None,
+        user_metadata_json: None,
+        source_branch: None,
+        merge_strategy: None,
+    };
+    let updates = [
+        (row(1), version_record(row(1), Vec::new(), title_cells("one"), None)),
+        (row(2), version_record(row(2), Vec::new(), title_cells("two"), None)),
+    ];
+
+    for (row_uuid, version) in updates {
+        reader
+            .apply_view_update(partial_exclusive_view_update(
+                subscription,
+                tx.clone(),
+                row_uuid,
+                version,
+            ))
+            .unwrap();
+    }
+
+    assert_eq!(
+        reader
+            .current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(1), title_cells("one")), (row(2), title_cells("two"))])
+    );
+}
+
+#[test]
+fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let tx_id = TxId::new(TxTime::from(10), node(1));
+    let tx = Transaction {
+        tx_id,
+        kind: TxKind::Exclusive,
+        n_total_writes: 2,
+        made_by: AuthorId::SYSTEM,
+        permission_subject: None,
+        base_snapshot: None,
+        row_read_set: None,
+        absent_read_set: None,
+        predicate_read_set: None,
+        user_metadata_json: None,
+        source_branch: None,
+        merge_strategy: None,
+    };
+    reader
+        .apply_view_update(partial_exclusive_view_update(
+            subscription,
+            tx.clone(),
+            row(1),
+            version_record(row(1), Vec::new(), title_cells("one"), None),
+        ))
+        .unwrap();
+
+    let mut conflicting_tx = tx;
+    conflicting_tx.made_by = AuthorId::from_bytes([0xa1; 16]);
+    assert!(matches!(
+        reader.apply_view_update(partial_exclusive_view_update(
+            subscription,
+            conflicting_tx,
+            row(2),
+            version_record(row(2), Vec::new(), title_cells("two"), None),
+        )),
+        Err(Error::ConflictingCommitUnit(conflicting)) if conflicting == tx_id
+    ));
+    assert_eq!(
+        reader.query_versions_for_tx(tx_id).unwrap().len(),
+        1,
+        "the conflicting completing fragment must not be stored"
+    );
+    assert_eq!(
+        reader.query_transaction(tx_id).unwrap().unwrap().tx.made_by,
+        AuthorId::SYSTEM,
+        "the original transaction metadata must remain authoritative"
+    );
+}
+
+fn partial_exclusive_view_update(
+    subscription: SubscriptionKey,
+    tx: Transaction,
+    row_uuid: RowUuid,
+    version: VersionRecord,
+) -> ViewUpdateParts {
+    let tx_id = tx.tx_id;
+    ViewUpdateParts {
+        subscription,
+        settled_through: GlobalSeq(1),
+        defer_settlement: false,
+        reset_result_set: false,
+        version_carriers: Vec::new(),
+        version_bundles: vec![VersionBundle {
+            tx,
+            versions: vec![version],
+            fate: Fate::Accepted,
+            global_seq: Some(GlobalSeq(1)),
+            durability: DurabilityTier::Global,
+        }],
+        peer_complete_tx_payload_refs: Vec::new(),
+            authorization_progress: None,
+        result_member_adds: vec![ResultMemberEntry::row((
+            "todos".to_owned().into(),
+            row_uuid,
+            tx_id,
+        ))],
+        result_member_removes: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    }
 }
 
 #[test]
@@ -774,6 +911,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
                 },
             ],
             peer_complete_tx_payload_refs: Vec::new(),
+            authorization_progress: None,
             result_member_adds: vec![ResultMemberEntry::row((
                 "todos".to_owned().into(),
                 row_uuid,
@@ -1361,7 +1499,7 @@ fn content_extent_fetch_rejects_row_context_mismatch_and_invisible_content() {
         .content_store()
         .append(author, visible_row, "title", b"unreferenced")
         .unwrap();
-    let mut peer = PeerState::for_author(author);
+    let mut peer = PeerState::client_link(author);
 
     assert!(matches!(
         peer.handle_content_extent_fetch(
@@ -1418,7 +1556,7 @@ fn row_version_fetch_returns_authorized_versions_and_omits_unauthorized_rows() {
         crate::protocol::RowVersionRef::new("todos", bob_row, bob_tx),
     ];
 
-    let mut alice_peer = PeerState::for_author(alice);
+    let mut alice_peer = PeerState::client_link(alice);
     let messages = alice_peer
         .handle_row_versions_fetch(
             &mut core,
@@ -3133,7 +3271,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
         reset_result_set,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
-                complete_tx_payloads: peer_payload_inventory_refs,
+                complete_tx_payloads: peer_payload_inventory_refs, ..
             },
         result_member_adds,
         result_member_removes,
@@ -3161,6 +3299,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
             version_carriers: Vec::new(),
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
+            authorization_progress: None,
             result_member_adds,
             result_member_removes,
             program_fact_adds: Vec::new(),
@@ -3202,7 +3341,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         reset_result_set,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
-                complete_tx_payloads: peer_payload_inventory_refs,
+                complete_tx_payloads: peer_payload_inventory_refs, ..
             },
         result_member_adds,
         result_member_removes,
@@ -3221,6 +3360,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             version_carriers: Vec::new(),
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
+            authorization_progress: None,
             result_member_adds,
             result_member_removes,
             program_fact_adds: Vec::new(),
@@ -3243,7 +3383,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         settled_through,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
-                complete_tx_payloads: peer_payload_inventory_refs,
+                complete_tx_payloads: peer_payload_inventory_refs, ..
             },
         result_member_adds,
         result_member_removes,
@@ -3268,6 +3408,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             version_carriers: Vec::new(),
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
+            authorization_progress: None,
             result_member_adds,
             result_member_removes,
             program_fact_adds: Vec::new(),
@@ -3292,6 +3433,7 @@ fn view_updates_downgrade_unknown_peer_payload_inventory_refs() {
             version_carriers: Vec::new(),
             version_bundles: Vec::new(),
             peer_complete_tx_payload_refs: vec![missing],
+            authorization_progress: None,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
             program_fact_adds: Vec::new(),

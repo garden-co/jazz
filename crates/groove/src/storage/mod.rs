@@ -278,6 +278,18 @@ pub trait OrderedKvStorage {
     fn close(&self) -> Result<(), Error> {
         Ok(())
     }
+    /// Configure the number of committed write batches between explicit local
+    /// durability boundaries. Backends that do not require an explicit boundary
+    /// may keep the default no-op implementation.
+    fn set_write_flush_cadence(&self, _every: usize) -> Result<(), Error> {
+        Ok(())
+    }
+    /// Finish any pending write cadence and make all preceding writes locally
+    /// durable. Backends that do not require an explicit boundary may keep the
+    /// default no-op implementation.
+    fn flush_write_boundary(&self) -> Result<(), Error> {
+        Ok(())
+    }
     /// Process-local identity for cache partitioning. Backends may override
     /// this when cheap clones should share cache entries.
     fn cache_token(&self) -> usize
@@ -660,6 +672,14 @@ where
 
     fn close(&self) -> Result<(), Error> {
         self.inner.close()
+    }
+
+    fn set_write_flush_cadence(&self, every: usize) -> Result<(), Error> {
+        self.inner.set_write_flush_cadence(every)
+    }
+
+    fn flush_write_boundary(&self) -> Result<(), Error> {
+        self.inner.flush_write_boundary()
     }
 
     fn scan_range(
@@ -1733,7 +1753,8 @@ fn encode_key_part(key: &mut Vec<u8>, value: &RecordValue) -> Result<(), Error> 
         RecordValue::F64(_)
         | RecordValue::Tuple(_)
         | RecordValue::Array(_)
-        | RecordValue::Nullable(_) => {
+        | RecordValue::Nullable(_)
+        | RecordValue::Record(_) => {
             return Err(Error::InvalidStorageKey(
                 "unsupported window key value type".to_owned(),
             ));
@@ -1825,9 +1846,13 @@ fn decode_key_part(bytes: &mut &[u8], value_type: &ValueType) -> Result<RecordVa
             expect_key_tag(bytes, 0)?;
             Ok(RecordValue::Enum(take_key_bytes(bytes, 1)?[0]))
         }
-        ValueType::F64 | ValueType::Tuple(_) | ValueType::Array(_) | ValueType::Nullable(_) => Err(
-            Error::InvalidStorageKey("unsupported window key type".to_owned()),
-        ),
+        ValueType::F64
+        | ValueType::Tuple(_)
+        | ValueType::Array(_)
+        | ValueType::Nullable(_)
+        | ValueType::Record(_) => Err(Error::InvalidStorageKey(
+            "unsupported window key type".to_owned(),
+        )),
     }
 }
 

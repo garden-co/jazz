@@ -50,6 +50,12 @@ fn todo_values(title: &str) -> HashMap<String, Value> {
 /// ```
 #[tokio::test]
 async fn concurrent_updates_resolve_to_lww_winner() {
+    tokio::task::LocalSet::new()
+        .run_until(concurrent_updates_resolve_to_lww_winner_impl())
+        .await
+}
+
+async fn concurrent_updates_resolve_to_lww_winner_impl() {
     let _suite_guard = lock_history_conflict_suite().await;
     let schema = test_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
@@ -87,15 +93,14 @@ async fn concurrent_updates_resolve_to_lww_winner() {
     )
     .await;
 
-    // Both update concurrently — tokio::spawn runs each on a separate
-    // OS thread, giving true parallelism. This maximises the chance of
-    // creating diverged tips (true conflict) rather than a linear chain.
+    // Both update without waiting for either write to settle, creating
+    // diverged tips rather than a linear chain.
     let alice = Arc::new(alice);
     let bob = Arc::new(bob);
     let alice2 = Arc::clone(&alice);
     let bob2 = Arc::clone(&bob);
 
-    let alice_handle = tokio::spawn(async move {
+    let alice_handle = tokio::task::spawn_local(async move {
         alice2
             .update(
                 todo_id,
@@ -103,7 +108,7 @@ async fn concurrent_updates_resolve_to_lww_winner() {
             )
             .expect("alice updates title");
     });
-    let bob_handle = tokio::spawn(async move {
+    let bob_handle = tokio::task::spawn_local(async move {
         bob2.update(
             todo_id,
             vec![("title".to_string(), Value::Text("bob-edit".to_string()))],
@@ -170,6 +175,12 @@ async fn concurrent_updates_resolve_to_lww_winner() {
 /// ```
 #[tokio::test]
 async fn concurrent_creates_both_survive() {
+    tokio::task::LocalSet::new()
+        .run_until(concurrent_creates_both_survive_impl())
+        .await
+}
+
+async fn concurrent_creates_both_survive_impl() {
     let _suite_guard = lock_history_conflict_suite().await;
     let schema = test_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
@@ -195,12 +206,12 @@ async fn concurrent_creates_both_survive() {
     let bob = Arc::new(bob);
     let alice2 = Arc::clone(&alice);
     let bob2 = Arc::clone(&bob);
-    let alice_handle = tokio::spawn(async move {
+    let alice_handle = tokio::task::spawn_local(async move {
         alice2
             .insert("todos", todo_values("buy milk"))
             .expect("alice creates");
     });
-    let bob_handle = tokio::spawn(async move {
+    let bob_handle = tokio::task::spawn_local(async move {
         bob2.insert("todos", todo_values("buy eggs"))
             .expect("bob creates");
     });
@@ -255,6 +266,12 @@ async fn concurrent_creates_both_survive() {
 /// ```
 #[tokio::test]
 async fn rapid_concurrent_updates_converge() {
+    tokio::task::LocalSet::new()
+        .run_until(rapid_concurrent_updates_converge_impl())
+        .await
+}
+
+async fn rapid_concurrent_updates_converge_impl() {
     let _suite_guard = lock_history_conflict_suite().await;
     let schema = test_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
@@ -289,15 +306,14 @@ async fn rapid_concurrent_updates_converge() {
     )
     .await;
 
-    // Both fire 10 rapid updates concurrently — each pair spawned on
-    // separate OS threads for true parallelism.
+    // Both fire 10 rapid updates without waiting for either write to settle.
     let alice = Arc::new(alice);
     let bob = Arc::new(bob);
 
     for i in 0..10 {
         let alice2 = Arc::clone(&alice);
         let bob2 = Arc::clone(&bob);
-        let alice_handle = tokio::spawn(async move {
+        let alice_handle = tokio::task::spawn_local(async move {
             alice2
                 .update(
                     todo_id,
@@ -305,7 +321,7 @@ async fn rapid_concurrent_updates_converge() {
                 )
                 .expect("alice rapid update");
         });
-        let bob_handle = tokio::spawn(async move {
+        let bob_handle = tokio::task::spawn_local(async move {
             bob2.update(
                 todo_id,
                 vec![("title".to_string(), Value::Text(format!("bob-{i}")))],
@@ -375,6 +391,12 @@ async fn rapid_concurrent_updates_converge() {
 /// ```
 #[tokio::test]
 async fn fresh_client_sees_lww_winner_after_conflict() {
+    tokio::task::LocalSet::new()
+        .run_until(fresh_client_sees_lww_winner_after_conflict_impl())
+        .await
+}
+
+async fn fresh_client_sees_lww_winner_after_conflict_impl() {
     let _suite_guard = lock_history_conflict_suite().await;
     let schema = test_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
@@ -411,13 +433,13 @@ async fn fresh_client_sees_lww_winner_after_conflict() {
     )
     .await;
 
-    // Create conflict — tokio::spawn runs each on a separate OS thread.
+    // Create conflict without waiting for either write to settle.
     let alice = Arc::new(alice);
     let bob = Arc::new(bob);
     let alice2 = Arc::clone(&alice);
     let bob2 = Arc::clone(&bob);
 
-    let alice_handle = tokio::spawn(async move {
+    let alice_handle = tokio::task::spawn_local(async move {
         alice2
             .update(
                 todo_id,
@@ -425,7 +447,7 @@ async fn fresh_client_sees_lww_winner_after_conflict() {
             )
             .expect("alice updates");
     });
-    let bob_handle = tokio::spawn(async move {
+    let bob_handle = tokio::task::spawn_local(async move {
         bob2.update(
             todo_id,
             vec![("title".to_string(), Value::Text("bob-edit".to_string()))],
@@ -528,6 +550,12 @@ async fn fresh_client_sees_lww_winner_after_conflict() {
 /// ```
 #[tokio::test]
 async fn subscription_reflects_concurrent_update() {
+    tokio::task::LocalSet::new()
+        .run_until(subscription_reflects_concurrent_update_impl())
+        .await
+}
+
+async fn subscription_reflects_concurrent_update_impl() {
     let _suite_guard = lock_history_conflict_suite().await;
     let schema = test_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
@@ -597,6 +625,12 @@ async fn subscription_reflects_concurrent_update() {
 /// ```
 #[tokio::test]
 async fn sequential_updates_preserve_latest() {
+    tokio::task::LocalSet::new()
+        .run_until(sequential_updates_preserve_latest_impl())
+        .await
+}
+
+async fn sequential_updates_preserve_latest_impl() {
     let _suite_guard = lock_history_conflict_suite().await;
     let schema = test_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
@@ -688,6 +722,12 @@ async fn sequential_updates_preserve_latest() {
 /// ```
 #[tokio::test]
 async fn concurrent_edits_on_different_fields() {
+    tokio::task::LocalSet::new()
+        .run_until(concurrent_edits_on_different_fields_impl())
+        .await
+}
+
+async fn concurrent_edits_on_different_fields_impl() {
     let _suite_guard = lock_history_conflict_suite().await;
     let schema = test_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
@@ -730,7 +770,7 @@ async fn concurrent_edits_on_different_fields() {
     let bob2 = Arc::clone(&bob);
 
     // Alice updates title only
-    let alice_handle = tokio::spawn(async move {
+    let alice_handle = tokio::task::spawn_local(async move {
         alice2
             .update(
                 todo_id,
@@ -739,7 +779,7 @@ async fn concurrent_edits_on_different_fields() {
             .expect("alice updates title");
     });
     // Bob updates completed only
-    let bob_handle = tokio::spawn(async move {
+    let bob_handle = tokio::task::spawn_local(async move {
         bob2.update(
             todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
@@ -818,6 +858,12 @@ async fn concurrent_edits_on_different_fields() {
 /// ```
 #[tokio::test]
 async fn post_conflict_update_rebases_on_merged_preview() {
+    tokio::task::LocalSet::new()
+        .run_until(post_conflict_update_rebases_on_merged_preview_impl())
+        .await
+}
+
+async fn post_conflict_update_rebases_on_merged_preview_impl() {
     let _suite_guard = lock_history_conflict_suite().await;
     let schema = test_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
@@ -872,7 +918,7 @@ async fn post_conflict_update_rebases_on_merged_preview() {
     let bob = Arc::new(bob);
     let alice2 = Arc::clone(&alice);
     let bob2 = Arc::clone(&bob);
-    let alice_handle = tokio::spawn(async move {
+    let alice_handle = tokio::task::spawn_local(async move {
         alice2
             .update(
                 todo_id,
@@ -880,7 +926,7 @@ async fn post_conflict_update_rebases_on_merged_preview() {
             )
             .expect("alice updates title");
     });
-    let bob_handle = tokio::spawn(async move {
+    let bob_handle = tokio::task::spawn_local(async move {
         bob2.update(
             todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
@@ -1047,6 +1093,12 @@ async fn establish_offline_reconnect_baseline(
 /// ```
 #[tokio::test]
 async fn persistent_peer_reloads_synced_state_before_offline_editing() {
+    tokio::task::LocalSet::new()
+        .run_until(persistent_peer_reloads_synced_state_before_offline_editing_impl())
+        .await
+}
+
+async fn persistent_peer_reloads_synced_state_before_offline_editing_impl() {
     let _suite_guard = lock_history_conflict_suite().await;
     let OfflineReconnectBaseline {
         server,
@@ -1103,6 +1155,12 @@ async fn persistent_peer_reloads_synced_state_before_offline_editing() {
 /// ```
 #[tokio::test]
 async fn offline_reconnect_replays_local_edit_after_rejoin() {
+    tokio::task::LocalSet::new()
+        .run_until(offline_reconnect_replays_local_edit_after_rejoin_impl())
+        .await
+}
+
+async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
     let _suite_guard = lock_history_conflict_suite().await;
     let OfflineReconnectBaseline {
         server,
@@ -1255,6 +1313,12 @@ async fn offline_reconnect_replays_local_edit_after_rejoin() {
 /// ```
 #[tokio::test]
 async fn online_user_wins_on_reconnect() {
+    tokio::task::LocalSet::new()
+        .run_until(online_user_wins_on_reconnect_impl())
+        .await
+}
+
+async fn online_user_wins_on_reconnect_impl() {
     let _suite_guard = lock_history_conflict_suite().await;
     let OfflineReconnectBaseline {
         server,

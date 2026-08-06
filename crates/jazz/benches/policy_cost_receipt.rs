@@ -9,13 +9,12 @@ use std::time::{Duration, Instant};
 
 use jazz::db::{
     Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
-    SubscriptionEvent, SubscriptionStream, block_on,
+    SubscriptionEvent, SubscriptionOutputRow, SubscriptionStream, block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::node::CurrentRow;
 use jazz::query::{OrderDirection, PolicyBranch, Query, claim, col, eq, in_list, lit};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
@@ -650,7 +649,7 @@ fn apply_events(stream: &mut SubscriptionStream, observed: &mut BTreeMap<RowUuid
     }
 }
 
-fn observed_row(row: CurrentRow) -> (RowUuid, u64) {
+fn observed_row(row: SubscriptionOutputRow) -> (RowUuid, u64) {
     let updated_at = match row.cell_at(2) {
         Some(Value::U64(updated_at)) => updated_at,
         other => panic!("expected projected updated_at, got {other:?}"),

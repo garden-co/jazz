@@ -323,7 +323,16 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
 #[tokio::test]
 async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_without_catalogue_resync()
  {
-    let user_id = "restart-no-catalogue-resync-cli";
+    tokio::task::LocalSet::new()
+        .run_until(
+            jazz_tools_cli_existing_client_keeps_working_after_server_restart_without_catalogue_resync_impl(),
+        )
+        .await
+}
+
+async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_without_catalogue_resync_impl()
+ {
+    let user_id = "919ba477-426f-5b7d-9d27-f50e07d1e8ef";
     let jwks_server = JwksServer::start().await;
     let server_data = TempDir::new().expect("temp server dir");
     let app_id = AppId::from_string(APP_ID_STR).expect("parse app id");
@@ -437,6 +446,12 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
 
 #[tokio::test]
 async fn memory_storage_client_does_not_persist_local_state_to_disk() {
+    tokio::task::LocalSet::new()
+        .run_until(memory_storage_client_does_not_persist_local_state_to_disk_impl())
+        .await
+}
+
+async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
     let data_dir = TempDir::new().expect("temp client dir");
     let context = AppContext {
         app_id: AppId::from_string(APP_ID_STR).expect("parse app id"),

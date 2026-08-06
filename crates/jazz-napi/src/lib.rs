@@ -43,12 +43,13 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz::db::{
     Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity,
-    LocalUpdates as CoreLocalUpdates, MergeableTxOps, PeerConnection as CorePeerConnection,
-    PreparedQuery as PreparedQueryInner, Propagation as CorePropagation,
-    QueryAttachment as CoreQueryAttachment, ReadOpts as CoreReadOpts, RowCells as CoreRowCells,
-    SeededRowIdSource as CoreSeededRowIdSource, SubscriptionEvent, SubscriptionStream,
-    TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
-    WireTransportAdapter as CoreWireTransportAdapter, WriteHandle, block_on as core_block_on,
+    InitialSyncFlushCadence as CoreInitialSyncFlushCadence, LocalUpdates as CoreLocalUpdates,
+    MergeableTxOps, PeerConnection as CorePeerConnection, PreparedQuery as PreparedQueryInner,
+    Propagation as CorePropagation, QueryAttachment as CoreQueryAttachment,
+    ReadOpts as CoreReadOpts, RowCells as CoreRowCells, SeededRowIdSource as CoreSeededRowIdSource,
+    SubscriptionEvent, SubscriptionStream, TickScheduler as CoreTickScheduler,
+    TickUrgency as CoreTickUrgency, WireTransportAdapter as CoreWireTransportAdapter, WriteHandle,
+    block_on as core_block_on,
 };
 use jazz::groove::records::{
     BorrowedRecord as CoreBorrowedRecord, RecordDescriptor, Value as CoreValue,
@@ -78,6 +79,7 @@ struct CoreOpenDbConfig {
     identity: CoreOpenDbIdentity,
     row_id_seed: Option<u64>,
     history_complete: bool,
+    initial_sync_flush_every: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -1521,11 +1523,32 @@ where
     if let Some(seed) = config.row_id_seed {
         db_config = db_config.with_id_source(CoreSeededRowIdSource::new(seed));
     }
+    let initial_sync_flush_every = config.initial_sync_flush_every;
     if config.history_complete {
-        core_block_on(CoreDb::open_history_complete(db_config))
+        let db = core_block_on(CoreDb::open_history_complete(db_config))?;
+        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
+        Ok(db)
     } else {
-        core_block_on(CoreDb::open(db_config))
+        let db = core_block_on(CoreDb::open(db_config))?;
+        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
+        Ok(db)
     }
+}
+
+fn configure_initial_sync_flush_cadence<S>(
+    db: &CoreDb<S>,
+    every: Option<u32>,
+) -> std::result::Result<(), jazz::db::Error>
+where
+    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
+{
+    let Some(every) = every else {
+        return Ok(());
+    };
+    let Some(every) = std::num::NonZeroUsize::new(every as usize) else {
+        return Ok(());
+    };
+    db.set_initial_sync_flush_cadence(CoreInitialSyncFlushCadence::every(every))
 }
 
 fn decode_core_cells(bytes: &[u8]) -> napi::Result<CoreRowCells> {
@@ -1952,11 +1975,21 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
             tier,
             ..
         } => {
-            let delta = encode_core_subscription_delta(added, updated, removed)
+            // Keep the current native wire source-row addressed until a later
+            // revision carries occurrence identity explicitly.
+            let added = added
+                .iter()
+                .map(|output| output.row.clone())
+                .collect::<Vec<_>>();
+            let updated = updated
+                .iter()
+                .map(|output| output.row.clone())
+                .collect::<Vec<_>>();
+            let delta = encode_core_subscription_delta(&added, &updated, removed)
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?;
             let relation_delta = encode_core_relation_subscription_delta(
-                added,
-                updated,
+                &added,
+                &updated,
                 removed,
                 added_related,
                 added_edges,
@@ -1987,6 +2020,12 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
                 jazz::protocol::SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission => {
                     serde_json::json!({
                         "type": "ShapeRegistrationPendingCatalogueAdmission",
+                    })
+                }
+                jazz::protocol::SubscribeRejectReason::ServerFailure { code } => {
+                    serde_json::json!({
+                        "type": "ServerFailure",
+                        "code": format!("{code:?}"),
                     })
                 }
             };

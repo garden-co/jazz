@@ -127,6 +127,12 @@ async fn assert_converges<T>(
 
 #[tokio::test]
 async fn concurrent_writes_converge_to_sorted_union() {
+    tokio::task::LocalSet::new()
+        .run_until(concurrent_writes_converge_to_sorted_union_impl())
+        .await
+}
+
+async fn concurrent_writes_converge_to_sorted_union_impl() {
     let _suite_guard = lock_gset_suite().await;
     let schema = gset_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
@@ -218,6 +224,12 @@ async fn concurrent_writes_converge_to_sorted_union() {
 
 #[tokio::test]
 async fn concurrent_writes_never_remove_a_shared_element() {
+    tokio::task::LocalSet::new()
+        .run_until(concurrent_writes_never_remove_a_shared_element_impl())
+        .await
+}
+
+async fn concurrent_writes_never_remove_a_shared_element_impl() {
     let _suite_guard = lock_gset_suite().await;
     let schema = gset_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
@@ -361,6 +373,12 @@ fn scores_bits(row: &(ObjectId, Vec<Value>)) -> Option<Vec<u64>> {
 /// either propagation order.
 #[tokio::test]
 async fn distinct_float_representations_converge_deterministically() {
+    tokio::task::LocalSet::new()
+        .run_until(distinct_float_representations_converge_deterministically_impl())
+        .await
+}
+
+async fn distinct_float_representations_converge_deterministically_impl() {
     let _suite_guard = lock_gset_suite().await;
     let schema = gset_float_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;

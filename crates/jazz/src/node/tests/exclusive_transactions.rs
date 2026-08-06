@@ -1147,7 +1147,7 @@ fn partial_exclusive_payload_does_not_establish_tx_level_complete_tx_ref() {
         .unwrap();
     let version_bundles = version_bundles_for_update(&first);
     let SyncMessage::ViewUpdate {
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         ..
     } = first
     else {
@@ -1164,7 +1164,7 @@ fn partial_exclusive_payload_does_not_establish_tx_level_complete_tx_ref() {
         .unwrap();
     let version_bundles = version_bundles_for_update(&second);
     let SyncMessage::ViewUpdate {
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         ..
     } = second
     else {
@@ -1203,7 +1203,7 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
         }
     ));
 
-    let mut link_a = PeerState::for_author(author_a);
+    let mut link_a = PeerState::client_link(author_a);
     let update_a = link_a.current_rows_update(&mut core, "todos").unwrap();
     let version_bundles = version_bundles_for_update(&update_a);
     let SyncMessage::ViewUpdate {

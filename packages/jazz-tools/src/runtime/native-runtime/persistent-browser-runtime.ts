@@ -61,6 +61,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     private readonly dbName: string,
     private readonly node: Uint8Array,
     private readonly author: Uint8Array,
+    private readonly initialSyncFlushEvery: number | undefined = 512,
   ) {
     this.worker = new Worker(new URL("./persistent-browser-worker.js", import.meta.url), {
       type: "module",
@@ -88,9 +89,14 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
         ),
       );
     };
-    this.opened = this.send("open", [runtimeSources, dbName, schema, node, author]).then(
-      () => undefined,
-    );
+    this.opened = this.send("open", [
+      runtimeSources,
+      dbName,
+      schema,
+      node,
+      author,
+      initialSyncFlushEvery,
+    ]).then(() => undefined);
     if (typeof window !== "undefined") {
       this.pagehideAbort = new AbortController();
       window.addEventListener(

@@ -257,7 +257,7 @@ fn print_help() {
 realistic_bench
 
 Usage:
-  cargo run -p jazz-tools --features client --example realistic_bench -- [options]
+  cargo run -p jazz --features client --example realistic_bench -- [options]
 
 Options:
   --scenario <path>    Scenario JSON (default: dev/benchmarks/realistic/scenarios/w1_interactive.json)

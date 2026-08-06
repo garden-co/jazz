@@ -113,6 +113,11 @@ latency numbers. #1224 adds B7 for public relation-result hydration coverage.
    route, persisted-hydration, and subscription-count evidence plus
    implementation plans. Its stable findings still need extraction into
    focused retained lanes.
+6. **PERF-4 known-state payload dedup:** `known_state_scaling` holds a persisted
+   whole-table rehydrate fixed while sweeping exact receiver coverage. The
+   retained receipt proves that emitted bodies and variable exchange bytes fall
+   with coverage while result membership remains identical. Full coverage cuts
+   the measured variable exchange by about 67%, including declaration cost.
 
 ### Important negative results retained
 
@@ -132,29 +137,29 @@ Ranked by their ability to change an engineering decision:
 1. **Policy and selective-hydration cost receipts.** Extract the stable lanes
    from #1170: authorized write-to-reader visibility, route/subscription scale,
    policy churn/reconnect, and selective Global hydration.
-2. **PERF-4 known-state payload dedup.** Hold the changed payload fixed while
-   sweeping peer-known-state cardinality; retain bundle/reference counts,
-   encoded bytes, and correctness digests.
-3. **PERF-5 maintained versus rehydrate.** Compare work, bytes, and retained
+   `ROUTE_SUBSCRIPTION_CURVE.md` now extracts the current-core
+   route/subscription lane and attributes its remaining slope to binding-private
+   full-source version/replacement witness state.
+2. **PERF-5 maintained versus rehydrate.** Compare work, bytes, and retained
    state over increasing view sizes while asserting identical results.
-4. **S4 fixed-delta/varying-view gate.** S4 already separates settlement and
+3. **S4 fixed-delta/varying-view gate.** S4 already separates settlement and
    propagation; add a deterministic structural bound proving propagation stays
    proportional to the affected delta.
-5. **S8 branch/merge/offline lifecycle.** Cover accumulated offline edits,
+4. **S8 branch/merge/offline lifecycle.** Cover accumulated offline edits,
    reconnect, merge-back, conflicts, and payload reuse end to end.
-6. **S5–S7 promised dimensions.** Add remote resume and evicted-prefix coverage
+5. **S5–S7 promised dimensions.** Add remote resume and evicted-prefix coverage
    for S5, full-history memory for S6, and native-versus-lens plus migration-wave
    costs for S7.
 
 ## Source of acceptance targets
 
-| property                                   | current evidence                                          | next enforcement                                                                               |
-| ------------------------------------------ | --------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `INV-INC-1` bounded incremental delivery   | retained 1k–20k ladder and `1.025x` gate                  | land #1192 and extend only when a new maintained mechanism needs its own shape-specific canary |
-| PERF-4 known-state payload dedup           | sync/S1 bundle and reference counters                     | controlled known-state-cardinality sweep                                                       |
-| PERF-5 maintained converges to rehydrate   | correctness and differential oracles                      | cost/bytes/state comparison over view scale                                                    |
-| PERF-7/8 current reads are O(current rows) | R3 persisted receipts, current-row and checkpoint benches | retained filtered/indexed-read slope where selection is held fixed                             |
-| S4 post-acceptance propagation is O(delta) | separate settlement/propagation phases                    | fixed-delta/varying-view structural gate                                                       |
+| property                                   | current evidence                                                                 | next enforcement                                                                               |
+| ------------------------------------------ | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `INV-INC-1` bounded incremental delivery   | retained 1k–20k ladder and `1.025x` gate                                         | land #1192 and extend only when a new maintained mechanism needs its own shape-specific canary |
+| PERF-4 known-state payload dedup           | retained exact-coverage sweep with bytes, bundles, reads, and correctness digest | profile the coverage-invariant serving work only if a user-facing cost justifies it            |
+| PERF-5 maintained converges to rehydrate   | correctness and differential oracles                                             | cost/bytes/state comparison over view scale                                                    |
+| PERF-7/8 current reads are O(current rows) | R3 persisted receipts, current-row and checkpoint benches                        | retained filtered/indexed-read slope where selection is held fixed                             |
+| S4 post-acceptance propagation is O(delta) | separate settlement/propagation phases                                           | fixed-delta/varying-view structural gate                                                       |
 
 Targets should come from specification properties and measured deterministic
 spread, not from an arbitrary percentage around today’s laptop timing.
@@ -166,9 +171,8 @@ spread, not from an arbitrary percentage around today’s laptop timing.
    its durable-format decision has team agreement.
 2. Extract focused policy/selective-hydration receipts from #1170 rather than
    merging one omnibus benchmark investigation.
-3. Add the PERF-4 known-state sweep.
-4. Add PERF-5 and the S4 structural gate.
-5. Build S8, then fill the remaining S5–S7 dimensions.
+3. Add PERF-5 and the S4 structural gate.
+4. Build S8, then fill the remaining S5–S7 dimensions.
 
 Add retention alongside each lane. A broad receipt-unification project is no
 longer a prerequisite for useful performance work.
