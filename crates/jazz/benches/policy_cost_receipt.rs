@@ -247,19 +247,14 @@ fn run_lifecycle(db: &BenchDb, fixture: &Fixture) -> LifecycleReceipt {
         .max_by_key(|document| (document.updated_at, document.row))
         .copied()
         .expect("team has document");
+    let moved_out = Document {
+        organization: fixture.organizations[1],
+        team: fixture.teams[1],
+        ..moved
+    };
     let move_out_started = Instant::now();
-    db.update(
-        DOCUMENTS,
-        moved.row,
-        BTreeMap::from([
-            (
-                "organization".to_owned(),
-                Value::Uuid(fixture.organizations[1].0),
-            ),
-            ("team".to_owned(), Value::Uuid(fixture.teams[1].0)),
-        ]),
-    )
-    .expect("move document out of scope");
+    db.update(DOCUMENTS, moved.row, document_cells(moved_out))
+        .expect("move document out of scope");
     let move_out_us = micros(move_out_started.elapsed());
     apply_events(&mut stream, &mut observed);
     let mut moved_fixture = fixture.documents.clone();
@@ -274,18 +269,8 @@ fn run_lifecycle(db: &BenchDb, fixture: &Fixture) -> LifecycleReceipt {
     exact &= move_out_exact;
 
     let move_back_started = Instant::now();
-    db.update(
-        DOCUMENTS,
-        moved.row,
-        BTreeMap::from([
-            (
-                "organization".to_owned(),
-                Value::Uuid(fixture.organizations[0].0),
-            ),
-            ("team".to_owned(), Value::Uuid(fixture.teams[0].0)),
-        ]),
-    )
-    .expect("move document back into scope");
+    db.update(DOCUMENTS, moved.row, document_cells(moved))
+        .expect("move document back into scope");
     let move_back_us = micros(move_back_started.elapsed());
     apply_events(&mut stream, &mut observed);
     let move_back_exact =
