@@ -35,6 +35,7 @@ Invariant digest:
 - `INV-STORAGE-24`: Persisted index scans MUST decode the persisted index record's `"value"` as primary-key bytes and fetch the current base table record; if the base record is missing for a primary-key table, the index MUST be treated as invalid.
 - `INV-STORAGE-25`: Ordered index key encoding via `encode_key_part` MUST preserve logical ordering for supported key values in RocksDB lexicographic order and MUST reject arrays as keys.
 - `INV-STORAGE-26`: Windowed record encoding (ch. 2 §2.9) MUST be invisible above the record store: decode∘encode is the identity over record sequences, the storage conformance suite passes identically under windowed and plain representations, and no consumer above the record store can observe which representation is in use.
+- `INV-STORAGE-27`: A record-valued `ValueType` MUST carry its descriptor inline and accept only canonical child bytes; it MUST NOT appear, directly or recursively, in a durable primary key.
 
 ## Details
 
@@ -101,6 +102,28 @@ variant changes the stored meaning of existing data and is a breaking change.
 
 The exact byte format for records, nullable values, and arrays is specified in
 §2.7.
+
+**Target design (record-valued values, 2026-08-04).** `ValueType` gains
+`Record(Box<RecordDescriptor>)`, whose runtime value is an `OwnedRecord`. The
+descriptor is inline in the parent descriptor metadata; groove MUST NOT require
+a descriptor registry or encode descriptor bytes beside every child value. The
+`Box` makes recursive descriptors finite at the Rust type level. An array of
+record values therefore uses the existing array framing around the canonical raw
+bytes of each element descriptor; no second outer-record layout is introduced.
+
+Record values are admitted only when their embedded descriptor equals the
+declared `ValueType::Record` descriptor and their raw bytes are canonical for
+that descriptor: decode every child value, recreate the record, and require
+byte equality. Validation alone is insufficient because `OwnedRecord::new`
+currently accepts arbitrary raw bytes (`src/records/mod.rs:1577-1582`). The
+recreate-and-compare rule is required for byte-based weighted consolidation and
+deterministic final tie-breaking.
+
+`Record`, `Array<Record>`, and any recursively containing value type MUST be
+rejected as a durable primary-key part. The primary-key codec has no
+field-semantic order for raw nested record bytes; this is a rejection rule, not
+an invitation to use their byte layout as an ordered key. Arrangement-key
+rejection is the graph-validation rule in ch. 3.
 
 ### 2.3 Tables
 
@@ -239,7 +262,8 @@ integers** (the opposite of the little-endian record encoding), `0|1` for
 for `String`/`Bytes`. A composite key concatenates these encoded parts in
 key-column declaration order, so it orders by the first key column, then the
 second, and so on. Valid key types are the integer widths, `Bool`, `String`,
-`Bytes`, and `Uuid`; `F64`, arrays, and nullable values are not valid key parts.
+`Bytes`, and `Uuid`; `F64`, arrays, record-valued types (including recursively
+nested records), and nullable values are not valid key parts.
 
 ### 2.9 Windowed record encoding
 
@@ -328,6 +352,161 @@ history consolidation. `history_windows_are_transparent_to_subscription_hydratio
 and `history_consolidation_visits_direct_record_stores` verify that the
 representation remains invisible to record-store consumers.
 
+### 2.10 Draft — columnar base chunks with a durable row delta
+
+**Draft decision note (evidence reports dated 2026-08-04/05; not accepted or
+implemented).** This section records a proposed table representation and the
+measurements behind it. It creates no new invariant and does not describe the
+current implementation. The proposed representation is **immutable columnar
+base chunks + a durable per-row delta + background compaction**. It is
+explicitly not a columnar-only design.
+
+For a table selected for this representation, a base chunk covers a bounded
+primary-key range and contains a primary-key stream plus one encoded stream per
+record field. The row delta is a separate durable, primary-keyed store of
+complete current rows or tombstones. It is the authoritative current state, not
+a cache, a best-effort write buffer, or an optional optimisation.
+
+The proposed interactive write path appends/replaces the affected row's delta
+entry under the ordinary storage atomicity and durability boundary. It does not
+read, decode, modify, and rewrite a base chunk. Reads reconstruct a logical
+table by combining the base for a range with the delta: a delta row replaces a
+base row of the same primary key, a tombstone hides it, and a delta-only key is
+included in a range scan. Compaction later reads a base-plus-delta view for a
+range, writes new immutable chunk(s), makes them current, and reclaims
+superseded material.
+
+**Compaction of a range does not overlap a scan of that range.** The proposal
+is to exclude the two rather than to isolate a reader from a publish it is
+concurrent with. This is the smallest of the available options and the reason
+the rest of the section needs no multi-version machinery: because no reader is
+mid-scan across a publish, superseded chunks need not stay addressable
+afterwards, and nothing has to track which readers still hold an older base.
+Whether the exclusion is worth relaxing later is a performance question, not a
+correctness one, and it is recorded as future work below.
+
+That decision does not settle how a reader locates the current base for a
+range, or what makes a newly compacted chunk current. Chunk boundaries are
+data-dependent and change when compaction splits or merges ranges, so the
+mapping is itself mutable state whatever form it takes. That mechanism is
+deliberately left open below, and this section should not be read as having
+chosen one.
+
+In particular, inserts whose keys fall into an existing chunk range use the
+same durable delta path. Whether their later compaction cost and scheduling
+behave like updates is an inference, not a measurement.
+
+#### Evidence and limits
+
+The numbers below are cited from the staged write-shape, RocksDB-update,
+OPFS-update, flush-cadence, row-reconstruction, and compression reports. They
+were taken on one shared AMD EPYC 4564P development box. Several runs had load
+averages around 7–12; the flush report deliberately ran at lower,
+non-overlapped load, and the compression run started at lower load. They are
+therefore directional crossovers and ratios, not service objectives, device
+guarantees, or a substitute for measurements on a target workload. Cache modes
+also differ by backend: “cold” is a RocksDB block-cache miss in the native
+report and a fresh B-tree cache in the OPFS report, not physical-media-cold
+latency.
+
+**Write shape.** For 10,000 individual logical puts, operation count dominates
+through roughly `k=64` on both RocksDB and Chromium OPFS. With 0.91 KiB mean
+records, the per-batch curve has effectively plateaued by `k=512`: RocksDB was
+76.6 ms at 64, 42.9 ms at 512, and 41.7 ms at one 10,000-row commit; OPFS was
+567.7 ms, 442.0 ms, and 428.7 ms respectively. With 9.54 KiB mean / 4.80 KiB
+median records, byte/page work dominates after 64: RocksDB remained 497–668 ms
+and OPFS 2.97–3.19 s while reducing 157 commits to one. The OPFS runs still
+issued 447–462 MiB at `k>=64`. A whole chunk is consequently not “as cheap as
+one row” once a batch carries multi-KiB records.
+
+**Update RMW and coalescing.** A blind row delta avoids a chunk read and rewrite
+on every interactive update. The conservative, at-least-2x single-update
+crossovers differ materially by backend:
+
+| record shape          | RocksDB, first material chunk-RMW loss | OPFS, first material chunk-RMW loss |
+| --------------------- | -------------------------------------- | ----------------------------------- |
+| 64 B, 1 or 8 columns  | warm `k=64`; cold `k=1`                | warm and cold `k=4096`              |
+| 1 KiB, 1 or 8 columns | warm and cold `k=1`                    | warm and cold `k=64`                |
+
+For 8-column, 256-byte rows, the first clear RocksDB coalescing wins for one
+chunk rewrite over blind row writes were `m=32` distinct rows at `k=64`,
+`m=128` at `k=512`, and `m=2048` at `k=4096`; `k=1` never won. The apparent
+`k=8, m=4` win had overlapping distributions and is not material. On real
+Chromium OPFS, thresholds are later, not earlier: no win through `m=64` at
+`k=64`; `m=512` at `k=512`; and `m=2048` was marginal at `k=4096`, with the
+first clear win at `m=4096`. Separate, uncoalesced chunk RMW never beat row
+writes in either report. This is the direct evidence for the durable delta and
+for making compaction a background, coalescing operation rather than an
+interactive write strategy.
+
+**CPU reconstruction.** The resident-memory, uncompressed measurement found
+that complete-row reconstruction was not materially worse through `k=512` and
+was often faster for variable-width records. The clear counterexample was
+`k=4096` with 64 columns: columnar/row time was 1.07x for all-fixed, 1.47x for
+mixed, and 2.21x for mostly-variable rows (2,012 ns / 1,889 ns; 3,902 ns /
+2,653 ns; and 6,813 ns / 3,079 ns). A one-column read remained roughly flat
+in chunk length. The adverse result is therefore principally width — touching
+64 separate columns for a full row — rather than length alone. This excludes
+storage I/O and compression.
+
+**Flush cadence, at the storage boundary only.** The initial-load flush cadence
+is a client-layer setting outside this Groove specification; it is already
+implemented there. Its storage relevance is that batching durability boundaries
+changes both wall time and OPFS write amplification. For a 10,000-row load,
+flush-once versus flush-every was 42.0x faster for about-1-KiB rows and 6.6x
+for about-10-KiB rows in RocksDB, and 17.7x / 3.3x in OPFS. At every 512 rows,
+the run was within 6–16% of flush-once; every 4,096 was within 4%. For 1-KiB
+OPFS input, every-write issued 749.4 MB and every-512 55.5 MB. This section
+does not choose the client cadence or its crash-loss policy.
+
+**Compression.** Compression is a space trade-off, not evidence that a
+compressed chunk belongs on the synchronous read path. In the 64-column,
+mixed, `k=64` CPU measurement, per-column LZ4 made a complete row
+16.27+/-0.04 us rather than 1.76+/-0.03 us uncompressed, for 1.62x reduction;
+per-column Zstd-1 was 128.30+/-0.59 us for 2.12x. Projection requires
+per-column framing: at mixed `k=4096`, a projected value took
+19.08+/-0.05 us with per-column LZ4 but 1,600.74+/-2.89 us with whole-chunk
+framing. Those are CPU-only figures, not backend measurements.
+
+#### Literature backing and boundary
+
+- [PAX — Ailamaki et al., VLDB 2001](https://www.vldb.org/conf/2001/P169.pdf)
+  supports the structural choice of grouping attributes within a bounded page:
+  it improves cache-line behavior for scans while keeping a row's parts local.
+  It does not establish this delta, compaction, or write protocol.
+- SAP HANA's delta merge is the closest shipping precedent for the shape
+  proposed here: a write-optimised delta in front of a read-optimised column
+  store, merged in the background. Notably its L1 delta holds updates in **row**
+  format. No production system appears to ship columnar-only for
+  transactional workloads.
+- The [HTAP survey (arXiv:2404.15670)](https://arxiv.org/abs/2404.15670)
+  likewise distinguishes random-write-friendly row layouts from scan-friendly
+  column layouts, and describes hybrids rather than a single format.
+- Modern-SSD work is supporting context in two directions: it undermines the
+  spinning-disk assumptions behind point-lookup-optimised layouts, but it also
+  cautions against concluding "read bigger units" — small random reads became
+  cheap, and decompression, not I/O, became the bottleneck.
+
+None of these establish the thresholds, the compaction work bound, or the
+delta visibility semantics proposed above. Those are contracts this draft is
+asserting, to be pinned by measurement.
+
+The work bound in particular is a **custom storage-operator contract**, not a
+result carried over from any cited system.
+
+#### Deferred choices
+
+**Merge operators.** The owner decision is to defer them “to keep things simple
+and see how fast stuff is without it.” They may later reduce chunk-update cost,
+but this draft specifies neither their semantics nor a backend abstraction for
+them.
+
+**Read-path compression.** Compression on the synchronous read path is deferred.
+The measurement above shows that it changes CPU cost decisively, and any future
+compressed projection format must preserve independently readable columns. No
+compaction-quality result is used as evidence here: current quality is known
+poor and its measurements were deliberately excluded from this design.
+
 ### 2.12 Subsumed storage backlog
 
 The former top-level storage notes are now represented by this chapter's
@@ -348,6 +527,48 @@ record descriptors, and reopen/migration diagnostics.
 
 ### Open questions
 
+- 🔶 **How a base is located and made current.** The draft above fixes the
+  representation (immutable chunks + durable delta) and excludes compaction
+  from overlapping a scan of the same range, but deliberately does not choose
+  the mechanism that connects base to delta. Two coupled decisions are open,
+  and they are correctness and recovery questions rather than
+  performance-tuning ones:
+  - How a reader finds the current base for a primary-key range, given that
+    chunk boundaries are data-dependent and change when compaction splits or
+    merges ranges. Encoding the mapping in the key space and deriving it by
+    ordered seek, or holding it in separate metadata, are both open; each
+    trades a consistency obligation against a lookup.
+  - What makes a newly compacted chunk current, and how superseded chunks and
+    folded-in delta entries are retired. Because no reader is mid-scan across
+    that point, retirement may be immediate. One concrete hazard to preserve
+    in any answer: compaction must retire exactly the delta entries it
+    consumed, not a key range, or rows written during the compaction window
+    are lost.
+- 🔶 **Future: allow compaction concurrent with a scan of the same range.**
+  The draft avoids the problem by excluding the two, which costs compaction
+  scheduling freedom under sustained read load. Relaxing it needs a source of
+  reader isolation, and today there is none to draw on: `OrderedKvStorage`
+  offers `get`/`scan_range`/`scan_prefix`/`write_many` with no snapshot or
+  read-version, so a scan observes whatever is committed while it runs.
+  Keeping superseded material addressable and changing the storage contract
+  are both possible answers. Neither should be pursued before the exclusion is
+  measured and shown to bind.
+- 🔶 **Compaction rule: per backend or one portable rule?** RocksDB's observed
+  coalescing points are `m=32`/`128`/`2048` at `k=64`/`512`/`4096`; OPFS is
+  later or absent in the matched sweep (`none through 64`, `m=512`, and only a
+  marginal `m=2048` / clear `m=4096`). Decide whether the eventual scheduler
+  uses backend-specific rules or one conservative portable rule, after target
+  workload measurements rather than treating either report as a service goal.
+- 🔶 **Inserts into an existing chunk range.** The draft sends them to the row
+  delta, but their compaction behavior is inferred from updates and was never
+  measured separately. Measure them before using update coalescing thresholds
+  to schedule insert-heavy ranges.
+- 🔶 **Chunk eligibility and compaction quality.** The `k=64`/`512` evidence
+  does not measure wide production schemas, insert-heavy ranges, backlog/space
+  limits, or compaction quality. Current compaction quality is known poor; its
+  measurements were intentionally not used as supporting evidence. Establish
+  receipts for range size, delta depth, bytes, foreground interference, and
+  output quality before selecting a broader policy.
 - 🔶 **Portable backend contract.** Before exposing storage through WASM/NAPI or
   a server package, pin which guarantees every backend must provide beyond the
   current reference surface: ordered key/value operations, atomic batches,

@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -43,7 +43,7 @@ use crate::tx::{
     RejectionReason as CoreRejectionReason, TxId as CoreTxId,
 };
 use base64::Engine;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -87,7 +87,25 @@ enum StorageBundle {
 struct UnverifiedJwtClaims {
     sub: String,
     #[serde(default)]
-    claims: serde_json::Value,
+    claims: JwtClaimsPayload,
+}
+
+/// Keeps a missing application-claims field distinct from a supplied JSON
+/// value, including JSON `null`.
+#[derive(Debug, Default)]
+enum JwtClaimsPayload {
+    #[default]
+    Absent,
+    Present(serde_json::Value),
+}
+
+impl<'de> Deserialize<'de> for JwtClaimsPayload {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        serde_json::Value::deserialize(deserializer).map(Self::Present)
+    }
 }
 
 /// Jazz client for building applications.
@@ -629,7 +647,7 @@ impl ClientDb {
         .await?;
         let inner = Rc::new(RefCell::new(inner));
         if has_upstream {
-            Self::spawn_local_tick_driver(Rc::clone(&inner), Rc::clone(&scheduler));
+            Self::spawn_local_tick_driver(Rc::downgrade(&inner), Rc::clone(&scheduler));
         }
         Ok(Rc::new(Self { inner }))
     }
@@ -998,7 +1016,7 @@ impl ClientDb {
     }
 
     fn spawn_local_tick_driver(
-        inner: Rc<RefCell<ClientDbInner>>,
+        inner: Weak<RefCell<ClientDbInner>>,
         scheduler: Rc<TickSchedulerImpl>,
     ) {
         let state = scheduler.wake_handle();
@@ -1006,6 +1024,9 @@ impl ClientDb {
             loop {
                 state.notify.notified().await;
                 while let Some(urgency) = scheduler.take() {
+                    let Some(inner) = inner.upgrade() else {
+                        return;
+                    };
                     if urgency == TickUrgency::Deferred {
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     }
@@ -1445,7 +1466,10 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
 
     Some(Session {
         user_id: user_id.to_string(),
-        claims: claims.claims,
+        claims: match claims.claims {
+            JwtClaimsPayload::Absent => serde_json::Value::Object(serde_json::Map::new()),
+            JwtClaimsPayload::Present(claims) => claims,
+        },
         ..Session::new(user_id)
     })
 }
@@ -2780,6 +2804,14 @@ mod tests {
         );
         format!("{header}.{payload}.sig")
     }
+
+    fn make_test_jwt_without_claims(sub: &str) -> String {
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"alg":"none","typ":"JWT"}"#);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&json!({ "sub": sub })).expect("serialize jwt payload"));
+        format!("{header}.{payload}.sig")
+    }
     #[test]
     fn core_integer_bridge_uses_signed_value_domain() {
         let core_value =
@@ -2810,6 +2842,29 @@ mod tests {
         let session = default_session_from_context(&context).expect("derive session from jwt");
         assert_eq!(session.user_id, "alice");
         assert_eq!(session.claims["join_code"], "secret-123");
+    }
+
+    // These internal tests are necessary because the distinction is made while
+    // decoding the unverified JWT, before a client connection can expose it.
+    #[test]
+    fn session_from_unverified_jwt_defaults_absent_claims_to_an_empty_object() {
+        let session = session_from_unverified_jwt(&make_test_jwt_without_claims("alice"))
+            .expect("derive session from jwt without application claims");
+
+        assert_eq!(session.claims, json!({}));
+        assert!(session_claims_to_core_claims(&session).is_ok());
+    }
+
+    #[test]
+    fn session_from_unverified_jwt_preserves_explicit_non_object_claims() {
+        let session = session_from_unverified_jwt(&make_test_jwt("alice", json!(null)))
+            .expect("derive session from jwt with explicit null claims");
+
+        let error = session_claims_to_core_claims(&session)
+            .expect_err("explicit null application claims must be rejected");
+        assert!(
+            matches!(error, JazzError::Connection(message) if message == "JWT claims payload must be a JSON object")
+        );
     }
 
     #[test]
