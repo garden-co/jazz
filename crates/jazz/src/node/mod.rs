@@ -5217,6 +5217,16 @@ pub enum Error {
     /// Query-engine capability report for a currently unsupported program.
     #[error("query capability unsupported: {0}")]
     QueryCapability(String),
+    /// A prepared policy claim predicate cannot be routed per binding.
+    #[error(
+        "prepared claim predicate routing unsupported: claim '{claim}' in {predicate}; prepared policies support claims only in direct source-column equality predicates"
+    )]
+    UnsupportedPreparedClaimPredicate {
+        /// Trusted claim referenced by the unsupported predicate.
+        claim: String,
+        /// Shape that cannot be represented by the prepared routing graph.
+        predicate: &'static str,
+    },
     /// Table was not found in the schema.
     #[error("table not found: {0}")]
     TableNotFound(String),

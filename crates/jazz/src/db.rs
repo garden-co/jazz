@@ -590,6 +590,10 @@ where
         let (schema, schema_version) = self.current_write_schema_for_query()?;
         let shape = query.validate_with_schema_version(&schema, schema_version)?;
         let binding = shape.bind(params)?;
+        self.node
+            .node
+            .borrow()
+            .validate_prepared_query_claim_routing(&shape, &binding)?;
         let (local_plan, global_plan) = if should_install_prepared_plan(&shape)
             && !self
                 .node
@@ -7128,6 +7132,8 @@ pub enum ErrorCode {
     Schema,
     /// Query validation or binding failed.
     Query,
+    /// A prepared policy claim predicate cannot be routed safely per binding.
+    PreparedClaimPredicateRoutingUnsupported,
     /// Write was rejected.
     WriteRejected,
     /// Storage failed.
@@ -7150,6 +7156,9 @@ impl From<crate::node::Error> for Error {
             }
             crate::node::Error::Storage(_) | crate::node::Error::Groove(_) => ErrorCode::Storage,
             crate::node::Error::Query(_) => ErrorCode::Query,
+            crate::node::Error::UnsupportedPreparedClaimPredicate { .. } => {
+                ErrorCode::PreparedClaimPredicateRoutingUnsupported
+            }
             crate::node::Error::TableNotFound(_)
             | crate::node::Error::UnsupportedColumnType(_)
             | crate::node::Error::InvalidMergeableCommit(_) => ErrorCode::Schema,

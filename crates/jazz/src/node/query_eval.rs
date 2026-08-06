@@ -5974,7 +5974,11 @@ where
         if identity != AuthorId::SYSTEM {
             merge_claim_params(
                 &mut binding_claim_params,
-                self.read_policy_claim_params_for_shape(shape.schema_version(), &input_shape)?,
+                self.read_policy_claim_params_for_shape(
+                    shape.schema_version(),
+                    &input_shape,
+                    false,
+                )?,
             )?;
         }
         let source_shape = use_prepared_binding_source
@@ -6018,7 +6022,16 @@ where
     fn normalized_row_set_shape(
         &self,
         shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<NormalizedRowSetShape, Error> {
+        self.normalized_row_set_shape_with_prepared_claims(shape, binding, true)
+    }
+
+    fn normalized_row_set_shape_with_prepared_claims(
+        &self,
+        shape: &ValidatedQuery,
         _binding: &Binding,
+        retarget_prepared_claims: bool,
     ) -> Result<NormalizedRowSetShape, Error> {
         let schema = if shape.schema_version() == self.catalogue.current_schema_version_id {
             &self.catalogue.schema
@@ -6264,8 +6277,11 @@ where
             reachable_contributions,
             nodes,
         };
-        let inferred_claim_params =
-            retarget_predicate_claims_to_binding_params(&mut normalized, schema)?;
+        let inferred_claim_params = if retarget_prepared_claims {
+            retarget_predicate_claims_to_binding_params(&mut normalized, schema)?
+        } else {
+            BTreeMap::new()
+        };
         let mut claim_params = collect_binding_claim_params_for_shape(&normalized, schema)?;
         merge_claim_params(&mut claim_params, inferred_claim_params)?;
         let binding_source_shape =
@@ -6278,6 +6294,7 @@ where
         &self,
         query_schema: SchemaVersionId,
         input_shape: &NormalizedRowSetShape,
+        validate_prepared_predicates: bool,
     ) -> Result<BTreeMap<String, ProgramClaimParam>, Error> {
         let mut pending = source_tables_for_shape(input_shape)
             .into_iter()
@@ -6313,6 +6330,9 @@ where
                 .find(|candidate| candidate.name == table_name)
                 .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
             let query = authorization_query_from_read_policy(table);
+            if validate_prepared_predicates {
+                validate_prepared_policy_claim_predicate_routing(&query)?;
+            }
             let shape = query.validate(policy_schema)?;
             let binding = shape.bind(BTreeMap::new())?;
             let normalized = self.normalized_row_set_shape(&shape, &binding)?;
@@ -6333,6 +6353,20 @@ where
             }
         }
         Ok(claims)
+    }
+
+    /// Reject read-policy claim predicates that the prepared binding router
+    /// cannot represent. This is called by the public preparation surface as
+    /// well as by the policy-parameter discovery path, before a graph can be
+    /// cached with a claim value baked into a residual predicate.
+    pub(crate) fn validate_prepared_query_claim_routing(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<(), Error> {
+        let input_shape = self.normalized_row_set_shape(shape, binding)?;
+        self.read_policy_claim_params_for_shape(shape.schema_version(), &input_shape, true)?;
+        Ok(())
     }
 
     fn binding_claim_params_for_shape(
@@ -6358,7 +6392,20 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<NormalizedRowSetShape, Error> {
-        let mut normalized = self.normalized_row_set_shape(shape, binding)?;
+        self.normalized_include_deleted_row_set_shape_with_prepared_claims(shape, binding, true)
+    }
+
+    fn normalized_include_deleted_row_set_shape_with_prepared_claims(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        retarget_prepared_claims: bool,
+    ) -> Result<NormalizedRowSetShape, Error> {
+        let mut normalized = self.normalized_row_set_shape_with_prepared_claims(
+            shape,
+            binding,
+            retarget_prepared_claims,
+        )?;
         let root_source = root_source_id(&shape.query().table);
         for node in normalized.nodes.values_mut() {
             if let RowSetExpr::Source { source, visibility } = node
@@ -9231,7 +9278,13 @@ where
             ));
         }
         let binding = policy_shape.bind(BTreeMap::new())?;
-        let mut input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
+        let route_prepared_claims =
+            validate_prepared_policy_claim_predicate_routing(&query).is_ok();
+        let mut input_shape = self.normalized_row_set_shape_with_prepared_claims(
+            &policy_shape,
+            &binding,
+            route_prepared_claims,
+        )?;
         let mut claim_params = collect_binding_claim_params_for_shape(&input_shape, policy_schema)?;
         collect_reachable_seed_claim_params(
             policy_schema,
@@ -9367,10 +9420,20 @@ where
             ));
         }
         let binding = policy_shape.bind(BTreeMap::new())?;
+        let route_prepared_claims =
+            validate_prepared_policy_claim_predicate_routing(&query).is_ok();
         let mut input_shape = if include_deleted_root {
-            self.normalized_include_deleted_row_set_shape(&policy_shape, &binding)?
+            self.normalized_include_deleted_row_set_shape_with_prepared_claims(
+                &policy_shape,
+                &binding,
+                route_prepared_claims,
+            )?
         } else {
-            self.normalized_row_set_shape(&policy_shape, &binding)?
+            self.normalized_row_set_shape_with_prepared_claims(
+                &policy_shape,
+                &binding,
+                route_prepared_claims,
+            )?
         };
         let mut claim_params = collect_binding_claim_params_for_shape(&input_shape, policy_schema)?;
         collect_reachable_seed_claim_params(
@@ -9459,7 +9522,13 @@ where
             ));
         }
         let binding = policy_shape.bind(BTreeMap::new())?;
-        let mut input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
+        let route_prepared_claims =
+            validate_prepared_policy_claim_predicate_routing(&query).is_ok();
+        let mut input_shape = self.normalized_row_set_shape_with_prepared_claims(
+            &policy_shape,
+            &binding,
+            route_prepared_claims,
+        )?;
         let mut claim_params =
             collect_binding_claim_params_for_shape(&input_shape, &self.catalogue.schema)?;
         collect_reachable_seed_claim_params(
@@ -9666,6 +9735,155 @@ fn authorization_query_from_read_policy(table: &TableSchema) -> JazzQuery {
         });
     }
     query
+}
+
+/// Prepared policy graphs route claims only by joining a source column to the
+/// prepared binding source. Every other shape would leave the claim as a
+/// residual predicate, where lowering would bake the compiling binding's
+/// value into a shared graph.
+fn validate_prepared_policy_claim_predicate_routing(query: &JazzQuery) -> Result<(), Error> {
+    for predicate in &query.filters {
+        validate_prepared_claim_predicate(predicate)?;
+    }
+    for join in &query.joins {
+        validate_prepared_claim_predicates_in_join(join)?;
+    }
+    for branch in &query.policy_branches {
+        for predicate in &branch.filters {
+            validate_prepared_claim_predicate(predicate)?;
+        }
+        for join in &branch.joins {
+            validate_prepared_claim_predicates_in_join(join)?;
+        }
+        for reachable in &branch.reachable {
+            validate_prepared_claim_predicates_in_reachable(reachable)?;
+        }
+    }
+    for reachable in &query.reachable {
+        validate_prepared_claim_predicates_in_reachable(reachable)?;
+    }
+    for array in &query.array_subqueries {
+        validate_prepared_claim_predicates_in_array(array)?;
+    }
+    Ok(())
+}
+
+fn validate_prepared_claim_predicates_in_join(join: &JoinVia) -> Result<(), Error> {
+    for predicate in &join.filters {
+        validate_prepared_claim_predicate(predicate)?;
+    }
+    for nested in &join.nested_joins {
+        validate_prepared_claim_predicates_in_join(nested)?;
+    }
+    Ok(())
+}
+
+fn validate_prepared_claim_predicates_in_reachable(
+    reachable: &crate::query::ReachableVia,
+) -> Result<(), Error> {
+    for predicate in reachable
+        .access_filters
+        .iter()
+        .chain(&reachable.edge_filters)
+    {
+        validate_prepared_claim_predicate(predicate)?;
+    }
+    if let Some(seed) = &reachable.seed {
+        for predicate in &seed.filters {
+            validate_prepared_claim_predicate(predicate)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_prepared_claim_predicates_in_array(array: &ArraySubquery) -> Result<(), Error> {
+    for predicate in &array.filters {
+        validate_prepared_claim_predicate(predicate)?;
+    }
+    for nested in &array.nested_arrays {
+        validate_prepared_claim_predicates_in_array(nested)?;
+    }
+    Ok(())
+}
+
+fn validate_prepared_claim_predicate(predicate: &Predicate) -> Result<(), Error> {
+    let unsupported =
+        match predicate {
+            Predicate::All(predicates) => {
+                for predicate in predicates {
+                    validate_prepared_claim_predicate(predicate)?;
+                }
+                None
+            }
+            Predicate::Eq(left, right) => match (claim_name(left), claim_name(right)) {
+                (Some(_), None) if matches!(right, Operand::Column(_)) => None,
+                (None, Some(_)) if matches!(left, Operand::Column(_)) => None,
+                (Some(claim), _) | (_, Some(claim)) => Some((
+                    claim,
+                    "equality predicate without a source-column/claim pair",
+                )),
+                (None, None) => None,
+            },
+            Predicate::Any(_) => predicate_claim_name(predicate)
+                .map(|claim| (claim, "OR/disjunction containing a claim predicate")),
+            Predicate::Not(_) => predicate_claim_name(predicate)
+                .map(|claim| (claim, "NOT/negation containing a claim predicate")),
+            Predicate::Ne(left, right) => {
+                first_claim_name([left, right]).map(|claim| (claim, "not-equal comparison"))
+            }
+            Predicate::Gt(left, right) => {
+                first_claim_name([left, right]).map(|claim| (claim, "greater-than comparison"))
+            }
+            Predicate::Gte(left, right) => first_claim_name([left, right])
+                .map(|claim| (claim, "greater-than-or-equal comparison")),
+            Predicate::Lt(left, right) => {
+                first_claim_name([left, right]).map(|claim| (claim, "less-than comparison"))
+            }
+            Predicate::Lte(left, right) => first_claim_name([left, right])
+                .map(|claim| (claim, "less-than-or-equal comparison")),
+            Predicate::In(value, options) => {
+                first_claim_name(std::iter::once(value).chain(options.iter()))
+                    .map(|claim| (claim, "IN membership predicate"))
+            }
+            Predicate::Contains(value, needle) => first_claim_name([value, needle])
+                .map(|claim| (claim, "contains/text containment predicate")),
+            Predicate::IsNull(value) => claim_name(value).map(|claim| (claim, "null check")),
+        };
+    if let Some((claim, predicate)) = unsupported {
+        return Err(Error::UnsupportedPreparedClaimPredicate { claim, predicate });
+    }
+    Ok(())
+}
+
+fn claim_name(operand: &Operand) -> Option<String> {
+    match operand {
+        Operand::Claim(claim) => Some(claim.clone()),
+        Operand::Column(_) | Operand::Param(_) | Operand::Literal(_) => None,
+    }
+}
+
+fn first_claim_name<'a>(operands: impl IntoIterator<Item = &'a Operand>) -> Option<String> {
+    operands.into_iter().find_map(claim_name)
+}
+
+fn predicate_claim_name(predicate: &Predicate) -> Option<String> {
+    match predicate {
+        Predicate::All(predicates) | Predicate::Any(predicates) => {
+            predicates.iter().find_map(predicate_claim_name)
+        }
+        Predicate::Not(predicate) => predicate_claim_name(predicate),
+        Predicate::Eq(left, right)
+        | Predicate::Ne(left, right)
+        | Predicate::Gt(left, right)
+        | Predicate::Gte(left, right)
+        | Predicate::Lt(left, right)
+        | Predicate::Lte(left, right)
+        | Predicate::Contains(left, right) => first_claim_name([left, right]),
+        Predicate::In(value, options) => {
+            first_claim_name(std::iter::once(value).chain(options.iter()))
+        }
+        Predicate::IsNull(value) => claim_name(value),
+    }
 }
 
 fn access_edge_parent_reference(table: &TableSchema) -> Option<String> {
@@ -12172,7 +12390,7 @@ mod tests {
     }
 
     #[test]
-    fn lowered_groove_graph_differs_for_distinct_identity_claims() {
+    fn lowered_groove_graph_is_stable_across_distinct_identity_claims() {
         let schema = owner_policy_schema();
         let (_dir, mut node) =
             open_node_with_uuid(NodeUuid::from_bytes([0xa1; 16]), schema.clone());
@@ -12194,14 +12412,14 @@ mod tests {
             &ReadViewSpec::default(),
         );
 
-        assert_ne!(
+        assert_eq!(
             alice_graph, bob_graph,
-            "claim('sub') must be encoded in the lowered Groove descriptor graph"
+            "prepared claim values must be supplied per binding, not baked into the shared graph"
         );
     }
 
     #[test]
-    fn lowered_groove_graph_differs_for_distinct_session_claim_values() {
+    fn lowered_groove_graph_is_stable_across_distinct_session_claim_values() {
         let schema = JazzSchema::new([TableSchema::new(
             "issues",
             [
@@ -12242,9 +12460,9 @@ mod tests {
             &ReadViewSpec::default(),
         );
 
-        assert_ne!(
+        assert_eq!(
             admin_graph, non_admin_graph,
-            "session claim values must be encoded in the lowered Groove descriptor graph"
+            "session claim values must be supplied per binding, not baked into the shared graph"
         );
     }
 
@@ -13584,15 +13802,15 @@ mod tests {
         let binding = shape.bind(BTreeMap::new()).unwrap();
         let normalized = node.normalized_row_set_shape(&shape, &binding).unwrap();
         let claims = node
-            .read_policy_claim_params_for_shape(&normalized)
+            .read_policy_claim_params_for_shape(base.version_id(), &normalized, false)
             .unwrap();
 
         assert_eq!(
-            node.read_policy_schema_for_table_name("documents"),
+            node.read_policy_schema_for_table_name("documents", base.version_id(), &normalized),
             base.version_id()
         );
         assert_eq!(
-            node.read_policy_schema_for_table_name("memberships"),
+            node.read_policy_schema_for_table_name("memberships", base.version_id(), &normalized),
             evolved_payload.id
         );
         assert_eq!(

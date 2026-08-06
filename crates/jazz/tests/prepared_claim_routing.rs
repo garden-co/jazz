@@ -9,12 +9,16 @@ use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::query::{OrderDirection, Query, claim, col, eq, param};
+use jazz::query::{
+    OrderDirection, Query, any_of, claim, col, contains, eq, gt, gte, in_list, lt, lte, ne, not,
+    param,
+};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
 
 const DOCUMENTS: &str = "documents";
 const MEMBERSHIPS: &str = "memberships";
+const RANKED_DOCUMENTS: &str = "ranked_documents";
 const TEAMS: &str = "teams";
 const WRITER: AuthorId = AuthorId(uuid::uuid!("82000000-0000-0000-0000-000000000001"));
 const USER_A: AuthorId = AuthorId(uuid::uuid!("82000000-0000-0000-0000-000000000002"));
@@ -66,6 +70,18 @@ fn schema_with_membership_policy(membership_policy: Option<Query>) -> JazzSchema
         .with_read_policy(Policy::shape(policy))
         .with_write_policy(Policy::public()),
     ])
+}
+
+fn ranked_documents_schema(policy: Query) -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        RANKED_DOCUMENTS,
+        [
+            ColumnSchema::new("rank", ColumnType::U64),
+            ColumnSchema::new("state", ColumnType::String),
+        ],
+    )
+    .with_read_policy(policy)
+    .with_write_policy(Policy::public())])
 }
 
 fn open_db() -> BenchDb {
@@ -206,6 +222,89 @@ fn prepared_policy_claims_route_per_identity_and_application_binding() {
     );
 }
 
+#[test]
+fn prepared_policy_claim_predicate_routing_rejects_unsupported_shapes() {
+    let cases = [
+        (
+            "greater-than",
+            Query::from(RANKED_DOCUMENTS).filter(gt(col("rank"), claim("minimum_rank"))),
+            "minimum_rank",
+            "greater-than comparison",
+        ),
+        (
+            "greater-than-or-equal",
+            Query::from(RANKED_DOCUMENTS).filter(gte(col("rank"), claim("minimum_rank"))),
+            "minimum_rank",
+            "greater-than-or-equal comparison",
+        ),
+        (
+            "less-than",
+            Query::from(RANKED_DOCUMENTS).filter(lt(col("rank"), claim("maximum_rank"))),
+            "maximum_rank",
+            "less-than comparison",
+        ),
+        (
+            "less-than-or-equal",
+            Query::from(RANKED_DOCUMENTS).filter(lte(col("rank"), claim("maximum_rank"))),
+            "maximum_rank",
+            "less-than-or-equal comparison",
+        ),
+        (
+            "not-equal",
+            Query::from(RANKED_DOCUMENTS).filter(ne(col("rank"), claim("excluded_rank"))),
+            "excluded_rank",
+            "not-equal comparison",
+        ),
+        (
+            "in",
+            Query::from(RANKED_DOCUMENTS).filter(in_list(col("state"), [claim("visible_state")])),
+            "visible_state",
+            "IN membership predicate",
+        ),
+        (
+            "contains",
+            Query::from(RANKED_DOCUMENTS).filter(contains(col("state"), claim("needle"))),
+            "needle",
+            "contains/text containment predicate",
+        ),
+        (
+            "or",
+            Query::from(RANKED_DOCUMENTS).filter(any_of([eq(col("rank"), claim("minimum_rank"))])),
+            "minimum_rank",
+            "OR/disjunction containing a claim predicate",
+        ),
+        (
+            "not",
+            Query::from(RANKED_DOCUMENTS).filter(not(eq(col("rank"), claim("minimum_rank")))),
+            "minimum_rank",
+            "NOT/negation containing a claim predicate",
+        ),
+    ];
+
+    for (name, policy, claim, predicate_shape) in cases {
+        let db = open_db_with_schema(ranked_documents_schema(policy));
+        let error = db
+            .prepare_query(&Query::from(RANKED_DOCUMENTS))
+            .expect_err("unsupported claim predicate must fail during preparation");
+        assert_eq!(
+            error.code,
+            jazz::db::ErrorCode::PreparedClaimPredicateRoutingUnsupported,
+            "{name}"
+        );
+        assert!(
+            error
+                .message
+                .contains("prepared claim predicate routing unsupported"),
+            "{name}: {error}"
+        );
+        assert!(
+            error.message.contains(&format!("claim '{claim}'")),
+            "{name}: {error}"
+        );
+        assert!(error.message.contains(predicate_shape), "{name}: {error}");
+    }
+}
+
 fn assert_retained_subscription_regions(region_a: &str, region_b: &str) {
     let db = open_db();
     let team_a = row(0x11);
@@ -344,12 +443,9 @@ fn prepared_binding_rejects_conflicting_claim_types_across_policies() {
         USER_A,
         BTreeMap::from([("shared_scope".to_owned(), Value::Uuid(row(0x11).0))]),
     );
-    let prepared = db
+    let error = db
         .prepare_query(&Query::from(DOCUMENTS))
-        .expect("prepare conflicting-policy shape");
-
-    let error = block_on(db.all_for_identity(&prepared, opts(), USER_A))
-        .expect_err("conflicting policy claim types must fail explicitly");
+        .expect_err("conflicting policy claim types must fail during preparation");
     assert!(
         error.to_string().contains("conflicting policy types"),
         "unexpected error: {error}"
