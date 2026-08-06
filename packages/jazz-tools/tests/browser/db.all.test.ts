@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
+import { PersistentBrowserOpfsRuntime } from "../../src/runtime/native-runtime/persistent-browser-runtime.js";
 
 const schema: WasmSchema = {
   orgs: {
@@ -514,6 +515,66 @@ describe("db.all browser integration", () => {
         expect.objectContaining({ title: "with-owner-2", owner_id: ownerId }),
       ]),
     );
+  });
+
+  it("preserves nested row names across the persistent worker boundary", async () => {
+    const ownerId = "00000000-0000-0000-0000-000000000201";
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      uniqueDbName("relation-worker-boundary"),
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+
+    try {
+      runtime.insert("users", { name: { type: "Text", value: "Owner" } }, null, ownerId);
+      runtime.insert(
+        "todos",
+        {
+          title: { type: "Text", value: "through-worker" },
+          done: { type: "Boolean", value: false },
+          owner_id: { type: "Uuid", value: ownerId },
+          tags: { type: "Array", value: [] },
+        },
+        null,
+      );
+
+      // This stays below Db because positional decoding can mask lost named-row transport metadata.
+      const rows = (await runtime.query(
+        JSON.stringify({
+          table: "users",
+          array_subqueries: [
+            {
+              column_name: "todosViaOwner",
+              table: "todos",
+              inner_column: "owner_id",
+              outer_column: "users.id",
+            },
+          ],
+        }),
+        null,
+        "local",
+        null,
+      )) as Array<{ valuesByColumn?: Map<string, unknown> }>;
+      expect(Object.getOwnPropertyDescriptor(rows[0]!, "valuesByColumn")?.enumerable).toBe(false);
+      const relation = rows[0]?.valuesByColumn?.get("todosViaOwner") as
+        | {
+            type: "Array";
+            value: Array<{
+              type: "Row";
+              value: { valuesByColumn?: Map<string, unknown> };
+            }>;
+          }
+        | undefined;
+
+      expect(relation?.value[0]?.value.valuesByColumn?.get("title")).toEqual({
+        type: "Text",
+        value: "through-worker",
+      });
+    } finally {
+      await runtime.close();
+    }
   });
 
   it("supports multi-hop queries", async () => {
