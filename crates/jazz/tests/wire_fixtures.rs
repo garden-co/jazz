@@ -598,6 +598,19 @@ fn exhaustive_native_row_codec_case() -> (
         ),
         ("i64_value", ValueType::I64),
         ("i32_value", ValueType::I32),
+        ("i32_min", ValueType::I32),
+        ("i32_negative_one", ValueType::I32),
+        ("i32_zero", ValueType::I32),
+        ("i32_max", ValueType::I32),
+        ("i64_min", ValueType::I64),
+        ("i64_negative_one", ValueType::I64),
+        ("i64_zero", ValueType::I64),
+        ("i64_max", ValueType::I64),
+        (
+            "nullable_negative_i32",
+            ValueType::Nullable(Box::new(ValueType::I32)),
+        ),
+        ("i64_negatives", ValueType::Array(Box::new(ValueType::I64))),
     ]);
     let values = vec![
         Value::U8(0xa1),
@@ -635,6 +648,21 @@ fn exhaustive_native_row_codec_case() -> (
         Value::Nullable(None),
         Value::I64(-42),
         Value::I32(-13),
+        Value::I32(i32::MIN),
+        Value::I32(-1),
+        Value::I32(0),
+        Value::I32(i32::MAX),
+        Value::I64(i64::MIN),
+        Value::I64(-1),
+        Value::I64(0),
+        Value::I64(i64::MAX),
+        Value::Nullable(Some(Box::new(Value::I32(-42)))),
+        Value::Array(vec![
+            Value::I64(i64::MIN),
+            Value::I64(-1),
+            Value::I64(0),
+            Value::I64(i64::MAX),
+        ]),
     ];
     (descriptor, values)
 }

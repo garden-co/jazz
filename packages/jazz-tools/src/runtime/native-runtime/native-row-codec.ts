@@ -549,7 +549,7 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
         throw new Error("expected Integer value");
       }
       const bytes = new Uint8Array(4);
-      new DataView(bytes.buffer).setInt32(0, value.value, true);
+      new DataView(bytes.buffer).setUint32(0, encodeSignedI32ForStorage(value.value), true);
       return bytes;
     }
     case "Timestamp": {
@@ -563,7 +563,11 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
     case "BigInt": {
       if (value.type !== "BigInt") throw new Error("expected BigInt value");
       const bytes = new Uint8Array(8);
-      new DataView(bytes.buffer).setBigInt64(0, BigInt(value.value), true);
+      new DataView(bytes.buffer).setBigUint64(
+        0,
+        encodeSignedI64ForStorage(BigInt(value.value)),
+        true,
+      );
       return bytes;
     }
     case "Double": {
@@ -682,9 +686,9 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
     case "Boolean":
       return { type: "Boolean", value: bytes[0] !== 0 };
     case "Integer":
-      return { type: "Integer", value: view.getInt32(0, true) };
+      return { type: "Integer", value: decodeSignedI32FromStorage(view.getUint32(0, true)) };
     case "BigInt":
-      return { type: "BigInt", value: view.getBigInt64(0, true) };
+      return { type: "BigInt", value: decodeSignedI64FromStorage(view.getBigUint64(0, true)) };
     case "Double":
       return { type: "Double", value: view.getFloat64(0, true) };
     case "Timestamp":
@@ -902,6 +906,22 @@ function readU32Le(bytes: Uint8Array, offset: number): number {
   return (
     bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)
   );
+}
+
+function encodeSignedI32ForStorage(value: number): number {
+  return (value ^ 0x80000000) >>> 0;
+}
+
+function decodeSignedI32FromStorage(value: number): number {
+  return (value ^ 0x80000000) | 0;
+}
+
+function encodeSignedI64ForStorage(value: bigint): bigint {
+  return BigInt.asUintN(64, value) ^ (1n << 63n);
+}
+
+function decodeSignedI64FromStorage(value: bigint): bigint {
+  return BigInt.asIntN(64, value ^ (1n << 63n));
 }
 
 function concatBytes(chunks: Uint8Array[]): Uint8Array {

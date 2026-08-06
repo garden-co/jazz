@@ -5,7 +5,9 @@ import { describe, expect, it } from "vitest";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   createRecord,
+  decodeNativeRowValues,
   decodeRecordValue,
+  encodeNativeRowValues,
   readDescriptor,
   writeDescriptor,
 } from "./native-row-codec.js";
@@ -82,6 +84,51 @@ describe("native row codec", () => {
       const decoded = decodeRecordValue(descriptor, raw, index);
       expect(decoded == null ? null : bytesToHex(decoded)).toBe(field.decoded_hex);
     }
+  });
+
+  it("round-trips signed storage values, including nested nullable and array values", () => {
+    const columns = [
+      { name: "i32_min", column_type: { type: "Integer" as const }, nullable: false },
+      { name: "i32_negative_one", column_type: { type: "Integer" as const }, nullable: false },
+      { name: "i32_zero", column_type: { type: "Integer" as const }, nullable: false },
+      { name: "i32_max", column_type: { type: "Integer" as const }, nullable: false },
+      { name: "i64_min", column_type: { type: "BigInt" as const }, nullable: false },
+      { name: "i64_negative_one", column_type: { type: "BigInt" as const }, nullable: false },
+      { name: "i64_zero", column_type: { type: "BigInt" as const }, nullable: false },
+      { name: "i64_max", column_type: { type: "BigInt" as const }, nullable: false },
+      { name: "nullable_i32", column_type: { type: "Integer" as const }, nullable: true },
+      {
+        name: "i64_array",
+        column_type: { type: "Array" as const, element: { type: "BigInt" as const } },
+        nullable: false,
+      },
+    ];
+    const values = [
+      { type: "Integer" as const, value: -2_147_483_648 },
+      { type: "Integer" as const, value: -1 },
+      { type: "Integer" as const, value: 0 },
+      { type: "Integer" as const, value: 2_147_483_647 },
+      { type: "BigInt" as const, value: -(1n << 63n) },
+      { type: "BigInt" as const, value: -1n },
+      { type: "BigInt" as const, value: 0n },
+      { type: "BigInt" as const, value: (1n << 63n) - 1n },
+      { type: "Integer" as const, value: -42 },
+      {
+        type: "Array" as const,
+        value: [
+          { type: "BigInt" as const, value: -(1n << 63n) },
+          { type: "BigInt" as const, value: -1n },
+          { type: "BigInt" as const, value: 0n },
+          { type: "BigInt" as const, value: (1n << 63n) - 1n },
+        ],
+      },
+    ];
+
+    const encoded = encodeNativeRowValues(columns, values);
+    expect(bytesToHex(encoded)).toBe(
+      "00000000ffffff7f00000080ffffffff0000000000000000ffffffffffffff7f0000000000000080ffffffffffffffff01d6ffff7f0000000000000000ffffffffffffff7f0000000000000080ffffffffffffffff",
+    );
+    expect(decodeNativeRowValues(columns, encoded)).toEqual(values);
   });
 });
 
