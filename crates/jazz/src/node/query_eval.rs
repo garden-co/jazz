@@ -5216,9 +5216,23 @@ where
             return Ok(None);
         }
         if let Some(position) = self.settled_through_for_binding_view(binding_view_key) {
-            return Ok(Some(KnownStateDeclaration::Fast {
-                completeness: KnownStateCompleteness::FastCurrentMembership,
-                position,
+            let authorization_progress = self
+                .query
+                .authorization_progress_by_binding_view
+                .get(&binding_view_key)
+                .copied();
+            return Ok(Some(match authorization_progress {
+                Some(authorization_progress) => {
+                    KnownStateDeclaration::FastWithAuthorizationProgress {
+                        completeness: KnownStateCompleteness::FastCurrentMembership,
+                        position,
+                        authorization_progress,
+                    }
+                }
+                None => KnownStateDeclaration::Fast {
+                    completeness: KnownStateCompleteness::FastCurrentMembership,
+                    position,
+                },
             }));
         }
         if let Some(position) = self.load_known_state_fact(binding_view_key)? {

@@ -279,6 +279,9 @@ pub struct PeerPayloadInventory {
     /// exclusive coverage must remain explicit `VersionBundle` payloads until
     /// the wire protocol grows finer-grained inventory refs.
     pub complete_tx_payloads: Vec<TxId>,
+    /// Server-stamped authorization generation for the binding view carried by
+    /// this update. It qualifies a subsequent fast known-state declaration.
+    pub authorization_progress: Option<u64>,
 }
 
 /// One immutable row-version payload carried by a committed transaction.
@@ -1471,6 +1474,16 @@ pub enum KnownStateDeclaration {
         completeness: KnownStateCompleteness,
         /// Server-stamped settled-through position being echoed.
         position: GlobalSeq,
+    },
+    /// Fast declaration qualified by the authorization state under which the
+    /// receiver applied it.
+    FastWithAuthorizationProgress {
+        /// Completeness class this declaration claims.
+        completeness: KnownStateCompleteness,
+        /// Server-stamped settled-through position being echoed.
+        position: GlobalSeq,
+        /// Server-stamped authorization generation echoed by the receiver.
+        authorization_progress: u64,
     },
     /// Exact declaration of row-version payloads currently held by the receiver.
     ExactVersionSet {

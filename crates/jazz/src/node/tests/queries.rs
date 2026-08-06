@@ -1824,7 +1824,7 @@ fn query_payload_dedup_is_per_peer_across_subscriptions() {
         .unwrap();
     let version_bundles = version_bundles_for_update(&first);
     let SyncMessage::ViewUpdate {
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         ..
     } = first
     else {
@@ -1839,7 +1839,7 @@ fn query_payload_dedup_is_per_peer_across_subscriptions() {
         .unwrap();
     let version_bundles = version_bundles_for_update(&second);
     let SyncMessage::ViewUpdate {
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         ..
     } = second
     else {
@@ -1885,7 +1885,7 @@ fn partial_mergeable_payload_does_not_establish_tx_level_complete_tx_ref() {
         .unwrap();
     let version_bundles = version_bundles_for_update(&first);
     let SyncMessage::ViewUpdate {
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         ..
     } = first
     else {
@@ -1901,7 +1901,7 @@ fn partial_mergeable_payload_does_not_establish_tx_level_complete_tx_ref() {
         .unwrap();
     let version_bundles = version_bundles_for_update(&second);
     let SyncMessage::ViewUpdate {
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         ..
     } = second
     else {
