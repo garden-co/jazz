@@ -14,6 +14,7 @@ Invariant digest:
 - `INV-TEST-2`: Node-core simulation MUST be deterministic under driver-supplied time, randomness, and delivery order.
 - `INV-TEST-3`: Every consistency claim MUST have randomized oracle coverage.
 - `INV-TEST-4`: The canonical local gate set MUST be maintained as the pre-push verification contract, and any difference from CI MUST be explicit.
+- `INV-TEST-5`: Structured-result maintained-vs-one-shot equivalence MUST use canonical `ResultTree` equality, not root-membership set equality.
 
 ## Details
 
@@ -114,6 +115,33 @@ through `insert_with_id`/`update`, wait on `DurabilityTier::Local`, and compare
 query/subscription results against a local oracle. Internal hooks are reserved for
 behavior that cannot be observed through the public surface, or for narrow
 lower-level tests that best pin an invariant.
+
+### D.4.1 Structured-result oracle boundary
+
+**Current coverage limit (verified 2026-08-04).**
+`m3_maintained_one_shot_differential_oracle` compares only
+`BTreeSet<(table, RowUuid)>` (`crates/jazz/src/node/tests/m3_differential.rs:896-936`).
+It discards cells, content versions, relation edges, position/order, and
+duplicates. It therefore proves root-membership convergence only; it does not
+prove output content, ordering, nested association, or delivery shape. The
+current differential also reduces in-process updates rather than exercising
+receiver application or chunk assembly.
+
+**Target contract.** Before extending that oracle for structured output, define
+a canonical public-facing `ResultTree` reducer and equality relation. Equality
+MUST include the ordered root sequence; each node's output identity and selected
+values; named child relations and each relation's ordered child sequence;
+recursive descendants; aggregate/group payloads; and the specified semantic
+states for null, hole, and empty relation. Identity is part of the comparison;
+it MUST NOT replace payload equality. Transport provenance/coverage facts that
+are contractual remain separately testable protocol facts rather than implicit
+tree fields.
+
+The future oracle MUST reduce maintained snapshots and whole-parent deltas at a
+receiver-facing result boundary, then compare that tree with a one-shot tree at
+the same frontier. It should additionally cover valid chunk assembly (no
+publication before the final chunk) and exact order at every relation boundary.
+This is target coverage; no test currently enforces `INV-TEST-5`.
 
 ### D.5 Current CI gap
 

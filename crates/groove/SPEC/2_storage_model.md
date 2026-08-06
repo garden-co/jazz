@@ -35,6 +35,7 @@ Invariant digest:
 - `INV-STORAGE-24`: Persisted index scans MUST decode the persisted index record's `"value"` as primary-key bytes and fetch the current base table record; if the base record is missing for a primary-key table, the index MUST be treated as invalid.
 - `INV-STORAGE-25`: Ordered index key encoding via `encode_key_part` MUST preserve logical ordering for supported key values in RocksDB lexicographic order and MUST reject arrays as keys.
 - `INV-STORAGE-26`: Windowed record encoding (ch. 2 §2.9) MUST be invisible above the record store: decode∘encode is the identity over record sequences, the storage conformance suite passes identically under windowed and plain representations, and no consumer above the record store can observe which representation is in use.
+- `INV-STORAGE-27`: A record-valued `ValueType` MUST carry its descriptor inline and accept only canonical child bytes; it MUST NOT appear, directly or recursively, in a durable primary key.
 
 ## Details
 
@@ -101,6 +102,28 @@ variant changes the stored meaning of existing data and is a breaking change.
 
 The exact byte format for records, nullable values, and arrays is specified in
 §2.7.
+
+**Target design (record-valued values, 2026-08-04).** `ValueType` gains
+`Record(Box<RecordDescriptor>)`, whose runtime value is an `OwnedRecord`. The
+descriptor is inline in the parent descriptor metadata; groove MUST NOT require
+a descriptor registry or encode descriptor bytes beside every child value. The
+`Box` makes recursive descriptors finite at the Rust type level. An array of
+record values therefore uses the existing array framing around the canonical raw
+bytes of each element descriptor; no second outer-record layout is introduced.
+
+Record values are admitted only when their embedded descriptor equals the
+declared `ValueType::Record` descriptor and their raw bytes are canonical for
+that descriptor: decode every child value, recreate the record, and require
+byte equality. Validation alone is insufficient because `OwnedRecord::new`
+currently accepts arbitrary raw bytes (`src/records/mod.rs:1577-1582`). The
+recreate-and-compare rule is required for byte-based weighted consolidation and
+deterministic final tie-breaking.
+
+`Record`, `Array<Record>`, and any recursively containing value type MUST be
+rejected as a durable primary-key part. The primary-key codec has no
+field-semantic order for raw nested record bytes; this is a rejection rule, not
+an invitation to use their byte layout as an ordered key. Arrangement-key
+rejection is the graph-validation rule in ch. 3.
 
 ### 2.3 Tables
 
@@ -239,7 +262,8 @@ integers** (the opposite of the little-endian record encoding), `0|1` for
 for `String`/`Bytes`. A composite key concatenates these encoded parts in
 key-column declaration order, so it orders by the first key column, then the
 second, and so on. Valid key types are the integer widths, `Bool`, `String`,
-`Bytes`, and `Uuid`; `F64`, arrays, and nullable values are not valid key parts.
+`Bytes`, and `Uuid`; `F64`, arrays, record-valued types (including recursively
+nested records), and nullable values are not valid key parts.
 
 ### 2.9 Windowed record encoding
 

@@ -56,6 +56,7 @@ Invariant digest:
 - `INV-QUERY-19`: Exclusive transaction view shipping MUST be view-atomic, not transport-atomic: a visible exclusive result for a maintained subscription view MUST include every exclusive version required by that view, but the `VersionBundle` MAY omit transaction versions outside that view.
 - `INV-QUERY-20`: Query payload dedup MUST be per peer across all subscriptions for complete transaction payloads: already-covered complete payloads are referenced via `peer_payload_inventory.complete_tx_payloads`, and partial bundles, including partial mergeable or exclusive bundles, MUST NOT establish complete-transaction payload coverage.
 - `INV-QUERY-21`: Array subqueries MUST be represented separately from forward `Include` paths and MUST emit relation payload edges `(source_table, source_row_uuid, relation, target_table, target_row_uuid)` plus row batches; child filters/select/order/limit affect only child relation material, optional unreadable children are omitted with their edges while readable parents remain, and explicit requirements are the only array-subquery form that can filter root membership.
+- `INV-QUERY-22`: Structured query output MUST be constructed only by the output terminal as an ordered tree; maintained graph deltas remain flat, and a changed rendered parent is delivered as one whole-parent replacement.
 
 ## Details
 
@@ -218,7 +219,7 @@ sharing. Lowering MUST use the established policy-comparison path for claim
 comparisons; any policy-only normalization remains scoped to that comparison
 path and MUST NOT change ordinary arrangement-key encodings.
 
-### 6.4 Result sets, include paths, and relation payloads
+### 6.4 Result sets, include paths, and structured output
 
 A result set is the authoritative membership for a query in a read view.
 Result-set sharing MUST be keyed by every semantic input that can affect
@@ -244,18 +245,111 @@ subscription payload. Sync membership keeps holes first-class: a readable parent
 is never dropped from sync solely because an included target is absent or
 unreadable (`INV-QUERY-10`).
 
-Array subqueries produce relation payload material, not nested row values inside
-core rows. A relation payload is a set of row batches plus typed relation facts
-that identify the source and target rows across each relation level. It MUST
-retain the membership, ordering, and visibility information required to apply
-child changes correctly.
-For a reverse relation array, the edge source is the parent row and the target
-is each visible correlated child row. For nested array subqueries, child rows
-become the source for the next relation level. Child filters, select columns,
-ordering, and limits affect only the child relation material; they do not change
-root row membership unless the array subquery has an explicit requirement.
-Unreadable child rows and their edges are omitted, while readable parents remain
-visible for optional array subqueries (`INV-QUERY-21`).
+**Decision, 2026-08-04 — structured output at the terminal.** A public query
+result with array subqueries is an ordered recursive result tree: each output
+node carries its row value and named child relations, and each child relation is
+an ordered array of output nodes. The IVM graph and its lowering remain flat and
+DBSP-native: parent rows, child rows, and their associations remain ordinary
+weighted rows keyed/grouped by parent occurrence. A graph delta MUST NOT update
+an inner collection. This is the chosen rendering boundary for a
+shredded/factorized maintained representation, not a claim that the semantic
+nested query is flat.
+
+**Implementation status (2026-08-04).** This is a target design. Current core
+still emits flat root rows plus relation facts and the consumer-side materializer
+reassembles them; no structured terminal, recursive record value, or v4 wire
+exists yet.
+
+Nesting is constructed only by Groove's output-terminal collector
+(`groove/SPEC/3_queries_operators.md` §3.6.1). A collector MUST NOT feed any
+graph node, including another collector; graph validation MUST reject that
+shape. Nested arrays are rendered by one terminal-owned collector tree over flat
+associations. The collector descriptor MUST encode every input that affects its
+output, as required by `groove/SPEC/INVARIANTS.md::INV-QUERY-1A`; Jazz names the
+query shape, correlation, projection, ordering, and bounds that supply those
+inputs. This keeps policy, lens, and permission concerns out of Groove's
+operator contract.
+
+The only v1 incremental structured delta is a **whole-parent replacement**:
+retract the previously rendered parent node and add the complete new parent
+node, addressed by its stable output occurrence. There is no children-only,
+child-insert, child-remove, or position delta in v1. The structured-delta wire
+envelope MUST be extensible so a narrower parent/child delta family can be added
+later without reinterpreting v1 data. A touched parent replacement is an
+ordinary incremental delta, not a reset; attach/rebuild/reset triggers retain
+their existing meaning. The current maintained path instead emits flat root
+adds/removes and relation-edge changes (`crates/jazz/src/node/query_eval.rs:496-501`)
+and `Db` caches `RelationSnapshot` rows and edges
+(`crates/jazz/src/db.rs:7786-7824`); that is current implementation behavior,
+not this target result model.
+
+Child order is semantic and is represented by array position in the replacement
+value. There is no explicit rank/position field. The query comparator remains
+the source of that order: child `order_by` when supplied, otherwise ascending
+`RowUuid`, with the specified stable tie-break. Replacing the whole parent makes
+every child position correct after a front insert, reorder, or TopBy boundary
+crossing without sending a renumbering delta. For example, a new eleventh child
+that sorts fifth in a limit-ten relation replaces the old ten-child parent with
+the newly ordered ten-child parent. It does not emit a child retract/add pair.
+
+Array subqueries MUST support `order_by`, `offset`, and a finite `limit` with
+the same semantics as those clauses at the root query. The bounded form is
+mandatory: for limit `L`, the rendered collection contribution is bounded by
+`R(L)`, rather than `R(group)`, and query validation/planning can keep a parent
+payload below `MAX_WIRE_FRAME_BYTES`. A finite zero limit yields an empty child
+array. Child filtering, selection, ordering, offset, and limit change only the
+rendered child relation unless the array subquery has an explicit requirement;
+unreadable children are omitted while readable parents remain visible for an
+optional relation.
+
+The terminal's recursive value uses Groove's inline
+`ValueType::Record(Box<RecordDescriptor>)` descriptor form, not a descriptor
+registry. Nested record bytes MUST be canonical on decode: decode, recreate
+with the declared descriptor, and byte-compare before accepting them. This is
+required because `OwnedRecord::new` currently accepts arbitrary raw bytes
+(`crates/groove/src/records/mod.rs:1577-1582`), and non-canonical bytes would
+break weighted-delta consolidation. A record-valued value, or a type containing
+one, MUST be rejected in arrangement keys and durable primary keys; it is an
+opaque rendered value, never an ordering/key codec (`groove/SPEC/2_storage_model.md`
+§2.2 and `groove/SPEC/3_queries_operators.md` §3.6.1).
+
+**Decision, Anselm 2026-08-04 — children carry explicit ids.** Every child
+record in a structured result MUST carry its source row id as an explicitly
+projected field. Deterministic array position alone would satisfy delta
+application, but an explicit id is what lets a consumer preserve object identity
+across reorders without re-deriving keys — and key derivation in the consumer is
+precisely the duplicated semantics this design removes.
+
+The id MUST be an explicit projected field. It MUST NOT be recovered from
+implicit source-row bytes, because that would make an internal encoding load
+bearing at the public boundary.
+
+A child id identifies the source **row**, not the output **occurrence**: one row
+may appear under more than one parent, and under bag semantics the same row may
+occur more than once within a single parent's array. Position therefore remains
+the occurrence discriminator, and consumers MUST NOT assume a child id is unique
+within one parent's array unless the query shape guarantees it.
+
+**Decision, Anselm 2026-08-04 — bounded arrays are enforced, with a runtime
+over-size error as backstop.** Two mechanisms, both required:
+
+1. **Validation enforces the bound.** An array subquery MUST carry a finite
+   child limit; query validation MUST reject an unbounded array subquery in a
+   structured result. This makes the size bound a property of the query rather
+   than of the data.
+2. **A runtime over-size error backstops it.** A bounded array can still render
+   a parent larger than `MAX_WIRE_FRAME_BYTES` (2 MiB;
+   `crates/jazz/src/protocol_limits.rs:16`) when individual children are large.
+   The terminal MUST then fail with a structured, named error identifying the
+   parent row, the relation, the rendered byte size and the limit exceeded. It
+   MUST NOT silently truncate the array, drop children, or emit a partial
+   parent: a partial parent is a wrong answer, whereas a named error is a
+   diagnosable one.
+
+Fragmenting one logical parent replacement across chunks was considered and
+rejected for this revision: it preserves expressiveness at the cost of atomic
+receiver assembly and a recursive fragment format, and the mandatory child limit
+already makes the common case bounded. Nothing here forecloses adding it later.
 
 Alpha-style relation traversal has an output-changing query surface. A
 relation-query facade MUST normalize into the same row-set program vocabulary as
@@ -304,13 +398,13 @@ the stable tie-breaker.
 Ordering is part of the delivered result, not a presentation hint. Initial
 snapshots, reset-result-set `ViewUpdate`s, maintained subscription deltas, and
 settled subscriber reads must all reduce to the same ordered result as a
-one-shot read at the same frontier. Incremental delivery must include enough
-position/order information for insertions, removals, updates, and boundary churn
-to be applied in the specified order. This composes with
-`groove/SPEC/INVARIANTS.md::INV-INC-1`: because default row ordering is by
-immutable id, a single-row content update that does not change membership must
-not reorder neighboring rows, and a single-row insert must publish its ordered
-position without scanning or diffing the accumulated relation state.
+one-shot read at the same frontier. For a structured child relation, the
+replacement array's positions are the complete order information; no separate
+rank field or successor-position deltas are sent. This composes with
+`groove/SPEC/INVARIANTS.md::INV-INC-1`: a default-id content update that does
+not affect a rendered relation must not reorder neighboring children, while a
+child insert/order change replaces only its touched rendered parent group rather
+than scanning or diffing the accumulated view.
 
 ### 6.5 Query-driven sync
 
@@ -322,14 +416,13 @@ resolved read identity from the semantic read view plus tier; callers do not
 supply the key as independent identity. The wire vocabulary is `RegisterShape`,
 `Subscribe`, `Unsubscribe`, and `ViewUpdate` (ch. 8).
 
-The serving authority maintains the settled result set for each program instance:
-the result member set plus its matched include paths, relation edges, and join
-witnesses (§6.4).
-The subscriber receives and stores its own **settled subscription result set**:
-the rows, typed program facts, and matched include/relation material it can
-answer settled reads from (§6.6).
-The two sides share entry shape, but have different roles. A `ViewUpdate` with
-`reset_result_set = true` resets the subscriber's settled result set.
+The serving authority maintains flat result members, association state, and
+version witnesses for each program instance, then its output terminal renders
+the structured result tree (§6.4). The subscriber receives and stores its own
+**settled structured subscription result** and applies reset snapshots or
+whole-parent replacements directly; its environment-specific facade performs
+only the minimal conversion from that tree (§6.6). A `ViewUpdate` with
+`reset_result_set = true` resets that settled result.
 
 Two correctness properties govern result-set maintenance. Incremental
 result-set updates converge to the same typed result-member and program-fact
@@ -394,16 +487,16 @@ surface. The test plan below records additional intended coverage.
 
 - Strengthen the maintained-vs-one-shot differential oracle command
   `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
-  to assert ordered equality rather than set equality for root rows and every
-  relation payload. The oracle should keep using public query shapes/builders
-  and compare the maintained stream's reduced result to the one-shot result at
-  each checkpoint.
+  to compare the canonical `ResultTree` specified in appendix D, rather than a
+  root-id set. The oracle should keep using public query shapes/builders and
+  compare the maintained stream's reduced result to the one-shot result at each
+  checkpoint.
 - Extend the TS query API coverage in
   `packages/jazz-tools/tests/ts-dsl/query-api.test.ts` so result arrays that
   currently sort ids before comparison become ordered-equality assertions. Add
   explicit cases for
   default root ordering, reverse/forward relation include arrays ordered by
-  child id, nested relation payloads, and explicit `orderBy` preserving its
+  child id, nested structured arrays, and explicit `orderBy` preserving its
   override with row-id tie-breaks.
 - Add grouped/aggregate conformance cases for default group-key ordering:
   scalar/global aggregate output, single-column groups, and composite groups
@@ -413,8 +506,8 @@ surface. The test plan below records additional intended coverage.
   `crates/jazz/tests/incremental_delivery_canary.rs` for a large unordered
   relation/include result. It should subscribe through the public `Db` API,
   insert one child whose id belongs in the middle of the child relation, assert
-  the delivered insert position/order, and keep the existing scale-independent
-  allocation/byte expectation so ordered insertion remains covered by
+  the complete touched-parent replacement's order, and pin the bounded
+  allocation/byte expectation for the collector exception to
   `groove/SPEC/INVARIANTS.md::INV-INC-1`.
 - Keep Rust tests aligned with
   `crates/jazz/TESTING_GUIDELINES.md`: prefer black-box integration tests
@@ -433,10 +526,8 @@ validated shape identity.
 
 Array subqueries remain distinct from include paths. They represent correlated
 one-to-many result fields with parent-column to child-column bindings. One-shot
-and maintained subscriptions use the same relation-payload contract; the
-maintained-vs-one-shot equivalence is covered by
-`array_subquery_one_shot_and_maintained_subscription_are_equivalent` in
-`crates/jazz/src/db/tests.rs`.
+and maintained subscriptions use the same structured-output contract; no current
+test is cited for this target design.
 
 SQL is an entry surface, not a second semantic model. A Jazz SQL dialect should
 lower into the same query AST and reject unsupported SQL constructs loudly.

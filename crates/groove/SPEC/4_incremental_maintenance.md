@@ -18,6 +18,7 @@ Invariant digest:
 - `INV-ARR-6`: Source operators MAY hydrate from static point, prefix, or range scan specs over their table/index arrangement key; the scan spec MUST participate in node identity, and one-shot static scans MUST NOT perturb existing subscriptions.
 - `INV-MV-1`: No state that feeds a maintained view may change without that maintained view observing the change, either as ordinary deltas through the runtime or as an explicit rebuild from authoritative base state. Producer classes include upstream sync apply, local commit finalize, fate application including merge-back/ahead cleanup, subscription registration changes, repair/refetch apply, and recovery. This invariant was made explicit after July 2026 incidents in fallback classification, bulk-load suppression, serve-dirty gating/epoch handling, fated ahead cleanup, and subscriber dirty propagation.
 - `INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffing, and delivery to subscribers — must be bounded by the size of the change and its affected keys, never by the size of the accumulated view state. Corollary 1: Full re-materialization or full-state diffing on a maintained path is a defect, even when its observable output is correct. Equivalence gates (INV-MV-1, the differential oracle) verify observations; INV-INC-1 constrains mechanism; passing the former does not license violating the latter. Corollary 2: A snapshot is not a separate concept: initial hydration is the first delta, applied to empty state, using the same delta shape and delivery pathway as every subsequent change. Any type, wire shape, or code path that exists only to carry the full current state of a maintained view is a second format of the view and shares the burden of proof of the no-second-formats rule. Corollary 3 (strong form, Anselm 2026-07-09): One-shot reads are the degenerate case of maintained views (subscribe, take first delta, unsubscribe) — not the other way around. New query capabilities must define their delta form no later than their one-shot form; a capability shipped one-shot-only is incomplete, not done. Legitimate O(state) moments (initial hydration, reset-after-revocation) are covered: there, the state IS the change.
+- `INV-INC-2`: The target output-terminal exception to `INV-INC-1` permits `CollectBy` work and delivery bounded by the touched rendered group, `R(limit)` when finite, but never accumulated-view work; a scale canary is required before it becomes `now`.
 - `INV-REC-8`: Retractions reaching recursive state MUST be handled by full recompute from storage and diff against the previous accumulated set; subscribers MUST receive only the re...
 - `INV-REC-9`: After recompute, recursive step arrangements MUST be hydrated from full table snapshots and the full accumulated weighted record set before future positive incremental...
 - `INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes while the shape remains registered.
@@ -108,6 +109,23 @@ deltas, never unchanged matching rows or base-table changes outside the result
 existing subscriptions' future deltas (`INV-TICK-19`). The tick provides that
 isolation with per-tick memoization keyed by `{scope, node, tick, sub_tick}`,
 cleared after the tick (`INV-TICK-5`).
+
+**Decision, 2026-08-04 — narrow output-terminal exception to `INV-INC-1`
+(`INV-INC-2`, target).** A
+terminal `CollectBy` may retain a complete flat group and, when that group is
+touched, render and deliver the complete old and new output records for that
+group. Its maintenance and delivery work is therefore bounded by the touched
+**rendered group** (for a finite window, `R(limit)`), not by the accumulated
+view. It remains forbidden to scan, re-materialize, or diff unrelated groups or
+the full accumulated view. The emitted shape is exactly one `-old` and one
+`+new` record when output bytes change; no output means no delta.
+
+This is a custom collector contract, not a result proved by the incremental-view
+literature. DBSP's `MIN` precedent is only that retained full state plus a
+specialized operator can improve on brute force; it does not establish that
+serializing a rendered list is cheap. The output-size work must be pinned by an
+explicit scale canary before this target becomes `now`; observational
+equivalence alone does not establish the mechanism law.
 
 ### 4.3 Arrangements: shared, logically-timed state
 
