@@ -1,4 +1,90 @@
 {
-  "descriptor_hex": "060108726f775f7575696408010a757365725f7469746c650c060109757365725f646f6e650c05010d757365725f7072696f726974790c0f010774785f74696d650e0110757365725f6465736372697074696f6e0c06",
-  "record_hex": "11111111111111111111111111111111010001070000002a000000000000002c00000001427579206d696c6b00"
+  "cases": [
+    {
+      "name": "all_value_types_depth_three",
+      "descriptor_hex": [
+        "15010875385f76616c75650001097531365f76616c75650101097533325f76616c75650201097536345f76616c756503",
+        "01096636345f76616c756504010a626f6f6c5f76616c756505010c737472696e675f76616c756506010b62797465735f",
+        "76616c756507010a757569645f76616c756508010a656e756d5f76616c756509046d6f646502036c6f770468696768",
+        "010b6d697865645f7475706c650a04000e0c050f010b66697865645f61727261790b0f010e7661726961626c655f6172",
+        "7261790b06011a6e756c6c61626c655f61727261795f64657074685f74687265650c0b0c0f010d696e6c696e655f726563",
+        "6f72640d02010b6368696c645f636f756e740f010b6368696c645f6c6162656c0c06010c7265636f72645f61727261790b",
+        "0d02010b6368696c645f636f756e740f010b6368696c645f6c6162656c0c060111656d7074795f66697865645f61727261790b010114656d7074795f7661726961626c655f61727261",
+        "790b06010e6e756c6c5f66697865645f6933320c0f01096936345f76616c75650e01096933325f76616c75650f"
+      ],
+      "record_hex": [
+        "a1c3b207f6e5d4807060504030201000000000000029400011111111111111111111111111111111",
+        "01097ffffffffffffffd00007fffffef0000000000d6fffffffffffffff3ffffff72000000740000007c00000087000000",
+        "920000009a000000af000000af00000073796e746865746963deadfdffffff05000000020000000900000078797a0100",
+        "0000000001f9ffffff04000000016f6e650200000010000000050000000174776f060000000000000000"
+      ],
+      "fields": [
+        { "name": "u8_value", "encoded_hex": "a1", "decoded_hex": "a1" },
+        { "name": "u16_value", "encoded_hex": "c3b2", "decoded_hex": "c3b2" },
+        { "name": "u32_value", "encoded_hex": "07f6e5d4", "decoded_hex": "07f6e5d4" },
+        {
+          "name": "u64_value",
+          "encoded_hex": "8070605040302010",
+          "decoded_hex": "8070605040302010"
+        },
+        {
+          "name": "f64_value",
+          "encoded_hex": "0000000000002940",
+          "decoded_hex": "0000000000002940"
+        },
+        { "name": "bool_value", "encoded_hex": "00", "decoded_hex": "00" },
+        {
+          "name": "string_value",
+          "encoded_hex": "73796e746865746963",
+          "decoded_hex": "73796e746865746963"
+        },
+        { "name": "bytes_value", "encoded_hex": "dead", "decoded_hex": "dead" },
+        {
+          "name": "uuid_value",
+          "encoded_hex": "11111111111111111111111111111111",
+          "decoded_hex": "11111111111111111111111111111111"
+        },
+        { "name": "enum_value", "encoded_hex": "01", "decoded_hex": "01" },
+        {
+          "name": "mixed_tuple",
+          "encoded_hex": "097ffffffffffffffd00007fffffef",
+          "decoded_hex": "097ffffffffffffffd00007fffffef"
+        },
+        {
+          "name": "fixed_array",
+          "encoded_hex": "fdffffff05000000",
+          "decoded_hex": "fdffffff05000000"
+        },
+        {
+          "name": "variable_array",
+          "encoded_hex": "020000000900000078797a",
+          "decoded_hex": "020000000900000078797a"
+        },
+        {
+          "name": "nullable_array_depth_three",
+          "encoded_hex": "01000000000001f9ffffff",
+          "decoded_hex": "000000000001f9ffffff"
+        },
+        {
+          "name": "inline_record",
+          "encoded_hex": "04000000016f6e65",
+          "decoded_hex": "04000000016f6e65"
+        },
+        {
+          "name": "record_array",
+          "encoded_hex": "0200000010000000050000000174776f0600000000",
+          "decoded_hex": "0200000010000000050000000174776f0600000000"
+        },
+        { "name": "empty_fixed_array", "encoded_hex": "", "decoded_hex": "" },
+        { "name": "empty_variable_array", "encoded_hex": "00000000", "decoded_hex": "00000000" },
+        { "name": "null_fixed_i32", "encoded_hex": "0000000000", "decoded_hex": null },
+        {
+          "name": "i64_value",
+          "encoded_hex": "d6ffffffffffffff",
+          "decoded_hex": "d6ffffffffffffff"
+        },
+        { "name": "i32_value", "encoded_hex": "f3ffffff", "decoded_hex": "f3ffffff" }
+      ]
+    }
+  ]
 }

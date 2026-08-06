@@ -8,8 +8,10 @@ export type ValueType = {
   inner?: ValueType;
   members?: ValueType[];
   record?: DescriptorField[];
+  enumSchema?: EnumSchema;
 };
 export type DescriptorField = { name?: string; valueType: ValueType };
+export type EnumSchema = { name: string; variants: string[] };
 export type NativeRow = { rowId: Uint8Array; deleted: boolean; raw: Uint8Array };
 export type NativeRowBatch = { table: string; descriptor: DescriptorField[]; rows: NativeRow[] };
 export type NativeRemovedRow = { table: string; rowId: Uint8Array };
@@ -127,14 +129,14 @@ export function readNativeRelationSubscriptionEdge(
 export function writeDescriptor(writer: PostcardWriterLike, descriptor: DescriptorField[]): void {
   writer.vec((field, index) => {
     field.some((nameWriter) => nameWriter.string(descriptor[index].name ?? ""));
-    writeValueType(field, descriptor[index].valueType);
+    writeGrooveValueType(field, descriptor[index].valueType);
   }, descriptor.length);
 }
 
 export function readDescriptor(reader: PostcardReaderLike): DescriptorField[] {
   return reader.readVec((fieldReader) => ({
     name: fieldReader.option((nameReader) => nameReader.string()),
-    valueType: readValueType(fieldReader),
+    valueType: readGrooveValueType(fieldReader),
   }));
 }
 
@@ -166,6 +168,61 @@ export function readValueType(reader: PostcardReaderLike): ValueType {
   }
   if (tag === 10) {
     const members = reader.readVec(readValueType);
+    return { tag, members, inner: members[0] };
+  }
+  if (tag === 13) {
+    return { tag, record: readDescriptor(reader) };
+  }
+  return { tag };
+}
+
+function writeGrooveValueType(writer: PostcardWriterLike, valueType: ValueType): void {
+  writer.enumUnit(valueType.tag);
+  if (valueType.tag === 9) {
+    if (!valueType.enumSchema) throw new Error("missing enum schema for Groove ValueType::Enum");
+    writer.string(valueType.enumSchema.name);
+    writer.vec(
+      (variantWriter, index) => variantWriter.string(valueType.enumSchema!.variants[index]!),
+      valueType.enumSchema.variants.length,
+    );
+    return;
+  }
+  if (valueType.tag === 10) {
+    const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
+    writer.vec(
+      (memberWriter, index) => writeGrooveValueType(memberWriter, members[index]!),
+      members.length,
+    );
+    return;
+  }
+  if (valueType.tag === 11 || valueType.tag === 12) {
+    if (!valueType.inner) throw new Error(`missing inner value type for tag ${valueType.tag}`);
+    writeGrooveValueType(writer, valueType.inner);
+    return;
+  }
+  if (valueType.tag === 13) {
+    if (!valueType.record)
+      throw new Error("missing inline record descriptor for Groove ValueType::Record");
+    writeDescriptor(writer, valueType.record);
+  }
+}
+
+function readGrooveValueType(reader: PostcardReaderLike): ValueType {
+  const tag = reader.u64();
+  if (tag === 9) {
+    return {
+      tag,
+      enumSchema: {
+        name: reader.string(),
+        variants: reader.readVec((variantReader) => variantReader.string()),
+      },
+    };
+  }
+  if (tag === 11 || tag === 12) {
+    return { tag, inner: readGrooveValueType(reader) };
+  }
+  if (tag === 10) {
+    const members = reader.readVec(readGrooveValueType);
     return { tag, members, inner: members[0] };
   }
   if (tag === 13) {
