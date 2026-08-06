@@ -19,7 +19,7 @@ use jazz::wire::{
     FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireEnvelope, WireFrame,
     decode_sync_message, encode_frame, encode_sync_message,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -43,6 +43,12 @@ struct Fixture {
     frame_base64: String,
     payload_hex: String,
     decoded_debug: String,
+}
+
+#[derive(Deserialize)]
+struct NativeRowCodecFixture {
+    descriptor_hex: String,
+    record_hex: String,
 }
 
 fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
@@ -443,6 +449,57 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
         assert_eq!(envelope.session, None);
         assert_eq!(decode_sync_message(&envelope.payload).unwrap(), expected);
     }
+}
+
+// This is intentionally a codec-level integration fixture: a TypeScript row
+// decoder consumes these exact bytes, while this Rust test pins the Groove
+// descriptor discriminants and record layout that produced them.
+#[test]
+fn native_row_codec_fixture_matches_groove_descriptor_and_record_layout() {
+    let fixture: NativeRowCodecFixture =
+        serde_json::from_str(include_str!("../fixtures/native_row_codec.json"))
+            .expect("native row codec fixture parses");
+    let descriptor = groove::records::RecordDescriptor::new([
+        ("row_uuid", groove::records::ValueType::Uuid),
+        (
+            "user_title",
+            groove::records::ValueType::Nullable(Box::new(groove::records::ValueType::String)),
+        ),
+        (
+            "user_done",
+            groove::records::ValueType::Nullable(Box::new(groove::records::ValueType::Bool)),
+        ),
+        (
+            "user_priority",
+            groove::records::ValueType::Nullable(Box::new(groove::records::ValueType::I32)),
+        ),
+        ("tx_time", groove::records::ValueType::I64),
+        (
+            "user_description",
+            groove::records::ValueType::Nullable(Box::new(groove::records::ValueType::String)),
+        ),
+    ]);
+    let descriptor_fields = descriptor
+        .fields()
+        .iter()
+        .map(|field| (field.name.clone(), field.value_type.clone()))
+        .collect::<Vec<_>>();
+    let descriptor_bytes = postcard::to_allocvec(&descriptor_fields).expect("descriptor encodes");
+    let record = descriptor
+        .create(&[
+            groove::records::Value::Uuid(uuid::Uuid::from_bytes([0x11; 16])),
+            groove::records::Value::Nullable(Some(Box::new(groove::records::Value::String(
+                "Buy milk".to_owned(),
+            )))),
+            groove::records::Value::Nullable(Some(Box::new(groove::records::Value::Bool(false)))),
+            groove::records::Value::Nullable(Some(Box::new(groove::records::Value::I32(7)))),
+            groove::records::Value::I64(42),
+            groove::records::Value::Nullable(None),
+        ])
+        .expect("record encodes");
+
+    assert_eq!(hex(&descriptor_bytes), fixture.descriptor_hex);
+    assert_eq!(hex(&record), fixture.record_hex);
 }
 
 fn hex(bytes: &[u8]) -> String {

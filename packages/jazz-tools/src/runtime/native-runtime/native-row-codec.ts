@@ -3,7 +3,12 @@ import { isProvenanceMagicTimestampColumn } from "../../magic-columns.js";
 
 const textDecoder = new TextDecoder();
 
-export type ValueType = { tag: number; inner?: ValueType; members?: ValueType[] };
+export type ValueType = {
+  tag: number;
+  inner?: ValueType;
+  members?: ValueType[];
+  record?: DescriptorField[];
+};
 export type DescriptorField = { name?: string; valueType: ValueType };
 export type NativeRow = { rowId: Uint8Array; deleted: boolean; raw: Uint8Array };
 export type NativeRowBatch = { table: string; descriptor: DescriptorField[]; rows: NativeRow[] };
@@ -146,6 +151,11 @@ export function writeValueType(writer: PostcardWriterLike, valueType: ValueType)
   if (valueType.tag === 11 || valueType.tag === 12) {
     if (!valueType.inner) throw new Error(`missing inner value type for tag ${valueType.tag}`);
     writeValueType(writer, valueType.inner);
+    return;
+  }
+  if (valueType.tag === 13) {
+    if (!valueType.record) throw new Error("missing inline record descriptor for tag 13");
+    writeDescriptor(writer, valueType.record);
   }
 }
 
@@ -157,6 +167,9 @@ export function readValueType(reader: PostcardReaderLike): ValueType {
   if (tag === 10) {
     const members = reader.readVec(readValueType);
     return { tag, members, inner: members[0] };
+  }
+  if (tag === 13) {
+    return { tag, record: readDescriptor(reader) };
   }
   return { tag };
 }
@@ -366,7 +379,14 @@ function decodeRecordValueWithLayout(
     target.variableIndex === layout.variable.length - 1
       ? raw.length
       : readU32Le(raw, offsetTableStart + target.variableIndex * 4);
-  if (start > end || end > raw.length) throw new Error("invalid offset");
+  if (start > end || end > raw.length) {
+    const field = descriptor[logicalIndex];
+    const claimedWidth = end - start;
+    const remaining = Math.max(0, raw.length - start);
+    throw new Error(
+      `invalid offset for ${field?.name ?? `<field ${logicalIndex}>`}: declared type ${formatValueType(valueType)}, tag ${valueType.tag}, claimed width ${claimedWidth}, remaining buffer ${remaining}, current offset ${start}, end offset ${end}, record length ${raw.length}`,
+    );
+  }
   const value = raw.subarray(start, end);
   return unwrapValue(value, valueType);
 }
@@ -378,6 +398,52 @@ function unwrapValue(value: Uint8Array, valueType: ValueType): Uint8Array | null
   return valueType.inner ? unwrapValue(unwrapped, valueType.inner) : unwrapped;
 }
 
+function formatValueType(valueType: ValueType): string {
+  if (valueType.tag === 11 || valueType.tag === 12) {
+    return `${valueType.tag === 11 ? "Array" : "Nullable"}<${valueType.inner ? formatValueType(valueType.inner) : "?"}>`;
+  }
+  return valueTypeName(valueType.tag);
+}
+
+function valueTypeName(tag: number): string {
+  switch (tag) {
+    case 0:
+      return "U8";
+    case 1:
+      return "U16";
+    case 2:
+      return "U32";
+    case 3:
+      return "U64";
+    case 4:
+      return "F64";
+    case 5:
+      return "Bool";
+    case 6:
+      return "String";
+    case 7:
+      return "Bytes";
+    case 8:
+      return "Uuid";
+    case 9:
+      return "Enum";
+    case 10:
+      return "Tuple";
+    case 11:
+      return "Array";
+    case 12:
+      return "Nullable";
+    case 13:
+      return "Record";
+    case 14:
+      return "I64";
+    case 15:
+      return "I32";
+    default:
+      return `unknown(${tag})`;
+  }
+}
+
 function unwrapNullable(value: Uint8Array): Uint8Array | null {
   if (value[0] === 0) return null;
   if (value[0] !== 1) return value;
@@ -387,7 +453,7 @@ function unwrapNullable(value: Uint8Array): Uint8Array | null {
 function descriptorFromColumns(columns: readonly ColumnDescriptor[]): DescriptorField[] {
   return columns.map((column) => ({
     name: column.name,
-    valueType: columnValueType(column),
+    valueType: storageColumnValueType(column),
   }));
 }
 
@@ -396,12 +462,12 @@ function encodeValueForColumn(column: ColumnDescriptor, value: Value | undefined
     if (!column.nullable) {
       throw new Error(`missing non-nullable value for ${column.name}`);
     }
-    return encodeNullValue(columnValueType(column));
+    return encodeNullValue(storageColumnValueType(column));
   }
   const encoded = encodeNonNullValue(column.column_type, value);
   if (!column.nullable) return encoded;
-  const valueType = columnValueType(column);
-  const inner = valueType.inner ?? columnTypeToValueType(column.column_type);
+  const valueType = storageColumnValueType(column);
+  const inner = valueType.inner ?? storageColumnTypeToValueType(column.column_type);
   if (fixedSize(inner) == null) {
     return concatBytes([Uint8Array.of(1), encoded]);
   }
@@ -426,7 +492,7 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
         throw new Error("expected Integer value");
       }
       const bytes = new Uint8Array(4);
-      new DataView(bytes.buffer).setUint32(0, (value.value ^ 0x80000000) >>> 0, true);
+      new DataView(bytes.buffer).setInt32(0, value.value, true);
       return bytes;
     }
     case "Timestamp": {
@@ -494,7 +560,7 @@ function encodeRowValue(
 
 function encodeArrayValue(elementType: ColumnType, values: readonly Value[]): Uint8Array {
   const encoded = values.map((value) => encodeNonNullValue(elementType, value));
-  const elementWidth = fixedSize(columnTypeToValueType(elementType));
+  const elementWidth = fixedSize(storageColumnTypeToValueType(elementType));
   if (elementWidth != null) return concatBytes(encoded);
 
   const offsets = new Uint8Array(Math.max(0, values.length - 1) * 4);
@@ -521,19 +587,19 @@ function parseUuid(value: string): Uint8Array {
   return Uint8Array.from(hex.match(/../g)!.map((byte) => Number.parseInt(byte, 16)));
 }
 
-function columnValueType(column: ColumnDescriptor): ValueType {
-  const valueType = columnTypeToValueType(column.column_type);
+export function storageColumnValueType(column: ColumnDescriptor): ValueType {
+  const valueType = storageColumnTypeToValueType(column.column_type);
   return column.nullable ? { tag: 12, inner: valueType } : valueType;
 }
 
-function columnTypeToValueType(type: ColumnType): ValueType {
+export function storageColumnTypeToValueType(type: ColumnType): ValueType {
   switch (type.type) {
     case "Boolean":
       return { tag: 5 };
     case "Integer":
-      return { tag: 2 };
+      return { tag: 15 };
     case "BigInt":
-      return { tag: 13 };
+      return { tag: 14 };
     case "Timestamp":
       return { tag: 3 };
     case "Double":
@@ -547,7 +613,7 @@ function columnTypeToValueType(type: ColumnType): ValueType {
     case "Uuid":
       return { tag: 8 };
     case "Array":
-      return { tag: 11, inner: columnTypeToValueType(type.element) };
+      return { tag: 11, inner: storageColumnTypeToValueType(type.element) };
     case "Row":
       return { tag: 7 };
   }
@@ -559,7 +625,7 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
     case "Boolean":
       return { type: "Boolean", value: bytes[0] !== 0 };
     case "Integer":
-      return { type: "Integer", value: decodeSignedI32FromCore(view.getUint32(0, true)) };
+      return { type: "Integer", value: view.getInt32(0, true) };
     case "BigInt":
       return { type: "BigInt", value: view.getBigInt64(0, true) };
     case "Double":
@@ -639,7 +705,7 @@ function decodeArrayElements<T>(
   bytes: Uint8Array,
   decodeElement: (bytes: Uint8Array) => T,
 ): T[] {
-  const elementWidth = fixedSize(columnTypeToValueType(elementType));
+  const elementWidth = fixedSize(storageColumnTypeToValueType(elementType));
   if (elementWidth != null) {
     if (elementWidth === 0) return [];
     if (bytes.length % elementWidth !== 0) {
@@ -681,10 +747,6 @@ function timestampToDate(value: number, columnName?: string): Date {
   return new Date(value);
 }
 
-function decodeSignedI32FromCore(value: number): number {
-  return (value ^ 0x80000000) | 0;
-}
-
 function formatUuid(bytes: Uint8Array): string {
   const hex = Array.from(bytes.subarray(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join(
     "",
@@ -704,9 +766,10 @@ function fixedSize(valueType: ValueType): number | undefined {
     case 1:
       return 2;
     case 2:
+    case 15:
       return 4;
     case 3:
-    case 13:
+    case 14:
     case 4:
       return 8;
     case 8:
