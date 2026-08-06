@@ -198,6 +198,73 @@ fn creates_and_reads_mixed_records() {
 }
 
 #[test]
+fn record_values_and_arrays_of_records_round_trip() {
+    let child = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
+    let first = OwnedRecord::new(
+        child
+            .create(&[Value::U64(1), Value::String("Kind of Blue".to_owned())])
+            .unwrap(),
+        child,
+    );
+    let second = OwnedRecord::new(
+        child
+            .create(&[Value::U64(2), Value::String("A Love Supreme".to_owned())])
+            .unwrap(),
+        child,
+    );
+    let descriptor = RecordDescriptor::new([
+        ("featured", ValueType::Record(Box::new(child))),
+        (
+            "albums",
+            ValueType::Array(Box::new(ValueType::Record(Box::new(child)))),
+        ),
+    ]);
+    let values = vec![
+        Value::Record(first.clone()),
+        Value::Array(vec![Value::Record(first), Value::Record(second)]),
+    ];
+
+    let raw = descriptor.create(&values).unwrap();
+
+    assert_eq!(descriptor.bind(&raw).to_values().unwrap(), values);
+}
+
+#[test]
+fn nested_record_values_round_trip_at_multiple_depths() {
+    let leaf = RecordDescriptor::new([("name", ValueType::String)]);
+    let leaf_record = OwnedRecord::new(
+        leaf.create(&[Value::String("leaf".to_owned())]).unwrap(),
+        leaf,
+    );
+    let middle = RecordDescriptor::new([("leaf", ValueType::Record(Box::new(leaf)))]);
+    let middle_record = OwnedRecord::new(
+        middle.create(&[Value::Record(leaf_record)]).unwrap(),
+        middle,
+    );
+    let root = RecordDescriptor::new([("middle", ValueType::Record(Box::new(middle)))]);
+    let values = vec![Value::Record(middle_record)];
+
+    let raw = root.create(&values).unwrap();
+
+    assert_eq!(root.bind(&raw).to_values().unwrap(), values);
+}
+
+#[test]
+fn record_values_reject_non_canonical_child_bytes() {
+    let child = RecordDescriptor::new([("maybe_id", ValueType::Nullable(Box::new(ValueType::U8)))]);
+    // A fixed-width null reserves one zero payload byte. `OwnedRecord::new`
+    // permits these arbitrary bytes, so validation at the embedding boundary is
+    // what prevents this malformed child from entering byte-based deltas.
+    let non_canonical = OwnedRecord::new(vec![0, 7], child);
+    let parent = RecordDescriptor::new([("child", ValueType::Record(Box::new(child)))]);
+
+    assert_eq!(
+        parent.create(&[Value::Record(non_canonical)]).unwrap_err(),
+        Error::InvalidOffset
+    );
+}
+
+#[test]
 fn pure_fixed_schema_bytes_are_unchanged() {
     let schema = RecordDescriptor::new([
         ("a", ValueType::U8),

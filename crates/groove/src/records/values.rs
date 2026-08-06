@@ -7,7 +7,7 @@
 //! borrowed/owned record access. Query expressions and schemas refer to these
 //! value types but do not perform byte-level encoding themselves.
 
-use super::Error;
+use super::{Error, OwnedRecord, RecordDescriptor};
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum Value {
@@ -26,6 +26,7 @@ pub enum Value {
     Nullable(Option<Box<Value>>),
     I64(i64),
     I32(i32),
+    Record(OwnedRecord),
 }
 
 impl From<u8> for Value {
@@ -183,6 +184,8 @@ pub enum ValueType {
     Tuple(Vec<ValueType>),
     Array(Box<ValueType>),
     Nullable(Box<ValueType>),
+    /// A variable-width nested record interpreted by this inline descriptor.
+    Record(Box<RecordDescriptor>),
     I64,
     I32,
 }
@@ -201,7 +204,7 @@ impl ValueType {
                 .iter()
                 .try_fold(0usize, |total, member| Some(total + member.fixed_size()?)),
             Self::Nullable(value_type) => value_type.fixed_size().map(|size| size + 1),
-            Self::String | Self::Bytes | Self::Array(_) => None,
+            Self::String | Self::Bytes | Self::Array(_) | Self::Record(_) => None,
         }
     }
 
@@ -226,6 +229,10 @@ pub(super) fn encode_value(value: &Value, value_type: &ValueType) -> Result<Vec<
         }
         (Value::Nullable(value), ValueType::Nullable(inner_type)) => {
             encode_nullable(&mut bytes, value.as_deref(), inner_type)?;
+        }
+        (Value::Record(record), ValueType::Record(_)) => {
+            ensure_value_type(value, value_type)?;
+            bytes.extend_from_slice(record.raw());
         }
         _ if value_type.is_fixed_size() => encode_fixed_value(&mut bytes, value, value_type)?,
         _ => {
@@ -264,6 +271,11 @@ pub(super) fn encode_fixed_value(
         }
         (Value::Nullable(value), ValueType::Nullable(inner_type)) => {
             encode_nullable(bytes, value.as_deref(), inner_type)?;
+        }
+        (_, ValueType::Record(_)) => {
+            return Err(Error::TypeMismatch {
+                expected: value_type.clone(),
+            });
         }
         _ => {
             return Err(Error::TypeMismatch {
@@ -304,6 +316,17 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
         ValueType::Tuple(members) => decode_tuple(bytes, members),
         ValueType::Array(element_type) => decode_array(bytes, element_type),
         ValueType::Nullable(inner_type) => decode_nullable(bytes, inner_type),
+        ValueType::Record(descriptor) => {
+            let values = descriptor.bind(bytes).to_values()?;
+            let canonical = descriptor.create(&values)?;
+            if canonical != bytes {
+                return Err(Error::NonCanonicalRecord);
+            }
+            Ok(Value::Record(OwnedRecord::new(
+                bytes.to_vec(),
+                **descriptor,
+            )))
+        }
     }
 }
 
@@ -469,6 +492,18 @@ pub(super) fn ensure_value_type(value: &Value, value_type: &ValueType) -> Result
         (Value::Nullable(Some(value)), ValueType::Nullable(inner_type)) => {
             ensure_value_type(value, inner_type)
         }
+        (Value::Record(record), ValueType::Record(descriptor)) => {
+            if record.descriptor() != descriptor.as_ref() {
+                return Err(Error::TypeMismatch {
+                    expected: value_type.clone(),
+                });
+            }
+            let values = record.to_values()?;
+            if descriptor.create(&values)? != record.raw() {
+                return Err(Error::NonCanonicalRecord);
+            }
+            Ok(())
+        }
         _ => Err(Error::TypeMismatch {
             expected: value_type.clone(),
         }),
@@ -489,6 +524,12 @@ pub(super) fn validate_schema_value_type(value_type: &ValueType) -> Result<(), E
             Ok(())
         }
         ValueType::Array(inner) | ValueType::Nullable(inner) => validate_schema_value_type(inner),
+        ValueType::Record(descriptor) => {
+            for field in descriptor.fields() {
+                validate_schema_value_type(&field.value_type)?;
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -592,11 +633,13 @@ fn decode_tuple_member(bytes: &[u8], value_type: &ValueType) -> Result<Value, Er
         }
         ValueType::Tuple(members) => decode_tuple(bytes, members),
         ValueType::Nullable(inner_type) => decode_nullable(bytes, inner_type),
-        ValueType::F64 | ValueType::String | ValueType::Bytes | ValueType::Array(_) => {
-            Err(Error::InvalidTupleMember {
-                member_type: value_type.clone(),
-            })
-        }
+        ValueType::F64
+        | ValueType::String
+        | ValueType::Bytes
+        | ValueType::Array(_)
+        | ValueType::Record(_) => Err(Error::InvalidTupleMember {
+            member_type: value_type.clone(),
+        }),
     }
 }
 

@@ -337,6 +337,8 @@ pub enum LiteralValue {
     Tuple(Vec<LiteralValue>),
     Array(Vec<LiteralValue>),
     Nullable(Option<Box<LiteralValue>>),
+    /// Record-valued predicates are intentionally unsupported in this stage.
+    Record,
 }
 
 impl From<Value> for LiteralValue {
@@ -357,6 +359,7 @@ impl From<Value> for LiteralValue {
             Value::Tuple(values) => Self::Tuple(values.into_iter().map(Into::into).collect()),
             Value::Array(values) => Self::Array(values.into_iter().map(Into::into).collect()),
             Value::Nullable(value) => Self::Nullable(value.map(|value| Box::new((*value).into()))),
+            Value::Record(_) => Self::Record,
         }
     }
 }
@@ -389,6 +392,7 @@ impl LiteralValue {
                 .value_type()
                 .map(|value_type| ValueType::Nullable(Box::new(value_type))),
             Self::Nullable(None) => None,
+            Self::Record => None,
         }
     }
 
@@ -411,6 +415,7 @@ impl LiteralValue {
             Self::Nullable(value) => {
                 Value::Nullable(value.as_ref().map(|value| Box::new(value.to_value())))
             }
+            Self::Record => unreachable!("record literals are rejected during type validation"),
         }
     }
 }

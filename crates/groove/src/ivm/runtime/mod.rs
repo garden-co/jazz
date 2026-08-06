@@ -7560,7 +7560,7 @@ pub(crate) fn encode_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Iv
             key.push(9);
             encode_key_part(key, value)?;
         }
-        Value::Array(_) => return Err(IvmRuntimeError::UnsupportedJoinKey),
+        Value::Array(_) | Value::Record(_) => return Err(IvmRuntimeError::UnsupportedJoinKey),
     }
     Ok(())
 }
@@ -8193,12 +8193,15 @@ pub(super) fn encoded_record_key_part(
     let mut key = Vec::new();
     for field_idx in field_indices {
         let value = descriptor.get_idx(record, *field_idx)?;
-        encode_runtime_primary_key_part(&mut key, &value);
+        encode_runtime_primary_key_part(&mut key, &value)?;
     }
     Ok(key)
 }
 
-fn encode_runtime_primary_key_part(key: &mut Vec<u8>, value: &Value) {
+fn encode_runtime_primary_key_part(
+    key: &mut Vec<u8>,
+    value: &Value,
+) -> Result<(), IvmRuntimeError> {
     match value {
         Value::U8(value) => {
             key.push(0);
@@ -8251,7 +8254,7 @@ fn encode_runtime_primary_key_part(key: &mut Vec<u8>, value: &Value) {
         Value::Tuple(values) => {
             key.push(11);
             for value in values {
-                encode_runtime_primary_key_part(key, value);
+                encode_runtime_primary_key_part(key, value)?;
             }
         }
         Value::Nullable(None) => {
@@ -8261,12 +8264,11 @@ fn encode_runtime_primary_key_part(key: &mut Vec<u8>, value: &Value) {
         Value::Nullable(Some(value)) => {
             key.push(12);
             key.push(1);
-            encode_runtime_primary_key_part(key, value);
+            encode_runtime_primary_key_part(key, value)?;
         }
-        Value::Array(_) => {
-            unreachable!("unsupported primary-key value type was validated before encoding")
-        }
+        Value::Array(_) | Value::Record(_) => return Err(IvmRuntimeError::UnsupportedJoinKey),
     }
+    Ok(())
 }
 
 fn ordered_f64_key(value: f64) -> u64 {
@@ -9818,6 +9820,46 @@ mod tests {
             Err(IvmRuntimeError::RecordEncoding(
                 records::Error::InvalidF64NaN
             ))
+        ));
+    }
+
+    #[test]
+    fn record_values_canonicalize_delta_identity_and_are_rejected_as_arrangement_keys() {
+        // This is deliberately a runtime-level test: consolidation identifies
+        // records by their encoded bytes, so the relevant observable is the
+        // delta batch produced by the maintained runtime rather than a record
+        // field accessor alone.
+        let child = RecordDescriptor::new([("id", ValueType::U64)]);
+        let first = records::OwnedRecord::new(child.create(&[Value::U64(7)]).unwrap(), child);
+        let second = records::OwnedRecord::new(child.create(&[Value::U64(7)]).unwrap(), child);
+        let descriptor = RecordDescriptor::new([("child", ValueType::Record(Box::new(child)))]);
+        let first_parent = descriptor.create(&[Value::Record(first)]).unwrap();
+        let second_parent = descriptor.create(&[Value::Record(second)]).unwrap();
+
+        assert_eq!(first_parent, second_parent);
+        assert!(
+            consolidate_deltas(vec![
+                RecordDelta {
+                    record: first_parent.into(),
+                    weight: 1,
+                },
+                RecordDelta {
+                    record: second_parent.into(),
+                    weight: -1,
+                },
+            ])
+            .is_empty()
+        );
+
+        let record = descriptor
+            .create(&[Value::Record(records::OwnedRecord::new(
+                child.create(&[Value::U64(7)]).unwrap(),
+                child,
+            ))])
+            .unwrap();
+        assert!(matches!(
+            encoded_record_key_part(descriptor, &record, &[0]),
+            Err(IvmRuntimeError::UnsupportedJoinKey)
         ));
     }
 }
