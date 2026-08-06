@@ -245,10 +245,6 @@ enum PendingUpstreamCommand {
         owner: LargeValueOwnerRef,
         extent: crate::node::content_store::Extent,
     },
-    SessionClaims {
-        identity: AuthorId,
-        claims: BTreeMap<String, Value>,
-    },
 }
 
 #[derive(Clone)]
@@ -2041,15 +2037,15 @@ where
 
     /// Attach process-local auth claims for `identity`.
     pub fn set_identity_claims(&self, identity: AuthorId, claims: BTreeMap<String, Value>) {
-        self.node
-            .node
-            .borrow_mut()
-            .set_session_claims(identity, claims.clone());
-        self.node
-            .upstream_subscriptions
-            .borrow_mut()
-            .push(PendingUpstreamCommand::SessionClaims { identity, claims });
-        self.node.schedule_tick(TickUrgency::Deferred);
+        let changed = {
+            let mut node = self.node.node.borrow_mut();
+            let previous_revision = node.session_claim_revision(identity);
+            node.set_session_claims(identity, claims);
+            node.session_claim_revision(identity) != previous_revision
+        };
+        if changed {
+            self.node.schedule_tick(TickUrgency::Deferred);
+        }
     }
 
     /// Return whether this Db's author can delete the current local row.
@@ -3776,6 +3772,7 @@ where
                 pending,
                 upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
                 announced_shapes: BTreeSet::new(),
+                sent_session_claim_revisions: BTreeMap::new(),
                 outbox: Rc::clone(&self.outbox),
                 uploaded: BTreeSet::new(),
                 pending_row_version_repairs: VecDeque::new(),
@@ -4853,6 +4850,10 @@ enum ConnectionLink {
         upstream_subscriptions: PendingUpstreamCommands,
         /// Shapes already registered on this connection.
         announced_shapes: BTreeSet<ShapeRegistrationKey>,
+        /// Latest session-claim revision shipped for each identity on this
+        /// connection. A fresh link starts empty and therefore receives every
+        /// current claim map, even if another link has already received it.
+        sent_session_claim_revisions: BTreeMap<AuthorId, u64>,
         /// Locally-authored transactions to upload (shared with the `Db`).
         outbox: Outbox,
         /// Transactions already shipped on this connection (dedup across ticks).
@@ -5098,12 +5099,32 @@ where
                 pending,
                 upstream_subscriptions,
                 announced_shapes,
+                sent_session_claim_revisions,
                 outbox,
                 uploaded,
                 pending_row_version_repairs,
                 pending_view_update_chunks,
             } => {
                 pending.extend(upstream_subscriptions.borrow_mut().drain(..));
+                let claims = self.node.borrow().session_claims_with_revisions();
+                for (identity, claims, revision) in claims {
+                    if sent_session_claim_revisions
+                        .get(&identity)
+                        .is_some_and(|sent| *sent >= revision)
+                    {
+                        continue;
+                    }
+                    if let Err(error) = self
+                        .transport
+                        .send(SyncMessage::SessionClaims { identity, claims })
+                    {
+                        if handle_transport_backpressure(&self.node, &self.scheduler, &error) {
+                            return Ok(stats);
+                        }
+                        return Err(transport_error(error));
+                    }
+                    sent_session_claim_revisions.insert(identity, revision);
+                }
                 let pending_index = 0;
                 while pending_index < pending.len() {
                     match &pending[pending_index] {
@@ -5198,21 +5219,6 @@ where
                                     extent: extent.clone(),
                                 })
                             {
-                                if handle_transport_backpressure(
-                                    &self.node,
-                                    &self.scheduler,
-                                    &error,
-                                ) {
-                                    return Ok(stats);
-                                }
-                                return Err(transport_error(error));
-                            }
-                        }
-                        PendingUpstreamCommand::SessionClaims { identity, claims } => {
-                            if let Err(error) = self.transport.send(SyncMessage::SessionClaims {
-                                identity: *identity,
-                                claims: claims.clone(),
-                            }) {
                                 if handle_transport_backpressure(
                                     &self.node,
                                     &self.scheduler,
