@@ -55,6 +55,17 @@ fn member_settle_position(member: &ResultMemberEntry) -> Option<crate::time::Glo
     }
 }
 
+fn fast_cursor_membership_mismatch(
+    position: crate::time::GlobalSeq,
+    previous: &BTreeSet<ResultMemberEntry>,
+    current: &BTreeSet<ResultMemberEntry>,
+) -> bool {
+    previous.difference(current).next().is_some()
+        || current
+            .difference(previous)
+            .any(|member| member_settle_position(member).is_none_or(|settled| settled <= position))
+}
+
 /// Tracks what one downstream peer has already received.
 #[derive(Debug)]
 pub struct PeerState {
@@ -999,7 +1010,19 @@ impl PeerState {
             .difference(&current_member_result_set)
             .cloned()
             .collect::<Vec<_>>();
+        // The downstream cursor tracks data progress, not authorization. A
+        // removed prior member or newly visible pre-cursor member cannot be
+        // reconstructed from that cursor, so it cannot safely suppress the
+        // authoritative membership diff or the payload needed to apply it.
+        let cursor_membership_mismatch = known_membership_position.is_some_and(|position| {
+            fast_cursor_membership_mismatch(
+                position,
+                previous_member_result_set,
+                &current_member_result_set,
+            )
+        });
         let (program_fact_adds, program_fact_removes, reset_result_set) = if reset_result_set
+            && !cursor_membership_mismatch
             && let Some(position) = known_membership_position
             && watermark.0 > 0
             && position >= watermark
@@ -1008,6 +1031,7 @@ impl PeerState {
             result_member_removes.clear();
             (Vec::new(), Vec::new(), false)
         } else if reset_result_set
+            && !cursor_membership_mismatch
             && simple_membership_delta
             && let Some(position) = known_membership_position
             && result_member_adds
@@ -1025,6 +1049,11 @@ impl PeerState {
                 transitions.program_fact_removes,
                 reset_result_set,
             )
+        };
+        let bundle_known_state = if cursor_membership_mismatch {
+            None
+        } else {
+            known_state.clone()
         };
         let filter_elapsed = filter_start.elapsed();
         let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
@@ -1045,7 +1074,7 @@ impl PeerState {
             crate::node::MaintainedViewBundleInputs {
                 subscription,
                 peer_complete_tx_payloads,
-                known_state,
+                known_state: bundle_known_state,
                 complete_exclusive_payloads: self.ship_complete_exclusive_payloads,
                 previous_result_set: BTreeSet::new(),
                 result_member_adds,
@@ -2269,7 +2298,7 @@ mod tests {
         Aggregate, OrderDirection, Query, claim, col, eq, gt, is_null, lit, ne, not, param,
     };
     use crate::schema::{JazzSchema, Policy, TableSchema};
-    use crate::time::GlobalSeq;
+    use crate::time::{GlobalSeq, TxTime};
     use crate::tx::DeletionEvent;
     use crate::tx::{DurabilityTier, Fate, TxKind};
     use groove::records::{BorrowedRecord, RecordDescriptor, Value, ValueType};
@@ -2288,6 +2317,43 @@ mod tests {
         let mut bytes = [0; 16];
         bytes[..8].copy_from_slice(&value.to_be_bytes());
         RowUuid::from_bytes(bytes)
+    }
+
+    fn settled_member(row_uuid: RowUuid, position: u64) -> ResultMemberEntry {
+        ResultMemberEntry::Row(
+            crate::protocol::RealRowMemberEntry::current_content((
+                String::from("docs").into(),
+                row_uuid,
+                TxId::new(TxTime(position), node(0x44)),
+            ))
+            .with_settle_position(Some(GlobalSeq(position))),
+        )
+    }
+
+    #[test]
+    fn fast_cursor_membership_mismatch_detects_pre_cursor_changes() {
+        let direct = settled_member(row(1), 5);
+        let revoked = settled_member(row(2), 6);
+        let newly_granted_old_row = settled_member(row(3), 7);
+        let new_post_cursor_row = settled_member(row(4), 12);
+        let cursor = GlobalSeq(10);
+
+        let previous = BTreeSet::from([direct.clone(), revoked.clone()]);
+        assert!(fast_cursor_membership_mismatch(
+            cursor,
+            &previous,
+            &BTreeSet::from([direct.clone()]),
+        ));
+        assert!(fast_cursor_membership_mismatch(
+            cursor,
+            &previous,
+            &BTreeSet::from([direct.clone(), revoked.clone(), newly_granted_old_row]),
+        ));
+        assert!(!fast_cursor_membership_mismatch(
+            cursor,
+            &previous,
+            &BTreeSet::from([direct, revoked, new_post_cursor_row]),
+        ));
     }
 
     fn current_row_pair(row: crate::node::CurrentRow) -> (RowUuid, BTreeMap<String, Value>) {
