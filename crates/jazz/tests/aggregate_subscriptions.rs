@@ -125,8 +125,8 @@ async fn wait_for_values(
 
 async fn wait_for_subscription_driven_values(
     client: &JazzClient,
-    stream: &mut jazz_tools::SubscriptionStream,
-    query: jazz_tools::Query,
+    stream: &mut jazz::tools::SubscriptionStream,
+    query: jazz::tools::Query,
     expected: Vec<Vec<Value>>,
     label: &str,
 ) {
