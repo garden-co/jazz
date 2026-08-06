@@ -2270,10 +2270,12 @@ where
         row_uuid: RowUuid,
         record: BorrowedRecord<'_>,
     ) -> Result<(TxTime, NodeUuid), Error> {
-        let malformed = |source| Error::MalformedCurrentRow {
-            table: table.to_owned(),
-            row_uuid,
-            source,
+        let malformed = |source| {
+            Error::MalformedCurrentRow(Box::new(MalformedCurrentRow {
+                table: table.to_owned(),
+                row_uuid,
+                source,
+            }))
         };
         let tx_time = TxTime(
             record
@@ -5142,6 +5144,19 @@ fn storage_consistency_marker_key() -> [Value; 1] {
     [Value::String(STORAGE_CONSISTENCY_MARKER_NAME.to_owned())]
 }
 
+/// Details of a persisted current row that could not be decoded at the point of use.
+#[derive(Debug, thiserror::Error)]
+#[error("malformed current row in table {table} for {row_uuid:?}: {source}")]
+pub struct MalformedCurrentRow {
+    /// Logical table containing the row.
+    pub table: String,
+    /// Primary-key row identity of the malformed record.
+    pub row_uuid: RowUuid,
+    /// The record decoding failure.
+    #[source]
+    pub source: records::Error,
+}
+
 /// Error type returned by the storage-backed node API.
 #[derive(Debug, Error)]
 pub enum Error {
@@ -5152,16 +5167,8 @@ pub enum Error {
     #[error(transparent)]
     Record(#[from] records::Error),
     /// A persisted current row could not be decoded at the point of use.
-    #[error("malformed current row in table {table} for {row_uuid:?}: {source}")]
-    MalformedCurrentRow {
-        /// Logical table containing the row.
-        table: String,
-        /// Primary-key row identity of the malformed record.
-        row_uuid: RowUuid,
-        /// The record decoding failure.
-        #[source]
-        source: records::Error,
-    },
+    #[error(transparent)]
+    MalformedCurrentRow(#[from] Box<MalformedCurrentRow>),
     /// Error returned by storage.
     #[error(transparent)]
     Storage(#[from] storage::Error),
