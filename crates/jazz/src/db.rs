@@ -64,6 +64,10 @@ use crate::query::{
     RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinKind, RelationPredicate,
     RelationProjectExpr, RelationRowIdRef, RelationValueRef,
 };
+pub use crate::result_tree::{
+    MAX_RESULT_TREE_PARENT_BYTES, ParentTooLargeError, ResultNode, ResultRelation, ResultTree,
+    ResultTreeReplacement,
+};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
 use crate::tools::{ObjectId, OutputOccurrenceId};
@@ -244,10 +248,6 @@ enum PendingUpstreamCommand {
     FetchContentExtent {
         owner: LargeValueOwnerRef,
         extent: crate::node::content_store::Extent,
-    },
-    SessionClaims {
-        identity: AuthorId,
-        claims: BTreeMap<String, Value>,
     },
 }
 
@@ -864,6 +864,20 @@ where
             .map_err(Into::into)
     }
 
+    /// Tier-gated canonical structured result read.
+    ///
+    /// This is the sole Jazz-boundary materialization of relation facts into
+    /// recursive output. Wire delivery deliberately remains on its v3 carrier
+    /// until the structured delivery migration.
+    pub async fn all_result_tree(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<ResultTree, Error> {
+        let snapshot = self.all_relation_snapshot(prepared, opts).await?;
+        materialize_result_tree(prepared.shape.query(), snapshot)
+    }
+
     /// Tier-gated one-shot output-changing relation read evaluated as the database identity.
     pub async fn all_relation_query(
         &self,
@@ -1118,6 +1132,13 @@ where
                 &opts.read_view,
                 Some(_local_plan),
             )?;
+        // Array output is admitted only as a complete terminal-rendered parent.
+        // Validate the reset before retaining subscription state or publishing
+        // its reset event, so an over-budget parent cannot become a partial
+        // replacement through the maintained path.
+        if !prepared.shape.query().array_subqueries.is_empty() {
+            materialize_result_tree(prepared.shape.query(), snapshot.clone())?;
+        }
         let maintained_subscription = Some(subscription);
         let mut state_shape = local_shape;
         let mut state_binding = local_binding;
@@ -2041,15 +2062,15 @@ where
 
     /// Attach process-local auth claims for `identity`.
     pub fn set_identity_claims(&self, identity: AuthorId, claims: BTreeMap<String, Value>) {
-        self.node
-            .node
-            .borrow_mut()
-            .set_session_claims(identity, claims.clone());
-        self.node
-            .upstream_subscriptions
-            .borrow_mut()
-            .push(PendingUpstreamCommand::SessionClaims { identity, claims });
-        self.node.schedule_tick(TickUrgency::Deferred);
+        let changed = {
+            let mut node = self.node.node.borrow_mut();
+            let previous_revision = node.session_claim_revision(identity);
+            node.set_session_claims(identity, claims);
+            node.session_claim_revision(identity) != previous_revision
+        };
+        if changed {
+            self.node.schedule_tick(TickUrgency::Deferred);
+        }
     }
 
     /// Return whether this Db's author can delete the current local row.
@@ -3776,6 +3797,7 @@ where
                 pending,
                 upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
                 announced_shapes: BTreeSet::new(),
+                sent_session_claim_revisions: BTreeMap::new(),
                 outbox: Rc::clone(&self.outbox),
                 uploaded: BTreeSet::new(),
                 pending_row_version_repairs: VecDeque::new(),
@@ -4853,6 +4875,10 @@ enum ConnectionLink {
         upstream_subscriptions: PendingUpstreamCommands,
         /// Shapes already registered on this connection.
         announced_shapes: BTreeSet<ShapeRegistrationKey>,
+        /// Latest session-claim revision shipped for each identity on this
+        /// connection. A fresh link starts empty and therefore receives every
+        /// current claim map, even if another link has already received it.
+        sent_session_claim_revisions: BTreeMap<AuthorId, u64>,
         /// Locally-authored transactions to upload (shared with the `Db`).
         outbox: Outbox,
         /// Transactions already shipped on this connection (dedup across ticks).
@@ -4933,6 +4959,7 @@ where
         else {
             unreachable!("subscriber identity requires a subscriber link")
         };
+        peer.advance_authorization_progress();
         let groups = coverage_groups
             .iter()
             .map(|(coverage, group)| {
@@ -5040,6 +5067,7 @@ where
         else {
             return Ok(());
         };
+        peer.advance_authorization_progress();
         let groups = coverage_groups
             .iter()
             .map(|(coverage, group)| {
@@ -5057,7 +5085,7 @@ where
                 binding_id: coverage.binding_id,
                 read_view: coverage.opts.read_view_key(),
             };
-            let mut update = {
+            let update = {
                 let mut node = self.node.borrow_mut();
                 peer.rehydrate_query_for_subscription_with_opts(
                     &mut node,
@@ -5067,15 +5095,6 @@ where
                     coverage.opts.clone(),
                 )?
             };
-            // A policy-head rehydrate is authoritative. Force reset framing
-            // even when the peer's known-state cursor is current: permissions
-            // are not represented in that cursor.
-            if let SyncMessage::ViewUpdate {
-                reset_result_set, ..
-            } = &mut update
-            {
-                *reset_result_set = true;
-            }
             for subscription in subscribers {
                 let update = retarget_view_update(update.clone(), subscription);
                 self.last_resume_bytes = Some(serialized_sync_message_len(&update));
@@ -5098,12 +5117,32 @@ where
                 pending,
                 upstream_subscriptions,
                 announced_shapes,
+                sent_session_claim_revisions,
                 outbox,
                 uploaded,
                 pending_row_version_repairs,
                 pending_view_update_chunks,
             } => {
                 pending.extend(upstream_subscriptions.borrow_mut().drain(..));
+                let claims = self.node.borrow().session_claims_with_revisions();
+                for (identity, claims, revision) in claims {
+                    if sent_session_claim_revisions
+                        .get(&identity)
+                        .is_some_and(|sent| *sent >= revision)
+                    {
+                        continue;
+                    }
+                    if let Err(error) = self
+                        .transport
+                        .send(SyncMessage::SessionClaims { identity, claims })
+                    {
+                        if handle_transport_backpressure(&self.node, &self.scheduler, &error) {
+                            return Ok(stats);
+                        }
+                        return Err(transport_error(error));
+                    }
+                    sent_session_claim_revisions.insert(identity, revision);
+                }
                 let pending_index = 0;
                 while pending_index < pending.len() {
                     match &pending[pending_index] {
@@ -5198,21 +5237,6 @@ where
                                     extent: extent.clone(),
                                 })
                             {
-                                if handle_transport_backpressure(
-                                    &self.node,
-                                    &self.scheduler,
-                                    &error,
-                                ) {
-                                    return Ok(stats);
-                                }
-                                return Err(transport_error(error));
-                            }
-                        }
-                        PendingUpstreamCommand::SessionClaims { identity, claims } => {
-                            if let Err(error) = self.transport.send(SyncMessage::SessionClaims {
-                                identity: *identity,
-                                claims: claims.clone(),
-                            }) {
                                 if handle_transport_backpressure(
                                     &self.node,
                                     &self.scheduler,
@@ -6151,6 +6175,7 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             version_carriers,
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+            authorization_progress: peer_payload_inventory.authorization_progress,
             result_member_adds,
             result_member_removes,
             program_fact_adds,
@@ -6176,6 +6201,7 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             version_carriers,
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+            authorization_progress: peer_payload_inventory.authorization_progress,
             result_member_adds,
             result_member_removes,
             program_fact_adds,
@@ -6428,6 +6454,23 @@ fn send_with_content_extents<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    let mut message = message;
+    match &mut message {
+        SyncMessage::ViewUpdate {
+            subscription,
+            peer_payload_inventory,
+            ..
+        }
+        | SyncMessage::ViewUpdateChunk {
+            subscription,
+            peer_payload_inventory,
+            ..
+        } => {
+            peer_payload_inventory.authorization_progress =
+                Some(peer.authorization_progress_for_subscription(*subscription));
+        }
+        _ => {}
+    }
     let extents = match &message {
         SyncMessage::ViewUpdate { .. } | SyncMessage::ViewUpdateChunk { .. } => BTreeSet::new(),
         _ => node.borrow().content_refs_in_sync_message(&message)?,
@@ -7897,6 +7940,101 @@ where
 
 fn write_rejected(reason: RejectionReason) -> Error {
     Error::new(ErrorCode::WriteRejected, format!("{reason:?}"))
+}
+
+/// Render the flat maintained/query fact boundary once, at the Jazz public
+/// result boundary. In particular, consumers must not rebuild relation trees
+/// from `RelationSnapshot` rows and edges themselves.
+fn materialize_result_tree(query: &Query, snapshot: RelationSnapshot) -> Result<ResultTree, Error> {
+    type RowKey = (String, RowUuid);
+    let roots = snapshot
+        .rows
+        .iter()
+        .take(snapshot.root_count)
+        .map(|row| (row.table().to_owned(), row.row_uuid()))
+        .collect::<Vec<_>>();
+    let rows = snapshot
+        .rows
+        .into_iter()
+        .map(|row| ((row.table().to_owned(), row.row_uuid()), row))
+        .collect::<BTreeMap<RowKey, CurrentRow>>();
+    let mut edges = BTreeMap::<RowKey, Vec<RelationEdge>>::new();
+    for edge in snapshot.edges {
+        edges
+            .entry((edge.source_table.clone(), edge.source_row))
+            .or_default()
+            .push(edge);
+    }
+
+    fn node(
+        row_key: &(String, RowUuid),
+        row: &CurrentRow,
+        arrays: &[crate::query::ArraySubquery],
+        rows: &BTreeMap<RowKey, CurrentRow>,
+        edges: &BTreeMap<RowKey, Vec<RelationEdge>>,
+        root: bool,
+    ) -> Result<ResultNode, Error> {
+        let mut relations = BTreeMap::new();
+        for array in arrays {
+            let children = edges
+                .get(row_key)
+                .into_iter()
+                .flatten()
+                .filter(|edge| edge.relation == array.column_name)
+                .filter_map(|edge| {
+                    let key = (edge.target_table.clone(), edge.target_row);
+                    rows.get(&key).map(|child| (key, child))
+                })
+                .map(|(key, child)| node(&key, child, &array.nested_arrays, rows, edges, false))
+                .collect::<Result<Vec<_>, _>>()?;
+            relations.insert(array.column_name.clone(), ResultRelation::Array(children));
+        }
+        let occurrence = OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0));
+        let rendered_bytes = rendered_node_bytes(row, &relations);
+        if rendered_bytes > MAX_RESULT_TREE_PARENT_BYTES {
+            let relation_path = arrays
+                .first()
+                .map(|array| array.column_name.clone())
+                .unwrap_or_default();
+            return Err(Error::new(
+                ErrorCode::Query,
+                ParentTooLargeError {
+                    parent: row.row_uuid(),
+                    relation_path,
+                    rendered_bytes,
+                    limit: MAX_RESULT_TREE_PARENT_BYTES,
+                }
+                .to_string(),
+            ));
+        }
+        let _ = root;
+        Ok(ResultNode {
+            occurrence,
+            row: row.clone(),
+            relations,
+        })
+    }
+
+    let roots = roots
+        .into_iter()
+        .filter_map(|key| rows.get(&key).map(|row| (key, row)))
+        .map(|(key, row)| node(&key, row, &query.array_subqueries, &rows, &edges, true))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ResultTree { roots })
+}
+
+fn rendered_node_bytes(row: &CurrentRow, relations: &BTreeMap<String, ResultRelation>) -> usize {
+    let mut bytes = row.encoded_record().1.len();
+    for (name, relation) in relations {
+        bytes += name.len();
+        if let ResultRelation::Array(children) = relation {
+            bytes += children
+                .iter()
+                .map(|child| rendered_node_bytes(&child.row, &child.relations))
+                .sum::<usize>();
+        }
+    }
+    bytes
 }
 
 struct SubscriptionState {

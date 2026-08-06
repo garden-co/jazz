@@ -282,6 +282,7 @@ pub struct CollectByProjection {
 /// allowed to affect a shared collector node.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CollectByOp {
+    pub mode: CollectByMode,
     pub group_fields: Vec<String>,
     pub group_field_indices: Vec<usize>,
     pub parent_fields: Vec<CollectByProjection>,
@@ -289,12 +290,28 @@ pub struct CollectByOp {
     pub child_descriptor: RecordDescriptor,
     pub collection_field: String,
     pub collection_field_index: usize,
+    /// Flat output projection used only in [`CollectByMode::Expand`].
+    pub tuple_fields: Vec<CollectByProjection>,
+    /// Ordered contributing source-row ids used to address expanded tuples.
+    pub occurrence_id_fields: Vec<String>,
+    pub occurrence_id_field_indices: Vec<usize>,
     pub order_fields: Vec<TopByOrderField>,
     pub tie_fields: Vec<String>,
     pub sort_field_indices: Vec<usize>,
     pub sort_directions: Vec<TopByDirection>,
     pub offset: u64,
     pub limit: TopByLimit,
+}
+
+/// The rendered shape selected by the terminal [`CollectByOp`].
+///
+/// Both variants consume the same grouped, ordered input and window.  Collect
+/// owns a single parent record, while Expand owns one output occurrence per
+/// selected flat tuple.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CollectByMode {
+    Collect,
+    Expand,
 }
 
 /// Placeholder aggregate descriptor for future lowering/execution.

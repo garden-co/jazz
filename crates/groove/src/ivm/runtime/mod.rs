@@ -23,12 +23,13 @@ use rustc_hash::FxHashMap as HashMap;
 
 use crate::ivm::{
     AggregateExpr, AggregateFunction, AggregateOp, ArgMaxByOp, ArgMinByOp, BindingSourceOp,
-    CollectByBuilder, CollectByField, CollectByOp, CollectByProjection, DurableStorage, FieldRef,
-    FilterOp, FrontierName, FrontierSourceOp, GraphBuilder, IndexByOp, IndexSourceOp,
-    InlineRecordsOp, IvmGraph, JoinOp, JoinOpKind, LiteralValue, MapProjectOp, NodeDescriptor,
-    NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField,
-    ProjectionExpr, RecursiveOp, Retainer, StaticScanSpec, TableSourceOp, TopByDirection,
-    TopByLimit, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp, ValueComparison,
+    CollectByBuilder, CollectByField, CollectByMode, CollectByOp, CollectByProjection,
+    DurableStorage, FieldRef, FilterOp, FrontierName, FrontierSourceOp, GraphBuilder, IndexByOp,
+    IndexSourceOp, InlineRecordsOp, IvmGraph, JoinOp, JoinOpKind, LiteralValue, MapProjectOp,
+    NodeDescriptor, NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr,
+    ProjectExpr, ProjectField, ProjectionExpr, RecursiveOp, Retainer, StaticScanSpec,
+    TableSourceOp, TopByDirection, TopByLimit, TopByOp, TopByOrderField, UnnestOp,
+    UnwrapNullableOp, ValueComparison,
 };
 use crate::records::{
     self, BorrowedRecord, OwnedRecord, RawProjectionField, RawProjectionScratch, RecordDescriptor,
@@ -1304,12 +1305,17 @@ impl IvmRuntime {
             }
             GraphBuilder::CollectBy { input, collect, .. } => {
                 let input = self.infer_builder_output_cached(input, output_memo)?;
-                collect_by_descriptor(
-                    &input,
-                    &collect.parent_fields,
-                    &collect.child_fields,
-                    &collect.collection_field,
-                )
+                match collect.mode {
+                    CollectByMode::Collect => collect_by_descriptor(
+                        &input,
+                        &collect.parent_fields,
+                        &collect.child_fields,
+                        &collect.collection_field,
+                    ),
+                    CollectByMode::Expand => {
+                        collect_by_expand_descriptor(&input, &collect.tuple_fields)
+                    }
+                }
             }
             GraphBuilder::Aggregate {
                 input,
@@ -2455,17 +2461,25 @@ impl IvmRuntime {
             .collect::<Result<Vec<_>, _>>()?;
         let parent_fields = collect_by_projections(&input_output, &collect.parent_fields)?;
         let child_fields = collect_by_projections(&input_output, &collect.child_fields)?;
+        let tuple_fields = collect_by_projections(&input_output, &collect.tuple_fields)?;
+        let occurrence_id_field_indices = collect
+            .occurrence_id_cols
+            .iter()
+            .map(|field| resolve_field_ref(&input_output, field))
+            .collect::<Result<Vec<_>, _>>()?;
         // Parent values must be determined by the group, rather than by
         // whichever child happens to be selected.
-        if parent_fields
-            .iter()
-            .any(|field| !group_field_indices.contains(&field.field_idx))
+        if collect.mode == CollectByMode::Collect
+            && parent_fields
+                .iter()
+                .any(|field| !group_field_indices.contains(&field.field_idx))
         {
             return Err(IvmRuntimeError::InvalidCollectBy(
                 "parent projection fields must be grouping fields".into(),
             ));
         }
         validate_collect_by_key_types(&input_output, &group_field_indices)?;
+        validate_collect_by_key_types(&input_output, &occurrence_id_field_indices)?;
         let order_field_indices = collect
             .order_cols
             .iter()
@@ -2520,10 +2534,18 @@ impl IvmRuntime {
             let value_type = input_output.fields()[field.field_idx].value_type.clone();
             (field.output_name.clone(), value_type)
         }));
+        if collect.mode == CollectByMode::Expand
+            && (tuple_fields.is_empty() || occurrence_id_field_indices.is_empty())
+        {
+            return Err(IvmRuntimeError::InvalidCollectBy(
+                "expand mode requires a tuple projection and ordered occurrence-id fields".into(),
+            ));
+        }
         let collection_field_index = parent_fields.len();
         let node = self.graph.dedup_node(
             NodeDescriptor::new(
                 OpType::CollectBy(Box::new(CollectByOp {
+                    mode: collect.mode,
                     group_fields,
                     group_field_indices,
                     parent_fields,
@@ -2531,6 +2553,12 @@ impl IvmRuntime {
                     child_descriptor,
                     collection_field: collect.collection_field.clone(),
                     collection_field_index,
+                    tuple_fields,
+                    occurrence_id_fields: occurrence_id_field_indices
+                        .iter()
+                        .map(|field| field_name_at(&input_output, *field))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    occurrence_id_field_indices,
                     order_fields,
                     tie_fields,
                     sort_field_indices,
@@ -6214,26 +6242,71 @@ where
         for (group_prefix, group_deltas) in touched_groups {
             let after_records = arrangement.value().records_for_key(&group_prefix);
             let before_records = records_before_deltas(after_records.clone(), &group_deltas);
-            let before = collect_by_parent_from_records(
-                input_desc,
-                output_desc,
-                collect_by,
-                &before_records,
-            )?;
-            let after = collect_by_parent_from_records(
-                input_desc,
-                output_desc,
-                collect_by,
-                &after_records,
-            )?;
-            if before == after {
-                continue;
-            }
-            if let Some(record) = before {
-                output.push(RecordDelta { record, weight: -1 });
-            }
-            if let Some(record) = after {
-                output.push(RecordDelta { record, weight: 1 });
+            match collect_by.mode {
+                CollectByMode::Collect => {
+                    let before = collect_by_parent_from_records(
+                        input_desc,
+                        output_desc,
+                        collect_by,
+                        &before_records,
+                    )?;
+                    let after = collect_by_parent_from_records(
+                        input_desc,
+                        output_desc,
+                        collect_by,
+                        &after_records,
+                    )?;
+                    if before == after {
+                        continue;
+                    }
+                    if let Some(record) = before {
+                        output.push(RecordDelta { record, weight: -1 });
+                    }
+                    if let Some(record) = after {
+                        output.push(RecordDelta { record, weight: 1 });
+                    }
+                }
+                CollectByMode::Expand => {
+                    let before = collect_by_expanded_window(
+                        input_desc,
+                        output_desc,
+                        collect_by,
+                        &before_records,
+                    )?;
+                    let after = collect_by_expanded_window(
+                        input_desc,
+                        output_desc,
+                        collect_by,
+                        &after_records,
+                    )?;
+                    let mut occurrences = BTreeSet::new();
+                    occurrences.extend(before.keys().cloned());
+                    occurrences.extend(after.keys().cloned());
+                    for occurrence in occurrences {
+                        match (before.get(&occurrence), after.get(&occurrence)) {
+                            (Some(before), Some(after)) if before == after => {}
+                            (Some(before), Some(after)) => {
+                                output.push(RecordDelta {
+                                    record: before.clone(),
+                                    weight: -1,
+                                });
+                                output.push(RecordDelta {
+                                    record: after.clone(),
+                                    weight: 1,
+                                });
+                            }
+                            (Some(before), None) => output.push(RecordDelta {
+                                record: before.clone(),
+                                weight: -1,
+                            }),
+                            (None, Some(after)) => output.push(RecordDelta {
+                                record: after.clone(),
+                                weight: 1,
+                            }),
+                            (None, None) => unreachable!("occurrence came from a selected window"),
+                        }
+                    }
+                }
             }
         }
         self.arrangement_states.insert(arrangement_key, arrangement);
@@ -6722,6 +6795,34 @@ fn collect_by_descriptor(
         )))),
     ));
     Ok(RecordDescriptor::new(output))
+}
+
+fn collect_by_expand_descriptor(
+    input: &RecordDescriptor,
+    tuple_fields: &[CollectByField],
+) -> Result<RecordDescriptor, IvmRuntimeError> {
+    if tuple_fields.is_empty() {
+        return Err(IvmRuntimeError::InvalidCollectBy(
+            "expand mode requires a non-empty tuple projection".into(),
+        ));
+    }
+    let mut names = HashSet::new();
+    tuple_fields
+        .iter()
+        .map(|field| {
+            if !names.insert(field.output_name.clone()) {
+                return Err(IvmRuntimeError::InvalidCollectBy(
+                    "expand tuple output field names must be unique".into(),
+                ));
+            }
+            let index = resolve_field_ref(input, &field.field)?;
+            Ok((
+                field.output_name.clone(),
+                input.fields()[index].value_type.clone(),
+            ))
+        })
+        .collect::<Result<Vec<_>, IvmRuntimeError>>()
+        .map(RecordDescriptor::new)
 }
 
 fn collect_by_projections(
@@ -8635,6 +8736,45 @@ fn collect_by_parent_from_records(
     Ok(Some(output_desc.create(&values)?.into()))
 }
 
+/// Render the selected expand window keyed by its ordered contributing source
+/// ids. Keeping the key separate from the rendered bytes is what lets expand
+/// suppress only a byte-equal occurrence without collapsing equal tuples from
+/// different joins.
+fn collect_by_expanded_window(
+    input_desc: RecordDescriptor,
+    output_desc: RecordDescriptor,
+    collect_by: &CollectByOp,
+    records: &[(Bytes, i64)],
+) -> Result<BTreeMap<Vec<u8>, Bytes>, IvmRuntimeError> {
+    let window = collect_by_window_from_records(input_desc, records, collect_by)?;
+    let mut expanded = BTreeMap::new();
+    for (record, copies) in window {
+        let occurrence =
+            encoded_record_key_part(input_desc, &record, &collect_by.occurrence_id_field_indices)?;
+        // A weighted duplicate or two different source rows that map to the
+        // same vector cannot be addressed by OutputOccurrenceId yet. Do not
+        // silently turn that ambiguity into one row.
+        if copies != 1 || expanded.contains_key(&occurrence) {
+            return Err(IvmRuntimeError::DuplicateCollectByOccurrenceId);
+        }
+        let values = BorrowedRecord::new(&record, &input_desc)
+            .to_values()
+            .map_err(IvmRuntimeError::RecordEncoding)?;
+        let tuple = collect_by
+            .tuple_fields
+            .iter()
+            .map(|field| {
+                values
+                    .get(field.field_idx)
+                    .cloned()
+                    .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        expanded.insert(occurrence, output_desc.create(&tuple)?.into());
+    }
+    Ok(expanded)
+}
+
 fn collect_by_window_from_records(
     descriptor: RecordDescriptor,
     records: &[(Bytes, i64)],
@@ -8924,6 +9064,8 @@ pub enum IvmRuntimeError {
     CollectByMustBeTerminal,
     #[error("invalid collect_by descriptor: {0}")]
     InvalidCollectBy(String),
+    #[error("collect_by expand encountered duplicate output occurrence source ids")]
+    DuplicateCollectByOccurrenceId,
     #[error("unsupported operator")]
     UnsupportedOperator,
 }

@@ -351,7 +351,10 @@ impl JazzSchema {
                     ("binding_id", ValueType::Uuid),
                     ("read_view_id", ValueType::Uuid),
                 ]),
-                RecordDescriptor::new([("settled_through", ValueType::U64)]),
+                RecordDescriptor::new([
+                    ("settled_through", ValueType::U64),
+                    ("authorization_progress", ValueType::U64),
+                ]),
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 SETTLED_RESULT_MEMBERS_STORE,

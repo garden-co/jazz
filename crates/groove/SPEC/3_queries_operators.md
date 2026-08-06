@@ -41,7 +41,7 @@ Invariant digest:
 - `INV-QUERY-25`: A record straddling a window boundary MUST contribute exactly its in-window copies, as one output record whose weight is the in-window copy count.
 - `INV-QUERY-26`: Per touched partition TopBy MUST emit the minimal consolidated weighted diff of retained windows; unchanged in-window copy counts MUST NOT emit, including rank-only moves, unless rank metadata is declared.
 - `INV-QUERY-27`: `CollectBy` MUST be an output-terminal-only operator: validation MUST reject it as an input to every graph node, including another collector.
-- `INV-QUERY-28`: For each touched `CollectBy` group, the terminal MUST emit no delta when the rendered output bytes are unchanged, otherwise exactly one old-record retraction and one new-record addition; its descriptor and scalar key/order inputs MUST make this result deterministic.
+- `INV-QUERY-28`: For each touched `CollectBy` output occurrence, the terminal MUST suppress byte-equal output. A surviving changed collect group emits exactly one old-record retraction and one new-record addition; an appearing/disappearing group emits its one addition/retraction. Expand mode emits the corresponding minimal per-occurrence additions, removals, and replacements. Its descriptor and scalar key/order inputs MUST make this deterministic.
 
 ## Details
 
@@ -245,48 +245,83 @@ retained suffixes are supported for consumers such as jazz maintained ordered
 subscriptions, but they can retain and diff a large portion of each partition.
 Use a finite limit when the consumer only needs a bounded window.
 
-### 3.6.1 `CollectBy` (terminal structured-output collection)
+### 3.6.1 `CollectBy` (the single output terminal)
 
-**Target design, 2026-08-04.** `CollectBy` is a terminal-only collector that
-renders one output record per group with an `Array<Record>` field. Its input is
-an ordinary flat weighted record stream: child rows stay rows, parent/child
-association stays in scalar group fields, and no graph-internal delta updates an
-inner collection. `CollectBy` may retain per-group state, including a ranked
-window and the flat records needed to maintain it, but its rendered collection
-exists only at the output terminal.
+**Target design, Anselm 2026-08-05.** `CollectBy` is the only terminal
+output-shaping operator. It consumes one ordinary flat weighted record stream
+and has two descriptor-selected modes:
+
+- **Collect** renders one output record per group with an `Array<Record>`
+  field. Parent/child associations remain scalar fields on flat input rows; the
+  nested array exists only in the terminal's output.
+- **Expand** renders the selected flat input rows as output tuples. A wide join
+  has already carried every source column into this one unary input, so expand
+  neither reads multiple sinks nor reconstructs a tuple from arrangements.
+
+No other Groove operator and no Jazz/facade component renders either shape.
+`CollectBy` may retain per-group state, including a ranked window and the flat
+records needed to maintain it, but graph-internal deltas remain flat in both
+modes.
 
 The `CollectBy` descriptor MUST include every output-affecting input:
 
-- the grouping fields and output parent-field sources;
-- the child projection and the output collection slot;
+- the grouping fields, terminal mode, and output occurrence-id source fields;
+- in collect mode, the output parent-field sources, child projection, and
+  output collection slot; in expand mode, the tuple projection;
 - the complete scalar order and tie fields, direction, offset, and limit; and
-- the parent/child presence rules needed to render an empty collection.
+- the parent/child presence rules needed to render an empty collection in
+  collect mode.
 
 This is an application of `INV-QUERY-1A`: descriptors, not external planner
 state, define output identity and sharing. Validation MUST require a complete,
-type-compatible parent projection; an `Array<Record(child_descriptor)>` output
-slot; and a deterministic scalar sort key followed by a complete-child-byte
-tie-break. It MUST reject record-valued types, including `Array<Record>`, in
-group, order, tie, or other arrangement-key fields. Arrangement iteration and
-arrival order are never a semantic order.
+type-compatible mode projection; in collect mode, an
+`Array<Record(child_descriptor)>` output slot; and in both modes a deterministic
+scalar sort key followed by a complete-output-byte tie-break. It MUST validate
+the occurrence-id source-field arity against the terminal mode, and reject
+record-valued types, including `Array<Record>`, in group, order, tie, occurrence
+identity, or other arrangement-key fields. Arrangement iteration and arrival
+order are never a semantic order.
 
-For every touched group, the collector forms the old and new selected child
-arrays using the same finite/unbounded window semantics as `TopBy`. It encodes
-the old and new complete parent output records and byte-compares them. If they
-are equal, it emits nothing. If they differ, it emits exactly `-old_parent` and
-`+new_parent`; it MUST NOT emit a child-level delta. Thus a front insert or a
-window-boundary change has one whole-parent replacement even when many array
-positions change. A finite limit bounds the rendered collection by the selected
-window; an unbounded collector's rendered work and bytes scale with its whole
+For every touched group, the terminal forms the old and new selected windows
+using the same finite/unbounded window semantics as `TopBy`. In collect mode it
+encodes the old and new complete parent records and byte-compares them. Equal
+bytes emit nothing; a surviving changed parent emits exactly `-old_parent` and
+`+new_parent`, while an appearing/disappearing parent emits its one
+addition/retraction. It never emits a child-level delta. Thus a front insert or
+a window-boundary change has one whole-parent replacement even when many array
+positions change.
+
+In expand mode, the terminal projects each selected wide row as one tuple,
+addressed by its `OutputOccurrenceId`. It suppresses an occurrence whose old and
+new tuple bytes are equal; an appearing or disappearing occurrence emits its
+one addition or retraction, and a changed occurrence emits exactly one
+retraction and one addition. It MUST NOT coalesce two distinct occurrence ids
+because their tuple bytes match. A finite limit bounds each selected window;
+an unbounded terminal's rendered work and bytes scale with its whole selected
 group.
+
+For `INV-INC-2`, let `D_g` be a touched group's input delta, `G_g` its retained
+flat state, and `W_g^-`/`W_g^+` its old/new selected windows. Define
+`R_g(limit)` as the larger row-and-byte footprint of those windows; for a finite
+limit it contains at most `limit` output occurrences (plus their encoded
+payload). Indexed state maintenance MAY cost `O(|D_g| log(1 + |G_g|))`.
+Everything after that index maintenance — selecting, rendering, comparing, and
+delivering — MUST be bounded by `O(|D_g| + R_g(limit))` and MUST inspect only
+the deltas and the old/new selected windows, never scan, re-materialize, or diff
+the rest of `G_g` or unrelated groups. Collect mode uses that allowance to emit
+at most one whole-group replacement. Expand mode uses it to emit the actual
+selected occurrence diff, at most the old/new window footprint, rather than one
+fictional group row. This is the same meaningful finite-window bound in both
+modes, not permission to do work proportional to accumulated state.
 
 `CollectBy` MUST NOT compose as a graph node. Node validation and terminal
 preparation MUST reject a collector as an input to every other node, including a
 second collector (`INV-QUERY-27`); planner convention is insufficient. A nested
-structured result is rendered by a terminal-owned collector tree that consumes
-flat associations and writes directly into its final output, never by flowing an
-inner collection update through an ordinary graph edge. This restriction keeps
-the graph's deltas flat.
+structured result is rendered by one terminal-owned internal collector tree that
+consumes flat associations and writes directly into its final output, never by
+flowing an inner collection update through an ordinary graph edge. This
+restriction keeps the graph's deltas flat and prevents mode-specific terminals
+from drifting.
 
 The terminal's output descriptor may contain
 `ValueType::Record(Box<RecordDescriptor>)` only under the canonical-byte and

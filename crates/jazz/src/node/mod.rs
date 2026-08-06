@@ -350,6 +350,8 @@ struct QueryServing {
     settled_program_facts: BTreeMap<BindingViewKey, BTreeSet<ViewFactEntry>>,
     /// Server-stamped settled-through cursor for each canonical binding view.
     settled_through_by_binding_view: BTreeMap<BindingViewKey, GlobalSeq>,
+    /// Server-stamped authorization generation paired with settled fast state.
+    authorization_progress_by_binding_view: BTreeMap<BindingViewKey, u64>,
     /// Binding views whose current subscription declared known-state repair.
     known_state_declared_binding_views: BTreeSet<BindingViewKey>,
     /// Binding views that have begun receiving an initial snapshot. Some
@@ -610,6 +612,7 @@ where
                 settled_result_row_index: BTreeMap::new(),
                 settled_program_facts: BTreeMap::new(),
                 settled_through_by_binding_view: BTreeMap::new(),
+                authorization_progress_by_binding_view: BTreeMap::new(),
                 known_state_declared_binding_views: BTreeSet::new(),
                 initial_hydration_binding_views: BTreeSet::new(),
                 deferred_publication_binding_views: BTreeSet::new(),
@@ -724,6 +727,25 @@ where
             .unwrap_or_default()
     }
 
+    /// Return the current process-local claims together with their revisions.
+    ///
+    /// Upstream links use this snapshot to decide which claims have not yet
+    /// reached that particular connection.
+    pub(crate) fn session_claims_with_revisions(
+        &self,
+    ) -> Vec<(AuthorId, BTreeMap<String, Value>, u64)> {
+        self.session_claims
+            .iter()
+            .map(|(identity, claims)| {
+                (
+                    *identity,
+                    claims.clone(),
+                    self.session_claim_revision(*identity),
+                )
+            })
+            .collect()
+    }
+
     /// Gate session-scoped serving until an authority has installed its
     /// permissions head. Local/offline nodes stay ready by default.
     pub(crate) fn set_permissions_ready(&mut self, ready: bool) {
@@ -775,6 +797,7 @@ where
         self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
         self.query.settled_through_by_binding_view.clear();
+        self.query.authorization_progress_by_binding_view.clear();
         self.query.known_state_declared_binding_views.clear();
         self.query.initial_hydration_binding_views.clear();
         self.query.deferred_publication_binding_views.clear();
@@ -2175,7 +2198,7 @@ where
             .primary_key_get_raw(&global_tables[0].name, &[Value::Uuid(row_uuid.0)])?
         {
             let record = raw.record();
-            let tx = self.current_record_sort_key(record)?;
+            let tx = self.current_record_sort_key(&table.name, row_uuid, record)?;
             candidates.push((decode_current_row(table, record)?, tx));
         }
         let ahead_tables = table.ahead_current_storage_tables();
@@ -2193,7 +2216,7 @@ where
                 ],
             )? {
                 let record = raw.record();
-                let tx = self.current_record_sort_key(record)?;
+                let tx = self.current_record_sort_key(&table.name, row_uuid, record)?;
                 candidates.push((decode_current_row(table, record)?, tx));
             }
         }
@@ -2216,7 +2239,7 @@ where
                 deletion_event_from_value(
                     record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
                 )?,
-                self.current_record_sort_key(record)?,
+                self.current_record_sort_key(&table.name, row_uuid, record)?,
             ));
         }
         let ahead_tables = table.ahead_current_storage_tables();
@@ -2238,7 +2261,7 @@ where
                     deletion_event_from_value(
                         record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
                     )?,
-                    self.current_record_sort_key(record)?,
+                    self.current_record_sort_key(&table.name, row_uuid, record)?,
                 ));
             }
         }
@@ -2247,11 +2270,27 @@ where
 
     fn current_record_sort_key(
         &self,
+        table: &str,
+        row_uuid: RowUuid,
         record: BorrowedRecord<'_>,
     ) -> Result<(TxTime, NodeUuid), Error> {
-        let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
-        let tx_node_alias =
-            NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+        let malformed = |source| {
+            Error::MalformedCurrentRow(Box::new(MalformedCurrentRow {
+                table: table.to_owned(),
+                row_uuid,
+                source,
+            }))
+        };
+        let tx_time = TxTime(
+            record
+                .get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)
+                .map_err(malformed)?,
+        );
+        let tx_node_alias = NodeAlias(
+            record
+                .get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)
+                .map_err(malformed)?,
+        );
         let tx_node = self
             .node_aliases
             .iter()
@@ -2590,7 +2629,16 @@ where
             .direct_record_store(KNOWN_STATE_FACTS_STORE)?
             .set(
                 &known_state_fact_key(binding_view_key),
-                &[Value::U64(settled_through.0)],
+                &[
+                    Value::U64(settled_through.0),
+                    Value::U64(
+                        self.query
+                            .authorization_progress_by_binding_view
+                            .get(&binding_view_key)
+                            .copied()
+                            .unwrap_or(u64::MAX),
+                    ),
+                ],
             )?;
         Ok(())
     }
@@ -2614,6 +2662,13 @@ where
         self.query
             .settled_through_by_binding_view
             .insert(binding_view_key, settled_through);
+        if let Value::U64(progress) = record.get_idx(1)?
+            && progress != u64::MAX
+        {
+            self.query
+                .authorization_progress_by_binding_view
+                .insert(binding_view_key, progress);
+        }
         Ok(Some(settled_through))
     }
 
@@ -2628,6 +2683,7 @@ where
             store.delete(&key)?;
         }
         self.query.settled_through_by_binding_view.clear();
+        self.query.authorization_progress_by_binding_view.clear();
         self.clear_all_settled_result_state()?;
         Ok(())
     }
@@ -2895,6 +2951,7 @@ where
 
     fn recover_known_state_facts(&mut self) -> Result<(), Error> {
         self.query.settled_through_by_binding_view.clear();
+        self.query.authorization_progress_by_binding_view.clear();
         self.query.settled_result_sets.clear();
         self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
@@ -2937,10 +2994,23 @@ where
                     ));
                 }
             };
-            self.query.settled_through_by_binding_view.insert(
-                BindingViewKey::new(shape_id, binding_id, read_view),
-                settled_through,
-            );
+            let binding_view_key = BindingViewKey::new(shape_id, binding_id, read_view);
+            self.query
+                .settled_through_by_binding_view
+                .insert(binding_view_key, settled_through);
+            match entry.value.get_idx(1)? {
+                Value::U64(progress) if progress != u64::MAX => {
+                    self.query
+                        .authorization_progress_by_binding_view
+                        .insert(binding_view_key, progress);
+                }
+                Value::U64(_) => {}
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "known-state authorization progress must be u64",
+                    ));
+                }
+            }
         }
         let store = self
             .database
@@ -4632,6 +4702,7 @@ pub(crate) struct ViewUpdateParts {
     pub(crate) version_carriers: Vec<VersionCarrier>,
     pub(crate) version_bundles: Vec<VersionBundle>,
     pub(crate) peer_complete_tx_payload_refs: Vec<TxId>,
+    pub(crate) authorization_progress: Option<u64>,
     pub(crate) result_member_adds: Vec<ResultMemberEntry>,
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ViewFactEntry>,
@@ -5109,6 +5180,19 @@ fn storage_consistency_marker_key() -> [Value; 1] {
     [Value::String(STORAGE_CONSISTENCY_MARKER_NAME.to_owned())]
 }
 
+/// Details of a persisted current row that could not be decoded at the point of use.
+#[derive(Debug, thiserror::Error)]
+#[error("malformed current row in table {table} for {row_uuid:?}: {source}")]
+pub struct MalformedCurrentRow {
+    /// Logical table containing the row.
+    pub table: String,
+    /// Primary-key row identity of the malformed record.
+    pub row_uuid: RowUuid,
+    /// The record decoding failure.
+    #[source]
+    pub source: records::Error,
+}
+
 /// Error type returned by the storage-backed node API.
 #[derive(Debug, Error)]
 pub enum Error {
@@ -5118,6 +5202,9 @@ pub enum Error {
     /// Error returned by groove records.
     #[error(transparent)]
     Record(#[from] records::Error),
+    /// A persisted current row could not be decoded at the point of use.
+    #[error(transparent)]
+    MalformedCurrentRow(#[from] Box<MalformedCurrentRow>),
     /// Error returned by storage.
     #[error(transparent)]
     Storage(#[from] storage::Error),

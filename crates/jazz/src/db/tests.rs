@@ -407,17 +407,6 @@ fn assert_subscribe_rejected_branch_overlay(
     }
 }
 
-fn assert_subscribe_rejected_unsupported_window(
-    message: SyncMessage,
-    expected_subscription: SubscriptionKey,
-) {
-    assert_subscribe_rejected_unsupported_shape_capability_detail(
-        message,
-        expected_subscription,
-        "maintained subscription view window shape is not lowered yet",
-    );
-}
-
 fn assert_subscribe_rejected_unsupported_shape_capability_detail(
     message: SyncMessage,
     expected_subscription: SubscriptionKey,
@@ -1862,12 +1851,8 @@ fn branch_read_view_relation_snapshot_uses_query_engine_relation_edges() {
         )
         .expect("commit branch todo");
 
-    let query = Query::from("users").array_subquery(ArraySubquery::new(
-        "todosViaOwner",
-        "todos",
-        "owner_id",
-        "id",
-    ));
+    let query = Query::from("users")
+        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").unbounded());
     let prepared_query = prepared(&db, &query);
     let snapshot =
         doctest_support::block_on(db.all_relation_snapshot(&prepared_query, branch_read_opts()))
@@ -2576,12 +2561,7 @@ fn relation_snapshot_reverse_array_skips_deleted_children() {
 
     let query = Query::from("users")
         .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
-        .array_subquery(ArraySubquery::new(
-            "todosViaOwner",
-            "todos",
-            "owner_id",
-            "id",
-        ))
+        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").unbounded())
         .limit(1);
     let prepared = db.prepare_query(&query).unwrap();
     let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
@@ -2768,7 +2748,9 @@ fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() 
     let query = Query::from("users")
         .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
         .array_subquery(
-            ArraySubquery::new("todosViaOwner", "todos", "ownerId", "id").select(["id"]),
+            ArraySubquery::new("todosViaOwner", "todos", "ownerId", "id")
+                .select(["id"])
+                .unbounded(),
         )
         .limit(1);
     let prepared = db.prepare_query(&query).unwrap();
@@ -2820,7 +2802,9 @@ fn relation_snapshot_reverse_array_reads_local_nullable_ref_child() {
     let query = Query::from("users")
         .filter(eq(col("id"), lit(Value::Uuid(user.0))))
         .array_subquery(
-            ArraySubquery::new("todosViaOwner", "todos", "ownerId", "id").select(["id"]),
+            ArraySubquery::new("todosViaOwner", "todos", "ownerId", "id")
+                .select(["id"])
+                .unbounded(),
         )
         .limit(1);
     let prepared = db.prepare_query(&query).unwrap();
@@ -2883,6 +2867,45 @@ fn relation_snapshot_reverse_array_limit_reads_local_child() {
     assert_eq!(snapshot.edges.len(), 1);
     assert_eq!(snapshot.edges[0].source_row, project);
     assert_eq!(snapshot.edges[0].target_row, todo);
+}
+
+#[test]
+fn relation_snapshot_unordered_array_offset_uses_child_row_id_order() {
+    let schema = relation_schema();
+    let db = open_db(0xd4, AuthorId::from_bytes([0xd4; 16]), &schema);
+    let parent = row(0x41);
+    db.insert_with_id(
+        "todos",
+        parent,
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("parent".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ]),
+    )
+    .unwrap();
+    for id in [0xb1, 0xb2, 0xb3] {
+        db.insert_with_id(
+            "comments",
+            row(id),
+            BTreeMap::from([
+                ("body".to_owned(), Value::String("tie".to_owned())),
+                ("todo_id".to_owned(), Value::Uuid(parent.0)),
+            ]),
+        )
+        .unwrap();
+    }
+
+    let query = Query::from("todos").array_subquery(
+        ArraySubquery::new("comments", "comments", "todo_id", "id")
+            .offset(1)
+            .limit(1),
+    );
+    let prepared = db.prepare_query(&query).unwrap();
+    let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+
+    assert_eq!(snapshot.edges.len(), 1);
+    assert_eq!(snapshot.edges[0].source_row, parent);
+    assert_eq!(snapshot.edges[0].target_row, row(0xb2));
 }
 
 #[test]
@@ -3010,12 +3033,7 @@ fn array_subquery_live_subscription_tracks_child_edges() {
 
     let query = Query::from("users")
         .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
-        .array_subquery(ArraySubquery::new(
-            "todosViaOwner",
-            "todos",
-            "owner_id",
-            "id",
-        ));
+        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").unbounded());
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
@@ -3091,7 +3109,7 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
     )
     .unwrap();
     let query = Query::from("todos")
-        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id"));
+        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id").unbounded());
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
@@ -3213,7 +3231,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     let query = Query::from("todos")
-        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id"));
+        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id").unbounded());
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
@@ -3361,7 +3379,7 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
         .unwrap();
     }
     let query = Query::from("todos")
-        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id"));
+        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id").unbounded());
     let prepared_query = prepared(&db, &query);
 
     let admin = block_on(db.all_relation_snapshot_for_identity(
@@ -3445,7 +3463,8 @@ fn array_subquery_one_shot_and_maintained_subscription_are_equivalent() {
     }
     let query = Query::from("todos").array_subquery(
         ArraySubquery::new("comments", "comments", "todo_id", "id")
-            .order_by("body", OrderDirection::Asc),
+            .order_by("body", OrderDirection::Asc)
+            .unbounded(),
     );
     let prepared_query = prepared(&db, &query);
     let one_shot =
@@ -3485,9 +3504,11 @@ fn array_subquery_subscription_projects_late_root_and_existing_forward_target() 
         BTreeMap::from([("name".to_owned(), Value::String("owner".to_owned()))]),
     )
     .unwrap();
-    let query = Query::from("todos")
-        .select(["title"])
-        .array_subquery(ArraySubquery::new("owner", "users", "id", "owner_id").select(["name"]));
+    let query = Query::from("todos").select(["title"]).array_subquery(
+        ArraySubquery::new("owner", "users", "id", "owner_id")
+            .select(["name"])
+            .unbounded(),
+    );
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
     let opened = snapshot_from_event(block_on(subscription.next_event()).unwrap());
@@ -3539,7 +3560,9 @@ fn array_subquery_subscription_projects_late_camel_case_root_and_existing_forwar
     )
     .unwrap();
     let query = Query::from("issues").select(["title"]).array_subquery(
-        ArraySubquery::new("project", "projects", "id", "project").select(["name"]),
+        ArraySubquery::new("project", "projects", "id", "project")
+            .select(["name"])
+            .unbounded(),
     );
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
@@ -3586,12 +3609,8 @@ fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
     let _upstream = client.connect_upstream(client_transport);
     let _subscriber = server.accept_subscriber(server_transport, client_author);
 
-    let query = Query::from("users").array_subquery(ArraySubquery::new(
-        "todosViaOwner",
-        "todos",
-        "owner_id",
-        "id",
-    ));
+    let query = Query::from("users")
+        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").unbounded());
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     let opened = snapshot_from_event(block_on(subscription.next_event()).unwrap());
     assert!(opened.rows.is_empty());
@@ -6404,7 +6423,7 @@ fn subscriber_connection_surfaces_server_table_not_found_without_silence() {
 }
 
 #[test]
-fn subscriber_connection_rejects_unsupported_maintained_shape_and_keeps_serving_others() {
+fn subscriber_connection_serves_default_ordered_window_alongside_unbounded_shape() {
     let schema = schema();
     let owner = AuthorId::from_bytes([0xa1; 16]);
     let client_author = AuthorId::from_bytes([0xc1; 16]);
@@ -6412,34 +6431,33 @@ fn subscriber_connection_rejects_unsupported_maintained_shape_and_keeps_serving_
     seed(&server, "todos", cells("first", false, owner));
     seed(&server, "todos", cells("second", false, owner));
 
-    // Protocol-level coverage: jazz-tools subscriptions do not expose raw
-    // SubscribeRejected messages, so this exercises the first layer where the
-    // rejection is directly observable while still using public query builders.
+    // Protocol-level coverage for the current prepared/policy routing path:
+    // keep an ordinary root and a default-ordered offset window live together.
     let (mut client_transport, server_transport) = duplex();
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let supported_shape = Query::from("todos").validate(&schema).unwrap();
-    let unsupported_shape = Query::from("todos")
+    let window_shape = Query::from("todos")
         .offset(1)
         .limit(1)
         .validate(&schema)
         .unwrap();
     let supported_binding = supported_shape.bind(BTreeMap::new()).unwrap();
-    let unsupported_binding = unsupported_shape.bind(BTreeMap::new()).unwrap();
+    let window_binding = window_shape.bind(BTreeMap::new()).unwrap();
     let supported_subscription = SubscriptionKey {
         shape_id: supported_shape.shape_id(),
         binding_id: supported_binding.binding_id(),
         read_view: RegisterShapeOptions::default().read_view_key(),
     };
-    let unsupported_subscription = SubscriptionKey {
-        shape_id: unsupported_shape.shape_id(),
-        binding_id: unsupported_binding.binding_id(),
+    let window_subscription = SubscriptionKey {
+        shape_id: window_shape.shape_id(),
+        binding_id: window_binding.binding_id(),
         read_view: RegisterShapeOptions::default().read_view_key(),
     };
 
     client_transport
         .send(SyncMessage::RegisterShape {
-            shape_id: unsupported_shape.shape_id(),
-            ast: ShapeAst::from_validated(&unsupported_shape),
+            shape_id: window_shape.shape_id(),
+            ast: ShapeAst::from_validated(&window_shape),
             opts: RegisterShapeOptions::default(),
         })
         .unwrap();
@@ -6460,34 +6478,40 @@ fn subscriber_connection_rejects_unsupported_maintained_shape_and_keeps_serving_
         .unwrap();
 
     subscriber.borrow_mut().tick().unwrap();
-    assert_subscribe_rejected_unsupported_window(
-        client_transport
-            .try_recv()
-            .expect("expected unsupported shape rejection"),
-        unsupported_subscription,
-    );
     assert_view_update_for_subscription(
         client_transport
             .try_recv()
-            .expect("expected supported subscription update after rejection"),
+            .expect("expected unbounded subscription update"),
         supported_subscription,
     );
 
     client_transport
         .send(SyncMessage::Subscribe(Subscribe {
-            shape_id: unsupported_shape.shape_id(),
-            subscription: unsupported_subscription,
+            shape_id: window_shape.shape_id(),
+            subscription: window_subscription,
             values: Vec::new(),
             known_state: None,
         }))
         .unwrap();
     seed(&server, "todos", cells("third", false, owner));
     subscriber.borrow_mut().tick().unwrap();
-    assert_view_update_for_subscription(
-        client_transport
-            .try_recv()
-            .expect("supported subscription should continue after unsupported subscribe"),
-        supported_subscription,
+    let first = client_transport
+        .try_recv()
+        .expect("expected maintained subscription update");
+    let second = client_transport
+        .try_recv()
+        .expect("expected maintained window update");
+    let subscriptions = [first, second]
+        .into_iter()
+        .map(|message| match message {
+            SyncMessage::ViewUpdate { subscription, .. } => subscription,
+            other => panic!("expected ViewUpdate, got {other:?}"),
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        subscriptions,
+        BTreeSet::from([supported_subscription, window_subscription]),
+        "both the unbounded and default-ordered window subscriptions remain served"
     );
 }
 
@@ -6924,7 +6948,7 @@ fn subscriber_connection_accepts_array_subquery_register_shape_for_serving_subsc
     let (mut client_transport, server_transport) = duplex();
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let shape = Query::from("users")
-        .array_subquery(ArraySubquery::new("todos", "todos", "owner_id", "id"))
+        .array_subquery(ArraySubquery::new("todos", "todos", "owner_id", "id").unbounded())
         .validate(&schema)
         .unwrap();
 
@@ -8482,6 +8506,99 @@ fn connect_upstream_announces_existing_subscriptions_on_first_tick() {
     assert_eq!(subscribe.subscription.shape_id, shape_id);
 }
 
+// SessionClaims has no distinct public state once the receiving NodeState has
+// ignored an identical map, so wire-count coverage must inspect the transport.
+// The policy-visible integration coverage lives above this facade; this test
+// protects the otherwise unobservable wire-chatter contract.
+#[test]
+fn repeated_identical_session_claims_emit_once_on_a_live_connection() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+    let (client_transport, mut upstream_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let claims = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
+
+    client.set_identity_claims(client_author, claims.clone());
+    client.set_identity_claims(client_author, claims);
+    client.tick().unwrap();
+
+    assert!(matches!(
+        upstream_transport.try_recv(),
+        Some(SyncMessage::SessionClaims { .. })
+    ));
+    assert!(
+        upstream_transport.try_recv().is_none(),
+        "an unchanged claim map must not produce another wire message"
+    );
+}
+
+// This is lower-level for the same reason as the wire-count test above. In
+// particular, it is the regression that a global deduplication would miss:
+// each newly attached transport must receive the current map independently.
+#[test]
+fn current_session_claims_reach_late_and_reconnected_upstreams() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+    let claims = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
+
+    client.set_identity_claims(client_author, claims.clone());
+    let (first_transport, mut first_upstream_transport) = duplex();
+    let first_upstream = client.connect_upstream(first_transport);
+    client.tick().unwrap();
+    assert!(matches!(
+        first_upstream_transport.try_recv(),
+        Some(SyncMessage::SessionClaims { identity, claims: received })
+            if identity == client_author && received == claims
+    ));
+    assert!(first_upstream_transport.try_recv().is_none());
+
+    client.set_identity_claims(client_author, claims.clone());
+    assert!(client.detach_connection(&first_upstream));
+
+    let (reconnected_transport, mut reconnected_upstream_transport) = duplex();
+    let _reconnected_upstream = client.connect_upstream(reconnected_transport);
+    client.tick().unwrap();
+    assert!(matches!(
+        reconnected_upstream_transport.try_recv(),
+        Some(SyncMessage::SessionClaims { identity, claims: received })
+            if identity == client_author && received == claims
+    ));
+    assert!(reconnected_upstream_transport.try_recv().is_none());
+}
+
+#[test]
+fn changed_session_claims_advance_delivery_after_an_identical_call() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+    let (client_transport, mut upstream_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let reader = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
+    let writer = BTreeMap::from([("role".to_owned(), Value::String("writer".to_owned()))]);
+
+    client.set_identity_claims(client_author, reader.clone());
+    client.tick().unwrap();
+    assert!(matches!(
+        upstream_transport.try_recv(),
+        Some(SyncMessage::SessionClaims { claims, .. }) if claims == reader
+    ));
+
+    client.set_identity_claims(client_author, reader);
+    client.tick().unwrap();
+    assert!(upstream_transport.try_recv().is_none());
+
+    client.set_identity_claims(client_author, writer.clone());
+    client.tick().unwrap();
+    assert!(matches!(
+        upstream_transport.try_recv(),
+        Some(SyncMessage::SessionClaims { identity, claims })
+            if identity == client_author && claims == writer
+    ));
+    assert!(upstream_transport.try_recv().is_none());
+}
+
 #[test]
 fn global_subscription_registers_array_subquery_upstream_coverage() {
     let schema = relation_schema();
@@ -8492,7 +8609,8 @@ fn global_subscription_registers_array_subquery_upstream_coverage() {
 
     let query = Query::from("users").array_subquery(
         ArraySubquery::new("todos", "todos", "owner_id", "id")
-            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id")),
+            .unbounded()
+            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id").unbounded()),
     );
     let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
 
@@ -8517,7 +8635,8 @@ fn array_subquery_attachment_registers_upstream_coverage() {
 
     let query = Query::from("users").array_subquery(
         ArraySubquery::new("todos", "todos", "owner_id", "id")
-            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id")),
+            .unbounded()
+            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id").unbounded()),
     );
     let prepared = prepared(&client, &query);
     let attachment = client

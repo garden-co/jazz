@@ -17,8 +17,8 @@ use jazz::tools::{
 };
 use serde_json::json;
 use support::{
-    TestingClient, has_added, publish_permissions, wait_for_edge_query_ready, wait_for_query,
-    wait_for_subscription_update,
+    TestingClient, has_added, has_removed, publish_permissions, wait_for_edge_query_ready,
+    wait_for_query, wait_for_subscription_update,
 };
 use tempfile::TempDir;
 
@@ -142,22 +142,253 @@ async fn edge_tier_public_subscription_opens_and_receives_rows() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn unsupported_subscription_shape_returns_err_offline() {
+async fn maintained_unordered_limit_and_offset_windows_open_offline() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let client = JazzClient::test_client(todo_schema()).await;
-            let query = QueryBuilder::new("todos").offset(1).limit(1).build();
+            for query in [
+                QueryBuilder::new("todos").limit(2).build(),
+                QueryBuilder::new("todos").offset(1).limit(1).build(),
+            ] {
+                let _stream = client
+                    .subscribe(query)
+                    .await
+                    .expect("default-ordered maintained window should open");
+            }
+        })
+        .await;
+}
 
-            let error = match client.subscribe(query).await {
-                Ok(_) => panic!("unsupported maintained subscription shape should fail"),
-                Err(error) => error,
-            };
+#[tokio::test(flavor = "current_thread")]
+async fn public_root_default_order_and_windows_are_stable_across_reset() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = todo_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("00000000-0000-4000-8000-000000000102")
+                .ready_on("todos", Duration::from_secs(30))
+                .connect()
+                .await;
 
-            let message = error.to_string();
-            assert!(
-                message.contains("maintained subscription view window shape is not lowered yet"),
-                "unexpected subscribe error: {message}"
+            let mut ids = Vec::new();
+            for title in ["third", "first", "second", "fourth"] {
+                let (id, _, batch) = client
+                    .insert("todos", row_input!("title" => title, "done" => false))
+                    .expect("insert todo");
+                client
+                    .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                    .await
+                    .expect("todo settles at edge");
+                ids.push(id);
+            }
+            let mut row_id_order = ids.clone();
+            row_id_order.sort();
+
+            let default_query = QueryBuilder::new("todos").build();
+            let one_shot = client
+                .query(default_query.clone(), Some(DurabilityTier::EdgeServer))
+                .await
+                .expect("default-ordered one-shot query");
+            assert_eq!(
+                one_shot.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                row_id_order,
+                "root queries default to ascending row id"
             );
+
+            let mut initial = client
+                .subscribe(default_query.clone())
+                .await
+                .expect("subscribe to default-ordered root");
+            let first = tokio::time::timeout(Duration::from_secs(10), initial.next())
+                .await
+                .expect("initial reset arrives")
+                .expect("stream remains open");
+            let SubscriptionStreamItem::Delta(first) = first else {
+                panic!("default root subscription was rejected");
+            };
+            assert_eq!(
+                first
+                    .added
+                    .into_iter()
+                    .map(|row| row.id)
+                    .collect::<Vec<_>>(),
+                row_id_order,
+                "initial maintained reset preserves default root order"
+            );
+            drop(initial);
+
+            let mut rehydrated = client
+                .subscribe(default_query)
+                .await
+                .expect("rehydrate default-ordered root");
+            let reset = tokio::time::timeout(Duration::from_secs(10), rehydrated.next())
+                .await
+                .expect("rehydrated reset arrives")
+                .expect("rehydrated stream remains open");
+            let SubscriptionStreamItem::Delta(reset) = reset else {
+                panic!("rehydrated default root subscription was rejected");
+            };
+            assert_eq!(
+                reset
+                    .added
+                    .into_iter()
+                    .map(|row| row.id)
+                    .collect::<Vec<_>>(),
+                row_id_order,
+                "rehydrated maintained reset preserves default root order"
+            );
+
+            for (query, expected) in [
+                (
+                    QueryBuilder::new("todos").limit(2).build(),
+                    row_id_order[..2].to_vec(),
+                ),
+                (
+                    QueryBuilder::new("todos").offset(1).limit(2).build(),
+                    row_id_order[1..3].to_vec(),
+                ),
+            ] {
+                let mut stream = client
+                    .subscribe(query)
+                    .await
+                    .expect("default-ordered maintained window opens");
+                let item = tokio::time::timeout(Duration::from_secs(10), stream.next())
+                    .await
+                    .expect("window reset arrives")
+                    .expect("window stream remains open");
+                let SubscriptionStreamItem::Delta(delta) = item else {
+                    panic!("default-ordered window was rejected");
+                };
+                assert_eq!(
+                    delta
+                        .added
+                        .into_iter()
+                        .map(|row| row.id)
+                        .collect::<Vec<_>>(),
+                    expected,
+                    "maintained window follows the root default row-id order"
+                );
+            }
+
+            client.shutdown().await.expect("shutdown test client");
+            server.shutdown().await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boundary() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = todo_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("00000000-0000-4000-8000-000000000103")
+                .ready_on("todos", Duration::from_secs(30))
+                .connect()
+                .await;
+
+            let mut tied = Vec::new();
+            for _ in 0..3 {
+                let (id, _, batch) = client
+                    .insert("todos", row_input!("title" => "same", "done" => false))
+                    .expect("insert tied todo");
+                client
+                    .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                    .await
+                    .expect("tied todo settles at edge");
+                tied.push(id);
+            }
+            tied.sort();
+            let tie_query = QueryBuilder::new("todos").order_by("title").build();
+            let tied_rows = client
+                .query(tie_query, Some(DurabilityTier::EdgeServer))
+                .await
+                .expect("query tied rows");
+            assert_eq!(
+                tied_rows.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                tied,
+                "equal explicit order keys use row id as a stable tie-breaker"
+            );
+
+            let mut window = client
+                .subscribe(
+                    QueryBuilder::new("todos")
+                        .order_by("title")
+                        .limit(2)
+                        .build(),
+                )
+                .await
+                .expect("subscribe ordered window");
+            let mut updates = Vec::new();
+            wait_for_subscription_update(
+                &mut window,
+                &mut updates,
+                Duration::from_secs(10),
+                "initial ordered window reset",
+                |deltas| deltas.iter().any(|delta| delta.added.len() == 2),
+            )
+            .await;
+            let initial = updates
+                .iter()
+                .find(|delta| delta.added.len() == 2)
+                .expect("initial ordered window delta");
+            assert_eq!(
+                initial
+                    .added
+                    .iter()
+                    .map(|change| change.id.root())
+                    .collect::<Vec<_>>(),
+                tied[..2],
+                "maintained tied rows use the same stable row-id tie-breaker"
+            );
+
+            let promoted = tied[2];
+            let batch = client
+                .update(
+                    promoted,
+                    vec![("title".to_owned(), Value::Text("ahead".to_owned()))],
+                )
+                .expect("move row into window");
+            client
+                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("promotion settles at edge");
+            wait_for_subscription_update(
+                &mut window,
+                &mut updates,
+                Duration::from_secs(10),
+                "promoted row enters maintained window",
+                |deltas| has_added(deltas, promoted) && has_removed(deltas, tied[1]),
+            )
+            .await;
+
+            let batch = client
+                .update(
+                    promoted,
+                    vec![("title".to_owned(), Value::Text("zulu".to_owned()))],
+                )
+                .expect("move row out of window");
+            client
+                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("demotion settles at edge");
+            wait_for_subscription_update(
+                &mut window,
+                &mut updates,
+                Duration::from_secs(10),
+                "demoted row leaves maintained window",
+                |deltas| has_removed(deltas, promoted) && has_added(deltas, tied[1]),
+            )
+            .await;
+
+            client.shutdown().await.expect("shutdown test client");
+            server.shutdown().await;
         })
         .await;
 }

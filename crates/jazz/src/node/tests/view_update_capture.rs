@@ -74,7 +74,7 @@ fn capture_view_update(update: SyncMessage) -> CanonicalViewUpdate {
         subscription,
         reset_result_set,
         peer_payload_inventory: crate::protocol::PeerPayloadInventory {
-            complete_tx_payloads: complete_tx_payload_refs,
+            complete_tx_payloads: complete_tx_payload_refs, ..
         },
         result_member_adds,
         result_member_removes,
@@ -252,7 +252,7 @@ fn apply_capture_delivery_state(
 ) {
     apply_capture_result_delta(result_set, update);
     let SyncMessage::ViewUpdate {
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         ..
     } = update
     else {
@@ -513,7 +513,7 @@ fn assert_retraction_without_replacement_leak(
 ) {
     let SyncMessage::ViewUpdate {
         version_bundles,
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         result_member_adds,
         result_member_removes,
         ..

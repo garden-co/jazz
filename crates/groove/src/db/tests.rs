@@ -263,6 +263,23 @@ fn history_collect_by(limit: u64) -> GraphBuilder {
     )
 }
 
+fn history_collect_by_expand(offset: u64, limit: u64) -> GraphBuilder {
+    GraphBuilder::collect_by_expand(
+        GraphBuilder::table("history"),
+        ["row"],
+        [
+            CollectByField::named("row"),
+            CollectByField::renamed("node", "source_node"),
+            CollectByField::renamed("title", "child_title"),
+        ],
+        ["row", "node"],
+        [TopByOrder::asc("stamp")],
+        ["node"],
+        offset,
+        TopByLimit::Finite(limit),
+    )
+}
+
 fn collect_parent(row: u64, children: &[(u64, &str)]) -> Vec<Value> {
     let child_descriptor = RecordDescriptor::new([
         ("child_id", ValueType::U64),
@@ -1762,28 +1779,6 @@ fn direct_record_store_rejects_record_containing_durable_keys_at_schema_admissio
             .unwrap(),
         Value::Bytes(b"allowed".to_vec())
     );
-}
-
-#[test]
-fn direct_record_store_rejects_record_valued_durable_keys() {
-    let child = RecordDescriptor::new([("id", ValueType::U64)]);
-    let schema = DatabaseSchema::new([]).with_direct_record_store(DirectRecordStoreSchema::new(
-        "rendered_results",
-        RecordDescriptor::new([("result", ValueType::Record(Box::new(child)))]),
-        RecordDescriptor::new([("payload", ValueType::Bytes)]),
-    ));
-    let storage = MemoryStorage::new(&schema.column_families());
-    let database = Database::new(schema, storage).unwrap();
-    let store = database.direct_record_store("rendered_results").unwrap();
-    let child = crate::records::OwnedRecord::new(child.create(&[Value::U64(1)]).unwrap(), child);
-
-    assert!(matches!(
-        store.set(
-            &[Value::Record(child)],
-            &[Value::Bytes(b"not-a-key".to_vec())],
-        ),
-        Err(Error::InvalidDirectRecordStoreKey(_))
-    ));
 }
 
 #[test]
@@ -4805,6 +4800,171 @@ fn collect_by_round_trips_ordered_explicit_child_ids() {
             1,
         )]
     );
+}
+
+#[test]
+fn collect_by_expand_renders_selected_tuples_in_source_order() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_collect_by_expand(0, 3))
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    // Deliberately not in declared stamp order. The first two columns are the
+    // ordered root/child occurrence-source vector carried by the tuple.
+    batch.insert("history", history_values(1, 30, 30, "third"));
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    batch.insert("history", history_values(1, 20, 20, "second"));
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (
+                vec![
+                    Value::U64(1),
+                    Value::U64(10),
+                    Value::String("first".to_owned()),
+                ],
+                1,
+            ),
+            (
+                vec![
+                    Value::U64(1),
+                    Value::U64(20),
+                    Value::String("second".to_owned()),
+                ],
+                1,
+            ),
+            (
+                vec![
+                    Value::U64(1),
+                    Value::U64(30),
+                    Value::String("third".to_owned()),
+                ],
+                1,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn collect_by_expand_diffs_only_selected_tuple_occurrences() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_collect_by_expand(0, 2))
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    batch.insert("history", history_values(1, 20, 20, "second"));
+    database.commit_batch(batch).unwrap();
+    let _initial = subscription.recv().unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 5, 5, "front"));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (
+                vec![
+                    Value::U64(1),
+                    Value::U64(5),
+                    Value::String("front".to_owned()),
+                ],
+                1,
+            ),
+            (
+                vec![
+                    Value::U64(1),
+                    Value::U64(20),
+                    Value::String("second".to_owned()),
+                ],
+                -1,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn collect_by_expand_suppresses_byte_equal_selected_tuples() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_collect_by_expand(0, 2))
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    batch.insert("history", history_values(1, 20, 20, "second"));
+    database.commit_batch(batch).unwrap();
+    let _initial = subscription.recv().unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 30, 30, "outside"));
+    database.commit_batch(batch).unwrap();
+    assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[test]
+fn collect_by_expand_honors_order_tie_offset_and_limit() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_collect_by_expand(1, 2))
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    batch.insert("history", history_values(1, 10, 20, "tied-second"));
+    batch.insert("history", history_values(1, 20, 30, "third"));
+    batch.insert("history", history_values(1, 30, 40, "outside"));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (
+                vec![
+                    Value::U64(1),
+                    Value::U64(20),
+                    Value::String("tied-second".to_owned()),
+                ],
+                1,
+            ),
+            (
+                vec![
+                    Value::U64(1),
+                    Value::U64(30),
+                    Value::String("third".to_owned()),
+                ],
+                1,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn collect_by_expand_rejects_duplicate_occurrence_source_ids() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 7, "first"));
+    batch.insert("history", history_values(1, 20, 7, "ambiguous"));
+    database.commit_batch(batch).unwrap();
+
+    assert!(matches!(
+        database.subscribe_one_sink(history_collect_by_expand(0, 3)),
+        Err(Error::IvmRuntime(
+            IvmRuntimeError::DuplicateCollectByOccurrenceId
+        ))
+    ));
 }
 
 #[test]
