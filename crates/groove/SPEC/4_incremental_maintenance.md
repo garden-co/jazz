@@ -113,16 +113,17 @@ cleared after the tick (`INV-TICK-5`).
 **Decision, Anselm 2026-08-05 — narrow output-terminal exception to `INV-INC-1`
 (`INV-INC-2`, target).** A terminal `CollectBy` may retain a complete flat
 group. For a touched group `g`, let `D_g` be its input delta and let
-`W_g^-`/`W_g^+` be its old/new selected windows. `R_g(limit)` is the larger
-row-and-byte footprint of those windows, at most `limit` output occurrences for
-a finite limit. Indexed state maintenance may cost
+`T_g^-`/`T_g^+` be its old/new selected trees. `R_g(limit)` is the larger
+row-and-byte footprint of all selected windows across those trees, including
+encoded descendants; finite slots contribute their bounded windows and an
+unbounded slot only its actual selected output. Indexed state maintenance may cost
 `O(|D_g| log(1 + |G_g|))`; selecting, rendering, comparing, and delivering
 MUST cost only `O(|D_g| + R_g(limit))`. It remains forbidden to scan,
 re-materialize, or diff unrelated groups or the rest of the accumulated group
 state.
 
-In collect mode this allowance renders and delivers the complete old/new parent
-as at most one `-old,+new` replacement. In expand mode it renders and delivers
+In collect mode this allowance renders and delivers the complete old/new root
+parent tree as at most one `-old,+new` replacement. In expand mode it renders and delivers
 the actual diff of selected tuple occurrences, bounded by the old/new window
 footprint. Thus expansion does not turn the group exception into permission to
 scan accumulated state merely because it can yield many rows.

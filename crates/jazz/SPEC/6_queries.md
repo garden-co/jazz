@@ -255,7 +255,12 @@ unreadable (`INV-QUERY-10`).
 **Decision, Anselm 2026-08-05 — one output terminal, two shapes.** Joins
 produce flat, wide rows in the Groove graph. `CollectBy` is the sole output
 terminal and chooses the public shape: **collect** renders an ordered recursive
-tree, while **expand** renders flat tuples. Nothing on the Jazz side renders,
+tree, while **expand** renders flat tuples. A collect descriptor is a tree of
+named slots: every array field names one sibling relation on its owning record
+and carries its owner-group, child projection, order/tie, direction, offset,
+limit, and nested slots. Slot names are unique among siblings and a nested slot
+is addressed by its field-name path (for example `comments.replies`). Nothing
+on the Jazz side renders,
 fan-ins, or otherwise reshapes maintained output. The IVM graph and its
 lowering remain flat and DBSP-native: parent rows, child rows, associations, and
 joined tuples are ordinary weighted rows. A graph delta MUST NOT update an
@@ -269,9 +274,12 @@ exists yet.
 Nesting and flat expansion are constructed only by Groove's output-terminal
 `CollectBy` (`groove/SPEC/3_queries_operators.md` §3.6.1). A collector MUST NOT
 feed any graph node, including another collector; graph validation MUST reject
-that shape. In collect mode, one terminal-owned internal collection tree reads
-flat associations and writes the final recursive value. In expand mode, the same
-terminal reads flat wide tuples and writes tuples directly. The descriptor MUST
+that shape. Nested slots are data inside that one operator rather than collector
+inputs, so `INV-QUERY-27` is unchanged. In collect mode, one terminal-owned
+internal collection tree reads flat associations and writes the final recursive
+value. In expand mode, the same terminal reads flat wide tuples and writes
+tuples directly; a tree descriptor is invalid in Expand mode, which remains
+single-level and flat. The descriptor MUST
 encode every input that affects either output, as required by
 `groove/SPEC/INVARIANTS.md::INV-QUERY-1A`; Jazz names the query shape,
 correlation, projection, ordering, bounds, source positions, and terminal mode

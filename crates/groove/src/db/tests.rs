@@ -13,8 +13,8 @@ use std::sync::mpsc::TryRecvError;
 use std::time::Instant;
 
 use crate::ivm::{
-    AggregateExpr, AggregateFunction, IvmRuntimeError, LiteralValue, PlanExpr, PredicateExpr,
-    ProjectField, StaticScanSpec, TopByLimit, TopByOrder,
+    AggregateExpr, AggregateFunction, CollectByField, CollectBySlotBuilder, IvmRuntimeError,
+    LiteralValue, PlanExpr, PredicateExpr, ProjectField, StaticScanSpec, TopByLimit, TopByOrder,
 };
 use crate::queries::{
     BinaryOp, ColumnRef, Cte, Expr, JoinConstraint, JoinKind, Query, Select, SelectItem, TableRef,
@@ -203,6 +203,99 @@ fn history_key(row: u64, stamp: u64, node: u64) -> PrimaryKeyValue {
         PrimaryKeyValue::U64(stamp),
         PrimaryKeyValue::U64(node),
     ])
+}
+
+fn collect_tree_schema() -> DatabaseSchema {
+    DatabaseSchema::new([TableSchema::new(
+        "tree",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("root", ColumnType::U64),
+            ColumnSchema::new("child", ColumnType::U64),
+            ColumnSchema::new("child_order", ColumnType::U64),
+            ColumnSchema::new("grandchild", ColumnType::U64),
+            ColumnSchema::new("grandchild_order", ColumnType::U64),
+            ColumnSchema::new("left", ColumnType::U64),
+            ColumnSchema::new("left_order", ColumnType::U64),
+            ColumnSchema::new("right", ColumnType::U64),
+            ColumnSchema::new("right_order", ColumnType::U64),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))])
+}
+
+fn collect_tree_values(
+    id: u64,
+    child: u64,
+    child_order: u64,
+    grandchild: u64,
+    grandchild_order: u64,
+    left: u64,
+    left_order: u64,
+    right: u64,
+    right_order: u64,
+) -> Vec<Value> {
+    vec![
+        Value::U64(id),
+        Value::U64(1),
+        Value::U64(child),
+        Value::U64(child_order),
+        Value::U64(grandchild),
+        Value::U64(grandchild_order),
+        Value::U64(left),
+        Value::U64(left_order),
+        Value::U64(right),
+        Value::U64(right_order),
+    ]
+}
+
+fn collect_tree_graph() -> GraphBuilder {
+    GraphBuilder::collect_by_tree(
+        GraphBuilder::table("tree"),
+        ["root"],
+        [CollectByField::named("root")],
+        [
+            CollectBySlotBuilder::new(
+                ["root"],
+                [CollectByField::named("child")],
+                "children",
+                [CollectBySlotBuilder::new(
+                    ["child"],
+                    [CollectByField::named("grandchild")],
+                    "grandchildren",
+                    [],
+                    [TopByOrder::asc("grandchild_order")],
+                    ["grandchild"],
+                    0,
+                    TopByLimit::Finite(2),
+                )],
+                [TopByOrder::asc("child_order")],
+                ["child"],
+                0,
+                TopByLimit::Finite(2),
+            ),
+            CollectBySlotBuilder::new(
+                ["root"],
+                [CollectByField::named("left")],
+                "lefts",
+                [],
+                [TopByOrder::asc("left_order")],
+                ["left"],
+                0,
+                TopByLimit::Finite(2),
+            ),
+            CollectBySlotBuilder::new(
+                ["root"],
+                [CollectByField::named("right")],
+                "rights",
+                [],
+                [TopByOrder::desc("right_order")],
+                ["right"],
+                1,
+                TopByLimit::Finite(1),
+            ),
+        ],
+    )
 }
 
 fn history_arg_max() -> GraphBuilder {
@@ -5034,6 +5127,167 @@ fn collect_by_suppresses_unchanged_rendered_group_and_replaces_once_at_boundary(
         replacement[1],
         (collect_parent(1, &[(5, "front"), (10, "first")]), 1)
     );
+}
+
+#[test]
+fn collect_by_tree_renders_sibling_slots_and_grandchildren_with_independent_windows() {
+    let storage = MemoryStorage::new(&["tree"]);
+    let mut database = Database::new(collect_tree_schema(), storage).unwrap();
+    let subscription = database.subscribe_one_sink(collect_tree_graph()).unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert("tree", collect_tree_values(1, 10, 20, 100, 10, 3, 3, 9, 9));
+    batch.insert("tree", collect_tree_values(2, 10, 20, 101, 20, 1, 1, 5, 5));
+    batch.insert("tree", collect_tree_values(3, 20, 10, 200, 10, 2, 2, 7, 7));
+    database.commit_batch(batch).unwrap();
+    let initial = subscription.recv().unwrap().to_values().unwrap();
+    assert_eq!(initial.len(), 1);
+    let root = &initial[0].0;
+    let Value::Array(children) = &root[1] else {
+        panic!("children must be an array")
+    };
+    assert_eq!(children.len(), 2);
+    let Value::Record(first_child) = &children[0] else {
+        panic!("child must be a record")
+    };
+    let Value::Record(second_child) = &children[1] else {
+        panic!("child must be a record")
+    };
+    assert_eq!(first_child.to_values().unwrap()[0], Value::U64(20));
+    let first_child_values = first_child.to_values().unwrap();
+    let Value::Array(first_grandchildren) = &first_child_values[1] else {
+        panic!("grandchildren must be an array")
+    };
+    assert_eq!(first_grandchildren.len(), 1);
+    assert_eq!(second_child.to_values().unwrap()[0], Value::U64(10));
+    let second_child_values = second_child.to_values().unwrap();
+    let Value::Array(second_grandchildren) = &second_child_values[1] else {
+        panic!("grandchildren must be an array")
+    };
+    assert_eq!(
+        second_grandchildren
+            .iter()
+            .map(|value| match value {
+                Value::Record(record) => record.to_values().unwrap()[0].clone(),
+                _ => panic!("grandchild must be a record"),
+            })
+            .collect::<Vec<_>>(),
+        [Value::U64(100), Value::U64(101)]
+    );
+    for (slot, expected) in [(&root[2], vec![1, 2]), (&root[3], vec![7])] {
+        let Value::Array(records) = slot else {
+            panic!("sibling slot must be an array")
+        };
+        assert_eq!(
+            records
+                .iter()
+                .map(|value| match value {
+                    Value::Record(record) => match record.to_values().unwrap()[0] {
+                        Value::U64(value) => value,
+                        _ => panic!("sibling value must be u64"),
+                    },
+                    _ => panic!("sibling value must be a record"),
+                })
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn collect_by_tree_grandchild_change_replaces_one_whole_parent_and_suppresses_unrendered_change() {
+    let storage = MemoryStorage::new(&["tree"]);
+    let mut database = Database::new(collect_tree_schema(), storage).unwrap();
+    let subscription = database.subscribe_one_sink(collect_tree_graph()).unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+    let mut batch = database.open_batch();
+    batch.insert("tree", collect_tree_values(1, 10, 20, 100, 10, 3, 3, 9, 9));
+    batch.insert("tree", collect_tree_values(2, 10, 20, 101, 20, 1, 1, 5, 5));
+    database.commit_batch(batch).unwrap();
+    let _initial = subscription.recv().unwrap();
+
+    // Planted positive: this is inside the rendered grandchild window, so the
+    // parent must change. Its one -/+ pair proves delivery is whole-parent,
+    // not a child delta or one replacement at each descriptor level.
+    let mut batch = database.open_batch();
+    batch.insert("tree", collect_tree_values(3, 10, 20, 99, 0, 2, 2, 7, 7));
+    database.commit_batch(batch).unwrap();
+    let replacement = subscription.recv().unwrap().to_values().unwrap();
+    assert_eq!(replacement.len(), 2);
+    assert_eq!(replacement[0].1, -1);
+    assert_eq!(replacement[1].1, 1);
+    let Value::Array(old_children) = &replacement[0].0[1] else {
+        panic!()
+    };
+    let Value::Array(new_children) = &replacement[1].0[1] else {
+        panic!()
+    };
+    let Value::Record(old_child) = &old_children[0] else {
+        panic!()
+    };
+    let Value::Record(new_child) = &new_children[0] else {
+        panic!()
+    };
+    let Value::Array(old_grandchildren) = &old_child.to_values().unwrap()[1] else {
+        panic!()
+    };
+    let Value::Array(new_grandchildren) = &new_child.to_values().unwrap()[1] else {
+        panic!()
+    };
+    assert_eq!(old_grandchildren.len(), 2);
+    assert_eq!(new_grandchildren.len(), 2);
+    let Value::Record(new_first_grandchild) = &new_grandchildren[0] else {
+        panic!()
+    };
+    assert_eq!(new_first_grandchild.to_values().unwrap()[0], Value::U64(99));
+
+    // A third grandchild beyond this slot's selected window is byte-equal at
+    // the root, so the whole rendered tree must be suppressed.
+    let mut batch = database.open_batch();
+    batch.insert(
+        "tree",
+        collect_tree_values(4, 10, 20, 999, 999, 999, 999, 1, 1),
+    );
+    database.commit_batch(batch).unwrap();
+    assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[test]
+fn collect_by_tree_rejects_depth_beyond_descriptor_bound() {
+    fn nested(depth: usize) -> CollectBySlotBuilder {
+        CollectBySlotBuilder::new(
+            ["child"],
+            [CollectByField::named("child")],
+            "children",
+            (depth > 0).then(|| nested(depth - 1)),
+            [TopByOrder::asc("child_order")],
+            ["child"],
+            0,
+            TopByLimit::Finite(1),
+        )
+    }
+    let graph = GraphBuilder::collect_by_tree(
+        GraphBuilder::table("tree"),
+        ["root"],
+        [CollectByField::named("root")],
+        [CollectBySlotBuilder::new(
+            ["root"],
+            [CollectByField::named("child")],
+            "children",
+            [nested(crate::ivm::MAX_COLLECT_BY_TREE_DEPTH)],
+            [TopByOrder::asc("child_order")],
+            ["child"],
+            0,
+            TopByLimit::Finite(1),
+        )],
+    );
+    let storage = MemoryStorage::new(&["tree"]);
+    let mut database = Database::new(collect_tree_schema(), storage).unwrap();
+    assert!(matches!(
+        database.subscribe_one_sink(graph),
+        Err(Error::IvmRuntime(IvmRuntimeError::InvalidCollectBy(_)))
+    ));
 }
 
 #[test]
