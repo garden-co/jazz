@@ -267,7 +267,7 @@ where
                 branch_id,
             ),
             history_primary_key(&stored),
-            stored.record.raw().to_vec(),
+            stored.groove_record(),
         );
         self.database.commit_batch(batch)?;
         Ok(tx_id)

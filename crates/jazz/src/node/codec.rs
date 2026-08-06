@@ -709,6 +709,20 @@ impl VersionRow {
         )
     }
 
+    /// Bind this row's encoded payload to the schema version already stored in
+    /// its Jazz metadata before handing it to Groove.
+    pub(super) fn groove_record(&self) -> groove::records::VersionedRecord {
+        self.bind_groove_record(self.record.clone())
+    }
+
+    /// Bind a derived storage row to the same schema version as this version.
+    pub(super) fn bind_groove_record(
+        &self,
+        record: OwnedRecord,
+    ) -> groove::records::VersionedRecord {
+        groove::records::VersionedRecord::new(self.schema_version_alias().0, record)
+    }
+
     pub(super) fn deletion(&self) -> Option<DeletionEvent> {
         if !self.is_register_record() {
             return None;

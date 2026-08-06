@@ -68,12 +68,13 @@ fn opening_defers_malformed_current_row_to_read() {
         let table = schema.tables[0].global_current_storage_tables()[0]
             .name
             .clone();
-        let (key, raw) = node
+        let raw = node
             .database
             .primary_key_get_raw(&table, &[Value::Uuid(row(0xff).0)])
             .unwrap()
-            .unwrap()
-            .into_parts();
+            .unwrap();
+        let schema_version = raw.schema_version();
+        let (key, raw) = raw.into_parts();
         node.database.close().unwrap();
         drop(node);
 
@@ -82,7 +83,13 @@ fn opening_defers_malformed_current_row_to_read() {
         let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
         let storage =
             groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v1()).unwrap();
-        storage.set(&table, &key, &raw[..1]).unwrap();
+        storage
+            .set(
+                &table,
+                &key,
+                &groove::records::encode_versioned_record(schema_version, &raw[..1]),
+            )
+            .unwrap();
         storage.close().unwrap();
     }
 

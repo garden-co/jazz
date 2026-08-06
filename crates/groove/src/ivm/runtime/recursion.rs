@@ -385,6 +385,7 @@ pub(super) fn snapshot_table_deltas(
             let store = super::record_store_for_table(storage, table_schema, &descriptor);
             let mut deltas = Vec::new();
             let mut visit = |_: &[u8], record: &[u8]| {
+                let record = super::single_layout_payload(record)?;
                 deltas.push(RecordDelta {
                     record: Bytes::copy_from_slice(record),
                     weight: 1,
@@ -913,6 +914,7 @@ where
         let store = super::record_store_for_table(self.storage, table_schema, &output_desc);
         let mut deltas = Vec::new();
         store.scan_prefix(b"", &mut |_, record| {
+            let record = super::single_layout_payload(record)?;
             deltas.push(RecordDelta {
                 record: Bytes::copy_from_slice(record),
                 weight: 1,

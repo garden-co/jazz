@@ -86,8 +86,9 @@ Groove records are schema-driven typed tuples whose physical layout can reorder 
 
 Shared storage will use **schema-versioned tuple decoding**. Every encoded history
 and current row begins with a stable envelope that can be decoded without knowing
-the payload shape. At minimum, the envelope contains its format version and the
-node-local `SchemaVersionAlias`. The `PhysicalTableId` comes from the
+the payload shape. The current Groove envelope is a fixed-width, little-endian
+`u64` discriminator; Jazz writes its node-local `SchemaVersionAlias` there. The
+`PhysicalTableId` comes from the
 storage key/table context. Together they identify the logical table mapping and
 the Groove tuple descriptor needed to decode the payload:
 
@@ -108,6 +109,47 @@ The schema catalogue and the local `jazz_schema_versions` rows containing each
 alias and its physical mapping must be durable and recovered before payload
 decoding. A schema version or mapping cannot be removed while any retained
 history, current row, branch, or snapshot uses its alias.
+
+#### Groove versioned rows
+
+Groove should support heterogeneous rows through **schema versions**, without depending
+on Jazz schema ids, lenses, or physical mappings. A versioned table declares one stable
+field catalogue (field name plus type), and each schema version selects an ordered subset
+of those fields. Each row begins with a stable header containing a fixed-width `u64`
+version, from which Groove derives the matching `RecordDescriptor` before decoding the
+remaining record. Registries are supplied when a database is opened or rebuilt; a
+registered field or schema-version layout cannot change while retained rows use it.
+
+Writes name the version explicitly, and an update may replace
+a row with another variant. A field absent from a variant remains distinguishable
+from a present nullable field.
+
+Indexes are declared against stable field names/ids across the table's variants:
+
+- every variant containing an indexed field must give it the same type;
+- a variant missing any field of an index produces no entry for that index;
+- updates remove entries using the old row's discriminator and descriptor, then
+  add entries using the new row's discriminator and descriptor;
+- index rebuilds and query evaluation select each row's descriptor before
+  reading indexed or projected fields.
+
+For each `PhysicalTableId`, Jazz derives the variant registry from its local schema
+catalogue and physical mappings. Variant fields use stable physical names derived
+from `PhysicalColumnId`, rather than application-facing names, so compatible
+schema versions expose the same field and reuse the same Groove index. Logical
+renames remain entirely in Jazz's projection layer. This abstraction could also
+model other heterogeneous stores in the future, such as object-table subtypes or
+inherited table rows, by assigning their concrete row shapes local `u64` discriminators.
+
+Groove can implement this incrementally: first discriminator-aware record
+encoding and primary-key reads/scans, then variant-aware index maintenance and
+rebuilding, and finally variant-aware query field resolution.
+
+For field resolution, we need a generic `VariantProject` Groove node that maps different
+row versions to a single schema version (making it possible to perform queries on top).
+Jazz builds its cases from lenses and physical mappings; Groove is not aware of those concepts.
+
+#### Avoiding data loss
 
 Jazz currently selects a winning content version across all writes. If that version omits a retired column,
 the schema's default value is returned to the user. That leads to frequent data loss for columns dropped across
@@ -159,7 +201,10 @@ A commit's `VersionRecord` already carries:
 - parents and provenance;
 - optional cells, where absence is distinguishable from explicit null.
 
-That is sufficient for a receiver to resolve logical names to physical IDs and encode the row using its own local physical layout. `PhysicalLayoutId` and the storage envelope should remain entirely local.
+That is sufficient for a receiver to intern the authored schema as a local
+`SchemaVersionAlias`, resolve logical names to local physical IDs, and use the
+alias as the Groove schema discriminator. Schema aliases, physical IDs, and the
+storage envelope remain entirely local.
 
 When receiving rows written in a schema different from the current one, missing columns are preserved as unset
 (instead of using the schema default values).
@@ -326,11 +371,17 @@ Overall approach: start preserving today’s copy-forward/default behavior, incl
      safely be defined using logical names.
 
 2. Add schema-versioned record envelopes.
-   - Teach Groove/Jazz storage tables to hold rows encoded under multiple schema
-     versions.
-   - Decode the stable envelope first, then use its `SchemaVersionAlias` plus the
-     surrounding `PhysicalTableId` to derive the payload descriptor from durable
-     schema and mapping metadata.
+   **Status: in progress (2026-08-06).** Groove's stable field catalogue,
+   per-version ordered layouts, common batch insert/update/get/scan paths, mixed-version
+   replacement, reopen coverage, window preservation, and Jazz
+   `SchemaVersionAlias` binding are implemented. Variant-aware indexes and
+   IVM/query resolution remain.
+   - Add generic schema-versioned tables to Groove, using a per-table `u64`
+     version-to-descriptor registry.
+   - Make primary-key reads/scans, indexes, rebuilds, and query field resolution
+     select the row descriptor through its schema version.
+   - Use `SchemaVersionAlias` as Jazz's discriminator and derive physical field
+     descriptors from `PhysicalTableId` plus durable schema mapping metadata.
    - Initially use existing lens projection/default behavior when normalizing
      schema versions.
    - Test mixed-schema-version scans, point reads, indexes, and restart recovery

@@ -1603,7 +1603,7 @@ where
                 batch.insert_raw(
                     history_table.as_ref(),
                     history_primary_key(&stored),
-                    stored.record.raw().to_vec(),
+                    stored.groove_record(),
                 );
                 if stored.layer() == VersionLayer::Content {
                     content_versions.push(stored.clone());
@@ -2593,16 +2593,17 @@ where
                 let table_schema = self.table_in_schema(version.table(), schema_version)?;
                 let rejected_version_table = table_schema.rejected_versions_storage_table();
                 let rejected_version_values = rejected_version_values(&table_schema, version)?;
+                let rejected_version_record = owned_record_from_storage_values(
+                    &rejected_version_table,
+                    rejected_version_values,
+                )?;
                 batch.insert(
                     rejected_versions_table_name(version.table()),
-                    rejected_version_values.clone(),
+                    version.bind_groove_record(rejected_version_record.clone()),
                 );
                 rejected_versions.push(RejectedVersion::new(
                     version.table().to_owned(),
-                    owned_record_from_storage_values(
-                        &rejected_version_table,
-                        rejected_version_values,
-                    )?,
+                    rejected_version_record,
                 ));
             }
             rejected_versions.sort_by_key(|version| {
@@ -4053,14 +4054,14 @@ where
                 batch.update_raw(
                     current_table,
                     global_current_primary_key(version.row_uuid()),
-                    owned_record_from_storage_values(
-                        &table.global_current_storage_tables()[0],
-                        global_current_values(&table, version, Some(global_seq))
-                            .expect("valid global current values"),
-                    )
-                    .expect("valid global current row")
-                    .raw()
-                    .to_vec(),
+                    version.bind_groove_record(
+                        owned_record_from_storage_values(
+                            &table.global_current_storage_tables()[0],
+                            global_current_values(&table, version, Some(global_seq))
+                                .expect("valid global current values"),
+                        )
+                        .expect("valid global current row"),
+                    ),
                 );
             }
             VersionLayer::Deletion => batch.update_raw(
@@ -4070,15 +4071,15 @@ where
                     base_for_current_names,
                 ),
                 global_current_primary_key(version.row_uuid()),
-                owned_record_from_storage_values(
-                    &self
-                        .table_in_schema(version.table(), schema_version)?
-                        .global_current_storage_tables()[1],
-                    register_global_current_values(version, Some(global_seq)),
-                )
-                .expect("valid register global current row")
-                .raw()
-                .to_vec(),
+                version.bind_groove_record(
+                    owned_record_from_storage_values(
+                        &self
+                            .table_in_schema(version.table(), schema_version)?
+                            .global_current_storage_tables()[1],
+                        register_global_current_values(version, Some(global_seq)),
+                    )
+                    .expect("valid register global current row"),
+                ),
             ),
         }
         batch.update(
@@ -4116,14 +4117,14 @@ where
                     )
                     .as_ref(),
                     history_primary_key(version),
-                    owned_record_from_storage_values(
-                        &table.ahead_current_storage_tables()[0],
-                        global_current_values(&table, version, None)
-                            .expect("valid ahead current values"),
-                    )
-                    .expect("valid ahead current row")
-                    .raw()
-                    .to_vec(),
+                    version.bind_groove_record(
+                        owned_record_from_storage_values(
+                            &table.ahead_current_storage_tables()[0],
+                            global_current_values(&table, version, None)
+                                .expect("valid ahead current values"),
+                        )
+                        .expect("valid ahead current row"),
+                    ),
                 );
             }
             VersionLayer::Deletion => batch.insert_raw(
@@ -4135,15 +4136,15 @@ where
                 )
                 .as_ref(),
                 history_primary_key(version),
-                owned_record_from_storage_values(
-                    &self
-                        .table_in_schema(version.table(), schema_version)?
-                        .ahead_current_storage_tables()[1],
-                    register_global_current_values(version, None),
-                )
-                .expect("valid register ahead current row")
-                .raw()
-                .to_vec(),
+                version.bind_groove_record(
+                    owned_record_from_storage_values(
+                        &self
+                            .table_in_schema(version.table(), schema_version)?
+                            .ahead_current_storage_tables()[1],
+                        register_global_current_values(version, None),
+                    )
+                    .expect("valid register ahead current row"),
+                ),
             ),
         }
         self.insert_ahead_current_key(
@@ -4513,14 +4514,14 @@ where
                     batch.insert_raw(
                         history_table.as_ref(),
                         history_primary_key(&stored),
-                        stored.record.raw().to_vec(),
+                        stored.groove_record(),
                     );
                 }
             } else {
                 batch.insert_raw_fresh(
                     history_table.as_ref(),
                     history_primary_key(&stored),
-                    stored.record.raw().to_vec(),
+                    stored.groove_record(),
                 );
             }
             if update_current_indexes && !matches!(fate, Fate::Rejected(_)) && global_seq.is_none()

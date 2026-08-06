@@ -807,7 +807,6 @@ where
         self.clock.applied_global_watermark = GlobalSeq(0);
         self.clock.applied_global_above_watermark.clear();
         self.node_aliases.clear();
-        self.catalogue.schema_version_aliases.clear();
         self.rejections.child_txs_by_parent.clear();
         self.rejections.rejected_transactions.clear();
         self.branches.branches.clear();
@@ -1284,7 +1283,7 @@ where
                     self.catalogue.current_schema_version_id,
                 ),
                 history_primary_key(&stored),
-                stored.record.raw().to_vec(),
+                stored.groove_record(),
             );
             self.update_merge_heads_for_content_version(&mut batch, &stored)?;
             self.write_ahead_current_insert(&mut batch, &stored)?;
@@ -1445,7 +1444,7 @@ where
                 self.catalogue.current_schema_version_id,
             ),
             history_primary_key(&stored),
-            stored.record.raw().to_vec(),
+            stored.groove_record(),
         );
         self.update_merge_heads_for_content_version(&mut batch, &stored)?;
         self.write_ahead_current_insert(&mut batch, &stored)?;

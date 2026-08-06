@@ -108,6 +108,7 @@ impl IvmRuntime {
         let table_descriptors = schema
             .tables
             .iter()
+            .filter(|table| !table.has_schema_variants())
             .map(|table| (table.name.clone(), table.record_schema()))
             .collect();
         let mut runtime = Self {
@@ -1162,6 +1163,9 @@ impl IvmRuntime {
 
     pub fn add_dedup_schema_indices(&mut self) -> Result<(), IvmRuntimeError> {
         for table in self.schema.tables.clone() {
+            if table.has_schema_variants() {
+                continue;
+            }
             for index in &table.indices {
                 self.add_dedup_schema_index(&table, index)?;
             }
@@ -3525,7 +3529,7 @@ where
     if is_windowed_history_table(&table.name)
         && let Some(primary_key) = &table.primary_key
     {
-        RecordStore::new_windowed(
+        RecordStore::new_windowed_versioned(
             storage,
             &table.name,
             primary_key_descriptor(primary_key),
@@ -3534,6 +3538,12 @@ where
     } else {
         RecordStore::new(storage, &table.name, descriptor)
     }
+}
+
+pub(super) fn single_layout_payload(stored: &[u8]) -> Result<&[u8], crate::storage::Error> {
+    let (_, payload) = crate::records::split_versioned_record(stored)
+        .map_err(|error| crate::storage::Error::InvalidWindowRecord(error.to_string()))?;
+    Ok(payload)
 }
 
 fn primary_key_descriptor(primary_key: &PrimaryKey) -> RecordDescriptor {
@@ -9893,6 +9903,8 @@ mod tests {
         let second = albums
             .create(&[Value::U64(2), Value::String("two".to_owned())])
             .unwrap();
+        let first = crate::records::encode_versioned_record(0, &first);
+        let second = crate::records::encode_versioned_record(0, &second);
         store
             .write_many(&[store.set(b"1", &first), store.set(b"2", &second)])
             .unwrap();
@@ -10221,6 +10233,8 @@ mod tests {
         let second = albums
             .create(&[Value::U64(2), Value::String("two".to_owned())])
             .unwrap();
+        let first = crate::records::encode_versioned_record(0, &first);
+        let second = crate::records::encode_versioned_record(0, &second);
 
         store
             .write_many(&[store.set(b"1", &first), store.set(b"2", &second)])

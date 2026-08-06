@@ -31,6 +31,12 @@ use crate::storage::{
 };
 use crate::window_codec::TARGET_RECORDS_PER_WINDOW;
 
+fn version_zero_payload(stored: &[u8]) -> &[u8] {
+    let (version, payload) = crate::records::split_versioned_record(stored).unwrap();
+    assert_eq!(version, 0);
+    payload
+}
+
 fn albums_schema() -> DatabaseSchema {
     DatabaseSchema::new([TableSchema::new(
         "albums",
@@ -1100,16 +1106,17 @@ fn commits_insert_update_and_delete_batches() {
             .storage
             .get("albums", &PrimaryKeyValue::U64(7).into_bytes())
             .unwrap(),
-        Some(
-            database
+        Some(crate::records::encode_versioned_record(
+            0,
+            &database
                 .ivm_runtime
                 .schema()
                 .table("albums")
                 .unwrap()
                 .record_schema()
                 .create(&[Value::U64(7), Value::String("Blue Train".to_owned())])
-                .unwrap()
-        )
+                .unwrap(),
+        ))
     );
 
     let mut batch = database.open_batch();
@@ -1129,8 +1136,9 @@ fn commits_insert_update_and_delete_batches() {
         .table("albums")
         .unwrap()
         .record_schema();
+    let stored = version_zero_payload(&stored);
     assert_eq!(
-        descriptor.get(&stored, "title").unwrap(),
+        descriptor.get(stored, "title").unwrap(),
         Value::String("Giant Steps".to_owned())
     );
 
@@ -2596,13 +2604,14 @@ fn inserts_accept_values_in_table_declaration_order_even_when_storage_order_diff
         .unwrap()
         .unwrap();
 
-    assert_eq!(descriptor.get(&stored, "id").unwrap(), Value::U64(7));
+    let stored = version_zero_payload(&stored);
+    assert_eq!(descriptor.get(stored, "id").unwrap(), Value::U64(7));
     assert_eq!(
-        descriptor.get(&stored, "title").unwrap(),
+        descriptor.get(stored, "title").unwrap(),
         Value::String("Blue Train".to_owned())
     );
     assert_eq!(
-        descriptor.get(&stored, "rating").unwrap(),
+        descriptor.get(stored, "rating").unwrap(),
         Value::Nullable(Some(Box::new(Value::F64(4.5))))
     );
 }
@@ -2690,7 +2699,9 @@ fn composite_primary_keys_are_encoded_from_multiple_columns() {
         .record_schema();
     let stored = database.storage.get("history", &key).unwrap().unwrap();
     assert_eq!(
-        descriptor.get(&stored, "payload").unwrap(),
+        descriptor
+            .get(version_zero_payload(&stored), "payload")
+            .unwrap(),
         Value::String("first".to_owned())
     );
 
@@ -6951,7 +6962,7 @@ fn same_key_writes_in_one_batch_emit_deltas_against_earlier_batch_writes() {
             .table("albums")
             .unwrap()
             .record_schema()
-            .get(&stored, "title")
+            .get(version_zero_payload(&stored), "title")
             .unwrap(),
         Value::String("Giant Steps".to_owned())
     );
@@ -6995,7 +7006,7 @@ fn inserts_over_existing_primary_keys_are_rejected() {
             .table("albums")
             .unwrap()
             .record_schema()
-            .get(&stored, "title")
+            .get(version_zero_payload(&stored), "title")
             .unwrap(),
         Value::String("Blue Train".to_owned())
     );
