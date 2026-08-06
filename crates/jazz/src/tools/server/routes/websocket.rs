@@ -615,7 +615,7 @@ async fn handle_ws_connection(
         return;
     }
 
-    loop {
+    'connection: loop {
         tokio::select! {
             eviction = admission_registration.evict_rx.recv() => {
                 if eviction.is_some() {
@@ -655,19 +655,38 @@ async fn handle_ws_connection(
                             break;
                         }
                     };
-                    let outbound = match core_server_shell.receive_tick_take(session, frames).await {
-                        Ok(frames) => frames,
+                    // The shell owns a synchronous database, so one tick is the
+                    // smallest ordering-preserving unit at which its newly
+                    // durable responses can be observed. Do not hold those
+                    // responses behind the rest of this WebSocket message: a
+                    // large import can otherwise delay an already-global
+                    // FateUpdate until every later commit has been ingested.
+                    let mut outbound = match core_server_shell.receive_tick_stream(session, frames) {
+                        Ok(outbound) => outbound,
                         Err(error) => {
                             send_ws_error(
                                 &mut socket,
                                 WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
                             )
                             .await;
-                            break;
+                            break 'connection;
                         }
                     };
-                    if !outbound.is_empty()
-                        && let Err(error) = send_ws_encoded_frames(&mut socket, &outbound).await {
+                    while let Some(outbound) = outbound.recv().await {
+                        let outbound = match outbound {
+                            Ok(frames) => frames,
+                            Err(error) => {
+                                send_ws_error(
+                                    &mut socket,
+                                    WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
+                                )
+                                .await;
+                                break 'connection;
+                            }
+                        };
+                        if !outbound.is_empty()
+                            && let Err(error) = send_ws_encoded_frames(&mut socket, &outbound).await
+                        {
                             send_ws_error(
                                 &mut socket,
                                 WireError::new(
@@ -677,8 +696,9 @@ async fn handle_ws_connection(
                                 ),
                             )
                             .await;
-                            break;
+                            break 'connection;
                         }
+                    }
                 }
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Ok(Message::Ping(payload))) => {
@@ -840,12 +860,13 @@ mod tests {
     use crate::groove::schema::ColumnType as CoreColumnType;
     use crate::groove::storage::MemoryStorage as CoreMemoryStorage;
     use crate::ids::NodeUuid;
+    use crate::protocol::SyncMessage;
     use crate::query::{Query, claim, col, eq};
     use crate::schema::{ColumnSchema, JazzSchema, Policy, TableSchema};
-    use crate::tx::DurabilityTier;
+    use crate::tx::{DurabilityTier, TxId};
     use crate::wire::FEATURE_STRUCTURED_ERRORS;
-    use crate::wire::decode_frame;
     use crate::wire::{TransportError, WireTransport};
+    use crate::wire::{WireStreamDecoder, decode_frame, decode_sync_message};
     use futures::StreamExt as _;
     use futures::stream::FuturesUnordered;
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
@@ -1322,6 +1343,23 @@ mod tests {
             .collect()
     }
 
+    fn fate_tx_ids(decoder: &mut WireStreamDecoder, message: &WsMessage) -> Vec<TxId> {
+        decode_ws_message(message)
+            .into_iter()
+            .filter_map(|frame| match frame {
+                WireFrame::Message(envelope) => decoder
+                    .decode_message(&envelope.payload, envelope.features)
+                    .ok()
+                    .and_then(|payload| decode_sync_message(&payload).ok())
+                    .and_then(|message| match message {
+                        SyncMessage::FateUpdate { tx_id, .. } => Some(tx_id),
+                        _ => None,
+                    }),
+                WireFrame::Hello(_) | WireFrame::Error(_) => None,
+            })
+            .collect()
+    }
+
     #[derive(Clone, Default)]
     struct TestWireTransport {
         queues: Rc<RefCell<TestWireQueues>>,
@@ -1400,6 +1438,19 @@ mod tests {
                 )
                 .expect("insert client row")
                 .row_uuid()
+        }
+
+        fn write_todo_tx_id(&self, title: &str) -> TxId {
+            self.db
+                .insert(
+                    "todos",
+                    RowCells::from([
+                        ("title".to_owned(), CoreValue::String(title.to_owned())),
+                        ("done".to_owned(), CoreValue::Bool(false)),
+                    ]),
+                )
+                .expect("insert client row")
+                .mergeable_tx_id()
         }
 
         fn insert_private_doc(&self, title: &str, owner: AuthorId) -> crate::ids::RowUuid {
@@ -1638,6 +1689,57 @@ mod tests {
             vec!["route sync".to_owned()],
             "the receiving client must materialize the row through the websocket route"
         );
+    }
+
+    // Internal route-boundary guard: WebSocket message boundaries are not
+    // observable through the public JazzClient facade. Two real Db clients and
+    // the public websocket route are therefore required to prove that a fate
+    // already made Global is emitted before a later input frame is ingested.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ws_flushes_early_global_fate_before_later_batch_frames() {
+        let state = make_ws_convergence_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let client = TestClient::new(ws_public_schema_convert(), 0xa1, 0xa100).await;
+        let mut ws = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
+
+        let early_tx = client.write_todo_tx_id("early fate");
+        let mut final_tx = early_tx;
+        for index in 0..32 {
+            final_tx = client.write_todo_tx_id(&format!("later fate {index}"));
+        }
+        let outbound = client.tick_take();
+        assert!(outbound.len() > 1, "import must contain later input frames");
+        ws.send(WsMessage::Binary(ws_frame_batch(&outbound).into()))
+            .await
+            .expect("send one batched import message");
+
+        let first_response = ws
+            .next()
+            .await
+            .expect("server response while later frames remain")
+            .expect("valid websocket response");
+        let mut decoder = WireStreamDecoder::new(current_wire_features())
+            .expect("current wire compression must be available");
+        let first_fates = fate_tx_ids(&mut decoder, &first_response);
+        assert!(
+            first_fates.contains(&early_tx),
+            "the first server response must include the already-global early transaction; frames={:?}",
+            decode_ws_message(&first_response)
+        );
+        assert!(
+            !first_fates.contains(&final_tx),
+            "the final transaction must not be ingested before the early fate is flushed"
+        );
+
+        let mut observed_final = false;
+        while !observed_final {
+            let response = ws
+                .next()
+                .await
+                .expect("server continues ingesting the batch")
+                .expect("valid websocket response");
+            observed_final = fate_tx_ids(&mut decoder, &response).contains(&final_tx);
+        }
     }
 
     // Internal route-boundary test: this exercises the public websocket
