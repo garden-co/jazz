@@ -5375,6 +5375,7 @@ function readPolicyOperandForTest(reader: PostcardReader): TestPolicyOperand {
 function skipSchemaValueType(reader: PostcardReader): void {
   const tag = reader.u64();
   if (tag === 11 || tag === 12) skipSchemaValueType(reader);
+  if (tag === 15) reader.option((schemaReader) => schemaReader.string());
 }
 
 function skipGrooveValue(reader: PostcardReader): void {

@@ -6,8 +6,9 @@ use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::protocol::{
-    PeerPayloadInventory, RegisterShapeOptions, ShapeAst, Subscribe, SubscriptionKey, SyncMessage,
-    VersionBundle, VersionRecord,
+    CurrentWriteSchema, LensOp, MigrationLens, PeerPayloadInventory, RegisterShapeOptions,
+    SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage, TableLens, VersionBundle,
+    VersionRecord,
 };
 use jazz::query::Query;
 use jazz::schema::{ColumnSchema, ColumnType, JazzSchema, Policy, TableSchema};
@@ -33,6 +34,28 @@ fn schema_requiring_string_name() -> JazzSchema {
         "required": ["name"],
         "additionalProperties": false
     })))
+}
+
+fn schema_with_copied_json_validation() -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "documents",
+        [
+            ColumnSchema::json("payload", None),
+            ColumnSchema::json(
+                "validated_payload",
+                Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    },
+                    "required": ["name"],
+                    "additionalProperties": false
+                })),
+            ),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public())])
 }
 
 fn open_db(schema: JazzSchema) -> Db<MemoryStorage> {
@@ -396,6 +419,54 @@ fn remote_ingest_rejects_json_schema_violation() {
     let document_id = row(4);
 
     let messages = ingest_remote_payload(&mut node, &schema, document_id, "{\"name\":123}");
+
+    assert_row_absent(&mut node, document_id, &messages);
+}
+
+/// A forward CopyColumn can move an otherwise valid source JSON value into a
+/// target column with a stricter JSON Schema. The authority must validate the
+/// translated target cells before it stages the inbound commit unit.
+///
+/// Direct wire construction is necessary: local write admission correctly
+/// rejects the target-invalid value before a CommitUnit can be emitted.
+#[test]
+fn forward_copy_lens_rejects_json_invalid_for_target_column() {
+    let source = documents_schema(None);
+    let target = SchemaVersion::new(schema_with_copied_json_validation());
+    let mut node = open_node(source.clone());
+
+    node.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(target.clone()),
+    })
+    .expect("publish target schema");
+    node.apply_sync_message(SyncMessage::PublishLens {
+        author: AuthorId::SYSTEM,
+        lens: MigrationLens::new(
+            source.version_id(),
+            target.id,
+            vec![TableLens {
+                source_table: "documents".to_owned(),
+                target_table: "documents".to_owned(),
+                ops: vec![LensOp::CopyColumn {
+                    from: "payload".to_owned(),
+                    to: "validated_payload".to_owned(),
+                }],
+            }],
+        ),
+    })
+    .expect("publish copy lens");
+    node.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: target.id,
+        },
+    })
+    .expect("select target write schema");
+
+    let document_id = row(8);
+    let messages = ingest_remote_payload(&mut node, &source, document_id, "{\"name\":123}");
 
     assert_row_absent(&mut node, document_id, &messages);
 }
