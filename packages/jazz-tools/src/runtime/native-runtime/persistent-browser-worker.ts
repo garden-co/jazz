@@ -7,6 +7,7 @@ import {
   type PersistentBrowserOpfsOwnerRequest,
   type PersistentBrowserSubscriptionFrame,
 } from "./persistent-browser-protocol.js";
+import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 
 type OpenMessage = Extract<PersistentBrowserOpfsOwnerRequest, { method: "open" }>;
 type WriteMessage = Extract<
@@ -78,7 +79,12 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
       }
       case "query": {
         const result = await getRuntime().query(...message.args);
-        postResult(message.id, result);
+        setNamedRowValuesEnumerable(result, true);
+        try {
+          postResult(message.id, result);
+        } finally {
+          setNamedRowValuesEnumerable(result, false);
+        }
         return;
       }
       case "createExecutedSubscription": {

@@ -22,7 +22,7 @@ use crate::protocol::SyncMessage;
 use crate::protocol_limits::{validate_sync_message_len, validate_wire_frame_len};
 
 /// Current Jazz wire protocol version.
-pub const WIRE_PROTOCOL_VERSION: u16 = 3;
+pub const WIRE_PROTOCOL_VERSION: u16 = 4;
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
@@ -809,8 +809,8 @@ mod tests {
             serde_json::to_value(frame).unwrap(),
             json!({
                 "Hello": {
-                "min_protocol_version": 3,
-                "max_protocol_version": 3,
+                "min_protocol_version": 4,
+                "max_protocol_version": 4,
                     "features": 5,
                     "role": "client"
                 }
@@ -1173,6 +1173,9 @@ mod tests {
                     crate::protocol::ResultMemberEntry::Row(crate::protocol::RealRowMemberEntry {
                         table: groove::Intern::new("res_l_child_3".to_owned()),
                         row_uuid: row,
+                        occurrence_id: Some(crate::tools::OutputOccurrenceId::single_source(
+                            crate::tools::ObjectId::from_uuid(row.0),
+                        )),
                         content_tx: Some(tx),
                         layer: Default::default(),
                         deletion_tx: None,
@@ -1279,6 +1282,7 @@ mod tests {
                 version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
+                    authorization_progress: None,
                 },
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
@@ -1294,6 +1298,7 @@ mod tests {
                 version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
+                    authorization_progress: None,
                 },
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
@@ -1369,6 +1374,7 @@ mod tests {
             version_bundles: Vec::new(),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: vec![tx_id],
+                authorization_progress: None,
             },
             result_member_adds: vec![entry.into()],
             result_member_removes: Vec::new(),

@@ -705,13 +705,9 @@ fn assert_settled_result_sets_unique(
     let Some(result_set) = node.query.settled_result_sets.get(&binding_view_key) else {
         return;
     };
-    let row_result_set = result_set
-        .iter()
-        .filter_map(crate::protocol::ResultMemberEntry::as_row)
-        .collect::<BTreeSet<_>>();
-    if let Some((table, row_uuid, first, second)) = duplicate_row_result_set(&row_result_set) {
+    if let Some((occurrence_id, first, second)) = duplicate_output_occurrence_result_set(result_set) {
         panic!(
-            "seed {seed}: subscription {subscription_ordinal} has multiple content versions for {table}.{row_uuid:?}: {first:?} and {second:?}"
+            "seed {seed}: subscription {subscription_ordinal} has multiple content versions for output occurrence {occurrence_id:?}: {first:?} and {second:?}"
         );
     }
 }
@@ -881,7 +877,7 @@ fn assert_view_update_result_set_matches_current_rows(node: &mut NodeState<Rocks
     let update = node.view_update_for_current_rows("todos").unwrap();
     let SyncMessage::ViewUpdate {
         version_bundles: _,
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         result_member_adds,
         result_member_removes,
         ..

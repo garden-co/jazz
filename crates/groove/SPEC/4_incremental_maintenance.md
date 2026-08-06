@@ -18,6 +18,7 @@ Invariant digest:
 - `INV-ARR-6`: Source operators MAY hydrate from static point, prefix, or range scan specs over their table/index arrangement key; the scan spec MUST participate in node identity, and one-shot static scans MUST NOT perturb existing subscriptions.
 - `INV-MV-1`: No state that feeds a maintained view may change without that maintained view observing the change, either as ordinary deltas through the runtime or as an explicit rebuild from authoritative base state. Producer classes include upstream sync apply, local commit finalize, fate application including merge-back/ahead cleanup, subscription registration changes, repair/refetch apply, and recovery. This invariant was made explicit after July 2026 incidents in fallback classification, bulk-load suppression, serve-dirty gating/epoch handling, fated ahead cleanup, and subscriber dirty propagation.
 - `INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffing, and delivery to subscribers — must be bounded by the size of the change and its affected keys, never by the size of the accumulated view state. Corollary 1: Full re-materialization or full-state diffing on a maintained path is a defect, even when its observable output is correct. Equivalence gates (INV-MV-1, the differential oracle) verify observations; INV-INC-1 constrains mechanism; passing the former does not license violating the latter. Corollary 2: A snapshot is not a separate concept: initial hydration is the first delta, applied to empty state, using the same delta shape and delivery pathway as every subsequent change. Any type, wire shape, or code path that exists only to carry the full current state of a maintained view is a second format of the view and shares the burden of proof of the no-second-formats rule. Corollary 3 (strong form, Anselm 2026-07-09): One-shot reads are the degenerate case of maintained views (subscribe, take first delta, unsubscribe) — not the other way around. New query capabilities must define their delta form no later than their one-shot form; a capability shipped one-shot-only is incomplete, not done. Legitimate O(state) moments (initial hydration, reset-after-revocation) are covered: there, the state IS the change.
+- `INV-INC-2`: The target `CollectBy` exception to `INV-INC-1` permits indexed maintenance plus terminal work bounded by a touched group's old/new selected windows, `R(limit)` when finite, in both collect and expand modes; it never permits accumulated-view work, and a scale canary is required before it becomes `now`.
 - `INV-REC-8`: Retractions reaching recursive state MUST be handled by full recompute from storage and diff against the previous accumulated set; subscribers MUST receive only the re...
 - `INV-REC-9`: After recompute, recursive step arrangements MUST be hydrated from full table snapshots and the full accumulated weighted record set before future positive incremental...
 - `INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes while the shape remains registered.
@@ -108,6 +109,30 @@ deltas, never unchanged matching rows or base-table changes outside the result
 existing subscriptions' future deltas (`INV-TICK-19`). The tick provides that
 isolation with per-tick memoization keyed by `{scope, node, tick, sub_tick}`,
 cleared after the tick (`INV-TICK-5`).
+
+**Decision, Anselm 2026-08-05 — narrow output-terminal exception to `INV-INC-1`
+(`INV-INC-2`, target).** A terminal `CollectBy` may retain a complete flat
+group. For a touched group `g`, let `D_g` be its input delta and let
+`W_g^-`/`W_g^+` be its old/new selected windows. `R_g(limit)` is the larger
+row-and-byte footprint of those windows, at most `limit` output occurrences for
+a finite limit. Indexed state maintenance may cost
+`O(|D_g| log(1 + |G_g|))`; selecting, rendering, comparing, and delivering
+MUST cost only `O(|D_g| + R_g(limit))`. It remains forbidden to scan,
+re-materialize, or diff unrelated groups or the rest of the accumulated group
+state.
+
+In collect mode this allowance renders and delivers the complete old/new parent
+as at most one `-old,+new` replacement. In expand mode it renders and delivers
+the actual diff of selected tuple occurrences, bounded by the old/new window
+footprint. Thus expansion does not turn the group exception into permission to
+scan accumulated state merely because it can yield many rows.
+
+This is a custom collector contract, not a result proved by the incremental-view
+literature. DBSP's `MIN` precedent is only that retained full state plus a
+specialized operator can improve on brute force; it does not establish that
+serializing a rendered list is cheap. The output-size work must be pinned by an
+explicit scale canary before this target becomes `now`; observational
+equivalence alone does not establish the mechanism law.
 
 ### 4.3 Arrangements: shared, logically-timed state
 

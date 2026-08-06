@@ -33,6 +33,8 @@ Invariant digest:
 - `INV-SYNC-25`: A stream served under known-state dedup followed by its repair responses MUST be observationally equivalent to the same stream served without dedup.
 - `INV-SYNC-26`: A receiver detecting a referenced version without its body MUST be able to request exactly those `(table, row_uuid, tx_time, tx_node_id)` payloads, and the server MUST serve them subject to ordinary read policy. The repair vocabulary and server/client repair helpers are implemented and activated for declared known-state subscriptions.
 - `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams; any local eviction touching stored row-version bodies invalidates persisted fast declarations before another declaration can be made.
+- `INV-SYNC-29`: A fast known-state declaration carrying authorization progress may suppress a reset for a pre-cursor membership difference only when its server-stamped authorization-progress token matches the serving peer's current token for that reader and canonical binding view. `crates/jazz/src/peer.rs::tests::fast_authorization_progress_bounds_membership_resets` enforces both bounds.
+- `INV-SYNC-28`: Structured-output wire v4 MUST carry recursive snapshots and whole-parent replacements in both complete and chunked view updates, reject recursive payloads exceeding named depth/width limits before semantic apply, and provide no v3 compatibility path.
 - `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as `Fate::Pending` with `DurabilityTier::Local` and emit exactly one `SyncMessage::CommitUnit`.
 - `INV-TX-3`: A commit unit whose Transaction.ntotalwrites does not equal the delivered version count MUST be rejected by the fate authority as RejectionReason::MalformedCommit(...)...
 - `INV-TX-4`: Duplicate commit units with identical payloads MUST be idempotent and return the already-known fate; duplicate units with conflicting payloads MUST fail as Error::Conf...
@@ -67,6 +69,17 @@ human-readable golden checks. Row/version payloads remain groove custom
 replace row encoding. The same split applies at the binding ABI (ch. 13):
 commands, acks, and event metadata are postcard envelopes, while row-shaped
 payloads are descriptor/raw `Record` bytes at the hot boundary.
+
+**Decision, 2026-08-04 — wire v4 is a breaking cut.** Structured query output
+changes the semantic/postcard layout. Rust and TypeScript protocol constants
+MUST move together from v3 to v4, and Rust, WASM, N-API, and TypeScript fixtures
+MUST be refreshed together. The current wire advertises exactly v3 in Rust
+(`crates/jazz/src/wire.rs:24-25`, `:83-92`) and TypeScript
+(`packages/jazz-tools/src/runtime/native-runtime/websocket.ts:40-47`); no older
+negotiated version or version-specific compatibility shim exists. v4 therefore
+MUST NOT negotiate v3 or retain a compatibility decoder. At the cut,
+`RelationSnapshot` and `RelationEdge` are deleted rather than carried as a
+parallel result representation.
 
 Inside Rust, `Db` and `PeerConnection` keep the semantic `Transport` surface over
 `SyncMessage`. Binding/server byte transports use `WireFrame` and are bridged at
@@ -218,6 +231,18 @@ and `cold_reset_bulk_ingest_matches_incremental_ingest`
 The remaining reset-specific bypass and the move to an `OrderedKvStorage`
 transaction are implementation work, not protocol invariants.
 
+**Target structured-output delivery (v4).** A structured reset carries an
+ordered recursive snapshot. An incremental update carries whole-parent
+replacements addressed by stable output occurrence; its extensible envelope
+reserves distinct tags for future narrower delta shapes without changing the v4
+meaning. Both `SyncMessage::ViewUpdate` and `ViewUpdateChunk` MUST carry the
+same structured-output vocabulary, and chunk assembly MUST publish no partial
+logical replacement before its final chunk. Row/version payload references and
+dedup remain separate from the rendered tree so v4 does not duplicate row bodies
+already available through typed members and bundles. The current chunk merger
+only appends flat member/fact vectors (`crates/jazz/src/db.rs:6026-6078`,
+`:6120-6154`); it is not structured-output behavior yet.
+
 _Further invariants._ `INV-SYNC-17` — a result add carries enough
 deletion-register witness to reconstruct the row's visible presence/absence.
 `INV-SYNC-20` — incremental view updates are observationally equivalent to a full
@@ -308,6 +333,14 @@ Protocol size limits are enforced at the layer that can recover correctly:
   ~64 KiB blob chunk target while preventing one content response from becoming
   an unbounded allocation. The content lane may split larger values into
   multiple extents.
+- Structured-output v4 adds named `MAX_STRUCTURED_RESULT_DEPTH` and
+  `MAX_STRUCTURED_RESULT_WIDTH` limits in `protocol_limits.rs`. A receiver MUST
+  enforce both before recursively decoding/allocating an untrusted structured
+  snapshot, replacement, or chunk accumulation. Byte caps alone do not bound
+  recursive decoder stack depth or the count of children/nodes allocated from a
+  compact payload. The limits apply to the rendered payload at every nesting
+  level and are protocol-admission limits: over-limit input is rejected before
+  semantic application (`INV-SYNC-28`).
 
 Outbound websocket batching is byte-budgeted by the same 2 MiB encoded-frame
 limit: senders split batches across multiple binary messages instead of relying
@@ -401,6 +434,43 @@ A subscriber declares its known state per usage-site query in one of two forms:
   wire `TxId` form (`INV-SYNC-21`); unfated versions are declarable because
   `TxId`s exist before fate.
 
+#### Authorization progress
+
+A fast declaration may additionally carry an **authorization-progress token**.
+It is a server-stamped monotonic generation of the authorization state governing
+this reader's visibility for this canonical binding view (shape, binding, and
+read view). It is deliberately part of the declaration, rather than an
+out-of-band connection hint: it qualifies exactly the state the subscriber is
+claiming to have applied and persists with that state across reconnects.
+`ViewUpdate` and `ViewUpdateChunk` carry the server stamp beside their
+peer-payload inventory, so the receiver persists it atomically with the
+corresponding settled fast fact before later echoing it in the declaration.
+
+The serving peer owns the token. Its granularity is **one reader plus one
+canonical binding view**, not a global policy-head counter. It advances when
+that reader/view is rebuilt because its effective authorization changed (for
+example, session claims changed or a permissions head was installed). This
+avoids forcing every reader to reset for unrelated policy churn. The cost of a
+token that is too coarse is excess resets; the cost of one that is too fine is
+unsafe suppression of a reset, so an absent token, an unknown server generation,
+or a mismatch is always treated conservatively. The peer retains the generation
+in its resumable peer state; if that state is not available after server loss,
+the old token cannot match.
+
+A matching token lets the server conclude that a pre-cursor membership
+difference is not evidence of an authorization change. It does **not** assert
+payload possession (the ordinary known-state body/repair rules still apply),
+nor does a mismatched token itself prove that membership is unreconstructible.
+
+The reset rule has two bounds. A reset is **required** when authorization
+progress differs and the resulting membership cannot be reconstructed from the
+data cursor (a removal or a newly visible member settled at or before `p`). A
+reset is **forbidden** when authorization progress matches and the data cursor
+is sufficient; when it is not sufficient, the server sends the smallest
+expressible incremental repair and resets only if that repair cannot be encoded
+as normal additions/removals. Conversely, an authorization-token mismatch with
+only post-cursor additions is reconstructible and therefore must not reset.
+
 Every `ViewUpdate` carries `settled_through`, the serving node's applied global
 watermark when the update was assembled. Its meaning is per binding view: this
 update reflects every global change at or before that position for the served
@@ -477,6 +547,34 @@ network wire-frame batches.
 ## Open Questions
 
 ### Open questions
+
+- 🔶 **Pending catalogue admission should park, not reject.** `SubscribeRejected`
+  is specified for a **permanent** capability gap, and states that after it the
+  subscription is not active and the requester must not expect `ViewUpdate`s.
+  The implementation also emits `ShapeRegistrationPendingCatalogueAdmission`,
+  which is **transient**: the serving peer parks the shape when its catalogue
+  schema is absent and admits it later, but it drops the accompanying
+  `Subscribe`. Only a new `Subscribe` re-registers, and the requester does not
+  retry, so nothing re-drives admission and delivery never begins.
+
+  The parking machinery already exists — the serving peer parks the _shape_. The
+  proposed direction is to park the _subscription_ alongside it and activate it
+  when admission completes, so this case stops being a rejection at all and
+  `SubscribeRejected` keeps its permanent-only meaning untouched. Two riders
+  the design must answer:
+  - **Restart.** Parking is in-memory (see _Parked-unit persistence_ below), so
+    a serving-peer restart drops parked subscriptions. Requester retry is then
+    still needed as a recovery path, even though it is no longer the normal
+    path. Decide whether that is stated as an implementation limitation or
+    resolved by persisting parked units.
+  - **Bound.** A subscription parked for a shape that is never admitted must not
+    accumulate indefinitely. Decide the bound and what the requester observes
+    when it is reached — that outcome may legitimately be a rejection, at which
+    point the permanent/transient distinction in the reason vocabulary becomes
+    meaningful again.
+
+  Observed against a two-client browser scenario where the local client
+  recovers but cross-client delivery never starts.
 
 - 🔶 **Transport state.** The current binding-facing send/poll surface can
   express "send" and "no message staged"; it cannot express closed/error/

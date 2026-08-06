@@ -380,14 +380,21 @@ where
         )?;
         let mut tx_versions_cache = BTreeMap::<TxId, Vec<VersionRow>>::new();
         let known_state_position = match &known_state {
-            Some(KnownStateDeclaration::Fast { position, .. }) => Some(*position),
+            Some(
+                KnownStateDeclaration::Fast { position, .. }
+                | KnownStateDeclaration::FastWithAuthorizationProgress { position, .. },
+            ) => Some(*position),
             Some(KnownStateDeclaration::ExactVersionSet { .. }) | None => None,
         };
         let known_state_exact_refs = match &known_state {
             Some(KnownStateDeclaration::ExactVersionSet { versions }) => {
                 versions.iter().cloned().collect::<BTreeSet<_>>()
             }
-            Some(KnownStateDeclaration::Fast { .. }) | None => BTreeSet::new(),
+            Some(
+                KnownStateDeclaration::Fast { .. }
+                | KnownStateDeclaration::FastWithAuthorizationProgress { .. },
+            )
+            | None => BTreeSet::new(),
         };
         let skipped_known_state_rows = result_member_adds
             .iter()
@@ -611,6 +618,7 @@ where
             version_bundles: Vec::new(),
             peer_payload_inventory: PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs,
+                authorization_progress: None,
             },
             result_member_adds: result_member_adds.into_iter().collect(),
             result_member_removes: result_member_removes.into_iter().collect(),
@@ -732,6 +740,7 @@ where
             version_carriers,
             version_bundles,
             peer_complete_tx_payload_refs,
+            authorization_progress,
             result_member_adds,
             result_member_removes,
             program_fact_adds,
@@ -755,6 +764,11 @@ where
             }
             Err(error) => return Err(error),
         };
+        if let Some(progress) = authorization_progress {
+            self.query
+                .authorization_progress_by_binding_view
+                .insert(binding_view_key, progress);
+        }
         if reset_result_set {
             self.query
                 .initial_hydration_binding_views
@@ -870,12 +884,11 @@ where
                 if self.remove_settled_result_member_indexed(binding_view_key, &member) {
                     continue;
                 }
-                if let Some((removed_table, removed_row_uuid, _)) = member.as_row()
+                if let Some(occurrence_id) = member.output_occurrence_id()
                     && self
-                        .remove_settled_result_member_for_row_indexed(
+                        .remove_settled_result_member_for_occurrence_indexed(
                             binding_view_key,
-                            removed_table,
-                            removed_row_uuid,
+                            occurrence_id,
                         )
                         .is_some()
                 {
@@ -883,12 +896,11 @@ where
                 }
             }
             for member in result_member_adds {
-                if let Some((added_table, added_row_uuid, _)) = member.as_row() {
+                if let Some(occurrence_id) = member.output_occurrence_id() {
                     result_members_need_rewrite |= self
-                        .remove_settled_result_member_for_row_indexed(
+                        .remove_settled_result_member_for_occurrence_indexed(
                             binding_view_key,
-                            added_table,
-                            added_row_uuid,
+                            occurrence_id,
                         )
                         .is_some();
                 }
@@ -935,20 +947,15 @@ where
         // debug_assert, so it is wasted work in release. Gate to debug builds.
         #[cfg(debug_assertions)]
         {
-            let row_result_set = self
+            if let Some((occurrence_id, first, second)) = self
                 .query
                 .settled_result_sets
                 .get(&binding_view_key)
-                .into_iter()
-                .flat_map(|members| members.iter())
-                .filter_map(ResultMemberEntry::as_row)
-                .collect::<BTreeSet<_>>();
-            if let Some((table, row_uuid, first, second)) =
-                duplicate_row_result_set(&row_result_set)
+                .and_then(duplicate_output_occurrence_result_set)
             {
                 debug_assert!(
                     first == second,
-                    "settled binding view {binding_view_key:?} has multiple content versions for {table}.{row_uuid:?}: {first:?} and {second:?}"
+                    "settled binding view {binding_view_key:?} has multiple content versions for output occurrence {occurrence_id:?}: {first:?} and {second:?}"
                 );
             }
         }

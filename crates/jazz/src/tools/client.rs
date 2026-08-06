@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -12,8 +12,9 @@ use crate::db::{
     Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, Error as CoreDbError,
     ExclusiveTxOps, LocalUpdates as CoreLocalUpdates, PeerConnection as CorePeerConnection,
     Propagation as CorePropagation, ReadOpts as CoreReadOpts,
-    SubscriptionEvent as CoreSubscriptionEvent, TextEdit as CoreTextEdit, TickScheduler,
-    TickUrgency, Transport as CoreTransport, WireTransportAdapter,
+    SubscriptionEvent as CoreSubscriptionEvent, SubscriptionOutputRow as CoreSubscriptionOutputRow,
+    TextEdit as CoreTextEdit, TickScheduler, TickUrgency, Transport as CoreTransport,
+    WireTransportAdapter,
 };
 use crate::groove::records::Value as CoreValue;
 use crate::groove::storage::MemoryStorage as CoreMemoryStorage;
@@ -43,15 +44,16 @@ use crate::tx::{
     RejectionReason as CoreRejectionReason, TxId as CoreTxId,
 };
 use base64::Engine;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 #[cfg(feature = "rocksdb")]
 use crate::tools::ClientStorage;
 use crate::tools::{
-    AppContext, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionRejectReason,
-    SubscriptionServerFailureCode, SubscriptionStream, SubscriptionStreamItem,
+    AppContext, JazzError, ObjectId, OutputOccurrenceId, Result, SubscriptionHandle,
+    SubscriptionRejectReason, SubscriptionServerFailureCode, SubscriptionStream,
+    SubscriptionStreamItem,
 };
 
 type CoreMemoryDb = CoreDb<CoreMemoryStorage>;
@@ -87,7 +89,25 @@ enum StorageBundle {
 struct UnverifiedJwtClaims {
     sub: String,
     #[serde(default)]
-    claims: serde_json::Value,
+    claims: JwtClaimsPayload,
+}
+
+/// Keeps a missing application-claims field distinct from a supplied JSON
+/// value, including JSON `null`.
+#[derive(Debug, Default)]
+enum JwtClaimsPayload {
+    #[default]
+    Absent,
+    Present(serde_json::Value),
+}
+
+impl<'de> Deserialize<'de> for JwtClaimsPayload {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        serde_json::Value::deserialize(deserializer).map(Self::Present)
+    }
 }
 
 /// Jazz client for building applications.
@@ -629,7 +649,7 @@ impl ClientDb {
         .await?;
         let inner = Rc::new(RefCell::new(inner));
         if has_upstream {
-            Self::spawn_local_tick_driver(Rc::clone(&inner), Rc::clone(&scheduler));
+            Self::spawn_local_tick_driver(Rc::downgrade(&inner), Rc::clone(&scheduler));
         }
         Ok(Rc::new(Self { inner }))
     }
@@ -998,7 +1018,7 @@ impl ClientDb {
     }
 
     fn spawn_local_tick_driver(
-        inner: Rc<RefCell<ClientDbInner>>,
+        inner: Weak<RefCell<ClientDbInner>>,
         scheduler: Rc<TickSchedulerImpl>,
     ) {
         let state = scheduler.wake_handle();
@@ -1006,6 +1026,9 @@ impl ClientDb {
             loop {
                 state.notify.notified().await;
                 while let Some(urgency) = scheduler.take() {
+                    let Some(inner) = inner.upgrade() else {
+                        return;
+                    };
                     if urgency == TickUrgency::Deferred {
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     }
@@ -1231,7 +1254,7 @@ impl ClientDbInner {
         let inner = Rc::clone(inner);
         tokio::task::spawn_local(async move {
             let mut stream = stream;
-            let mut current_rows: Vec<crate::node::CurrentRow> = Vec::new();
+            let mut current_rows: Vec<CoreSubscriptionOutputRow> = Vec::new();
             while let Some(event) = stream.next_event().await {
                 match event {
                     CoreSubscriptionEvent::Delta {
@@ -1241,9 +1264,9 @@ impl ClientDbInner {
                         removed,
                         ..
                     } => {
-                        let previous_rows: Vec<ObjectId> = current_rows
+                        let previous_rows: Vec<OutputOccurrenceId> = current_rows
                             .iter()
-                            .map(|row| ObjectId::from_uuid(row.row_uuid().0))
+                            .map(|row| row.occurrence_id.clone())
                             .collect();
                         JazzClient::apply_core_subscription_rows(
                             &mut current_rows,
@@ -1252,7 +1275,11 @@ impl ClientDbInner {
                             &updated,
                             &removed,
                         );
-                        inner.borrow_mut().remember_rows(&table, &current_rows);
+                        let rows_for_cache = current_rows
+                            .iter()
+                            .map(|row| row.row.clone())
+                            .collect::<Vec<_>>();
+                        inner.borrow_mut().remember_rows(&table, &rows_for_cache);
                         let delta = if reset {
                             JazzClient::core_subscription_reset_delta(
                                 &db,
@@ -1445,7 +1472,10 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
 
     Some(Session {
         user_id: user_id.to_string(),
-        claims: claims.claims,
+        claims: match claims.claims {
+            JwtClaimsPayload::Absent => serde_json::Value::Object(serde_json::Map::new()),
+            JwtClaimsPayload::Present(claims) => claims,
+        },
         ..Session::new(user_id)
     })
 }
@@ -1954,8 +1984,13 @@ impl JazzClient {
         }
     }
     fn core_query(&self, query: &Query) -> Result<crate::query::Query> {
+        if !query.joins.is_empty() {
+            return Err(JazzError::Query(
+                "flat joined output requires complete OutputOccurrenceId source tuples; a root row id alone is unsafe"
+                    .to_string(),
+            ));
+        }
         if query.disjuncts.len() != 1
-            || !query.joins.is_empty()
             || !query.array_subqueries.is_empty()
             || query.recursive.is_some()
             || query.include_deleted
@@ -2102,17 +2137,20 @@ impl JazzClient {
         Ok(rows)
     }
 
-    fn core_subscription_row_to_public(db: &Backend, row: &crate::node::CurrentRow) -> Result<Row> {
-        let (_, encoded) = row.encoded_record();
+    fn core_subscription_row_to_public(
+        db: &Backend,
+        row: &CoreSubscriptionOutputRow,
+    ) -> Result<Row> {
+        let (_, encoded) = row.row.encoded_record();
         let provenance = db
-            .row_provenance(row)
+            .row_provenance(&row.row)
             .map_err(|error| JazzError::Query(error.to_string()))?
             .map(core_row_provenance_to_public)
             .unwrap_or_else(|| {
                 crate::tools::metadata::RowProvenance::for_insert("jazz:unknown", 0)
             });
         Ok(Row::new(
-            ObjectId::from_uuid(row.row_uuid().0),
+            row.occurrence_id.clone(),
             encoded.to_vec(),
             BatchId([0; 16]),
             provenance,
@@ -2121,7 +2159,7 @@ impl JazzClient {
 
     fn core_subscription_snapshot_delta(
         db: &Backend,
-        rows: &[crate::node::CurrentRow],
+        rows: &[CoreSubscriptionOutputRow],
     ) -> Result<OrderedRowDelta> {
         let added = rows
             .iter()
@@ -2129,7 +2167,7 @@ impl JazzClient {
             .map(|(index, row)| {
                 let public = Self::core_subscription_row_to_public(db, row)?;
                 Ok(OrderedAdded {
-                    id: public.id,
+                    id: public.id.clone(),
                     index,
                     row: public,
                 })
@@ -2143,12 +2181,12 @@ impl JazzClient {
 
     fn core_subscription_reset_delta(
         db: &Backend,
-        previous_rows: &[ObjectId],
-        rows: &[crate::node::CurrentRow],
+        previous_rows: &[OutputOccurrenceId],
+        rows: &[CoreSubscriptionOutputRow],
     ) -> Result<OrderedRowDelta> {
         let removed = previous_rows
             .iter()
-            .copied()
+            .cloned()
             .enumerate()
             .map(|(index, id)| OrderedRemoved { id, index })
             .collect();
@@ -2158,10 +2196,10 @@ impl JazzClient {
     }
 
     fn apply_core_subscription_rows(
-        current_rows: &mut Vec<crate::node::CurrentRow>,
+        current_rows: &mut Vec<CoreSubscriptionOutputRow>,
         reset: bool,
-        added_rows: &[crate::node::CurrentRow],
-        updated_rows: &[crate::node::CurrentRow],
+        added_rows: &[CoreSubscriptionOutputRow],
+        updated_rows: &[CoreSubscriptionOutputRow],
         removed_rows: &[crate::db::RemovedRow],
     ) {
         if reset {
@@ -2170,12 +2208,12 @@ impl JazzClient {
         current_rows.retain(|row| {
             !removed_rows
                 .iter()
-                .any(|removed| row.row_uuid() == removed.row_uuid)
+                .any(|removed| row.occurrence_id == removed.occurrence_id)
         });
         for row in updated_rows {
             if let Some(position) = current_rows
                 .iter()
-                .position(|current| current.row_uuid() == row.row_uuid())
+                .position(|current| current.occurrence_id == row.occurrence_id)
             {
                 current_rows[position] = row.clone();
             }
@@ -2183,7 +2221,7 @@ impl JazzClient {
         for row in added_rows {
             if let Some(position) = current_rows
                 .iter()
-                .position(|current| current.row_uuid() == row.row_uuid())
+                .position(|current| current.occurrence_id == row.occurrence_id)
             {
                 current_rows[position] = row.clone();
             } else {
@@ -2194,24 +2232,25 @@ impl JazzClient {
 
     fn core_subscription_change_delta(
         db: &Backend,
-        current_rows: &[crate::node::CurrentRow],
-        added_rows: &[crate::node::CurrentRow],
-        updated_rows: &[crate::node::CurrentRow],
+        current_rows: &[CoreSubscriptionOutputRow],
+        added_rows: &[CoreSubscriptionOutputRow],
+        updated_rows: &[CoreSubscriptionOutputRow],
         removed_rows: &[crate::db::RemovedRow],
     ) -> Result<OrderedRowDelta> {
-        let index_of = |id: ObjectId| {
+        let index_of = |id: &OutputOccurrenceId| {
             current_rows
                 .iter()
-                .position(|row| ObjectId::from_uuid(row.row_uuid().0) == id)
+                .position(|row| &row.occurrence_id == id)
                 .unwrap_or(0)
         };
         let added = added_rows
             .iter()
             .map(|row| {
                 let public = Self::core_subscription_row_to_public(db, row)?;
+                let index = index_of(&public.id);
                 Ok(OrderedAdded {
-                    id: public.id,
-                    index: index_of(public.id),
+                    id: public.id.clone(),
+                    index,
                     row: public,
                 })
             })
@@ -2220,9 +2259,9 @@ impl JazzClient {
             .iter()
             .map(|row| {
                 let public = Self::core_subscription_row_to_public(db, row)?;
-                let index = index_of(public.id);
+                let index = index_of(&public.id);
                 Ok(OrderedUpdated {
-                    id: public.id,
+                    id: public.id.clone(),
                     old_index: index,
                     new_index: index,
                     row: Some(public),
@@ -2233,7 +2272,7 @@ impl JazzClient {
             .iter()
             .enumerate()
             .map(|(index, row)| OrderedRemoved {
-                id: ObjectId::from_uuid(row.row_uuid.0),
+                id: row.occurrence_id.clone(),
                 index,
             })
             .collect();
@@ -2780,6 +2819,14 @@ mod tests {
         );
         format!("{header}.{payload}.sig")
     }
+
+    fn make_test_jwt_without_claims(sub: &str) -> String {
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"alg":"none","typ":"JWT"}"#);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&json!({ "sub": sub })).expect("serialize jwt payload"));
+        format!("{header}.{payload}.sig")
+    }
     #[test]
     fn core_integer_bridge_uses_signed_value_domain() {
         let core_value =
@@ -2810,6 +2857,29 @@ mod tests {
         let session = default_session_from_context(&context).expect("derive session from jwt");
         assert_eq!(session.user_id, "alice");
         assert_eq!(session.claims["join_code"], "secret-123");
+    }
+
+    // These internal tests are necessary because the distinction is made while
+    // decoding the unverified JWT, before a client connection can expose it.
+    #[test]
+    fn session_from_unverified_jwt_defaults_absent_claims_to_an_empty_object() {
+        let session = session_from_unverified_jwt(&make_test_jwt_without_claims("alice"))
+            .expect("derive session from jwt without application claims");
+
+        assert_eq!(session.claims, json!({}));
+        assert!(session_claims_to_core_claims(&session).is_ok());
+    }
+
+    #[test]
+    fn session_from_unverified_jwt_preserves_explicit_non_object_claims() {
+        let session = session_from_unverified_jwt(&make_test_jwt("alice", json!(null)))
+            .expect("derive session from jwt with explicit null claims");
+
+        let error = session_claims_to_core_claims(&session)
+            .expect_err("explicit null application claims must be rejected");
+        assert!(
+            matches!(error, JazzError::Connection(message) if message == "JWT claims payload must be a JSON object")
+        );
     }
 
     #[test]

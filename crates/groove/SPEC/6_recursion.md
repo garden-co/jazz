@@ -25,6 +25,7 @@ Invariant digest:
 - `INV-REC-13`: `arg_max_by` MUST NOT be accepted inside recursive graph seed or step graphs.
 - `INV-REC-14`: SQL lowering MUST either preserve a query's semantics exactly or reject it explicitly.
 - `INV-REC-15`: Nested recursive graphs MUST be rejected during validation/compilation.
+- `INV-REC-16`: A terminal collector's touched-rendered-group bound MUST NOT be applied to recursive fixed-point state, iterations, or nested logical time.
 
 ## Details
 
@@ -122,6 +123,14 @@ does not consume or suppress future tick deltas for existing subscribers
 
 _Further invariants._ `INV-REC-12` — recursive recompute does not persist
 per-context child operator state in the runtime state maps after it completes.
+
+**Target boundary rule (2026-08-04).** A terminal `CollectBy` may render a
+structured value after recursive evaluation has produced its flat output, but
+its touched-rendered-group exception to `INV-INC-1` does **not** bound recursive
+work. Fixed-point iteration count, frontier growth, recursive arrangements, and
+nested logical-time costs retain the contracts of this chapter. A conforming
+implementation MUST NOT attribute recursive cost to the terminal merely because
+the final rendered value is grouped (`INV-REC-16`).
 
 ## Open Questions
 

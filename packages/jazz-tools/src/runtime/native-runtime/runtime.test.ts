@@ -21,6 +21,7 @@ import { encodeSchema } from "./schema-codec.js";
 import { decodeNativeDelta } from "../subscription-manager.js";
 import { definePermissions } from "../../permissions/index.js";
 import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
+import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 
 const previousWebSocket = globalThis.WebSocket;
 
@@ -1887,6 +1888,28 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       ],
     });
+
+    setNamedRowValuesEnumerable(rows, true);
+    const clonedRows = structuredClone(rows);
+    setNamedRowValuesEnumerable(rows, false);
+    setNamedRowValuesEnumerable(clonedRows, false);
+    const clonedRelation = clonedRows[0]?.valuesByColumn?.get("todosViaOwner") as
+      | {
+          type: "Array";
+          value: Array<{
+            type: "Row";
+            value: { valuesByColumn?: Map<string, unknown> };
+          }>;
+        }
+      | undefined;
+    expect(clonedRelation?.value[0]?.value.valuesByColumn?.get("title")).toEqual({
+      type: "Text",
+      value: "Ship relation reads",
+    });
+
+    const unrelated = { valuesByColumn: "application data" };
+    setNamedRowValuesEnumerable(unrelated, false);
+    expect(Object.getOwnPropertyDescriptor(unrelated, "valuesByColumn")?.enumerable).toBe(true);
   });
 
   it("decodes native subscription chunks", async () => {

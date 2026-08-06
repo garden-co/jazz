@@ -220,6 +220,11 @@ harness = false
 name = "subscription_benchmark"
 harness = false
 
+[[bench]]
+name = "route_subscription_curve"
+harness = false
+required-features = ["testing"]
+
 [[test]]
 name = "large_blob_permissions"
 required-features = ["test"]
@@ -278,6 +283,10 @@ required-features = ["test"]
 
 [[test]]
 name = "parameterized_subscription_routing"
+required-features = ["test"]
+
+[[test]]
+name = "authorization_scope_reentry"
 required-features = ["test"]
 
 [[test]]

@@ -86,7 +86,8 @@ fn query() -> Query {
         .array_subquery(
             ArraySubquery::new("children", "children", "parent_id", "id")
                 .select(["label", "rank"])
-                .order_by("rank", OrderDirection::Asc),
+                .order_by("rank", OrderDirection::Asc)
+                .unbounded(),
         )
 }
 
@@ -278,6 +279,7 @@ fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: Subscription
                 let mut roots = Vec::new();
                 let mut related = Vec::new();
                 for row in added {
+                    let row = row.row;
                     if related_keys.contains(&(row.table(), row.row_uuid())) {
                         related.push(row);
                     } else {
@@ -307,6 +309,7 @@ fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: Subscription
             }
 
             for row in updated {
+                let row = row.row;
                 if let Some(position) = snapshot.rows.iter().position(|current| {
                     current.table() == row.table() && current.row_uuid() == row.row_uuid()
                 }) {
@@ -315,6 +318,7 @@ fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: Subscription
             }
 
             for row in added {
+                let row = row.row;
                 if let Some(position) =
                     snapshot
                         .rows

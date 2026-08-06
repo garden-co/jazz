@@ -137,6 +137,9 @@ Ranked by their ability to change an engineering decision:
 1. **Policy and selective-hydration cost receipts.** Extract the stable lanes
    from #1170: authorized write-to-reader visibility, route/subscription scale,
    policy churn/reconnect, and selective Global hydration.
+   `ROUTE_SUBSCRIPTION_CURVE.md` now extracts the current-core
+   route/subscription lane and attributes its remaining slope to binding-private
+   full-source version/replacement witness state.
 2. **PERF-5 maintained versus rehydrate.** Compare work, bytes, and retained
    state over increasing view sizes while asserting identical results.
 3. **S4 fixed-delta/varying-view gate.** S4 already separates settlement and

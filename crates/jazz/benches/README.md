@@ -53,10 +53,10 @@ than old helper behavior:
   byte-wire session/resume path with that recursive read policy: a reader first
   sees direct and inherited docs, disconnects, then resumes after one inherited
   grant is revoked and another is added. It is registered in the Criterion
-  group as a visible failing reproducer: the resumed client still keeps the
-  revoked doc visible. Recursive write-policy settlement is covered in the
-  `jazz` policy tests with global/settled support rows; local-only support rows
-  correctly do not authorize writes.
+  group as a reconnect correctness canary: the resumed subscription must emit
+  exactly the newly granted doc and remove exactly the revoked doc. The `jazz`
+  policy tests cover recursive write-policy settlement with global/settled
+  support rows; local-only support rows correctly do not authorize writes.
 
 `selective_global_hydration` is a custom JSONL receipt over the persisted
 Global query path. It holds one selected team and its result page fixed while

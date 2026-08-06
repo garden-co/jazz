@@ -180,6 +180,7 @@ where
                     version_carriers,
                     version_bundles,
                     peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+                    authorization_progress: peer_payload_inventory.authorization_progress,
                     result_member_adds,
                     result_member_removes,
                     program_fact_adds,
@@ -208,6 +209,7 @@ where
                     version_carriers,
                     version_bundles,
                     peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+                    authorization_progress: peer_payload_inventory.authorization_progress,
                     result_member_adds,
                     result_member_removes,
                     program_fact_adds,
@@ -2501,7 +2503,7 @@ where
         Ok(refs)
     }
 
-    fn transaction_ids(&self) -> Result<Vec<TxId>, Error> {
+    pub(crate) fn transaction_ids(&self) -> Result<Vec<TxId>, Error> {
         let mut tx_ids = Vec::new();
         for raw in self
             .database
