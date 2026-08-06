@@ -54,20 +54,6 @@ fn fast_current_membership_position(
     }
 }
 
-fn fast_authorization_progress(known_state: &Option<KnownStateDeclaration>) -> Option<u64> {
-    match known_state {
-        Some(KnownStateDeclaration::FastWithAuthorizationProgress {
-            completeness: KnownStateCompleteness::FastCurrentMembership,
-            authorization_progress,
-            ..
-        }) => Some(*authorization_progress),
-        Some(
-            KnownStateDeclaration::Fast { .. } | KnownStateDeclaration::ExactVersionSet { .. },
-        )
-        | None => None,
-    }
-}
-
 fn member_settle_position(member: &ResultMemberEntry) -> Option<crate::time::GlobalSeq> {
     match member {
         ResultMemberEntry::Row(row) => row.settle_position,
@@ -87,7 +73,6 @@ fn fast_cursor_membership_mismatch(
 }
 
 fn fast_cursor_requires_authoritative_reset(
-    _authorization_matches: bool,
     position: crate::time::GlobalSeq,
     previous: &BTreeSet<ResultMemberEntry>,
     current: &BTreeSet<ResultMemberEntry>,
@@ -1020,12 +1005,6 @@ impl PeerState {
             .get(&subscription)
             .and_then(|state| state.known_state.clone());
         let known_membership_position = fast_current_membership_position(&known_state);
-        let authorization_matches = self.subscriptions.get(&subscription).is_some_and(|state| {
-            fast_authorization_progress(&known_state)
-                .map_or(state.authorization_progress == 0, |progress| {
-                    progress == state.authorization_progress
-                })
-        });
         let watermark = node.applied_global_watermark();
         let simple_membership_delta =
             transitions.program_fact_adds.is_empty() && transitions.program_fact_removes.is_empty();
@@ -1055,7 +1034,6 @@ impl PeerState {
         // pre-cursor grants/revokes; post-cursor additions remain incremental.
         let cursor_membership_mismatch = known_membership_position.is_some_and(|position| {
             fast_cursor_requires_authoritative_reset(
-                authorization_matches,
                 position,
                 previous_member_result_set,
                 &current_member_result_set,
@@ -2416,7 +2394,7 @@ mod tests {
     }
 
     #[test]
-    fn fast_authorization_progress_bounds_membership_resets() {
+    fn fast_cursor_membership_bounds_authoritative_resets() {
         // This is intentionally an internal test: the four-way decision is a
         // peer-only protocol control-plane predicate, with no public API
         // surface. End-to-end rehydrate tests cover application of its output.
@@ -2427,12 +2405,11 @@ mod tests {
 
         // (1) same authorization, sufficient cursor: no reset.
         assert!(!fast_cursor_requires_authoritative_reset(
-            true, cursor, &previous, &previous,
+            cursor, &previous, &previous,
         ));
         // (2) same authorization, post-cursor add: incremental repair remains
         // sufficient and this predicate must not force a reset.
         assert!(!fast_cursor_requires_authoritative_reset(
-            true,
             cursor,
             &previous,
             &BTreeSet::from([old.clone(), new.clone()]),
@@ -2440,33 +2417,28 @@ mod tests {
         // Membership-affecting policy facts need the #1266 authoritative reset
         // even when the link-local authorization generation did not advance.
         assert!(fast_cursor_requires_authoritative_reset(
-            true,
             cursor,
             &previous,
             &BTreeSet::from([old.clone(), settled_member(row(3), 8)]),
         ));
         assert!(fast_cursor_requires_authoritative_reset(
-            true,
             cursor,
             &previous,
             &BTreeSet::new(),
         ));
         // (3) changed authorization with a reconstructible post-cursor add.
         assert!(!fast_cursor_requires_authoritative_reset(
-            false,
             cursor,
             &previous,
             &BTreeSet::from([old.clone(), new]),
         ));
         // (4) changed authorization with either a pre-cursor grant or revoke.
         assert!(fast_cursor_requires_authoritative_reset(
-            false,
             cursor,
             &previous,
             &BTreeSet::from([old.clone(), settled_member(row(3), 8)]),
         ));
         assert!(fast_cursor_requires_authoritative_reset(
-            false,
             cursor,
             &previous,
             &BTreeSet::new(),
