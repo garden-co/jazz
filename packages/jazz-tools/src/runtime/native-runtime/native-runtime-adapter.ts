@@ -3427,14 +3427,14 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
     case "Boolean":
       return Uint8Array.of(value.type === "Boolean" && value.value ? 1 : 0);
     case "Integer":
-      view.setInt32(0, expectI32(value, "Integer"), true);
+      view.setUint32(0, encodeSignedI32ForStorage(expectI32(value, "Integer")), true);
       return new Uint8Array(view.buffer, 0, 4);
     case "Timestamp":
       view.setBigUint64(0, BigInt(expectNumber(value, type.type)), true);
       return new Uint8Array(view.buffer);
     case "BigInt":
       if (value.type !== "BigInt") throw new Error("expected BigInt value");
-      view.setBigInt64(0, BigInt(value.value), true);
+      view.setBigUint64(0, encodeSignedI64ForStorage(BigInt(value.value)), true);
       return new Uint8Array(view.buffer);
     case "Double":
       view.setFloat64(0, expectNumber(value, "Double"), true);
@@ -3531,6 +3531,22 @@ function expectI32(value: Value, type: string): number {
     throw new Error(`${type} value must be a signed 32-bit integer`);
   }
   return number;
+}
+
+function encodeSignedI32ForStorage(value: number): number {
+  return (value ^ 0x80000000) >>> 0;
+}
+
+function decodeSignedI32FromStorage(value: number): number {
+  return (value ^ 0x80000000) | 0;
+}
+
+function encodeSignedI64ForStorage(value: bigint): bigint {
+  return BigInt.asUintN(64, value) ^ (1n << 63n);
+}
+
+function decodeSignedI64FromStorage(value: bigint): bigint {
+  return BigInt.asIntN(64, value ^ (1n << 63n));
 }
 
 function expectString(value: Value, type: string): string {
@@ -4026,9 +4042,9 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array, fieldName?: string): V
     case "Boolean":
       return { type: "Boolean", value: bytes[0] !== 0 };
     case "Integer":
-      return { type: "Integer", value: view.getInt32(0, true) };
+      return { type: "Integer", value: decodeSignedI32FromStorage(view.getUint32(0, true)) };
     case "BigInt":
-      return { type: "BigInt", value: view.getBigInt64(0, true) };
+      return { type: "BigInt", value: decodeSignedI64FromStorage(view.getBigUint64(0, true)) };
     case "Double":
       return { type: "Double", value: view.getFloat64(0, true) };
     case "Timestamp":
