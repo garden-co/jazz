@@ -1,6 +1,6 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeMap, BinaryHeap};
 
 use crate::BTreeError;
 use crate::file::SyncFile;
@@ -20,6 +20,10 @@ const DEFAULT_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_OVERFLOW_THRESHOLD: usize = 4 * 1024;
 const OVERFLOW_REUSE_MIN_BYTES: usize = 128 * 1024;
 const OVERFLOW_DIRECT_READ_MIN_BYTES: usize = 128 * 1024;
+// Keep the write threshold aligned with the read threshold.  At 128 KiB this
+// avoids replacing a handful of cheap page writes with an allocation-sized
+// staging buffer, while a default-page extent has already reached eight pages.
+const OVERFLOW_DIRECT_WRITE_MIN_BYTES: usize = OVERFLOW_DIRECT_READ_MIN_BYTES;
 const BOOTSTRAP_GENERATION: u64 = 1;
 const ALLOC_NEAR_WINDOW: u64 = 32;
 // Larger WAL tails reduce checkpoint frequency, but make browser files larger
@@ -30,6 +34,14 @@ const WAL_CHECKPOINT_THRESHOLD_PAGES: u64 = 1024;
 
 type OpfsMap<K, V> = FxHashMap<K, V>;
 type OpfsSet<T> = FxHashSet<T>;
+
+/// A contiguous overflow run staged outside the page cache.  It becomes one
+/// extent WAL record, rather than one dirty cache entry and WAL frame per page.
+#[derive(Debug)]
+struct DirtyBlobExtent {
+    page_count: usize,
+    raw: Vec<u8>,
+}
 
 struct PageWrite<'a> {
     page_id: PageId,
@@ -135,6 +147,7 @@ pub struct OpfsBTree<F: SyncFile> {
     access_epoch: u64,
     dirty_pages: OpfsSet<PageId>,
     wal_pages: OpfsSet<PageId>,
+    dirty_blob_extents: BTreeMap<PageId, DirtyBlobExtent>,
     freelist_dirty: bool,
     free_pages: Vec<PageId>,
     free_set: OpfsSet<PageId>,
@@ -196,6 +209,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             access_epoch: 0,
             dirty_pages: OpfsSet::default(),
             wal_pages: OpfsSet::default(),
+            dirty_blob_extents: BTreeMap::new(),
             freelist_dirty: false,
             free_pages: Vec::new(),
             free_set: OpfsSet::default(),
@@ -518,6 +532,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         self.truncate_wal_tail()?;
         self.dirty_pages.clear();
         self.wal_pages.clear();
+        self.dirty_blob_extents.clear();
         self.freelist_dirty = false;
         self.evict_pages_if_needed(None);
         Ok(())
@@ -533,6 +548,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         let root_page_id = self.root_page_id.unwrap_or(0);
         if self.dirty_pages.is_empty()
             && !self.freelist_dirty
+            && self.dirty_blob_extents.is_empty()
             && root_page_id == self.active.root_page_id
             && self.total_pages == self.active.total_pages
         {
@@ -550,15 +566,24 @@ impl<F: SyncFile> OpfsBTree<F> {
                 return Ok(());
             }
 
-            let wal_frames: Vec<WalFrameRef<'_>> = frames
+            let mut wal_frames: Vec<WalFrameRef<'_>> = frames
                 .iter()
-                .map(|frame| WalFrameRef {
+                .map(|frame| WalFrameRef::Page {
                     page_id: frame.page_id,
                     is_blob: frame.is_blob,
                     is_freelist: frame.is_freelist,
                     raw: frame.raw.as_ref(),
                 })
                 .collect();
+            wal_frames.extend(
+                self.dirty_blob_extents
+                    .iter()
+                    .map(|(&head_page_id, extent)| WalFrameRef::BlobExtent {
+                        head_page_id,
+                        page_count: extent.page_count,
+                        raw: &extent.raw,
+                    }),
+            );
             let start_page_id = self.persisted_pages.max(2);
             let pages_written = wal::append_commit(
                 &self.file,
@@ -580,6 +605,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         self.flush_for_write()?;
 
         self.wal_pages.extend(dirty_page_ids);
+        self.materialize_dirty_blob_extents_into_wal()?;
         self.dirty_pages.clear();
         self.active = Superblock::new(
             self.options.page_size as u32,
@@ -591,6 +617,15 @@ impl<F: SyncFile> OpfsBTree<F> {
         self.freelist_dirty = false;
         self.checkpoint_wal_tail_if_needed()?;
         Ok(())
+    }
+
+    /// Force a durability boundary for data already written to the WAL.
+    ///
+    /// This intentionally bypasses [`SyncPolicy`]: callers use it for an
+    /// explicit bounded cadence while the ordinary write path remains free to
+    /// defer syncs between boundaries.
+    pub fn flush_file(&self) -> Result<(), BTreeError> {
+        self.file.flush()
     }
 
     pub fn checkpoint_state(&self) -> CheckpointState {
@@ -830,6 +865,10 @@ impl<F: SyncFile> OpfsBTree<F> {
         let max_chunk = self.options.page_size;
         let page_count = overflow_pages_for_len(expected_len, max_chunk);
 
+        if let Some(raw) = self.dirty_blob_extent_raw(head_page_id, page_count) {
+            return overflow_payload_from_raw(raw, expected_len, self.options.page_size);
+        }
+
         if expected_len >= OVERFLOW_DIRECT_READ_MIN_BYTES
             && !self.overflow_extent_has_dirty_pages(head_page_id, page_count)?
         {
@@ -933,6 +972,9 @@ impl<F: SyncFile> OpfsBTree<F> {
         head_page_id: PageId,
         page_count: usize,
     ) -> Result<bool, BTreeError> {
+        if self.dirty_blob_extent_overlaps(head_page_id, page_count)? {
+            return Ok(true);
+        }
         for idx in 0..page_count {
             let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
                 BTreeError::Corrupt("overflow extent page id overflow".to_string())
@@ -942,6 +984,32 @@ impl<F: SyncFile> OpfsBTree<F> {
             }
         }
         Ok(false)
+    }
+
+    fn dirty_blob_extent_raw(&self, head_page_id: PageId, page_count: usize) -> Option<&[u8]> {
+        self.dirty_blob_extents
+            .get(&head_page_id)
+            .filter(|extent| extent.page_count >= page_count)
+            .map(|extent| extent.raw.as_slice())
+    }
+
+    fn dirty_blob_extent_overlaps(
+        &self,
+        head_page_id: PageId,
+        page_count: usize,
+    ) -> Result<bool, BTreeError> {
+        let end_page_id = head_page_id
+            .checked_add(page_count as u64)
+            .ok_or_else(|| BTreeError::Corrupt("overflow extent page id overflow".to_string()))?;
+        Ok(self
+            .dirty_blob_extents
+            .iter()
+            .any(|(&extent_head, extent)| {
+                let Some(extent_end) = extent_head.checked_add(extent.page_count as u64) else {
+                    return true;
+                };
+                extent_head < end_page_id && head_page_id < extent_end
+            }))
     }
 
     fn free_value_cell(&mut self, value: ValueCell) -> Result<(), BTreeError> {
@@ -1103,16 +1171,22 @@ impl<F: SyncFile> OpfsBTree<F> {
             ));
         }
 
-        let mut remaining = value;
-        for idx in 0..needed_pages {
-            let consume = remaining.len().min(max_chunk);
-            let chunk = &remaining[..consume];
-            remaining = &remaining[consume..];
-            let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
-                BTreeError::Corrupt("overflow extent page id overflow".to_string())
-            })?;
-            let raw = build_blob_page(chunk, self.options.page_size)?;
-            self.set_dirty_blob_page(page_id, raw);
+        if value.len() >= OVERFLOW_DIRECT_WRITE_MIN_BYTES
+            && !self.overflow_extent_has_dirty_pages(head_page_id, needed_pages)?
+        {
+            self.validate_overflow_extent(head_page_id, needed_pages)?;
+            self.dirty_blob_extents.insert(
+                head_page_id,
+                DirtyBlobExtent {
+                    page_count: needed_pages,
+                    raw: build_blob_extent(value, self.options.page_size, needed_pages)?,
+                },
+            );
+        } else {
+            // A preceding direct rewrite is still unflushed.  Materialize it
+            // before taking the page path so the later write wins page by page.
+            self.materialize_dirty_blob_extents_overlapping(head_page_id, existing_pages)?;
+            self.rewrite_overflow_extent_by_page(head_page_id, needed_pages, value)?;
         }
 
         for idx in needed_pages..existing_pages {
@@ -1127,6 +1201,27 @@ impl<F: SyncFile> OpfsBTree<F> {
             head_page_id,
             total_len,
         })
+    }
+
+    fn rewrite_overflow_extent_by_page(
+        &mut self,
+        head_page_id: PageId,
+        needed_pages: usize,
+        value: &[u8],
+    ) -> Result<(), BTreeError> {
+        let max_chunk = self.options.page_size;
+        let mut remaining = value;
+        for idx in 0..needed_pages {
+            let consume = remaining.len().min(max_chunk);
+            let chunk = &remaining[..consume];
+            remaining = &remaining[consume..];
+            let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
+                BTreeError::Corrupt("overflow extent page id overflow".to_string())
+            })?;
+            let raw = build_blob_page(chunk, self.options.page_size)?;
+            self.set_dirty_blob_page(page_id, raw);
+        }
+        Ok(())
     }
 
     fn find_leaf_page_id(&mut self, key: &[u8]) -> Result<Option<PageId>, BTreeError> {
@@ -1443,6 +1538,17 @@ impl<F: SyncFile> OpfsBTree<F> {
             idx = end;
         }
 
+        // Direct overflow rewrites intentionally bypass the page cache.  They
+        // still reach their home extent only during a checkpoint, after the
+        // WAL commit is durable and before the superblock advances.
+        for (&head_page_id, extent) in &self.dirty_blob_extents {
+            self.validate_overflow_extent(head_page_id, extent.page_count)?;
+            let offset = head_page_id.checked_mul(page_size as u64).ok_or_else(|| {
+                BTreeError::Io("checkpoint overflow extent write offset overflow".to_string())
+            })?;
+            self.file.write_all_at(offset, &extent.raw)?;
+        }
+
         Ok(())
     }
 
@@ -1589,28 +1695,40 @@ impl<F: SyncFile> OpfsBTree<F> {
         self.freelist_meta_pages.clear();
 
         for frame in frames {
-            self.validate_writable_page_id(frame.page_id)?;
-            if frame.raw.len() != self.options.page_size {
-                return Err(BTreeError::Corrupt(format!(
-                    "WAL frame page {} has invalid length {}",
-                    frame.page_id,
-                    frame.raw.len()
-                )));
+            match frame {
+                WalFrame::Page {
+                    page_id,
+                    is_blob,
+                    is_freelist,
+                    raw,
+                } => self.apply_wal_page(page_id, is_blob, is_freelist, raw)?,
+                WalFrame::BlobExtent {
+                    head_page_id,
+                    page_count,
+                    raw,
+                } => {
+                    self.validate_overflow_extent(head_page_id, page_count)?;
+                    if raw.len()
+                        != page_count
+                            .checked_mul(self.options.page_size)
+                            .ok_or_else(|| {
+                                BTreeError::Corrupt("WAL blob extent size overflow".to_string())
+                            })?
+                    {
+                        return Err(BTreeError::Corrupt(
+                            "WAL blob extent length does not match page count".to_string(),
+                        ));
+                    }
+                    for idx in 0..page_count {
+                        let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
+                            BTreeError::Corrupt("overflow extent page id overflow".to_string())
+                        })?;
+                        let start = idx * self.options.page_size;
+                        let end = start + self.options.page_size;
+                        self.apply_wal_page(page_id, true, false, raw[start..end].to_vec())?;
+                    }
+                }
             }
-            if frame.is_blob {
-                self.blob_pages.insert(frame.page_id);
-            } else {
-                let _ = validate_page(&frame.raw, self.options.page_size)?;
-                self.blob_pages.remove(&frame.page_id);
-            }
-            self.pages.insert(frame.page_id, frame.raw);
-            if frame.is_freelist {
-                self.dirty_pages.remove(&frame.page_id);
-                self.wal_pages.remove(&frame.page_id);
-            } else {
-                self.wal_pages.insert(frame.page_id);
-            }
-            self.touch_page(frame.page_id);
         }
 
         if header.freelist_head_page_id != 0 {
@@ -1630,6 +1748,38 @@ impl<F: SyncFile> OpfsBTree<F> {
         // after the freelist load because freelist frames are clean and
         // evictable the moment they are applied.
         self.evict_pages_if_needed(None);
+        Ok(())
+    }
+
+    fn apply_wal_page(
+        &mut self,
+        page_id: PageId,
+        is_blob: bool,
+        is_freelist: bool,
+        raw: Vec<u8>,
+    ) -> Result<(), BTreeError> {
+        self.validate_writable_page_id(page_id)?;
+        if raw.len() != self.options.page_size {
+            return Err(BTreeError::Corrupt(format!(
+                "WAL frame page {} has invalid length {}",
+                page_id,
+                raw.len()
+            )));
+        }
+        if is_blob {
+            self.blob_pages.insert(page_id);
+        } else {
+            let _ = validate_page(&raw, self.options.page_size)?;
+            self.blob_pages.remove(&page_id);
+        }
+        self.pages.insert(page_id, raw);
+        if is_freelist {
+            self.dirty_pages.remove(&page_id);
+            self.wal_pages.remove(&page_id);
+        } else {
+            self.wal_pages.insert(page_id);
+        }
+        self.touch_page(page_id);
         Ok(())
     }
 
@@ -1689,6 +1839,84 @@ impl<F: SyncFile> OpfsBTree<F> {
         self.evict_pages_if_needed(Some(page_id));
     }
 
+    fn validate_overflow_extent(
+        &self,
+        head_page_id: PageId,
+        page_count: usize,
+    ) -> Result<(), BTreeError> {
+        if page_count == 0 || head_page_id < 2 {
+            return Err(BTreeError::Corrupt(
+                "overflow extent page id out of bounds".to_string(),
+            ));
+        }
+        let last_page_id = head_page_id
+            .checked_add((page_count - 1) as u64)
+            .ok_or_else(|| BTreeError::Corrupt("overflow extent page id overflow".to_string()))?;
+        if last_page_id >= self.total_pages {
+            return Err(BTreeError::Corrupt(format!(
+                "overflow extent [{}..={}] exceeds total_pages {}",
+                head_page_id, last_page_id, self.total_pages
+            )));
+        }
+        Ok(())
+    }
+
+    fn materialize_dirty_blob_extents_overlapping(
+        &mut self,
+        head_page_id: PageId,
+        page_count: usize,
+    ) -> Result<(), BTreeError> {
+        if !self.dirty_blob_extent_overlaps(head_page_id, page_count)? {
+            return Ok(());
+        }
+        let end_page_id = head_page_id
+            .checked_add(page_count as u64)
+            .ok_or_else(|| BTreeError::Corrupt("overflow extent page id overflow".to_string()))?;
+        let matching_heads: Vec<PageId> = self
+            .dirty_blob_extents
+            .iter()
+            .filter_map(|(&extent_head, extent)| {
+                let extent_end = extent_head.checked_add(extent.page_count as u64)?;
+                (extent_head < end_page_id && head_page_id < extent_end).then_some(extent_head)
+            })
+            .collect();
+        for extent_head in matching_heads {
+            let extent = self
+                .dirty_blob_extents
+                .remove(&extent_head)
+                .expect("matching dirty overflow extent exists");
+            for idx in 0..extent.page_count {
+                let page_id = extent_head.checked_add(idx as u64).ok_or_else(|| {
+                    BTreeError::Corrupt("overflow extent page id overflow".to_string())
+                })?;
+                let start = idx * self.options.page_size;
+                let end = start + self.options.page_size;
+                self.set_dirty_blob_page(page_id, extent.raw[start..end].to_vec());
+            }
+        }
+        Ok(())
+    }
+
+    fn materialize_dirty_blob_extents_into_wal(&mut self) -> Result<(), BTreeError> {
+        let extents = std::mem::take(&mut self.dirty_blob_extents);
+        for (head_page_id, extent) in extents {
+            self.validate_overflow_extent(head_page_id, extent.page_count)?;
+            for idx in 0..extent.page_count {
+                let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
+                    BTreeError::Corrupt("overflow extent page id overflow".to_string())
+                })?;
+                let start = idx * self.options.page_size;
+                let end = start + self.options.page_size;
+                self.pages.insert(page_id, extent.raw[start..end].to_vec());
+                self.blob_pages.insert(page_id);
+                self.wal_pages.insert(page_id);
+                self.touch_page(page_id);
+            }
+        }
+        self.evict_pages_if_needed(None);
+        Ok(())
+    }
+
     // Marking an already-cached page dirty cannot grow the cache, so it must
     // not trigger an eviction scan; only the insertion paths do that.
     fn mark_dirty_loaded_page(&mut self, page_id: PageId) {
@@ -1697,6 +1925,12 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     fn remove_page(&mut self, page_id: PageId) -> Option<Vec<u8>> {
+        self.dirty_blob_extents.retain(|&head_page_id, extent| {
+            let Some(end_page_id) = head_page_id.checked_add(extent.page_count as u64) else {
+                return false;
+            };
+            !(head_page_id <= page_id && page_id < end_page_id)
+        });
         if self.last_leaf_hint == Some(page_id) {
             self.last_leaf_hint = None;
         }
@@ -2052,6 +2286,45 @@ fn build_blob_page(chunk: &[u8], page_size: usize) -> Result<Vec<u8>, BTreeError
     let mut raw = vec![0u8; page_size];
     raw[..chunk.len()].copy_from_slice(chunk);
     Ok(raw)
+}
+
+fn build_blob_extent(
+    value: &[u8],
+    page_size: usize,
+    page_count: usize,
+) -> Result<Vec<u8>, BTreeError> {
+    let raw_len = page_count
+        .checked_mul(page_size)
+        .ok_or_else(|| BTreeError::Io("overflow extent write size overflow".to_string()))?;
+    if value.len() > raw_len {
+        return Err(BTreeError::Corrupt(format!(
+            "overflow payload {} exceeds extent {}",
+            value.len(),
+            raw_len
+        )));
+    }
+    let mut raw = vec![0u8; raw_len];
+    raw[..value.len()].copy_from_slice(value);
+    Ok(raw)
+}
+
+fn overflow_payload_from_raw(
+    raw: &[u8],
+    expected_len: usize,
+    page_size: usize,
+) -> Result<Vec<u8>, BTreeError> {
+    let page_count = overflow_pages_for_len(expected_len, page_size);
+    let required_len = page_count
+        .checked_mul(page_size)
+        .ok_or_else(|| BTreeError::Io("overflow extent read size overflow".to_string()))?;
+    if raw.len() < required_len || expected_len > raw.len() {
+        return Err(BTreeError::Corrupt(format!(
+            "overflow payload truncated: expected {}, found {}",
+            expected_len,
+            raw.len()
+        )));
+    }
+    Ok(raw[..expected_len].to_vec())
 }
 
 fn ensure_page_fits(page: &Page, page_size: usize, context: &str) -> Result<(), BTreeError> {
@@ -2759,6 +3032,111 @@ mod tests {
         assert!(
             !tree.free_set.is_empty(),
             "shrinking overflow value should return tail pages to free list"
+        );
+    }
+
+    // This is an internal test because whether a large overflow rewrite is
+    // represented by one staged extent or individual dirty pages is a storage
+    // implementation detail; public API tests below cover the visible values.
+    #[test]
+    fn direct_overflow_rewrite_stages_one_contiguous_extent() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+        let first = deterministic_bytes(1, 256 * 1024);
+        let replacement = deterministic_bytes(2, 256 * 1024);
+
+        tree.put(b"large", &first).expect("seed large value");
+        tree.checkpoint().expect("checkpoint seed");
+        tree.put(b"large", &replacement).expect("direct rewrite");
+
+        assert_eq!(tree.dirty_blob_extents.len(), 1);
+        let extent = tree
+            .dirty_blob_extents
+            .values()
+            .next()
+            .expect("staged extent");
+        assert_eq!(extent.raw.len(), replacement.len());
+        assert_eq!(
+            tree.get(b"large").expect("read staged rewrite"),
+            Some(replacement)
+        );
+    }
+
+    // Internal for the same reason as the direct-staging assertion above: the
+    // public contract is the resulting value, while dirty-page fallback is an
+    // implementation guard that prevents an unflushed extent being replaced.
+    #[test]
+    fn dirty_overflow_extent_uses_page_by_page_fallback() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+        let first = deterministic_bytes(3, 256 * 1024);
+        let second = deterministic_bytes(4, 256 * 1024);
+        let third = deterministic_bytes(5, 256 * 1024);
+
+        tree.put(b"large", &first).expect("seed large value");
+        tree.checkpoint().expect("checkpoint seed");
+        tree.put(b"large", &second).expect("direct rewrite");
+        assert_eq!(tree.dirty_blob_extents.len(), 1);
+
+        tree.put(b"large", &third).expect("dirty fallback rewrite");
+        assert!(tree.dirty_blob_extents.is_empty());
+        assert!(
+            tree.dirty_pages.len() >= overflow_pages_for_len(third.len(), tree.options.page_size),
+            "fallback must materialize page-level dirty state"
+        );
+        assert_eq!(
+            tree.get(b"large").expect("read fallback rewrite"),
+            Some(third)
+        );
+    }
+
+    #[test]
+    fn overflow_rewrite_below_direct_threshold_keeps_page_path() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+        let first = deterministic_bytes(6, 256 * 1024);
+        let replacement = deterministic_bytes(7, OVERFLOW_DIRECT_WRITE_MIN_BYTES - 1);
+
+        tree.put(b"large", &first).expect("seed large value");
+        tree.checkpoint().expect("checkpoint seed");
+        tree.put(b"large", &replacement)
+            .expect("below-threshold rewrite");
+
+        assert!(tree.dirty_blob_extents.is_empty());
+        assert_eq!(
+            tree.get(b"large").expect("read below-threshold rewrite"),
+            Some(replacement)
+        );
+    }
+
+    #[test]
+    fn direct_overflow_rewrite_boundary_recovers_only_after_wal_commit() {
+        let file = MemoryFile::new();
+        let old = deterministic_bytes(8, OVERFLOW_DIRECT_WRITE_MIN_BYTES);
+        let new = deterministic_bytes(9, OVERFLOW_DIRECT_WRITE_MIN_BYTES);
+
+        {
+            let mut tree = OpfsBTree::open(file.clone(), small_options()).expect("open tree");
+            tree.put(b"large", &old).expect("seed value");
+            tree.checkpoint().expect("checkpoint seed");
+            tree.put(b"large", &new).expect("stage direct rewrite");
+            assert_eq!(tree.dirty_blob_extents.len(), 1);
+        }
+        let mut uncommitted = OpfsBTree::open(file.clone(), small_options()).expect("reopen crash");
+        assert_eq!(
+            uncommitted.get(b"large").expect("read old value"),
+            Some(old.clone())
+        );
+
+        {
+            let mut tree = OpfsBTree::open(file.clone(), small_options()).expect("reopen tree");
+            tree.put(b"large", &new).expect("stage direct rewrite");
+            tree.flush_wal().expect("commit direct rewrite to WAL");
+        }
+        let mut recovered = OpfsBTree::open(file, small_options()).expect("reopen committed WAL");
+        assert_eq!(
+            recovered.get(b"large").expect("read recovered value"),
+            Some(new)
         );
     }
 

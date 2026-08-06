@@ -42,6 +42,7 @@ Invariant digest:
 - `INV-API-27`: `Db::exclusive_tx()` MUST expose serializable exclusive transactions on the facade, preserving snapshot reads and returning `WriteRejected` when authority validation detects a conflict.
 - `INV-API-28`: `Db::can_insert`, `can_read`, `can_update`, and `can_delete` MUST evaluate permissions under the current `DbIdentity.author` without committing writes, changing local rows, or using caller-supplied identity.
 - `INV-API-29`: A `Db` is a client: facade writes MUST keep `permission_subject == made_by`, and a `Db` MUST reject any attempt to attribute a write to another author. Cross-author attribution is a node-level concern on the ingest side (a trusted serving `Node`, `INV-RLS-18`, ch. 9), never a `Db` capability.
+- `INV-API-30`: Reopening persistent storage with the same `DbIdentity` MUST schedule every locally originated transaction that reached `Local` durability and has not reached terminal settlement for upstream delivery. Locally originated means `TxId.node == DbIdentity.node` and `Transaction.made_by == DbIdentity.author`; delivery is at-least-once by `TxId` and relies on idempotent authority handling.
 
 ## Details
 
@@ -238,6 +239,16 @@ Write durability follows the client facade boundary. A `Db` write always lands
 locally first, remains `Local`, and is queued in the shared outbox for upstream
 upload (`INV-API-14`, ch. 3, ch. 8). Self-finalization to
 `Accepted`/`Global` is core `Node` behavior, not a `Db` role.
+
+The outbox itself is process-local, so reopening persistent storage rebuilds it
+from durable transaction state (`INV-API-30`). With the same `DbIdentity`, the
+facade schedules every locally originated transaction that reached `Local`
+durability and is not terminally settled (rejected or `Global`) for delivery.
+Here, locally originated means both `TxId.node == DbIdentity.node` and
+`Transaction.made_by == DbIdentity.author`; shared history from another device
+using the same author is not this client's backlog. Replayed delivery is
+at-least-once by `TxId`; the authority's idempotent commit-unit handling makes
+that safe, while each individual connection still sends a `TxId` at most once.
 
 Field-level semantics are the same regardless of the write method. An explicit
 null clears a nullable column. A JSON column is replaced atomically. A write to a
