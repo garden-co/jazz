@@ -1997,6 +1997,19 @@ fn run_permission_filtered_resume(
         assert!(server.detach_connection(&writer_subscriber));
     }
 
+    let server_query = recursive_docs_query(&server);
+    let server_rows =
+        block_on(server.all_for_identity(&server_query, ReadOpts::default(), READER_AUTHOR))
+            .expect("read disconnected permission state on server");
+    let mut expected_server_rows = vec![RESUME_DOC_DIRECT];
+    if !churn.revokes() {
+        expected_server_rows.push(RESUME_DOC_REVOKED);
+    }
+    if churn.grants() {
+        expected_server_rows.push(RESUME_DOC_GRANTED);
+    }
+    assert_permission_resume_docs(&server_rows, &expected_server_rows);
+
     let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_004);
     let _resumed_upstream = client.connect_upstream(client_transport);
     let resumed = server.accept_subscriber_with_resume(server_transport, READER_AUTHOR, cursor);

@@ -42,25 +42,25 @@ The benchmark requires exact public subscription events:
 
 The unchanged event is reset-framed and therefore reports the two retained rows
 as updates. This does not imply that their bodies are retransmitted: its wire
-response is only 61 bytes.
+response remains compact.
 
 `Db::read` is deliberately not an oracle here. It is a local-preview API and
 may retain row bodies after upstream membership is revoked. The authoritative
 security contract is the subscription result-set transition.
 
-## Initial local result
+## Refreshed local result
 
-One full run on the quiet local development box (load average
-`0.07 / 0.11 / 0.08` immediately before the run) produced:
+One refreshed full run after restacking onto the 2026-08-06 integration head
+produced:
 
 | Case             | Reconnect median | Resume response | Initial response | Added | Updated | Removed |
 | ---------------- | ---------------: | --------------: | ---------------: | ----: | ------: | ------: |
-| unchanged        |         1.864 ms |            61 B |            856 B |     0 |       2 |       0 |
-| grant only       |         2.201 ms |         1,256 B |            856 B |     1 |       0 |       0 |
-| revoke only      |         1.963 ms |           516 B |            856 B |     0 |       0 |       1 |
-| grant and revoke |         2.105 ms |           925 B |            856 B |     1 |       0 |       1 |
-| claim revoke     |         0.728 ms |           213 B |            824 B |     0 |       0 |       2 |
-| claim restore    |         0.888 ms |           824 B |             61 B |     2 |       0 |       0 |
+| unchanged        |         2.003 ms |            62 B |            895 B |     0 |       2 |       0 |
+| grant only       |         2.352 ms |         1,314 B |            895 B |     1 |       0 |       0 |
+| revoke only      |         2.064 ms |           555 B |            895 B |     0 |       0 |       1 |
+| grant and revoke |         2.225 ms |           983 B |            895 B |     1 |       0 |       1 |
+| claim revoke     |         0.744 ms |           252 B |            863 B |     0 |       0 |       2 |
+| claim restore    |         0.912 ms |           863 B |             62 B |     2 |       0 |       0 |
 
 The unchanged control retains a compact response at about 7% of its initial
 snapshot. Revokes are also smaller than the initial response because row-member
@@ -70,7 +70,7 @@ Grant responses can equal or exceed the reader's prior initial snapshot. A row
 that existed before the cursor but was not authorized was never shipped to that
 reader, so restoration must carry its body despite its old global sequence. In
 the recursive grant-only lane, the resulting three-row authoritative response
-is 1,256 bytes versus the prior two-row 856-byte snapshot. This is required
+is 1,314 bytes versus the prior two-row 895-byte snapshot. This is required
 correctness work, not resume amplification over an equivalent snapshot.
 
 These are single-process, single-threaded, network-free measurements. They are

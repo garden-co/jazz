@@ -87,12 +87,12 @@ fn fast_cursor_membership_mismatch(
 }
 
 fn fast_cursor_requires_authoritative_reset(
-    authorization_matches: bool,
+    _authorization_matches: bool,
     position: crate::time::GlobalSeq,
     previous: &BTreeSet<ResultMemberEntry>,
     current: &BTreeSet<ResultMemberEntry>,
 ) -> bool {
-    !authorization_matches && fast_cursor_membership_mismatch(position, previous, current)
+    fast_cursor_membership_mismatch(position, previous, current)
 }
 
 /// Tracks what one downstream peer has already received.
@@ -1050,6 +1050,9 @@ impl PeerState {
         // removed prior member or newly visible pre-cursor member cannot be
         // reconstructed from that cursor, so it cannot safely suppress the
         // authoritative membership diff or the payload needed to apply it.
+        // Membership can change through policy rows without advancing the
+        // link-local authorization generation. Preserve the #1266 reset for
+        // pre-cursor grants/revokes; post-cursor additions remain incremental.
         let cursor_membership_mismatch = known_membership_position.is_some_and(|position| {
             fast_cursor_requires_authoritative_reset(
                 authorization_matches,
@@ -2426,13 +2429,27 @@ mod tests {
         assert!(!fast_cursor_requires_authoritative_reset(
             true, cursor, &previous, &previous,
         ));
-        // (2) same authorization, insufficient cursor: an incremental repair
-        // remains permitted; this predicate must not force a reset.
+        // (2) same authorization, post-cursor add: incremental repair remains
+        // sufficient and this predicate must not force a reset.
         assert!(!fast_cursor_requires_authoritative_reset(
             true,
             cursor,
             &previous,
             &BTreeSet::from([old.clone(), new.clone()]),
+        ));
+        // Membership-affecting policy facts need the #1266 authoritative reset
+        // even when the link-local authorization generation did not advance.
+        assert!(fast_cursor_requires_authoritative_reset(
+            true,
+            cursor,
+            &previous,
+            &BTreeSet::from([old.clone(), settled_member(row(3), 8)]),
+        ));
+        assert!(fast_cursor_requires_authoritative_reset(
+            true,
+            cursor,
+            &previous,
+            &BTreeSet::new(),
         ));
         // (3) changed authorization with a reconstructible post-cursor add.
         assert!(!fast_cursor_requires_authoritative_reset(

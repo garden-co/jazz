@@ -221,10 +221,7 @@ test("benchmark workflow prebuilds the RocksDB-backed and SQLite-backed native b
     workflow,
     /cargo bench -p jazz --features rocksdb --bench realistic_phase1 --no-run/,
   );
-  assert.match(
-    workflow,
-    /cargo bench -p jazz --features sqlite --bench realistic_phase1 --no-run/,
-  );
+  assert.match(workflow, /cargo bench -p jazz --features sqlite --bench realistic_phase1 --no-run/);
   assert.doesNotMatch(workflow, /-p jazz-tools\b/);
 });
 
