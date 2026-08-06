@@ -252,30 +252,31 @@ subscription payload. Sync membership keeps holes first-class: a readable parent
 is never dropped from sync solely because an included target is absent or
 unreadable (`INV-QUERY-10`).
 
-**Decision, 2026-08-04 — structured output at the terminal.** A public query
-result with array subqueries is an ordered recursive result tree: each output
-node carries its row value and named child relations, and each child relation is
-an ordered array of output nodes. The IVM graph and its lowering remain flat and
-DBSP-native: parent rows, child rows, and their associations remain ordinary
-weighted rows keyed/grouped by parent occurrence. A graph delta MUST NOT update
-an inner collection. This is the chosen rendering boundary for a
-shredded/factorized maintained representation, not a claim that the semantic
-nested query is flat.
+**Decision, Anselm 2026-08-05 — one output terminal, two shapes.** Joins
+produce flat, wide rows in the Groove graph. `CollectBy` is the sole output
+terminal and chooses the public shape: **collect** renders an ordered recursive
+tree, while **expand** renders flat tuples. Nothing on the Jazz side renders,
+fan-ins, or otherwise reshapes maintained output. The IVM graph and its
+lowering remain flat and DBSP-native: parent rows, child rows, associations, and
+joined tuples are ordinary weighted rows. A graph delta MUST NOT update an
+inner collection or carry an already-rendered form.
 
 **Implementation status (2026-08-04).** This is a target design. Current core
 still emits flat root rows plus relation facts and the consumer-side materializer
 reassembles them; no structured terminal, recursive record value, or v4 wire
 exists yet.
 
-Nesting is constructed only by Groove's output-terminal collector
-(`groove/SPEC/3_queries_operators.md` §3.6.1). A collector MUST NOT feed any
-graph node, including another collector; graph validation MUST reject that
-shape. Nested arrays are rendered by one terminal-owned collector tree over flat
-associations. The collector descriptor MUST encode every input that affects its
-output, as required by `groove/SPEC/INVARIANTS.md::INV-QUERY-1A`; Jazz names the
-query shape, correlation, projection, ordering, and bounds that supply those
-inputs. This keeps policy, lens, and permission concerns out of Groove's
-operator contract.
+Nesting and flat expansion are constructed only by Groove's output-terminal
+`CollectBy` (`groove/SPEC/3_queries_operators.md` §3.6.1). A collector MUST NOT
+feed any graph node, including another collector; graph validation MUST reject
+that shape. In collect mode, one terminal-owned internal collection tree reads
+flat associations and writes the final recursive value. In expand mode, the same
+terminal reads flat wide tuples and writes tuples directly. The descriptor MUST
+encode every input that affects either output, as required by
+`groove/SPEC/INVARIANTS.md::INV-QUERY-1A`; Jazz names the query shape,
+correlation, projection, ordering, bounds, source positions, and terminal mode
+that supply those inputs. Jazz has no renderer or terminal policy-composition
+role.
 
 The only v1 incremental structured delta is a **whole-parent replacement**:
 retract the previously rendered parent node and add the complete new parent
@@ -369,13 +370,41 @@ normalizes into this program family. Multi-hop traversal and `gather` are
 currently rejected because matching maintained semantics have not yet been
 defined.
 
-### 6.4.1 Flat joined output and output occurrences
+### 6.4.1 Flat joined output, wide lowering, and output occurrences
 
-**Decision, 2026-08-04 — flat joined output uses composite output
-identity.** A flat join emits one row for every matching ordered tuple of the
-root source followed by the declared join sources. Its public data columns are
-the flattened columns of that tuple; it is not a nested relation payload and it
-does not change the semantics of `JoinVia`.
+**Decision, Anselm 2026-08-05 — expand is the other `CollectBy` mode.** A
+flat join emits one row for every matching ordered tuple of the root source
+followed by the declared join sources. Its public data columns are the flattened
+columns of that tuple; it is not a nested relation payload and it does not
+change the semantics of `JoinVia`. It is `CollectBy(mode = Expand)` over a
+unary, already-wide association stream, not a Jazz renderer over several
+sinks.
+
+Flat-join lowering MUST resolve, read-policy-filter, and read-view-project each
+source before it reaches the join. It then lowers the declared `FlatJoin` chain
+as ordinary Groove inner joins. After each join it projects the joined
+descriptor back to the stable, qualified source columns while retaining **all**
+prior left-source columns and adding the new right-source columns. Thus the next
+join sees the accumulated wide left row, and the final terminal input carries
+every source needed for the tuple and its identity. The contribution lowerer
+used for include closure intentionally does something narrower: it projects a
+join to `RIGHT_JOIN_PREFIX` only
+(`crates/jazz/src/node/query_engine/lowering.rs:5199-5251`). That projection is
+correct for a source-membership fact, but MUST NOT be reused for flat output.
+
+This is achievable with the existing Groove join representation. An inner join
+infers a descriptor containing all left fields followed by all right fields
+(`crates/groove/src/ivm/runtime/mod.rs:1354-1357` and
+`7900-7917`), and its descriptor retains the ordered left and right input
+descriptors (`crates/groove/src/ivm/op_types.rs:167-175`). Join arrangements are
+keyed by the declared join keys, not by every carried output column
+(`crates/groove/src/ivm/runtime/mod.rs:5703-5758`), so wider payload rows do not
+create an arrangement-key arity obstacle. They do increase arrangement value and
+terminal-payload bytes, which are ordinary descriptor/payload costs, not a
+reason to introduce a second terminal. The source resolver already supplies the
+policy-filtered projected source boundary before query composition
+(`crates/jazz/src/node/query_eval.rs:537-1066`, `2036-2184`); wide lowering
+preserves that ordering.
 
 The one-shot public Rust facade currently returns `Vec<(ObjectId, Vec<Value>)>`
 and converts the row id from the materialized root row
@@ -396,12 +425,29 @@ consolidation. It MUST NOT be derived from result position, payload bytes, a
 content transaction id, or an unordered set of source ids. It is consequently
 stable across ticks, resets, source-content replacements, and result reordering.
 
-This is the same **stable output occurrence** concept used by the structured
-results design (`origin/spec/structured-results`, `SPEC/6_queries.md` §6.4): a
-nested parent and a flat joined tuple are both output occurrences, even though
-their rendered values differ. A source row id remains useful object identity but
-is not by itself an occurrence identity: a joined row can occur under multiple
-roots, and a root can occur in multiple joined tuples.
+This is one type with variable arity, not two identity schemes. A collect-mode
+parent has a one-element `OutputOccurrenceId`, its parent source-row id. An
+expand-mode tuple has the ordered vector above. The terminal configuration
+declares source position and arity, so both use the same canonical bytes as
+terminal-state keys, subscriber-cache keys, and wire addresses. A source row id
+remains useful object identity but is not by itself an occurrence identity: a
+joined row can occur under multiple roots, and a root can occur in multiple
+joined tuples.
+
+**Multiplicity boundary.** Groove joins are weighted
+(`groove/SPEC/INVARIANTS.md::INV-QUERY-9`). The stated flat-join surface admits
+exactly one current-row occurrence for each declared source alias, so its
+ordered source-id vector is unique. It MUST reject a bag or multi-path input
+whose two visible copies have the same source-id vector. If that surface is ever
+admitted, the producing graph MUST carry a stable, canonical occurrence or
+derivation discriminator and `OutputOccurrenceId` MUST be extended to include
+it; delivery, cache, reset, and consolidation semantics MUST then be revised
+together. Collapsing copies under the current vector is forbidden.
+
+🔶 **Open question: bag occurrence discriminator.** A path label and an
+upstream per-copy identity are both plausible sources, but neither is defined
+for arbitrary weighted Groove input today. Bag support remains rejected until a
+stable discriminator is chosen and propagated below the terminal.
 
 Maintained flat-join additions, removals, updates, reset snapshots, and the
 subscriber cache MUST be keyed by `OutputOccurrenceId`; the root `ObjectId`
@@ -418,8 +464,9 @@ loud failure nor a valid delta application.
 The maintained wire MUST carry `OutputOccurrenceId` as the address of each
 flat-join output add, removal, and replacement, including reset snapshots. It
 MAY continue to reference the ordinary typed source members/version payloads for
-row bodies; it MUST NOT add a per-source provenance envelope or a terminal
-policy-composition field merely to construct joined output identity.
+row bodies; it MUST NOT add a per-source provenance envelope, multi-sink
+terminal input, or terminal policy-composition field merely to construct joined
+output identity.
 
 The flat-join descriptor is constructed in declared source order: root first,
 then each `JoinSpec`. Every field name is qualified as
@@ -458,14 +505,22 @@ id identifies a flat row.
 Read-policy filtering and read-view/lens projection are source operations. Each
 flat-join input MUST use its resolved, policy-filtered, read-view-projected
 source before it reaches the join; ordinary join retraction then propagates a
-permission or source-row removal. No terminal policy composition, per-source
-provenance fields, or source-specific ordering contract is required. A join node
-has ordered input descriptors, each already encoding its source/read-view and
-policy semantics, satisfying `groove/SPEC/INVARIANTS.md::INV-QUERY-1A` by
+permission or source-row removal. No terminal policy composition,
+facade-side fan-in, or source-specific ordering contract is required. A join
+node has ordered input descriptors, each already encoding its source/read-view
+and policy semantics, satisfying `groove/SPEC/INVARIANTS.md::INV-QUERY-1A` by
 construction. Groove's inner `JoinOp` already emits matching joined records with
 left-weight times right-weight on changes from either input
-(`groove/SPEC/INVARIANTS.md::INV-QUERY-9`); this design adds only the public
-output descriptor and occurrence-addressed delivery boundary.
+(`groove/SPEC/INVARIANTS.md::INV-QUERY-9`); this design adds only wide lowering,
+the terminal mode/descriptor, and occurrence-addressed delivery.
+
+The surviving `wip/flat-join-output` design material is the separately named
+`FlatJoin` AST, lowering of public `JoinSpec` into that AST, source-resolved
+policy-filtered chained joins, and `OutputOccurrenceId`. This decision discards
+the Jazz maintained-terminal renderer, facade-side fan-in/materialization,
+multiple terminal sinks, and any lowering that drops already-joined source
+columns before flat expansion. `result_element_index` remains discarded as a
+duplicate of qualified projection semantics.
 
 **Implementation status (2026-08-04).** Target/untested. No public flat join is
 currently executable: the public client rejects `joins`, core query reads
