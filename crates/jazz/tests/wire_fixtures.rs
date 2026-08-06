@@ -545,7 +545,7 @@ fn exhaustive_native_row_codec_case() -> (
                     Value::Nullable(label.map(|label| Box::new(Value::String(label.to_owned())))),
                 ])
                 .expect("child record encodes"),
-            child.clone(),
+            child,
         )
     };
     let descriptor = RecordDescriptor::new([
@@ -579,10 +579,10 @@ fn exhaustive_native_row_codec_case() -> (
                 Box::new(ValueType::I32),
             ))))),
         ),
-        ("inline_record", ValueType::Record(Box::new(child.clone()))),
+        ("inline_record", ValueType::Record(Box::new(child))),
         (
             "record_array",
-            ValueType::Array(Box::new(ValueType::Record(Box::new(child.clone())))),
+            ValueType::Array(Box::new(ValueType::Record(Box::new(child)))),
         ),
         (
             "empty_fixed_array",
