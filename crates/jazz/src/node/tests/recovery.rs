@@ -401,6 +401,167 @@ fn recovery_rebuilds_global_clock_from_accepted_transactions() {
     assert_eq!(reopened.clock.next_global_seq, GlobalSeq(3));
 }
 
+// This is necessarily an internal mechanism regression test: the public API
+// only exposes the restored upload queue, not the durable candidate records or
+// their decode work. It seeds valid commit units through the public node ingest
+// boundary, then compares the new lookup with the former full-decode predicate.
+fn pending_replay_fixture_transaction(
+    tx_id: TxId,
+    made_by: AuthorId,
+) -> Transaction {
+    Transaction {
+        tx_id,
+        kind: TxKind::Mergeable,
+        n_total_writes: 0,
+        made_by,
+        permission_subject: None,
+        base_snapshot: None,
+        row_read_set: None,
+        absent_read_set: None,
+        predicate_read_set: None,
+        user_metadata_json: None,
+        source_branch: None,
+        merge_strategy: None,
+    }
+}
+
+fn seed_pending_replay_state(
+    node: &mut NodeState<RocksDbStorage>,
+    tx_id: TxId,
+    made_by: AuthorId,
+    fate: Fate,
+    global_seq: Option<GlobalSeq>,
+    durability: DurabilityTier,
+) {
+    node.ingest_relay_commit_unit(pending_replay_fixture_transaction(tx_id, made_by), Vec::new())
+        .unwrap();
+    if !matches!(fate, Fate::Pending) || global_seq.is_some() || durability != DurabilityTier::Local
+    {
+        node.apply_fate_update(tx_id, fate, global_seq, Some(durability))
+            .unwrap();
+    }
+}
+
+fn legacy_pending_transaction_ids_for(
+    node: &mut NodeState<RocksDbStorage>,
+    local_node: NodeUuid,
+    author: AuthorId,
+) -> PendingTransactionScan {
+    let mut scan = PendingTransactionScan::default();
+    for tx_id in node.transaction_ids().unwrap() {
+        scan.records_visited += 1;
+        let transaction = node.query_transaction(tx_id).unwrap().unwrap();
+        scan.full_transactions_decoded += 1;
+        if transaction.tx.tx_id.node == local_node
+            && transaction.tx.made_by == author
+            && matches!(transaction.fate, Fate::Pending | Fate::Accepted)
+            && transaction.durability < DurabilityTier::Global
+        {
+            scan.tx_ids.push(tx_id);
+        }
+    }
+    scan.tx_ids.sort();
+    scan
+}
+
+#[test]
+fn pending_replay_index_lookup_matches_legacy_predicate_including_sequenced_edge_acceptance() {
+    let (_dir, mut node_under_test) = open_node();
+    let local_node = node(1);
+    let local_author = AuthorId::from_bytes([0xa1; 16]);
+    let other_author = AuthorId::from_bytes([0xb2; 16]);
+    let other_node = node(2);
+
+    let states = [
+        (local_node, local_author, Fate::Pending, None, DurabilityTier::Local),
+        (local_node, local_author, Fate::Accepted, None, DurabilityTier::Edge),
+        // A sequence can arrive before this replica learns Global durability.
+        (local_node, local_author, Fate::Accepted, Some(GlobalSeq(7)), DurabilityTier::Edge),
+        (local_node, local_author, Fate::Accepted, Some(GlobalSeq(8)), DurabilityTier::Global),
+        (
+            local_node,
+            local_author,
+            Fate::Rejected(RejectionReason::AuthorizationDenied),
+            None,
+            DurabilityTier::Local,
+        ),
+        (local_node, other_author, Fate::Pending, None, DurabilityTier::Local),
+        (other_node, local_author, Fate::Pending, None, DurabilityTier::Local),
+    ];
+    for (offset, (tx_node, author, fate, global_seq, durability)) in states.into_iter().enumerate() {
+        seed_pending_replay_state(
+            &mut node_under_test,
+            TxId::new(TxTime::from((offset + 1) as u64), tx_node),
+            author,
+            fate,
+            global_seq,
+            durability,
+        );
+    }
+
+    let legacy = legacy_pending_transaction_ids_for(&mut node_under_test, local_node, local_author);
+    let indexed = node_under_test
+        .pending_transaction_scan_for(local_node, local_author)
+        .unwrap();
+
+    assert_eq!(indexed.tx_ids, legacy.tx_ids);
+    assert_eq!(indexed.records_visited, indexed.tx_ids.len());
+    assert_eq!(indexed.full_transactions_decoded, 0);
+    assert!(indexed.tx_ids.contains(&TxId::new(TxTime::from(3), local_node)));
+}
+
+fn pending_replay_lookup_work(settled_history: usize) -> (PendingTransactionScan, PendingTransactionScan) {
+    let (_dir, mut node_under_test) = open_node();
+    let local_node = node(1);
+    let local_author = AuthorId::from_bytes([0xa1; 16]);
+    for offset in 0..settled_history {
+        seed_pending_replay_state(
+            &mut node_under_test,
+            TxId::new(TxTime::from((offset + 1) as u64), local_node),
+            local_author,
+            Fate::Accepted,
+            Some(GlobalSeq((offset + 1) as u64)),
+            DurabilityTier::Global,
+        );
+    }
+    seed_pending_replay_state(
+        &mut node_under_test,
+        TxId::new(TxTime::from((settled_history + 1) as u64), local_node),
+        local_author,
+        Fate::Accepted,
+        Some(GlobalSeq((settled_history + 1) as u64)),
+        DurabilityTier::Edge,
+    );
+    let legacy = legacy_pending_transaction_ids_for(&mut node_under_test, local_node, local_author);
+    let indexed = node_under_test
+        .pending_transaction_scan_for(local_node, local_author)
+        .unwrap();
+    (legacy, indexed)
+}
+
+#[test]
+fn pending_replay_lookup_is_scale_independent_of_settled_history() {
+    let (legacy_empty, indexed_empty) = pending_replay_lookup_work(0);
+    let (legacy_small, indexed_small) = pending_replay_lookup_work(8);
+    let (legacy_large, indexed_large) = pending_replay_lookup_work(128);
+
+    assert_eq!(indexed_empty.records_visited, 1);
+    assert_eq!(indexed_small.records_visited, 1);
+    assert_eq!(indexed_large.records_visited, 1);
+    assert_eq!(indexed_empty.full_transactions_decoded, 0);
+    assert_eq!(indexed_small.full_transactions_decoded, 0);
+    assert_eq!(indexed_large.full_transactions_decoded, 0);
+    assert_eq!(indexed_small.tx_ids.len(), indexed_large.tx_ids.len());
+    // This is the explicit counterfactual proof for the pre-index lookup: it
+    // visits and reconstructs every retained transaction, so this canary's
+    // constant-work assertion would fail under the former implementation.
+    assert_eq!(legacy_empty.records_visited, 1);
+    assert_eq!(legacy_small.records_visited, 9);
+    assert_eq!(legacy_large.records_visited, 129);
+    assert_eq!(legacy_large.full_transactions_decoded, legacy_large.records_visited);
+    assert!(legacy_large.records_visited > legacy_small.records_visited * 8);
+}
+
 #[test]
 fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer() {
     let (_dir, mut core) = open_node_with_uuid(node(0x3a));

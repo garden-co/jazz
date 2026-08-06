@@ -1385,6 +1385,15 @@ fn transactions_table() -> GrooveTableSchema {
         PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
     ]))
     .with_index(GrooveIndexSchema::new("by_global_seq", ["global_seq"]))
+    // Reopen replays only locally-authored transactions which remain pending
+    // or accepted below Global durability. Keep both state dimensions in the
+    // index: an accepted transaction can have a global sequence before this
+    // node learns Global durability, so `by_global_seq` cannot safely express
+    // the replay predicate.
+    .with_index(GrooveIndexSchema::new(
+        "by_replay_state",
+        ["node_id", "made_by", "fate", "durability"],
+    ))
 }
 
 fn canonical_schema_bytes(schema: &JazzSchema) -> Vec<u8> {
@@ -1811,6 +1820,10 @@ mod tests {
                 .iter()
                 .any(|column| column.name == "durability")
         );
+        assert!(transactions.indices.iter().any(|index| {
+            index.name == "by_replay_state"
+                && index.columns == ["node_id", "made_by", "fate", "durability"]
+        }));
         assert!(
             history
                 .columns

@@ -53,6 +53,7 @@ use crate::tx::{
 
 const TEXT_EXTENT_OPS_MAGIC: &[u8] = b"JTXTREF1";
 const LARGE_VALUE_HANDLE_MAGIC: &[u8] = b"JLVH1";
+const REPLAY_STATE_INDEX_MARKER: &str = "replay-state-index-v1";
 const CLEAN_CLOSE_MARKER_NAME: &str = "node-clean-close";
 const CLEAN_CLOSE_MARKER_VERSION: u64 = 1;
 const STORAGE_CONSISTENCY_MARKER_NAME: &str = "settled-ahead-current-clean-through";
@@ -645,6 +646,7 @@ where
             initial_sync_flush_completed: false,
         };
         node.recover_from_storage()?;
+        node.backfill_replay_state_index_if_needed()?;
         node.recover_known_state_facts()?;
         node.rebuild_ahead_current_keys()?;
         let self_node_alias = node.ensure_node_alias(node_uuid)?;
@@ -2594,20 +2596,106 @@ where
         node: NodeUuid,
         author: AuthorId,
     ) -> Result<Vec<TxId>, Error> {
-        let mut pending = Vec::new();
+        Ok(self.pending_transaction_scan_for(node, author)?.tx_ids)
+    }
+
+    /// Backfill the replay-state index once for storages created before that
+    /// index existed. Only transactions which can ever become replayable are
+    /// rewritten: terminal fates and Global durability are monotone, so they
+    /// can never enter a future replay result.
+    ///
+    /// This is an upgrade-only compatibility path. Without it, an old pending
+    /// transaction would have no new secondary-index entry and could be
+    /// silently skipped on the first reopen after upgrading.
+    fn backfill_replay_state_index_if_needed(&mut self) -> Result<(), Error> {
+        let marker_key = replay_state_index_marker_key();
+        if self
+            .database
+            .direct_record_store(CLEAN_CLOSE_MARKERS_STORE)?
+            .get(&marker_key)?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let mut updates = Vec::new();
         for tx_id in self.transaction_ids()? {
             let Some(transaction) = self.query_transaction(tx_id)? else {
                 continue;
             };
-            if transaction.tx.tx_id.node == node
-                && transaction.tx.made_by == author
-                && matches!(transaction.fate, Fate::Pending | Fate::Accepted)
+            if matches!(transaction.fate, Fate::Pending | Fate::Accepted)
                 && transaction.durability < DurabilityTier::Global
             {
-                pending.push(tx_id);
+                updates.push(transaction_values(
+                    transaction.node_alias,
+                    &transaction.tx,
+                    transaction.fate,
+                    transaction.global_seq,
+                    transaction.durability,
+                ));
             }
         }
-        Ok(pending)
+        if !updates.is_empty() {
+            let mut batch = self.database.open_batch();
+            for values in updates {
+                batch.update("jazz_transactions", values);
+            }
+            self.database.commit_batch(batch)?;
+        }
+        self.database
+            .direct_record_store(CLEAN_CLOSE_MARKERS_STORE)?
+            .set(&marker_key, &[Value::U64(1), Value::Uuid(self.node_uuid.0)])?;
+        Ok(())
+    }
+
+    /// Find replayable local transaction ids through the durable replay-state
+    /// index. The index contains every dimension of the predicate except the
+    /// transaction id itself, so this avoids reconstructing `Transaction` for
+    /// retained, settled history.
+    fn pending_transaction_scan_for(
+        &mut self,
+        node: NodeUuid,
+        author: AuthorId,
+    ) -> Result<PendingTransactionScan, Error> {
+        let Some(node_alias) = self.node_aliases.get(&node).copied() else {
+            return Ok(PendingTransactionScan::default());
+        };
+
+        let mut scan = PendingTransactionScan::default();
+        // `DurabilityTier` is encoded in ascending enum order. The exclusive
+        // Global bound includes None, Local, and Edge, but no globally durable
+        // records. Pending and Accepted require separate contiguous ranges.
+        for fate in [0, 1] {
+            for raw in self.database.index_scan_range_raw(
+                "jazz_transactions",
+                "by_replay_state",
+                &[
+                    Value::U64(node_alias.0),
+                    Value::Uuid(author.0),
+                    Value::Enum(fate),
+                    Value::Enum(0),
+                ],
+                &[
+                    Value::U64(node_alias.0),
+                    Value::Uuid(author.0),
+                    Value::Enum(fate),
+                    Value::Enum(3),
+                ],
+            )? {
+                // The index has already selected node, author, fate, and
+                // durability. Read only the primary-key fields; do not decode
+                // the stored transaction payload.
+                let record = raw.record();
+                scan.records_visited += 1;
+                scan.tx_ids.push(TxId::new(
+                    TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?),
+                    node,
+                ));
+            }
+        }
+        scan.tx_ids.sort();
+        scan.tx_ids.dedup();
+        Ok(scan)
     }
 
     /// Resolve creator/updater provenance for a projected current row.
@@ -4150,6 +4238,18 @@ pub struct CurrentRow {
     deleted: bool,
 }
 
+/// Work performed by the replay-state lookup.
+///
+/// This stays separate from storage metrics so scale tests can assert the
+/// semantic unit of work (candidate transaction records) independently of
+/// storage windowing and cache layout.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PendingTransactionScan {
+    tx_ids: Vec<TxId>,
+    records_visited: usize,
+    full_transactions_decoded: usize,
+}
+
 /// User-visible row provenance resolved from commit authorship.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RowProvenance {
@@ -5174,6 +5274,10 @@ fn binding_view_key_from_store_key(
 
 fn clean_close_marker_key() -> [Value; 1] {
     [Value::String(CLEAN_CLOSE_MARKER_NAME.to_owned())]
+}
+
+fn replay_state_index_marker_key() -> [Value; 1] {
+    [Value::String(REPLAY_STATE_INDEX_MARKER.to_owned())]
 }
 
 fn storage_consistency_marker_key() -> [Value; 1] {
