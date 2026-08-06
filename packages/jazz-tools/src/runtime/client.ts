@@ -85,8 +85,14 @@ export interface Runtime {
   clearClientStorage?(): Promise<void>;
   /** Connect to a Jazz server over WebSocket (Rust transport). */
   connect(url: string, auth_json: string): void;
-  /** Disconnect from the Jazz server and drop the transport handle. */
-  disconnect(options?: { rejectWaiters?: boolean }): void | Promise<void>;
+  /**
+   * Disconnect from the Jazz server and drop the transport handle.
+   *
+   * Resolves once the runtime has completed the disconnect. For worker-backed
+   * runtimes, this includes a round-trip in which the worker performs the
+   * disconnect before replying.
+   */
+  disconnect(options?: { rejectWaiters?: boolean }): Promise<void>;
   /** Push updated auth credentials into the live Rust transport. */
   updateAuth(auth_json: string): void;
   /** Register a callback invoked when the Rust transport rejects the JWT. */

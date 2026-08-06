@@ -956,7 +956,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.scheduleServerPump();
   }
 
-  disconnect(options: { rejectWaiters?: boolean } = {}): void {
+  disconnect(options: { rejectWaiters?: boolean } = {}): Promise<void> {
     this.serverCarrier?.close();
     this.serverCarrier = null;
     this.serverCarrierPromise = null;
@@ -973,6 +973,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.pendingInboundServerFrames.length = 0;
     this.serverPumpScheduled = false;
     this.serverPumpAgain = false;
+    return Promise.resolve();
   }
 
   updateAuth(authJson: string): Promise<void> | void {

@@ -124,7 +124,7 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
         return;
       }
       case "disconnect": {
-        getRuntime().disconnect();
+        await getRuntime().disconnect();
         postResult(message.id, undefined);
         return;
       }
