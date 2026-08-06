@@ -7,7 +7,7 @@ export type ValueType = {
   tag: number;
   inner?: ValueType;
   members?: ValueType[];
-  jsonSchema?: string;
+  record?: DescriptorField[];
 };
 export type DescriptorField = { name?: string; valueType: ValueType };
 export type NativeRow = { rowId: Uint8Array; deleted: boolean; raw: Uint8Array };
@@ -154,12 +154,9 @@ export function writeValueType(writer: PostcardWriterLike, valueType: ValueType)
     writeValueType(writer, valueType.inner);
     return;
   }
-  if (valueType.tag === 15) {
-    if (valueType.jsonSchema == null) {
-      writer.none();
-    } else {
-      writer.some((schemaWriter) => schemaWriter.string(valueType.jsonSchema!));
-    }
+  if (valueType.tag === 13) {
+    if (!valueType.record) throw new Error("missing inline record descriptor for tag 13");
+    writeDescriptor(writer, valueType.record);
   }
 }
 
@@ -172,11 +169,8 @@ export function readValueType(reader: PostcardReaderLike): ValueType {
     const members = reader.readVec(readValueType);
     return { tag, members, inner: members[0] };
   }
-  if (tag === 15) {
-    return {
-      tag,
-      jsonSchema: reader.option((schemaReader) => schemaReader.string()),
-    };
+  if (tag === 13) {
+    return { tag, record: readDescriptor(reader) };
   }
   return { tag };
 }
@@ -551,9 +545,9 @@ export function storageColumnTypeToValueType(type: ColumnType): ValueType {
     case "Boolean":
       return { tag: 5 };
     case "Integer":
-      return { tag: 14 };
+      return { tag: 15 };
     case "BigInt":
-      return { tag: 13 };
+      return { tag: 14 };
     case "Timestamp":
       return { tag: 3 };
     case "Double":
@@ -720,10 +714,10 @@ function fixedSize(valueType: ValueType): number | undefined {
     case 1:
       return 2;
     case 2:
-    case 14:
+    case 15:
       return 4;
     case 3:
-    case 13:
+    case 14:
     case 4:
       return 8;
     case 8:

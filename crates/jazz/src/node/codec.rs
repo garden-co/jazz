@@ -1259,7 +1259,6 @@ pub(super) fn history_values_from_parts(
     table: &TableSchema,
     version: &VersionRowParts,
 ) -> Result<Vec<Value>, Error> {
-    validate_cells_map(table, &version.cells)?;
     let mut values = vec![
         Value::Uuid(version.row_uuid.0),
         Value::U64(version.tx_time.0),
@@ -1772,7 +1771,6 @@ pub(super) fn positional_cells_from_map(
     table: &TableSchema,
     cells: &BTreeMap<String, Value>,
 ) -> Result<Vec<Option<Value>>, Error> {
-    validate_cells_map(table, cells)?;
     Ok(table
         .columns
         .iter()

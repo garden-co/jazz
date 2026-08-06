@@ -7,7 +7,7 @@ import type {
   Value,
   WasmSchema,
 } from "../../drivers/types.js";
-import { PostcardWriter, writeValueType, type ValueType } from "./native-codec.js";
+import { PostcardWriter } from "./native-codec.js";
 
 const OUTER_ROW_SESSION_PREFIX = "__jazz_outer_row";
 
@@ -75,6 +75,15 @@ type PendingPolicyReachable = Omit<
   "accessTable" | "accessRowColumn" | "accessTeamColumn" | "accessTeamTarget" | "accessFilters"
 >;
 
+// This is Jazz's schema::ColumnType, which is deliberately distinct from
+// groove::records::ValueType used by native row descriptors. In particular,
+// Jazz tag 15 is JSON-with-an-optional-schema whereas Groove tag 15 is I32.
+type SchemaColumnType = {
+  tag: number;
+  inner?: SchemaColumnType;
+  jsonSchema?: string;
+};
+
 export function encodeSchema(schema: WasmSchema): Uint8Array {
   const tables = Object.entries(schema);
   const writer = new PostcardWriter();
@@ -84,7 +93,7 @@ export function encodeSchema(schema: WasmSchema): Uint8Array {
     table.vec((column, columnIndex) => {
       const columnSpec = definition.columns[columnIndex]!;
       column.string(columnSpec.name);
-      writeValueType(column, columnValueType(columnSpec));
+      writeSchemaColumnType(column, columnValueType(columnSpec));
       writeLargeValueKind(column, columnSpec);
       column.none();
       writeColumnDefault(column, columnSpec);
@@ -109,7 +118,7 @@ export function encodeSchema(schema: WasmSchema): Uint8Array {
   return writer.finish();
 }
 
-export function columnValueType(column: ColumnDescriptor): ValueType {
+export function columnValueType(column: ColumnDescriptor): SchemaColumnType {
   const valueType = columnTypeToValueType(column.column_type);
   return column.nullable ? { tag: 12, inner: valueType } : valueType;
 }
@@ -237,7 +246,7 @@ function writeMergeStrategies(writer: PostcardWriter, columns: ColumnDescriptor[
   }
 }
 
-export function columnTypeToValueType(type: ColumnType): ValueType {
+export function columnTypeToValueType(type: ColumnType): SchemaColumnType {
   switch (type.type) {
     case "Boolean":
       return { tag: 5 };
@@ -265,6 +274,23 @@ export function columnTypeToValueType(type: ColumnType): ValueType {
       return { tag: 11, inner: columnTypeToValueType(type.element) };
     case "Row":
       throw new Error("Core runtime does not encode nested row columns yet");
+  }
+}
+
+function writeSchemaColumnType(writer: PostcardWriter, columnType: SchemaColumnType): void {
+  writer.enumUnit(columnType.tag);
+  if (columnType.tag === 11 || columnType.tag === 12) {
+    if (!columnType.inner)
+      throw new Error(`missing inner schema column type for tag ${columnType.tag}`);
+    writeSchemaColumnType(writer, columnType.inner);
+    return;
+  }
+  if (columnType.tag === 15) {
+    if (columnType.jsonSchema == null) {
+      writer.none();
+    } else {
+      writer.some((schemaWriter) => schemaWriter.string(columnType.jsonSchema!));
+    }
   }
 }
 

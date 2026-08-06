@@ -3493,10 +3493,10 @@ function fixedValueSize(valueType: ValueType): number | undefined {
     case 1:
       return 2;
     case 2:
-    case 14:
+    case 15:
       return 4;
     case 3:
-    case 13:
+    case 14:
     case 4:
       return 8;
     case 8:

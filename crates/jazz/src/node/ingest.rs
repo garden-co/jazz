@@ -909,6 +909,9 @@ where
         )? {
             return Ok(());
         }
+        if let Some(reason) = self.invalid_cell_value_reason(&versions) {
+            return Err(Error::InvalidJsonCell(reason));
+        }
 
         let mut memo = IngestMemo::default();
         if self.park_commit_unit_if_missing_parents(
@@ -4596,7 +4599,10 @@ where
     /// after forward-lens translation, because a lens can move a value into a
     /// differently constrained column (`CopyColumn`) or introduce one outright
     /// (`AddColumn`) without transforming any column's type.
-    fn invalid_cell_value_reason(&mut self, versions: &[VersionRecord]) -> Option<String> {
+    pub(super) fn invalid_cell_value_reason(
+        &mut self,
+        versions: &[VersionRecord],
+    ) -> Option<String> {
         for version in versions {
             if version.deletion().is_some() {
                 continue;
@@ -4618,26 +4624,14 @@ where
                 })
                 .collect::<BTreeMap<_, _>>();
 
-            let mut target_schema = author_schema;
-            if author_schema != self.catalogue.current_write_schema.schema
-                && self.has_forward_lens_path(
-                    author_schema,
-                    self.catalogue.current_write_schema.schema,
-                    version.table(),
-                )
+            let (target_schema, translated_table) = match self
+                .translate_cells_to_current_write_schema(author_schema, &target_table, &mut cells)
             {
-                target_schema = self.catalogue.current_write_schema.schema;
-                match self.translate_cells_forward(
-                    author_schema,
-                    target_schema,
-                    &target_table,
-                    &mut cells,
-                ) {
-                    Ok(table) => target_table = table,
-                    // Lens-chain failures are reported by the staging path.
-                    Err(_) => continue,
-                }
-            }
+                Ok(translated) => translated,
+                // Lens-chain failures are reported by the staging path.
+                Err(_) => continue,
+            };
+            target_table = translated_table;
 
             let Ok(table_schema) = self.table_in_schema(&target_table, target_schema) else {
                 continue;

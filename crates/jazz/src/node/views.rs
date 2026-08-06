@@ -629,6 +629,7 @@ where
 
     /// Apply a downstream current-row view update.
     pub(super) fn apply_view_update(&mut self, update: ViewUpdateParts) -> Result<(), Error> {
+        self.validate_view_update_cell_values(&update)?;
         self.apply_view_update_inner(update, None)
     }
 
@@ -638,6 +639,9 @@ where
     ) -> Result<(), Error> {
         if updates.is_empty() {
             return Ok(());
+        }
+        for update in &updates {
+            self.validate_view_update_cell_values(update)?;
         }
         if updates.iter().any(|update| update.reset_result_set) {
             self.begin_initial_sync_flush_cadence()?;
@@ -723,6 +727,19 @@ where
         }
         if self.initial_sync_flush_active && self.query.initial_hydration_binding_views.is_empty() {
             self.finish_initial_sync_flush_cadence()?;
+        }
+        Ok(())
+    }
+
+    /// View-update bundles arrive from a peer and bypass both local write
+    /// admission and authority/relay commit-unit ingress.
+    fn validate_view_update_cell_values(&mut self, update: &ViewUpdateParts) -> Result<(), Error> {
+        for bundle in
+            version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
+        {
+            if let Some(reason) = self.invalid_cell_value_reason(bundle.versions) {
+                return Err(Error::InvalidJsonCell(reason));
+            }
         }
         Ok(())
     }
