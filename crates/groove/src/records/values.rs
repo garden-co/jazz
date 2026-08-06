@@ -191,6 +191,16 @@ pub enum ValueType {
 }
 
 impl ValueType {
+    /// Whether this type contains an inline record at any nesting depth.
+    pub(crate) fn contains_record(&self) -> bool {
+        match self {
+            Self::Tuple(members) => members.iter().any(Self::contains_record),
+            Self::Array(inner) | Self::Nullable(inner) => inner.contains_record(),
+            Self::Record(_) => true,
+            _ => false,
+        }
+    }
+
     pub(super) fn fixed_size(&self) -> Option<usize> {
         match self {
             Self::U8 | Self::Bool => Some(1),

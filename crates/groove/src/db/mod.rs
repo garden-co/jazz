@@ -50,6 +50,19 @@ pub struct Database<S> {
     poisoned: bool,
 }
 
+fn validate_durable_key_schema(schema: &DatabaseSchema) -> Result<(), Error> {
+    for store in &schema.direct_record_stores {
+        if store
+            .key
+            .iter()
+            .any(|(_, value_type)| value_type.contains_record())
+        {
+            return Err(Error::InvalidDirectRecordStoreKey(store.name.clone()));
+        }
+    }
+    Ok(())
+}
+
 impl<S> Database<S>
 where
     S: OrderedKvStorage,
@@ -94,6 +107,7 @@ where
         storage: S,
         storage_layout: StorageLayout,
     ) -> Result<Self, Error> {
+        validate_durable_key_schema(&schema)?;
         let ivm_runtime = IvmRuntime::new(schema)?;
         Ok(Self {
             storage: LayoutStorage::new(storage, storage_layout)?,

@@ -1586,6 +1586,130 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
     );
 }
 
+fn assert_direct_record_store_round_trips_array_of_record_values() {
+    let child = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
+    let schema = DatabaseSchema::new([]).with_direct_record_store(DirectRecordStoreSchema::new(
+        "rendered_results",
+        RecordDescriptor::new([("id", ValueType::U64)]),
+        RecordDescriptor::new([(
+            "results",
+            ValueType::Array(Box::new(ValueType::Record(Box::new(child)))),
+        )]),
+    ));
+    let storage = MemoryStorage::new(&schema.column_families());
+    let database = Database::new(schema, storage).unwrap();
+    let first = crate::records::OwnedRecord::new(
+        child
+            .create(&[Value::U64(1), Value::String("Kind of Blue".to_owned())])
+            .unwrap(),
+        child,
+    );
+    let second = crate::records::OwnedRecord::new(
+        child
+            .create(&[Value::U64(2), Value::String("A Love Supreme".to_owned())])
+            .unwrap(),
+        child,
+    );
+    let results = Value::Array(vec![Value::Record(first), Value::Record(second)]);
+    let store = database.direct_record_store("rendered_results").unwrap();
+
+    store.set(&[Value::U64(7)], &[results.clone()]).unwrap();
+
+    assert_eq!(
+        store
+            .get(&[Value::U64(7)])
+            .unwrap()
+            .unwrap()
+            .get("results")
+            .unwrap(),
+        results
+    );
+}
+
+fn assert_direct_record_store_rejects_noncanonical_record_value_bytes_at_admission() {
+    let child = RecordDescriptor::new([("maybe_id", ValueType::Nullable(Box::new(ValueType::U8)))]);
+    let schema = DatabaseSchema::new([]).with_direct_record_store(DirectRecordStoreSchema::new(
+        "rendered_results",
+        RecordDescriptor::new([("id", ValueType::U64)]),
+        RecordDescriptor::new([(
+            "results",
+            ValueType::Array(Box::new(ValueType::Record(Box::new(child)))),
+        )]),
+    ));
+    let storage = MemoryStorage::new(&schema.column_families());
+    let database = Database::new(schema, storage).unwrap();
+    let store = database.direct_record_store("rendered_results").unwrap();
+    // A fixed-width null reserves a zero payload byte; this child has a
+    // noncanonical nonzero payload and must not reach durable storage.
+    let noncanonical = crate::records::OwnedRecord::new(vec![0, 7], child);
+
+    assert!(matches!(
+        store.set(
+            &[Value::U64(7)],
+            &[Value::Array(vec![Value::Record(noncanonical)])],
+        ),
+        Err(Error::RecordEncoding(crate::records::Error::InvalidOffset))
+    ));
+    assert!(store.get(&[Value::U64(7)]).unwrap().is_none());
+}
+
+#[test]
+fn direct_record_store_rejects_record_containing_durable_keys_at_schema_admission() {
+    assert_direct_record_store_round_trips_array_of_record_values();
+    assert_direct_record_store_rejects_noncanonical_record_value_bytes_at_admission();
+
+    let child = RecordDescriptor::new([("id", ValueType::U64)]);
+    for (name, key_type) in [
+        ("direct_record", ValueType::Record(Box::new(child))),
+        (
+            "array_record",
+            ValueType::Array(Box::new(ValueType::Record(Box::new(child)))),
+        ),
+        (
+            "nullable_array_record",
+            ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::Record(
+                Box::new(child),
+            ))))),
+        ),
+    ] {
+        let schema =
+            DatabaseSchema::new([]).with_direct_record_store(DirectRecordStoreSchema::new(
+                name,
+                RecordDescriptor::new([("key", key_type)]),
+                RecordDescriptor::new([("payload", ValueType::Bytes)]),
+            ));
+        let storage = MemoryStorage::new(&schema.column_families());
+
+        assert!(matches!(
+            Database::new(schema, storage),
+            Err(Error::InvalidDirectRecordStoreKey(store)) if store == name
+        ));
+    }
+
+    let scalar_schema =
+        DatabaseSchema::new([]).with_direct_record_store(DirectRecordStoreSchema::new(
+            "scalar_key",
+            RecordDescriptor::new([("id", ValueType::U64)]),
+            RecordDescriptor::new([("payload", ValueType::Bytes)]),
+        ));
+    let scalar_storage = MemoryStorage::new(&scalar_schema.column_families());
+    let scalar_database = Database::new(scalar_schema, scalar_storage).unwrap();
+    let scalar_store = scalar_database.direct_record_store("scalar_key").unwrap();
+
+    scalar_store
+        .set(&[Value::U64(7)], &[Value::Bytes(b"allowed".to_vec())])
+        .unwrap();
+    assert_eq!(
+        scalar_store
+            .get(&[Value::U64(7)])
+            .unwrap()
+            .unwrap()
+            .get("payload")
+            .unwrap(),
+        Value::Bytes(b"allowed".to_vec())
+    );
+}
+
 #[test]
 fn direct_record_store_rejects_record_valued_durable_keys() {
     let child = RecordDescriptor::new([("id", ValueType::U64)]);
