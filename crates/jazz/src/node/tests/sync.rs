@@ -491,6 +491,7 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
             version_carriers: Vec::new(),
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+            authorization_progress: None,
             result_member_adds,
             result_member_removes,
             program_fact_adds,
@@ -555,6 +556,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                 version_carriers: Vec::new(),
                 version_bundles: Vec::new(),
                 peer_complete_tx_payload_refs: Vec::new(),
+            authorization_progress: None,
                 result_member_adds: vec![ResultMemberEntry::row((
                     "todos".to_owned().into(),
                     row_uuid,
@@ -578,6 +580,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                     durability,
                 }],
                 peer_complete_tx_payload_refs: vec![tx_id],
+            authorization_progress: None,
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
                 program_fact_adds: Vec::new(),
@@ -638,6 +641,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                     durability: DurabilityTier::Global,
                 }],
                 peer_complete_tx_payload_refs: Vec::new(),
+            authorization_progress: None,
                 result_member_adds: vec![ResultMemberEntry::row((
                     "todos".to_owned().into(),
                     row(1),
@@ -661,6 +665,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                     durability: DurabilityTier::Global,
                 }],
                 peer_complete_tx_payload_refs: Vec::new(),
+            authorization_progress: None,
                 result_member_adds: vec![ResultMemberEntry::row((
                     "todos".to_owned().into(),
                     row(2),
@@ -810,6 +815,7 @@ fn partial_exclusive_view_update(
             durability: DurabilityTier::Global,
         }],
         peer_complete_tx_payload_refs: Vec::new(),
+            authorization_progress: None,
         result_member_adds: vec![ResultMemberEntry::row((
             "todos".to_owned().into(),
             row_uuid,
@@ -905,6 +911,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
                 },
             ],
             peer_complete_tx_payload_refs: Vec::new(),
+            authorization_progress: None,
             result_member_adds: vec![ResultMemberEntry::row((
                 "todos".to_owned().into(),
                 row_uuid,
@@ -3264,7 +3271,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
         reset_result_set,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
-                complete_tx_payloads: peer_payload_inventory_refs,
+                complete_tx_payloads: peer_payload_inventory_refs, ..
             },
         result_member_adds,
         result_member_removes,
@@ -3292,6 +3299,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
             version_carriers: Vec::new(),
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
+            authorization_progress: None,
             result_member_adds,
             result_member_removes,
             program_fact_adds: Vec::new(),
@@ -3333,7 +3341,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         reset_result_set,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
-                complete_tx_payloads: peer_payload_inventory_refs,
+                complete_tx_payloads: peer_payload_inventory_refs, ..
             },
         result_member_adds,
         result_member_removes,
@@ -3352,6 +3360,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             version_carriers: Vec::new(),
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
+            authorization_progress: None,
             result_member_adds,
             result_member_removes,
             program_fact_adds: Vec::new(),
@@ -3374,7 +3383,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         settled_through,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
-                complete_tx_payloads: peer_payload_inventory_refs,
+                complete_tx_payloads: peer_payload_inventory_refs, ..
             },
         result_member_adds,
         result_member_removes,
@@ -3399,6 +3408,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             version_carriers: Vec::new(),
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
+            authorization_progress: None,
             result_member_adds,
             result_member_removes,
             program_fact_adds: Vec::new(),
@@ -3423,6 +3433,7 @@ fn view_updates_downgrade_unknown_peer_payload_inventory_refs() {
             version_carriers: Vec::new(),
             version_bundles: Vec::new(),
             peer_complete_tx_payload_refs: vec![missing],
+            authorization_progress: None,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
             program_fact_adds: Vec::new(),

@@ -877,7 +877,7 @@ fn assert_view_update_result_set_matches_current_rows(node: &mut NodeState<Rocks
     let update = node.view_update_for_current_rows("todos").unwrap();
     let SyncMessage::ViewUpdate {
         version_bundles: _,
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         result_member_adds,
         result_member_removes,
         ..

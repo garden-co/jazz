@@ -350,6 +350,8 @@ struct QueryServing {
     settled_program_facts: BTreeMap<BindingViewKey, BTreeSet<ViewFactEntry>>,
     /// Server-stamped settled-through cursor for each canonical binding view.
     settled_through_by_binding_view: BTreeMap<BindingViewKey, GlobalSeq>,
+    /// Server-stamped authorization generation paired with settled fast state.
+    authorization_progress_by_binding_view: BTreeMap<BindingViewKey, u64>,
     /// Binding views whose current subscription declared known-state repair.
     known_state_declared_binding_views: BTreeSet<BindingViewKey>,
     /// Binding views that have begun receiving an initial snapshot. Some
@@ -610,6 +612,7 @@ where
                 settled_result_row_index: BTreeMap::new(),
                 settled_program_facts: BTreeMap::new(),
                 settled_through_by_binding_view: BTreeMap::new(),
+                authorization_progress_by_binding_view: BTreeMap::new(),
                 known_state_declared_binding_views: BTreeSet::new(),
                 initial_hydration_binding_views: BTreeSet::new(),
                 deferred_publication_binding_views: BTreeSet::new(),
@@ -794,6 +797,7 @@ where
         self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
         self.query.settled_through_by_binding_view.clear();
+        self.query.authorization_progress_by_binding_view.clear();
         self.query.known_state_declared_binding_views.clear();
         self.query.initial_hydration_binding_views.clear();
         self.query.deferred_publication_binding_views.clear();
@@ -2625,7 +2629,16 @@ where
             .direct_record_store(KNOWN_STATE_FACTS_STORE)?
             .set(
                 &known_state_fact_key(binding_view_key),
-                &[Value::U64(settled_through.0)],
+                &[
+                    Value::U64(settled_through.0),
+                    Value::U64(
+                        self.query
+                            .authorization_progress_by_binding_view
+                            .get(&binding_view_key)
+                            .copied()
+                            .unwrap_or(u64::MAX),
+                    ),
+                ],
             )?;
         Ok(())
     }
@@ -2649,6 +2662,13 @@ where
         self.query
             .settled_through_by_binding_view
             .insert(binding_view_key, settled_through);
+        if let Value::U64(progress) = record.get_idx(1)?
+            && progress != u64::MAX
+        {
+            self.query
+                .authorization_progress_by_binding_view
+                .insert(binding_view_key, progress);
+        }
         Ok(Some(settled_through))
     }
 
@@ -2663,6 +2683,7 @@ where
             store.delete(&key)?;
         }
         self.query.settled_through_by_binding_view.clear();
+        self.query.authorization_progress_by_binding_view.clear();
         self.clear_all_settled_result_state()?;
         Ok(())
     }
@@ -2930,6 +2951,7 @@ where
 
     fn recover_known_state_facts(&mut self) -> Result<(), Error> {
         self.query.settled_through_by_binding_view.clear();
+        self.query.authorization_progress_by_binding_view.clear();
         self.query.settled_result_sets.clear();
         self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
@@ -2972,10 +2994,23 @@ where
                     ));
                 }
             };
-            self.query.settled_through_by_binding_view.insert(
-                BindingViewKey::new(shape_id, binding_id, read_view),
-                settled_through,
-            );
+            let binding_view_key = BindingViewKey::new(shape_id, binding_id, read_view);
+            self.query
+                .settled_through_by_binding_view
+                .insert(binding_view_key, settled_through);
+            match entry.value.get_idx(1)? {
+                Value::U64(progress) if progress != u64::MAX => {
+                    self.query
+                        .authorization_progress_by_binding_view
+                        .insert(binding_view_key, progress);
+                }
+                Value::U64(_) => {}
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "known-state authorization progress must be u64",
+                    ));
+                }
+            }
         }
         let store = self
             .database
@@ -4667,6 +4702,7 @@ pub(crate) struct ViewUpdateParts {
     pub(crate) version_carriers: Vec<VersionCarrier>,
     pub(crate) version_bundles: Vec<VersionBundle>,
     pub(crate) peer_complete_tx_payload_refs: Vec<TxId>,
+    pub(crate) authorization_progress: Option<u64>,
     pub(crate) result_member_adds: Vec<ResultMemberEntry>,
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ViewFactEntry>,

@@ -1282,6 +1282,7 @@ mod tests {
                 version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
+                    authorization_progress: None,
                 },
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
@@ -1297,6 +1298,7 @@ mod tests {
                 version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
+                    authorization_progress: None,
                 },
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
@@ -1372,6 +1374,7 @@ mod tests {
             version_bundles: Vec::new(),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: vec![tx_id],
+                authorization_progress: None,
             },
             result_member_adds: vec![entry.into()],
             result_member_removes: Vec::new(),

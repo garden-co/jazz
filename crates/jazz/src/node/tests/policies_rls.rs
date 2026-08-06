@@ -446,7 +446,7 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
     let SyncMessage::ViewUpdate {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
-                complete_tx_payloads,
+                complete_tx_payloads, ..
             },
         result_member_adds,
         ..
@@ -516,7 +516,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
         version_bundles,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
-                complete_tx_payloads: complete_tx_payload_refs,
+                complete_tx_payloads: complete_tx_payload_refs, ..
             },
         result_member_adds,
         result_member_removes,

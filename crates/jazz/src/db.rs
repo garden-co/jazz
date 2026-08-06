@@ -4934,6 +4934,7 @@ where
         else {
             unreachable!("subscriber identity requires a subscriber link")
         };
+        peer.advance_authorization_progress();
         let groups = coverage_groups
             .iter()
             .map(|(coverage, group)| {
@@ -5041,6 +5042,7 @@ where
         else {
             return Ok(());
         };
+        peer.advance_authorization_progress();
         let groups = coverage_groups
             .iter()
             .map(|(coverage, group)| {
@@ -5058,7 +5060,7 @@ where
                 binding_id: coverage.binding_id,
                 read_view: coverage.opts.read_view_key(),
             };
-            let mut update = {
+            let update = {
                 let mut node = self.node.borrow_mut();
                 peer.rehydrate_query_for_subscription_with_opts(
                     &mut node,
@@ -5068,15 +5070,6 @@ where
                     coverage.opts.clone(),
                 )?
             };
-            // A policy-head rehydrate is authoritative. Force reset framing
-            // even when the peer's known-state cursor is current: permissions
-            // are not represented in that cursor.
-            if let SyncMessage::ViewUpdate {
-                reset_result_set, ..
-            } = &mut update
-            {
-                *reset_result_set = true;
-            }
             for subscription in subscribers {
                 let update = retarget_view_update(update.clone(), subscription);
                 self.last_resume_bytes = Some(serialized_sync_message_len(&update));
@@ -6157,6 +6150,7 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             version_carriers,
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+            authorization_progress: peer_payload_inventory.authorization_progress,
             result_member_adds,
             result_member_removes,
             program_fact_adds,
@@ -6182,6 +6176,7 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             version_carriers,
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+            authorization_progress: peer_payload_inventory.authorization_progress,
             result_member_adds,
             result_member_removes,
             program_fact_adds,
@@ -6434,6 +6429,23 @@ fn send_with_content_extents<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    let mut message = message;
+    match &mut message {
+        SyncMessage::ViewUpdate {
+            subscription,
+            peer_payload_inventory,
+            ..
+        }
+        | SyncMessage::ViewUpdateChunk {
+            subscription,
+            peer_payload_inventory,
+            ..
+        } => {
+            peer_payload_inventory.authorization_progress =
+                Some(peer.authorization_progress_for_subscription(*subscription));
+        }
+        _ => {}
+    }
     let extents = match &message {
         SyncMessage::ViewUpdate { .. } | SyncMessage::ViewUpdateChunk { .. } => BTreeSet::new(),
         _ => node.borrow().content_refs_in_sync_message(&message)?,
