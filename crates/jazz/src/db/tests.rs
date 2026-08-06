@@ -8482,6 +8482,99 @@ fn connect_upstream_announces_existing_subscriptions_on_first_tick() {
     assert_eq!(subscribe.subscription.shape_id, shape_id);
 }
 
+// SessionClaims has no distinct public state once the receiving NodeState has
+// ignored an identical map, so wire-count coverage must inspect the transport.
+// The policy-visible integration coverage lives above this facade; this test
+// protects the otherwise unobservable wire-chatter contract.
+#[test]
+fn repeated_identical_session_claims_emit_once_on_a_live_connection() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+    let (client_transport, mut upstream_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let claims = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
+
+    client.set_identity_claims(client_author, claims.clone());
+    client.set_identity_claims(client_author, claims);
+    client.tick().unwrap();
+
+    assert!(matches!(
+        upstream_transport.try_recv(),
+        Some(SyncMessage::SessionClaims { .. })
+    ));
+    assert!(
+        upstream_transport.try_recv().is_none(),
+        "an unchanged claim map must not produce another wire message"
+    );
+}
+
+// This is lower-level for the same reason as the wire-count test above. In
+// particular, it is the regression that a global deduplication would miss:
+// each newly attached transport must receive the current map independently.
+#[test]
+fn current_session_claims_reach_late_and_reconnected_upstreams() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+    let claims = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
+
+    client.set_identity_claims(client_author, claims.clone());
+    let (first_transport, mut first_upstream_transport) = duplex();
+    let first_upstream = client.connect_upstream(first_transport);
+    client.tick().unwrap();
+    assert!(matches!(
+        first_upstream_transport.try_recv(),
+        Some(SyncMessage::SessionClaims { identity, claims: received })
+            if identity == client_author && received == claims
+    ));
+    assert!(first_upstream_transport.try_recv().is_none());
+
+    client.set_identity_claims(client_author, claims.clone());
+    assert!(client.detach_connection(&first_upstream));
+
+    let (reconnected_transport, mut reconnected_upstream_transport) = duplex();
+    let _reconnected_upstream = client.connect_upstream(reconnected_transport);
+    client.tick().unwrap();
+    assert!(matches!(
+        reconnected_upstream_transport.try_recv(),
+        Some(SyncMessage::SessionClaims { identity, claims: received })
+            if identity == client_author && received == claims
+    ));
+    assert!(reconnected_upstream_transport.try_recv().is_none());
+}
+
+#[test]
+fn changed_session_claims_advance_delivery_after_an_identical_call() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+    let (client_transport, mut upstream_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let reader = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
+    let writer = BTreeMap::from([("role".to_owned(), Value::String("writer".to_owned()))]);
+
+    client.set_identity_claims(client_author, reader.clone());
+    client.tick().unwrap();
+    assert!(matches!(
+        upstream_transport.try_recv(),
+        Some(SyncMessage::SessionClaims { claims, .. }) if claims == reader
+    ));
+
+    client.set_identity_claims(client_author, reader);
+    client.tick().unwrap();
+    assert!(upstream_transport.try_recv().is_none());
+
+    client.set_identity_claims(client_author, writer.clone());
+    client.tick().unwrap();
+    assert!(matches!(
+        upstream_transport.try_recv(),
+        Some(SyncMessage::SessionClaims { identity, claims })
+            if identity == client_author && claims == writer
+    ));
+    assert!(upstream_transport.try_recv().is_none());
+}
+
 #[test]
 fn global_subscription_registers_array_subquery_upstream_coverage() {
     let schema = relation_schema();

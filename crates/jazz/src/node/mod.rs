@@ -724,6 +724,25 @@ where
             .unwrap_or_default()
     }
 
+    /// Return the current process-local claims together with their revisions.
+    ///
+    /// Upstream links use this snapshot to decide which claims have not yet
+    /// reached that particular connection.
+    pub(crate) fn session_claims_with_revisions(
+        &self,
+    ) -> Vec<(AuthorId, BTreeMap<String, Value>, u64)> {
+        self.session_claims
+            .iter()
+            .map(|(identity, claims)| {
+                (
+                    *identity,
+                    claims.clone(),
+                    self.session_claim_revision(*identity),
+                )
+            })
+            .collect()
+    }
+
     /// Gate session-scoped serving until an authority has installed its
     /// permissions head. Local/offline nodes stay ready by default.
     pub(crate) fn set_permissions_ready(&mut self, ready: bool) {
