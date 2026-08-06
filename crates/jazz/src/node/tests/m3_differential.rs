@@ -521,7 +521,11 @@ fn m3_differential_shapes(schema: &JazzSchema) -> Vec<DifferentialShape> {
         "docs_projected_with_doc_access",
         Query::from("docs")
             .select(["title"])
-            .array_subquery(ArraySubquery::new("access", "doc_access", "doc", "id").select(["team"]))
+            .array_subquery(
+                ArraySubquery::new("access", "doc_access", "doc", "id")
+                    .select(["team"])
+                    .limit(usize::MAX),
+            )
             .validate(schema)
             .unwrap(),
     );

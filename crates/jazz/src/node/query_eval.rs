@@ -3253,7 +3253,13 @@ fn normalize_array_subquery(
         child_current = order_node;
     }
 
-    if subquery.limit.is_some() {
+    // `usize::MAX` is the explicit compatibility bound used by legacy callers
+    // that require all currently representable children. It is still finite at
+    // the public surface, but does not need a maintained TopBy window.
+    if subquery
+        .limit
+        .is_some_and(|limit| limit != usize::MAX || subquery.offset != 0)
+    {
         let slice_node = RowSetNodeId(format!("array_subquery:{path_id}:slice"));
         nodes.insert(
             slice_node.clone(),
