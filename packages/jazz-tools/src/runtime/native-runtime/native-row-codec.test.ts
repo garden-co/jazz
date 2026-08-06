@@ -5,17 +5,19 @@ import { describe, expect, it } from "vitest";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   createRecord,
-  decodeRecordBool,
-  decodeRecordBytes,
-  decodeRecordString,
   decodeRecordValue,
   readDescriptor,
   writeDescriptor,
 } from "./native-row-codec.js";
 
 type NativeRowCodecFixture = {
-  descriptor_hex: string;
-  record_hex: string;
+  cases: NativeRowCodecCase[];
+};
+type NativeRowCodecCase = {
+  name: string;
+  descriptor_hex: string[];
+  record_hex: string[];
+  fields: { name: string; encoded_hex: string; decoded_hex: string | null }[];
 };
 
 describe("native row codec", () => {
@@ -41,41 +43,45 @@ describe("native row codec", () => {
     expect(reader.u64()).toBe(42);
   });
 
-  it("decodes the Rust I32/I64 descriptor fixture without treating fixed fields as offsets", () => {
+  it("round-trips every Groove ValueType fixture, including depth-three nesting", () => {
     const fixture = nativeRowCodecFixture();
-    const descriptorBytes = hexToBytes(fixture.descriptor_hex);
-    const raw = hexToBytes(fixture.record_hex);
+    const testCase = fixture.cases.find(
+      (candidate) => candidate.name === "all_value_types_depth_three",
+    );
+    expect(testCase).toBeDefined();
+    const descriptorBytes = hexToBytes(testCase!.descriptor_hex.join(""));
+    const raw = hexToBytes(testCase!.record_hex.join(""));
     const descriptor = readDescriptor(new PostcardReader(descriptorBytes));
 
-    expect(descriptor.map((field) => [field.name, field.valueType.tag])).toEqual([
-      ["row_uuid", 8],
-      ["user_title", 12],
-      ["user_done", 12],
-      ["user_priority", 12],
-      ["tx_time", 14],
-      ["user_description", 12],
-    ]);
-    expect(descriptor[3]?.valueType.inner?.tag).toBe(15);
-
-    expect(decodeRecordString(descriptor, raw, 1)).toBe("Buy milk");
-    expect(decodeRecordBool(descriptor, raw, 2)).toBe(false);
-    expect(decodeRecordBytes(descriptor, raw, 3)).toEqual(Uint8Array.of(7, 0, 0, 0));
-    expect(decodeRecordBytes(descriptor, raw, 4)).toEqual(Uint8Array.of(42, 0, 0, 0, 0, 0, 0, 0));
-    expect(decodeRecordValue(descriptor, raw, 5)).toBeNull();
+    expect(new Set(descriptor.map((field) => field.valueType.tag))).toEqual(
+      new Set(Array.from({ length: 16 }, (_, tag) => tag)),
+    );
+    expect(descriptor[9]?.valueType).toMatchObject({
+      tag: 9,
+      enumSchema: { name: "mode", variants: ["low", "high"] },
+    });
+    expect(descriptor[10]?.valueType.members?.map((member) => member.tag)).toEqual([0, 14, 12, 15]);
+    expect(descriptor[13]?.valueType).toMatchObject({
+      tag: 12,
+      inner: { tag: 11, inner: { tag: 12 } },
+    });
+    expect(descriptor[15]?.valueType).toMatchObject({ tag: 11, inner: { tag: 13 } });
 
     const descriptorWriter = new PostcardWriter();
     writeDescriptor(descriptorWriter, descriptor);
     expect(descriptorWriter.finish()).toEqual(descriptorBytes);
     expect(
-      createRecord(descriptor, [
-        raw.subarray(0, 16),
-        Uint8Array.of(1, ...new TextEncoder().encode("Buy milk")),
-        Uint8Array.of(1, 0),
-        Uint8Array.of(1, 7, 0, 0, 0),
-        Uint8Array.of(42, 0, 0, 0, 0, 0, 0, 0),
-        Uint8Array.of(0),
-      ]),
+      createRecord(
+        descriptor,
+        testCase!.fields.map((field) => hexToBytes(field.encoded_hex)),
+      ),
     ).toEqual(raw);
+
+    for (const [index, field] of testCase!.fields.entries()) {
+      expect(descriptor[index]?.name).toBe(field.name);
+      const decoded = decodeRecordValue(descriptor, raw, index);
+      expect(decoded == null ? null : bytesToHex(decoded)).toBe(field.decoded_hex);
+    }
   });
 });
 
@@ -94,4 +100,8 @@ function hexToBytes(hex: string): Uint8Array {
     bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
   }
   return bytes;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }

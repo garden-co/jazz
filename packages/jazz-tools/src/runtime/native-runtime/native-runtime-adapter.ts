@@ -20,7 +20,6 @@ import {
   readNativeRelationSubscriptionDelta,
   readNativeRelationSubscriptionSnapshot,
   readNativeSubscriptionDelta,
-  writeValueType,
   type NativeSubscriptionDelta,
   type NativeRelationSubscriptionSnapshot,
   type NativeRelationSubscriptionDelta,
@@ -43,6 +42,7 @@ import {
   createRecordValueDecoder,
   storageColumnTypeToValueType,
   storageColumnValueType,
+  writeDescriptor,
 } from "./native-row-codec.js";
 import { HIDDEN_INCLUDE_COLUMN_PREFIX, hiddenIncludeColumnName } from "../select-projection.js";
 import {
@@ -3379,10 +3379,7 @@ function encodeCells(
     encodeValue(column, valueFor(column), requireMissingDefaults),
   );
   const writer = new PostcardWriter();
-  writer.vec((field, index) => {
-    field.some((name) => name.string(descriptor[index]!.name));
-    writeValueType(field, descriptor[index]!.valueType);
-  }, descriptor.length);
+  writeDescriptor(writer, descriptor);
   writer.bytes(createRecord(descriptor, values));
   return writer.finish();
 }
