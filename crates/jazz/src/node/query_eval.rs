@@ -295,6 +295,13 @@ fn fact_public_fields(
         }
         ProgramFactSchema::ResultMembership(schema) => {
             let mut fields = vec![schema.table_field.clone(), schema.row_field.clone()];
+            fields.extend(
+                schema
+                    .occurrence_id_fields
+                    .iter()
+                    .filter(|field| **field != schema.row_field)
+                    .cloned(),
+            );
             fields.extend(schema.branch_or_prefix_field.clone());
             fields.extend(result_membership_version_fields(&schema.version));
             fields.extend(schema.settle_position_field.clone());

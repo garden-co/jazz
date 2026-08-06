@@ -1894,13 +1894,19 @@ pub(super) fn validate_cell_value(column: &ColumnSchema, value: &Value) -> Resul
 // callers are gated to debug builds, but a #[cfg(test)] helper references it,
 // so it must exist in any test build including `cargo test --release`).
 #[cfg(any(debug_assertions, test))]
-pub(super) fn duplicate_row_result_set(
-    result_set: &BTreeSet<ResultRowEntry>,
-) -> Option<(String, RowUuid, TxId, TxId)> {
+pub(super) fn duplicate_output_occurrence_result_set(
+    result_set: &BTreeSet<ResultMemberEntry>,
+) -> Option<(crate::tools::OutputOccurrenceId, TxId, TxId)> {
     let mut rows = BTreeMap::new();
-    for (table, row_uuid, tx_id) in result_set {
-        if let Some(first) = rows.insert((*table, *row_uuid), *tx_id) {
-            return Some((table.to_string(), *row_uuid, first, *tx_id));
+    for member in result_set {
+        let Some(occurrence_id) = member.output_occurrence_id() else {
+            continue;
+        };
+        let Some((_, _, tx_id)) = member.as_row() else {
+            continue;
+        };
+        if let Some(first) = rows.insert(occurrence_id.clone(), tx_id) {
+            return Some((occurrence_id, first, tx_id));
         }
     }
     None

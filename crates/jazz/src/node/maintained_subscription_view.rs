@@ -21,6 +21,7 @@ use crate::protocol::{
 };
 use crate::schema::TableSchema;
 use crate::time::{GlobalSeq, TxTime};
+use crate::tools::{ObjectId, OutputOccurrenceId};
 use crate::tx::TxId;
 
 type TableSchemas = BTreeMap<String, TableSchema>;
@@ -626,6 +627,18 @@ fn decode_typed_terminal_record(
                     "maintained result membership table_name must exist",
                 ))?;
             let row_uuid = RowUuid(record.get_uuid(field_idx(record, &schema.row_field)?)?);
+            let mut occurrence_ids = Vec::with_capacity(schema.occurrence_id_fields.len());
+            for field in &schema.occurrence_id_fields {
+                occurrence_ids.push(ObjectId::from_uuid(
+                    record.get_uuid(field_idx(record, field)?)?,
+                ));
+            }
+            let Some((root, joined)) = occurrence_ids.split_first() else {
+                return Err(super::Error::InvalidStoredValue(
+                    "maintained result membership occurrence must include its root row",
+                ));
+            };
+            let occurrence_id = OutputOccurrenceId::new(*root, joined.iter().copied());
             let (tx_time_field, tx_node_field) = match &schema.version {
                 super::query_engine::ResultMembershipVersionSchema::Content(content) => {
                     (&content.tx_time_field, &content.tx_node_field)
@@ -657,6 +670,7 @@ fn decode_typed_terminal_record(
                 row_uuid,
                 TxId::new(tx_time, tx_node),
             ))
+            .with_occurrence_id(occurrence_id)
             .with_settle_position(settle_position)
             .into();
             let payload = ResultMemberPayloadEntry {

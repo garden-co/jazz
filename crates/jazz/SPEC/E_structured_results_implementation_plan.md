@@ -24,7 +24,7 @@ registry row.
 
 | Foundation                                | What is actually supplied                                                                                                                                                                                                                                                                                                                                                                | Consequence for this stack                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| #1250, `origin/feat/output-occurrence-id` | `OutputOccurrenceId` is an ordered root-plus-joined-source tuple, with canonical bytes (`crates/jazz/src/tools/object.rs:78-130`); subscription root indexes and public added/removed rows carry it (`crates/jazz/src/db.rs:7844-7901`). The public integration test pins stable plain-root identity and join-position sensitivity (`crates/jazz/tests/output_occurrence_id.rs:50-145`). | It is sufficient identity plumbing for v1 whole-parent addresses. It does **not** construct a tree, lower an array query, replace a parent, or change the v3 relation snapshot wire shape. Merge it before the Jazz terminal/wire cut.                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| #1250, `origin/feat/output-occurrence-id` | `OutputOccurrenceId` is an ordered root-plus-joined-source tuple, with canonical bytes (`crates/jazz/src/tools/object.rs:78-130`); subscription root indexes and public added/removed rows carry it (`crates/jazz/src/db.rs:7844-7901`). The public integration test pins stable plain-root identity and join-position sensitivity (`crates/jazz/tests/output_occurrence_id.rs:50-145`). | It is sufficient identity plumbing for v1 whole-parent addresses. It does **not** construct a tree, lower an array query, replace a parent, or change the v3 relation snapshot delivery shape. Merge it before the Jazz terminal work.                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | #1251, `origin/feat/record-valued-type`   | `ValueType::Record(Box<RecordDescriptor>)` is inline (`crates/groove/src/records/values.rs:170-191`). Decode recreates and byte-compares the child (`:319-329`), and construction checks descriptor equality and canonical bytes (`:495-505`). Its tests cover nested values and malformed child bytes (`crates/groove/src/records/tests.rs:200-265`).                                   | It satisfies the inline-descriptor and canonical-child-byte parts of `INV-STORAGE-27`. It is only a **partial** delivery of the durable-key part: `DirectRecordStoreSchema::new` accepts any key descriptor (`crates/groove/src/schema.rs:128-167`), so a direct or recursively containing record type can enter durable schema metadata. The direct-store codec later refuses `Value::Record`/arrays/nullables on use (`crates/groove/src/db/mod.rs:2083-2135`, `:3279-3338`, `:3447-3454`), and its one test covers only a direct record value at `set` time (`crates/groove/src/db/tests.rs:1589-1609`). That is too late and does not prove recursive schema rejection. |
 
 Therefore `INV-STORAGE-27` must remain `target`/`untested` after #1251 and is
@@ -188,19 +188,19 @@ validation/over-size tests and the query validator/terminal size-check anchors.
 Landing: full canonical set and smoke (public query/engine work); build the full
 workspace because this introduces public Jazz result types.
 
-### PR 4 — Atomic structured delivery and the v4 wire cut
+### PR 4 — Atomic structured delivery on v4
 
 **Depends on:** PR 3 and #1250. This is the first PR allowed to make structured
 results remotely observable.
 
-**Implementation.** Replace the v3 `RelationSnapshot`/`RelationEdge` delivery
-family with the one `ResultTree` vocabulary. Change Rust and TypeScript wire
-constants together to v4; update postcard enums, `SyncMessage::ViewUpdate`,
-`ViewUpdateChunk`, server/peer/receiver reduction, WASM, N-API, native runtime,
-and cross-language fixtures in one compatibility cut. A reset carries an
-ordered recursive snapshot. An incremental item is an extensible tagged
-whole-parent replacement keyed by #1250's occurrence id; v4 must not interpret
-it as a child delta.
+**Implementation.** Extend the v4 protocol cut already made on #1259; do not
+bump again to v5. Replace the v3 `RelationSnapshot`/`RelationEdge` delivery
+family with the one `ResultTree` vocabulary. Update postcard enums,
+`SyncMessage::ViewUpdate`, `ViewUpdateChunk`, server/peer/receiver reduction,
+WASM, N-API, native runtime, and cross-language fixtures within v4. A reset
+carries an ordered recursive snapshot. An incremental item is an extensible
+tagged whole-parent replacement keyed by #1250's occurrence id; v4 must not
+interpret it as a child delta.
 
 Chunk assembly stores structured pieces but publishes neither a snapshot nor a
 replacement until the final chunk. Add
@@ -306,11 +306,10 @@ declaring the feature stable.
 3. Groove terminal semantics (PR 2) precede Jazz lowering (PR 3). Otherwise
    Jazz would either re-create a facade materializer or put a collection inside
    a graph—both violate §6.4.
-4. Wire v4 follows the canonical result model and terminal lowering (PR 3), and
-   must be the same compatibility cut as remote facade delivery (PR 4). It
-   cannot sensibly precede the terminal with a speculative second tree format;
-   nor may terminal delivery retain v3 `RelationSnapshot` in parallel after the
-   cut.
+4. #1259 cuts wire v4 for `OutputOccurrenceId` before this stack. PR 4 extends
+   that same v4 after the canonical result model and terminal lowering (PR 3);
+   it must not cut v5. Terminal delivery may not retain v3 `RelationSnapshot`
+   in parallel after its structured delivery migration.
 5. The `ResultTree` reducer helper can land before the feature as non-enforcing
    test infrastructure. `INV-TEST-5` cannot flip until PR 4 provides real
    structured snapshots, whole-parent replacements, and chunk assembly for the
