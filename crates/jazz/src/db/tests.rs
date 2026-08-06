@@ -20,7 +20,7 @@ use crate::protocol_limits::{
 use crate::query::{
     ArraySubquery, BindingId, Include, JoinMode, OrderDirection, PolicyBranch, Predicate,
     RelationOrderBy, ShapeId, all_of, any_of, claim, col, contains, eq, gt, in_list, is_null, lit,
-    lte, ne, not,
+    lte, ne, not, param,
 };
 use crate::schema::{Policy, TableSchema, WritePolicies};
 use crate::time::{GlobalSeq, TxTime};
@@ -4533,6 +4533,7 @@ fn db_facade_local_only_subscription_does_not_register_upstream_coverage() {
 #[test]
 fn propagated_subscriptions_refcount_upstream_coverage_by_shape() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let baseline = db.runtime_stats_for_test().active_subscriptions;
     let query = db.table("todos");
     let prepared_query = prepared(&db, &query);
     let opts = ReadOpts {
@@ -4550,6 +4551,10 @@ fn propagated_subscriptions_refcount_upstream_coverage_by_shape() {
     let mut second = doctest_support::block_on(db.subscribe(&prepared_query, opts)).unwrap();
     let _ = doctest_support::block_on(second.next_event()).unwrap();
     assert_eq!(
+        db.runtime_stats_for_test().active_subscriptions,
+        baseline + 2
+    );
+    assert_eq!(
         pending_upstream_subscribe_count(&db),
         1,
         "second propagating registrant should share upstream coverage"
@@ -4557,12 +4562,18 @@ fn propagated_subscriptions_refcount_upstream_coverage_by_shape() {
 
     drop(first);
     assert_eq!(
+        db.runtime_stats_for_test().active_subscriptions,
+        baseline + 1,
+        "dropping one propagated stream must release only its local Groove output"
+    );
+    assert_eq!(
         pending_upstream_unsubscribe_count(&db),
         0,
         "upstream coverage stays live while another propagating registrant remains"
     );
 
     drop(second);
+    assert_eq!(db.runtime_stats_for_test().active_subscriptions, baseline);
     assert_eq!(pending_upstream_unsubscribe_count(&db), 1);
 }
 
@@ -8849,6 +8860,102 @@ fn maintained_subscription_emits_created_by_scoped_insert_after_empty_seed() {
     assert_eq!(row_ids(&one_shot), vec![write.row_uuid()]);
 
     let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert_eq!(row_ids(&added), vec![write.row_uuid()]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+}
+
+#[test]
+fn prepared_one_shot_releases_local_groove_subscription_immediately() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let query = Query::from("todos").filter(eq(col("title"), param("title")));
+    let prepared = db
+        .prepare_query_bound(
+            &query,
+            BTreeMap::from([("title".to_owned(), Value::String("missing".to_owned()))]),
+        )
+        .unwrap();
+    let baseline = db.runtime_stats_for_test().active_subscriptions;
+
+    for _ in 0..4 {
+        assert!(
+            block_on(db.all(&prepared, ReadOpts::default()))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            db.runtime_stats_for_test().active_subscriptions,
+            baseline,
+            "completed one-shot reads must not retain Groove outputs"
+        );
+    }
+}
+
+#[test]
+fn dropping_local_stream_releases_groove_subscription_without_a_write() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let query = Query::from("todos").filter(eq(col("title"), param("title")));
+    let prepared = db
+        .prepare_query_bound(
+            &query,
+            BTreeMap::from([("title".to_owned(), Value::String("missing".to_owned()))]),
+        )
+        .unwrap();
+    let baseline = db.runtime_stats_for_test().active_subscriptions;
+    let opts = ReadOpts {
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+
+    let mut subscription = block_on(db.subscribe(&prepared, opts)).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert_eq!(
+        db.runtime_stats_for_test().active_subscriptions,
+        baseline + 1
+    );
+
+    drop(subscription);
+    assert_eq!(
+        db.runtime_stats_for_test().active_subscriptions,
+        baseline,
+        "dropping a local stream must not wait for a later Groove notification"
+    );
+}
+
+#[test]
+fn dropping_one_local_stream_preserves_a_sibling_on_the_same_binding() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let query = Query::from("todos").filter(eq(col("title"), param("title")));
+    let prepared = db
+        .prepare_query_bound(
+            &query,
+            BTreeMap::from([("title".to_owned(), Value::String("match".to_owned()))]),
+        )
+        .unwrap();
+    let baseline = db.runtime_stats_for_test().active_subscriptions;
+    let opts = ReadOpts {
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let mut first = block_on(db.subscribe(&prepared, opts.clone())).unwrap();
+    let mut survivor = block_on(db.subscribe(&prepared, opts)).unwrap();
+    assert!(opened_rows(block_on(first.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(survivor.next_event()).unwrap()).is_empty());
+    assert_eq!(
+        db.runtime_stats_for_test().active_subscriptions,
+        baseline + 2
+    );
+
+    drop(first);
+    assert_eq!(
+        db.runtime_stats_for_test().active_subscriptions,
+        baseline + 1
+    );
+
+    let write = db
+        .insert("todos", doctest_support::todo_cells("match", false))
+        .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(survivor.next_event()).unwrap());
     assert_eq!(row_ids(&added), vec![write.row_uuid()]);
     assert!(updated.is_empty());
     assert!(removed.is_empty());

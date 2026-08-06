@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::time::Instant;
 
-use groove::ivm::{LiteralValue, RoutedMultisinkTerminal, StaticScanSpec};
+use groove::ivm::{LiteralValue, PreparedShapeId, RoutedMultisinkTerminal, StaticScanSpec};
 use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas};
 use groove::records::{BorrowedRecord, OwnedRecord, RecordDescriptor, ValueType};
 use groove::schema::ColumnType;
@@ -99,6 +99,10 @@ pub(crate) struct LocalMaintainedViewSubscriptionFootprint {
 }
 
 impl LocalMaintainedViewSubscription {
+    pub(crate) fn subscription_id(&self) -> groove::ivm::SubscriptionId {
+        self.subscription.id()
+    }
+
     #[cfg(feature = "testing")]
     pub(crate) fn footprint(&self) -> LocalMaintainedViewSubscriptionFootprint {
         let maintained = self.maintained.footprint();
@@ -6508,9 +6512,8 @@ where
                 PreparedQueryPlan::Prepared { shape, params } => {
                     let values =
                         binding_values_for_plan(&binding, &params, &program.request.policy)?;
-                    let subscription = self.database.bind_shape(shape, &values)?;
                     take_required_sink_deltas(
-                        subscription.recv().map_err(|_| Error::SubscriptionClosed)?,
+                        self.bind_shape_snapshot(shape, &values)?,
                         JAZZ_APP_ROWS_SINK,
                     )?
                 }
@@ -6719,17 +6722,8 @@ where
             Some(plan) => match plan.as_ref() {
                 PreparedQueryPlan::Prepared { shape, params } => {
                     let values = binding_values_for_plan(binding, params, &policy)?;
-                    self.database
-                        .bind_shape(*shape, &values)
-                        .map_err(Error::Groove)
-                        .and_then(|subscription| {
-                            subscription
-                                .recv()
-                                .map_err(|_| Error::SubscriptionClosed)
-                                .and_then(|deltas| {
-                                    take_required_sink_deltas(deltas, JAZZ_APP_ROWS_SINK)
-                                })
-                        })
+                    self.bind_shape_snapshot(*shape, &values)
+                        .and_then(|deltas| take_required_sink_deltas(deltas, JAZZ_APP_ROWS_SINK))
                 }
                 PreparedQueryPlan::Graph(graph) => self
                     .database
@@ -6861,17 +6855,8 @@ where
             Some(plan) => match plan.as_ref() {
                 PreparedQueryPlan::Prepared { shape, params } => {
                     let values = binding_values_for_plan(binding, params, &policy)?;
-                    self.database
-                        .bind_shape(*shape, &values)
-                        .map_err(Error::Groove)
-                        .and_then(|subscription| {
-                            subscription
-                                .recv()
-                                .map_err(|_| Error::SubscriptionClosed)
-                                .and_then(|deltas| {
-                                    take_required_sink_deltas(deltas, JAZZ_APP_ROWS_SINK)
-                                })
-                        })
+                    self.bind_shape_snapshot(*shape, &values)
+                        .and_then(|deltas| take_required_sink_deltas(deltas, JAZZ_APP_ROWS_SINK))
                 }
                 PreparedQueryPlan::Graph(graph) => self
                     .database
@@ -8997,6 +8982,21 @@ where
         self.database
             .bind_shape(prepared.id(), &values)
             .map_err(Error::Groove)
+    }
+
+    fn bind_shape_snapshot(
+        &mut self,
+        shape: PreparedShapeId,
+        values: &[groove::records::Value],
+    ) -> Result<MultisinkDeltas, Error> {
+        let subscription = self
+            .database
+            .bind_shape(shape, values)
+            .map_err(Error::Groove)?;
+        let subscription_id = subscription.id();
+        let snapshot = subscription.recv().map_err(|_| Error::SubscriptionClosed);
+        self.database.unsubscribe(subscription_id);
+        snapshot
     }
 
     fn policy_filtered_current_source_graph_via_query_engine(
