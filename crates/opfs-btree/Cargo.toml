@@ -21,6 +21,7 @@ serde = { version = "1", features = ["derive"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+jazz-benchmark-guard = { path = "../benchmark-guard" }
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 

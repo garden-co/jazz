@@ -51,6 +51,7 @@ const STATE_IN_PROGRESS: u8 = 2;
 const STATE_DONE: u8 = 3;
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     if std::env::var("JAZZ_SMOKE").is_ok() {
         smoke();
         return;

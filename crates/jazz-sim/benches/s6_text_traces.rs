@@ -38,6 +38,7 @@ const EDITING_TRACES_COMMIT: &str = "762fa6c51605c88a05ebe5c4b9d4540caca30b97";
 const EGWALKER_ARTIFACT_COMMIT: &str = "4fb0970ce3fab729aac31e8e622b530fd17938cb";
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     if std::env::var("JAZZ_SMOKE").is_ok() {
         smoke();
         return;

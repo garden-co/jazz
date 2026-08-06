@@ -431,9 +431,19 @@ fn core_owner_policy_insert(c: &mut Criterion) {
     group.finish();
 }
 
+fn guarded_benches(c: &mut Criterion) {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
+    core_insert(c);
+    core_update_and_read(c);
+    core_filtered_prepared_read(c);
+    core_subscribed_write(c);
+    core_owner_policy_insert(c);
+    core_reachable_policy_read(c);
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = core_insert, core_update_and_read, core_filtered_prepared_read, core_subscribed_write, core_owner_policy_insert, core_reachable_policy_read
+    targets = guarded_benches
 }
 criterion_main!(benches);

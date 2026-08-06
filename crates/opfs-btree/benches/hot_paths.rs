@@ -120,12 +120,14 @@ fn bench_open_replay(c: &mut Criterion) {
     });
 }
 
-criterion_group!(
-    benches,
-    bench_get,
-    bench_range,
-    bench_put,
-    bench_put_churn,
-    bench_open_replay
-);
+fn guarded_benches(c: &mut Criterion) {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
+    bench_get(c);
+    bench_range(c);
+    bench_put(c);
+    bench_put_churn(c);
+    bench_open_replay(c);
+}
+
+criterion_group!(benches, guarded_benches);
 criterion_main!(benches);

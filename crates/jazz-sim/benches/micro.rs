@@ -18,6 +18,7 @@ use serde_json::{Map, Value as JsonValue, json};
 const TABLE: &str = "items";
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     let config = Config::from_env();
     run_node_open(&config);
     run_hlc(&config);

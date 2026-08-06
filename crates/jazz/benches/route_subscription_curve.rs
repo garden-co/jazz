@@ -105,6 +105,7 @@ struct RetainedReceipt {
 }
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     let routes = env_usize("JAZZ_ROUTE_CURVE_ROUTES", 100);
     assert!(
         (1..=MAX_ROUTES).contains(&routes),

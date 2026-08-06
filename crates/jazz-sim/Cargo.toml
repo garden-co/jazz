@@ -27,6 +27,9 @@ tempfile = "3.27.0"
 uuid = "1.18.1"
 zstd = "0.13.3"
 
+[dev-dependencies]
+jazz-benchmark-guard = { path = "../benchmark-guard" }
+
 [[bench]]
 name = "echo"
 harness = false

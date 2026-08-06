@@ -221,9 +221,15 @@ fn update_batch(c: &mut Criterion) {
     group.finish();
 }
 
+fn guarded_benches(c: &mut Criterion) {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
+    update_own_documents(c);
+    update_batch(c);
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = update_own_documents, update_batch
+    targets = guarded_benches
 }
 criterion_main!(benches);

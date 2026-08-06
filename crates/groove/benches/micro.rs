@@ -11,6 +11,7 @@ use groove::storage::{Durability, RocksDbStorage};
 use hdrhistogram::Histogram;
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     let iterations = env_usize("GROOVE_MICRO_ITERS", 1_000);
     let report = [
         run_record_encode_decode(iterations),

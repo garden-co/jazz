@@ -19,6 +19,7 @@ use support::{emit_json_line, insert_node_metrics, phase_fields, reset_phase_cou
 const TABLE: &str = "todos";
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     let config = Config::from_env();
     let mut bench = SyncBench::new(config);
     let elapsed = bench.run();

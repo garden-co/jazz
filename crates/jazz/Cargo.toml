@@ -125,6 +125,7 @@ opentelemetry-appender-tracing = { version = "0.31", optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 
 [dev-dependencies]
+jazz-benchmark-guard = { path = "../benchmark-guard" }
 hdrhistogram = "7.5.4"
 tempfile = "3.27.0"
 opentelemetry_sdk = { version = "0.31", features = ["testing"] }

@@ -163,9 +163,14 @@ fn update_write_path_with_and_without_observer(c: &mut Criterion) {
     group.finish();
 }
 
+fn guarded_benches(c: &mut Criterion) {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
+    update_write_path_with_and_without_observer(c);
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = update_write_path_with_and_without_observer
+    targets = guarded_benches
 }
 criterion_main!(benches);

@@ -1919,6 +1919,7 @@ where
 #[ignore]
 #[test]
 fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     let schema = policy_graph_perf_schema_fixture();
     let (_core_dir, mut core) = open_node_with_schema(node(0x22), schema.clone());
 

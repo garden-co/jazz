@@ -24,6 +24,7 @@ use jazz_sim::{emit_json_line, metadata_fields};
 use serde_json::{Value as JsonValue, json};
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     smoke();
 }
 

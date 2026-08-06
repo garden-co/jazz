@@ -38,6 +38,7 @@ use sha2::{Digest, Sha256};
 const TABLE: &str = "documents";
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     let config = Config::from_env();
     config.validate();
 
