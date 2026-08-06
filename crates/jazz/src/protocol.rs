@@ -2378,6 +2378,9 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
                 None => bytes.push(0),
             }
         }
+        Value::Record(_) => {
+            panic!("record-valued values have no v3 protocol encoding")
+        }
     }
 }
 

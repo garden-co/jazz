@@ -2501,7 +2501,7 @@ where
         Ok(refs)
     }
 
-    fn transaction_ids(&self) -> Result<Vec<TxId>, Error> {
+    pub(crate) fn transaction_ids(&self) -> Result<Vec<TxId>, Error> {
         let mut tx_ids = Vec::new();
         for raw in self
             .database

@@ -824,7 +824,7 @@ where
                     deltas,
                 })
             }
-            OpType::TopBy(_) => Err(IvmRuntimeError::UnsupportedOperator),
+            OpType::TopBy(_) | OpType::CollectBy(_) => Err(IvmRuntimeError::UnsupportedOperator),
             OpType::AntiJoin(join) => {
                 let [left, right] = graph_node.descriptor.inputs.as_slice() else {
                     return Err(IvmRuntimeError::GraphInputArityMismatch(node));

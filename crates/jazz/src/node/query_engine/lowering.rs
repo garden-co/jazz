@@ -254,6 +254,14 @@ pub(crate) fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTree
                 }))
                 .collect(),
         ),
+        GraphBuilder::CollectBy { collect, .. } => Some(
+            collect
+                .parent_fields
+                .iter()
+                .map(|field| field.output_name.clone())
+                .chain(std::iter::once(collect.collection_field.clone()))
+                .collect(),
+        ),
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
@@ -534,6 +542,7 @@ fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDom
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::CollectBy { input, .. }
         | GraphBuilder::Aggregate { input, .. } => collect_binding_source_params(input, domain),
         GraphBuilder::Union { inputs } => {
             for input in inputs {
@@ -575,6 +584,11 @@ fn column_type_from_value_type(value_type: &ValueType) -> ColumnType {
         }
         ValueType::Nullable(inner) => {
             ColumnType::Nullable(Box::new(column_type_from_value_type(inner)))
+        }
+        ValueType::Record(_) => {
+            panic!(
+                "record-valued Groove outputs are not part of the Jazz query schema in this stage"
+            )
         }
     }
 }

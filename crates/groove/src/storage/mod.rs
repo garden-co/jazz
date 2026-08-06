@@ -1753,7 +1753,8 @@ fn encode_key_part(key: &mut Vec<u8>, value: &RecordValue) -> Result<(), Error> 
         RecordValue::F64(_)
         | RecordValue::Tuple(_)
         | RecordValue::Array(_)
-        | RecordValue::Nullable(_) => {
+        | RecordValue::Nullable(_)
+        | RecordValue::Record(_) => {
             return Err(Error::InvalidStorageKey(
                 "unsupported window key value type".to_owned(),
             ));
@@ -1845,9 +1846,13 @@ fn decode_key_part(bytes: &mut &[u8], value_type: &ValueType) -> Result<RecordVa
             expect_key_tag(bytes, 0)?;
             Ok(RecordValue::Enum(take_key_bytes(bytes, 1)?[0]))
         }
-        ValueType::F64 | ValueType::Tuple(_) | ValueType::Array(_) | ValueType::Nullable(_) => Err(
-            Error::InvalidStorageKey("unsupported window key type".to_owned()),
-        ),
+        ValueType::F64
+        | ValueType::Tuple(_)
+        | ValueType::Array(_)
+        | ValueType::Nullable(_)
+        | ValueType::Record(_) => Err(Error::InvalidStorageKey(
+            "unsupported window key type".to_owned(),
+        )),
     }
 }
 

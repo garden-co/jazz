@@ -46,6 +46,13 @@ export const FEATURE_PAYLOAD_ZSTD = 1 << 4;
 export const CLIENT_WIRE_FEATURES =
   FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_PAYLOAD_ZSTD;
 
+// The server route accepts WebSocket messages up to one MiB. Reserve enough
+// postcard framing bytes that a burst of otherwise-valid wire frames remains
+// a valid WebSocket message.
+const MAX_WEBSOCKET_BATCH_BYTES = 1 << 20;
+const POSTCARD_FRAME_LENGTH_RESERVE = 5;
+const POSTCARD_BATCH_LENGTH_RESERVE = 5;
+
 export function webSocketUrl(serverUrl: string, appId: string): string {
   return httpUrlToWs(serverUrl, appId);
 }
@@ -141,13 +148,26 @@ export class WebSocketCarrier {
   }
 
   async send(frame: Uint8Array): Promise<void> {
-    await this.ready();
-    this.socket.send(encodeWebSocketFrameBatch([frame]));
+    await this.sendBatch([frame]);
   }
 
   async sendBatch(frames: readonly Uint8Array[]): Promise<void> {
     await this.ready();
-    this.socket.send(encodeWebSocketFrameBatch(frames));
+    let batch: Uint8Array[] = [];
+    let batchBytes = POSTCARD_BATCH_LENGTH_RESERVE;
+    for (const frame of frames) {
+      const frameBytes = frame.byteLength + POSTCARD_FRAME_LENGTH_RESERVE;
+      if (batch.length > 0 && batchBytes + frameBytes > MAX_WEBSOCKET_BATCH_BYTES) {
+        this.socket.send(encodeWebSocketFrameBatch(batch));
+        batch = [];
+        batchBytes = POSTCARD_BATCH_LENGTH_RESERVE;
+      }
+      batch.push(frame);
+      batchBytes += frameBytes;
+    }
+    if (batch.length > 0) {
+      this.socket.send(encodeWebSocketFrameBatch(batch));
+    }
   }
 
   ready(): Promise<void> {

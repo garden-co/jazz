@@ -2,13 +2,14 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Instant;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, Node, ReadOpts, SeededRowIdSource, SubscriptionEvent,
-    SubscriptionStream, Transport,
+    Db, DbConfig, DbIdentity, InitialSyncFlushCadence, Node, ReadOpts, SeededRowIdSource,
+    SubscriptionEvent, SubscriptionStream, Transport,
 };
 use jazz::groove::records::{EnumSchema, Value};
 use jazz::groove::schema::{ColumnSchema, ColumnType};
@@ -352,6 +353,7 @@ struct Config {
     seed: u64,
     scale: f64,
     max_ticks: usize,
+    initial_sync_flush_cadence: usize,
     phases: Vec<String>,
     identity: BenchIdentity,
 }
@@ -375,6 +377,11 @@ impl Config {
             seed: env_u64("JAZZ_CUSTOMER_SEED", 0xC057_A271),
             scale: env_f64("JAZZ_CUSTOMER_SCALE", 1.0),
             max_ticks: env_usize("JAZZ_CUSTOMER_MAX_TICKS", 20_000),
+            // Zero selects the legacy flush-every-write behavior for before/after comparison.
+            initial_sync_flush_cadence: env_usize(
+                "JAZZ_CUSTOMER_INITIAL_SYNC_FLUSH_CADENCE",
+                InitialSyncFlushCadence::DEFAULT.writes(),
+            ),
             phases: std::env::var("JAZZ_CUSTOMER_PHASES")
                 .unwrap_or_else(|_| "cold,warm".to_owned())
                 .split(',')
@@ -1363,7 +1370,13 @@ fn run_cold(
         AuthorId::SYSTEM,
         Some(Rc::new(tempfile::tempdir().unwrap())),
     );
-    let client = open_client_db(node(3), schema.clone(), config.client_author(seeded), None);
+    let client = open_client_db(
+        node(3),
+        schema.clone(),
+        config.client_author(seeded),
+        config.initial_sync_flush_cadence,
+        None,
+    );
     run_connect_and_subscribe("cold", seeded, relay, client, expected, config)
 }
 
@@ -1380,7 +1393,13 @@ fn run_warm(
         AuthorId::SYSTEM,
         Some(Rc::clone(&relay_dir)),
     );
-    let client = open_client_db(node(5), schema.clone(), config.client_author(seeded), None);
+    let client = open_client_db(
+        node(5),
+        schema.clone(),
+        config.client_author(seeded),
+        config.initial_sync_flush_cadence,
+        None,
+    );
     let mut first =
         run_connect_and_subscribe("warm_prime", seeded, relay, client, expected, config);
     assert_eq!(first.rows_materialized, first.expected_rows);
@@ -1392,7 +1411,13 @@ fn run_warm(
         AuthorId::SYSTEM,
         Some(Rc::clone(&relay_dir)),
     );
-    let client = open_client_db(node(5), schema.clone(), config.client_author(seeded), None);
+    let client = open_client_db(
+        node(5),
+        schema.clone(),
+        config.client_author(seeded),
+        config.initial_sync_flush_cadence,
+        None,
+    );
     first = run_connect_and_subscribe("warm", seeded, relay, client, expected, config);
     assert!(
         first.relay_known_state_declared > 0,
@@ -1906,6 +1931,7 @@ fn open_client_db(
     node_uuid: NodeUuid,
     schema: JazzSchema,
     author: AuthorId,
+    initial_sync_flush_cadence: usize,
     dir: Option<Rc<tempfile::TempDir>>,
 ) -> DbClient {
     let dir = dir.unwrap_or_else(|| Rc::new(tempfile::tempdir().unwrap()));
@@ -1921,6 +1947,10 @@ fn open_client_db(
         large_value_checkpoint_op_interval: 1024,
     }))
     .unwrap();
+    if let Some(writes) = NonZeroUsize::new(initial_sync_flush_cadence) {
+        db.set_initial_sync_flush_cadence(InitialSyncFlushCadence::every(writes))
+            .unwrap();
+    }
     DbClient { _dir: dir, db }
 }
 
@@ -2115,6 +2145,14 @@ fn pending_description(subscriptions: &[OpenSubscription]) -> String {
 
 fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
     let mut fields = metadata_fields("customer_cold_start", "native", config.seed, "full");
+    fields
+        .get_mut("knobs")
+        .and_then(JsonValue::as_object_mut)
+        .expect("benchmark metadata has a knobs object")
+        .insert(
+            "JAZZ_CUSTOMER_INITIAL_SYNC_FLUSH_CADENCE".to_owned(),
+            json!(config.initial_sync_flush_cadence),
+        );
     let transport_codec = match WireCompression::from_features(current_wire_features()) {
         WireCompression::None => "none",
         WireCompression::Lz4 => "lz4",

@@ -4010,6 +4010,9 @@ fn value_type(value: &Value) -> ColumnType {
             .unwrap_or_else(|| ColumnType::Array(Box::new(ColumnType::Bytes))),
         Value::Nullable(Some(value)) => ColumnType::Nullable(Box::new(value_type(value))),
         Value::Nullable(None) => ColumnType::Nullable(Box::new(ColumnType::Bytes)),
+        Value::Record(_) => {
+            panic!("record-valued query bindings are not part of the current Jazz query surface")
+        }
     }
 }
 
@@ -4041,6 +4044,9 @@ fn value_matches_type(value: &Value, column_type: &ColumnType) -> bool {
         (Value::Nullable(Some(value)), ColumnType::Nullable(inner)) => {
             value_matches_type(value, inner)
         }
+        // Jazz has no public record column type in this step, so records are
+        // never accepted as query-bound values.
+        (Value::Record(_), _) => false,
         _ => false,
     }
 }
@@ -4117,6 +4123,9 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             bytes.push(13);
             bytes.push(1);
             put_value(bytes, value);
+        }
+        Value::Record(_) => {
+            panic!("record-valued query bindings have no current canonical encoding")
         }
     }
 }

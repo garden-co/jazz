@@ -264,6 +264,39 @@ pub enum TopByDirection {
     Desc,
 }
 
+/// One input field copied into a rendered `CollectBy` parent or child record.
+///
+/// The resolved field index is kept alongside the name because the descriptor
+/// is the graph sharing boundary, while the runtime must not re-resolve names.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CollectByProjection {
+    pub field: String,
+    pub field_idx: usize,
+    pub output_name: String,
+}
+
+/// Terminal collector for one `Array<Record>` field on a rendered parent.
+///
+/// This descriptor intentionally contains all of the flat input projections
+/// and ranking data needed to render its output. No planner-side state is
+/// allowed to affect a shared collector node.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CollectByOp {
+    pub group_fields: Vec<String>,
+    pub group_field_indices: Vec<usize>,
+    pub parent_fields: Vec<CollectByProjection>,
+    pub child_fields: Vec<CollectByProjection>,
+    pub child_descriptor: RecordDescriptor,
+    pub collection_field: String,
+    pub collection_field_index: usize,
+    pub order_fields: Vec<TopByOrderField>,
+    pub tie_fields: Vec<String>,
+    pub sort_field_indices: Vec<usize>,
+    pub sort_directions: Vec<TopByDirection>,
+    pub offset: u64,
+    pub limit: TopByLimit,
+}
+
 /// Placeholder aggregate descriptor for future lowering/execution.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AggregateOp {
@@ -337,6 +370,8 @@ pub enum LiteralValue {
     Tuple(Vec<LiteralValue>),
     Array(Vec<LiteralValue>),
     Nullable(Option<Box<LiteralValue>>),
+    /// Record-valued predicates are intentionally unsupported in this stage.
+    Record,
 }
 
 impl From<Value> for LiteralValue {
@@ -357,6 +392,7 @@ impl From<Value> for LiteralValue {
             Value::Tuple(values) => Self::Tuple(values.into_iter().map(Into::into).collect()),
             Value::Array(values) => Self::Array(values.into_iter().map(Into::into).collect()),
             Value::Nullable(value) => Self::Nullable(value.map(|value| Box::new((*value).into()))),
+            Value::Record(_) => Self::Record,
         }
     }
 }
@@ -389,6 +425,7 @@ impl LiteralValue {
                 .value_type()
                 .map(|value_type| ValueType::Nullable(Box::new(value_type))),
             Self::Nullable(None) => None,
+            Self::Record => None,
         }
     }
 
@@ -411,6 +448,7 @@ impl LiteralValue {
             Self::Nullable(value) => {
                 Value::Nullable(value.as_ref().map(|value| Box::new(value.to_value())))
             }
+            Self::Record => unreachable!("record literals are rejected during type validation"),
         }
     }
 }

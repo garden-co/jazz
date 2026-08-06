@@ -5,7 +5,7 @@
 //! [`crate::peer`]. In the layer map this is the top `Db` facade over the node.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::{Pin, pin};
@@ -406,11 +406,13 @@ where
             false,
             config.large_value_checkpoint_op_interval,
         )?;
+        let node = Node::new(node);
+        node.restore_pending_uploads(config.identity)?;
         Ok(Self {
             schema: config.schema,
             schema_version_id,
             identity: config.identity,
-            node: Node::new(node),
+            node,
             row_id_source: RefCell::new(
                 config
                     .id_source
@@ -1762,7 +1764,10 @@ where
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents) = if self.local_row(table, row)?.is_some() {
+        let (cells, parents) = if self
+            .upsert_target_for_identity(table, row, self.identity.author)?
+            .is_some()
+        {
             let (cells, parent) = self.merge_existing_cells(table, row, cells)?;
             (cells, parent.into_iter().collect())
         } else {
@@ -1780,7 +1785,10 @@ where
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents) = if self.local_row(table, row)?.is_some() {
+        let (cells, parents) = if self
+            .upsert_target_for_identity(table, row, self.identity.author)?
+            .is_some()
+        {
             let (cells, parent) = self.merge_existing_cells(table, row, cells)?;
             (cells, parent.into_iter().collect())
         } else {
@@ -1807,7 +1815,10 @@ where
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents) = if self.local_row_for_identity(table, row, identity)?.is_some() {
+        let (cells, parents) = if self
+            .upsert_target_for_identity(table, row, identity)?
+            .is_some()
+        {
             let (cells, parent) =
                 self.merge_existing_cells_for_identity(table, row, cells, identity)?;
             (cells, parent.into_iter().collect())
@@ -1827,7 +1838,10 @@ where
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents) = if self.local_row_for_identity(table, row, identity)?.is_some() {
+        let (cells, parents) = if self
+            .upsert_target_for_identity(table, row, identity)?
+            .is_some()
+        {
             let (cells, parent) =
                 self.merge_existing_cells_for_identity(table, row, cells, identity)?;
             (cells, parent.into_iter().collect())
@@ -1881,7 +1895,7 @@ where
         now_ms: Option<u64>,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (_, parent) = self.merge_existing_cells(table, row, BTreeMap::new())?;
+        let (parents, _) = self.row_layer_parents(table, row)?;
         match now_ms {
             Some(now_ms) => self.write_mergeable_at_ms(
                 self.identity.author,
@@ -1889,7 +1903,7 @@ where
                 table,
                 row,
                 BTreeMap::new(),
-                parent.into_iter().collect(),
+                parents,
                 Some(DeletionEvent::Deleted),
                 now_ms,
             ),
@@ -1899,7 +1913,7 @@ where
                 table,
                 row,
                 BTreeMap::new(),
-                parent.into_iter().collect(),
+                parents,
                 Some(DeletionEvent::Deleted),
             ),
         }
@@ -1914,13 +1928,14 @@ where
         table: &str,
         row: RowUuid,
     ) -> Result<WriteHandle<S>, Error> {
-        let (_, parent) = self.merge_existing_cells(table, row, BTreeMap::new())?;
+        self.ensure_row_not_deleted(table, row)?;
+        let (parents, _) = self.row_layer_parents(table, row)?;
         self.write_mergeable_as_session_subject(
             made_by,
             table,
             row,
             BTreeMap::new(),
-            parent.into_iter().collect(),
+            parents,
             Some(DeletionEvent::Deleted),
         )
     }
@@ -1960,8 +1975,7 @@ where
                 format!("policy denied DELETE on table {table}"),
             ));
         }
-        let (_, parent) =
-            self.merge_existing_cells_for_identity(table, row, BTreeMap::new(), identity)?;
+        let (parents, _) = self.row_layer_parents(table, row)?;
         match now_ms {
             Some(now_ms) => self.write_mergeable_at_ms(
                 identity,
@@ -1969,7 +1983,7 @@ where
                 table,
                 row,
                 BTreeMap::new(),
-                parent.into_iter().collect(),
+                parents,
                 Some(DeletionEvent::Deleted),
                 now_ms,
             ),
@@ -1979,7 +1993,7 @@ where
                 table,
                 row,
                 BTreeMap::new(),
-                parent.into_iter().collect(),
+                parents,
                 Some(DeletionEvent::Deleted),
             ),
         }
@@ -2828,8 +2842,20 @@ where
         Ok(cells)
     }
 
-    fn local_row(&self, table: &str, row: RowUuid) -> Result<Option<CurrentRow>, Error> {
-        self.local_row_for_identity(table, row, self.identity.author)
+    fn upsert_target_for_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        identity: AuthorId,
+    ) -> Result<Option<CurrentRow>, Error> {
+        let target = self.local_row_for_identity(table, row, identity)?;
+        if target.is_some()
+            || identity == AuthorId::SYSTEM
+            || self.table_schema(table)?.read_policy.is_none()
+        {
+            return Ok(target);
+        }
+        Err(read_for_write_denied("UPSERT", table))
     }
 
     /// Read one locally-current row by primary key without evaluating a table
@@ -2966,19 +2992,36 @@ where
     ) -> Result<(RowCells, Option<TxId>), Error> {
         let table_schema = self.table_schema(table)?;
         self.ensure_row_not_deleted(table, row)?;
-        let mut cells = BTreeMap::new();
-        let mut parent = None;
-        if let Some(existing) = self.local_row_for_identity(table, row, identity)? {
-            for column in &table_schema.columns {
-                if column.large_value.is_some() {
-                    continue;
-                }
-                if let Some(value) = existing.cell(table_schema, &column.name) {
-                    cells.insert(column.name.clone(), value);
-                }
-            }
-            parent = self.node.node.borrow_mut().current_row_tx_id(&existing);
+        if table_schema
+            .columns
+            .iter()
+            .all(|column| patch.contains_key(&column.name))
+        {
+            // A full-row write does not observe user data. Its causal parent is
+            // storage bookkeeping, so obtain only that parent with system
+            // authority rather than evaluating the writer's read policy.
+            let parent = self
+                .local_current_row(table, row)?
+                .as_ref()
+                .and_then(|existing| self.node.node.borrow_mut().current_row_tx_id(existing));
+            return Ok((patch, parent));
         }
+        if !self.can_read_for_identity(table, row, identity)? {
+            return Err(read_for_write_denied("partial UPDATE", table));
+        }
+        let mut cells = BTreeMap::new();
+        let existing = self
+            .local_row_for_identity(table, row, identity)?
+            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+        for column in &table_schema.columns {
+            if column.large_value.is_some() {
+                continue;
+            }
+            if let Some(value) = existing.cell(table_schema, &column.name) {
+                cells.insert(column.name.clone(), value);
+            }
+        }
+        let parent = self.node.node.borrow_mut().current_row_tx_id(&existing);
         cells.extend(patch);
         Ok((cells, parent))
     }
@@ -3529,9 +3572,30 @@ where
     }
 
     fn queue_pending_upload(&self, tx_id: TxId, unit: Option<SyncMessage>) {
-        self.outbox.borrow_mut().push(PendingUpload { tx_id, unit });
+        let mut outbox = self.outbox.borrow_mut();
+        if outbox.iter().any(|pending| pending.tx_id == tx_id) {
+            return;
+        }
+        outbox.push(PendingUpload { tx_id, unit });
+        drop(outbox);
         self.mark_subscriber_connections_dirty();
         self.schedule_tick(TickUrgency::Deferred);
+    }
+
+    /// Restore locally originated, unsettled durable writes into the
+    /// process-local upload queue after reopening client storage.
+    fn restore_pending_uploads(&self, identity: DbIdentity) -> Result<(), Error> {
+        let pending = self
+            .node
+            .borrow_mut()
+            .pending_transaction_ids_for(identity.node, identity.author)?;
+        let mut restored = HashSet::new();
+        for tx_id in pending {
+            if restored.insert(tx_id) {
+                self.queue_pending_upload(tx_id, None);
+            }
+        }
+        Ok(())
     }
 
     fn mark_subscriber_connections_dirty(&self) {
@@ -6989,6 +7053,15 @@ fn row_already_deleted(row: RowUuid) -> Error {
     Error::new(
         ErrorCode::WriteRejected,
         format!("row already deleted: {}", row.0),
+    )
+}
+
+fn read_for_write_denied(operation: &str, table: &str) -> Error {
+    Error::new(
+        ErrorCode::WriteRejected,
+        format!(
+            "read policy denied {operation} on table {table}: the operation requires read permission on the target row"
+        ),
     )
 }
 
