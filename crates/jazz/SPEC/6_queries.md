@@ -57,6 +57,7 @@ Invariant digest:
 - `INV-QUERY-20`: Query payload dedup MUST be per peer across all subscriptions for complete transaction payloads: already-covered complete payloads are referenced via `peer_payload_inventory.complete_tx_payloads`, and partial bundles, including partial mergeable or exclusive bundles, MUST NOT establish complete-transaction payload coverage.
 - `INV-QUERY-21`: Array subqueries MUST be represented separately from forward `Include` paths and MUST emit relation payload edges `(source_table, source_row_uuid, relation, target_table, target_row_uuid)` plus row batches; child filters/select/order/limit affect only child relation material, optional unreadable children are omitted with their edges while readable parents remain, and explicit requirements are the only array-subquery form that can filter root membership.
 - `INV-QUERY-22`: Structured query output MUST be constructed only by the output terminal as an ordered tree; maintained graph deltas remain flat, and a changed rendered parent is delivered as one whole-parent replacement.
+- `INV-QUERY-23`: A flat joined output occurrence MUST be identified by its ordered contributing source-row ids, not by its root row id; maintained delivery MUST address additions, removals, and replacements by that composite occurrence identity.
 
 ## Details
 
@@ -100,6 +101,12 @@ reject subquery joins unless those joins have defined query and
 maintained-subscription semantics. `array_subqueries` are
 canonicalized into shape identity separately from includes; sibling ordering is
 not semantic, but duplicate sibling `column_name`s are rejected.
+
+`JoinVia` is an existential reference/junction traversal: it constrains root
+membership and supplies join witnesses; it is not a general relational join
+whose record is publicly returned. Flat joined output is a separate target AST
+form, described in §6.4.1. Conflating these two forms would make policy
+traversal accidentally promise a public tuple shape.
 
 ### 6.1.1 Membership and containment filters
 
@@ -362,7 +369,113 @@ normalizes into this program family. Multi-hop traversal and `gather` are
 currently rejected because matching maintained semantics have not yet been
 defined.
 
-### 6.4.1 Default result ordering
+### 6.4.1 Flat joined output and output occurrences
+
+**Decision, 2026-08-04 — flat joined output uses composite output
+identity.** A flat join emits one row for every matching ordered tuple of the
+root source followed by the declared join sources. Its public data columns are
+the flattened columns of that tuple; it is not a nested relation payload and it
+does not change the semantics of `JoinVia`.
+
+The one-shot public Rust facade currently returns `Vec<(ObjectId, Vec<Value>)>`
+and converts the row id from the materialized root row
+(`crates/jazz/src/tools/client.rs:2052-2102`). For a flat join its first element
+MUST remain that root `ObjectId` for source compatibility. It is a representative
+root id, not the identity of the joined result: several joined output rows may
+therefore carry the same first element. One-shot callers receive complete tuples
+at once and perform no incremental address-based application, so this is not an
+ambiguity in one-shot semantics.
+
+For a maintained subscription, every flat joined row MUST instead carry an
+`OutputOccurrenceId`. It is the ordered vector of contributing source row ids:
+`(root-row-id, join[0]-row-id, ..., join[n]-row-id)`. Source position is part of
+the encoding; the query shape supplies the table/alias at each position. The
+wire value is opaque to callers except for equality and reconciliation, and its
+canonical positional encoding MUST be usable as a terminal-state key and for
+consolidation. It MUST NOT be derived from result position, payload bytes, a
+content transaction id, or an unordered set of source ids. It is consequently
+stable across ticks, resets, source-content replacements, and result reordering.
+
+This is the same **stable output occurrence** concept used by the structured
+results design (`origin/spec/structured-results`, `SPEC/6_queries.md` §6.4): a
+nested parent and a flat joined tuple are both output occurrences, even though
+their rendered values differ. A source row id remains useful object identity but
+is not by itself an occurrence identity: a joined row can occur under multiple
+roots, and a root can occur in multiple joined tuples.
+
+Maintained flat-join additions, removals, updates, reset snapshots, and the
+subscriber cache MUST be keyed by `OutputOccurrenceId`; the root `ObjectId`
+MUST NOT be used as that key. Today this target does not exist. The local public
+adapter rejects any `Query` with `joins` (`crates/jazz/src/tools/client.rs:1956-1967`),
+and the current maintained bridge is root rows plus relation edges
+(`crates/jazz/src/node/query_eval.rs:496-501`). If joins were enabled without
+this boundary change, the adapter would silently collapse outputs sharing a root:
+it searches and replaces `current_rows` by `row_uuid`
+(`crates/jazz/src/tools/client.rs:2160-2192`), and its ordered delta ids are that
+same `ObjectId` (`crates/jazz/src/tools/client.rs:2202-2239`). This is neither a
+loud failure nor a valid delta application.
+
+The maintained wire MUST carry `OutputOccurrenceId` as the address of each
+flat-join output add, removal, and replacement, including reset snapshots. It
+MAY continue to reference the ordinary typed source members/version payloads for
+row bodies; it MUST NOT add a per-source provenance envelope or a terminal
+policy-composition field merely to construct joined output identity.
+
+The flat-join descriptor is constructed in declared source order: root first,
+then each `JoinSpec`. Every field name is qualified as
+`<effective-source-name>.<column>`; the effective source name is the root alias
+or root table name, and for a join its alias or table name. Aliases MUST be
+unique across the root and joins. An unaliased repeated table name is therefore
+rejected, as are duplicate effective names. `select`, predicates, and
+`order_by` referring to a flat join MUST use qualified names unless validation
+can prove an unqualified name has exactly one candidate; canonical shape bytes
+and the emitted descriptor use the qualified spelling in all cases. Thus columns
+with the same physical name never collide, descriptor names and field order are
+stable, and a descriptor does not depend on runtime data.
+
+The existing public `JoinSpec { table, alias, on }` advertises aliases and an
+arbitrary equality from the accumulated left result to the newly joined table
+(`crates/jazz/src/tools/public_api/query.rs:196-213`). The core `JoinVia` AST is
+not that form: it has no alias or accumulated-left scope, and only represents a
+root- or immediately-nested reference/junction traversal with a target column,
+optional source column/lookup, correlations, filters, and nested joins
+(`crates/jazz/src/query.rs:2045-2071`; validation at
+`crates/jazz/src/query.rs:2713-2822`). **Recommendation:** extend the core with
+a separately named flat-join AST and lower the public `JoinSpec` into it; do not
+try to encode aliases or arbitrary accumulated joins in `JoinVia`, and do not
+leave the public builder advertising a shape that the client rejects. This is a
+small, explicit surface addition rather than a policy-model change.
+
+`result_element_index` is not part of core `Query`
+(`crates/jazz/src/query.rs:24-61`), and MUST be removed from the
+public flat-join surface. It is fully expressible as a qualified projection:
+select the desired source's qualified columns (including its explicit row-id
+field where needed), or make that table the query root when its `ObjectId` is the
+desired representative id. Keeping a positional tuple selector would duplicate
+projection semantics and create a second, underspecified answer to which object
+id identifies a flat row.
+
+Read-policy filtering and read-view/lens projection are source operations. Each
+flat-join input MUST use its resolved, policy-filtered, read-view-projected
+source before it reaches the join; ordinary join retraction then propagates a
+permission or source-row removal. No terminal policy composition, per-source
+provenance fields, or source-specific ordering contract is required. A join node
+has ordered input descriptors, each already encoding its source/read-view and
+policy semantics, satisfying `groove/SPEC/INVARIANTS.md::INV-QUERY-1A` by
+construction. Groove's inner `JoinOp` already emits matching joined records with
+left-weight times right-weight on changes from either input
+(`groove/SPEC/INVARIANTS.md::INV-QUERY-9`); this design adds only the public
+output descriptor and occurrence-addressed delivery boundary.
+
+**Implementation status (2026-08-04).** Target/untested. No public flat join is
+currently executable: the public client rejects `joins`, core query reads
+materialize root `CurrentRow`s, and the maintained wire carries root membership
+plus relation facts rather than flat join occurrences. The ordinary current
+source resolver already applies source authorization and schema projection
+before lowered query composition (`crates/jazz/src/node/query_eval.rs:537-1066`,
+`2036-2184`); this target relies on that existing source boundary.
+
+### 6.4.2 Default result ordering
 
 Ordering is a core-owned query semantic: it must be expressed in the lowered
 plan and carried through delivered results and delta positions, never
@@ -383,6 +496,11 @@ after the user-declared order terms, ties are broken by ascending row id unless
 the query surface later exposes an explicit, stable tie policy. Child-local
 `order_by` overrides only that child relation's ordering and does not reorder
 parents or sibling relation payloads.
+
+For a flat joined result, `order_by` is the only cross-source ordering contract:
+its qualified fields order output occurrences and the complete occurrence id is
+the deterministic final tie-breaker. No join declaration order is an output sort
+rule, and no source contributes an independent terminal ordering rule.
 
 Aggregate or grouped outputs that do not have a real row id default to ascending
 group-key order. Composite group keys compare lexicographically in the query's
