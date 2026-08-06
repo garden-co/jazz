@@ -1467,7 +1467,7 @@ fn fate_update_rejects_backward_global_seq_and_keeps_durability_monotone() {
             tx_id,
             Fate::Accepted,
             Some(GlobalSeq(4)),
-            Some(DurabilityTier::Local),
+            Some(DurabilityTier::Global),
         ),
         Err(Error::NonMonotoneState("global seq cannot move backwards"))
     ));
@@ -1480,13 +1480,128 @@ fn fate_update_rejects_backward_global_seq_and_keeps_durability_monotone() {
         tx_id,
         Fate::Accepted,
         Some(GlobalSeq(6)),
-        Some(DurabilityTier::Local),
+        Some(DurabilityTier::Global),
     )
     .unwrap();
     assert_eq!(
         node.transaction_state(tx_id).unwrap(),
         (Fate::Accepted, Some(GlobalSeq(6)), DurabilityTier::Global)
     );
+}
+
+#[test]
+fn peer_rejects_sequenced_non_global_fate_without_crashing_the_node() {
+    let (_temp_dir, mut node) = open_node();
+    let tx_id = node
+        .commit_mergeable(MergeableCommit::new("todos", row(8), 10).cells(title_cells("base")))
+        .unwrap();
+
+    let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        node.apply_sync_message(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_seq: Some(GlobalSeq(7)),
+            durability: Some(DurabilityTier::Edge),
+        })
+    }));
+    assert!(received.is_ok(), "a peer message must not panic the receiver");
+    assert!(matches!(
+        received.unwrap(),
+        Err(Error::UnsupportedSyncMessage(
+            "global sequence requires Global durability"
+        ))
+    ));
+    assert_eq!(
+        node.transaction_state(tx_id),
+        Some((Fate::Pending, None, DurabilityTier::Local))
+    );
+
+    node.apply_sync_message(SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Accepted,
+        global_seq: Some(GlobalSeq(7)),
+        durability: Some(DurabilityTier::Global),
+    })
+    .unwrap();
+    assert_eq!(
+        node.transaction_state(tx_id),
+        Some((Fate::Accepted, Some(GlobalSeq(7)), DurabilityTier::Global))
+    );
+}
+
+#[test]
+fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
+    let (_temp_dir, mut receiver) = open_node();
+    let bad_tx = TxId::new(TxTime::from(10), node(8));
+    let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        receiver.apply_sync_message(SyncMessage::ViewUpdate {
+            subscription: SubscriptionKey {
+                shape_id: ShapeId(uuid::Uuid::from_u128(1)),
+                binding_id: BindingId(uuid::Uuid::from_u128(2)),
+                read_view: Default::default(),
+            },
+            settled_through: GlobalSeq(0),
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: vec![VersionBundle {
+                tx: Transaction {
+                    tx_id: bad_tx,
+                    kind: TxKind::Mergeable,
+                    n_total_writes: 0,
+                    made_by: AuthorId::SYSTEM,
+                    permission_subject: None,
+                    base_snapshot: None,
+                    row_read_set: None,
+                    absent_read_set: None,
+                    predicate_read_set: None,
+                    user_metadata_json: None,
+                    source_branch: None,
+                    merge_strategy: None,
+                },
+                versions: Vec::new(),
+                fate: Fate::Accepted,
+                global_seq: Some(GlobalSeq(7)),
+                durability: DurabilityTier::Edge,
+            }],
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+    }));
+    assert!(received.is_ok(), "a peer view must not panic the receiver");
+    assert!(matches!(
+        received.unwrap(),
+        Err(Error::MalformedViewUpdate(
+            "global sequence requires Global durability"
+        ))
+    ));
+    assert!(receiver.transaction_state(bad_tx).is_none());
+    assert!(receiver
+        .commit_mergeable(MergeableCommit::new("todos", row(9), 11).cells(title_cells("alive")))
+        .is_ok());
+}
+
+// This is necessarily an internal mechanism test: the public sync boundary
+// returns a protocol error instead. The assertion protects locally constructed
+// state without turning malformed peer input into a remote panic vector.
+#[cfg(debug_assertions)]
+#[test]
+fn internal_sequenced_non_global_fate_trips_the_debug_assertion() {
+    let (_temp_dir, mut node) = open_node();
+    let tx_id = node
+        .commit_mergeable(MergeableCommit::new("todos", row(10), 10).cells(title_cells("base")))
+        .unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        node.apply_fate_update(
+            tx_id,
+            Fate::Accepted,
+            Some(GlobalSeq(7)),
+            Some(DurabilityTier::Edge),
+        )
+    }));
+    assert!(result.is_err());
 }
 
 #[test]

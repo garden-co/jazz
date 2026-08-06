@@ -157,6 +157,7 @@ where
                 global_seq,
                 durability,
             } => {
+                validate_received_fate_update_global_seq_durability(global_seq, durability)?;
                 self.apply_fate_update(tx_id, fate, global_seq, durability)?;
                 self.drain_parked_commit_units()
             }
@@ -1298,6 +1299,10 @@ where
         global_seq: Option<GlobalSeq>,
         durability: DurabilityTier,
     ) -> Result<(), Error> {
+        debug_assert!(
+            global_seq.is_none() || durability == DurabilityTier::Global,
+            "a global sequence requires Global durability"
+        );
         self.merge_tx_time(tx.tx_id.time);
         let versions = canonical_versions(versions);
         if let Some(existing) = self.query_transaction(tx.tx_id)? {
@@ -1347,6 +1352,10 @@ where
         durability: DurabilityTier,
         staged_global_seqs: &mut Vec<GlobalSeq>,
     ) -> Result<(), Error> {
+        debug_assert!(
+            global_seq.is_none() || durability == DurabilityTier::Global,
+            "a global sequence requires Global durability"
+        );
         self.merge_tx_time(tx.tx_id.time);
         let versions = canonical_versions(versions);
         if self.query_transaction(tx.tx_id)?.is_some() {
@@ -1376,6 +1385,10 @@ where
     ) -> Result<BTreeSet<TxId>, Error> {
         let mut bundles_by_tx = BTreeMap::<TxId, Vec<VersionBundleRef<'_>>>::new();
         for bundle in bundles {
+            validate_received_view_bundle_global_seq_durability(
+                bundle.global_seq,
+                bundle.durability,
+            )?;
             bundles_by_tx
                 .entry(bundle.tx.tx_id)
                 .or_default()
@@ -1644,6 +1657,10 @@ where
         global_seq: Option<GlobalSeq>,
         durability: Option<DurabilityTier>,
     ) -> Result<(), Error> {
+        debug_assert!(
+            global_seq.is_none() || durability == Some(DurabilityTier::Global),
+            "a global sequence requires Global durability"
+        );
         let mut terminal_fate_persisted = false;
         let result = self.apply_fate_update_once(
             tx_id,
@@ -4637,6 +4654,34 @@ where
         self.database.commit_batch(batch)?;
         Ok(())
     }
+}
+
+/// A sequence is the global-authority receipt. Peer payloads which pair it
+/// with a weaker durability must be rejected before they can reach storage.
+pub(super) fn validate_received_fate_update_global_seq_durability(
+    global_seq: Option<GlobalSeq>,
+    durability: Option<DurabilityTier>,
+) -> Result<(), Error> {
+    if global_seq.is_some() && durability != Some(DurabilityTier::Global) {
+        return Err(Error::UnsupportedSyncMessage(
+            "global sequence requires Global durability",
+        ));
+    }
+    Ok(())
+}
+
+/// View bundles are peer payloads too, including reset bundles eligible for
+/// bulk persistence.
+pub(super) fn validate_received_view_bundle_global_seq_durability(
+    global_seq: Option<GlobalSeq>,
+    durability: DurabilityTier,
+) -> Result<(), Error> {
+    if global_seq.is_some() && durability != DurabilityTier::Global {
+        return Err(Error::MalformedViewUpdate(
+            "global sequence requires Global durability",
+        ));
+    }
+    Ok(())
 }
 
 fn merge_large_value_head_ops(

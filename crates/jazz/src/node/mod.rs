@@ -2594,20 +2594,52 @@ where
         node: NodeUuid,
         author: AuthorId,
     ) -> Result<Vec<TxId>, Error> {
-        let mut pending = Vec::new();
-        for tx_id in self.transaction_ids()? {
-            let Some(transaction) = self.query_transaction(tx_id)? else {
-                continue;
-            };
-            if transaction.tx.tx_id.node == node
-                && transaction.tx.made_by == author
-                && matches!(transaction.fate, Fate::Pending | Fate::Accepted)
-                && transaction.durability < DurabilityTier::Global
+        Ok(self.pending_transaction_scan_for(node, author)?.tx_ids)
+    }
+
+    /// Find replayable local transactions in the null slice of
+    /// `by_global_seq`. The sequence/durability invariant makes every
+    /// below-Global transaction sequence-null, so settled history is outside
+    /// this scan without a second index or an upgrade backfill.
+    fn pending_transaction_scan_for(
+        &mut self,
+        node: NodeUuid,
+        author: AuthorId,
+    ) -> Result<PendingTransactionScan, Error> {
+        let Some(node_alias) = self.node_aliases.get(&node).copied() else {
+            return Ok(PendingTransactionScan::default());
+        };
+
+        let mut scan = PendingTransactionScan::default();
+        for raw in self.database.index_scan_raw(
+            "jazz_transactions",
+            "by_global_seq",
+            &[Value::Nullable(None)],
+        )? {
+            scan.records_visited += 1;
+            let record = raw.record();
+            if NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?) != node_alias
+                || AuthorId(record.get_uuid(TransactionRowRecord::FIELD_MADE_BY_IDX)?) != author
             {
-                pending.push(tx_id);
+                continue;
             }
+            if !matches!(
+                record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?,
+                0 | 1
+            ) || durability_from_discriminant(
+                record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
+            )? >= DurabilityTier::Global
+            {
+                continue;
+            }
+            scan.tx_ids.push(TxId::new(
+                TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?),
+                node,
+            ));
         }
-        Ok(pending)
+        scan.tx_ids.sort();
+        scan.tx_ids.dedup();
+        Ok(scan)
     }
 
     /// Resolve creator/updater provenance for a projected current row.
@@ -3797,6 +3829,10 @@ where
     ) -> Result<(), Error> {
         let request_set = requests.iter().cloned().collect::<BTreeSet<_>>();
         for bundle in version_bundles {
+            ingest::validate_received_view_bundle_global_seq_durability(
+                bundle.global_seq,
+                bundle.durability,
+            )?;
             let versions = bundle
                 .versions
                 .into_iter()
@@ -4148,6 +4184,17 @@ pub struct CurrentRow {
     table: groove::Intern<String>,
     record: std::sync::Arc<OwnedRecord>,
     deleted: bool,
+}
+
+/// Work performed by the durable local-write replay lookup.
+///
+/// Kept separate from storage metrics so scale tests can assert candidate
+/// records independently of storage-window and cache details.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PendingTransactionScan {
+    tx_ids: Vec<TxId>,
+    records_visited: usize,
+    full_transactions_decoded: usize,
 }
 
 /// User-visible row provenance resolved from commit authorship.
