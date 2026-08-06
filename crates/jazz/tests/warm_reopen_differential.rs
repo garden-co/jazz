@@ -86,7 +86,8 @@ fn query() -> Query {
         .array_subquery(
             ArraySubquery::new("children", "children", "parent_id", "id")
                 .select(["label", "rank"])
-                .order_by("rank", OrderDirection::Asc),
+                .order_by("rank", OrderDirection::Asc)
+                .unbounded(),
         )
 }
 

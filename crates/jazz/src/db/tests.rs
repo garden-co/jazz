@@ -1851,12 +1851,8 @@ fn branch_read_view_relation_snapshot_uses_query_engine_relation_edges() {
         )
         .expect("commit branch todo");
 
-    let query = Query::from("users").array_subquery(ArraySubquery::new(
-        "todosViaOwner",
-        "todos",
-        "owner_id",
-        "id",
-    ));
+    let query = Query::from("users")
+        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").unbounded());
     let prepared_query = prepared(&db, &query);
     let snapshot =
         doctest_support::block_on(db.all_relation_snapshot(&prepared_query, branch_read_opts()))
@@ -2565,12 +2561,7 @@ fn relation_snapshot_reverse_array_skips_deleted_children() {
 
     let query = Query::from("users")
         .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
-        .array_subquery(ArraySubquery::new(
-            "todosViaOwner",
-            "todos",
-            "owner_id",
-            "id",
-        ))
+        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").unbounded())
         .limit(1);
     let prepared = db.prepare_query(&query).unwrap();
     let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
@@ -2757,7 +2748,9 @@ fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() 
     let query = Query::from("users")
         .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
         .array_subquery(
-            ArraySubquery::new("todosViaOwner", "todos", "ownerId", "id").select(["id"]),
+            ArraySubquery::new("todosViaOwner", "todos", "ownerId", "id")
+                .select(["id"])
+                .unbounded(),
         )
         .limit(1);
     let prepared = db.prepare_query(&query).unwrap();
@@ -2809,7 +2802,9 @@ fn relation_snapshot_reverse_array_reads_local_nullable_ref_child() {
     let query = Query::from("users")
         .filter(eq(col("id"), lit(Value::Uuid(user.0))))
         .array_subquery(
-            ArraySubquery::new("todosViaOwner", "todos", "ownerId", "id").select(["id"]),
+            ArraySubquery::new("todosViaOwner", "todos", "ownerId", "id")
+                .select(["id"])
+                .unbounded(),
         )
         .limit(1);
     let prepared = db.prepare_query(&query).unwrap();
@@ -3038,12 +3033,7 @@ fn array_subquery_live_subscription_tracks_child_edges() {
 
     let query = Query::from("users")
         .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
-        .array_subquery(ArraySubquery::new(
-            "todosViaOwner",
-            "todos",
-            "owner_id",
-            "id",
-        ));
+        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").unbounded());
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
@@ -3119,7 +3109,7 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
     )
     .unwrap();
     let query = Query::from("todos")
-        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id"));
+        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id").unbounded());
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
@@ -3241,7 +3231,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     let query = Query::from("todos")
-        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id"));
+        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id").unbounded());
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
@@ -3389,7 +3379,7 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
         .unwrap();
     }
     let query = Query::from("todos")
-        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id"));
+        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id").unbounded());
     let prepared_query = prepared(&db, &query);
 
     let admin = block_on(db.all_relation_snapshot_for_identity(
@@ -3473,7 +3463,8 @@ fn array_subquery_one_shot_and_maintained_subscription_are_equivalent() {
     }
     let query = Query::from("todos").array_subquery(
         ArraySubquery::new("comments", "comments", "todo_id", "id")
-            .order_by("body", OrderDirection::Asc),
+            .order_by("body", OrderDirection::Asc)
+            .unbounded(),
     );
     let prepared_query = prepared(&db, &query);
     let one_shot =
@@ -3513,9 +3504,11 @@ fn array_subquery_subscription_projects_late_root_and_existing_forward_target() 
         BTreeMap::from([("name".to_owned(), Value::String("owner".to_owned()))]),
     )
     .unwrap();
-    let query = Query::from("todos")
-        .select(["title"])
-        .array_subquery(ArraySubquery::new("owner", "users", "id", "owner_id").select(["name"]));
+    let query = Query::from("todos").select(["title"]).array_subquery(
+        ArraySubquery::new("owner", "users", "id", "owner_id")
+            .select(["name"])
+            .unbounded(),
+    );
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
     let opened = snapshot_from_event(block_on(subscription.next_event()).unwrap());
@@ -3567,7 +3560,9 @@ fn array_subquery_subscription_projects_late_camel_case_root_and_existing_forwar
     )
     .unwrap();
     let query = Query::from("issues").select(["title"]).array_subquery(
-        ArraySubquery::new("project", "projects", "id", "project").select(["name"]),
+        ArraySubquery::new("project", "projects", "id", "project")
+            .select(["name"])
+            .unbounded(),
     );
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
@@ -3614,12 +3609,8 @@ fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
     let _upstream = client.connect_upstream(client_transport);
     let _subscriber = server.accept_subscriber(server_transport, client_author);
 
-    let query = Query::from("users").array_subquery(ArraySubquery::new(
-        "todosViaOwner",
-        "todos",
-        "owner_id",
-        "id",
-    ));
+    let query = Query::from("users")
+        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").unbounded());
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     let opened = snapshot_from_event(block_on(subscription.next_event()).unwrap());
     assert!(opened.rows.is_empty());
@@ -6957,7 +6948,7 @@ fn subscriber_connection_accepts_array_subquery_register_shape_for_serving_subsc
     let (mut client_transport, server_transport) = duplex();
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let shape = Query::from("users")
-        .array_subquery(ArraySubquery::new("todos", "todos", "owner_id", "id"))
+        .array_subquery(ArraySubquery::new("todos", "todos", "owner_id", "id").unbounded())
         .validate(&schema)
         .unwrap();
 
@@ -8618,7 +8609,8 @@ fn global_subscription_registers_array_subquery_upstream_coverage() {
 
     let query = Query::from("users").array_subquery(
         ArraySubquery::new("todos", "todos", "owner_id", "id")
-            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id")),
+            .unbounded()
+            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id").unbounded()),
     );
     let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
 
@@ -8643,7 +8635,8 @@ fn array_subquery_attachment_registers_upstream_coverage() {
 
     let query = Query::from("users").array_subquery(
         ArraySubquery::new("todos", "todos", "owner_id", "id")
-            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id")),
+            .unbounded()
+            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id").unbounded()),
     );
     let prepared = prepared(&client, &query);
     let attachment = client

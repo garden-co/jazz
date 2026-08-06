@@ -987,7 +987,8 @@ fn array_subquery_match_correlation_cardinality_requires_every_referenced_member
     let shape = Query::from("groups")
         .array_subquery(
             ArraySubquery::new("memberRows", "profiles", "id", "members")
-                .requirement(crate::query::ArraySubqueryRequirement::MatchCorrelationCardinality),
+                .requirement(crate::query::ArraySubqueryRequirement::MatchCorrelationCardinality)
+                .unbounded(),
         )
         .validate(&schema)
         .unwrap();
@@ -1067,7 +1068,8 @@ fn rows_skipped_by_require_includes_affect_limit_offset_pagination() {
     let shape = Query::from("groups")
         .array_subquery(
             ArraySubquery::new("memberRows", "profiles", "id", "members")
-                .requirement(crate::query::ArraySubqueryRequirement::MatchCorrelationCardinality),
+                .requirement(crate::query::ArraySubqueryRequirement::MatchCorrelationCardinality)
+                .unbounded(),
         )
         .order_by("name", crate::query::OrderDirection::Asc)
         .offset(1)
@@ -1127,7 +1129,7 @@ fn relation_snapshot_single_level_array_uses_query_engine_edges() {
 
     let shape = Query::from("users")
         .filter(eq(col("id"), lit(Value::Uuid(alice.0))))
-        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id"))
+        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").unbounded())
         .validate(&schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
@@ -1206,7 +1208,8 @@ fn relation_snapshot_materializes_reverse_array_edges() {
         .filter(eq(col("id"), lit(Value::Uuid(alice.0))))
         .array_subquery(
             ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id")
-                .nested(ArraySubquery::new("commentsViaTodo", "comments", "todo_id", "id")),
+                .unbounded()
+                .nested(ArraySubquery::new("commentsViaTodo", "comments", "todo_id", "id").unbounded()),
         )
         .validate(&schema)
         .unwrap();
@@ -1291,7 +1294,8 @@ fn relation_snapshot_array_subquery_filters_use_parent_binding_params() {
         .array_subquery(
             ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id")
                 .filter(eq(col("title"), param("wanted")))
-                .requirement(crate::query::ArraySubqueryRequirement::AtLeastOne),
+                .requirement(crate::query::ArraySubqueryRequirement::AtLeastOne)
+                .unbounded(),
         )
         .validate(&schema)
         .unwrap();
@@ -1354,7 +1358,7 @@ fn relation_snapshot_filters_unreadable_children_and_required_parents() {
     .unwrap();
 
     let optional_shape = Query::from("users")
-        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id"))
+        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").unbounded())
         .validate(&schema)
         .unwrap();
     let optional_binding = optional_shape.bind(BTreeMap::new()).unwrap();
@@ -1380,7 +1384,8 @@ fn relation_snapshot_filters_unreadable_children_and_required_parents() {
     let required_shape = Query::from("users")
         .array_subquery(
             ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id")
-                .requirement(crate::query::ArraySubqueryRequirement::AtLeastOne),
+                .requirement(crate::query::ArraySubqueryRequirement::AtLeastOne)
+                .unbounded(),
         )
         .validate(&schema)
         .unwrap();
