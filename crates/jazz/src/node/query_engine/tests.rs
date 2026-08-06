@@ -860,7 +860,7 @@ fn current_source_filter_order_slice_chain_lowers_to_groove_graph() {
 }
 
 #[test]
-fn current_source_select_projection_and_unordered_slice_lower() {
+fn current_source_select_projection_and_default_ordered_slice_lower() {
     let root = RowSetNodeId("root".to_owned());
     let slice = RowSetNodeId("slice".to_owned());
     let root_source = source("todos", SourceRole::Root);
@@ -946,7 +946,10 @@ fn current_source_select_projection_and_unordered_slice_lower() {
             limit: groove::ivm::TopByLimit::Finite(3),
         } if matches!(input.as_ref(), GraphBuilder::Table { table, .. } if table == "resolved_todos")
             && group_cols.is_empty()
-            && order_cols.is_empty()
+            && matches!(order_cols.as_slice(), [groove::ivm::TopByOrder {
+                field: groove::ivm::FieldRef::Name(field),
+                direction: groove::ivm::TopByDirection::Asc,
+            }] if field == "row_uuid")
             && matches!(tie_cols.as_slice(), [groove::ivm::FieldRef::Name(field)]
                 if field == "row_uuid")
     ));

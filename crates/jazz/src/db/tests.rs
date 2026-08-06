@@ -407,17 +407,6 @@ fn assert_subscribe_rejected_branch_overlay(
     }
 }
 
-fn assert_subscribe_rejected_unsupported_window(
-    message: SyncMessage,
-    expected_subscription: SubscriptionKey,
-) {
-    assert_subscribe_rejected_unsupported_shape_capability_detail(
-        message,
-        expected_subscription,
-        "maintained subscription view window shape is not lowered yet",
-    );
-}
-
 fn assert_subscribe_rejected_unsupported_shape_capability_detail(
     message: SyncMessage,
     expected_subscription: SubscriptionKey,
@@ -6404,7 +6393,7 @@ fn subscriber_connection_surfaces_server_table_not_found_without_silence() {
 }
 
 #[test]
-fn subscriber_connection_rejects_unsupported_maintained_shape_and_keeps_serving_others() {
+fn subscriber_connection_serves_default_ordered_window_alongside_unbounded_shape() {
     let schema = schema();
     let owner = AuthorId::from_bytes([0xa1; 16]);
     let client_author = AuthorId::from_bytes([0xc1; 16]);
@@ -6412,34 +6401,33 @@ fn subscriber_connection_rejects_unsupported_maintained_shape_and_keeps_serving_
     seed(&server, "todos", cells("first", false, owner));
     seed(&server, "todos", cells("second", false, owner));
 
-    // Protocol-level coverage: jazz-tools subscriptions do not expose raw
-    // SubscribeRejected messages, so this exercises the first layer where the
-    // rejection is directly observable while still using public query builders.
+    // Protocol-level coverage for the current prepared/policy routing path:
+    // keep an ordinary root and a default-ordered offset window live together.
     let (mut client_transport, server_transport) = duplex();
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let supported_shape = Query::from("todos").validate(&schema).unwrap();
-    let unsupported_shape = Query::from("todos")
+    let window_shape = Query::from("todos")
         .offset(1)
         .limit(1)
         .validate(&schema)
         .unwrap();
     let supported_binding = supported_shape.bind(BTreeMap::new()).unwrap();
-    let unsupported_binding = unsupported_shape.bind(BTreeMap::new()).unwrap();
+    let window_binding = window_shape.bind(BTreeMap::new()).unwrap();
     let supported_subscription = SubscriptionKey {
         shape_id: supported_shape.shape_id(),
         binding_id: supported_binding.binding_id(),
         read_view: RegisterShapeOptions::default().read_view_key(),
     };
-    let unsupported_subscription = SubscriptionKey {
-        shape_id: unsupported_shape.shape_id(),
-        binding_id: unsupported_binding.binding_id(),
+    let window_subscription = SubscriptionKey {
+        shape_id: window_shape.shape_id(),
+        binding_id: window_binding.binding_id(),
         read_view: RegisterShapeOptions::default().read_view_key(),
     };
 
     client_transport
         .send(SyncMessage::RegisterShape {
-            shape_id: unsupported_shape.shape_id(),
-            ast: ShapeAst::from_validated(&unsupported_shape),
+            shape_id: window_shape.shape_id(),
+            ast: ShapeAst::from_validated(&window_shape),
             opts: RegisterShapeOptions::default(),
         })
         .unwrap();
@@ -6460,34 +6448,40 @@ fn subscriber_connection_rejects_unsupported_maintained_shape_and_keeps_serving_
         .unwrap();
 
     subscriber.borrow_mut().tick().unwrap();
-    assert_subscribe_rejected_unsupported_window(
-        client_transport
-            .try_recv()
-            .expect("expected unsupported shape rejection"),
-        unsupported_subscription,
-    );
     assert_view_update_for_subscription(
         client_transport
             .try_recv()
-            .expect("expected supported subscription update after rejection"),
+            .expect("expected unbounded subscription update"),
         supported_subscription,
     );
 
     client_transport
         .send(SyncMessage::Subscribe(Subscribe {
-            shape_id: unsupported_shape.shape_id(),
-            subscription: unsupported_subscription,
+            shape_id: window_shape.shape_id(),
+            subscription: window_subscription,
             values: Vec::new(),
             known_state: None,
         }))
         .unwrap();
     seed(&server, "todos", cells("third", false, owner));
     subscriber.borrow_mut().tick().unwrap();
-    assert_view_update_for_subscription(
-        client_transport
-            .try_recv()
-            .expect("supported subscription should continue after unsupported subscribe"),
-        supported_subscription,
+    let first = client_transport
+        .try_recv()
+        .expect("expected maintained subscription update");
+    let second = client_transport
+        .try_recv()
+        .expect("expected maintained window update");
+    let subscriptions = [first, second]
+        .into_iter()
+        .map(|message| match message {
+            SyncMessage::ViewUpdate { subscription, .. } => subscription,
+            other => panic!("expected ViewUpdate, got {other:?}"),
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        subscriptions,
+        BTreeSet::from([supported_subscription, window_subscription]),
+        "both the unbounded and default-ordered window subscriptions remain served"
     );
 }
 

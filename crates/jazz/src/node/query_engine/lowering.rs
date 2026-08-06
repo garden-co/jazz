@@ -798,6 +798,7 @@ fn analyze_query_plan(
         gaps.push(analyzed.unwrap_err());
         return Err(gaps);
     };
+    let plan = plan_with_default_result_order(plan, request);
     validate_output_capabilities(request, &plan, &mut gaps);
 
     for plan_source in analyzed_plan_sources(&plan) {
@@ -852,6 +853,75 @@ fn validate_output_capabilities(
     gaps.push(UnsupportedReason::Operator(
         "maintained subscription view window shape is not lowered yet".to_owned(),
     ));
+}
+
+/// Root queries have a public default order even when callers do not spell an
+/// `order_by`: ascending row id. Make that order part of a root *window's*
+/// executable plan so `limit`/`offset` is a real `TopBy` window instead of
+/// depending on source scan order. Unbounded root delivery already restores
+/// the same public default while materializing result rows. `TopBy` also
+/// retains its full-record final tie-breaker, which keeps the maintained bag
+/// order total when equal records are present.
+///
+/// This deliberately does not inject order into relation subtrees. Their
+/// ordering contract is distinct from root result ordering and some recursive
+/// and policy-composed relation paths cannot yet carry an added order node.
+fn plan_with_default_result_order(
+    mut plan: AnalyzedQueryPlan,
+    request: &QueryProgramRequest,
+) -> AnalyzedQueryPlan {
+    let produces_root_rows = request.output.app_rows.is_some()
+        || request
+            .output
+            .facts
+            .contains(&ProgramFactKey::ResultMembership);
+    if !produces_root_rows {
+        return plan;
+    }
+
+    match &mut plan {
+        AnalyzedQueryPlan::Linear(linear) => {
+            inject_default_root_order(&linear.root, &mut linear.steps);
+        }
+        AnalyzedQueryPlan::CorrelatedPath(path) => {
+            // For a correlated root, parent eligibility is established before
+            // `output_steps`; the root order/window must therefore be applied
+            // in that output tail, not to the parent input.
+            inject_default_root_order(&path.parent.root, &mut path.output_steps);
+        }
+        AnalyzedQueryPlan::Union(_) | AnalyzedQueryPlan::RecursiveRelation(_) => {}
+    }
+    plan
+}
+
+fn inject_default_root_order(root: &LinearRoot, steps: &mut Vec<LinearStep>) {
+    let Some(source) = root.source().cloned() else {
+        return;
+    };
+    let Some(first_terminal) = steps.iter().position(|step| {
+        matches!(
+            step,
+            LinearStep::OrderBy(_) | LinearStep::Slice { .. } | LinearStep::Aggregate { .. }
+        )
+    }) else {
+        return;
+    };
+
+    // Explicit order and aggregate output own their order semantics.
+    if matches!(
+        steps.get(first_terminal),
+        Some(LinearStep::OrderBy(_) | LinearStep::Aggregate { .. })
+    ) {
+        return;
+    }
+    steps.insert(first_terminal, default_root_order(source));
+}
+
+fn default_root_order(source: SourceId) -> LinearStep {
+    LinearStep::OrderBy(vec![OrderKey {
+        value: NormalizedValueRef::RowId(RowIdRef::Source(source)),
+        direction: SortDirection::Asc,
+    }])
 }
 
 fn maintained_result_membership_window_supported(plan: &AnalyzedQueryPlan) -> bool {
