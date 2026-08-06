@@ -2354,6 +2354,7 @@ mod tests {
             &previous,
             &BTreeSet::from([direct, revoked, new_post_cursor_row]),
         ));
+    }
 
     fn output_member(root: RowUuid, joined: RowUuid, time: u64) -> ResultMemberEntry {
         RealRowMemberEntry::current_content((
