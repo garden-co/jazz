@@ -28,6 +28,14 @@ const FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/wire_message_frames.json"
 );
+const NATIVE_ROW_CODEC_FIXTURE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/native_row_codec.json"
+);
+const NATIVE_QUERY_CODEC_FIXTURE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/native_query_codec.json"
+);
 
 #[derive(Serialize)]
 struct Manifest {
@@ -48,12 +56,12 @@ struct Fixture {
     decoded_debug: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct NativeRowCodecFixture {
     cases: Vec<NativeRowCodecCase>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct NativeRowCodecCase {
     name: String,
     descriptor_hex: Vec<String>,
@@ -61,18 +69,19 @@ struct NativeRowCodecCase {
     fields: Vec<NativeRowCodecField>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct NativeRowCodecField {
     name: String,
     encoded_hex: String,
+    decoded_hex: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct NativeQueryCodecFixture {
     cases: Vec<NativeQueryCodecCase>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct NativeQueryCodecCase {
     name: String,
     query_hex: String,
@@ -484,6 +493,47 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
 // record-layout contract, which is not observable through the public API.
 #[test]
 fn native_row_codec_fixture_round_trips_every_groove_value_type() {
+    if std::env::var_os("JAZZ_UPDATE_NATIVE_CODEC_FIXTURES").is_some() {
+        let (descriptor, values) = exhaustive_native_row_codec_case();
+        let descriptor_fields = descriptor
+            .fields()
+            .iter()
+            .map(|field| (field.name.clone(), field.value_type.clone()))
+            .collect::<Vec<_>>();
+        let descriptor_bytes =
+            postcard::to_allocvec(&descriptor_fields).expect("descriptor encodes");
+        let record = descriptor.create(&values).expect("record encodes");
+        let fields = descriptor
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                let span = descriptor
+                    .field_span(&record, index)
+                    .expect("field span resolves");
+                let encoded = &record[span];
+                NativeRowCodecField {
+                    name: field.name.clone().expect("fixture fields are named"),
+                    encoded_hex: hex(encoded),
+                    decoded_hex: fixture_decoded_hex(encoded, &field.value_type),
+                }
+            })
+            .collect();
+        let fixture = NativeRowCodecFixture {
+            cases: vec![NativeRowCodecCase {
+                name: "all_value_types_depth_three".to_owned(),
+                descriptor_hex: vec![hex(&descriptor_bytes)],
+                record_hex: vec![hex(&record)],
+                fields,
+            }],
+        };
+        std::fs::write(
+            NATIVE_ROW_CODEC_FIXTURE_PATH,
+            serde_json::to_string_pretty(&fixture).expect("native row fixture serializes") + "\n",
+        )
+        .expect("native row fixture writes");
+        return;
+    }
     let fixture: NativeRowCodecFixture =
         serde_json::from_str(include_str!("../fixtures/native_row_codec.json"))
             .expect("native row codec fixture parses");
@@ -543,6 +593,23 @@ fn native_row_codec_fixture_round_trips_every_groove_value_type() {
 // narrowest way to protect its positional layout contract.
 #[test]
 fn native_query_codec_fixture_round_trips_relation_shapes() {
+    if std::env::var_os("JAZZ_UPDATE_NATIVE_CODEC_FIXTURES").is_some() {
+        let fixture = NativeQueryCodecFixture {
+            cases: native_query_codec_cases()
+                .into_iter()
+                .map(|(name, query)| NativeQueryCodecCase {
+                    name: name.to_owned(),
+                    query_hex: hex(&postcard::to_allocvec(&query).expect("query encodes")),
+                })
+                .collect(),
+        };
+        std::fs::write(
+            NATIVE_QUERY_CODEC_FIXTURE_PATH,
+            serde_json::to_string_pretty(&fixture).expect("native query fixture serializes") + "\n",
+        )
+        .expect("native query fixture writes");
+        return;
+    }
     let fixture: NativeQueryCodecFixture =
         serde_json::from_str(include_str!("../fixtures/native_query_codec.json"))
             .expect("native query codec fixture parses");
@@ -566,6 +633,17 @@ fn native_query_codec_fixture_round_trips_relation_shapes() {
             decoded, expected,
             "{name} fixture decodes to the expected query"
         );
+    }
+}
+
+fn fixture_decoded_hex(bytes: &[u8], value_type: &groove::records::ValueType) -> Option<String> {
+    match value_type {
+        groove::records::ValueType::Nullable(inner) => match bytes.first() {
+            Some(0) => None,
+            Some(1) => fixture_decoded_hex(&bytes[1..], inner),
+            _ => Some(hex(bytes)),
+        },
+        _ => Some(hex(bytes)),
     }
 }
 

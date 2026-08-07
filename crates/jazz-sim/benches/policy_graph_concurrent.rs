@@ -747,6 +747,9 @@ fn json_to_cell_value(value: &JsonValue, column_type: &ColumnType) -> Value {
                 .map(|value| json_to_cell_value(value, member_type))
                 .collect(),
         ),
+        ColumnType::Record(_) => {
+            panic!("policy-graph JSON seed fixtures do not support inline record columns")
+        }
     }
 }
 

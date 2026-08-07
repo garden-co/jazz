@@ -1162,7 +1162,7 @@ fn scan_plan(table: &TableSchema, alias: Option<String>) -> LogicalPlan {
             qualifier: qualifier.clone(),
             name: column.name.clone(),
             source_name: column.name.clone(),
-            value_type: column.column_type.value_type(),
+            value_type: column.column_type.clone(),
         })
         .collect();
     LogicalPlan::Scan {

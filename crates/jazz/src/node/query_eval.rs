@@ -1749,9 +1749,7 @@ fn project_current_content_fields(
                                 .iter()
                                 .find(|candidate| candidate.name == *column)
                                 .map(|candidate| {
-                                    ValueType::Nullable(Box::new(
-                                        candidate.column_type.clone().value_type(),
-                                    ))
+                                    ValueType::Nullable(Box::new(candidate.column_type.clone()))
                                 })
                                 // A multi-lens path can add a temporary column
                                 // and remove it again before reaching the read
@@ -1777,7 +1775,7 @@ fn project_current_content_fields(
         column_fields.remove(&column.name).unwrap_or_else(|| {
             ProjectField::null_typed(
                 user_column_field(&column.name),
-                ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
+                ValueType::Nullable(Box::new(column.column_type.clone())),
             )
         })
     }));
@@ -2385,7 +2383,7 @@ fn current_row_descriptor_fields(table: &TableSchema) -> Vec<(String, ValueType)
         .chain(table.columns.iter().map(|column| {
             (
                 user_column_field(&column.name),
-                ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
+                ValueType::Nullable(Box::new(column.column_type.clone())),
             )
         }))
         .chain([
@@ -9164,7 +9162,7 @@ where
             param_names
                 .iter()
                 .cloned()
-                .zip(params.iter().map(|param| param.ty.value_type())),
+                .zip(params.iter().map(|param| param.ty.clone())),
         );
         if params.is_empty() {
             Ok(PreparedQueryPlan::Graph(graph))
@@ -9346,7 +9344,7 @@ where
             param_names
                 .iter()
                 .cloned()
-                .zip(params.iter().map(|param| param.ty.value_type())),
+                .zip(params.iter().map(|param| param.ty.clone())),
         );
         let values = binding_values_for_plan(binding, &params, &program.request.policy)?;
         let terminals = program
@@ -11350,7 +11348,7 @@ fn current_row_descriptor(table: &TableSchema) -> RecordDescriptor {
             .chain(table.columns.iter().map(|column| {
                 (
                     user_column_field(&column.name),
-                    ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
+                    ValueType::Nullable(Box::new(column.column_type.clone())),
                 )
             }))
             .chain([
@@ -11813,7 +11811,7 @@ fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescript
             .chain(table.columns.iter().map(|column| {
                 (
                     user_column_field(&column.name),
-                    ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
+                    ValueType::Nullable(Box::new(column.column_type.clone())),
                 )
             }))
             .chain([

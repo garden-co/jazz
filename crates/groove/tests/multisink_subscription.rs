@@ -70,8 +70,8 @@ fn project_schema() -> DatabaseSchema {
 
 fn route_descriptor() -> RecordDescriptor {
     RecordDescriptor::new([
-        ("org_id", ColumnType::U64.value_type()),
-        ("project_id", ColumnType::U64.value_type()),
+        ("org_id", ColumnType::U64.clone()),
+        ("project_id", ColumnType::U64.clone()),
     ])
 }
 

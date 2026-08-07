@@ -82,6 +82,18 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
             groove::schema::ColumnType::Nullable(member) => {
                 Value::Nullable(Some(Box::new(sample_value(member, seed.wrapping_add(1)))))
             }
+            groove::schema::ColumnType::Record(descriptor) => {
+                let values = descriptor
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, field)| sample_value(&field.value_type, seed.wrapping_add(idx as u8 + 1)))
+                    .collect::<Vec<_>>();
+                Value::Record(groove::records::OwnedRecord::new(
+                    descriptor.create(&values).unwrap(),
+                    **descriptor,
+                ))
+            }
         }
     }
 
