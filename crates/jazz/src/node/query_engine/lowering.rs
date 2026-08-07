@@ -4856,7 +4856,21 @@ fn lowered_terminals(
                 &root_route_fields,
             ))
     };
-    if let Some(app_rows) = &request.output.app_rows {
+    // Correlated path lowering can carry a route field while reporting a
+    // conservative `available_fields` set for the root.  Use the parameter
+    // domain rather than only `root_route_fields` to keep routed maintained
+    // array queries on their existing fact-terminal path; the tree collector
+    // cannot retain any routed binding fields yet.
+    let has_routed_tree_app_projection = matches!(
+        &request.output.app_rows,
+        Some(AppRowOutputRequest {
+            projection: PayloadProjection::Tree(tree),
+            ..
+        }) if !tree.paths.is_empty() && !routing_param_fields.is_empty()
+    );
+    if let Some(app_rows) = &request.output.app_rows
+        && !has_routed_tree_app_projection
+    {
         let (graph, descriptor, hidden_fields) = match app_rows.projection.clone() {
             PayloadProjection::Tree(tree) if !tree.paths.is_empty() => {
                 if !root_route_fields.is_empty() {
@@ -5435,15 +5449,21 @@ fn collect_flat_projection(
         let is_current = current_slot.is_some_and(|current| current.path == slot.path);
         for field in &slot.fields {
             fields.push(if is_current {
-                ProjectField::renamed(
-                    right_field(
-                        field
-                            .source_field
-                            .as_ref()
-                            .expect("collector child fields retain their source field"),
-                    ),
-                    &field.input,
-                )
+                let source = right_field(
+                    field
+                        .source_field
+                        .as_ref()
+                        .expect("collector child fields retain their source field"),
+                );
+                if field.is_row_id {
+                    ProjectField::renamed(source, &field.input)
+                } else {
+                    // Anchor rows have no child, so collector child payload
+                    // fields are nullable. Preserve that descriptor on actual
+                    // child rows as well, rather than making the union depend
+                    // on whether this particular source column is nullable.
+                    ProjectField::nullable_flat(source, &field.input)
+                }
             } else if inherited_flat_fields.contains(&field.input) {
                 ProjectField::renamed(left_field(&field.input), &field.input)
             } else {

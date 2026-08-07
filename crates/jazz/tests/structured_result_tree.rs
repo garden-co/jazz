@@ -6,7 +6,7 @@ use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid};
-use jazz::query::{ArraySubquery, OrderDirection, Query};
+use jazz::query::{ArraySubquery, OrderDirection, Query, col, eq, param};
 use jazz::result_tree::MAX_RESULT_TREE_PARENT_BYTES;
 use jazz::result_tree::ResultRelation;
 use jazz::schema::{JazzSchema, Policy, TableSchema};
@@ -186,6 +186,98 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
     };
     assert_eq!(added.first().map(|row| row.row_uuid()), Some(parent));
     assert!(added.iter().any(|row| row.table() == "children"));
+}
+
+#[test]
+fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
+    let db = open_db();
+    let matching_parent = db
+        .insert(
+            "parents",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("matching".to_owned())),
+                ("rank".to_owned(), Value::U32(7)),
+            ]),
+        )
+        .expect("insert matching parent")
+        .row_uuid();
+    db.insert(
+        "parents",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("other".to_owned())),
+            ("rank".to_owned(), Value::U32(8)),
+        ]),
+    )
+    .expect("insert non-matching parent");
+    let initial_child = db
+        .insert(
+            "children",
+            BTreeMap::from([
+                ("parent_id".to_owned(), Value::Uuid(matching_parent.0)),
+                ("label".to_owned(), Value::String("initial".to_owned())),
+                ("rank".to_owned(), Value::U32(0)),
+            ]),
+        )
+        .expect("insert initial child")
+        .row_uuid();
+
+    let query = Query::from("parents")
+        .filter(eq(col("rank"), param("rank")))
+        .array_subquery(
+            ArraySubquery::new("children", "children", "parent_id", "id")
+                .select(["label"])
+                .unbounded(),
+        );
+    let prepared = db
+        .prepare_query_bound(&query, BTreeMap::from([("rank".to_owned(), Value::U32(7))]))
+        .expect("prepare parameter-routed array query");
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default()))
+        .expect("open parameter-routed maintained array subscription");
+
+    let SubscriptionEvent::Delta {
+        reset: true, added, ..
+    } = block_on(subscription.next_event()).expect("initial maintained reset")
+    else {
+        panic!("expected initial maintained reset");
+    };
+    assert_eq!(
+        added
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![matching_parent, initial_child],
+        "the routed subscription delivers the matching root and its array member"
+    );
+
+    let added_child = db
+        .insert(
+            "children",
+            BTreeMap::from([
+                ("parent_id".to_owned(), Value::Uuid(matching_parent.0)),
+                ("label".to_owned(), Value::String("later".to_owned())),
+                ("rank".to_owned(), Value::U32(1)),
+            ]),
+        )
+        .expect("insert later child")
+        .row_uuid();
+    let SubscriptionEvent::Delta {
+        reset: false,
+        added,
+        added_related,
+        ..
+    } = block_on(subscription.next_event()).expect("incremental maintained delivery")
+    else {
+        panic!("expected incremental maintained delta");
+    };
+    assert_eq!(
+        added
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .chain(added_related.into_iter().map(|row| row.row_uuid()))
+            .collect::<Vec<_>>(),
+        vec![added_child],
+        "the routed subscription delivers later array members through the public relation delta"
+    );
 }
 
 #[test]
