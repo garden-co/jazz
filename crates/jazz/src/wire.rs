@@ -19,7 +19,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::AuthorId;
 use crate::protocol::SyncMessage;
-use crate::protocol_limits::{validate_sync_message_len, validate_wire_frame_len};
+use crate::protocol_limits::{
+    validate_structured_result_tree, validate_sync_message_len, validate_wire_frame_len,
+};
 
 /// Current Jazz wire protocol version.
 pub const WIRE_PROTOCOL_VERSION: u16 = 4;
@@ -259,6 +261,14 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
     message
         .validate_version_carriers()
         .map_err(|_| postcard::Error::DeserializeBadOption)?;
+    match &message {
+        SyncMessage::StructuredViewUpdate { result_tree, .. }
+        | SyncMessage::StructuredViewUpdateChunk { result_tree, .. } => {
+            validate_structured_result_tree(result_tree)
+                .map_err(|_| postcard::Error::DeserializeBadOption)?;
+        }
+        _ => {}
+    }
     Ok(message)
 }
 

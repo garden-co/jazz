@@ -11,7 +11,7 @@ use crate::merge_strategy::{MergeSide, MergeStrategyInput, materialize_strategy_
 use crate::protocol::{CatalogueAck, ContentExtent, LensOp, VersionBundleRef};
 use crate::protocol_limits::{
     commit_unit_limit_violation, validate_content_extents, validate_known_state_declaration,
-    validate_shape_ast_size,
+    validate_shape_ast_size, validate_structured_result_tree,
 };
 use crate::schema::LargeValueKind;
 use crate::schema::{ColumnSchema, MERGE_HEADS_TABLE, no_text_merge_spec_hash};
@@ -201,6 +201,71 @@ where
                 program_fact_adds,
                 program_fact_removes,
             } => {
+                self.apply_view_update(ViewUpdateParts {
+                    subscription,
+                    settled_through,
+                    defer_settlement: !final_chunk,
+                    reset_result_set,
+                    version_carriers,
+                    version_bundles,
+                    peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+                    authorization_progress: peer_payload_inventory.authorization_progress,
+                    result_member_adds,
+                    result_member_removes,
+                    program_fact_adds,
+                    program_fact_removes,
+                })?;
+                Ok(Vec::new())
+            }
+            SyncMessage::StructuredViewUpdate {
+                subscription,
+                settled_through,
+                reset_result_set,
+                version_carriers,
+                version_bundles,
+                peer_payload_inventory,
+                result_member_adds,
+                result_member_removes,
+                program_fact_adds,
+                program_fact_removes,
+                result_tree,
+            } => {
+                validate_structured_result_tree(&result_tree).map_err(|_| {
+                    Error::MalformedViewUpdate("structured result exceeds receive limits")
+                })?;
+                self.apply_view_update(ViewUpdateParts {
+                    subscription,
+                    settled_through,
+                    defer_settlement: false,
+                    reset_result_set,
+                    version_carriers,
+                    version_bundles,
+                    peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+                    authorization_progress: peer_payload_inventory.authorization_progress,
+                    result_member_adds,
+                    result_member_removes,
+                    program_fact_adds,
+                    program_fact_removes,
+                })?;
+                Ok(Vec::new())
+            }
+            SyncMessage::StructuredViewUpdateChunk {
+                subscription,
+                settled_through,
+                reset_result_set,
+                final_chunk,
+                version_carriers,
+                version_bundles,
+                peer_payload_inventory,
+                result_member_adds,
+                result_member_removes,
+                program_fact_adds,
+                program_fact_removes,
+                result_tree,
+            } => {
+                validate_structured_result_tree(&result_tree).map_err(|_| {
+                    Error::MalformedViewUpdate("structured result exceeds receive limits")
+                })?;
                 self.apply_view_update(ViewUpdateParts {
                     subscription,
                     settled_through,

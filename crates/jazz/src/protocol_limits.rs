@@ -5,7 +5,8 @@
 //! configuration, but the core owns the default contract.
 
 use crate::protocol::{
-    ContentExtent, KnownStateDeclaration, RowVersionRef, ShapeAst, SyncMessage, VersionRecord,
+    ContentExtent, KnownStateDeclaration, ResultTree, ResultTreeNode, ResultTreeRelation,
+    RowVersionRef, ShapeAst, SyncMessage, VersionRecord,
 };
 
 /// Maximum encoded `WireFrame` bytes accepted before postcard decode.
@@ -61,6 +62,57 @@ pub const MAX_KNOWN_STATE_EXACT_REFS: usize = MAX_FETCH_ROW_VERSIONS;
 /// targets; 1 MiB comfortably exceeds legitimate current chunks while bounding a
 /// single bulk-lane allocation.
 pub const MAX_CONTENT_EXTENT_BYTES: usize = 1024 * 1024;
+
+/// Maximum nesting accepted in a structured result received from a peer.
+///
+/// 32 is far beyond ordinary relation-query depth while bounding recursive
+/// descent independently of postcard's byte limit.
+pub const MAX_STRUCTURED_RESULT_DEPTH: usize = 32;
+
+/// Maximum children accepted for one relation slot in a structured result.
+///
+/// 16k fits the existing multi-frame result budget without allowing one
+/// malicious relation value to dominate receiver allocation.
+pub const MAX_STRUCTURED_RESULT_WIDTH: usize = 16 * 1024;
+
+/// Validate a terminal-produced recursive result before receiver application.
+pub fn validate_structured_result_tree(tree: &ResultTree) -> Result<(), String> {
+    if tree.roots.len() > MAX_STRUCTURED_RESULT_WIDTH {
+        return Err(format!(
+            "structured result root width {} exceeds max {}",
+            tree.roots.len(),
+            MAX_STRUCTURED_RESULT_WIDTH
+        ));
+    }
+    for root in &tree.roots {
+        validate_structured_result_node(root, 1)?;
+    }
+    Ok(())
+}
+
+fn validate_structured_result_node(node: &ResultTreeNode, depth: usize) -> Result<(), String> {
+    if depth > MAX_STRUCTURED_RESULT_DEPTH {
+        return Err(format!(
+            "structured result depth {depth} exceeds max {MAX_STRUCTURED_RESULT_DEPTH}"
+        ));
+    }
+    for relation in node.relations.values() {
+        let ResultTreeRelation::Array(children) = relation else {
+            continue;
+        };
+        if children.len() > MAX_STRUCTURED_RESULT_WIDTH {
+            return Err(format!(
+                "structured result relation width {} exceeds max {}",
+                children.len(),
+                MAX_STRUCTURED_RESULT_WIDTH
+            ));
+        }
+        for child in children {
+            validate_structured_result_node(child, depth + 1)?;
+        }
+    }
+    Ok(())
+}
 
 /// Validate raw frame bytes before postcard can allocate from declared lengths.
 pub fn validate_wire_frame_len(len: usize) -> Result<(), String> {

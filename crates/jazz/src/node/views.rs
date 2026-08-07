@@ -613,7 +613,11 @@ where
         }
         let version_carriers = build_version_carriers_from_singletons(version_bundles)
             .map_err(|_| Error::InvalidStoredValue("failed to build version-bundle run"))?;
-        Ok(SyncMessage::ViewUpdate {
+        // The tree is rendered directly from the maintained collector output.
+        // Do this after collector construction and before any carrier framing;
+        // no row/edge materialization is involved in this path.
+        let result_tree = maintained_facts.structured_result_tree()?;
+        Ok(SyncMessage::StructuredViewUpdate {
             subscription,
             settled_through: self.clock.applied_global_watermark,
             reset_result_set: false,
@@ -627,6 +631,7 @@ where
             result_member_removes: result_member_removes.into_iter().collect(),
             program_fact_adds,
             program_fact_removes,
+            result_tree,
         })
     }
 

@@ -192,6 +192,66 @@ pub enum SyncMessage {
         /// Version bundles visible to the requesting link identity.
         version_bundles: Vec<VersionBundle>,
     },
+    /// Downstream v4 structured view update.
+    ///
+    /// This is intentionally appended to `SyncMessage`: postcard encodes enum
+    /// discriminants positionally.  It carries the terminal-produced tree in
+    /// addition to the witness bundles needed by the receiving core; it never
+    /// asks a facade or binding to reconstruct child relationships from rows.
+    StructuredViewUpdate {
+        /// Addressed query binding.
+        subscription: SubscriptionKey,
+        /// Producer's settled watermark.
+        settled_through: GlobalSeq,
+        /// Whether receiver membership is reset before application.
+        reset_result_set: bool,
+        /// Packed version witnesses.
+        version_carriers: Vec<VersionCarrier>,
+        /// Unpacked version witnesses.
+        version_bundles: Vec<VersionBundle>,
+        /// Peer payload coverage references.
+        peer_payload_inventory: PeerPayloadInventory,
+        /// Result membership additions.
+        result_member_adds: Vec<ResultMemberEntry>,
+        /// Result membership removals.
+        result_member_removes: Vec<ResultMemberEntry>,
+        /// Program fact additions.
+        program_fact_adds: Vec<ProgramFactEntry>,
+        /// Program fact removals.
+        program_fact_removes: Vec<ProgramFactEntry>,
+        /// Complete output from the producer's retained collector terminal.
+        result_tree: ResultTree,
+    },
+    /// One chunk of a v4 structured view update.
+    ///
+    /// A receiver may ingest witness data before the last chunk, but may not
+    /// publish this tree or advance settlement until `final_chunk` is true.
+    StructuredViewUpdateChunk {
+        /// Addressed query binding.
+        subscription: SubscriptionKey,
+        /// Producer's settled watermark.
+        settled_through: GlobalSeq,
+        /// Whether receiver membership is reset before application.
+        reset_result_set: bool,
+        /// Whether this completes the logical update.
+        final_chunk: bool,
+        /// Packed version witnesses.
+        version_carriers: Vec<VersionCarrier>,
+        /// Unpacked version witnesses.
+        version_bundles: Vec<VersionBundle>,
+        /// Peer payload coverage references.
+        peer_payload_inventory: PeerPayloadInventory,
+        /// Result membership additions.
+        result_member_adds: Vec<ResultMemberEntry>,
+        /// Result membership removals.
+        result_member_removes: Vec<ResultMemberEntry>,
+        /// Program fact additions.
+        program_fact_adds: Vec<ProgramFactEntry>,
+        /// Program fact removals.
+        program_fact_removes: Vec<ProgramFactEntry>,
+        /// Complete output from the producer's retained collector terminal.
+        result_tree: ResultTree,
+    },
 }
 
 impl SyncMessage {
@@ -202,6 +262,12 @@ impl SyncMessage {
                 version_carriers, ..
             }
             | Self::ViewUpdateChunk {
+                version_carriers, ..
+            }
+            | Self::StructuredViewUpdate {
+                version_carriers, ..
+            }
+            | Self::StructuredViewUpdateChunk {
                 version_carriers, ..
             } => {
                 for carrier in version_carriers {
@@ -224,6 +290,16 @@ impl SyncMessage {
                 ..
             }
             | Self::ViewUpdateChunk {
+                version_carriers,
+                version_bundles,
+                ..
+            }
+            | Self::StructuredViewUpdate {
+                version_carriers,
+                version_bundles,
+                ..
+            }
+            | Self::StructuredViewUpdateChunk {
                 version_carriers,
                 version_bundles,
                 ..
