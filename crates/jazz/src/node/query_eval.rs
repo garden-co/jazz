@@ -6048,7 +6048,6 @@ where
                     claims,
                     attribution,
                 } => PolicyContext::AuthorizationSubplan {
-                    protected_source: root_source_id(policy_shape.query().table.as_str()),
                     mode,
                     permission_subject,
                     claims,
@@ -6590,7 +6589,6 @@ where
                 claims,
                 attribution,
             } => PolicyContext::AuthorizationSubplan {
-                protected_source: root_source_id(policy_shape.query().table.as_str()),
                 mode,
                 permission_subject,
                 claims,
@@ -9538,7 +9536,6 @@ where
                 claims,
                 attribution,
             } => PolicyContext::AuthorizationSubplan {
-                protected_source: root_source_id(policy_shape.query().table.as_str()),
                 mode,
                 permission_subject,
                 claims,
@@ -9679,7 +9676,6 @@ where
                 claims,
                 attribution,
             } => PolicyContext::AuthorizationSubplan {
-                protected_source: root_source_id(policy_shape.query().table.as_str()),
                 mode,
                 permission_subject,
                 claims,
@@ -9768,7 +9764,6 @@ where
                 claims,
                 attribution,
             } => PolicyContext::AuthorizationSubplan {
-                protected_source: root_source_id(policy_shape.query().table.as_str()),
                 mode,
                 permission_subject,
                 claims,
