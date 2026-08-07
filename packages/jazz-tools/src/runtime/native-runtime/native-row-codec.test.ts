@@ -126,9 +126,29 @@ describe("native row codec", () => {
 
     const encoded = encodeNativeRowValues(columns, values);
     expect(bytesToHex(encoded)).toBe(
-      "00000000ffffff7f00000080ffffffff0000000000000000ffffffffffffff7f0000000000000080ffffffffffffffff01d6ffff7f0000000000000000ffffffffffffff7f0000000000000080ffffffffffffffff",
+      "00000080ffffffff00000000ffffff7f0000000000000080ffffffffffffffff0000000000000000ffffffffffffff7f01d6ffffff0000000000000080ffffffffffffffff0000000000000000ffffffffffffff7f",
     );
     expect(decodeNativeRowValues(columns, encoded)).toEqual(values);
+  });
+
+  it("rejects signed integer values outside their declared widths", () => {
+    const integerColumn = [
+      { name: "value", column_type: { type: "Integer" as const }, nullable: false },
+    ];
+    const bigintColumn = [
+      { name: "value", column_type: { type: "BigInt" as const }, nullable: false },
+    ];
+
+    for (const value of [-2_147_483_649, 2_147_483_648]) {
+      expect(() => encodeNativeRowValues(integerColumn, [{ type: "Integer", value }])).toThrow(
+        "Integer value must be a signed 32-bit integer",
+      );
+    }
+    for (const value of [-(1n << 63n) - 1n, 1n << 63n]) {
+      expect(() => encodeNativeRowValues(bigintColumn, [{ type: "BigInt", value }])).toThrow(
+        "BigInt value must be a signed 64-bit integer",
+      );
+    }
   });
 });
 

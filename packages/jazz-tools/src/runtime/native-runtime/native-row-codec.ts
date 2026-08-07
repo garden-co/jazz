@@ -508,11 +508,9 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
       if (value.type !== "Boolean") throw new Error("expected Boolean value");
       return Uint8Array.of(value.value ? 1 : 0);
     case "Integer": {
-      if (value.type !== "Integer" || !Number.isSafeInteger(value.value)) {
-        throw new Error("expected Integer value");
-      }
+      const integer = expectSignedI32(value);
       const bytes = new Uint8Array(4);
-      new DataView(bytes.buffer).setUint32(0, encodeSignedI32ForStorage(value.value), true);
+      new DataView(bytes.buffer).setInt32(0, integer, true);
       return bytes;
     }
     case "Timestamp": {
@@ -524,13 +522,9 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
       return bytes;
     }
     case "BigInt": {
-      if (value.type !== "BigInt") throw new Error("expected BigInt value");
+      const integer = expectSignedI64(value);
       const bytes = new Uint8Array(8);
-      new DataView(bytes.buffer).setBigUint64(
-        0,
-        encodeSignedI64ForStorage(BigInt(value.value)),
-        true,
-      );
+      new DataView(bytes.buffer).setBigInt64(0, integer, true);
       return bytes;
     }
     case "Double": {
@@ -649,9 +643,9 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
     case "Boolean":
       return { type: "Boolean", value: bytes[0] !== 0 };
     case "Integer":
-      return { type: "Integer", value: decodeSignedI32FromStorage(view.getUint32(0, true)) };
+      return { type: "Integer", value: view.getInt32(0, true) };
     case "BigInt":
-      return { type: "BigInt", value: decodeSignedI64FromStorage(view.getBigUint64(0, true)) };
+      return { type: "BigInt", value: view.getBigInt64(0, true) };
     case "Double":
       return { type: "Double", value: view.getFloat64(0, true) };
     case "Timestamp":
@@ -871,20 +865,25 @@ function readU32Le(bytes: Uint8Array, offset: number): number {
   );
 }
 
-function encodeSignedI32ForStorage(value: number): number {
-  return (value ^ 0x80000000) >>> 0;
+function expectSignedI32(value: Value): number {
+  if (
+    value.type !== "Integer" ||
+    !Number.isSafeInteger(value.value) ||
+    value.value < -0x80000000 ||
+    value.value > 0x7fffffff
+  ) {
+    throw new Error("Integer value must be a signed 32-bit integer");
+  }
+  return value.value;
 }
 
-function decodeSignedI32FromStorage(value: number): number {
-  return (value ^ 0x80000000) | 0;
-}
-
-function encodeSignedI64ForStorage(value: bigint): bigint {
-  return BigInt.asUintN(64, value) ^ (1n << 63n);
-}
-
-function decodeSignedI64FromStorage(value: bigint): bigint {
-  return BigInt.asIntN(64, value ^ (1n << 63n));
+function expectSignedI64(value: Value): bigint {
+  if (value.type !== "BigInt") throw new Error("expected BigInt value");
+  const integer = BigInt(value.value);
+  if (integer < -(1n << 63n) || integer > (1n << 63n) - 1n) {
+    throw new Error("BigInt value must be a signed 64-bit integer");
+  }
+  return integer;
 }
 
 function concatBytes(chunks: Uint8Array[]): Uint8Array {
