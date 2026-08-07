@@ -4952,38 +4952,45 @@ fn lowered_terminals(
                 graph: result_graph,
                 output: OutputTerminalSchema::Fact(output.clone()),
             });
-            for (source_id, closure_graph) in &closure.result_members {
-                let resolved_source = resolved_sources.get(&source_id).ok_or_else(|| {
-                    Box::new(CapabilityReport {
-                        gaps: vec![UnsupportedReason::Runtime(format!(
-                            "closure member source {:?} was not resolved",
-                            source_id
-                        ))],
-                        explain: ExplainPlan::default(),
-                    })
-                })?;
-                let output = fact_output_with_terminal(
-                    fact,
-                    ProgramFactTerminal::Primary,
-                    plan,
-                    resolved_source,
-                    resolved_sources,
-                    BTreeSet::new(),
-                )?;
-                let graph = fact_terminal_graph(
-                    fact,
-                    closure_graph.clone(),
-                    plan,
-                    resolved_source,
-                    resolved_sources,
-                    request,
-                    output_routing_fields(&output),
-                )?;
-                terminals.push(LoweredTerminal {
-                    sink: scoped_fact_sink_name(fact, &source_id),
-                    graph,
-                    output: OutputTerminalSchema::Fact(output),
-                });
+            // A flat join's one wide primary terminal is its public output.
+            // The ordinary closure terminals are source-only membership facts;
+            // they neither carry the tuple payload nor its contributor ids.
+            // Emitting them would also ask a source graph for
+            // `__flat_join_row_N`, which only exists after the wide project.
+            if flat_join_payload_fields(plan).is_empty() {
+                for (source_id, closure_graph) in &closure.result_members {
+                    let resolved_source = resolved_sources.get(&source_id).ok_or_else(|| {
+                        Box::new(CapabilityReport {
+                            gaps: vec![UnsupportedReason::Runtime(format!(
+                                "closure member source {:?} was not resolved",
+                                source_id
+                            ))],
+                            explain: ExplainPlan::default(),
+                        })
+                    })?;
+                    let output = fact_output_with_terminal(
+                        fact,
+                        ProgramFactTerminal::Primary,
+                        plan,
+                        resolved_source,
+                        resolved_sources,
+                        BTreeSet::new(),
+                    )?;
+                    let graph = fact_terminal_graph(
+                        fact,
+                        closure_graph.clone(),
+                        plan,
+                        resolved_source,
+                        resolved_sources,
+                        request,
+                        output_routing_fields(&output),
+                    )?;
+                    terminals.push(LoweredTerminal {
+                        sink: scoped_fact_sink_name(fact, &source_id),
+                        graph,
+                        output: OutputTerminalSchema::Fact(output),
+                    });
+                }
             }
             if has_explicit_closure_path(&request.input.shape) {
                 for contribution in &request.input.shape.join_contributions {
