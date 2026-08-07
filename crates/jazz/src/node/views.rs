@@ -649,6 +649,7 @@ where
             && result_member_removes.is_empty()
             && program_fact_adds.is_empty()
             && program_fact_removes.is_empty()
+            && result_tree.roots.is_empty()
             && result_tree_updates.is_empty()
         {
             return Ok(SyncMessage::ViewUpdate {

@@ -1414,9 +1414,10 @@ fn relation_snapshot_filters_unreadable_children_and_required_parents() {
 #[test]
 fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
     // The existing public subscription tests cover the flat v3 delivery
-    // vocabulary. This deliberately inspects the maintained terminal because
-    // the structured carrier is not on that wire yet; it proves the retained
-    // state that the future peer view-update builder will consume.
+    // vocabulary. This deliberately inspects the maintained terminal and its
+    // v4 carrier because exact recursive replacement payloads are not exposed
+    // by the public subscription facade; it proves the wire-only boundary
+    // consumes the collector's touched-root set without a whole-tree diff.
     let schema = relation_snapshot_policy_schema();
     let (_temp_dir, mut node) = open_node_with_schema(node(0x46), schema.clone());
     let alice = user(0xa1);
@@ -1553,6 +1554,36 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
         panic!("collector relation must be an array");
     };
     assert_eq!(alice_children.len(), 2, "child change replaces only its parent tree");
+    let subscription_key = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: Default::default(),
+    };
+    let small_update = node
+        .view_update_for_maintained_result_members(crate::node::MaintainedViewBundleInputs {
+            subscription: subscription_key,
+            reset_result_set: false,
+            peer_complete_tx_payloads: BTreeSet::new(),
+            known_state: None,
+            complete_exclusive_payloads: false,
+            previous_result_set: BTreeSet::new(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+            structured_app_row_changes: changed_roots.clone(),
+            identity: alice,
+            tier: DurabilityTier::Local,
+            maintained_facts: &maintained,
+            allow_storage_witness_fallback: false,
+        })
+        .expect("build touched-parent structured update");
+    let (small_bytes, small_records) = assert_single_alice_parent_replacement(
+        &small_update,
+        alice_parent,
+        bob_parent,
+        2,
+    );
     assert_eq!(
         maintained
             .structured_app_row(bob_parent)
@@ -1561,7 +1592,119 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
         bob_before,
         "unaffected parent tree is retained byte-for-byte"
     );
+
+    // Grow only unrelated root state, drain those roots, then change the same
+    // rendered parent again. The encoded replacement and record count must
+    // remain a function of Alice's complete parent, not total result width.
+    for index in 0..64 {
+        node.commit_mergeable(
+            MergeableCommit::new("users", row(0x30 + index as u8), 100 + index as u64)
+                .cells(BTreeMap::from([("name".to_owned(), v("unaffected"))])),
+        )
+        .unwrap();
+    }
+    node.flush_query_runtime().unwrap();
+    while let Ok(deltas) = subscription.try_recv() {
+        maintained
+            .apply_multisink_deltas(deltas, &terminal_schemas, &tables, &node.node_aliases)
+            .unwrap();
+    }
+    node.commit_mergeable(
+        MergeableCommit::new("todos", row(0x13), 200).cells(BTreeMap::from([
+            ("title".to_owned(), v("old visible")),
+            ("owner_id".to_owned(), Value::Uuid(alice.0)),
+        ])),
+    )
+    .unwrap();
+    node.flush_query_runtime().unwrap();
+    let mut large_changed_roots = BTreeSet::new();
+    while let Ok(deltas) = subscription.try_recv() {
+        let transitions = maintained
+            .apply_multisink_deltas(deltas, &terminal_schemas, &tables, &node.node_aliases)
+            .unwrap();
+        large_changed_roots.extend(transitions.structured_app_row_changes);
+    }
+    assert_eq!(large_changed_roots, BTreeSet::from([alice_parent]));
+    let large_update = node
+        .view_update_for_maintained_result_members(crate::node::MaintainedViewBundleInputs {
+            subscription: subscription_key,
+            reset_result_set: false,
+            peer_complete_tx_payloads: BTreeSet::new(),
+            known_state: None,
+            complete_exclusive_payloads: false,
+            previous_result_set: BTreeSet::new(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+            structured_app_row_changes: large_changed_roots,
+            identity: alice,
+            tier: DurabilityTier::Local,
+            maintained_facts: &maintained,
+            allow_storage_witness_fallback: false,
+        })
+        .expect("build scale-independent structured update");
+    let (large_bytes, large_records) = assert_single_alice_parent_replacement(
+        &large_update,
+        alice_parent,
+        bob_parent,
+        2,
+    );
+    assert_eq!(
+        (small_bytes, small_records),
+        (large_bytes, large_records),
+        "structured delivery must be bounded by the changed parent's rendered bytes and records, not result-set width"
+    );
     node.unsubscribe_groove_subscription(subscription.id());
+}
+
+/// This helper inspects the opaque v4 wire payload for the internal-only reason
+/// stated by its caller: public subscription events do not expose a recursive
+/// carrier record or its encoded byte count.
+fn assert_single_alice_parent_replacement(
+    update: &SyncMessage,
+    alice_parent: RowUuid,
+    bob_parent: RowUuid,
+    expected_children: usize,
+) -> (usize, usize) {
+    let SyncMessage::StructuredViewUpdate {
+        reset_result_set,
+        result_tree,
+        result_tree_updates,
+        ..
+    } = update
+    else {
+        panic!("expected structured incremental update");
+    };
+    assert!(!reset_result_set, "child changes are incremental, not resets");
+    assert!(result_tree.roots.is_empty(), "incremental updates carry no full tree");
+    assert_eq!(result_tree_updates.len(), 1, "one touched parent replacement");
+    let crate::protocol::ResultTreeUpdate::ReplaceParent { occurrence, parent } =
+        &result_tree_updates[0];
+    assert_eq!(
+        occurrence.root().uuid(),
+        &alice_parent.0,
+        "the replacement is addressed by Alice's parent occurrence"
+    );
+    assert_ne!(
+        occurrence.root().uuid(),
+        &bob_parent.0,
+        "the unaffected parent is not delivered"
+    );
+    let crate::protocol::ResultTreeRelation::Array(children) = parent
+        .relations
+        .get("todosViaOwner")
+        .expect("complete parent relation")
+    else {
+        panic!("parent relation must be an array");
+    };
+    assert_eq!(children.len(), expected_children);
+    (
+        crate::wire::encode_sync_message(update)
+            .expect("encode structured carrier")
+            .len(),
+        1 + children.len(),
+    )
 }
 
 #[test]
