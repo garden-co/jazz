@@ -8331,9 +8331,6 @@ where
                 OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
             )?);
         }
-        // The runtime terminal is transport-key ordered.  Keep this explicit
-        // rather than recovering order from a flat snapshot later.
-        roots.sort_by(|left, right| left.row.row_uuid().cmp(&right.row.row_uuid()));
         Ok(crate::result_tree::ResultTree { roots })
     }
 
