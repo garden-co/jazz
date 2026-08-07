@@ -5435,15 +5435,21 @@ fn collect_flat_projection(
         let is_current = current_slot.is_some_and(|current| current.path == slot.path);
         for field in &slot.fields {
             fields.push(if is_current {
-                ProjectField::renamed(
-                    right_field(
-                        field
-                            .source_field
-                            .as_ref()
-                            .expect("collector child fields retain their source field"),
-                    ),
-                    &field.input,
-                )
+                let source = right_field(
+                    field
+                        .source_field
+                        .as_ref()
+                        .expect("collector child fields retain their source field"),
+                );
+                if field.is_row_id {
+                    ProjectField::renamed(source, &field.input)
+                } else {
+                    // Anchor rows have no child, so collector child payload
+                    // fields are nullable. Preserve that descriptor on actual
+                    // child rows as well, rather than making the union depend
+                    // on whether this particular source column is nullable.
+                    ProjectField::nullable_flat(source, &field.input)
+                }
             } else if inherited_flat_fields.contains(&field.input) {
                 ProjectField::renamed(left_field(&field.input), &field.input)
             } else {

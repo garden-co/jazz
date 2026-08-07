@@ -166,6 +166,9 @@ pub(crate) struct MaintainedViewBundleInputs<'a> {
     pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
     pub(crate) identity: AuthorId,
     pub(crate) tier: DurabilityTier,
+    /// Maintained fact and collector state. The current carrier consumes its
+    /// membership/witness facts; the retained recursive app rows are available
+    /// here for the structured carrier without changing this boundary.
     pub(crate) maintained_facts: &'a MaintainedSubscriptionView,
     pub(crate) allow_storage_witness_fallback: bool,
 }

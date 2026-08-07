@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 
 use groove::ivm::{MultisinkDeltas, RecordDeltas};
-use groove::records::{BorrowedRecord, RecordDescriptor, RecordProjector, Value};
+use groove::records::{BorrowedRecord, OwnedRecord, RecordDescriptor, RecordProjector, Value};
 
 use super::codec::{
     VersionLayer, VersionRow, VersionRowParts, deletion_event_from_value,
@@ -10,7 +10,7 @@ use super::codec::{
     tx_ids_from_value, version_tx_id_from_aliases,
 };
 use super::query_engine::{
-    AggregateResultSchema, OutputTerminalSchema, ProgramFactKey, ProgramFactSchema,
+    AggregateResultSchema, AppRowSchema, OutputTerminalSchema, ProgramFactKey, ProgramFactSchema,
     ProgramFactTerminal, QueryProgram, RelationEdgeSchema, ResultMembershipSchema,
     ResultMembershipVersionSchema, VersionWitnessSchema, VersionedRowRefSchema,
 };
@@ -46,6 +46,11 @@ struct VersionDecodePlan {
 pub(crate) struct MaintainedSubscriptionView {
     result_weights: BTreeMap<ResultMemberEntry, i64>,
     result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
+    /// Incrementally maintained collector output. The key is the root row and
+    /// the encoded tree so a -/+ replacement for one root never requires
+    /// touching the rendered trees for other roots.
+    structured_app_rows: BTreeMap<RowUuid, BTreeMap<Vec<u8>, i64>>,
+    structured_app_row_descriptor: Option<RecordDescriptor>,
     versions: WeightedVersionIndex,
     replacements: ReplacementIndex,
 }
@@ -55,11 +60,13 @@ pub(crate) struct MaintainedSubscriptionViewFootprint {
     pub(crate) result_rows: usize,
     pub(crate) result_weights: usize,
     pub(crate) result_payloads: usize,
+    pub(crate) structured_app_rows: usize,
     pub(crate) version_identities: usize,
     pub(crate) version_tx_entries: usize,
     pub(crate) replacement_entries: usize,
     pub(crate) result_weights_bytes: usize,
     pub(crate) result_payloads_bytes: usize,
+    pub(crate) structured_app_rows_bytes: usize,
     pub(crate) versions_bytes: usize,
     pub(crate) replacements_bytes: usize,
     pub(crate) total_heap_bytes: usize,
@@ -115,6 +122,9 @@ pub(crate) struct ResultTransitions {
     pub(crate) result_payload_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
     pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
+    /// Root occurrences whose retained collector record changed in this tick.
+    /// The future structured carrier can render exactly these parents.
+    pub(crate) structured_app_row_changes: BTreeSet<RowUuid>,
     pub(crate) allow_storage_witness_fallback: bool,
     pub(crate) observed_delta_batches: usize,
     pub(crate) observed_result_delta_batches: usize,
@@ -137,6 +147,10 @@ pub(crate) enum DecodedMaintainedEvent {
     ReplacementContent(VersionRow),
     ReplacementDeletion(VersionRow),
     RelationEdge(RelationEdgeEntry),
+    StructuredAppRow {
+        root: RowUuid,
+        record: OwnedRecord,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -153,6 +167,7 @@ enum MaintainedTerminalKind {
     ReplacementContent(VersionWitnessSchema),
     ReplacementDeletion(VersionWitnessSchema),
     RelationEdge(RelationEdgeSchema),
+    StructuredAppRows(AppRowSchema),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -161,6 +176,7 @@ enum EventIdentity {
     Version(VersionIdentity),
     Replacement(ReplacementKey, VersionIdentity),
     ProgramFact(ProgramFactEntry),
+    StructuredAppRow(RowUuid, Vec<u8>),
 }
 
 #[derive(Clone, Debug)]
@@ -175,6 +191,7 @@ enum NetEvent {
     Version(VersionIdentity, VersionRow),
     Replacement(ReplacementKey, VersionIdentity, VersionRow),
     ProgramFact(ProgramFactEntry),
+    StructuredAppRow(RowUuid, OwnedRecord),
 }
 
 impl MaintainedSubscriptionView {
@@ -240,6 +257,9 @@ impl MaintainedSubscriptionView {
             transitions
                 .result_payload_removes
                 .extend(delta_transitions.result_payload_removes);
+            transitions
+                .structured_app_row_changes
+                .extend(delta_transitions.structured_app_row_changes);
             transitions.observed_result_delta_batches +=
                 delta_transitions.observed_result_delta_batches;
         }
@@ -280,6 +300,9 @@ impl MaintainedSubscriptionView {
                 }
                 DecodedMaintainedEvent::RelationEdge(edge) => {
                     NetEvent::ProgramFact(ProgramFactEntry::RelationEdge(edge))
+                }
+                DecodedMaintainedEvent::StructuredAppRow { root, record } => {
+                    NetEvent::StructuredAppRow(root, record)
                 }
             };
             let identity = net_event.identity();
@@ -322,6 +345,10 @@ impl MaintainedSubscriptionView {
                         transitions.program_fact_removes.push(fact);
                     }
                 }
+                NetEvent::StructuredAppRow(root, record) => {
+                    self.apply_structured_app_row_delta(root, record, weight);
+                    transitions.structured_app_row_changes.insert(root);
+                }
             }
         }
         Ok(transitions)
@@ -356,6 +383,18 @@ impl MaintainedSubscriptionView {
                 .sum::<usize>();
         let versions_bytes = self.versions.footprint_bytes();
         let replacements_bytes = self.replacements.footprint_bytes();
+        let structured_app_rows_bytes = self
+            .structured_app_rows
+            .values()
+            .map(|records| {
+                records
+                    .keys()
+                    .map(|record| record.len() + mem::size_of::<i64>())
+                    .sum::<usize>()
+                    + btree_map_bytes(records.len())
+            })
+            .sum::<usize>()
+            + btree_map_bytes(self.structured_app_rows.len());
         MaintainedSubscriptionViewFootprint {
             result_rows: self
                 .result_weights
@@ -364,6 +403,11 @@ impl MaintainedSubscriptionView {
                 .count(),
             result_weights: self.result_weights.len(),
             result_payloads: self.result_payloads.len(),
+            structured_app_rows: self
+                .structured_app_rows
+                .values()
+                .map(|records| records.values().filter(|weight| **weight > 0).count())
+                .sum(),
             version_identities: self.versions.by_identity.len(),
             version_tx_entries: self
                 .versions
@@ -375,10 +419,12 @@ impl MaintainedSubscriptionView {
             replacement_entries: self.replacements.entry_count(),
             result_weights_bytes,
             result_payloads_bytes,
+            structured_app_rows_bytes,
             versions_bytes,
             replacements_bytes,
             total_heap_bytes: result_weights_bytes
                 + result_payloads_bytes
+                + structured_app_rows_bytes
                 + versions_bytes
                 + replacements_bytes,
         }
@@ -394,6 +440,34 @@ impl MaintainedSubscriptionView {
             .cloned()
             .map(ProgramFactEntry::ResultPayload)
             .collect()
+    }
+
+    /// The collector's current recursive rows, retained directly from its
+    /// incremental terminal. This is intentionally an internal hand-off for
+    /// the view-update builder; the existing wire still uses fact delivery.
+    #[allow(dead_code)] // PR 4 consumes this from `MaintainedViewBundleInputs`.
+    pub(crate) fn structured_app_row(&self, root: RowUuid) -> Option<OwnedRecord> {
+        let descriptor = self.structured_app_row_descriptor?;
+        self.structured_app_rows
+            .get(&root)?
+            .iter()
+            .filter(|(_, weight)| **weight > 0)
+            .map(|(raw, _)| OwnedRecord::new(raw.clone(), descriptor))
+            .next()
+    }
+
+    fn apply_structured_app_row_delta(&mut self, root: RowUuid, record: OwnedRecord, weight: i64) {
+        self.structured_app_row_descriptor = Some(*record.descriptor());
+        let records = self.structured_app_rows.entry(root).or_default();
+        let new_weight = records.get(record.raw()).copied().unwrap_or(0) + weight;
+        if new_weight == 0 {
+            records.remove(record.raw());
+        } else {
+            records.insert(record.into_raw(), new_weight);
+        }
+        if records.is_empty() {
+            self.structured_app_rows.remove(&root);
+        }
     }
 
     fn apply_result_delta(
@@ -521,8 +595,17 @@ impl MaintainedTerminalSchemas {
     fn for_program(program: &QueryProgram) -> Self {
         let mut sinks = BTreeMap::new();
         for terminal in &program.lowered.terminals {
-            let OutputTerminalSchema::Fact(fact) = &terminal.output else {
+            if let OutputTerminalSchema::AppRows(rows) = &terminal.output {
+                if rows.descriptor.field_index("row_uuid").is_some() {
+                    sinks.insert(
+                        terminal.sink.clone(),
+                        MaintainedTerminalKind::StructuredAppRows(rows.clone()),
+                    );
+                }
                 continue;
+            };
+            let OutputTerminalSchema::Fact(fact) = &terminal.output else {
+                unreachable!("app-row terminals were handled above")
             };
             let kind = match (&fact.key, fact.terminal, &fact.schema) {
                 (
@@ -742,6 +825,13 @@ fn decode_typed_terminal_record(
         MaintainedTerminalKind::RelationEdge(schema) => {
             decode_typed_relation_edge(record, schema, tables, node_aliases)
                 .map(DecodedMaintainedEvent::RelationEdge)
+        }
+        MaintainedTerminalKind::StructuredAppRows(schema) => {
+            let root = RowUuid(record.get_uuid(field_idx(record, "row_uuid")?)?);
+            Ok(DecodedMaintainedEvent::StructuredAppRow {
+                root,
+                record: OwnedRecord::new(record.raw().to_vec(), schema.descriptor),
+            })
         }
     }
 }
@@ -1395,6 +1485,9 @@ impl NetEvent {
                 EventIdentity::Replacement(key.clone(), identity.clone())
             }
             Self::ProgramFact(fact) => EventIdentity::ProgramFact(fact.clone()),
+            Self::StructuredAppRow(root, record) => {
+                EventIdentity::StructuredAppRow(*root, record.raw().to_vec())
+            }
         }
     }
 }

@@ -1404,6 +1404,132 @@ fn relation_snapshot_filters_unreadable_children_and_required_parents() {
 }
 
 #[test]
+fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
+    // The existing public subscription tests cover the flat v3 delivery
+    // vocabulary. This deliberately inspects the maintained terminal because
+    // the structured carrier is not on that wire yet; it proves the retained
+    // state that the future peer view-update builder will consume.
+    let schema = relation_snapshot_policy_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x46), schema.clone());
+    let alice = user(0xa1);
+    let bob = user(0xb1);
+    let alice_parent = row(0xa1);
+    let bob_parent = row(0xb1);
+    let visible_child = row(0x11);
+    let denied_child = row(0x12);
+
+    for (parent, name, time) in [(alice_parent, "alice", 10), (bob_parent, "bob", 11)] {
+        node.commit_mergeable(
+            MergeableCommit::new("users", parent, time)
+                .cells(BTreeMap::from([("name".to_owned(), v(name))])),
+        )
+        .unwrap();
+    }
+    for (child, owner, title, time) in [
+        (visible_child, alice, "visible", 12),
+        (denied_child, bob, "denied", 13),
+    ] {
+        node.commit_mergeable(
+            MergeableCommit::new("todos", child, time).cells(BTreeMap::from([
+                ("title".to_owned(), v(title)),
+                ("owner_id".to_owned(), Value::Uuid(owner.0)),
+            ])),
+        )
+        .unwrap();
+    }
+
+    let shape = Query::from("users")
+        .array_subquery(
+            ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id")
+                .select(["title"])
+                .unbounded(),
+        )
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let (subscription, mut maintained, terminal_schemas, transitions, tables) = node
+        .open_seeded_maintained_subscription_view(
+            &shape,
+            &binding,
+            alice,
+            DurabilityTier::Local,
+            &crate::protocol::ReadViewSpec::default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        transitions.structured_app_row_changes,
+        BTreeSet::from([alice_parent, bob_parent]),
+        "collector emits one retained tree per root"
+    );
+    let alice_tree = maintained
+        .structured_app_row(alice_parent)
+        .expect("collector retained alice parent tree");
+    let Value::Array(alice_children) = alice_tree
+        .get("todosViaOwner")
+        .expect("collector relation field")
+    else {
+        panic!("collector relation must be an array");
+    };
+    assert_eq!(alice_children.len(), 1, "planted authorized child is retained");
+    let bob_tree = maintained
+        .structured_app_row(bob_parent)
+        .expect("collector retained bob parent tree");
+    let Value::Array(bob_children) = bob_tree
+        .get("todosViaOwner")
+        .expect("collector relation field")
+    else {
+        panic!("collector relation must be an array");
+    };
+    assert!(
+        bob_children.is_empty(),
+        "denied child must be absent while its optional parent retains an empty collection"
+    );
+    let bob_before = bob_tree.raw().to_vec();
+
+    node.commit_mergeable(
+        MergeableCommit::new("todos", row(0x13), 14).cells(BTreeMap::from([
+            ("title".to_owned(), v("new visible")),
+            ("owner_id".to_owned(), Value::Uuid(alice.0)),
+        ])),
+    )
+    .unwrap();
+    node.flush_query_runtime().unwrap();
+    let mut changed_roots = BTreeSet::new();
+    while let Ok(deltas) = subscription.try_recv() {
+        let transitions = maintained
+            .apply_multisink_deltas(deltas, &terminal_schemas, &tables, &node.node_aliases)
+            .unwrap();
+        changed_roots.extend(transitions.structured_app_row_changes);
+    }
+
+    assert_eq!(
+        changed_roots,
+        BTreeSet::from([alice_parent]),
+        "one child change identifies only its rendered parent"
+    );
+    let updated_alice_tree = maintained
+        .structured_app_row(alice_parent)
+        .expect("collector retained updated alice parent tree");
+    let Value::Array(alice_children) = updated_alice_tree
+        .get("todosViaOwner")
+        .expect("collector relation field")
+    else {
+        panic!("collector relation must be an array");
+    };
+    assert_eq!(alice_children.len(), 2, "child change replaces only its parent tree");
+    assert_eq!(
+        maintained
+            .structured_app_row(bob_parent)
+            .expect("collector retained unaffected bob parent tree")
+            .raw(),
+        bob_before,
+        "unaffected parent tree is retained byte-for-byte"
+    );
+    node.unsubscribe_groove_subscription(subscription.id());
+}
+
+#[test]
 fn include_deleted_one_shot_read_uses_lowered_literal_filters() {
     let (_temp_dir, mut node) = open_node();
     let table = schema().tables[0].clone();

@@ -29,11 +29,12 @@ use super::query_engine::{
     FieldProjection, FrontierId, JoinContribution, JoinMode as NormalizedJoinMode, LensSelection,
     NormalizedRowSetShape, NormalizedShapeIdentity, NormalizedValueRef,
     OrderKey as NormalizedOrderKey, OutputTerminalSchema, OverlayRef, OverlayStack,
-    PayloadProjection, PolicyContext, PolicyDecisionRole, PolicyEnforcementMode,
-    PredicateExpr as NormalizedPredicateExpr, ProgramBinding, ProgramClaimParam, ProgramFactKey,
-    ProgramOutputSchemas, ProgramPathId, ProvenanceField, QueryProgram, QueryProgramRequest,
-    QueryReadSet, ReachableContribution, ReadView, RequestedReadSet, RequestedSourceStage,
-    ResolvedSource, ResultId, ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
+    PathCardinality, PathHolePolicy, PayloadProjection, PolicyContext, PolicyDecisionRole,
+    PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr, ProgramBinding,
+    ProgramClaimParam, ProgramFactKey, ProgramOutputSchemas, ProgramPathId, ProvenanceField,
+    QueryProgram, QueryProgramRequest, QueryReadSet, ReachableContribution, ReadView,
+    RequestedReadSet, RequestedSourceStage, ResolvedSource, ResultId,
+    ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
     RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
     RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
     SortDirection as NormalizedSortDirection, SourceAuthorizationRequest, SourceExpr, SourceGap,
@@ -2655,37 +2656,92 @@ fn current_query_output_request(
         ]),
     };
     RowSetOutputRequest {
-        app_rows: matches!(
+        app_rows: (matches!(
             output,
             CurrentQueryProgramOutput::AppRows | CurrentQueryProgramOutput::RelationSnapshot
-        )
+        ) || matches!(output, CurrentQueryProgramOutput::MaintainedView)
+            && !query.array_subqueries.is_empty())
         .then(|| AppRowOutputRequest {
-            projection: app_row_payload_projection(query),
+            projection: app_row_payload_projection(
+                query,
+                matches!(output, CurrentQueryProgramOutput::MaintainedView),
+            ),
             large_values: Vec::new(),
         }),
         facts,
     }
 }
 
-fn app_row_payload_projection(query: &JazzQuery) -> PayloadProjection {
-    let Some(select) = &query.select else {
-        return PayloadProjection::ShapeDefault;
+fn app_row_payload_projection(query: &JazzQuery, collect_relations: bool) -> PayloadProjection {
+    let paths = if collect_relations {
+        app_row_path_projections(&root_source_id(&query.table), &query.array_subqueries, &[])
+    } else {
+        Vec::new()
     };
-    let mut fields = select
-        .iter()
-        .filter(|field| field.as_str() != "id")
-        .filter(|field| !field.starts_with('$'))
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    for include in &query.includes {
-        if let Some(root_field) = include.path.split('.').next() {
-            fields.insert(root_field.to_owned());
-        }
+    if query.select.is_none() && paths.is_empty() {
+        return PayloadProjection::ShapeDefault;
     }
-    PayloadProjection::Tree(AppProjectionTree {
-        fields: FieldProjection::Fields(fields),
-        paths: Vec::new(),
-    })
+    let fields = query
+        .select
+        .as_ref()
+        .map(|select| {
+            let mut fields = select
+                .iter()
+                .filter(|field| field.as_str() != "id")
+                .filter(|field| !field.starts_with('$'))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            for include in &query.includes {
+                if let Some(root_field) = include.path.split('.').next() {
+                    fields.insert(root_field.to_owned());
+                }
+            }
+            FieldProjection::Fields(fields)
+        })
+        .unwrap_or(FieldProjection::All);
+    PayloadProjection::Tree(AppProjectionTree { fields, paths })
+}
+
+fn app_row_path_projections(
+    owner: &SourceId,
+    subqueries: &[ArraySubquery],
+    path: &[usize],
+) -> Vec<super::query_engine::AppPathProjection> {
+    subqueries
+        .iter()
+        .enumerate()
+        .map(|(index, subquery)| {
+            let mut child_path = path.to_vec();
+            child_path.push(index);
+            let child = correlated_child_source_id(owner, subquery, &child_path);
+            let fields = subquery
+                .select
+                .as_ref()
+                .map(|select| {
+                    FieldProjection::Fields(
+                        select
+                            .iter()
+                            .filter(|field| field.as_str() != "id")
+                            .filter(|field| !field.starts_with('$'))
+                            .cloned()
+                            .collect(),
+                    )
+                })
+                .unwrap_or(FieldProjection::All);
+            super::query_engine::AppPathProjection {
+                path: ProgramPathId {
+                    owner: owner.clone(),
+                    child: child.clone(),
+                },
+                field: subquery.column_name.clone(),
+                cardinality: PathCardinality::Many,
+                fields,
+                children: app_row_path_projections(&child, &subquery.nested_arrays, &child_path),
+                hole_policy: PathHolePolicy::KeepParentWithHoles,
+                large_values: Vec::new(),
+            }
+        })
+        .collect()
 }
 
 fn required_field_idx(descriptor: &RecordDescriptor, field: &str) -> Result<usize, Error> {
@@ -5000,6 +5056,7 @@ where
                 result_payload_removes: Vec::new(),
                 program_fact_adds: current_facts.difference(&previous_facts).cloned().collect(),
                 program_fact_removes: previous_facts.difference(&current_facts).cloned().collect(),
+                structured_app_row_changes: BTreeSet::new(),
                 allow_storage_witness_fallback: true,
                 observed_delta_batches: 0,
                 observed_result_delta_batches: 0,
@@ -8889,6 +8946,9 @@ where
         transitions
             .program_fact_removes
             .extend(snapshot_transitions.program_fact_removes);
+        transitions
+            .structured_app_row_changes
+            .extend(snapshot_transitions.structured_app_row_changes);
         loop {
             match subscription.try_recv() {
                 Ok(deltas) => {
@@ -8912,6 +8972,9 @@ where
                     transitions
                         .program_fact_removes
                         .extend(delta_transitions.program_fact_removes);
+                    transitions
+                        .structured_app_row_changes
+                        .extend(delta_transitions.structured_app_row_changes);
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
