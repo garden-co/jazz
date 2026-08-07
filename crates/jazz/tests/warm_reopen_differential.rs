@@ -9,7 +9,7 @@ use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::RocksDbStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::node::{CurrentRow, RelationLink, RelationSnapshot};
+use jazz::node::{CurrentRow, RelationEdge, RelationSnapshot};
 use jazz::query::{ArraySubquery, OrderDirection, Query};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
@@ -25,7 +25,7 @@ struct CanonicalRow {
 struct CanonicalSnapshot {
     roots: Vec<CanonicalRow>,
     related: Vec<CanonicalRow>,
-    edges: BTreeSet<RelationLink>,
+    edges: BTreeSet<RelationEdge>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,8 +36,8 @@ enum CanonicalEvent {
         updated: Vec<CanonicalRow>,
         removed: Vec<(String, RowUuid)>,
         added_related: Vec<CanonicalRow>,
-        added_edges: BTreeSet<RelationLink>,
-        removed_edges: BTreeSet<RelationLink>,
+        added_edges: BTreeSet<RelationEdge>,
+        removed_edges: BTreeSet<RelationEdge>,
         settled: bool,
         tier: DurabilityTier,
     },

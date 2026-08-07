@@ -69,7 +69,7 @@ pub(crate) enum ProgramFactSchema {
     /// Synthetic aggregate result-set membership rows.
     AggregateResult(AggregateResultSchema),
     /// Relation edge rows.
-    RelationLinks(RelationLinkSchema),
+    RelationEdges(RelationEdgeSchema),
     /// Per-path correlation/cardinality coverage rows.
     PathCorrelationCoverage(PathCorrelationCoverageSchema),
     /// Source/table coverage facts.
@@ -179,7 +179,7 @@ pub(crate) struct ContentVersionFields {
 
 /// Include/join/relation edge row schema.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RelationLinkSchema {
+pub(crate) struct RelationEdgeSchema {
     /// Source row fields.
     pub(crate) source: VersionedRowRefSchema,
     /// Canonical include/join/relation node id field.

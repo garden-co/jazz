@@ -5702,11 +5702,11 @@ function encodeRelationSubscriptionDelta(delta: {
     removed.bytes(source.rowId);
   }, delta.removed.length);
   writer.vec(
-    (edge, index) => writeRelationLink(edge, delta.addedEdges[index]!),
+    (edge, index) => writeRelationEdge(edge, delta.addedEdges[index]!),
     delta.addedEdges.length,
   );
   writer.vec(
-    (edge, index) => writeRelationLink(edge, delta.removedEdges[index]!),
+    (edge, index) => writeRelationEdge(edge, delta.removedEdges[index]!),
     delta.removedEdges.length,
   );
   return writer.finish();
@@ -5753,7 +5753,7 @@ function presentBytes(bytes: Uint8Array): Uint8Array {
   return output;
 }
 
-function writeRelationLink(writer: PostcardWriter, edge: NativeRelationSubscriptionEdge): void {
+function writeRelationEdge(writer: PostcardWriter, edge: NativeRelationSubscriptionEdge): void {
   writer.string(edge.sourceTable);
   writer.bytes(edge.sourceRowId);
   writer.string(edge.relation);

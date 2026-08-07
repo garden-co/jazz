@@ -131,7 +131,7 @@ fn relation_edge_version_rows_for_bundle(
     facts
         .iter()
         .filter_map(|fact| match fact {
-            ProgramFactEntry::RelationLink(edge) => Some(edge),
+            ProgramFactEntry::RelationEdge(edge) => Some(edge),
             _ => None,
         })
         .flat_map(|edge| {

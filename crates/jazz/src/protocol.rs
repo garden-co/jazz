@@ -1925,7 +1925,7 @@ pub enum ProgramFactEntry {
     /// Payload bytes for a non-versioned result member, such as aggregate/window output.
     ResultPayload(ResultMemberPayloadEntry),
     /// A relation edge between two materialized rows.
-    RelationLink(RelationLinkEntry),
+    RelationEdge(RelationEdgeEntry),
     /// Coverage for one correlated path expansion.
     PathCorrelationCoverage(PathCorrelationCoverageEntry),
     /// Source/table coverage fact.
@@ -1974,7 +1974,7 @@ pub struct ResultMemberPayloadEntry {
 
 /// Relation edge fact emitted by query payloads.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
-pub struct RelationLinkEntry {
+pub struct RelationEdgeEntry {
     /// Logical path or relation name.
     pub path: String,
     /// Source row table.
@@ -1987,7 +1987,7 @@ pub struct RelationLinkEntry {
     pub target_row: RowUuid,
     /// Edge kind, when this is more specific than a plain include/join edge.
     #[serde(default)]
-    pub kind: Option<RelationLinkKind>,
+    pub kind: Option<RelationEdgeKind>,
     /// Source version identity, when edge membership depends on a concrete version.
     #[serde(default)]
     pub source_version: Option<RowVersionRefEntry>,
@@ -2005,7 +2005,7 @@ pub struct RelationLinkEntry {
     pub branch: Option<Vec<u8>>,
     /// Terminal role for intermediate/frontier/output relation rows.
     #[serde(default)]
-    pub role: Option<RelationLinkRole>,
+    pub role: Option<RelationEdgeRole>,
     /// Stable edge order when order affects the maintained output.
     #[serde(default)]
     pub order: Option<Vec<u8>>,
@@ -2120,7 +2120,7 @@ pub struct PolicyWitnessEntry {
     /// Witness version proving or revoking visibility.
     pub witness: RowVersionRefEntry,
     /// Dependency edge kind.
-    pub edge_kind: Option<RelationLinkKind>,
+    pub edge_kind: Option<RelationEdgeKind>,
 }
 
 /// Derived-output provenance fact.
@@ -2172,7 +2172,7 @@ pub struct PointReadEntry {
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
 )]
-pub enum RelationLinkKind {
+pub enum RelationEdgeKind {
     /// Include edge.
     Include,
     /// Join edge.
@@ -2189,7 +2189,7 @@ pub enum RelationLinkKind {
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
 )]
-pub enum RelationLinkRole {
+pub enum RelationEdgeRole {
     /// Internal edge only.
     Intermediate,
     /// Frontier/worklist edge.
