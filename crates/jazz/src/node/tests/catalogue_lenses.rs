@@ -247,6 +247,79 @@ fn publishing_lens_discards_all_provisional_physical_rows() {
 }
 
 #[test]
+fn publishing_lens_discards_global_changes_for_a_replaced_provisional_lineage() {
+    // Global-change physical keys and ID reuse are internal storage concerns;
+    // the accepted transaction audit state is the user-visible survivor.
+    let base = schema();
+    let target = SchemaVersion::new(catalogue_evolved_schema());
+    let (_dir, mut core) = open_node_with_schema(node(0x38), base.clone());
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(target.clone()),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: target.id,
+        },
+    })
+    .unwrap();
+
+    let provisional = core.catalogue.physical_mappings[&target.id].tables["todos"].table_id;
+    let accepted = core
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0x38), 10).cells(BTreeMap::from([
+                ("title".to_owned(), v("provisional")),
+                ("body".to_owned(), v("body")),
+            ])),
+        )
+        .unwrap();
+    core.apply_fate_update(
+        accepted,
+        Fate::Accepted,
+        Some(GlobalSeq(1)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+    assert_eq!(
+        core.database
+            .primary_key_scan_raw("jazz_global_changes", &[Value::U64(provisional.0)])
+            .unwrap()
+            .len(),
+        1
+    );
+
+    core.apply_sync_message(SyncMessage::PublishLens {
+        author: AuthorId::SYSTEM,
+        lens: MigrationLens::new(
+            base.version_id(),
+            target.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: v(""),
+                }],
+            }],
+        ),
+    })
+    .unwrap();
+
+    assert!(core
+        .database
+        .primary_key_scan_raw("jazz_global_changes", &[Value::U64(provisional.0)])
+        .unwrap()
+        .is_empty());
+    assert!(matches!(
+        core.transaction_state(accepted),
+        Some((Fate::Accepted, Some(GlobalSeq(1)), DurabilityTier::Global))
+    ));
+}
+
+#[test]
 fn publishing_lens_discards_an_entire_retry_payload_if_one_lineage_is_replaced() {
     // Retry archives and provisional physical identities are intentionally
     // internal. This verifies that an atomic exclusive retry never survives
@@ -2939,6 +3012,170 @@ fn historical_schema_projected_reads_use_projected_snapshot_source() {
     assert_eq!(
         rows.into_iter().map(current_row_pair).collect::<BTreeMap<_, _>>(),
         BTreeMap::from([(row(0x54), title_cells("historical"))])
+    );
+}
+
+#[test]
+fn global_changes_span_table_renames_for_history_and_conflict_detection() {
+    // The physical key and bounded-source selection are intentionally internal;
+    // user-visible historical rows and exclusive rejection cover their semantics.
+    let base = schema();
+    let renamed_schema = JazzSchema::new([TableSchema::new(
+        "tasks",
+        [ColumnSchema::new("name", ColumnType::String)],
+    )]);
+    let renamed = SchemaVersion::new(renamed_schema);
+    let (dir, mut core) = open_node_with_schema(node(0x57), base.clone());
+
+    let base_tx = core
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0x57), 10).cells(title_cells("before rename")),
+        )
+        .unwrap();
+    core.apply_fate_update(
+        base_tx,
+        Fate::Accepted,
+        Some(GlobalSeq(1)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+
+    let exclusive = core.open_exclusive().unwrap();
+    assert_eq!(core.tx_current_rows(exclusive, "todos").unwrap().len(), 1);
+    core.tx_write(
+        exclusive,
+        "todos",
+        row(0x58),
+        title_cells("conflicting transaction"),
+        None,
+    )
+    .unwrap();
+
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(renamed.clone()),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::PublishLens {
+        author: AuthorId::SYSTEM,
+        lens: MigrationLens::new(
+            base.version_id(),
+            renamed.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "tasks".to_owned(),
+                ops: vec![
+                    LensOp::RenameTable {
+                        from: "todos".to_owned(),
+                        to: "tasks".to_owned(),
+                    },
+                    LensOp::RenameColumn {
+                        from: "title".to_owned(),
+                        to: "name".to_owned(),
+                    },
+                ],
+            }],
+        ),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: renamed.id,
+        },
+    })
+    .unwrap();
+
+    let renamed_tx = core
+        .commit_mergeable(
+            MergeableCommit::new("tasks", row(0x59), 11)
+                .cells(BTreeMap::from([("name".to_owned(), v("after rename"))])),
+        )
+        .unwrap();
+    core.apply_fate_update(
+        renamed_tx,
+        Fate::Accepted,
+        Some(GlobalSeq(2)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+
+    let table_id = core.catalogue.physical_mappings[&base.version_id()].tables["todos"].table_id;
+    assert_eq!(
+        core.catalogue.physical_mappings[&renamed.id].tables["tasks"].table_id,
+        table_id
+    );
+    let changes = core
+        .database
+        .primary_key_scan_raw("jazz_global_changes", &[])
+        .unwrap();
+    assert_eq!(changes.len(), 2);
+    assert!(changes.iter().all(|raw| {
+        raw.record()
+            .get_u64(GlobalChangeRowRecord::FIELD_PHYSICAL_TABLE_ID_IDX)
+            .unwrap()
+            == table_id.0
+    }));
+
+    let (_exclusive_tx, unit) = core
+        .commit_exclusive(exclusive, AuthorId::SYSTEM, 12)
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("exclusive commit unit expected");
+    };
+    assert_eq!(
+        core.finalize_local_exclusive_commit(tx, versions).unwrap(),
+        Fate::Rejected(RejectionReason::ExclusiveConflict)
+    );
+
+    let shape = Query::from("todos").validate(&base).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    assert_eq!(
+        core.query_rows_at(&shape, &binding, GlobalSeq(1))
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(0x57), title_cells("before rename"))])
+    );
+    core.reset_query_engine_read_metrics();
+    assert_eq!(
+        core.query_rows_at(&shape, &binding, GlobalSeq(2))
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([
+            (row(0x57), title_cells("before rename")),
+            (row(0x59), title_cells("after rename")),
+        ])
+    );
+    assert_eq!(
+        core.query_engine_read_metrics()
+            .source_global_seq_range_scans,
+        1,
+        "a renamed lineage should use the bounded physical global-change source"
+    );
+
+    drop(core);
+    let mut reopened = reopen_node_at(&dir, node(0x57), base.clone());
+    assert!(
+        reopened
+            .global_currency_changed_after("todos", GlobalSeq(1))
+            .unwrap()
+    );
+    assert_eq!(
+        reopened
+            .query_rows_at(&shape, &binding, GlobalSeq(2))
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([
+            (row(0x57), title_cells("before rename")),
+            (row(0x59), title_cells("after rename")),
+        ])
     );
 }
 

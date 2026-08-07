@@ -1098,7 +1098,7 @@ fn global_changes_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_global_changes",
         [
-            column("table_name", GrooveColumnType::Bytes),
+            column("physical_table_id", GrooveColumnType::U64),
             column("row_uuid", GrooveColumnType::Uuid),
             column("layer", GrooveColumnType::Bytes),
             column("global_seq", GrooveColumnType::U64),
@@ -1108,18 +1108,18 @@ fn global_changes_table() -> GrooveTableSchema {
         ],
     )
     .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::bytes("table_name"),
+        PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
         PrimaryKeyColumn::uuid("row_uuid"),
         PrimaryKeyColumn::bytes("layer"),
         PrimaryKeyColumn::integer("global_seq", IntegerKeyType::U64),
     ]))
     .with_index(GrooveIndexSchema::new(
         "by_global_seq",
-        ["global_seq", "table_name", "row_uuid", "layer"],
+        ["global_seq", "physical_table_id", "row_uuid", "layer"],
     ))
     .with_index(GrooveIndexSchema::new(
         "by_table_global_seq",
-        ["table_name", "global_seq", "row_uuid", "layer"],
+        ["physical_table_id", "global_seq", "row_uuid", "layer"],
     ))
 }
 
@@ -1635,7 +1635,7 @@ mod tests {
                 .iter()
                 .map(|column| column.column.as_str())
                 .collect::<Vec<_>>(),
-            vec!["table_name", "row_uuid", "layer", "global_seq"]
+            vec!["physical_table_id", "row_uuid", "layer", "global_seq"]
         );
 
         let index = table
@@ -1645,7 +1645,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             index.columns,
-            vec!["global_seq", "table_name", "row_uuid", "layer"]
+            vec!["global_seq", "physical_table_id", "row_uuid", "layer"]
         );
         let table_index = table
             .indices
@@ -1654,7 +1654,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             table_index.columns,
-            vec!["table_name", "global_seq", "row_uuid", "layer"]
+            vec!["physical_table_id", "global_seq", "row_uuid", "layer"]
         );
     }
 

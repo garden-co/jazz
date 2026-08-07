@@ -77,7 +77,7 @@ groove::define_record! {
 
 groove::define_record! {
     pub(super) struct GlobalChangeRowRecord {
-        0 => table_name: Vec<u8>,
+        0 => physical_table_id: u64,
         1 => row_uuid: RowUuid,
         2 => layer: Vec<u8>,
         3 => global_seq: GlobalSeq,
@@ -419,6 +419,12 @@ pub(super) fn debug_assert_lowered_layouts(schema: &JazzSchema) {
             .expect("pending edges table")
             .record_schema();
         PendingEdgeRowRecord::assert_layout(&pending_edge_descriptor);
+
+        let global_change_descriptor = groove_schema
+            .table("jazz_global_changes")
+            .expect("global changes table")
+            .record_schema();
+        GlobalChangeRowRecord::assert_layout(&global_change_descriptor);
 
         for table in &schema.tables {
             let rejected_version_descriptor =
@@ -1445,9 +1451,13 @@ pub(super) fn register_global_current_values(
     values
 }
 
-pub(super) fn global_change_values(version: &VersionRow, global_seq: GlobalSeq) -> Vec<Value> {
+pub(super) fn global_change_values(
+    table_id: PhysicalTableId,
+    version: &VersionRow,
+    global_seq: GlobalSeq,
+) -> Vec<Value> {
     vec![
-        Value::Bytes(version.table().as_bytes().to_vec()),
+        Value::U64(table_id.0),
         Value::Uuid(version.row_uuid().0),
         Value::Bytes(version_layer_string(version.layer()).into_bytes()),
         Value::U64(global_seq.0),
@@ -1459,6 +1469,21 @@ pub(super) fn global_change_values(version: &VersionRow, global_seq: GlobalSeq) 
                 .map(|deletion| Box::new(deletion_event_value(deletion))),
         ),
     ]
+}
+
+pub(super) fn global_change_primary_key_from_record(
+    record: &BorrowedRecord<'_>,
+) -> Result<PrimaryKeyValue, Error> {
+    Ok(PrimaryKeyValue::Composite(vec![
+        PrimaryKeyValue::U64(record.get_u64(GlobalChangeRowRecord::FIELD_PHYSICAL_TABLE_ID_IDX)?),
+        PrimaryKeyValue::Uuid(record.get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?),
+        PrimaryKeyValue::Bytes(
+            record
+                .get_bytes(GlobalChangeRowRecord::FIELD_LAYER_IDX)?
+                .to_vec(),
+        ),
+        PrimaryKeyValue::U64(record.get_u64(GlobalChangeRowRecord::FIELD_GLOBAL_SEQ_IDX)?),
+    ]))
 }
 
 pub(super) fn rejected_transaction_primary_key(alias: NodeAlias, tx_id: TxId) -> PrimaryKeyValue {

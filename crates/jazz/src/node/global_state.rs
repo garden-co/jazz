@@ -18,13 +18,15 @@ where
         layer: VersionLayer,
         global_base: GlobalSeq,
     ) -> Result<Option<VersionRow>, Error> {
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
         let prefix = [
-            Value::Bytes(table.as_bytes().to_vec()),
+            Value::U64(table_id.0),
             Value::Uuid(row_uuid.0),
             Value::Bytes(version_layer_string(layer).into_bytes()),
         ];
         let upper = [
-            Value::Bytes(table.as_bytes().to_vec()),
+            Value::U64(table_id.0),
             Value::Uuid(row_uuid.0),
             Value::Bytes(version_layer_string(layer).into_bytes()),
             Value::U64(global_base.0),
@@ -68,10 +70,12 @@ where
         table: &str,
         global_base: GlobalSeq,
     ) -> Result<bool, Error> {
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
         let Some(raw) = self.database.index_last_raw(
             "jazz_global_changes",
             "by_table_global_seq",
-            &[Value::Bytes(table.as_bytes().to_vec())],
+            &[Value::U64(table_id.0)],
         )?
         else {
             return Ok(false);

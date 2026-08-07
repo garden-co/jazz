@@ -3981,10 +3981,14 @@ where
         version: &VersionRow,
         global_seq: GlobalSeq,
     ) -> Result<(), Error> {
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+        let table_id = self.physical_table_id_for_schema(schema_version, version.table())?;
         let rows = self.database.primary_key_scan_raw(
             "jazz_global_changes",
             &[
-                Value::Bytes(version.table().as_bytes().to_vec()),
+                Value::U64(table_id.0),
                 Value::Uuid(version.row_uuid().0),
                 Value::Bytes(version_layer_string(version.layer()).into_bytes()),
                 Value::U64(global_seq.0),
@@ -4086,7 +4090,11 @@ where
         }
         batch.update(
             "jazz_global_changes",
-            global_change_values(version, global_seq),
+            global_change_values(
+                self.physical_table_id_for_schema(schema_version, version.table())?,
+                version,
+                global_seq,
+            ),
         );
         Ok(())
     }

@@ -684,6 +684,23 @@ where
                 }
                 self.database.commit_batch(batch)?;
             }
+
+            let rows = self
+                .database
+                .primary_key_scan_raw("jazz_global_changes", &[Value::U64(table_id.0)])?
+                .into_iter()
+                .map(|row| row.owned_record())
+                .collect::<Vec<_>>();
+            if !rows.is_empty() {
+                let mut batch = self.database.open_batch();
+                for row in rows {
+                    batch.delete(
+                        "jazz_global_changes",
+                        global_change_primary_key_from_record(&row.borrowed())?,
+                    );
+                }
+                self.database.commit_batch(batch)?;
+            }
         }
 
         if !invalidated_rejections.is_empty() {

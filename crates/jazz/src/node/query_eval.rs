@@ -1457,18 +1457,9 @@ where
         if self.read_view.read_schema != self.node.catalogue.current_schema_version_id {
             return false;
         }
-        let Ok(table_id) = self
-            .node
-            .physical_table_id_for_schema(self.read_view.read_schema, table)
-        else {
-            return false;
-        };
         self.node
-            .catalogue
-            .physical_mappings
-            .values()
-            .flat_map(|mapping| &mapping.tables)
-            .all(|(logical_table, mapping)| mapping.table_id != table_id || logical_table == table)
+            .physical_table_id_for_schema(self.read_view.read_schema, table)
+            .is_ok()
     }
 
     fn needs_projected_current_source(&mut self, table: &str) -> bool {
@@ -7048,21 +7039,20 @@ where
         table: &str,
         position: GlobalSeq,
     ) -> Result<Vec<groove::db::EncodedKeyValue<'_>>, Error> {
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
         if position.0 == u64::MAX {
             Ok(self.database.index_scan_raw(
                 "jazz_global_changes",
                 "by_table_global_seq",
-                &[Value::Bytes(table.as_bytes().to_vec())],
+                &[Value::U64(table_id.0)],
             )?)
         } else {
             Ok(self.database.index_scan_range_raw(
                 "jazz_global_changes",
                 "by_table_global_seq",
-                &[Value::Bytes(table.as_bytes().to_vec()), Value::U64(0)],
-                &[
-                    Value::Bytes(table.as_bytes().to_vec()),
-                    Value::U64(position.0 + 1),
-                ],
+                &[Value::U64(table_id.0), Value::U64(0)],
+                &[Value::U64(table_id.0), Value::U64(position.0 + 1)],
             )?)
         }
     }
@@ -11368,11 +11358,12 @@ fn inline_branch_current_record(
 #[cfg(test)]
 fn historical_current_graph_full_scan(
     table: &TableSchema,
+    table_id: PhysicalTableId,
     position: GlobalSeq,
     history_rows: GraphBuilder,
 ) -> GraphBuilder {
     let cut_predicate = PredicateExpr::And(vec![
-        PredicateExpr::eq("table_name", Value::Bytes(table.name.as_bytes().to_vec())),
+        PredicateExpr::eq("physical_table_id", Value::U64(table_id.0)),
         PredicateExpr::LtEq {
             field: "global_seq".to_owned(),
             value: Value::U64(position.0).into(),
@@ -12161,6 +12152,9 @@ mod tests {
         table: &TableSchema,
         position: GlobalSeq,
     ) -> BTreeMap<RowUuid, Value> {
+        let table_id = node
+            .physical_table_id_for_schema(node.catalogue.current_schema_version_id, &table.name)
+            .expect("physical table id");
         let history_source = node
             .physical_history_source_graph(node.catalogue.current_schema_version_id, &table.name)
             .expect("physical history source");
@@ -12168,6 +12162,7 @@ mod tests {
             .database
             .query_graph(historical_current_graph_full_scan(
                 table,
+                table_id,
                 position,
                 history_source,
             ))
