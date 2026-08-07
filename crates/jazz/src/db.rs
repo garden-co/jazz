@@ -5357,7 +5357,11 @@ where
                             )?;
                         }
                         message @ (SyncMessage::ViewUpdate { subscription, .. }
-                        | SyncMessage::ViewUpdateChunk { subscription, .. }) => {
+                        | SyncMessage::ViewUpdateChunk { subscription, .. }
+                        | SyncMessage::StructuredViewUpdate { subscription, .. }
+                        | SyncMessage::StructuredViewUpdateChunk {
+                            subscription, ..
+                        }) => {
                             #[cfg(not(feature = "sync-autopsy"))]
                             let _ = subscription;
                             let missing = {
@@ -6254,6 +6258,62 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             program_fact_adds,
             program_fact_removes,
         },
+        // The receiver validates the recursive tree at admission.  Settled
+        // membership/witness application remains shared with ordinary updates;
+        // facade reads obtain their shape from the collector terminal.
+        SyncMessage::StructuredViewUpdate {
+            subscription,
+            settled_through,
+            reset_result_set,
+            version_carriers,
+            version_bundles,
+            peer_payload_inventory,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+            ..
+        } => ViewUpdateParts {
+            subscription,
+            settled_through,
+            defer_settlement: false,
+            reset_result_set,
+            version_carriers,
+            version_bundles,
+            peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+            authorization_progress: peer_payload_inventory.authorization_progress,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+        },
+        SyncMessage::StructuredViewUpdateChunk {
+            subscription,
+            settled_through,
+            reset_result_set,
+            final_chunk,
+            version_carriers,
+            version_bundles,
+            peer_payload_inventory,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+            ..
+        } => ViewUpdateParts {
+            subscription,
+            settled_through,
+            defer_settlement: !final_chunk,
+            reset_result_set,
+            version_carriers,
+            version_bundles,
+            peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+            authorization_progress: peer_payload_inventory.authorization_progress,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+        },
         _ => unreachable!("expected view update message"),
     }
 }
@@ -6269,7 +6329,12 @@ fn push_view_update_message_for_receiver(
             final_chunk,
             ..
         } => (*subscription, *final_chunk),
-        SyncMessage::ViewUpdate { .. } => {
+        SyncMessage::StructuredViewUpdateChunk {
+            subscription,
+            final_chunk,
+            ..
+        } => (*subscription, *final_chunk),
+        SyncMessage::ViewUpdate { .. } | SyncMessage::StructuredViewUpdate { .. } => {
             ready.push(view_update_parts_from_message(message));
             return Ok(());
         }
