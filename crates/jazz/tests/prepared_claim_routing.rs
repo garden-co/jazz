@@ -552,7 +552,6 @@ fn prepared_binding_includes_claims_from_auxiliary_source_policies() {
 }
 
 #[test]
-#[ignore = "INV-RLS-21: policy subplans drop the evaluating policy's claim binding past the first hop. Unfixed; see SPEC/7_authorization.md 7.4."]
 fn prepared_binding_routes_claims_through_two_hop_seeded_policy_sources() {
     let db = open_db_with_schema(two_hop_seeded_policy_schema());
     let (project_a, project_b, document_a, document_b) = seed_two_hop_reachability_policy(&db);
@@ -590,6 +589,27 @@ fn prepared_binding_routes_claims_through_two_hop_seeded_policy_sources() {
         row_ids_for_identity(&db, &prepared_b, USER_B),
         vec![document_b],
         "principal B must receive only project B through the seeded policy chain"
+    );
+}
+
+#[test]
+fn policy_proof_implicit_and_outer_include_sources_do_not_reenter_policy_compilation() {
+    let db = open_db_with_schema(two_hop_seeded_policy_schema());
+    let (project_a, _, document_a, _) = seed_two_hop_reachability_policy(&db);
+    let query = Query::from(DOCUMENTS)
+        .filter(eq(col("project"), param("project")))
+        .include("project");
+    let prepared = db
+        .prepare_query_bound(
+            &query,
+            BTreeMap::from([("project".to_owned(), Value::Uuid(project_a.0))]),
+        )
+        .expect("prepare included project binding");
+
+    assert_eq!(
+        row_ids_for_identity(&db, &prepared, USER_A),
+        vec![document_a],
+        "policy and outer include sources must not re-enter the protected policy"
     );
 }
 
