@@ -11,7 +11,10 @@ use jazz::protocol::{
     SyncMessage, TableLens, VersionBundle, VersionCarrier, VersionRecord,
     build_version_bundle_runs_from_singletons,
 };
-use jazz::query::{BindingId, Query, ShapeId};
+use jazz::query::{
+    ArraySubquery, ArraySubqueryRequirement, BindingId, OrderDirection, Query, ShapeId, col, eq,
+    lit,
+};
 use jazz::schema::{ColumnSchema, JazzSchema, TableSchema};
 use jazz::time::{GlobalSeq, TxTime};
 use jazz::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
@@ -62,6 +65,17 @@ struct NativeRowCodecCase {
 struct NativeRowCodecField {
     name: String,
     encoded_hex: String,
+}
+
+#[derive(Deserialize)]
+struct NativeQueryCodecFixture {
+    cases: Vec<NativeQueryCodecCase>,
+}
+
+#[derive(Deserialize)]
+struct NativeQueryCodecCase {
+    name: String,
+    query_hex: String,
 }
 
 fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
@@ -521,6 +535,80 @@ fn native_row_codec_fixture_round_trips_every_groove_value_type() {
             field.name
         );
     }
+}
+
+// This is intentionally a codec-level integration fixture: TypeScript emits
+// these exact postcard Query values and Rust independently decodes and emits
+// them. Query preparation is the public boundary; a raw fixture is the
+// narrowest way to protect its positional layout contract.
+#[test]
+fn native_query_codec_fixture_round_trips_relation_shapes() {
+    let fixture: NativeQueryCodecFixture =
+        serde_json::from_str(include_str!("../fixtures/native_query_codec.json"))
+            .expect("native query codec fixture parses");
+
+    for (name, expected) in native_query_codec_cases() {
+        let case = fixture
+            .cases
+            .iter()
+            .find(|case| case.name == name)
+            .unwrap_or_else(|| panic!("{name} fixture is present"));
+        assert_eq!(
+            hex(&postcard::to_allocvec(&expected).expect("query encodes")),
+            case.query_hex,
+            "{name} fixture encodes from Rust"
+        );
+        let bytes = parse_hex(&case.query_hex);
+        let decoded: Query = postcard::from_bytes(&bytes).unwrap_or_else(|error| {
+            panic!("{name} fixture decodes: {error}");
+        });
+        assert_eq!(
+            decoded, expected,
+            "{name} fixture decodes to the expected query"
+        );
+    }
+}
+
+fn native_query_codec_cases() -> Vec<(&'static str, Query)> {
+    let forward = Query::from("accounts")
+        .select(["label"])
+        .order_by("label", OrderDirection::Asc);
+    let mut forward = forward;
+    forward.array_subqueries.push(
+        ArraySubquery::new("entries", "entries", "account_id", "id")
+            .select(["label"])
+            .order_by("label", OrderDirection::Asc)
+            .limit(3)
+            .offset(1),
+    );
+
+    let mut reverse = Query::from("groups");
+    reverse.array_subqueries.push(
+        ArraySubquery::new("members", "members", "group_id", "id")
+            .filter(eq(col("state"), lit("active")))
+            .select(["name"])
+            .limit(4)
+            .requirement(ArraySubqueryRequirement::AtLeastOne)
+            .nested(
+                ArraySubquery::new("notes", "notes", "member_id", "id")
+                    .select(["body"])
+                    .limit(2)
+                    .requirement(ArraySubqueryRequirement::MatchCorrelationCardinality),
+            ),
+    );
+
+    let mut unbounded = Query::from("teams");
+    unbounded.array_subqueries.push(
+        ArraySubquery::new("participants", "participants", "team_id", "id")
+            .unbounded()
+            .offset(2),
+    );
+
+    vec![
+        ("forward_include_projected_optional", forward),
+        ("reverse_include_required_nested_projection", reverse),
+        ("unbounded_reverse_include_with_offset", unbounded),
+    ]
 }
 
 fn exhaustive_native_row_codec_case() -> (
