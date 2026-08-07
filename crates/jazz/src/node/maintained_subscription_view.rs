@@ -17,7 +17,7 @@ use super::query_engine::{
 use crate::ids::{AuthorId, NodeAlias, NodeUuid, RowUuid};
 use crate::protocol::{
     ProgramFactEntry, RealRowMemberEntry, RelationEdgeEntry, ResultMemberEntry,
-    ResultMemberPayloadEntry, ResultRowLayer, RowVersionRefEntry,
+    ResultMemberPayloadEntry, ResultRowLayer, RowVersionRefEntry, SyntheticReplacementToken,
 };
 use crate::schema::TableSchema;
 use crate::time::{GlobalSeq, TxTime};
@@ -801,15 +801,15 @@ fn decode_typed_terminal_record(
             let row = postcard::to_allocvec(&row_value).map_err(|_| {
                 super::Error::InvalidStoredValue("aggregate result row encoding failed")
             })?;
-            let revision_value =
-                record.get_idx(field_idx(record, &schema.synthetic.revision_field)?)?;
-            let revision = postcard::to_allocvec(&revision_value).map_err(|_| {
-                super::Error::InvalidStoredValue("aggregate result revision encoding failed")
+            let replacement_value =
+                record.get_idx(field_idx(record, &schema.synthetic.replacement_field)?)?;
+            let replacement = postcard::to_allocvec(&replacement_value).map_err(|_| {
+                super::Error::InvalidStoredValue("aggregate replacement token encoding failed")
             })?;
             let member = ResultMemberEntry::Synthetic {
                 table,
                 row,
-                revision,
+                replacement: SyntheticReplacementToken::from_encoded_record(replacement),
             };
             let payload = ResultMemberPayloadEntry {
                 member: member.clone(),
@@ -1417,8 +1417,8 @@ fn result_member_entry_bytes(member: &ResultMemberEntry) -> usize {
             ResultMemberEntry::Synthetic {
                 table,
                 row,
-                revision,
-            } => table.len() + vec_bytes(row) + vec_bytes(revision),
+                replacement,
+            } => table.len() + vec_bytes(row) + mem::size_of_val(replacement),
             ResultMemberEntry::PathTuple {
                 path,
                 source_table,

@@ -8684,20 +8684,20 @@ fn aggregate_sum(
         Some(ValueType::U8) => u8::try_from(u64_sum)
             .map(Value::U8)
             .map(Some)
-            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
+            .map_err(|_| IvmRuntimeError::AggregateOverflow),
         Some(ValueType::U16) => u16::try_from(u64_sum)
             .map(Value::U16)
             .map(Some)
-            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
+            .map_err(|_| IvmRuntimeError::AggregateOverflow),
         Some(ValueType::U32) => u32::try_from(u64_sum)
             .map(Value::U32)
             .map(Some)
-            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
+            .map_err(|_| IvmRuntimeError::AggregateOverflow),
         Some(ValueType::U64) => Ok(Some(Value::U64(u64_sum))),
         Some(ValueType::I32) => i32::try_from(i64_sum)
             .map(Value::I32)
             .map(Some)
-            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
+            .map_err(|_| IvmRuntimeError::AggregateOverflow),
         Some(ValueType::F64) => Ok(Some(Value::F64(f64_sum))),
         Some(ValueType::I64) => Ok(Some(Value::I64(i64_sum))),
         Some(_) => Err(IvmRuntimeError::UnsupportedOperator),
@@ -8770,14 +8770,14 @@ fn aggregate_extremum(
 }
 
 fn add_weighted_u64(current: u64, value: u64, weight: i64) -> Result<u64, IvmRuntimeError> {
-    let weight = u64::try_from(weight).map_err(|_| IvmRuntimeError::UnsupportedOperator)?;
+    let weight = u64::try_from(weight).map_err(|_| IvmRuntimeError::AggregateOverflow)?;
     current
         .checked_add(
             value
                 .checked_mul(weight)
-                .ok_or(IvmRuntimeError::UnsupportedOperator)?,
+                .ok_or(IvmRuntimeError::AggregateOverflow)?,
         )
-        .ok_or(IvmRuntimeError::UnsupportedOperator)
+        .ok_or(IvmRuntimeError::AggregateOverflow)
 }
 
 fn add_weighted_i64(current: i64, value: i64, weight: i64) -> Result<i64, IvmRuntimeError> {
@@ -8785,9 +8785,9 @@ fn add_weighted_i64(current: i64, value: i64, weight: i64) -> Result<i64, IvmRun
         .checked_add(
             value
                 .checked_mul(weight)
-                .ok_or(IvmRuntimeError::UnsupportedOperator)?,
+                .ok_or(IvmRuntimeError::AggregateOverflow)?,
         )
-        .ok_or(IvmRuntimeError::UnsupportedOperator)
+        .ok_or(IvmRuntimeError::AggregateOverflow)
 }
 
 fn numeric_value_as_f64(value: &Value) -> Result<f64, IvmRuntimeError> {
@@ -9475,6 +9475,8 @@ fn encode_runtime_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
 
 #[derive(Debug, Error)]
 pub enum IvmRuntimeError {
+    #[error("aggregate result exceeds its declared numeric width")]
+    AggregateOverflow,
     #[error("graph field not found: {0}")]
     GraphFieldNotFound(String),
     #[error("graph field index out of bounds: {0}")]

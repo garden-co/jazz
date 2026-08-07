@@ -4322,8 +4322,8 @@ mod tests {
             let cells = aggregate_cells(&rows[0]);
             assert_eq!(cells["count"], Value::U64(expected_count));
             assert_eq!(
-                cells["sum_score"],
-                Value::Nullable(expected_sum.map(|sum| Box::new(Value::U64(sum))))
+                cells.get("sum_score").cloned(),
+                expected_sum.map(Value::U64)
             );
         }
     }

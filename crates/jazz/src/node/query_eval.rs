@@ -49,7 +49,7 @@ use crate::protocol::{
     BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry, ReadViewKey,
     ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry,
     ResultMemberPayloadEntry, RowVersionRef, ShapeAst, ShapeBody, Subscribe, SubscriptionKey,
-    SyncMessage,
+    SyncMessage, SyntheticReplacementToken,
 };
 use crate::protocol_limits::{MAX_KNOWN_STATE_EXACT_REFS, MAX_SYNC_MESSAGE_BYTES};
 use crate::query::{
@@ -62,21 +62,15 @@ use crate::schema::{ColumnSchema, branch_metadata_table_schema, global_current_i
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
 
-/// The maintained aggregate terminal deliberately names its synthetic relation
-/// after the source table.  Admit only that exact terminal as a public root:
-/// other synthetic members have protocol meanings that cannot be rendered as
-/// application rows.
+/// Aggregate terminal membership is structurally identified by the aggregate
+/// query plan and its synthetic group-key member. Its table label is not an
+/// identity and must not participate in public delivery decisions.
 fn is_public_aggregate_result_member(
     member: &ResultMemberEntry,
-    result_table: &str,
+    _result_table: &str,
     aggregate_query: bool,
 ) -> bool {
-    aggregate_query
-        && matches!(
-            member,
-            ResultMemberEntry::Synthetic { table, .. }
-                if table == &format!("{result_table}_aggregate")
-        )
+    aggregate_query && matches!(member, ResultMemberEntry::Synthetic { .. })
 }
 
 fn is_public_result_member(
@@ -368,7 +362,7 @@ fn fact_public_fields(
             let mut fields = vec![
                 schema.synthetic.table_field.clone(),
                 schema.synthetic.row_field.clone(),
-                schema.synthetic.revision_field.clone(),
+                schema.synthetic.replacement_field.clone(),
             ];
             fields.extend(
                 schema
@@ -11189,9 +11183,9 @@ fn aggregate_query_row_uuid(
     let row = postcard::to_allocvec(&row_value)
         .map_err(|_| Error::InvalidStoredValue("aggregate result row encoding failed"))?;
     aggregate_result_member_row_uuid(&ResultMemberEntry::Synthetic {
-        table: format!("{}_aggregate", query.table),
+        table: "aggregate_result".to_owned(),
         row,
-        revision: Vec::new(),
+        replacement: SyntheticReplacementToken::from_encoded_record(Vec::new()),
     })
 }
 
@@ -13965,18 +13959,9 @@ mod tests {
             .query_rows(&shape, &binding, DurabilityTier::Local)
             .unwrap();
         let cells = rows[0].test_cells_by_descriptor();
-        assert_eq!(
-            cells["sum_priority"],
-            Value::Nullable(Some(Box::new(Value::U64(6))))
-        );
-        assert_eq!(
-            cells["min_priority"],
-            Value::Nullable(Some(Box::new(Value::U64(0))))
-        );
-        assert_eq!(
-            cells["max_priority"],
-            Value::Nullable(Some(Box::new(Value::U64(4))))
-        );
+        assert_eq!(cells["sum_priority"], Value::U64(6));
+        assert_eq!(cells["min_priority"], Value::U64(0));
+        assert_eq!(cells["max_priority"], Value::U64(4));
     }
 
     #[test]
@@ -14001,22 +13986,10 @@ mod tests {
             .query_rows(&shape, &binding, DurabilityTier::Local)
             .unwrap();
         let cells = rows[0].test_cells_by_descriptor();
-        assert_eq!(
-            cells["sum_score"],
-            Value::Nullable(Some(Box::new(Value::I64(-1))))
-        );
-        assert_eq!(
-            cells["avg_score"],
-            Value::Nullable(Some(Box::new(Value::F64(-0.5))))
-        );
-        assert_eq!(
-            cells["min_score"],
-            Value::Nullable(Some(Box::new(Value::I64(-3))))
-        );
-        assert_eq!(
-            cells["max_score"],
-            Value::Nullable(Some(Box::new(Value::I64(2))))
-        );
+        assert_eq!(cells["sum_score"], Value::I64(-1));
+        assert_eq!(cells["avg_score"], Value::F64(-0.5));
+        assert_eq!(cells["min_score"], Value::I64(-3));
+        assert_eq!(cells["max_score"], Value::I64(2));
     }
 
     #[test]

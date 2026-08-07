@@ -208,6 +208,7 @@ impl ObservedSubscription {
                     .skip(1)
                     .take(self.descriptor.fields().len())
                     .map(|value| match value {
+                        GrooveValue::Nullable(None) => Value::Null,
                         GrooveValue::Nullable(Some(value)) => match *value {
                             GrooveValue::String(value) => Value::Text(value),
                             GrooveValue::I32(value) => Value::Integer(value),
@@ -641,6 +642,134 @@ async fn aggregate_sum_public_boundary_preserves_nullable_results() {
             // value using the schema's nullable type. That is independent of
             // aggregate semantics; empty and all-NULL cases are the boundary
             // this test owns.
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = nullable_metrics_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let writer = JazzClient::connect(server.make_client_context_for_user(
+                schema.clone(),
+                "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa7",
+            ))
+            .await
+            .expect("connect writer");
+            let client = JazzClient::connect(
+                server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa17"),
+            )
+            .await
+            .expect("connect subscriber");
+            let query = QueryBuilder::new("metrics")
+                .sum("score")
+                .count()
+                .group_by("bucket")
+                .build();
+            let mut stream = ObservedSubscription::new(
+                client
+                    .subscribe(query.clone())
+                    .await
+                    .expect("subscribe grouped nullable aggregate"),
+                aggregate_descriptor([
+                    ("bucket", ValueType::String),
+                    ("count", ValueType::U64),
+                    ("sum_score", ValueType::I32),
+                ]),
+            );
+            stream
+                .wait_for_values(Vec::new(), "initial grouped aggregate is empty")
+                .await;
+
+            let mut rows = Vec::new();
+            for bucket in ["null", "null", "gone", "changed"] {
+                let (row, _, batch) = writer
+                    .insert(
+                        "metrics",
+                        row_input!("bucket" => bucket, "score" => Value::Null),
+                    )
+                    .expect("insert nullable metric");
+                writer
+                    .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                    .await
+                    .expect("nullable metric settles");
+                rows.push(row);
+            }
+            stream
+                .wait_for_values(
+                    vec![
+                        vec![
+                            Value::Text("changed".to_owned()),
+                            Value::Timestamp(1),
+                            Value::Null,
+                        ],
+                        vec![
+                            Value::Text("gone".to_owned()),
+                            Value::Timestamp(1),
+                            Value::Null,
+                        ],
+                        vec![
+                            Value::Text("null".to_owned()),
+                            Value::Timestamp(2),
+                            Value::Null,
+                        ],
+                    ],
+                    "all-null groups remain delivered",
+                )
+                .await;
+
+            let batch = writer.delete(rows[2]).expect("delete gone group");
+            writer
+                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("gone group delete settles");
+            stream
+                .wait_for_values(
+                    vec![
+                        vec![
+                            Value::Text("changed".to_owned()),
+                            Value::Timestamp(1),
+                            Value::Null,
+                        ],
+                        vec![
+                            Value::Text("null".to_owned()),
+                            Value::Timestamp(2),
+                            Value::Null,
+                        ],
+                    ],
+                    "absent group is retracted without losing all-null group",
+                )
+                .await;
+
+            let (_, _, batch) = writer
+                .insert(
+                    "metrics",
+                    row_input!("bucket" => "changed", "score" => Value::Null),
+                )
+                .expect("replace changed aggregate group");
+            writer
+                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("changed group replacement settles");
+            stream
+                .wait_for_values(
+                    vec![
+                        vec![
+                            Value::Text("changed".to_owned()),
+                            Value::Timestamp(2),
+                            Value::Null,
+                        ],
+                        vec![
+                            Value::Text("null".to_owned()),
+                            Value::Timestamp(2),
+                            Value::Null,
+                        ],
+                    ],
+                    "present-null group can change after another group disappears",
+                )
+                .await;
         })
         .await;
 }

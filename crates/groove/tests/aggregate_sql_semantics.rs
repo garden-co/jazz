@@ -10,7 +10,7 @@
 //!    output types never change with their contents.
 //! 6. Signed `I64` inputs are supported by `SUM`, `AVG`, `MIN`, and `MAX`.
 
-use groove::db::{Database, GraphBuilder};
+use groove::db::{Database, Error as DatabaseError, GraphBuilder, IvmRuntimeError};
 use groove::ivm::{AggregateExpr, AggregateFunction, PlanExpr};
 use groove::records::{Value, ValueType};
 use groove::schema::{
@@ -218,4 +218,27 @@ fn signed_i64_inputs_are_supported() {
             1,
         )]
     );
+}
+
+#[test]
+fn sum_overflow_fails_with_a_named_error_at_the_declared_width() {
+    let storage = MemoryStorage::new(&["metrics"]);
+    let mut database = Database::new(metric_schema(ColumnType::U8), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "metrics",
+        vec![Value::U64(1), Value::U64(10), Value::U8(250)],
+    );
+    batch.insert(
+        "metrics",
+        vec![Value::U64(2), Value::U64(10), Value::U8(10)],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert!(matches!(
+        database.query_graph(metric_aggregates(["bucket"])),
+        Err(DatabaseError::IvmRuntime(
+            IvmRuntimeError::AggregateOverflow
+        ))
+    ));
 }
