@@ -507,6 +507,8 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
             result_member_removes,
             program_fact_adds,
             program_fact_removes,
+            result_tree: None,
+            result_tree_updates: Vec::new(),
         }])
         .unwrap();
 
@@ -576,6 +578,8 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                 result_member_removes: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
+                result_tree: None,
+                result_tree_updates: Vec::new(),
             },
             ViewUpdateParts {
                 subscription,
@@ -596,6 +600,8 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                 result_member_removes: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
+                result_tree: None,
+                result_tree_updates: Vec::new(),
             },
         ])
         .unwrap();
@@ -661,6 +667,8 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                 result_member_removes: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
+                result_tree: None,
+                result_tree_updates: Vec::new(),
             },
             ViewUpdateParts {
                 subscription,
@@ -685,6 +693,8 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                 result_member_removes: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
+                result_tree: None,
+                result_tree_updates: Vec::new(),
             },
         ])
         .unwrap();
@@ -835,6 +845,8 @@ fn partial_exclusive_view_update(
         result_member_removes: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
+        result_tree: None,
+        result_tree_updates: Vec::new(),
     }
 }
 
@@ -931,6 +943,8 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
             result_member_removes: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
+            result_tree: None,
+            result_tree_updates: Vec::new(),
         }])
         .unwrap();
 
@@ -3375,6 +3389,8 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
             result_member_removes,
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
+            result_tree: None,
+            result_tree_updates: Vec::new(),
         })
         .unwrap();
 
@@ -3447,6 +3463,8 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             result_member_removes,
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
+            result_tree: None,
+            result_tree_updates: Vec::new(),
         })
         .unwrap();
 
@@ -3504,6 +3522,8 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             result_member_removes,
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
+            result_tree: None,
+            result_tree_updates: Vec::new(),
         })
         .unwrap();
 }
@@ -3529,6 +3549,8 @@ fn view_updates_downgrade_unknown_peer_payload_inventory_refs() {
             result_member_removes: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
+            result_tree: None,
+            result_tree_updates: Vec::new(),
         })
         .unwrap();
 
