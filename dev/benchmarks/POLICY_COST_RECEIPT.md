@@ -51,10 +51,10 @@ authorization lifecycle gate. Compare an access path only between tiers where
 its expected result is identical; do not sum identity timings into a product
 latency claim.
 
-The initial extraction exposed two correctness prerequisites. #1238 makes
-authorization proofs existential before finite windows, and #1239 preserves
-omitted cells while composing a partial update for a writer who cannot read the
-row. Both fixes are carried on this branch until they land independently.
+The initial extraction exposed two correctness prerequisites that have since
+landed independently: #1238 makes authorization proofs existential before
+finite windows, and #1239 preserves omitted cells while composing a partial
+update for a writer who cannot read the row.
 
 ## Initial result
 

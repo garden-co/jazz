@@ -100,6 +100,8 @@ struct LifecycleReceipt {
 }
 
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
+
     let mut tiers = Vec::new();
     let mut all_exact = true;
     for branches in 1..=5 {
