@@ -1268,11 +1268,36 @@ impl ClientDbInner {
                             .iter()
                             .map(|row| row.occurrence_id.clone())
                             .collect();
+                        // A local aggregate snapshot may retract while the
+                        // relay concurrently publishes its replacement.  The
+                        // relay correctly calls that replacement an update,
+                        // but it is an add relative to this facade's already
+                        // retracted snapshot. Normalize at this boundary so a
+                        // public stream never emits an update for an unknown
+                        // row.
+                        let surviving_rows = current_rows
+                            .iter()
+                            .filter(|row| {
+                                !removed
+                                    .iter()
+                                    .any(|removed| removed.occurrence_id == row.occurrence_id)
+                            })
+                            .map(|row| row.occurrence_id.clone())
+                            .collect::<std::collections::BTreeSet<_>>();
+                        let mut effective_added = added;
+                        let mut effective_updated = Vec::new();
+                        for row in updated {
+                            if surviving_rows.contains(&row.occurrence_id) {
+                                effective_updated.push(row);
+                            } else {
+                                effective_added.push(row);
+                            }
+                        }
                         JazzClient::apply_core_subscription_rows(
                             &mut current_rows,
                             reset,
-                            &added,
-                            &updated,
+                            &effective_added,
+                            &effective_updated,
                             &removed,
                         );
                         let rows_for_cache = current_rows
@@ -1290,8 +1315,8 @@ impl ClientDbInner {
                             JazzClient::core_subscription_change_delta(
                                 &db,
                                 &current_rows,
-                                &added,
-                                &updated,
+                                &effective_added,
+                                &effective_updated,
                                 &removed,
                             )
                         };

@@ -543,6 +543,7 @@ impl MaintainedSubscriptionView {
                 transitions.removes.push(member.clone());
                 self.result_weights.remove(&member);
                 if let Some(existing) = self.result_payloads.remove(&member) {
+                    transitions.result_payload_removes.push(member.clone());
                     transitions
                         .program_fact_removes
                         .push(ProgramFactEntry::ResultPayload(existing));
@@ -557,6 +558,7 @@ impl MaintainedSubscriptionView {
             transitions.removes.push(old_member.clone());
             self.result_weights.remove(&old_member);
             if let Some(existing) = self.result_payloads.remove(&old_member).or(old_payload) {
+                transitions.result_payload_removes.push(old_member.clone());
                 transitions
                     .program_fact_removes
                     .push(ProgramFactEntry::ResultPayload(existing));
@@ -568,6 +570,9 @@ impl MaintainedSubscriptionView {
         transitions
             .program_fact_adds
             .push(ProgramFactEntry::ResultPayload(payload.clone()));
+        transitions
+            .result_payload_adds
+            .push((member.clone(), payload.clone()));
         self.result_payloads.insert(member.clone(), payload);
         self.result_weights.insert(member, 1);
         Ok(())
