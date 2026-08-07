@@ -1373,9 +1373,9 @@ impl ClientDbInner {
             let mut stream = stream;
             let mut current_rows: Vec<CoreSubscriptionOutputRow> = Vec::new();
             // A fresh subscription may be hydrated by consecutive reset
-            // frames. Each such frame replaces the still-initial result set.
-            // Once ordinary delivery begins, later reset framing retains its
-            // delta-shaped relation to the facade's tracked rows.
+            // frames. They replace the still-initial result set until core
+            // sends a delta-shaped update for a tracked occurrence. That is
+            // attach framing, not a replacement snapshot.
             let mut initial_hydration = true;
             while let Some(event) = stream.next_event().await {
                 match event {
@@ -1390,7 +1390,13 @@ impl ClientDbInner {
                             .iter()
                             .map(|row| row.occurrence_id.clone())
                             .collect();
-                        let reset_replaces_initial_view = initial_hydration && reset;
+                        let reset_updates_tracked_row = updated.iter().any(|updated| {
+                            current_rows
+                                .iter()
+                                .any(|current| current.occurrence_id == updated.occurrence_id)
+                        });
+                        let reset_replaces_initial_view =
+                            initial_hydration && reset && !reset_updates_tracked_row;
                         if reset_replaces_initial_view {
                             current_rows.clear();
                         }
@@ -1440,7 +1446,7 @@ impl ClientDbInner {
                                 &removed,
                             )
                         };
-                        if !reset {
+                        if !reset_replaces_initial_view {
                             initial_hydration = false;
                         }
                         let Ok(delta) = delta else {
