@@ -224,6 +224,8 @@ export type QueryArraySubquery = {
   select?: string[];
   orderBy?: QueryOrder[];
   limit?: number | null;
+  unbounded?: boolean;
+  offset?: number;
   requirement?: QueryArraySubqueryRequirement;
   nestedArrays?: QueryArraySubquery[];
 };
@@ -305,6 +307,8 @@ function writeArraySubquery(writer: PostcardWriter, subquery: QueryArraySubquery
     select,
     orderBy = [],
     limit = null,
+    unbounded = false,
+    offset = 0,
     requirement = "Optional",
     nestedArrays = [],
   } = subquery;
@@ -334,6 +338,8 @@ function writeArraySubquery(writer: PostcardWriter, subquery: QueryArraySubquery
   } else {
     writer.some((valueWriter) => valueWriter.u64(limit));
   }
+  writer.bool(unbounded);
+  writer.u64(offset);
   writer.u64(arraySubqueryRequirementTag(requirement));
   writer.vec((nested, index) => {
     writeArraySubquery(nested, nestedArrays[index]!);

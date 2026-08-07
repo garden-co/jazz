@@ -349,6 +349,7 @@ function toArraySubqueries(
         select_columns: selectColumns,
         order_by: orderBy,
         limit: spec.limit ?? null,
+        unbounded: spec.limit == null,
         ...(requirement ? { requirement } : {}),
         nested_arrays: nestedArrays,
       });
@@ -365,6 +366,7 @@ function toArraySubqueries(
         select_columns: selectColumns,
         order_by: orderBy,
         limit: spec.limit ?? null,
+        unbounded: spec.limit == null,
         nested_arrays: nestedArrays,
       });
     }
