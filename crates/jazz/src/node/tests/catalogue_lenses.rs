@@ -1100,7 +1100,7 @@ fn catalogue_current_write_schema_revision_is_core_ordered() {
     assert_eq!(core.current_write_schema().schema, base.version_id());
 }
 #[test]
-fn durable_catalogue_values_pointer_and_partitions_survive_restart() {
+fn durable_catalogue_values_pointer_and_physical_mappings_survive_restart() {
     let base = schema();
     let evolved = catalogue_evolved_schema();
     let evolved_payload = SchemaVersion::new(evolved.clone());
@@ -1135,9 +1135,11 @@ fn durable_catalogue_values_pointer_and_partitions_survive_restart() {
         },
     })
     .unwrap();
-    assert!(core
-        .partitions()
-        .contains(&("todos".to_owned(), evolved_payload.id)));
+    let physical_mapping = core.catalogue.physical_mappings[&evolved_payload.id].clone();
+    assert!(matches!(
+        core.database.table_schema("jazz_partitions"),
+        Err(GrooveDbError::TableNotFound(_))
+    ));
     drop(core);
 
     let reopened = reopen_node_at(&dir, node(0x39), base.clone());
@@ -1156,12 +1158,14 @@ fn durable_catalogue_values_pointer_and_partitions_survive_restart() {
             schema: evolved_payload.id,
         }
     );
-    assert!(reopened
-        .partitions()
-        .contains(&("todos".to_owned(), base.version_id())));
-    assert!(reopened
-        .partitions()
-        .contains(&("todos".to_owned(), evolved_payload.id)));
+    assert_eq!(
+        reopened.catalogue.physical_mappings[&evolved_payload.id],
+        physical_mapping
+    );
+    assert!(matches!(
+        reopened.database.table_schema("jazz_partitions"),
+        Err(GrooveDbError::TableNotFound(_))
+    ));
 }
 #[test]
 fn shape_registration_parks_until_schema_version_catalogue_arrives() {
@@ -1197,7 +1201,7 @@ fn shape_registration_parks_until_schema_version_catalogue_arrives() {
         .contains_key(&shape.schema_version()));
 }
 #[test]
-fn current_write_pointer_flip_registers_new_partition_tables_live() {
+fn publishing_schema_registers_new_physical_tables_live() {
     let base = schema();
     let evolved = catalogue_evolved_schema();
     let evolved_payload = SchemaVersion::new(evolved);
@@ -1207,6 +1211,13 @@ fn current_write_pointer_flip_registers_new_partition_tables_live() {
         schema: Box::new(evolved_payload.clone()),
     })
     .unwrap();
+    let table_id =
+        core.catalogue.physical_mappings[&evolved_payload.id].tables["todos"].table_id;
+    let history = physical_history_table_name(table_id);
+    let register = physical_register_table_name(table_id);
+    assert!(core.database.primary_key_scan_raw(&history, &[]).is_ok());
+    assert!(core.database.primary_key_scan_raw(&register, &[]).is_ok());
+
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
@@ -1215,19 +1226,12 @@ fn current_write_pointer_flip_registers_new_partition_tables_live() {
         },
     })
     .unwrap();
-
-    let history = physical_history_table_name(
-        core.catalogue.physical_mappings[&evolved_payload.id].tables["todos"].table_id,
-    );
-    let register = physical_register_table_name(
-        core.catalogue.physical_mappings[&evolved_payload.id].tables["todos"].table_id,
-    );
     assert!(core.database.primary_key_scan_raw(&history, &[]).is_ok());
     assert!(core.database.primary_key_scan_raw(&register, &[]).is_ok());
 }
 
 #[test]
-fn current_write_pointer_flip_rebuilds_live_database_without_storage_reopen() {
+fn publishing_schema_registers_new_tables_without_storage_reopen() {
     let base = schema();
     let evolved = JazzSchema::new([
         TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]),
@@ -1318,7 +1322,44 @@ fn current_write_pointer_flip_rebuilds_live_database_without_storage_reopen() {
 }
 
 #[test]
-fn partitioned_reads_project_natural_lenses_after_schema_agnostic_winner() {
+fn transaction_version_scans_recover_table_names_from_physical_mappings() {
+    let base = schema();
+    let evolved = JazzSchema::new([
+        TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]),
+        TableSchema::new("notes", [ColumnSchema::new("body", ColumnType::String)]),
+    ]);
+    let evolved_payload = SchemaVersion::new(evolved);
+    let (dir, mut core) = open_node_with_schema(node(0x3f), base.clone());
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(evolved_payload.clone()),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved_payload.id,
+        },
+    })
+    .unwrap();
+    let tx_id = core
+        .commit_mergeable(
+            MergeableCommit::new("notes", row(0x3f), 10)
+                .cells(BTreeMap::from([("body".to_owned(), v("mapped scan"))])),
+        )
+        .unwrap();
+    drop(core);
+
+    let mut reopened = reopen_node_at(&dir, node(0x3f), base);
+    let versions = reopened.query_versions_for_tx(tx_id).unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].table(), "notes");
+    assert_eq!(versions[0].row_uuid(), row(0x3f));
+}
+
+#[test]
+fn shared_physical_reads_project_natural_lenses_after_schema_agnostic_winner() {
     let base = schema();
     let evolved = JazzSchema::new([TableSchema::new(
         "todos",
@@ -1559,7 +1600,7 @@ fn later_lens_cannot_change_an_authoritative_physical_mapping() {
 }
 
 #[test]
-fn old_schema_commit_units_copy_on_write_into_current_schema_partition() {
+fn old_schema_commit_units_copy_on_write_into_current_physical_lineage() {
     let base = schema();
     let evolved = JazzSchema::new([TableSchema::new(
         "todos",
@@ -2062,7 +2103,7 @@ fn exclusive_writes_store_versions_under_current_write_schema_storage() {
 }
 
 #[test]
-fn schema_version_partition_tables_survive_pointer_changes_and_reopen() {
+fn physical_schema_variants_survive_pointer_changes_and_reopen() {
     let base = schema();
     let evolved = catalogue_evolved_schema();
     let evolved_payload = SchemaVersion::new(evolved.clone());
@@ -2096,9 +2137,9 @@ fn schema_version_partition_tables_survive_pointer_changes_and_reopen() {
     })
     .unwrap();
 
-    let evolved_history_table = physical_history_table_name(
-        core.catalogue.physical_mappings[&evolved_payload.id].tables["todos"].table_id,
-    );
+    let evolved_table_id =
+        core.catalogue.physical_mappings[&evolved_payload.id].tables["todos"].table_id;
+    let evolved_history_table = physical_history_table_name(evolved_table_id);
     assert_eq!(
         core.database
             .primary_key_scan_raw(&evolved_history_table, &[])
@@ -2109,9 +2150,10 @@ fn schema_version_partition_tables_survive_pointer_changes_and_reopen() {
     drop(core);
 
     let reopened = reopen_node_at(&dir, node(0x48), base);
-    assert!(reopened
-        .partitions()
-        .contains(&("todos".to_owned(), evolved_payload.id)));
+    assert_eq!(
+        reopened.catalogue.physical_mappings[&evolved_payload.id].tables["todos"].table_id,
+        evolved_table_id
+    );
     assert_eq!(
         reopened
             .database
@@ -2123,7 +2165,7 @@ fn schema_version_partition_tables_survive_pointer_changes_and_reopen() {
 }
 
 #[test]
-fn partitioned_schema_projected_reads_use_projected_current_source_without_prepared_fallback() {
+fn heterogeneous_schema_projected_reads_bypass_prepared_plans() {
     let base = schema();
     let evolved = JazzSchema::new([TableSchema::new(
         "todos",
@@ -2134,6 +2176,24 @@ fn partitioned_schema_projected_reads_use_projected_current_source_without_prepa
     )]);
     let evolved_payload = SchemaVersion::new(evolved.clone());
     let (_dir, mut core) = open_node_with_schema(node(0x49), base.clone());
+    let shape = Query::from("todos")
+        .filter(eq(col("title"), param("wanted")))
+        .validate(&base)
+        .unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([(
+            "wanted".to_owned(),
+            Value::String("projected".to_owned()),
+        )]))
+        .unwrap();
+    let pre_lens_plan = core
+        .prepared_query_plan(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorId::SYSTEM,
+        )
+        .unwrap();
     core.apply_sync_message(SyncMessage::PublishSchema {
         author: AuthorId::SYSTEM,
         schema: Box::new(evolved_payload.clone()),
@@ -2177,26 +2237,21 @@ fn partitioned_schema_projected_reads_use_projected_current_source_without_prepa
     )
     .unwrap();
 
-    let shape = Query::from("todos")
-        .filter(eq(col("title"), param("wanted")))
-        .validate(&base)
-        .unwrap();
-    let binding = shape
-        .bind(BTreeMap::from([(
-            "wanted".to_owned(),
-            Value::String("projected".to_owned()),
-        )]))
-        .unwrap();
     let rows = core
         .query_rows(&shape, &binding, DurabilityTier::Local)
         .unwrap();
 
     assert_eq!(rows.into_iter().map(current_row_pair).collect::<BTreeMap<_, _>>(), BTreeMap::from([(row(0x49), title_cells("projected"))]));
-    assert!(
-        !core.query.query_shape_cache
-            .keys()
-            .any(|(shape_id, _, _)| *shape_id == shape.shape_id()),
-        "partitioned/schema-projected reads must not install prepared groove plans"
+    assert!(core.uses_schema_projected_read(&shape));
+    let rows = core
+        .query_rows_local_preview(&shape, &binding, Some(&pre_lens_plan))
+        .unwrap();
+    assert_eq!(
+        rows.into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(0x49), title_cells("projected"))]),
+        "a plan prepared before lens publication must be ignored once its physical lineage becomes heterogeneous"
     );
 
     let join_base = JazzSchema::new([
@@ -3413,7 +3468,7 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
 }
 
 #[test]
-fn partitioned_inner_include_target_bypasses_prepared_lowering() {
+fn unreconciled_schema_variants_do_not_disable_base_schema_includes() {
     let base = JazzSchema::new([
         TableSchema::new(
             "todos",
@@ -3443,15 +3498,19 @@ fn partitioned_inner_include_target_bypasses_prepared_lowering() {
         ),
     ]));
     let (_dir, mut core) = open_node_with_schema(node(0x50), base.clone());
-    core.catalogue.partitions.insert(("projects".to_owned(), evolved.id));
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(evolved),
+    })
+    .unwrap();
 
     let inner_shape = Query::from("todos")
         .include("project")
         .validate(&base)
         .unwrap();
     assert!(
-        core.uses_partitioned_or_schema_projected_read(&inner_shape),
-        "inner/required include targets are storage reads and must use the projected current source path when partitioned"
+        !core.uses_schema_projected_read(&inner_shape),
+        "a separate provisional lineage must not disable base-schema prepared lowering"
     );
 
     let holes_shape = Query::from("todos")
@@ -3459,8 +3518,8 @@ fn partitioned_inner_include_target_bypasses_prepared_lowering() {
         .validate(&base)
         .unwrap();
     assert!(
-        !core.uses_partitioned_or_schema_projected_read(&holes_shape),
-        "hole-only includes do not filter membership and are not a prepared-lowering bypass by themselves"
+        !core.uses_schema_projected_read(&holes_shape),
+        "hole-only includes remain preparable in the base schema"
     );
 }
 

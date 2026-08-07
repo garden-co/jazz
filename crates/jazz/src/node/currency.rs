@@ -248,16 +248,9 @@ where
 
     pub(super) fn tx_version_scan_tables(&self) -> BTreeSet<String> {
         self.catalogue
-            .schema
-            .tables
-            .iter()
-            .map(|table| table.name.clone())
-            .chain(
-                self.catalogue
-                    .partitions
-                    .iter()
-                    .map(|(table, _)| table.clone()),
-            )
+            .physical_mappings
+            .values()
+            .flat_map(|mapping| mapping.tables.keys().cloned())
             .collect()
     }
 

@@ -249,13 +249,6 @@ groove::define_record! {
 }
 
 groove::define_record! {
-    pub(super) struct PartitionRowRecord {
-        0 => table_name: Vec<u8>,
-        1 => schema_version: SchemaVersionId,
-    }
-}
-
-groove::define_record! {
     pub(super) struct BranchPartitionRowRecord {
         0 => physical_table_id: u64,
         1 => branch_id: BranchId,

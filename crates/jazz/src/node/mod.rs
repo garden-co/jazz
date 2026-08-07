@@ -187,7 +187,7 @@ pub struct NodeState<S> {
     node_uuid: NodeUuid,
     /// Compact alias assigned to this node for on-disk transaction keys.
     self_node_alias: Option<NodeAlias>,
-    /// Schema catalogue, migration lenses, and schema-partition state.
+    /// Schema catalogue, migration lenses, and logical-to-physical mappings.
     catalogue: SchemaCatalogue,
     /// In-memory branch records and branch-specific storage partitions.
     branches: Branches,
@@ -270,8 +270,6 @@ struct SchemaCatalogue {
     compiled_lens_cache: BTreeMap<CompiledLensCacheKey, Option<CompiledLensPath>>,
     /// Schema version currently used for newly authored writes.
     current_write_schema: CurrentWriteSchema,
-    /// Storage partitions materialized for table/schema-version pairs.
-    partitions: BTreeSet<(String, SchemaVersionId)>,
 }
 
 /// Branch metadata and branch-partition layout known by the node.
@@ -543,7 +541,6 @@ where
             next_physical_table_id,
             next_physical_column_id,
             current_write_schema,
-            partitions,
             branch_partitions,
         } = Self::open_catalogue_stage(schema.clone(), storage)?;
         let database = Self::open_full_database(
@@ -551,7 +548,6 @@ where
             &schemas,
             &schema_version_aliases,
             &physical_mappings,
-            &partitions,
             &branch_partitions,
             storage,
         )?;
@@ -574,7 +570,6 @@ where
                 lens_path_cache: BTreeMap::new(),
                 compiled_lens_cache: BTreeMap::new(),
                 current_write_schema,
-                partitions,
             },
             branches: Branches {
                 branches: BTreeMap::new(),
@@ -651,9 +646,6 @@ where
         node.self_node_alias = Some(self_node_alias);
         let schema_alias = node.ensure_schema_version_alias(current_schema_version_id)?;
         node.catalogue.current_schema_version_alias = Some(schema_alias);
-        for table in schema.tables.iter().map(|table| table.name.clone()) {
-            node.persist_partition(table, current_schema_version_id)?;
-        }
         Ok(node)
     }
 
@@ -662,12 +654,11 @@ where
         catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
         schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
         physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
-        partitions: &BTreeSet<(String, SchemaVersionId)>,
         branch_partitions: &BTreeSet<(PhysicalTableId, BranchId)>,
         storage: S,
     ) -> Result<Database<S>, Error> {
         debug_assert_lowered_layouts(schema);
-        let mut lowered = schema.lower_to_groove_with_partitions(partitions);
+        let mut lowered = schema.lower_to_groove();
         lowered.tables.extend(physical_version_storage_tables(
             catalogue_schemas,
             schema_version_aliases,
@@ -750,7 +741,6 @@ where
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
             &self.catalogue.physical_mappings,
-            &self.catalogue.partitions,
             &self.branches.branch_partitions,
             storage,
         )?;
@@ -1014,19 +1004,6 @@ where
                 ),
             };
         }
-        let mut partitions = BTreeSet::new();
-        for raw in meta_database.primary_key_scan_raw("jazz_partitions", &[])? {
-            let record = raw.record();
-            let table = String::from_utf8(
-                record
-                    .get_bytes(PartitionRowRecord::FIELD_TABLE_NAME_IDX)?
-                    .to_vec(),
-            )
-            .map_err(|_| Error::InvalidStoredValue("partition table name must be utf8"))?;
-            let schema_version =
-                SchemaVersionId(record.get_uuid(PartitionRowRecord::FIELD_SCHEMA_VERSION_IDX)?);
-            partitions.insert((table, schema_version));
-        }
         let mut branch_partitions = BTreeSet::new();
         for raw in meta_database.primary_key_scan_raw("jazz_branch_partitions", &[])? {
             let record = raw.record();
@@ -1046,7 +1023,6 @@ where
             next_physical_table_id,
             next_physical_column_id,
             current_write_schema,
-            partitions,
             branch_partitions,
         })
     }
@@ -2570,11 +2546,6 @@ where
         self.catalogue.current_write_schema
     }
 
-    /// Durable partition registry entries known at open time.
-    pub fn partitions(&self) -> &BTreeSet<(String, SchemaVersionId)> {
-        &self.catalogue.partitions
-    }
-
     /// Return a historical read handle at an exact global settle position.
     pub fn at(&mut self, position: GlobalSeq) -> HistoricalRead<'_, S> {
         HistoricalRead {
@@ -3726,32 +3697,6 @@ where
         );
         self.database.commit_batch(batch)?;
         Ok(())
-    }
-
-    fn persist_partition(
-        &mut self,
-        table: impl Into<String>,
-        schema_version: SchemaVersionId,
-    ) -> Result<bool, Error> {
-        let table = table.into();
-        if !self
-            .catalogue
-            .partitions
-            .insert((table.clone(), schema_version))
-        {
-            return Ok(false);
-        }
-        self.query.version_storage_sources_cache.clear();
-        let mut batch = self.database.open_batch();
-        batch.update(
-            "jazz_partitions",
-            vec![
-                Value::Bytes(table.as_bytes().to_vec()),
-                Value::Uuid(schema_version.0),
-            ],
-        );
-        self.database.commit_batch(batch)?;
-        Ok(true)
     }
 
     fn ensure_node_alias(&mut self, node_uuid: NodeUuid) -> Result<NodeAlias, Error> {
@@ -5084,7 +5029,6 @@ struct CatalogueOpenState<S> {
     next_physical_table_id: u64,
     next_physical_column_id: u64,
     current_write_schema: CurrentWriteSchema,
-    partitions: BTreeSet<(String, SchemaVersionId)>,
     branch_partitions: BTreeSet<(PhysicalTableId, BranchId)>,
 }
 

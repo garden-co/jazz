@@ -489,16 +489,22 @@ remain compatible with databases written by the former per-schema history layout
    schema's planner only selects indexes declared by that schema. Integration
    coverage writes a row before its physical index exists, proves live backfill,
    then adds another schema variant and verifies that the same query still reads
-   exactly one physical index entry and one current row.
+   exactly one physical index entry and one current row. Parameter-bound
+   prepared snapshots over a heterogeneous `VariantProject` remain a known
+   Groove limitation: the predicate sees the projected field, but the bound
+   terminal loses its payload. Until that is fixed, Jazz uses the ordinary
+   unprepared lowered graph for those lineages.
    - Move global-current, ahead-current, and durable index prefixes to physical identities.
    - Replace the current union-and-`arg_max` path in
      [query_eval.rs](../src/node/query_eval.rs) with one source plus logical projection.
-   - Re-enable the ordinary prepared-query path.
+   - Re-enable the ordinary prepared-query path for heterogeneous physical
+     lineages once bound `VariantProject` terminals preserve projected payloads.
    - Add a storage-read receipt proving read cost stays constant as schema-version count increases.
 
 6. Convert the remaining schema-keyed storage.
-   **Status: in progress.** Rejected-version storage, global-change identity,
-   branch overlays, and merge-head identity are complete.
+   **Status: complete for the unified-table cutover (2026-08-07).**
+   Rejected-version storage, global-change identity, branch overlays,
+   merge-head identity, and catalogue recovery now use physical mappings.
    - Branch overlays: each `(PhysicalTableId, BranchId)` owns one versioned
      content-history table and one stable deletion-register table.
      `jazz_branch_partitions` stores only those two identities. Writes retain
@@ -531,7 +537,13 @@ remain compatible with databases written by the former per-schema history layout
      carry authored logical names and cross the public API/wire boundary, so
      changing this subsystem is a separate protocol/API decision rather than a
      mechanical local-key conversion.
-   - Remove `jazz_partitions` only after recovery no longer depends on it.
+   - `jazz_partitions` has been removed. Reopen, transaction-scan enumeration,
+     and query-routing decisions now derive from durable schema-version physical
+     mappings. A separately mapped provisional schema no longer disables
+     base-schema prepared plans. A genuinely heterogeneous physical lineage
+     still takes the safe unprepared route because Groove's parameter-bound
+     prepared snapshot currently loses projected `VariantProject` payload
+     fields; that limitation is independent of the removed catalogue table.
 
 7. Implement unset/data-preservation semantics later.
 

@@ -16,11 +16,7 @@ where
         read_schema_version: SchemaVersionId,
         tier: DurabilityTier,
     ) -> Result<Vec<CurrentRow>, Error> {
-        if read_schema_version == self.catalogue.current_schema_version_id
-            && !self.catalogue.partitions.iter().any(|(logical, version)| {
-                logical == table && *version != self.catalogue.current_schema_version_id
-            })
-        {
+        if read_schema_version == self.catalogue.current_schema_version_id {
             return self.current_rows(table, tier);
         }
         let read_table = self.table_in_schema(table, read_schema_version)?;

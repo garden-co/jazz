@@ -168,14 +168,6 @@ impl JazzSchema {
         self.with_jazz_direct_record_stores(GrooveDatabaseSchema::new(self.storage_tables()))
     }
 
-    /// Lower the schema plus registered legacy schema-version partitions.
-    pub fn lower_to_groove_with_partitions(
-        &self,
-        _partitions: &std::collections::BTreeSet<(String, SchemaVersionId)>,
-    ) -> GrooveDatabaseSchema {
-        self.lower_to_groove()
-    }
-
     /// Lower only the fixed metadata tables needed for the first open stage.
     pub fn lower_catalogue_meta_to_groove(&self) -> GrooveDatabaseSchema {
         self.with_jazz_direct_record_stores(GrooveDatabaseSchema::new(
@@ -210,7 +202,6 @@ impl JazzSchema {
             schema_versions_table(),
             catalogue_table(),
             catalogue_pointer_table(),
-            partitions_table(),
             branch_partitions_table(),
             branches_table(),
             transactions_table(),
@@ -222,14 +213,13 @@ impl JazzSchema {
         tables
     }
 
-    /// Return the version-independent metadata tables available before partitions are known.
+    /// Return the version-independent metadata tables used by staged catalogue open.
     pub fn catalogue_meta_storage_tables(&self) -> Vec<GrooveTableSchema> {
         vec![
             nodes_table(),
             schema_versions_table(),
             catalogue_table(),
             catalogue_pointer_table(),
-            partitions_table(),
             branch_partitions_table(),
             branches_table(),
         ]
@@ -978,20 +968,6 @@ fn catalogue_pointer_table() -> GrooveTableSchema {
         ],
     )
     .with_primary_key(PrimaryKey::new("revision", IntegerKeyType::U64).user_supplied())
-}
-
-fn partitions_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        "jazz_partitions",
-        [
-            column("table_name", GrooveColumnType::Bytes),
-            column("schema_version", GrooveColumnType::Uuid),
-        ],
-    )
-    .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::bytes("table_name"),
-        PrimaryKeyColumn::uuid("schema_version"),
-    ]))
 }
 
 fn branch_partitions_table() -> GrooveTableSchema {

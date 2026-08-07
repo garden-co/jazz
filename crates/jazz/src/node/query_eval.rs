@@ -6553,8 +6553,10 @@ where
             .as_ref()
             .map(|(shape, binding)| (shape, binding))
             .unwrap_or((shape, binding));
-        let prepared_plan = prepared_plan
-            .filter(|plan| !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker));
+        let prepared_plan = prepared_plan.filter(|plan| {
+            self.can_use_prepared_current_query_plan(shape)
+                && !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker)
+        });
         let program = if prepared_plan.is_some() {
             None
         } else {
@@ -6674,8 +6676,10 @@ where
             .as_ref()
             .map(|(shape, binding)| (shape, binding))
             .unwrap_or((shape, binding));
-        let prepared_plan = prepared_plan
-            .filter(|plan| !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker));
+        let prepared_plan = prepared_plan.filter(|plan| {
+            self.can_use_prepared_current_query_plan(shape)
+                && !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker)
+        });
         let mut profile = QueryReadProfile {
             resolve_view: phase_started.elapsed(),
             ..Default::default()
@@ -6803,10 +6807,7 @@ where
 
     fn can_use_prepared_current_query_plan(&self, shape: &ValidatedQuery) -> bool {
         shape.schema_version() == self.catalogue.current_schema_version_id
-            && !self.catalogue.partitions.iter().any(|(table, version)| {
-                table == &shape.query().table
-                    && *version != self.catalogue.current_schema_version_id
-            })
+            && !self.query_uses_heterogeneous_physical_lineage(shape)
     }
 
     fn settled_binding_view_source_rows(
@@ -8576,13 +8577,32 @@ where
         self.query_rows_at_for_identity(shape, binding, position, identity)
     }
 
-    pub(crate) fn uses_partitioned_or_schema_projected_read(&self, shape: &ValidatedQuery) -> bool {
+    pub(crate) fn uses_schema_projected_read(&self, shape: &ValidatedQuery) -> bool {
         shape.schema_version() != self.catalogue.current_schema_version_id
-            || self.query_storage_read_tables(shape).is_some_and(|tables| {
-                self.catalogue.partitions.iter().any(|(table, version)| {
-                    *version != self.catalogue.current_schema_version_id && tables.contains(table)
+            || self.query_uses_heterogeneous_physical_lineage(shape)
+    }
+
+    fn query_uses_heterogeneous_physical_lineage(&self, shape: &ValidatedQuery) -> bool {
+        let Some(tables) = self.query_storage_read_tables(shape) else {
+            return true;
+        };
+        tables.into_iter().any(|logical_table| {
+            let Ok(table_id) =
+                self.physical_table_id_for_schema(shape.schema_version(), &logical_table)
+            else {
+                return true;
+            };
+            self.catalogue
+                .physical_mappings
+                .iter()
+                .any(|(schema_version, mapping)| {
+                    *schema_version != shape.schema_version()
+                        && mapping
+                            .tables
+                            .values()
+                            .any(|table| table.table_id == table_id)
                 })
-            })
+        })
     }
 
     fn query_storage_read_tables(&self, shape: &ValidatedQuery) -> Option<BTreeSet<String>> {

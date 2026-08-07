@@ -636,21 +636,6 @@ where
         self.register_physical_current_variant_projections()
     }
 
-    pub(super) fn synchronize_partition_storage_tables(&mut self) -> Result<(), Error> {
-        let lowered = self
-            .catalogue
-            .schema
-            .lower_to_groove_with_partitions(&self.catalogue.partitions);
-        for table in lowered.tables {
-            match self.database.table_schema(&table.name) {
-                Ok(_) => {}
-                Err(GrooveDbError::TableNotFound(_)) => self.database.register_table(table)?,
-                Err(error) => return Err(error.into()),
-            }
-        }
-        Ok(())
-    }
-
     pub(super) fn discard_unmapped_physical_version_tables(
         &mut self,
         candidates: impl IntoIterator<Item = PhysicalTableId>,
