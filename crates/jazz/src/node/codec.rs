@@ -336,9 +336,9 @@ impl VersionRecord {
             commit.row_uuid,
             commit.parents.clone(),
             commit.made_by,
-            TxTime(commit.now_ms),
+            TxTime::from(commit.now_ms),
             commit.made_by,
-            TxTime(commit.now_ms),
+            TxTime::from(commit.now_ms),
             &positional,
             commit.deletion,
         )

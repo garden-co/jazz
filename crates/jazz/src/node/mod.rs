@@ -1149,7 +1149,7 @@ where
             let (created_by, created_at) = creator_source
                 .as_ref()
                 .map(|version| (version.created_by(), version.created_at()))
-                .unwrap_or((commit.made_by, TxTime(commit.now_ms)));
+                .unwrap_or((commit.made_by, made_at));
 
             let implicit_parent = if table_schema
                 .columns
@@ -1193,7 +1193,7 @@ where
                     created_by,
                     created_at,
                     updated_by: commit.made_by,
-                    updated_at: TxTime(commit.now_ms),
+                    updated_at: made_at,
                     cells,
                     deletion: commit.deletion,
                 },
@@ -1306,7 +1306,7 @@ where
         let (created_by, created_at) = previous_current
             .as_ref()
             .map(|version| (version.created_by(), version.created_at()))
-            .unwrap_or((edit.made_by, TxTime(edit.now_ms)));
+            .unwrap_or((edit.made_by, made_at));
         let parent_len = match previous_current.as_ref() {
             Some(parent) => self.large_value_column_len(&table_schema, parent, &edit.column)?,
             None => 0,
@@ -1314,7 +1314,7 @@ where
         let table = edit.table.clone();
         let row_uuid = edit.row_uuid;
         let made_by = edit.made_by;
-        let updated_at = TxTime(edit.now_ms);
+        let updated_at = made_at;
         let column_name = edit.column.clone();
         let inline_ops = edit.ops;
         validate_large_value_edit_ranges(parent_len, &inline_ops)?;
