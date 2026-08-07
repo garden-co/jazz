@@ -2928,17 +2928,52 @@ fn align_union_route_fields(
         ));
     }
 
-    let project_fields = fields
-        .iter()
-        .map(|field| {
-            if branch.fields.contains(field) {
-                Ok(ProjectField::named(field.clone()))
-            } else {
-                route_literal_project_field(field, request)
-            }
-        })
-        .collect::<Result<Vec<_>, UnsupportedReason>>()?;
-    branch.graph = branch.graph.project_fields(project_fields);
+    if let Some(binding_source_shape) = &request.input.binding.source_shape {
+        let binding = GraphBuilder::binding_source(
+            binding_source_shape.clone(),
+            binding_source_descriptor_with_user_params(request, [])?,
+        );
+        let project_fields = fields
+            .iter()
+            .map(|field| {
+                if branch.fields.contains(field) {
+                    ProjectField::renamed(left_field(field), field.clone())
+                } else {
+                    let binding_field = route_param_from_field(field).unwrap_or(field);
+                    ProjectField::renamed(right_field(binding_field), field.clone())
+                }
+            })
+            .collect::<Vec<_>>();
+        let existing_route_fields = branch
+            .fields
+            .intersection(&route_fields)
+            .cloned()
+            .collect::<Vec<_>>();
+        let binding_route_fields = existing_route_fields
+            .iter()
+            .map(|field| route_param_from_field(field).unwrap_or(field).to_owned())
+            .collect::<Vec<_>>();
+        branch.graph = policy_join_if_needed(
+            branch.graph,
+            binding,
+            existing_route_fields,
+            binding_route_fields,
+            request,
+        )
+        .project_fields(project_fields);
+    } else {
+        let project_fields = fields
+            .iter()
+            .map(|field| {
+                if branch.fields.contains(field) {
+                    Ok(ProjectField::named(field.clone()))
+                } else {
+                    route_literal_project_field(field, request)
+                }
+            })
+            .collect::<Result<Vec<_>, UnsupportedReason>>()?;
+        branch.graph = branch.graph.project_fields(project_fields);
+    }
     branch.fields = fields.clone();
     Ok(branch)
 }
