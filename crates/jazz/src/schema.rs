@@ -172,28 +172,10 @@ impl JazzSchema {
     pub fn lower_to_groove_with_partitions(
         &self,
         catalogue_schemas: &BTreeMap<SchemaVersionId, crate::protocol::SchemaVersion>,
-        partitions: &std::collections::BTreeSet<(String, SchemaVersionId)>,
+        _partitions: &std::collections::BTreeSet<(String, SchemaVersionId)>,
         branch_partitions: &std::collections::BTreeSet<(String, SchemaVersionId, BranchId)>,
     ) -> GrooveDatabaseSchema {
         let mut tables = self.storage_tables();
-        let base_id = self.version_id();
-        for (logical_table, schema_version) in partitions {
-            if *schema_version == base_id {
-                continue;
-            }
-            let Some(schema) = catalogue_schemas.get(schema_version) else {
-                continue;
-            };
-            let Some(table) = schema
-                .schema
-                .tables
-                .iter()
-                .find(|table| table.name == *logical_table)
-            else {
-                continue;
-            };
-            tables.push(table.rejected_versions_storage_table());
-        }
         for (logical_table, schema_version, branch_id) in branch_partitions {
             let Some(schema) = catalogue_schemas.get(schema_version) else {
                 continue;
@@ -254,11 +236,6 @@ impl JazzSchema {
             pending_edges_table(),
             merge_heads_table(),
         ];
-        tables.extend(
-            self.tables
-                .iter()
-                .map(TableSchema::rejected_versions_storage_table),
-        );
         tables.push(global_changes_table());
         tables
     }

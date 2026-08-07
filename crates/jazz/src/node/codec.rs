@@ -421,10 +421,8 @@ pub(super) fn debug_assert_lowered_layouts(schema: &JazzSchema) {
         PendingEdgeRowRecord::assert_layout(&pending_edge_descriptor);
 
         for table in &schema.tables {
-            let rejected_version_descriptor = groove_schema
-                .table(&rejected_versions_table_name(&table.name))
-                .expect("rejected versions table")
-                .record_schema();
+            let rejected_version_descriptor =
+                table.rejected_versions_storage_table().record_schema();
             RejectedVersionRowRecord::assert_layout(&rejected_version_descriptor);
         }
 
@@ -2017,10 +2015,6 @@ pub(super) fn deletion_event_from_value(value: Value) -> Result<DeletionEvent, E
 
 pub(super) fn tx_id_value(tx_id: TxId) -> Value {
     Value::Tuple(vec![Value::U64(tx_id.time.0), Value::Uuid(tx_id.node.0)])
-}
-
-pub(super) fn rejected_versions_table_name(table: &str) -> String {
-    format!("jazz_{table}_rejected_versions")
 }
 
 pub(super) fn branch_version_storage_table_name(

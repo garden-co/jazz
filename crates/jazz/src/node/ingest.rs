@@ -2619,10 +2619,9 @@ where
                     &rejected_version_table,
                     rejected_version_values,
                 )?;
-                batch.insert(
-                    rejected_versions_table_name(version.table()),
-                    version.bind_groove_record(rejected_version_record.clone()),
-                );
+                let (storage_table, storage_record) =
+                    self.rejected_version_storage_write_binding(version, &rejected_version_record)?;
+                batch.insert(storage_table.as_ref(), storage_record);
                 rejected_versions.push(RejectedVersion::new(
                     version.table().to_owned(),
                     rejected_version_record,

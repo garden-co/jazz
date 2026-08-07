@@ -48,6 +48,10 @@ pub(super) fn physical_register_ahead_current_table_name(table_id: PhysicalTable
     format!("jazz_physical_{}_register_ahead_current", table_id.0)
 }
 
+pub(super) fn physical_rejected_versions_table_name(table_id: PhysicalTableId) -> String {
+    format!("jazz_physical_{}_rejected_versions", table_id.0)
+}
+
 pub(super) fn physical_current_index_name(column_id: PhysicalColumnId) -> String {
     format!("by_physical_user_{}", column_id.0)
 }
@@ -173,6 +177,35 @@ pub(super) fn physical_current_binding(
     Ok(PhysicalHistoryBinding {
         storage_table,
         descriptor: physical_current_descriptor(table, mapping)?,
+    })
+}
+
+pub(super) fn physical_rejected_version_binding(
+    catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
+    physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    schema_version: SchemaVersionId,
+    logical_table: &str,
+) -> Result<PhysicalHistoryBinding, Error> {
+    let schema = catalogue_schemas
+        .get(&schema_version)
+        .ok_or(Error::InvalidStoredValue(
+            "physical rejected-version schema missing",
+        ))?;
+    let table = schema
+        .schema
+        .tables
+        .iter()
+        .find(|table| table.name == logical_table)
+        .ok_or_else(|| Error::TableNotFound(logical_table.to_owned()))?;
+    let mapping = physical_mappings
+        .get(&schema_version)
+        .and_then(|mapping| mapping.tables.get(logical_table))
+        .ok_or(Error::InvalidStoredValue(
+            "physical rejected-version table mapping missing",
+        ))?;
+    Ok(PhysicalHistoryBinding {
+        storage_table: physical_rejected_versions_table_name(mapping.table_id),
+        descriptor: physical_rejected_version_descriptor(table, mapping)?,
     })
 }
 
@@ -304,6 +337,14 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "physical row logical table mapping missing",
             ))
+    }
+
+    pub(super) fn physical_table_ids(&self) -> BTreeSet<PhysicalTableId> {
+        self.catalogue
+            .physical_mappings
+            .values()
+            .flat_map(|mapping| mapping.tables.values().map(|table| table.table_id))
+            .collect()
     }
 
     pub(super) fn physical_history_source_graph(
@@ -621,6 +662,27 @@ where
                 }
                 self.database.commit_batch(batch)?;
             }
+
+            let table = physical_rejected_versions_table_name(table_id);
+            let rows = match self.database.primary_key_scan_raw(&table, &[]) {
+                Ok(rows) => rows
+                    .into_iter()
+                    .map(|row| row.owned_record())
+                    .collect::<Vec<_>>(),
+                Err(GrooveDbError::TableNotFound(_)) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if rows.is_empty() {
+                continue;
+            }
+            let mut batch = self.database.open_batch();
+            for row in rows {
+                batch.delete(
+                    &table,
+                    rejected_version_primary_key_from_record(&row.borrowed())?,
+                );
+            }
+            self.database.commit_batch(batch)?;
         }
         Ok(())
     }
@@ -829,6 +891,29 @@ where
             groove::records::VersionedRecord::new(version.schema_version_alias().0, record),
         ))
     }
+
+    pub(super) fn rejected_version_storage_write_binding(
+        &self,
+        version: &VersionRow,
+        logical_record: &OwnedRecord,
+    ) -> Result<(groove::Intern<String>, groove::records::VersionedRecord), Error> {
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "rejected row schema version alias missing",
+            ))?;
+        let binding = physical_rejected_version_binding(
+            &self.catalogue.catalogue_schemas,
+            &self.catalogue.physical_mappings,
+            schema_version,
+            version.table(),
+        )?;
+        let record = OwnedRecord::new(logical_record.raw().to_vec(), binding.descriptor);
+        Ok((
+            groove::Intern::new(binding.storage_table),
+            groove::records::VersionedRecord::new(version.schema_version_alias().0, record),
+        ))
+    }
 }
 
 pub(super) fn physical_version_storage_tables(
@@ -863,7 +948,7 @@ pub(super) fn physical_version_storage_tables(
         }
     }
 
-    let mut tables = Vec::with_capacity(lineages.len() * 6);
+    let mut tables = Vec::with_capacity(lineages.len() * 7);
     for (table_id, variants) in lineages {
         let (_, template_table, _) = variants
             .first()
@@ -958,8 +1043,26 @@ pub(super) fn physical_version_storage_tables(
         let mut register_ahead = logical_ahead_tables[1].clone();
         register_ahead.name = physical_register_ahead_current_table_name(table_id);
 
+        let rejected_template = template_table.rejected_versions_storage_table();
+        let rejected_system_columns = rejected_template
+            .columns
+            .iter()
+            .take(RejectedVersionRowRecord::USER_CELLS)
+            .cloned();
+        let rejected_columns = rejected_system_columns.chain(physical_columns.iter().map(
+            |(column_id, column_type)| {
+                GrooveColumnSchema::new(physical_user_column_field(*column_id), column_type.clone())
+            },
+        ));
+        let mut rejected = GrooveTableSchema::new(
+            physical_rejected_versions_table_name(table_id),
+            rejected_columns,
+        );
+        rejected.primary_key = rejected_template.primary_key.clone();
+
         let mut layouts_by_alias = BTreeMap::new();
         let mut current_layouts_by_alias = BTreeMap::new();
+        let mut rejected_layouts_by_alias = BTreeMap::new();
         for (schema_version, logical_table, mapping) in &variants {
             let alias = schema_version_aliases.get(&schema_version).copied().ok_or(
                 Error::InvalidStoredValue("physical history schema alias missing"),
@@ -976,6 +1079,12 @@ pub(super) fn physical_version_storage_tables(
                     "schema maps multiple logical tables to one physical lineage",
                 ));
             }
+            let fields = physical_rejected_version_field_names(logical_table, mapping)?;
+            if rejected_layouts_by_alias.insert(alias, fields).is_some() {
+                return Err(Error::InvalidStoredValue(
+                    "schema maps multiple logical tables to one physical lineage",
+                ));
+            }
         }
         for (alias, fields) in layouts_by_alias {
             physical = physical.with_schema_version(alias.0, fields);
@@ -984,12 +1093,16 @@ pub(super) fn physical_version_storage_tables(
             physical_global = physical_global.with_schema_version(alias.0, fields.clone());
             physical_ahead = physical_ahead.with_schema_version(alias.0, fields);
         }
+        for (alias, fields) in rejected_layouts_by_alias {
+            rejected = rejected.with_schema_version(alias.0, fields);
+        }
         tables.push(physical);
         tables.push(register);
         tables.push(physical_global);
         tables.push(register_global);
         tables.push(physical_ahead);
         tables.push(register_ahead);
+        tables.push(rejected);
     }
     Ok(tables)
 }
@@ -1025,6 +1138,27 @@ fn physical_current_descriptor(
     if logical_descriptor.fields().len() != physical_names.len() {
         return Err(Error::InvalidStoredValue(
             "physical current descriptor width mismatch",
+        ));
+    }
+    Ok(records::RecordDescriptor::new(
+        physical_names.into_iter().zip(
+            logical_descriptor
+                .fields()
+                .iter()
+                .map(|field| field.value_type.clone()),
+        ),
+    ))
+}
+
+fn physical_rejected_version_descriptor(
+    table: &TableSchema,
+    mapping: &TablePhysicalMapping,
+) -> Result<records::RecordDescriptor, Error> {
+    let logical_descriptor = table.rejected_versions_storage_table().record_schema();
+    let physical_names = physical_rejected_version_field_names(table, mapping)?;
+    if logical_descriptor.fields().len() != physical_names.len() {
+        return Err(Error::InvalidStoredValue(
+            "physical rejected-version descriptor width mismatch",
         ));
     }
     Ok(records::RecordDescriptor::new(
@@ -1089,6 +1223,35 @@ fn physical_current_field_names(
                 .copied()
                 .ok_or(Error::InvalidStoredValue(
                     "physical current column mapping missing",
+                ))?;
+        fields.push(physical_user_column_field(column_id));
+    }
+    Ok(fields)
+}
+
+fn physical_rejected_version_field_names(
+    table: &TableSchema,
+    mapping: &TablePhysicalMapping,
+) -> Result<Vec<String>, Error> {
+    let logical_descriptor = table.rejected_versions_storage_table().record_schema();
+    let mut fields = logical_descriptor
+        .fields()
+        .iter()
+        .take(RejectedVersionRowRecord::USER_CELLS)
+        .map(|field| {
+            field.name.clone().ok_or(Error::InvalidStoredValue(
+                "physical rejected-version system field unnamed",
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for column in &table.columns {
+        let column_id =
+            mapping
+                .columns
+                .get(&column.name)
+                .copied()
+                .ok_or(Error::InvalidStoredValue(
+                    "physical rejected-version column mapping missing",
                 ))?;
         fields.push(physical_user_column_field(column_id));
     }

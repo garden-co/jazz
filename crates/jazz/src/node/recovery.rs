@@ -17,8 +17,8 @@ where
         tx_id: TxId,
     ) -> Result<Vec<RejectedVersion>, Error> {
         let mut versions = Vec::new();
-        for table in self.catalogue.schema.tables.clone() {
-            let storage_table = rejected_versions_table_name(&table.name);
+        for table_id in self.physical_table_ids() {
+            let storage_table = physical_rejected_versions_table_name(table_id);
             for raw in self.database.primary_key_scan_raw(
                 &storage_table,
                 &[Value::U64(tx_id.time.0), Value::U64(alias.0)],
@@ -29,9 +29,19 @@ where
                 if node_id != alias.0 || time != tx_id.time.0 {
                     continue;
                 }
+                let schema_alias = SchemaVersionAlias(raw.schema_version());
+                let schema_version = self.schema_version_for_alias(schema_alias).ok_or(
+                    Error::InvalidStoredValue("rejected row schema version alias missing"),
+                )?;
+                let logical_table =
+                    self.logical_table_for_physical_alias(table_id, schema_alias)?;
+                let logical_descriptor = self
+                    .table_in_schema(&logical_table, schema_version)?
+                    .rejected_versions_storage_table()
+                    .record_schema();
                 versions.push(RejectedVersion::new(
-                    table.name.clone(),
-                    OwnedRecord::new(raw.raw().to_vec(), record.descriptor()),
+                    logical_table,
+                    OwnedRecord::new(raw.raw().to_vec(), logical_descriptor),
                 ));
             }
         }

@@ -493,8 +493,16 @@ remain compatible with databases written by the former per-schema history layout
    - Add a storage-read receipt proving read cost stays constant as schema-version count increases.
 
 6. Convert the remaining schema-keyed storage.
+   **Status: in progress.** Rejected-version storage is complete; branch
+   overlays and the remaining key audit are still pending.
    - Branch overlays: retain branch identity, remove schema identity.
-   - Audit global-change keys, rejected-version storage, large-value checkpoints, and any table/column-name-derived keys.
+   - Rejected versions: `jazz_rejected_transactions` remains global transaction
+     metadata. Each `PhysicalTableId` now owns one schema-versioned rejected
+     payload archive; logical-name payload tables are no longer lowered. Rows
+     retain their authored `SchemaVersionAlias`, and recovery derives their
+     authored logical table and descriptor from the alias plus physical lineage.
+   - Audit global-change keys, large-value checkpoints, and any remaining
+     table/column-name-derived keys.
    - Remove `jazz_partitions` only after recovery no longer depends on it.
 
 7. Implement unset/data-preservation semantics later.

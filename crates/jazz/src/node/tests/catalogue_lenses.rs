@@ -380,6 +380,120 @@ fn table_and_column_rename_reuses_the_existing_physical_identities() {
 }
 
 #[test]
+fn rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen() {
+    // Rejected payload storage is intentionally not public API, so this test
+    // inspects its physical identity and stored schema discriminator directly.
+    let base = schema();
+    let renamed_schema = JazzSchema::new([TableSchema::new(
+        "tasks",
+        [ColumnSchema::new("name", ColumnType::String)],
+    )]);
+    let renamed = SchemaVersion::new(renamed_schema.clone());
+    let (dir, mut core) = open_node_with_schema(node(0x34), base.clone());
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(renamed.clone()),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::PublishLens {
+        author: AuthorId::SYSTEM,
+        lens: MigrationLens::new(
+            base.version_id(),
+            renamed.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "tasks".to_owned(),
+                ops: vec![
+                    LensOp::RenameTable {
+                        from: "todos".to_owned(),
+                        to: "tasks".to_owned(),
+                    },
+                    LensOp::RenameColumn {
+                        from: "title".to_owned(),
+                        to: "name".to_owned(),
+                    },
+                ],
+            }],
+        ),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: renamed.id,
+        },
+    })
+    .unwrap();
+
+    let tx = core.open_exclusive().unwrap();
+    core.tx_write(
+        tx,
+        "tasks",
+        row(0x35),
+        BTreeMap::from([("name".to_owned(), v("retry renamed"))]),
+        None,
+    )
+    .unwrap();
+    let (rejected, _unit) = core.commit_exclusive(tx, AuthorId::SYSTEM, 10).unwrap();
+    core.apply_sync_message(SyncMessage::FateUpdate {
+        tx_id: rejected,
+        fate: Fate::Rejected(RejectionReason::ExclusiveConflict),
+        global_seq: None,
+        durability: None,
+    })
+    .unwrap();
+
+    let table_id = core.catalogue.physical_mappings[&base.version_id()].tables["todos"].table_id;
+    assert_eq!(
+        core.catalogue.physical_mappings[&renamed.id].tables["tasks"].table_id,
+        table_id
+    );
+    let storage_table = physical_rejected_versions_table_name(table_id);
+    let rows = core
+        .database
+        .primary_key_scan_raw(&storage_table, &[])
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].schema_version(),
+        core.catalogue.schema_version_aliases[&renamed.id].0
+    );
+    for logical_table in ["jazz_todos_rejected_versions", "jazz_tasks_rejected_versions"] {
+        assert!(matches!(
+            core.database.table_schema(logical_table),
+            Err(GrooveDbError::TableNotFound(_))
+        ));
+    }
+    let stored = core.rejected_transaction(rejected).unwrap();
+    assert_eq!(stored.versions()[0].table(), "tasks");
+    assert_eq!(
+        stored.versions()[0].cell(&renamed_schema.tables[0], "name"),
+        Some(v("retry renamed"))
+    );
+
+    drop(core);
+    let mut reopened = reopen_node_at(&dir, node(0x34), base);
+    let recovered = reopened.rejected_transaction(rejected).unwrap();
+    assert_eq!(recovered.versions(), stored.versions());
+    assert_eq!(recovered.versions()[0].table(), "tasks");
+    assert_eq!(
+        recovered.versions()[0].cell(&renamed_schema.tables[0], "name"),
+        Some(v("retry renamed"))
+    );
+
+    reopened.discard_rejection(rejected).unwrap();
+    assert!(reopened
+        .database
+        .primary_key_scan_raw(&storage_table, &[])
+        .unwrap()
+        .is_empty());
+    drop(reopened);
+    let reopened = reopen_node_at(&dir, node(0x34), schema());
+    assert!(reopened.rejected_transaction(rejected).is_none());
+}
+
+#[test]
 fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
     let base = schema();
     let renamed_schema = JazzSchema::new([TableSchema::new(

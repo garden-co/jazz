@@ -3232,8 +3232,8 @@ where
             "jazz_rejected_transactions",
             rejected_transaction_primary_key(alias, tx_id),
         );
-        for table in self.catalogue.schema.tables.clone() {
-            let storage_table = rejected_versions_table_name(&table.name);
+        for table_id in self.physical_table_ids() {
+            let storage_table = physical_rejected_versions_table_name(table_id);
             for raw in self.database.primary_key_scan_raw(
                 &storage_table,
                 &[Value::U64(tx_id.time.0), Value::U64(alias.0)],
