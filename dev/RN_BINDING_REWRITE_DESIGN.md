@@ -1,8 +1,9 @@
 # React Native binding rewrite — design
 
-Status: proposed (2026-08-07). Owner: RN surface owner.
-Scope: `crates/groove` SQLite storage backend, `crates/jazz-rn` rewrite,
-`packages/jazz-tools/src/react-native` wiring, revived Expo example E2E.
+Status: proposed (2026-08-07, amended same day after design review). Owner: RN
+surface owner. Scope: `crates/groove` SQLite storage backend, `crates/jazz-rn`
+rewrite, `packages/jazz-tools/src/react-native` wiring, revived Expo example
+E2E.
 
 ## 1. Context
 
@@ -15,12 +16,7 @@ TS RN scaffold (`packages/jazz-tools/src/react-native`) is compile-level only:
 persistent configs throw `UnimplementedSqliteStorageDriver`, and the fallback
 path loads the WASM runtime, which Hermes cannot execute.
 
-The v2 runtime already has two proven bindings over one shared contract:
-
-- `jazz-napi` — Node, holds `Rc<Db<S>>` directly on the JS thread.
-- `jazz-wasm` — browser, single-threaded by construction.
-
-Both are driven by the same TypeScript adapter
+The v2 runtime already has two bindings driven by the same TypeScript adapter
 (`packages/jazz-tools/src/runtime/native-runtime/native-runtime-adapter.ts`),
 which speaks a structural `NativeDb` contract: postcard-encoded rows and
 schemas, JSON option bags, `setTickScheduler`/`tick()`, byte-queue transports
@@ -30,6 +26,18 @@ pumped by a JS-owned WebSocket (`WebSocketCarrier`), non-blocking
 requires that bindings not fork query/transaction/sync semantics; the RN
 binding therefore implements this same contract rather than resurrecting the
 old JSON `RnRuntime` surface.
+
+### Compatibility target
+
+The target is the **full `NativeDb` contract and the SPEC 13.7.5 capability
+matrix**, not "whatever `jazz-napi` exposes today". The matrix marks exclusive
+transactions, dry-run permission probes, and transaction reads as required
+(`Y`) for both WASM and NAPI ABIs, and the adapter's public API depends on
+them (`readPlainRows` throws "Native runtime does not support transaction
+reads" when `allInTransaction` is missing). `jazz-wasm` implements all of
+them; `jazz-napi` currently implements none of them and is itself behind the
+matrix. Where the two disagree, **`jazz-wasm` is the behavioral reference**
+and the napi gap is recorded, not copied.
 
 ### Recorded decisions
 
@@ -71,9 +79,12 @@ crates/jazz-rn (ubrn / uniffi 0.30)         Send+Sync handles ── mpsc jobs �
 crates/groove storage/sqlite.rs             OrderedKvStorage + ReopenableStorage (new)
 ```
 
-One rule governs the whole stack: **jazz-rn exposes byte-for-byte the same
-contract as `NapiDb`** — same postcard payloads, same options JSON, same error
-message substrings — so every TS layer above the shim is reused unmodified.
+One rule governs the whole stack: **jazz-rn implements the full `NativeDb`
+contract with the same postcard payloads, options JSON, and error-code
+markers the adapter already consumes** — so every TS layer above the shim is
+reused unmodified. `jazz-wasm` is the reference implementation for behavior;
+`jazz-napi` is the reference for the actor-external method shapes it does
+implement.
 
 ## 3. Groove SQLite backend
 
@@ -83,14 +94,20 @@ amalgamation cross-compiles cleanly for aarch64-apple-ios and Android NDK
 targets). Jazz's existing vestigial `sqlite = ["dep:rusqlite"]` feature is
 re-pointed to `["groove/sqlite"]` and its direct rusqlite dependency dropped.
 
-### Schema
+### Schema and format identification
 
 ```sql
-CREATE TABLE IF NOT EXISTS column_families (
+CREATE TABLE meta (
+  key   TEXT PRIMARY KEY,
+  value BLOB NOT NULL
+);                                   -- 'format' → 'jazz-groove-kv'
+                                     -- 'format_version' → 1
+                                     -- 'boundary_seq' → u64 (see Durability)
+CREATE TABLE column_families (
   id   INTEGER PRIMARY KEY,
   name TEXT NOT NULL UNIQUE
 );
-CREATE TABLE IF NOT EXISTS kv (
+CREATE TABLE kv (
   cf INTEGER NOT NULL,
   k  BLOB    NOT NULL,
   v  BLOB    NOT NULL,
@@ -98,52 +115,102 @@ CREATE TABLE IF NOT EXISTS kv (
 ) WITHOUT ROWID;
 ```
 
-`open(path, column_families)` interns CF names to ids; `reopen` re-interns and
-may add new CFs (matching `ReopenableStorage` semantics used on schema
-evolution). The composite PK B-tree provides the ordered contract directly:
+`open(path, column_families)`:
+
+- Fresh file ⇒ create the three tables and stamp `format`/`format_version`.
+- Existing file ⇒ **validate before use**: `meta.format`/`format_version`
+  must match and the table shapes must be exactly the expected ones
+  (`pragma table_info`). Any mismatch ⇒ `Error::InvalidStorageLayout` with a
+  message naming what diverged. `CREATE TABLE IF NOT EXISTS` alone is not an
+  acceptance test — an unrelated pre-existing SQLite file must be rejected,
+  not adopted.
+- CF names intern to ids; `reopen(self, cfs)` re-validates and may add new
+  CFs (matching `ReopenableStorage` semantics used on schema evolution).
+
+### Contract implementation
+
+The composite PK B-tree provides the ordered contract:
 
 - `get`/`set`/`delete` — point ops on `(cf, k)`.
-- `scan_range(cf, start, end)` — `WHERE cf=? AND k>=? AND k<?` ordered by `k`,
-  streamed through the `ScanVisitor` callback (no materialization).
-- `scan_prefix` / `scan_prefix_reverse` / `last_with_prefix` /
-  `last_with_prefix_before_or_at` — prefix upper bound computed by
-  rightmost-byte increment (empty prefix ⇒ full-CF scan); reverse variants use
-  `ORDER BY k DESC`, `last_*` use `LIMIT 1`.
-- `write_many(ops)` — one SQLite transaction over the batch: atomicity parity
-  with the RocksDB `WriteBatch`.
+- `scan_range(cf, start, end)` — `WHERE cf=? AND k>=? AND k<?` ordered by
+  `k`, streamed through the `ScanVisitor` callback (no materialization).
+- `scan_prefix` family — lower bound `k >= prefix` plus a **prefix predicate
+  with early termination**, not a computed upper bound alone. When the prefix
+  has a rightmost non-`0xFF` byte, the incremented exclusive upper bound is
+  used as an index-range optimization; a prefix consisting entirely of `0xFF`
+  bytes has **no finite upper bound**, and the scan must run upper-unbounded
+  and stop on the first non-`starts_with` key (forward) or skip the
+  non-matching tail (reverse). The existing conformance fixtures already
+  place `[0xff, …]` keys; the suite adds all-`0xFF` prefixes explicitly.
+- `write_many(ops)` — one SQLite transaction over the batch. Must support all
+  three `WriteOperation` variants, including **`Delta`**: deltas apply in
+  operation order with read-your-own-writes semantics inside the batch (a
+  `Delta` on a key written earlier in the same batch reads that staged value,
+  matching the memory/RocksDB backends' merge behavior), decoding via the
+  shared `StorageDelta` machinery, and erroring the whole transaction on an
+  invalid delta (`InvalidStorageDelta`), leaving no partial state.
+- `close()` — the trait closes through `&self` while
+  `rusqlite::Connection::close` consumes the connection, so the backend holds
+  `RefCell<Option<Connection>>`; `close()` takes the connection out,
+  checkpoints (see Durability), and closes it. Post-close calls surface a
+  closed-storage error, and reopen after close succeeds (mobile
+  kill/restore is a first-class path).
 - `column_family_names()` — from the intern table.
-- `approximate_class_bytes` — `SELECT SUM(LENGTH(k)+LENGTH(v))` per CF is
-  O(n); return `Ok(None)` (the contract's "unsupported" answer) unless a cheap
-  page-count heuristic proves useful later.
+- `approximate_class_bytes` — `Ok(None)` (the contract's "unsupported"
+  answer) unless a cheap page-count heuristic proves useful later.
 
 ### Durability
 
-Mirrors the RocksDB backend's `Durability` enum, whose `WalNoSync` doc already
-reads "like SQLite WAL/NORMAL":
+`Durability` (`FullSync` / `WalNoSync`) is today defined inside the
+RocksDB-gated module and exported only under `feature = "rocksdb"`. **M1
+lifts it into `storage/mod.rs` as a backend-neutral type** (RocksDB re-export
+kept for compatibility) so the SQLite backend can accept it without dragging
+RocksDB in.
 
-- `journal_mode=WAL`, `foreign_keys` off, prepared-statement cache on.
-- `FullSync` ⇒ `synchronous=FULL` (every commit fsyncs).
-- `WalNoSync` ⇒ `synchronous=NORMAL` (WAL atomicity, no per-commit fsync).
-- `flush_write_boundary()` ⇒ forced WAL sync (`wal_checkpoint(PASSIVE)` after
-  an fsync-forcing commit), and resets the pending counter of
-  `set_write_flush_cadence`, exactly like RocksDB's `flush_wal(true)` path.
-- `close()` ⇒ `wal_checkpoint(TRUNCATE)` + connection close, releasing file
-  locks. Mobile lifecycle (kill/restore, background suspension) makes clean
-  close/reopen a first-class path, not a shutdown nicety.
+Mapping (`journal_mode=WAL` always):
+
+- `FullSync` ⇒ `synchronous=FULL`: every commit syncs the WAL. Durable
+  across power loss per SQLite's documented semantics.
+- `WalNoSync` ⇒ `synchronous=NORMAL`: WAL atomicity, commits are durable
+  across process death but **not** across power loss until the next durable
+  boundary. This is the tier's contract — RocksDB's `WalNoSync` doc defines
+  itself as "like SQLite WAL/NORMAL" — so no stronger claim is made.
+- `flush_write_boundary()` ⇒ forces a real durable boundary, defined as: a
+  bump of `meta.boundary_seq` committed with WAL sync forced for that commit
+  (per-connection `PRAGMA synchronous=FULL` around the marker commit, then
+  restored). This is verifiable — the commit either returns an error or the
+  boundary is on disk — and does not depend on checkpointing. It resets the
+  `set_write_flush_cadence` pending counter, mirroring RocksDB's
+  `flush_wal(true)` path.
+- Checkpoints are a compaction concern, not the durability mechanism:
+  `wal_checkpoint(TRUNCATE)` runs at `close()` under a `busy_timeout`, and
+  its result is checked — `SQLITE_BUSY`/partial checkpoint at close is an
+  error surfaced to the caller, not silently ignored. No checkpoint is
+  attempted on the hot path.
 
 ### Error mapping
 
-`SQLITE_CORRUPT`/`SQLITE_NOTADB` and open-time shape mismatches map onto the
-same `storage::Error` variants the OPFS/RocksDB backends use for corruption
-and migration reporting, satisfying the SPEC 13 gate ("migration reporting,
-corruption behavior, durability tests") before `OpenStorage` advertises the
-backend.
+`groove::storage::Error` has no shared corruption variant today (RocksDB and
+OPFS each carry a `#[from]` transparent variant). M1 adds, gated on the
+feature:
+
+```rust
+#[cfg(feature = "sqlite")]
+#[error(transparent)]
+Sqlite(#[from] rusqlite::Error),
+```
+
+plus uses `InvalidStorageLayout` for open-time format/shape mismatches (see
+above). Corruption (`SQLITE_CORRUPT`, `SQLITE_NOTADB`) surfaces through the
+`Sqlite` variant with the SQLite result code preserved; the conformance suite
+asserts that a truncated/garbage file produces it at open or first read
+rather than a panic or silent empty database.
 
 ### Threading note
 
-`OrderedKvStorage` is used thread-affinely by `Db`; the backend keeps a single
-`rusqlite::Connection` in a `RefCell` and is `!Sync` like its siblings. No
-connection pool, no async.
+`OrderedKvStorage` is used thread-affinely by `Db`; the backend keeps its
+single connection in the `RefCell<Option<Connection>>` and is `!Sync` like
+its siblings. No connection pool, no async.
 
 ## 4. `crates/jazz-rn` (Rust)
 
@@ -151,39 +218,94 @@ UniFFI proc-macro surface (no UDL), uniffi 0.30, generated for RN by
 `uniffi-bindgen-react-native` exactly as the existing scaffold configures
 (`ubrn.config.yaml`, `cpp/`, `android/`, `ios/`, podspec unchanged in shape).
 
-### 4.1 Core thread (actor)
+Crate features: `jazz = { default-features = false, features = ["sqlite",
+"transport-compression-zstd"] }`. The compression feature is not optional
+polish: the shared `WebSocketCarrier` advertises `FEATURE_PAYLOAD_ZSTD` in
+the wire `Hello` unconditionally, so a native client without the zstd decode
+path can be handed frames it cannot decode (§11 records the pre-existing
+napi instance of this bug). `zstd-sys` is plain C and cross-compiles for
+mobile targets without the RocksDB-class pain.
+
+### 4.1 Core thread (actor) and its lifecycle
 
 - `RnDb.open_memory(schema, config)` / `open_persistent(data_path, schema,
 config)` spawn one `jazz-rn-core` thread per database. The thread decodes
   the same postcard `(schema, config)` payload napi's `decode_core_open_args`
   consumes, opens `MemoryStorage::new(&cfs)` or `SqliteStorage::open(path,
-&cfs)`, builds the `Db` via the shared `open_core_db` path, then loops on
+&cfs)`, builds the `Db` via the shared open path, then loops on
   `mpsc::Receiver<Job>`.
 - `Job = Box<dyn FnOnce(&mut CoreState) + Send>`. `CoreState` owns the `Db`
   plus id-keyed registries: prepared queries, query attachments, open
-  transactions, writes (`TxId`s), subscriptions (`SubscriptionStream`s),
-  transports (`PeerConnection` + wire queues). Ids mint from an `AtomicU64`.
-- Handle objects (`RnDb`, `RnTx`, `RnWrite`, `RnTransport`, `RnSubscription`,
-  `RnPreparedQuery`, `RnQueryAttachment`) are `#[derive(uniffi::Object)]`
-  structs holding `{jobs: Sender<Job>, id: u64}` — trivially `Send + Sync`.
-  Sync methods marshal a job plus `mpsc` reply channel and block for the
-  round-trip (µs-scale; the same order as the JSI hop itself). `Drop` on a
-  handle enqueues a best-effort release job (open transactions abandon, napi
-  `Tx::drop` parity).
-- Open/close: `RnDb.close()` drains the queue, tears down transports and the
-  scheduler callback, flushes and closes storage, and terminates the thread.
-  A second `open_persistent` on the same path after `close()` must succeed
-  (lock-release test).
+  transactions, writes (`TxId`s), write-state waiters, subscriptions
+  (`SubscriptionStream`s), transports (`PeerConnection` + wire queues). Ids
+  mint from an `AtomicU64`.
+- Handle objects (`RnDb`, `RnTx`, `RnWrite`, `RnWriteStateWaiter`,
+  `RnTransport`, `RnSubscription`, `RnPreparedQuery`, `RnQueryAttachment`)
+  are uniffi Objects holding `{actor: Arc<ActorHandle>, id: u64}` —
+  trivially `Send + Sync`. Sync methods marshal a job plus reply channel and
+  block for the round-trip (µs-scale; the same order as the JSI hop itself).
+  `Drop` on a handle enqueues a best-effort release job (open transactions
+  abandon, napi `Tx::drop` parity).
 
-### 4.2 Queries and futures
+**Lifecycle state machine.** `ActorHandle` carries an explicit shared state:
+
+```
+Open ──close()──► Closing ──drained──► Closed
+  │
+  └──job panic──► Poisoned(reason)
+```
+
+- **Job submission** checks the state under the same lock that guards the
+  sender: in `Closing`/`Closed`/`Poisoned`, submission fails fast with a
+  `Closed`/`Poisoned` error instead of enqueueing — a cloned handle can never
+  enqueue after the close barrier and block on a dead actor.
+- **Panic containment**: a per-FFI-call `catch_unwind` cannot catch a panic
+  that happens later on the core thread, so the **actor loop itself wraps
+  every job in `catch_unwind`**. Reply channels are completed on the panic
+  path (the job's reply sender is owned by the wrapper, which sends
+  `Err(Internal)` if the closure unwound), so no caller is left blocking. A
+  panicking job transitions the state to `Poisoned(reason)`; the loop then
+  drains remaining queued jobs by failing them, and every subsequent
+  submission errors without enqueueing.
+- **Close protocol**: `close()` moves `Open → Closing` (new submissions now
+  fail), enqueues the terminal job (teardown transports, clear the tick
+  scheduler, cancel all registered write-state waiters with a `Closed`
+  error, flush + close storage), then **joins the core thread** before
+  returning. Joining is safe precisely because the core thread never calls
+  into JS (next section) — the old crate's never-join rule applied to the
+  notifier, and still does; the DB actor is not the notifier.
+- The FFI-entry panic boundaries (`with_panic_boundary`) still port from the
+  old crate — they cover panics in argument parsing and channel plumbing on
+  the caller's thread.
+
+### 4.2 Queries, waits, and the write-state waiter
 
 Queries execute on the core thread with the crate-shared `block_on` (noop
 waker, immediate ticks), exactly as napi runs `core_block_on` on the JS
-thread. The one true-async method is
-`RnWrite.next_write_state_change() -> ()` — an async uniffi export backed by a
-`oneshot` whose sender fires from the core-thread
-`on_next_write_state_change` callback. No tokio; uniffi futures are polled by
-the generated foreign code (same pattern the old crate's async exports used).
+thread.
+
+`Db::next_write_state_change` is documented as a **wake primitive, not a
+predicate**: callers must check `write_state` before and after registration
+or wakeups are lost. The adapter does exactly that (check → register →
+re-check → await). A plain uniffi `async fn` cannot guarantee the middle
+step: uniffi async bodies run lazily when the foreign side first polls, so
+the JS Promise can exist — and the adapter's re-check can run — before
+registration has executed. The design therefore splits the primitive:
+
+- `RnWrite.register_write_state_waiter() -> RnWriteStateWaiter` — **sync**;
+  the reply arrives only after the core thread has executed the registration
+  job (`on_next_write_state_change` installing a fire-once channel sender).
+  When this method returns, registration has provably happened.
+- `RnWriteStateWaiter.wait()` — **async**; awaits the already-registered
+  oneshot. Fires on state transition, or errors with `Closed` when `close()`
+  cancels waiters.
+- The TS shim composes them: `nextWriteStateChange = () =>
+write.registerWriteStateWaiter().wait()`, preserving the adapter's
+  check-register-recheck pattern unchanged.
+
+A dedicated Rust test forces a state transition into every boundary
+(before registration, between registration and await, after await) to prove
+no lost wakeup.
 
 ### 4.3 Tick scheduling and the notifier thread
 
@@ -200,6 +322,8 @@ busy core thread — the old crate's deadlock lesson (`64b033b19`). The old
   `"deferred"`, napi's vocabulary). JS responds by calling `rnDb.tick()`,
   which enqueues a tick job. Debounce lives Rust-side; deferred-tick pacing
   stays in the TS adapter as today.
+- The notifier remains detached and is never joined; only the DB actor joins
+  on close (§4.1).
 
 ### 4.4 Transport
 
@@ -214,17 +338,28 @@ busy core thread — the old crate's deadlock lesson (`64b033b19`). The old
 JS owns the WebSocket via the untouched `WebSocketCarrier`; React Native's
 built-in `WebSocket` (binary `arraybuffer` mode) is sufficient.
 
-### 4.5 Exported surface (napi parity)
+### 4.5 Exported surface (full `NativeDb` contract)
 
-| Object                                 | Methods                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `RnDb`                                 | `open_memory`, `open_persistent` (constructors); `set_tick_scheduler`, `tick`, `close`; `prepare_query`; `all`, `all_for_identity`; `all_relation_query(_for_identity)`, `all_relation_snapshot(_for_identity)`; `local_current_row`; `set_identity_claims`; `attach_query(_for_identity)`, `query_attachment_is_covered`, `detach_query`; `subscribe(_for_identity)`, `subscribe_relation_query(_for_identity)`; `insert_with_id_encoded(_for_identity)`, `update_encoded(_for_identity)`, `upsert_encoded(_for_identity)`, `delete(_for_identity)`, `restore_encoded(_for_identity)`; `mergeable_tx(_for_identity)`; `connect_upstream` |
-| `RnTx`                                 | `insert_with_id_encoded`, `update_encoded`, `upsert_encoded`, `delete`, `restore_encoded`, `commit -> RnWrite`, `rollback`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `RnWrite`                              | `payload`, `wait(tier)`, `write_state -> String(JSON)`, `next_write_state_change` (async), `close`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `RnTransport`                          | `send_wire_frame(s)`, `recv_wire_frames`, `tick`, `close`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `RnSubscription`                       | `read_all -> Vec<String(JSON)>`, `drain`, `close`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `RnPreparedQuery`, `RnQueryAttachment` | opaque handles                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| module fns                             | `mint_local_first_token`, `mint_anonymous_token`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Object                                 | Methods                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RnDb`                                 | `open_memory`, `open_persistent` (constructors); `set_tick_scheduler`, `tick`, `close`; `prepare_query`; `all`, `all_for_identity`; `all_relation_query(_for_identity)`, `all_relation_snapshot(_for_identity)`; `all_in_transaction(_for_identity)`; `local_current_row`; `set_identity_claims`; `can_insert_encoded(_for_identity)`, `can_read_for_identity`, `can_update_encoded_for_identity`, `can_delete_for_identity`; `attach_query(_for_identity)`, `query_attachment_is_covered`, `detach_query`; `subscribe(_for_identity)`, `subscribe_relation_query(_for_identity)`; `insert_with_id_encoded(_for_identity)`, `update_encoded(_for_identity)`, `upsert_encoded(_for_identity)`, `delete(_for_identity)`, `restore_encoded(_for_identity)`; `mergeable_tx(_for_identity)`, `exclusive_tx`; `connect_upstream` |
+| `RnTx`                                 | `insert_with_id_encoded`, `update_encoded`, `upsert_encoded`, `delete`, `restore_encoded`, `commit -> RnWrite`, `rollback`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `RnWrite`                              | `payload`, `wait(tier)`, `write_state -> String(JSON)`, `register_write_state_waiter -> RnWriteStateWaiter`, `close`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `RnWriteStateWaiter`                   | `wait()` (async)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `RnTransport`                          | `send_wire_frame(s)`, `recv_wire_frames`, `tick`, `close`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `RnSubscription`                       | `read_all -> Vec<String(JSON)>`, `drain`, `close`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `RnPreparedQuery`, `RnQueryAttachment` | opaque handles                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| module fns                             | `mint_local_first_token(secret, audience, ttl_seconds, now_seconds)`, `mint_anonymous_token(secret, audience, ttl_seconds, now_seconds)`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+
+The permission probes, `exclusive_tx`, and `all_in_transaction*` are
+implemented against the core `Db` facade (`can_insert`/`can_read`/
+`can_update`/`can_delete` per `INV-API-28`, `exclusive_tx()` per
+`INV-API-27`, open-transaction reads via the engine's
+`OverlayRef::OpenTransaction` path) with `jazz-wasm`'s implementations as
+the behavioral reference, since napi has not implemented them yet.
+
+The token functions take `now_seconds: u64` — `RuntimeTokenOptions` carries
+`nowSeconds` and the shim must pass it through, not synthesize time.
 
 Explicitly out: `JazzServer`, `TestJwtIssuer` (Node test fixtures),
 `verify_local_first_identity_proof` (backend-only; used by
@@ -237,8 +372,8 @@ wasm path).
 
 **Shared binding helpers.** The payload codecs and open path today live as
 per-crate copies in `jazz-napi` (`decode_core_open_args`, `open_core_db`,
-`decode_core_cells`, `encode_core_rows`, `core_wait_for_tx`, …) with twins in
-`jazz-wasm`. jazz-rn does not become copy three: M2 extracts these into a
+`decode_core_cells`, `encode_core_rows`, wait-state checking, …) with twins
+in `jazz-wasm`. jazz-rn does not become copy three: M2 extracts these into a
 shared `jazz` binding-support module (move, not redesign), `jazz-napi`
 switches to it in the same change (its existing suite verifies the move), and
 `jazz-wasm` adoption is a recorded follow-up. This is what makes the §4.6
@@ -246,21 +381,26 @@ switches to it in the same change (its existing suite verifies the move), and
 
 ### 4.6 Error contract
 
-`JazzRnError` (uniffi error enum, `thiserror`) with variants mirroring the old
-crate (`InvalidPayload`, `Schema`, `Runtime`, `Internal`, `Closed`). Two rules:
+`JazzRnError` (uniffi error enum, `thiserror`) with variants mirroring the
+old crate (`InvalidPayload`, `Schema`, `Runtime`, `Internal`, `Closed`,
+`Poisoned`). Two rules:
 
-1. **Wait-state messages are wire contract.** The adapter string-matches
-   pending/rejected states. The `wait(tier)` implementation must reuse napi's
-   `core_wait_for_tx` message text verbatim: `"transaction was rejected:
-{reason:?}"`, `"transaction has not been accepted at requested tier
-{tier:?}"`, `"transaction has not reached requested tier {tier:?}"`
-   (and coverage errors keep `NotObserved`/`NotCovered` markers). A shared
-   helper in `jazz` (extracted from jazz-napi) is preferred over copied
-   strings so the three bindings cannot drift.
-2. **Panics never cross the FFI.** `with_panic_boundary` /
-   `with_async_panic_boundary` port from the old crate around every export. A
-   panic on the core thread marks the actor poisoned; every subsequent call
-   returns `Internal("core thread died: …")` rather than aborting the app.
+1. **Wait-state errors carry binding-neutral core error codes.** The adapter
+   string-matches classes of failure, and the markers are the contract:
+   rejection recognition requires the **`WriteRejected`** marker
+   (`rejectedWaitError` matches nothing else), pending recognition matches
+   `NotObserved` / `"has not been accepted at requested tier"` / `"has not
+reached requested tier"`, and coverage-pending matches `NotCovered`. The
+   shared wait-state helper (§4.5) returns the core `ErrorCode` and renders
+   messages as `"{code}: {detail}"` — e.g. `WriteRejected: …` — rather than
+   preserving napi's current `"transaction was rejected: …"` text, which the
+   adapter does **not** recognize as a rejection. napi adopting the shared
+   helper in M2 fixes that stale text as a side effect; the TS suites that
+   encode these markers gate the change.
+2. **Panics never cross the FFI.** Entry boundaries as in the old crate, and
+   the actor-loop containment of §4.1. A panic on the core thread is
+   terminal for that `RnDb` (`Poisoned`): every subsequent call returns a
+   clear error rather than aborting the app.
 
 ## 5. TypeScript layer
 
@@ -268,15 +408,35 @@ crate (`InvalidPayload`, `Schema`, `Runtime`, `Internal`, `Closed`). Two rules:
   from the ubrn-generated classes to the adapter's `NativeDbConstructor` /
   `NativeDb` contract — camelCase mapping, `ArrayBuffer`↔`Uint8Array`
   conversion at the boundary, `setTickScheduler(cb)` registering the uniffi
-  callback interface, `nextWriteStateChange()` passing the uniffi Promise
-  through, `readAll()` parsing the JSON event strings.
+  callback interface, `nextWriteStateChange()` composed from the waiter
+  handle (§4.2), `readAll()` parsing the JSON event strings.
+- **Persistent identity is deterministic, or `INV-API-30` breaks.** On
+  reopen, locally originated pending transactions are rescheduled only when
+  `TxId.node == DbIdentity.node` and `made_by == DbIdentity.author` — a
+  random node id per launch silently orphans the outbox.
+  `DefaultRuntimeSource` already derives deterministic node/author bytes for
+  the persistent-browser path (`persistentIdentitySeed`,
+  `deterministicBytes`, `authorBytesForSubject`); M3 extracts those helpers
+  into a shared module and `ReactNativeRuntimeSource` reuses them keyed on
+  `(appId, env, userBranch, subject, dbName)`. A Rust-side reopen test plus a
+  TS test pin the derivation.
+- **Data directory is an explicit contract.** Public config supplies a
+  logical `dbName`, not a path, and React Native has no built-in filesystem
+  path API. `ReactNativeDbConfig` gains `dataDirectory: string` (absolute
+  path), required for persistent drivers — the RN provider errors clearly
+  without it. `jazz-tools/expo` supplies the convenience default from
+  `expo-file-system`'s document directory. The final path is
+  `${dataDirectory}/${sanitize(resolveDefaultPersistentDbName(config))}.db`;
+  sanitization is filename-safe (the old crate's alphanumeric/-/\_ rule), and
+  the Rust side runs `create_dir_all` on the parent at open. iOS backup
+  policy (excluding the DB from iCloud backup) is recorded as a non-gating
+  M5 follow-up.
 - **Rewired** `runtime-source.ts`: `ReactNativeRuntimeSource.load()` imports
   `jazz-rn` (optional peer dependency, same loading discipline as `jazz-wasm`
   on other platforms); `createClient()` builds
   `NativeRuntimeAdapter(RnDbShim, schema, node, author, …)` for both memory
-  and persistent drivers (persistent resolves `data_path` under the app's
-  documents directory); `mintLocalFirstToken`/`mintAnonymousToken` route to
-  the native module. No wasm load on RN at all.
+  and persistent drivers; `mintLocalFirstToken`/`mintAnonymousToken` route to
+  the native module, passing `nowSeconds` through. No wasm load on RN at all.
 - **Deleted**: `storage.ts` (`ReactNativeSqliteStorageDriver`,
   `UnimplementedSqliteStorageDriver`) and the `sqliteStorage` config hook —
   storage is native-side. `react-native/README.md` rewritten to describe the
@@ -295,10 +455,11 @@ payload → adapter `pumpSubscriptions()`.
 
 **Durability wait.** `waitForTransaction(tier)` loop (adapter, unchanged):
 `write.wait(tier)` round-trips the actor and either returns or throws a
-pending-marker error → adapter awaits `write.nextWriteStateChange()` (uniffi
-future; oneshot fired by core thread on state change) → retry. The JS thread
-is never blocked while frames still need pumping — same non-blocking contract
-napi relies on.
+pending-marker error → adapter calls `nextWriteStateChange()` (shim:
+sync-registered waiter, then async wait) → re-checks `wait(tier)` → awaits →
+retry. Registration-before-return makes the adapter's check-register-recheck
+sound across the FFI; the JS thread is never blocked while frames still need
+pumping.
 
 **Sync.** Server frame arrives on RN WebSocket → `WebSocketCarrier` →
 `transport.sendWireFrame(bytes)` → core thread ingests → tick scheduler wants
@@ -307,26 +468,29 @@ JS `rnDb.tick()` → core tick produces outbound frames + subscription events �
 adapter's debounced pump calls `transport.recvWireFrames()` → carrier sends;
 `subscription.readAll()` drains deltas → hooks re-render.
 
-**Cold start offline.** `open_persistent` reopens SQLite storage; schema
-catalogue and rows serve locally; queries at `tier: "local"` resolve without
-a transport, matching the local-first contract of the other bindings.
+**Cold start offline.** `open_persistent` reopens SQLite storage with the
+deterministic identity (§5); pending local transactions reschedule per
+`INV-API-30`; schema catalogue and rows serve locally; queries at
+`tier: "local"` resolve without a transport.
 
 ## 7. Error handling and lifecycle
 
-- Every FFI entry point returns `Result<_, JazzRnError>`; panic boundaries as
-  §4.6. JS exceptions inside the tick callback are caught by the notifier
-  (ported behavior) and never unwind into Rust.
+- Every FFI entry point returns `Result<_, JazzRnError>`; panic containment
+  and the actor state machine as §4.1/§4.6.
 - Core-thread poisoning is terminal per `RnDb`; the app-visible failure mode
   is a clear error, recoverable by reconstructing the client (RN dev-reload
   friendly). The installer-side "load exactly once" flags in `index.tsx`
   already handle metro reloads of the JS module itself.
 - App backgrounding: no special handling in v1 beyond durable-by-default
-  writes and clean `close()`; iOS jetsam after suspension is equivalent to
-  the kill/restore path the reopen tests cover.
+  writes and clean `close()`; iOS jetsam after suspension is exercised by the
+  abrupt-termination storage tests (§8) rather than assumed equivalent to a
+  clean close.
 - Transport loss: carrier reconnection and auth-failure routing stay in TS
-  (`WebSocketCarrier`, `wireAuthFailureReason`) — no Rust-side reconnect
-  logic, per the "RN runtime reuse" open question's direction (deterministic
-  connect/disconnect, no per-call executors).
+  (`WebSocketCarrier`, `wireAuthFailureReason`). Note the carrier currently
+  has **no retry** — one socket, closure reported, waiters failed (§9 orders
+  the E2E around this; richer reconnect is the existing SPEC 13 "RN runtime
+  reuse" open question plus the ledger's disconnect/reconnect NEEDS-PORT row,
+  out of scope here).
 
 ## 8. Testing
 
@@ -338,25 +502,39 @@ builders, then encoded with the same helpers the bindings use.
 1. **Groove conformance** (`crates/groove`): backend-parametrized suite
    running the ordered-KV contract over `SqliteStorage` and asserting
    behavioral equality with `MemoryStorage` — point ops, range/prefix/reverse
-   scans, `last_with_prefix*`, atomic `write_many` (including a mid-batch
-   failure leaving no partial state), reopen with added CFs, close → reopen
-   durability at both `Durability` levels, corruption reporting on a
-   truncated/garbage file.
-2. **Node harness over SQLite** (`crates/jazz`): run the existing node
+   scans, `last_with_prefix*`, all-`0xFF` prefixes, empty keys, multi-MB
+   values, atomic `write_many` covering `Set`/`Delete`/`Delta` (including
+   delta-after-set-in-same-batch read-your-own-writes and a mid-batch invalid
+   delta leaving no partial state), reopen with added CFs, format/shape
+   rejection of alien files, corruption surfacing from truncated/garbage
+   files, and close → reopen durability at both `Durability` levels.
+2. **Abrupt-termination durability** (`crates/groove`): subprocess writer is
+   `SIGKILL`ed at controlled points (after commit under `FullSync`; after
+   `flush_write_boundary` under `WalNoSync`; mid-batch); the parent reopens
+   and asserts WAL recovery yields exactly the durable prefix — boundary
+   guarantees for `WalNoSync`, per-commit guarantees for `FullSync`, never a
+   torn batch. Clean close → reopen tests cannot stand in for jetsam.
+3. **Node harness over SQLite** (`crates/jazz`): run the existing node
    test-harness storage matrix (the slot `NativeBtreeStorage` occupies) with
    `SqliteStorage` under `--features sqlite,test`.
-3. **jazz-rn crate tests** (host target, in-workspace): actor lifecycle
-   (open/close/reopen, drop-abandons-tx), napi-parity behavior for
-   write→wait→pending→settle across tiers, subscription delta delivery via a
-   registered tick callback, transport frame round-trip against an in-process
-   `jazz` server over the wire codec, the two ported scheduler regression
-   tests, and a poisoned-actor test (induced panic → subsequent calls error,
-   no abort).
-4. **TS unit** (`jazz-tools` vitest): shim contract tests over a mocked
-   generated module (tick registration, byte conversions, error mapping,
-   pending-wait recognition). The adapter itself is already covered by the
-   napi/wasm suites; no RN-specific adapter fork exists to test.
-5. **E2E** (§9): the only tier that exercises Hermes + JSI + real devices.
+4. **jazz-rn crate tests** (host target, in-workspace): actor lifecycle
+   (open/close/reopen, close-joins-actor, submission-after-close errors
+   without hanging, drop-abandons-tx), poisoning (induced job panic →
+   in-flight reply completes with error, queued jobs fail, subsequent calls
+   error, no abort), the §4.2 lost-wakeup matrix for the write-state waiter,
+   write→wait→pending→settle across tiers with the `WriteRejected`-marker
+   rendering, exclusive-tx + transaction reads + permission probes asserted
+   behaviorally against `jazz-wasm`'s semantics (shared fixtures), tick
+   scheduler regression tests (ported), transport frame round-trip against an
+   in-process `jazz` server over the wire codec including a
+   zstd-compressed-payload exchange, and deterministic-identity reopen
+   rescheduling (`INV-API-30`).
+5. **TS unit** (`jazz-tools` vitest): shim contract tests over a mocked
+   generated module (tick registration, byte conversions, waiter-handle
+   composition, error-marker mapping, `nowSeconds` passthrough), plus the
+   extracted identity-derivation helpers pinned against the current
+   persistent-browser values.
+6. **E2E** (§9): the only tier that exercises Hermes + JSI + real devices.
 
 **Gates.** `crates/jazz-rn/rust` re-enters `workspace.members` (the pause
 comment is resolved by this design). Canonical set additions: `cargo test -p
@@ -373,14 +551,23 @@ and the test targets land in the same PR as the code they cover.
 - Revive `examples/todo-client-localfirst-expo`: remove its pnpm-workspace
   exclusion (and the stress-test app's, only if free), port `App.tsx` /
   `schema.ts` / `permissions.ts` to the current jazz-tools API, point it at
-  the RN provider from `jazz-tools/react-native`.
+  the RN provider from `jazz-tools/react-native` with the Expo
+  `dataDirectory` default.
 - Build loop: `pnpm ubrn:ios` / `pnpm ubrn:android` in `crates/jazz-rn`
   produce the xcframework + jniLibs and regenerate bindings; `expo run:ios`
   on the simulator.
-- Gating scenario (iOS simulator): create todos offline → kill app → relaunch
-  → rows served from SQLite → start local server (`cargo run -p jazz` CLI) →
-  connect → writes reach `edge` tier → second client (Node script or web)
-  observes them; subscription deltas re-render live.
+- Gating scenario (iOS simulator), ordered around the carrier's
+  no-retry behavior — the app must not be asked to connect before its server
+  exists:
+  1. Launch with no `serverUrl` (pure local): create todos → kill app →
+     relaunch → rows served from SQLite (persistence + reopen).
+  2. Start the local server (`cargo run -p jazz` CLI) **first**, then
+     relaunch the app configured with `serverUrl`: pending local writes
+     upload (`INV-API-30`), new writes reach `edge` tier, a second client
+     (Node script or web) observes them, and subscription deltas re-render
+     live.
+     Automatic reconnect after a failed first connect is explicitly not part of
+     the scenario (no retry exists today; see §7).
 - Android: `ubrn build android` artifact must build; emulator validation
   best-effort.
 
@@ -388,34 +575,42 @@ and the test targets land in the same PR as the code they cover.
 
 Each lands green and independently valuable:
 
-1. **M1 — groove SQLite backend** + conformance/durability tests (+ jazz
-   feature re-point). No jazz-rn changes.
-2. **M2 — jazz-rn Rust rewrite** + workspace re-entry + crate tests, host
-   target only.
-3. **M3 — bindings + TS**: ubrn regeneration, `native-db.ts` shim,
-   `ReactNativeRuntimeSource` rewire, scaffold deletions, shim unit tests.
-4. **M4 — mobile artifacts**: `ubrn build ios` / `android` verified;
-   podspec/gradle fixes as needed.
+1. **M1 — groove SQLite backend**: `Durability` lift, backend, conformance +
+   abrupt-termination tests, jazz feature re-point. No jazz-rn changes.
+2. **M2 — shared binding helpers + jazz-rn Rust rewrite**: helper extraction
+   (napi adopts; wait-state helper renders `ErrorCode` markers), actor +
+   full surface + crate tests, workspace re-entry. Host target only.
+3. **M3 — bindings + TS**: ubrn regeneration, `native-db.ts` shim, identity
+   helper extraction, `ReactNativeRuntimeSource` rewire (incl.
+   `dataDirectory`), scaffold deletions, shim unit tests.
+4. **M4 — mobile artifacts**: `ubrn build ios` / `android` verified
+   (including cross-compiled `zstd-sys` + bundled SQLite); podspec/gradle
+   fixes as needed.
 5. **M5 — E2E**: revived Expo example, gating scenario on iOS simulator,
    spec/README/ledger updates recording the outcome.
 
 ## 11. Risks and open questions
 
-- **ubrn 0.30.0-1 ↔ uniffi 0.30 async/callback fidelity.** The old crate
-  proved sync methods + callback interfaces + async exports on this pair, but
-  not uniffi futures resolved from a non-JS thread. M3 starts with a spike
-  binding (`next_write_state_change` against a ticking core) before the full
-  surface is generated. Fallback if foreign-polled futures misbehave: a
-  callback-interface completion (`WriteStateWaiter.on_change()`) behind the
-  same shim Promise — contract unchanged.
+- **ubrn 0.30.0-1 ↔ uniffi 0.30 fidelity.** The old crate proved sync
+  methods + callback interfaces + async exports on this pair. The waiter
+  split (§4.2) removes the dependency on eager async-body execution, but M3
+  still starts with a spike binding (waiter handle + tick callback against a
+  live core) before the full surface is generated.
+- **Carrier feature advertisement is capability-blind (pre-existing).**
+  `WebSocketCarrier` hard-codes `FEATURE_PAYLOAD_ZSTD` into the Hello for
+  every native runtime; `jazz-napi` builds without any
+  `transport-compression-*` feature, so the napi path advertises a decoder it
+  does not compile. jazz-rn sidesteps it by compiling zstd (§4), and the
+  clean fix — carrier features derived from native capability — is recorded
+  as a follow-up on the shared-helper track, not solved here.
 - **Actor round-trip cost on bulk paths.** Initial sync pumps
   (`sendWireFrames`/`recvWireFrames`) are already batched; if per-call hops
   show up in E2E profiling, widen batching at the shim (frames per job), not
   the contract.
-- **SQLite blob-key edge cases.** Ordered-KV keys are arbitrary blobs; the
-  conformance suite includes empty keys, 0xFF-run prefixes (upper-bound
-  increment edge), and multi-MB values (large blob rows) before trusting the
-  backend under real fixtures.
+- **napi capability gap.** Probes/exclusive-tx/transaction-reads land in
+  jazz-rn per the SPEC matrix while napi remains behind; the matrix row stays
+  accurate only if napi's gap is tracked. Out of scope here beyond recording
+  it.
 - **Expo 54 / RN 0.81 new-architecture drift.** The scaffold predates the
   swap; podspec/codegen may need version bumps discovered only in M4. Treat
   as mechanical, timebox, and record fixes in the crate README.
@@ -430,5 +625,7 @@ Each lands green and independently valuable:
 - A public storage-driver plug-in API for RN (explicitly removed; the native
   backend is the route).
 - RocksDB-on-mobile packaging, per recorded decision 1.
+- WebSocket reconnect/retry (existing SPEC 13 open question + ledger
+  NEEDS-PORT row).
 - Old-runtime ledger rows marked NEEDS-PORT that concern the deleted broker /
   connection-manager surfaces.
