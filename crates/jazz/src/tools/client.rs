@@ -1390,6 +1390,14 @@ impl ClientDbInner {
                             .iter()
                             .map(|row| row.occurrence_id.clone())
                             .collect();
+                        let is_initial_reset = awaiting_initial_reset && reset;
+                        // The initial reset reduces from empty by definition.
+                        // Clearing here (and only here) discards any core setup
+                        // entries that preceded initial hydration; later resets
+                        // keep their delta-shaped relation to tracked rows.
+                        if is_initial_reset {
+                            current_rows.clear();
+                        }
                         // A local aggregate snapshot may retract while the
                         // relay concurrently publishes its replacement.  The
                         // relay correctly calls that replacement an update,
@@ -1421,7 +1429,7 @@ impl ClientDbInner {
                             .map(|row| row.row.clone())
                             .collect::<Vec<_>>();
                         inner.borrow_mut().remember_rows(&table, &rows_for_cache);
-                        let delta = if awaiting_initial_reset && reset {
+                        let delta = if is_initial_reset {
                             JazzClient::core_subscription_reset_delta(
                                 &db,
                                 &previous_rows,
