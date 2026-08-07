@@ -142,12 +142,25 @@ model other heterogeneous stores in the future, such as object-table subtypes or
 inherited table rows, by assigning their concrete row shapes local `u64` discriminators.
 
 Groove can implement this incrementally: first discriminator-aware record
-encoding and primary-key reads/scans, then variant-aware index maintenance and
-rebuilding, and finally variant-aware query field resolution.
+encoding and primary-key reads/scans, then variant-aware IVM ingress and query
+field resolution, and finally variant-aware index maintenance and rebuilding.
 
-For field resolution, we need a generic `VariantProject` Groove node that maps different
-row versions to a single schema version (making it possible to perform queries on top).
-Jazz builds its cases from lenses and physical mappings; Groove is not aware of those concepts.
+For field resolution, Groove uses a generic `VariantProject` source-boundary
+node that maps different row versions to one fixed output descriptor. Jazz
+builds its cases from lenses and physical mappings; Groove is not aware of those
+concepts. The node's projection target and output descriptor are immutable, so
+every downstream IVM node and active subscription continues to use the
+descriptor with which it was compiled.
+
+The set of supported input versions is not part of the node's graph identity.
+`VariantProject` consults an append-only runtime registry keyed by table,
+projection target, and source discriminator. Registering a previously unsupported
+source case extends the node's input domain without changing its `NodeId`, graph
+topology, output descriptor, or existing cases. Jazz must register a variant's
+descriptor and every required projection case before storing the first row with
+that discriminator. Consequently case registration never needs to backfill rows
+that were already present, and active subscriptions can consume subsequent rows
+as ordinary incremental deltas without graph rebuilding or reset.
 
 #### Avoiding data loss
 
@@ -370,39 +383,66 @@ Overall approach: start preserving today’s copy-forward/default behavior, incl
    - Include column identity now because reusable storage and indexes cannot
      safely be defined using logical names.
 
-2. Add schema-versioned record envelopes.
+2. Add schema-versioned Groove storage and IVM support.
    **Status: in progress (2026-08-06).** Groove's stable field catalogue,
    per-version ordered layouts, common batch insert/update/get/scan paths, mixed-version
    replacement, reopen coverage, window preservation, and Jazz
-   `SchemaVersionAlias` binding are implemented. Variant-aware indexes and
-   IVM/query resolution remain.
+   `SchemaVersionAlias` binding are implemented. Groove's descriptor-correct
+   heterogeneous IVM deltas and live-extensible, fixed-output variant projection
+   are also implemented. Variant-aware indexes and Jazz catalogue registration
+   remain.
    - Add generic schema-versioned tables to Groove, using a per-table `u64`
      version-to-descriptor registry.
-   - Make primary-key reads/scans, indexes, rebuilds, and query field resolution
+   - Make IVM table deltas retain their source discriminator and descriptor.
+     Cross-version updates retract the old payload through its old descriptor
+     and insert the new payload through its new descriptor.
+   - Add fixed-output `VariantProject` nodes backed by an append-only runtime
+     case registry. Registering a new input case must not rebuild the graph or
+     reset active subscriptions.
+   - Require Jazz to register the descriptor and projection cases for a schema
+     version before accepting rows authored in that version.
+   - Build durable indexes on fixed variant projections. A variant missing any
+     indexed field emits no index entry; uniqueness spans all variants.
+   - Make primary-key reads/scans, index rebuilding, and query field resolution
      select the row descriptor through its schema version.
    - Use `SchemaVersionAlias` as Jazz's discriminator and derive physical field
      descriptors from `PhysicalTableId` plus durable schema mapping metadata.
    - Initially use existing lens projection/default behavior when normalizing
      schema versions.
-   - Test mixed-schema-version scans, point reads, indexes, and restart recovery
-     before changing table placement.
+   - Test adding a variant while a subscription is active, mixed-version scans,
+     point reads, indexes, and restart recovery before changing table placement.
 
-3. Share immutable history first.
+3. Connect Jazz's catalogue to Groove's live variant registry.
+   - Build one stable Groove field catalogue per `PhysicalTableId`, naming user
+     fields from `PhysicalColumnId` rather than logical column names.
+   - Register every `SchemaVersionAlias` and compile its projection cases from
+     the durable physical mapping and lens paths.
+   - On lens publication, append the new variant and cases to the running Groove
+     database before enabling writes; do not rebuild Groove merely to teach it
+     the new variant.
+   - Prove that an active Jazz subscription retains its output descriptor and
+     receives new-version writes without rehydration.
+
+4. Share immutable history first.
    - Key content-history and deletion-register structures by `PhysicalTableId`.
-   - Replace `version_storage_sources()` fanout with one physical source per lineage.
-   - Keep global/ahead-current tables partitioned temporarily, giving us a contained vertical slice.
+   - Replace `version_storage_sources()` fanout with one physical source and a
+     fixed-output `VariantProject` per consumer.
+   - Keep global/ahead-current and branch-overlay tables partitioned temporarily,
+     giving us a contained vertical slice.
+   - Prove mixed-version history survives restart and that physical-source count
+     is independent of schema-version count.
 
-4. Share current state and indexes.
+5. Share current state and indexes.
    - Move global-current, ahead-current, and durable index prefixes to physical identities.
    - Replace the current union-and-`arg_max` path in [query_eval.rs](/Users/nicolasr/Desktop/Jazz/jazz2/crates/jazz/src/node/query_eval.rs:1256) with one source plus logical projection.
    - Re-enable the ordinary prepared-query path.
    - Add a storage-read receipt proving read cost stays constant as schema-version count increases.
 
-5. Convert the remaining schema-keyed storage.
+6. Convert the remaining schema-keyed storage.
    - Branch overlays: retain branch identity, remove schema identity.
    - Audit global-change keys, rejected-version storage, large-value checkpoints, and any table/column-name-derived keys.
    - Remove `jazz_partitions` only after recovery no longer depends on it.
 
-6. Implement unset/data-preservation semantics later.
+7. Implement unset/data-preservation semantics later.
 
    This becomes a semantic change on top of a storage model already capable of selecting layouts and physical columns, rather than being entangled with eliminating partition fanout.

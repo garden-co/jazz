@@ -1,7 +1,8 @@
-use groove::db::{Database, Error};
-use groove::records::{Value, VersionedRecord};
+use groove::db::{Database, Error, GraphBuilder, ProjectField};
+use groove::records::{RecordDescriptor, Value, VersionedRecord};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
+    TableSchemaVersion,
 };
 use groove::storage::{MemoryStorage, OrderedKvStorage};
 
@@ -34,6 +35,111 @@ fn row(version: u64, values: &[Value]) -> VersionedRecord {
         .record_schema_for_version(version)
         .expect("registered test version");
     VersionedRecord::create(version, descriptor, values).expect("valid test row")
+}
+
+#[test]
+fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
+-> Result<(), Box<dyn std::error::Error>> {
+    let table = TableSchema::new(
+        "items",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("completed", ColumnType::Bool),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+    .with_schema_version(1, ["title", "id"]);
+    let schema = DatabaseSchema::new([table]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let mut database = Database::new(schema, storage)?;
+    let output = RecordDescriptor::new([
+        ("id", ColumnType::U64.value_type()),
+        ("title", ColumnType::String.value_type()),
+    ]);
+    database.define_variant_projection("items", "reader-v1", output)?;
+    database.register_variant_projection_case(
+        "items",
+        "reader-v1",
+        1,
+        [ProjectField::named("id"), ProjectField::named("title")],
+    )?;
+
+    let subscription =
+        database.subscribe_one_sink(GraphBuilder::variant_project("items", "reader-v1"))?;
+    let subscription_id = subscription.id();
+    assert!(subscription.recv()?.is_empty());
+
+    let v1 = RecordDescriptor::new([
+        ("title", ColumnType::String.value_type()),
+        ("id", ColumnType::U64.value_type()),
+    ]);
+    let mut batch = database.open_batch();
+    batch.insert(
+        "items",
+        VersionedRecord::create(1, v1, &[Value::String("first".into()), Value::U64(1)])?,
+    );
+    database.commit_batch(batch)?;
+    assert_eq!(
+        subscription.recv()?.to_values()?,
+        vec![(vec![Value::U64(1), Value::String("first".into())], 1,)]
+    );
+
+    database.register_table_schema_version(
+        "items",
+        TableSchemaVersion::new(2, ["id", "title", "completed"]),
+    )?;
+    database.register_variant_projection_case(
+        "items",
+        "reader-v1",
+        2,
+        [ProjectField::named("id"), ProjectField::named("title")],
+    )?;
+    assert_eq!(subscription.id(), subscription_id);
+    assert!(subscription.try_recv().is_err());
+
+    let v2 = RecordDescriptor::new([
+        ("id", ColumnType::U64.value_type()),
+        ("title", ColumnType::String.value_type()),
+        ("completed", ColumnType::Bool.value_type()),
+    ]);
+    let mut batch = database.open_batch();
+    batch.update(
+        "items",
+        VersionedRecord::create(
+            2,
+            v2,
+            &[
+                Value::U64(1),
+                Value::String("first, revised".into()),
+                Value::Bool(true),
+            ],
+        )?,
+    );
+    database.commit_batch(batch)?;
+
+    let mut deltas = subscription.recv()?.to_values()?;
+    deltas.sort_by_key(|(_, weight)| *weight);
+    assert_eq!(
+        deltas,
+        vec![
+            (vec![Value::U64(1), Value::String("first".into())], -1,),
+            (
+                vec![Value::U64(1), Value::String("first, revised".into())],
+                1,
+            ),
+        ]
+    );
+    assert_eq!(
+        database
+            .query_graph(GraphBuilder::variant_project("items", "reader-v1"))?
+            .to_values()?,
+        vec![(
+            vec![Value::U64(1), Value::String("first, revised".into())],
+            1,
+        )]
+    );
+    Ok(())
 }
 
 #[test]

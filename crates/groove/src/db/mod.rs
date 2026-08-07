@@ -27,7 +27,7 @@ use crate::records::{
 };
 use crate::schema::{
     ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType, PrimaryKey,
-    PrimaryKeyColumn, PrimaryKeyType, TableSchema,
+    PrimaryKeyColumn, PrimaryKeyType, TableSchema, TableSchemaVersion,
 };
 use crate::storage::{
     LayoutStorage, OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay,
@@ -38,7 +38,8 @@ use thiserror::Error;
 
 pub use crate::ivm::{
     CollectByField, GraphBuilder, IvmRuntimeError, MultisinkDeltas, MultisinkSubscription,
-    PredicateExpr, PreparedShapeId, RoutedMultisinkTerminal, Subscription, SubscriptionId,
+    PredicateExpr, PreparedShapeId, ProjectField, RoutedMultisinkTerminal, Subscription,
+    SubscriptionId,
 };
 
 /// Schema-aware database facade over storage and IVM subscriptions.
@@ -203,6 +204,62 @@ where
 
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {
         self.ivm_runtime.set_auto_direct_family_enabled(enabled);
+    }
+
+    /// Append one row layout to an already schema-variant table.
+    ///
+    /// Registration is process-local schema metadata. Callers must restore all
+    /// durable variants before opening reads after restart, and must register
+    /// every required projection case before writing the first row of a newly
+    /// registered version.
+    pub fn register_table_schema_version(
+        &mut self,
+        table: &str,
+        schema_version: TableSchemaVersion,
+    ) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        let mut updated = self.table(table)?.clone();
+        if !updated.has_schema_variants() {
+            return Err(Error::CannotPromoteLiveTableToSchemaVariants(
+                table.to_owned(),
+            ));
+        }
+        updated.schema_versions.push(schema_version.clone());
+        validate_table_schema_variants(&updated)?;
+        self.ivm_runtime
+            .register_table_schema_version(table, schema_version)
+            .map_err(Error::IvmRuntime)
+    }
+
+    /// Define one fixed-output projection family for a heterogeneous table.
+    ///
+    /// The family identity and output descriptor are immutable. Source-version
+    /// cases may be appended later without replacing active graph nodes.
+    pub fn define_variant_projection(
+        &mut self,
+        table: &str,
+        target: &str,
+        output: RecordDescriptor,
+    ) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        self.ivm_runtime
+            .define_variant_projection(table, target, output)
+            .map_err(Error::IvmRuntime)
+    }
+
+    /// Append one source-version case to a fixed-output variant projection.
+    pub fn register_variant_projection_case(
+        &mut self,
+        table: &str,
+        target: &str,
+        schema_version: u64,
+        fields: impl IntoIterator<Item = ProjectField>,
+    ) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        let fields = fields.into_iter().collect::<Vec<_>>();
+        self.ivm_runtime
+            .register_variant_projection_case(table, target, schema_version, &fields)
+            .map_err(Error::IvmRuntime)
     }
 
     /// Include arrangement and recursive-state size walks in future tick metrics.
@@ -1729,7 +1786,8 @@ where
                 record_store_for_table(&self.storage, write.table(), key_descriptor, descriptor)
             })
             .collect::<Vec<_>>();
-        let table_deltas = compute_table_deltas(&pending_writes, &stores)?;
+        let table_deltas =
+            compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema())?;
         let mut staged_operations = pending_writes
             .iter()
             .map(|write| match write {
@@ -1855,7 +1913,6 @@ where
                     schema_version,
                     descriptor,
                     record,
-                    maintain_ivm: !table_schema.has_schema_variants(),
                 })
             }
             BatchOperation::InsertRaw { table, key, record } => {
@@ -1869,7 +1926,6 @@ where
                     schema_version,
                     descriptor,
                     record: record.clone(),
-                    maintain_ivm: !table_schema.has_schema_variants(),
                 })
             }
             BatchOperation::InsertRawFresh { table, key, record } => {
@@ -1883,7 +1939,6 @@ where
                     schema_version,
                     descriptor,
                     record: record.clone(),
-                    maintain_ivm: !table_schema.has_schema_variants(),
                 })
             }
             BatchOperation::Update { table, record } => {
@@ -1898,7 +1953,6 @@ where
                     schema_version,
                     descriptor,
                     record,
-                    maintain_ivm: !table_schema.has_schema_variants(),
                 })
             }
             BatchOperation::UpdateRaw { table, key, record } => {
@@ -1912,7 +1966,6 @@ where
                     schema_version,
                     descriptor,
                     record: record.clone(),
-                    maintain_ivm: !table_schema.has_schema_variants(),
                 })
             }
             BatchOperation::Delete { table, key } => {
@@ -1921,7 +1974,6 @@ where
                     table: table.clone(),
                     key: key.clone().into_bytes(),
                     descriptor: table_schema.record_schema(),
-                    maintain_ivm: !table_schema.has_schema_variants(),
                 })
             }
         }
@@ -2721,13 +2773,11 @@ enum PendingTableWrite {
         schema_version: u64,
         descriptor: RecordDescriptor,
         record: Vec<u8>,
-        maintain_ivm: bool,
     },
     Delete {
         table: String,
         key: Vec<u8>,
         descriptor: RecordDescriptor,
-        maintain_ivm: bool,
     },
 }
 
@@ -2757,12 +2807,6 @@ impl PendingTableWrite {
         }
     }
 
-    fn maintains_ivm(&self) -> bool {
-        match self {
-            Self::Set { maintain_ivm, .. } | Self::Delete { maintain_ivm, .. } => *maintain_ivm,
-        }
-    }
-
     fn stored_record(&self) -> Option<Vec<u8>> {
         match self {
             Self::Set {
@@ -2773,43 +2817,12 @@ impl PendingTableWrite {
             Self::Delete { .. } => None,
         }
     }
-
-    fn delta_from_current(&self, current: Option<Vec<u8>>) -> TableDelta {
-        let deltas = match self {
-            Self::Set { record, .. } => {
-                let mut deltas = current
-                    .into_iter()
-                    .map(|record| RecordDelta {
-                        record: record.into(),
-                        weight: -1,
-                    })
-                    .collect::<Vec<_>>();
-                deltas.push(RecordDelta {
-                    record: record.clone().into(),
-                    weight: 1,
-                });
-                deltas
-            }
-            Self::Delete { .. } => current
-                .into_iter()
-                .map(|record| RecordDelta {
-                    record: record.into(),
-                    weight: -1,
-                })
-                .collect(),
-        };
-
-        TableDelta {
-            table: self.table().to_owned(),
-            descriptor: self.descriptor(),
-            deltas,
-        }
-    }
 }
 
 fn compute_table_deltas<S>(
     pending_writes: &[PendingTableWrite],
     stores: &[RecordStore<'_, S>],
+    schema: &DatabaseSchema,
 ) -> Result<Vec<TableDelta>, Error>
 where
     S: OrderedKvStorage,
@@ -2848,21 +2861,57 @@ where
                 key: write.key().to_vec(),
             });
         }
-        if write.maintains_ivm() {
-            let current_payload = current
-                .as_deref()
-                .map(|stored| {
-                    let (_, payload) = split_versioned_record(stored)?;
-                    Ok::<_, Error>(payload.to_vec())
-                })
-                .transpose()?;
-            table_deltas.push(write.delta_from_current(current_payload));
+        let table_schema = schema
+            .table(write.table())
+            .ok_or_else(|| Error::TableNotFound(write.table().to_owned()))?;
+        if let Some(current) = current.as_deref() {
+            table_deltas.push(table_delta_from_stored(table_schema, current, -1)?);
+        }
+        if let PendingTableWrite::Set {
+            schema_version,
+            descriptor,
+            record,
+            ..
+        } = write
+        {
+            table_deltas.push(TableDelta {
+                table: write.table().to_owned(),
+                schema_version: *schema_version,
+                descriptor: *descriptor,
+                deltas: vec![RecordDelta {
+                    record: record.clone().into(),
+                    weight: 1,
+                }],
+            });
         }
         let next = write.stored_record();
         overlay.insert(overlay_key, next);
     }
 
     Ok(consolidate_table_deltas(table_deltas))
+}
+
+fn table_delta_from_stored(
+    table: &TableSchema,
+    stored: &[u8],
+    weight: i64,
+) -> Result<TableDelta, Error> {
+    let (schema_version, payload) = split_versioned_record(stored)?;
+    let descriptor = table
+        .record_schema_for_version(schema_version)
+        .ok_or_else(|| Error::UnknownTableSchemaVersion {
+            table: table.name.clone(),
+            version: schema_version,
+        })?;
+    Ok(TableDelta {
+        table: table.name.clone(),
+        schema_version,
+        descriptor,
+        deltas: vec![RecordDelta {
+            record: bytes::Bytes::copy_from_slice(payload),
+            weight,
+        }],
+    })
 }
 
 fn record_store_for_table<'a, S>(
@@ -2893,18 +2942,23 @@ fn primary_key_descriptor(primary_key: &PrimaryKey) -> RecordDescriptor {
 }
 
 fn consolidate_table_deltas(table_deltas: Vec<TableDelta>) -> Vec<TableDelta> {
-    let mut by_table = HashMap::<String, (RecordDescriptor, HashMap<bytes::Bytes, i64>)>::new();
+    let mut by_table =
+        HashMap::<(String, u64, RecordDescriptor), HashMap<bytes::Bytes, i64>>::new();
     for table_delta in table_deltas {
-        let (_, records) = by_table
-            .entry(table_delta.table)
-            .or_insert_with(|| (table_delta.descriptor, HashMap::new()));
+        let records = by_table
+            .entry((
+                table_delta.table,
+                table_delta.schema_version,
+                table_delta.descriptor,
+            ))
+            .or_default();
         for delta in table_delta.deltas {
             *records.entry(delta.record).or_default() += delta.weight;
         }
     }
     by_table
         .into_iter()
-        .filter_map(|(table, (descriptor, records))| {
+        .filter_map(|((table, schema_version, descriptor), records)| {
             let deltas = records
                 .into_iter()
                 .filter_map(|(record, weight)| {
@@ -2913,6 +2967,7 @@ fn consolidate_table_deltas(table_deltas: Vec<TableDelta>) -> Vec<TableDelta> {
                 .collect::<Vec<_>>();
             (!deltas.is_empty()).then_some(TableDelta {
                 table,
+                schema_version,
                 descriptor,
                 deltas,
             })
@@ -4017,6 +4072,8 @@ pub enum Error {
     SchemaVersionDescriptorMismatch { table: String, version: u64 },
     #[error("schema version 0 is reserved for Groove's implicit table layout: {0}")]
     ReservedTableSchemaVersion(String),
+    #[error("cannot add the first explicit schema version to a live homogeneous table: {0}")]
+    CannotPromoteLiveTableToSchemaVariants(String),
     #[error("unknown schema version {version} for table {table}")]
     UnknownTableSchemaVersion { table: String, version: u64 },
     #[error("unknown query parameter binding: {0}")]

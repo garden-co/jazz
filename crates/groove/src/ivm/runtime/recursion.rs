@@ -15,8 +15,9 @@ use crate::storage::OrderedKvStorage;
 
 use super::{
     ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError, NodeState,
-    RecordDelta, RecordDeltas, ScopeId, StaticScanBounds, SubTick, TableDelta, consolidate_deltas,
-    plan_expr_names, project_binding_source_deltas, scan_bounds,
+    RecordDelta, RecordDeltas, ScopeId, StaticScanBounds, SubTick, TableDelta, VariantProjection,
+    VariantProjectionKey, consolidate_deltas, plan_expr_names, project_binding_source_deltas,
+    scan_bounds,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -156,6 +157,7 @@ where
         let next = recompute_recursive(
             runtime.schema,
             runtime.graph,
+            runtime.variant_projections,
             node,
             recursive,
             output_desc,
@@ -374,42 +376,60 @@ pub(super) fn snapshot_table_deltas(
     storage: &impl OrderedKvStorage,
     root: NodeId,
 ) -> Result<Vec<TableDelta>, IvmRuntimeError> {
-    let mut tables = HashMap::<TableSnapshotSource, RecordDescriptor>::default();
+    let mut tables = std::collections::HashSet::<TableSnapshotSource>::new();
     collect_table_sources(graph, root, &mut tables)?;
-    tables
-        .into_iter()
-        .map(|(source, descriptor)| {
-            let table_schema = schema
-                .table(&source.table)
-                .ok_or_else(|| IvmRuntimeError::TableNotFound(source.table.clone()))?;
-            let store = super::record_store_for_table(storage, table_schema, &descriptor);
-            let mut deltas = Vec::new();
-            let mut visit = |_: &[u8], record: &[u8]| {
-                let record = super::single_layout_payload(record)?;
-                deltas.push(RecordDelta {
-                    record: Bytes::copy_from_slice(record),
+    let mut output = Vec::new();
+    for source in tables {
+        let table_schema = schema
+            .table(&source.table)
+            .ok_or_else(|| IvmRuntimeError::TableNotFound(source.table.clone()))?;
+        let storage_descriptor = table_schema.record_schema();
+        let store = super::record_store_for_table(storage, table_schema, &storage_descriptor);
+        let mut stored_records = Vec::new();
+        let mut visit = |_: &[u8], record: &[u8]| {
+            stored_records.push(record.to_vec());
+            Ok(())
+        };
+        match &source.scan {
+            None => store.scan_prefix(b"", &mut visit)?,
+            Some(scan) => match scan_bounds(scan)? {
+                StaticScanBounds::Prefix(prefix) => store.scan_prefix(&prefix, &mut visit)?,
+                StaticScanBounds::Range { start, end } => {
+                    if start < end {
+                        store.scan_range(&start, &end, &mut visit)?;
+                    }
+                }
+            },
+        }
+        let mut by_variant = HashMap::<(u64, RecordDescriptor), Vec<RecordDelta>>::default();
+        for stored in stored_records {
+            let (schema_version, payload) = crate::records::split_versioned_record(&stored)?;
+            let descriptor = table_schema
+                .record_schema_for_version(schema_version)
+                .ok_or_else(|| IvmRuntimeError::UnknownTableSchemaVersion {
+                    table: source.table.clone(),
+                    version: schema_version,
+                })?;
+            by_variant
+                .entry((schema_version, descriptor))
+                .or_default()
+                .push(RecordDelta {
+                    record: Bytes::copy_from_slice(payload),
                     weight: 1,
                 });
-                Ok(())
-            };
-            match &source.scan {
-                None => store.scan_prefix(b"", &mut visit)?,
-                Some(scan) => match scan_bounds(scan)? {
-                    StaticScanBounds::Prefix(prefix) => store.scan_prefix(&prefix, &mut visit)?,
-                    StaticScanBounds::Range { start, end } => {
-                        if start < end {
-                            store.scan_range(&start, &end, &mut visit)?;
-                        }
-                    }
-                },
-            }
-            Ok(TableDelta {
-                table: source.table,
-                descriptor,
-                deltas,
-            })
-        })
-        .collect()
+        }
+        output.extend(
+            by_variant
+                .into_iter()
+                .map(|((schema_version, descriptor), deltas)| TableDelta {
+                    table: source.table.clone(),
+                    schema_version,
+                    descriptor,
+                    deltas,
+                }),
+        );
+    }
+    Ok(output)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -421,18 +441,16 @@ struct TableSnapshotSource {
 fn collect_table_sources(
     graph: &IvmGraph,
     node: NodeId,
-    tables: &mut HashMap<TableSnapshotSource, RecordDescriptor>,
+    tables: &mut std::collections::HashSet<TableSnapshotSource>,
 ) -> Result<(), IvmRuntimeError> {
     let graph_node = graph
         .node(node)
         .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
     if let OpType::TableSource(table) = &graph_node.descriptor.operator {
-        tables
-            .entry(TableSnapshotSource {
-                table: table.table.clone(),
-                scan: table.scan.clone(),
-            })
-            .or_insert_with(|| graph_node.descriptor.output);
+        tables.insert(TableSnapshotSource {
+            table: table.table.clone(),
+            scan: table.scan.clone(),
+        });
     }
     for input in &graph_node.descriptor.inputs {
         collect_table_sources(graph, *input, tables)?;
@@ -521,6 +539,7 @@ fn collect_anti_join_right_table_sources(
 pub(super) fn recompute_recursive(
     schema: &crate::schema::DatabaseSchema,
     graph: &IvmGraph,
+    variant_projections: &HashMap<VariantProjectionKey, VariantProjection>,
     node: NodeId,
     recursive: &RecursiveOp,
     output_desc: RecordDescriptor,
@@ -540,6 +559,7 @@ pub(super) fn recompute_recursive(
     let mut snapshot = HydrationEvaluator {
         schema,
         graph,
+        variant_projections,
         storage,
         binding_snapshots,
         context: EvalContext::root(),
@@ -564,6 +584,7 @@ pub(super) fn recompute_recursive(
         let mut snapshot = HydrationEvaluator {
             schema,
             graph,
+            variant_projections,
             storage,
             binding_snapshots,
             context,
@@ -614,6 +635,7 @@ fn reject_non_positive_frontier_deltas(deltas: &[RecordDelta]) -> Result<(), Ivm
 struct HydrationEvaluator<'a, S> {
     schema: &'a crate::schema::DatabaseSchema,
     graph: &'a IvmGraph,
+    variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     storage: &'a S,
     binding_snapshots: &'a HashMap<String, RecordDeltas>,
     context: EvalContext,
@@ -878,6 +900,7 @@ where
                 let accumulated = recompute_recursive(
                     self.schema,
                     self.graph,
+                    self.variant_projections,
                     node,
                     recursive,
                     output_desc,
@@ -911,20 +934,46 @@ where
             .schema
             .table(&table.table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(table.table.clone()))?;
-        let store = super::record_store_for_table(self.storage, table_schema, &output_desc);
-        let mut deltas = Vec::new();
+        let storage_descriptor = table_schema.record_schema();
+        let store = super::record_store_for_table(self.storage, table_schema, &storage_descriptor);
+        let mut stored_records = Vec::new();
         store.scan_prefix(b"", &mut |_, record| {
-            let record = super::single_layout_payload(record)?;
-            deltas.push(RecordDelta {
-                record: Bytes::copy_from_slice(record),
-                weight: 1,
-            });
+            stored_records.push(record.to_vec());
             Ok(())
         })?;
-        Ok(RecordDeltas {
-            descriptor: output_desc,
-            deltas,
-        })
+        let mut grouped = HashMap::<(u64, RecordDescriptor), Vec<RecordDelta>>::default();
+        for stored in stored_records {
+            let (schema_version, payload) = crate::records::split_versioned_record(&stored)?;
+            let descriptor = table_schema
+                .record_schema_for_version(schema_version)
+                .ok_or_else(|| IvmRuntimeError::UnknownTableSchemaVersion {
+                    table: table.table.clone(),
+                    version: schema_version,
+                })?;
+            grouped
+                .entry((schema_version, descriptor))
+                .or_default()
+                .push(RecordDelta {
+                    record: Bytes::copy_from_slice(payload),
+                    weight: 1,
+                });
+        }
+        let table_deltas = grouped
+            .into_iter()
+            .map(|((schema_version, descriptor), deltas)| TableDelta {
+                table: table.table.clone(),
+                schema_version,
+                descriptor,
+                deltas,
+            })
+            .collect::<Vec<_>>();
+        NodeState::update_table_source(
+            table,
+            self.schema,
+            self.variant_projections,
+            &output_desc,
+            &table_deltas,
+        )
     }
 
     fn eval_unary_input(

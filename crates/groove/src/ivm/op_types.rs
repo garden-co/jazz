@@ -26,6 +26,10 @@ use crate::schema::IndexSchema;
 pub struct TableSourceOp {
     pub table: String,
     pub scan: Option<StaticScanSpec>,
+    /// Fixed-output projection applied while heterogeneous table deltas enter
+    /// the graph. The target names an append-only runtime registry whose cases
+    /// are deliberately outside this node's structural identity.
+    pub variant_projection: Option<String>,
 }
 
 /// Source node for a schema-declared durable index arrangement.
