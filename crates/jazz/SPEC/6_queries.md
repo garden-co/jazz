@@ -621,11 +621,24 @@ it may be derived from, or matched against, a constructed name such as
 is specifically forbidden: an aggregate member's name is a label, not a key.
 
 **`INV-QUERY-31`** — Aggregate output types are fixed by function, not inferred
-per call site. `count` is `U64` and is never null. `sum`, `min`, and `max` are
-nullable over the non-nullable base type of their input, and `avg` is
-`Nullable(F64)` regardless of input type. `sum` MUST NOT silently widen its
-result type, and a sum exceeding its declared width MUST fail with a named
-overflow error rather than wrapping, saturating, or promoting.
+per call site. `count` is `U64` and is never null. `min` and `max` are nullable
+over the non-nullable base type of their input. `avg` is `Nullable(F64)`
+regardless of input type. `sum` widens to the widest type of its input's own
+signedness — `U8`, `U16`, `U32`, `U64` all produce `Nullable(U64)`; `I32` and
+`I64` produce `Nullable(I64)`; `F64` produces `Nullable(F64)` — and MUST NOT
+change signedness. A sum exceeding the widened type MUST fail with a named
+overflow error rather than wrapping, saturating, or promoting further.
+
+Decision, Anselm 2026-08-07: `sum` widens. Postgres widens by one step and
+terminates in unbounded `numeric` (`int → bigint`, `bigint → numeric`); SQL
+Server does not widen `int` at all and overflows, which is a well-known
+production hazard. The SQL standard requires only that the result type can
+represent the sum, so both are conformant and only one is kind. Jazz follows
+Postgres as far as it can, and stops at 64 bits because there is no
+arbitrary-precision numeric type to promote into. That boundary is stated
+rather than incidental: a `sum` over a narrow column no longer fails at a
+width the caller never chose, and the residual overflow error fires only at a
+genuine 64-bit overflow, where no representable answer exists.
 
 **`INV-QUERY-32`** — There are two distinct nullable layers, and exactly one
 place where they merge. The payload layer carries SQL `NULL` as
@@ -830,16 +843,15 @@ parallel query identities.
   types inside one relation. If future relation-valued outputs can mix id types
   or grouped outputs can expose heterogeneous key domains at one key position,
   the spec needs a stable cross-type ordering rule or must reject those shapes.
-- 🔶 **Whether `sum` should widen its result type.** `INV-QUERY-31` currently
-  keeps `sum` at its input width and requires a named overflow error, which is
-  honest but means `sum` over a `U8` column fails at 256 — early enough to be a
-  usability problem rather than a safety one. Postgres widens instead
-  (`int → bigint`, `bigint → numeric`), trading a type surprise for a much later
-  failure. Widening is the likely destination, but it changes the declared
-  descriptor type of every existing `sum`, so it should land as a deliberate
-  cut with the wire and schema consequences priced in, not as a quiet
-  relaxation. What should decide it is whether real schemas aggregate narrow
-  integer columns at all.
+- 🔶 **Exact `avg` over integer inputs.** `INV-QUERY-31` fixes `avg` at
+  `Nullable(F64)` for every input type. That matches Postgres for `real` and
+  `double precision` inputs but not for integers, where Postgres returns exact
+  `numeric`: an `avg` over large `I64` values loses precision in Jazz today and
+  does not in Postgres. This shares a root cause with the boundary `sum`
+  widening stops at — there is no arbitrary-precision numeric type — so the two
+  should be settled together rather than separately, and the decision is really
+  whether Jazz wants such a type at all. Until then the `F64` result is a
+  stated approximation, not an oversight.
 - 🔶 **SQL dialect boundary.** Define the first supported SQL subset, parameter
   syntax, error reporting, and escape-hatch rules, and prove it lowers to the
   same `Query` contract as the builder DSL.
