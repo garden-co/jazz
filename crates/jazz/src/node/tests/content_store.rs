@@ -1593,6 +1593,33 @@ fn text_view_update_repair_fetches_missing_ancestor_chain() {
 }
 
 #[test]
+fn structured_view_update_content_extent_scanner_includes_text_extents() {
+    // This exercises the internal scanner because it decides whether the transport
+    // sends content extents before a structured view update; that framing is not
+    // otherwise observable through the public NodeState API.
+    let schema = text_large_value_schema();
+    let row_uuid = row(0x78);
+    let (_core_dir, mut core) = open_node_with_schema(node(0x7a), schema);
+    let unit = commit_large_value_edit_unit(
+        &mut core,
+        LargeValueEditCommit::new("docs", row_uuid, "body", 10)
+            .made_by(user(0xa1))
+            .insert(0, b"extent"),
+    );
+    let expected_extents = large_value_extents(&core, &unit);
+    let [expected] = expected_extents.as_slice() else {
+        panic!("expected one content extent");
+    };
+
+    let update = core.view_update_for_current_rows("docs").unwrap();
+    assert!(matches!(update, SyncMessage::StructuredViewUpdate { .. }));
+    assert_eq!(
+        core.content_refs_in_sync_message(&update).unwrap(),
+        BTreeSet::from([expected.extent.clone()])
+    );
+}
+
+#[test]
 fn text_edit_history_rehydrates_materialized_text_after_reopen() {
     let schema = text_large_value_schema();
     let row_uuid = row(0x79);

@@ -2531,6 +2531,16 @@ where
                 version_carriers,
                 version_bundles,
                 ..
+            }
+            | SyncMessage::StructuredViewUpdate {
+                version_carriers,
+                version_bundles,
+                ..
+            }
+            | SyncMessage::StructuredViewUpdateChunk {
+                version_carriers,
+                version_bundles,
+                ..
             } => {
                 let mut refs = BTreeSet::new();
                 for bundle in version_bundles {
