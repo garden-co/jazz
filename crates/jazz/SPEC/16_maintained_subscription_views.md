@@ -335,10 +335,57 @@ replacement witness information for the peer state machine to emit the same net
 Aggregate functions are capability-gated by groove support. Maintained Jazz
 subscriptions should initially accept only deterministic, retractable summaries
 such as count, numeric sum, min, and max, with deterministic witness ties owned
-by groove. Floating-point accumulation, user-defined aggregates, approximate
-aggregates, and empty-global-row SQL compatibility stay outside the maintained
-subscription surface until their replay semantics and payload shape are
-specified.
+by groove. User-defined aggregates, approximate aggregates, and
+empty-global-row SQL compatibility stay outside the maintained subscription
+surface until their replay semantics and payload shape are specified.
+
+Floating-point accumulation IS inside the maintained surface, under a weaker
+agreement guarantee than the exact one above. Incremental maintenance sums in
+arrival order and subtracts on retraction, while a one-shot recompute sums from
+scratch, so the two cannot be required to agree bit-for-bit. They MUST agree
+approximately, as follows:
+
+- `count`, `min` and `max` MUST agree **exactly**, for every value type
+  including `F64`. They are counting and selection, not accumulation, so
+  floating point gives them no licence to differ.
+- Integer `sum` and `avg` MUST agree **exactly**. A divergence in exact integer
+  arithmetic is a maintenance defect, never a rounding artifact, and this
+  requirement is what makes the two distinguishable.
+- `F64` `sum` and `avg` MUST agree within a tolerance proportional to
+  `ε × (input rows + maintenance updates) × Σ|x|`, where `Σ|x|` is the sum of
+  absolute input magnitudes for the group.
+
+The tolerance is expressed against `Σ|x|` rather than against the result
+deliberately. Under catastrophic cancellation — inputs of opposite sign summing
+to near zero — the result approaches zero while the absolute error does not, so
+a result-relative tolerance is unbounded and cannot be enforced.
+
+The error term grows with maintenance updates, and an implementation is NOT
+currently required to bound it. Drift may accumulate across a long-lived
+subscription; a maintained `F64` `sum` or `avg` is permitted to move further
+from its one-shot value the longer the subscription runs.
+
+🔶 **Open question: the constant of proportionality, and whether to bound
+drift at all.** Both are deliberately unfixed.
+
+The first is a measurement problem: the differential oracle reports observed
+divergence against update count, and that data should set the constant rather
+than an assumed value.
+
+The second is a design decision with a consequence worth stating plainly. With
+update count unbounded, the `ε × (input rows + maintenance updates) × Σ|x|`
+term is unbounded too, so the guarantee weakens toward vacuity over a
+sufficiently long-lived subscription — it constrains a young view tightly and
+an old one barely at all. That is an accepted trade for now, on the grounds
+that no current workload runs a single maintained `F64` aggregate long enough
+for the drift to matter, and that recomputation has its own cost.
+
+The remedy, when it is wanted, is to recompute a group from its inputs after a
+bounded number of updates, which converts unbounded drift into a stated bound.
+What should decide it is evidence: the oracle's divergence-versus-update-count
+curve, together with a real workload's observed update volume per group. If a
+maintained aggregate is ever surfaced as a number a user acts on — a dashboard
+total, a billing figure — this should be revisited before that ships.
 
 Policy composition happens before these operators. A policy row changing
 visibility must flow through the same `TopBy` or `Aggregate` state as a base row
