@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Run a cargo-test filter, refusing Cargo's successful "running 0 tests" result.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+usage() {
+  echo "Usage: dev/t <filter> [cargo test arguments...]" >&2
+}
+
+(($# >= 1)) || {
+  usage
+  exit 2
+}
+
+for required in cargo rg mktemp cat grep; do
+  command -v "$required" >/dev/null 2>&1 || {
+    echo "dev/t: required command not found: $required" >&2
+    exit 127
+  }
+done
+
+filter="$1"
+shift
+output="$(mktemp "${TMPDIR:-/tmp}/jazz-dev-t.XXXXXX")"
+trap 'rm -f "$output"' EXIT
+
+# Redirect to a file instead of teeing through a pipe so the captured status is
+# Cargo's actual status, not a pipeline's status.
+set +e
+cargo test "$filter" "$@" >"$output" 2>&1
+status=$?
+set -e
+cat "$output"
+
+if ((status != 0)); then
+  exit "$status"
+fi
+
+# Cargo may also print zero-test doctest targets after a real match. It only
+# matched nothing when no result line reports one or more passed tests.
+if grep -q 'running 0 tests' "$output" && ! grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$output"; then
+  test_name="${filter##*::}"
+  echo "dev/t: filter matched nothing: $filter" >&2
+  echo "Likely location(s) for $test_name:" >&2
+  matches="$(rg -l -F "$test_name" --glob '*.rs' crates 2>/dev/null || true)"
+  if [[ -n "$matches" ]]; then
+    while IFS= read -r file; do
+      echo "  $file" >&2
+      base="$(basename "$file")"
+      includers="$(rg -l -F "include!(\"$base\")" --glob '*.rs' crates 2>/dev/null || true)"
+      if [[ -n "$includers" ]]; then
+        while IFS= read -r includer; do
+          module="${includer#crates/*/src/}"
+          module="${module%.rs}"
+          module="${module%/mod}"
+          module="${module//\//::}"
+          echo "    likely module path: $module::$test_name (included by $includer)" >&2
+        done <<<"$includers"
+      fi
+    done <<<"$matches"
+  else
+    echo "  no Rust source mention found" >&2
+  fi
+  exit 1
+fi
+
+exit 0
