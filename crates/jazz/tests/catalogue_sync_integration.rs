@@ -2449,7 +2449,12 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
 
     let query = QueryBuilder::new("people")
         .with_array("posts", |sub| {
-            sub.from("posts").correlate("author_id", "people.id")
+            // INV-QUERY-29: array subqueries must declare boundedness. This
+            // test asserts the rename finds *all* related rows, so the
+            // unbounded suffix is the assertion, not a default.
+            sub.from("posts")
+                .correlate("author_id", "people.id")
+                .unbounded()
         })
         .build();
     let rows = wait_for_query(
