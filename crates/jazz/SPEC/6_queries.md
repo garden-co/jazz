@@ -840,6 +840,18 @@ parallel query identities.
   cut with the wire and schema consequences priced in, not as a quiet
   relaxation. What should decide it is whether real schemas aggregate narrow
   integer columns at all.
+- 🔶 **Aggregate result identity across a table rename.** `INV-QUERY-30`
+  requires aggregate identity to be derived structurally from the group key.
+  The implementation namespaces that derivation by the source table's _name_
+  (`jazz:aggregate-result:v1` + table + group key), so renaming a table changes
+  the identity of every aggregate row over it: a maintained subscription
+  spanning the rename observes a member removal followed by an add rather than
+  continuity. Namespacing itself is necessary — aggregates over different
+  tables must not collide — but the namespace does not have to be the mutable
+  name, and a stable table identity would preserve continuity across a rename.
+  Deferred deliberately (Anselm 2026-08-07): this is the same question
+  multi-schema support must answer for every name-keyed identity, so it should
+  be settled together with that work rather than patched here in isolation.
 - 🔶 **SQL dialect boundary.** Define the first supported SQL subset, parameter
   syntax, error reporting, and escape-hatch rules, and prove it lowers to the
   same `Query` contract as the builder DSL.
