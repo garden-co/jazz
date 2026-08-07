@@ -4861,13 +4861,20 @@ fn lowered_terminals(
     // domain rather than only `root_route_fields` to keep routed maintained
     // array queries on their existing fact-terminal path; the tree collector
     // cannot retain any routed binding fields yet.
-    let has_routed_tree_app_projection = matches!(
-        &request.output.app_rows,
-        Some(AppRowOutputRequest {
-            projection: PayloadProjection::Tree(tree),
-            ..
-        }) if !tree.paths.is_empty() && !routing_param_fields.is_empty()
-    );
+    let has_correlated_path_projection = request
+        .input
+        .shape
+        .nodes
+        .values()
+        .any(|node| matches!(node, RowSetExpr::CorrelatedPathProjection { .. }));
+    let has_routed_tree_app_projection = has_correlated_path_projection
+        && matches!(
+            &request.output.app_rows,
+            Some(AppRowOutputRequest {
+                projection: PayloadProjection::Tree(tree),
+                ..
+            }) if !tree.paths.is_empty() && !routing_param_fields.is_empty()
+        );
     if let Some(app_rows) = &request.output.app_rows
         && !has_routed_tree_app_projection
     {
