@@ -612,6 +612,50 @@ async fn subscription_reflects_concurrent_update_impl() {
     )
     .await;
 
+    let changes_for_todo = log
+        .iter()
+        .filter(|delta| {
+            delta.added.iter().any(|change| change.id == todo_id)
+                || delta.updated.iter().any(|change| change.id == todo_id)
+                || delta.removed.iter().any(|change| change.id == todo_id)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        changes_for_todo.len(),
+        2,
+        "the observable stream must contain exactly the initial add and the concurrent update: {log:#?}"
+    );
+    assert!(
+        changes_for_todo[0]
+            .added
+            .iter()
+            .any(|change| change.id == todo_id)
+            && changes_for_todo[0]
+                .updated
+                .iter()
+                .all(|change| change.id != todo_id)
+            && changes_for_todo[0]
+                .removed
+                .iter()
+                .all(|change| change.id != todo_id),
+        "the first observable change must add the subscribed occurrence: {log:#?}"
+    );
+    assert!(
+        changes_for_todo[1]
+            .updated
+            .iter()
+            .any(|change| change.id == todo_id)
+            && changes_for_todo[1]
+                .added
+                .iter()
+                .all(|change| change.id != todo_id)
+            && changes_for_todo[1]
+                .removed
+                .iter()
+                .all(|change| change.id != todo_id),
+        "the concurrent write must update, never remove/re-add, the occurrence: {log:#?}"
+    );
+
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
