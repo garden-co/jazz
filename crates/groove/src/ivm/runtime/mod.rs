@@ -6467,22 +6467,24 @@ where
                 next: format!("{sub_tick:?}"),
             });
         }
-        let before_groups =
-            if self.context.arrangement_update_mode == ArrangementUpdateMode::Replace {
-                BTreeMap::new()
-            } else {
-                touched_groups
-                    .keys()
-                    .map(|group| {
-                        (
-                            group.clone(),
-                            current_arrangement
-                                .map(|arrangement| arrangement.value().records_for_key(group))
-                                .unwrap_or_default(),
-                        )
-                    })
-                    .collect::<BTreeMap<_, _>>()
-            };
+        let before_groups = if self.context.arrangement_update_mode
+            == ArrangementUpdateMode::Replace
+            || !should_apply_arrangement
+        {
+            BTreeMap::new()
+        } else {
+            touched_groups
+                .keys()
+                .map(|group| {
+                    (
+                        group.clone(),
+                        current_arrangement
+                            .map(|arrangement| arrangement.value().records_for_key(group))
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
         let mut staged_arrangement =
             if self.context.arrangement_update_mode == ArrangementUpdateMode::Replace {
                 ArrangementState::default()

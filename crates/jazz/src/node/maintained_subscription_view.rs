@@ -500,24 +500,20 @@ impl MaintainedSubscriptionView {
         &mut self,
         member: ResultMemberEntry,
         payload: ResultMemberPayloadEntry,
-        synthetic: &super::query_engine::SyntheticResultMembershipSchema,
-        value_fields: &[String],
+        _synthetic: &super::query_engine::SyntheticResultMembershipSchema,
+        _value_fields: &[String],
         weight: i64,
         transitions: &mut ResultTransitions,
     ) -> Result<(), super::Error> {
         let (old_member, old_payload) = self.aggregate_payload_for_stable_member(&member);
-        let materialized = materialize_aggregate_payload_delta(
-            old_payload.as_ref(),
-            payload,
-            synthetic,
-            value_fields,
-            weight,
-        )?;
-        if aggregate_payload_is_empty(&materialized, value_fields)? {
-            if let Some(old_member) = old_member {
-                transitions.removes.push(old_member.clone());
-                self.result_weights.remove(&old_member);
-                if let Some(existing) = self.result_payloads.remove(&old_member) {
+        if weight < 0 {
+            // Groove's aggregate operator emits complete before/after group
+            // rows. A retraction therefore removes only the payload it names;
+            // if its replacement is already current, it is stale.
+            if old_member.as_ref() == Some(&member) {
+                transitions.removes.push(member.clone());
+                self.result_weights.remove(&member);
+                if let Some(existing) = self.result_payloads.remove(&member) {
                     transitions
                         .program_fact_removes
                         .push(ProgramFactEntry::ResultPayload(existing));
@@ -525,31 +521,26 @@ impl MaintainedSubscriptionView {
             }
             return Ok(());
         }
+
         if let Some(old_member) = old_member
-            && old_member != materialized.member
+            && old_member != member
         {
             transitions.removes.push(old_member.clone());
             self.result_weights.remove(&old_member);
-            if let Some(existing) = self.result_payloads.remove(&old_member) {
+            if let Some(existing) = old_payload {
                 transitions
                     .program_fact_removes
                     .push(ProgramFactEntry::ResultPayload(existing));
             }
         }
-        let old = self
-            .result_weights
-            .get(&materialized.member)
-            .copied()
-            .unwrap_or(0);
-        if old <= 0 {
-            transitions.adds.push(materialized.member.clone());
+        if self.result_weights.get(&member).copied().unwrap_or(0) <= 0 {
+            transitions.adds.push(member.clone());
         }
         transitions
             .program_fact_adds
-            .push(ProgramFactEntry::ResultPayload(materialized.clone()));
-        self.result_payloads
-            .insert(materialized.member.clone(), materialized.clone());
-        self.result_weights.insert(materialized.member, 1);
+            .push(ProgramFactEntry::ResultPayload(payload.clone()));
+        self.result_payloads.insert(member.clone(), payload);
+        self.result_weights.insert(member, 1);
         Ok(())
     }
 
@@ -1490,143 +1481,6 @@ impl NetEvent {
             }
         }
     }
-}
-
-fn materialize_aggregate_payload_delta(
-    previous: Option<&ResultMemberPayloadEntry>,
-    delta: ResultMemberPayloadEntry,
-    synthetic: &super::query_engine::SyntheticResultMembershipSchema,
-    value_fields: &[String],
-    weight: i64,
-) -> Result<ResultMemberPayloadEntry, super::Error> {
-    let delta_descriptor = decode_payload_descriptor(&delta.descriptor)?;
-    let delta_record = BorrowedRecord::new(&delta.record, &delta_descriptor);
-    let mut values = if let Some(previous) = previous {
-        let previous_descriptor = decode_payload_descriptor(&previous.descriptor)?;
-        BorrowedRecord::new(&previous.record, &previous_descriptor)
-            .to_values()
-            .map_err(|_| super::Error::InvalidStoredValue("aggregate payload decode failed"))?
-    } else {
-        delta_record
-            .to_values()
-            .map_err(|_| super::Error::InvalidStoredValue("aggregate payload decode failed"))?
-    };
-    if previous.is_none() {
-        for field in value_fields {
-            let idx = field_idx(delta_record, field)?;
-            values[idx] = zero_aggregate_value(values[idx].clone());
-        }
-    }
-    for field in value_fields {
-        let idx = field_idx(delta_record, field)?;
-        let delta_value = delta_record.get_idx(idx)?;
-        values[idx] = apply_aggregate_value_delta(values[idx].clone(), delta_value, weight)?;
-    }
-    if let Some(first_value_field) = value_fields.first() {
-        let value_idx = field_idx(delta_record, first_value_field)?;
-        let revision_idx = field_idx(delta_record, &synthetic.revision_field)?;
-        values[revision_idx] = values[value_idx].clone();
-    }
-    let raw = delta_descriptor
-        .create(&values)
-        .map_err(|_| super::Error::InvalidStoredValue("aggregate payload encoding failed"))?;
-    let revision_value = values[field_idx(delta_record, &synthetic.revision_field)?].clone();
-    let revision = postcard::to_allocvec(&revision_value).map_err(|_| {
-        super::Error::InvalidStoredValue("aggregate result revision encoding failed")
-    })?;
-    let member = match delta.member {
-        ResultMemberEntry::Synthetic { table, row, .. } => ResultMemberEntry::Synthetic {
-            table,
-            row,
-            revision,
-        },
-        _ => delta.member,
-    };
-    Ok(ResultMemberPayloadEntry {
-        member,
-        descriptor: delta.descriptor,
-        record: raw,
-    })
-}
-
-fn decode_payload_descriptor(bytes: &[u8]) -> Result<RecordDescriptor, super::Error> {
-    let fields: Vec<(Option<String>, groove::records::ValueType)> = postcard::from_bytes(bytes)
-        .map_err(|_| super::Error::InvalidStoredValue("aggregate descriptor decoding failed"))?;
-    Ok(RecordDescriptor::new(fields.into_iter().map(
-        |(name, value_type)| (name.unwrap_or_default(), value_type),
-    )))
-}
-
-fn apply_aggregate_value_delta(
-    current: Value,
-    delta: Value,
-    weight: i64,
-) -> Result<Value, super::Error> {
-    macro_rules! signed_int {
-        ($value:expr, $variant:ident, $ty:ty) => {{
-            let next = ($value as i128)
-                .checked_add(
-                    (weight as i128)
-                        * (match delta {
-                            Value::$variant(value) => value as i128,
-                            _ => return Ok(delta),
-                        }),
-                )
-                .ok_or(super::Error::InvalidStoredValue("aggregate value overflow"))?;
-            Value::$variant(
-                <$ty>::try_from(next)
-                    .map_err(|_| super::Error::InvalidStoredValue("aggregate value overflow"))?,
-            )
-        }};
-    }
-    Ok(match current {
-        Value::U8(value) => signed_int!(value, U8, u8),
-        Value::U16(value) => signed_int!(value, U16, u16),
-        Value::U32(value) => signed_int!(value, U32, u32),
-        Value::U64(value) => signed_int!(value, U64, u64),
-        Value::I32(value) => signed_int!(value, I32, i32),
-        Value::I64(value) => signed_int!(value, I64, i64),
-        Value::F64(value) => match delta {
-            Value::F64(delta) => Value::F64(value + (weight as f64) * delta),
-            _ => delta,
-        },
-        _ => delta,
-    })
-}
-
-fn zero_aggregate_value(value: Value) -> Value {
-    match value {
-        Value::U8(_) => Value::U8(0),
-        Value::U16(_) => Value::U16(0),
-        Value::U32(_) => Value::U32(0),
-        Value::U64(_) => Value::U64(0),
-        Value::I32(_) => Value::I32(0),
-        Value::I64(_) => Value::I64(0),
-        Value::F64(_) => Value::F64(0.0),
-        other => other,
-    }
-}
-
-fn aggregate_payload_is_empty(
-    payload: &ResultMemberPayloadEntry,
-    value_fields: &[String],
-) -> Result<bool, super::Error> {
-    if value_fields.is_empty() {
-        return Ok(false);
-    }
-    let descriptor = decode_payload_descriptor(&payload.descriptor)?;
-    let record = BorrowedRecord::new(&payload.record, &descriptor);
-    for field in value_fields {
-        let value = record.get_idx(field_idx(record, field)?)?;
-        match value {
-            Value::U8(0) | Value::U16(0) | Value::U32(0) | Value::U64(0) => {}
-            Value::I32(0) => {}
-            Value::I64(0) => {}
-            Value::F64(0.0) => {}
-            _ => return Ok(false),
-        }
-    }
-    Ok(true)
 }
 
 fn encode_record_descriptor(descriptor: &RecordDescriptor) -> Result<Vec<u8>, super::Error> {

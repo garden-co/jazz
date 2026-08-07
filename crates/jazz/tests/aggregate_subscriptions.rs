@@ -36,6 +36,16 @@ fn bigint_metrics_schema() -> Schema {
         .build()
 }
 
+fn double_metrics_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("metrics")
+                .column("bucket", ColumnType::Text)
+                .column("score", ColumnType::Double),
+        )
+        .build()
+}
+
 fn counter_schema() -> Schema {
     let mut schema = SchemaBuilder::new()
         .table(
@@ -149,6 +159,19 @@ async fn insert_bigint_metric(client: &JazzClient, bucket: &str, score: i64) {
         .wait_for_batch(batch, DurabilityTier::Local)
         .await
         .expect("bigint metric settles");
+}
+
+async fn insert_double_metric(client: &JazzClient, bucket: &str, score: f64) {
+    let (_, _, batch) = client
+        .insert(
+            "metrics",
+            row_input!("bucket" => bucket, "score" => Value::Double(score)),
+        )
+        .expect("insert double metric");
+    client
+        .wait_for_batch(batch, DurabilityTier::Local)
+        .await
+        .expect("double metric settles");
 }
 
 fn aggregate_query(
@@ -366,6 +389,101 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
                 grouped_sum_query,
                 Vec::new(),
                 "empty signed aggregate group is retracted",
+            )
+            .await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn maintained_bigint_sum_replaces_a_multi_row_group_after_insert() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = bigint_metrics_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = JazzClient::connect(
+                server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa9"),
+            )
+            .await
+            .expect("connect client");
+            let query = QueryBuilder::new("metrics")
+                .sum("score")
+                .group_by("bucket")
+                .build();
+
+            insert_bigint_metric(&client, "same", -11).await;
+            insert_bigint_metric(&client, "same", 7).await;
+            let _stream = client
+                .subscribe(query.clone())
+                .await
+                .expect("subscribe grouped bigint sum");
+            wait_for_values(
+                &client,
+                query.clone(),
+                vec![vec![Value::Text("same".to_owned()), Value::BigInt(-4)]],
+                "initial multi-row bigint sum",
+            )
+            .await;
+
+            insert_bigint_metric(&client, "same", 3).await;
+            wait_for_values(
+                &client,
+                query,
+                vec![vec![Value::Text("same".to_owned()), Value::BigInt(-1)]],
+                "bigint sum replaces the prior group result after insert",
+            )
+            .await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn maintained_double_sum_and_avg_replace_a_multi_row_group_after_insert() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = double_metrics_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = JazzClient::connect(
+                server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa10"),
+            )
+            .await
+            .expect("connect client");
+            let sum_query = QueryBuilder::new("metrics")
+                .sum("score")
+                .group_by("bucket")
+                .build();
+            let avg_query = QueryBuilder::new("metrics")
+                .avg("score")
+                .group_by("bucket")
+                .build();
+
+            insert_double_metric(&client, "same", 1.5).await;
+            insert_double_metric(&client, "same", -0.25).await;
+            let _sum_stream = client
+                .subscribe(sum_query.clone())
+                .await
+                .expect("subscribe grouped double sum");
+            let _avg_stream = client
+                .subscribe(avg_query.clone())
+                .await
+                .expect("subscribe grouped double avg");
+
+            insert_double_metric(&client, "same", 0.5).await;
+            wait_for_values(
+                &client,
+                sum_query,
+                vec![vec![Value::Text("same".to_owned()), Value::Double(1.75)]],
+                "double sum replaces the prior group result after insert",
+            )
+            .await;
+            wait_for_values(
+                &client,
+                avg_query,
+                vec![vec![
+                    Value::Text("same".to_owned()),
+                    Value::Double(1.75 / 3.0),
+                ]],
+                "double avg replaces the prior group result after insert",
             )
             .await;
         })
