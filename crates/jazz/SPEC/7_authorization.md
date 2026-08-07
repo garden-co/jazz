@@ -256,6 +256,41 @@ the read policy for that identity. `INV-RLS-16` — a large-value content extent
 visible to an identity only when referenced by a version whose content row passes
 that identity's read policy (ch. 12).
 
+#### Policy subplan authorization
+
+A policy deciding visibility must often read tables the requesting identity
+cannot read directly — a document policy consults membership rows, a membership
+policy consults a project. Those reads therefore run **unfiltered**: policy
+evaluation does not recurse into policy. If it did, a policy could never see the
+rows it needs to reach a decision.
+
+That suspension is narrow, and `INV-RLS-21` states its limit.
+
+`INV-RLS-21` — A read performed inside a policy subplan MUST NOT apply the read
+target's own read policy; policy evaluation does not recurse into policy. The
+subplan MUST, however, apply every constraint the **evaluating** policy expresses
+— its filters, its join conditions, and its claim bindings — at every step of
+that subplan's evaluation, including each hop of a recursive reachability
+traversal and every step beyond the seed. A claim bound at the seed constrains
+all subsequent hops. For a recursive policy the constraint applies to each
+iteration, not to a flattened transitive closure computed without it.
+
+_Corollary._ Suspending the target's read policy MUST NOT suspend the evaluating
+policy's own predicate. A subplan that binds its claim only at the seed and then
+traverses freely violates `INV-RLS-21`, even though every individual read along
+that traversal was legitimately unfiltered. "Each read was permitted" is not a
+defence; the question is whether the evaluating policy's own predicate held
+throughout.
+
+_Known violation._ A two-hop chain — a document policy reaching a membership
+table whose own policy reaches a project via a reachability seed bound to
+`claim("sub")` — currently lets one principal's seed claim select another
+principal's document. `PolicyContext::AuthorizationSubplan` resolves source
+authorization to `System`
+(`crates/jazz/src/node/query_engine/lowering.rs::source_authorization_for_source`),
+which correctly suspends the target's policy but also drops the evaluating
+policy's claim binding past the first hop.
+
 ### 7.5 Exclusive atomicity and historical reads
 
 Exclusive transaction view shipping protects recipients from seeing an incomplete
