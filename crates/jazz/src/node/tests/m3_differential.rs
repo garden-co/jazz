@@ -1696,8 +1696,12 @@ fn aggregate_payload_value(
     let crate::protocol::ProgramFactEntry::ResultPayload(payload) = fact else {
         return None;
     };
-    let table = payload.member.table_name()?;
-    if table != "docs_aggregate" {
+    // Aggregate payloads are identified by their synthetic group-key member,
+    // never by a source-derived synthetic table label.
+    if !matches!(
+        payload.member,
+        crate::protocol::ResultMemberEntry::Synthetic { .. }
+    ) {
         return None;
     }
     let fields: Vec<(Option<String>, groove::records::ValueType)> =
