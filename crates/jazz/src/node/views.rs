@@ -856,6 +856,11 @@ where
             && result_member_removes.is_empty()
             && program_fact_adds.is_empty()
             && program_fact_removes.is_empty();
+        // A resume catch-up can use reset framing while carrying a cursor
+        // retraction. That is not a standalone replacement snapshot: the
+        // local maintained subscription must fold the retraction and its
+        // replacement into its existing result state.
+        let reset_has_result_removes = !result_member_removes.is_empty();
         let persisted_member_adds = result_member_adds.clone();
         let persisted_member_removes = result_member_removes.clone();
         let persisted_fact_adds = program_fact_adds.clone();
@@ -941,11 +946,10 @@ where
             self.query
                 .settled_through_by_binding_view
                 .insert(binding_view_key, settled_through);
-            // A reset is an authoritative membership rebuild, including when
-            // it carries retractions. The public subscription materializes its
-            // replacement snapshot below, rather than attempting to apply a
-            // removal after the reset has cleared the cached result set.
-            if reset_result_set && !preserve_existing_shared_state {
+            // Only a replacement snapshot is authoritative for facade
+            // materialization. Resume catch-up reset framing with retractions
+            // is an incremental maintenance path, not a rebuild.
+            if reset_result_set && !reset_has_result_removes && !preserve_existing_shared_state {
                 self.query
                     .pending_authoritative_reset_binding_views
                     .insert(binding_view_key);
