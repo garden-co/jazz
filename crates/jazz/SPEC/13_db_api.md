@@ -587,6 +587,32 @@ These are designed but not landed:
   a settled subscription result set for the binding (ch. 6), surfaced as a
   queryable `settled()` bit on the handle before the first gate. Neither the
   gating nor `settled()` is implemented yet.
+- 🔶 **Observable connection state, and cancelling a wait.** A wait at `Edge` or
+  `Global` tier while disconnected has no honest answer today: rejecting loses a
+  write's durability observation that would have resolved on reconnect, and
+  waiting indefinitely gives the caller no way to distinguish "offline, will
+  resolve later" from "something is broken". Neither carries a diagnosis.
+  The intended shape is that the **core waits indefinitely** and cancellation is
+  **caller policy**, because the core promises durability, not latency — only the
+  caller knows whether a wait backs a background sync or a user pressing Save. In
+  Rust this needs nothing new: `wait` is an `async fn`, so dropping the future
+  cancels and `tokio::time::timeout` composes. In TypeScript the idiomatic form is
+  an `AbortSignal` on the wait options, which yields timeouts via
+  `AbortSignal.timeout`, composition via `AbortSignal.any`, and component-lifecycle
+  cancellation for free; there is currently no `AbortSignal` anywhere in the
+  runtime API. Three details are load-bearing whenever this is built: cancelling a
+  _wait_ MUST NOT cancel the _write_, which is already committed and queued;
+  abort MUST reject with a distinct reason so "I gave up" is never mistaken for
+  "the write failed"; and abort MUST deregister the waiter, or an indefinite wait
+  becomes a slow leak on a long-lived client.
+  The missing complement is an **observable connection and pending state** — at
+  minimum whether the client is connected, and how many writes are outstanding at
+  each tier — so an application can render honestly rather than inferring from a
+  promise that has not settled. This is the more valuable half: a timeout tells
+  you only that time passed. A bulk import that hung on a global-tier wait was
+  undiagnosable for exactly this reason; the wait was unbounded, uncancellable,
+  and invisible, and the cause could only be found by instrumenting the core.
+  None of this is implemented.
 - 🔶 **Identity modes & admission.** `DbIdentity` is `{ node, author }` today;
   core-only attributed writes are callable, but the broader backend /
   no-identity-platform modes (ch. 9) and `accept_subscriber` admission policy are
