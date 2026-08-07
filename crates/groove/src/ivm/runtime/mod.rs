@@ -7510,13 +7510,11 @@ fn aggregate_output_type(
         AggregateFunction::Sum => {
             let value_type = aggregate_expr_value_type(input, aggregate)?;
             match non_nullable_type(&value_type) {
-                ValueType::U8
-                | ValueType::U16
-                | ValueType::U32
-                | ValueType::U64
-                | ValueType::I32
-                | ValueType::I64
-                | ValueType::F64 => nullable_type(&value_type),
+                ValueType::U8 | ValueType::U16 | ValueType::U32 | ValueType::U64 => {
+                    ValueType::Nullable(Box::new(ValueType::U64))
+                }
+                ValueType::I32 | ValueType::I64 => ValueType::Nullable(Box::new(ValueType::I64)),
+                ValueType::F64 => ValueType::Nullable(Box::new(ValueType::F64)),
                 _ => return Err(IvmRuntimeError::UnsupportedOperator),
             }
         }
@@ -8681,25 +8679,11 @@ fn aggregate_sum(
     }
     match kind {
         None => Ok(None),
-        Some(ValueType::U8) => u8::try_from(u64_sum)
-            .map(Value::U8)
-            .map(Some)
-            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
-        Some(ValueType::U16) => u16::try_from(u64_sum)
-            .map(Value::U16)
-            .map(Some)
-            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
-        Some(ValueType::U32) => u32::try_from(u64_sum)
-            .map(Value::U32)
-            .map(Some)
-            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
-        Some(ValueType::U64) => Ok(Some(Value::U64(u64_sum))),
-        Some(ValueType::I32) => i32::try_from(i64_sum)
-            .map(Value::I32)
-            .map(Some)
-            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
+        Some(ValueType::U8 | ValueType::U16 | ValueType::U32 | ValueType::U64) => {
+            Ok(Some(Value::U64(u64_sum)))
+        }
+        Some(ValueType::I32 | ValueType::I64) => Ok(Some(Value::I64(i64_sum))),
         Some(ValueType::F64) => Ok(Some(Value::F64(f64_sum))),
-        Some(ValueType::I64) => Ok(Some(Value::I64(i64_sum))),
         Some(_) => Err(IvmRuntimeError::UnsupportedOperator),
     }
 }
@@ -8770,14 +8754,14 @@ fn aggregate_extremum(
 }
 
 fn add_weighted_u64(current: u64, value: u64, weight: i64) -> Result<u64, IvmRuntimeError> {
-    let weight = u64::try_from(weight).map_err(|_| IvmRuntimeError::UnsupportedOperator)?;
+    let weight = u64::try_from(weight).map_err(|_| IvmRuntimeError::AggregateSumOverflow)?;
     current
         .checked_add(
             value
                 .checked_mul(weight)
-                .ok_or(IvmRuntimeError::UnsupportedOperator)?,
+                .ok_or(IvmRuntimeError::AggregateSumOverflow)?,
         )
-        .ok_or(IvmRuntimeError::UnsupportedOperator)
+        .ok_or(IvmRuntimeError::AggregateSumOverflow)
 }
 
 fn add_weighted_i64(current: i64, value: i64, weight: i64) -> Result<i64, IvmRuntimeError> {
@@ -8785,9 +8769,9 @@ fn add_weighted_i64(current: i64, value: i64, weight: i64) -> Result<i64, IvmRun
         .checked_add(
             value
                 .checked_mul(weight)
-                .ok_or(IvmRuntimeError::UnsupportedOperator)?,
+                .ok_or(IvmRuntimeError::AggregateSumOverflow)?,
         )
-        .ok_or(IvmRuntimeError::UnsupportedOperator)
+        .ok_or(IvmRuntimeError::AggregateSumOverflow)
 }
 
 fn numeric_value_as_f64(value: &Value) -> Result<f64, IvmRuntimeError> {
@@ -9554,6 +9538,8 @@ pub enum IvmRuntimeError {
     InvalidCollectBy(String),
     #[error("collect_by expand encountered duplicate output occurrence source ids")]
     DuplicateCollectByOccurrenceId,
+    #[error("aggregate sum overflow")]
+    AggregateSumOverflow,
     #[error("unsupported operator")]
     UnsupportedOperator,
 }

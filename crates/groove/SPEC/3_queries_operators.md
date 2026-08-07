@@ -355,7 +355,12 @@ can be updated by weighted deltas:
 
 - `count(*)`: signed total input multiplicity for the group.
 - `count(expr)`: signed total multiplicity where `expr` is non-null.
-- `sum(expr)`: weighted sum over numeric values, including signed `I64`.
+- `sum(expr)`: weighted sum over numeric values. `U8`, `U16`, `U32`, and
+  `U64` inputs return nullable `U64`; `I32` and `I64` inputs return nullable
+  `I64`; and `F64` inputs return nullable `F64`. `sum` never changes
+  signedness. A sum that exceeds its widened 64-bit accumulator fails with the
+  named aggregate-sum-overflow error rather than wrapping, saturating, or
+  promoting further.
 - `avg(expr)`: mean over non-null values, returned as `F64`.
 - `min(expr)` / `max(expr)`: extremum over positive-multiplicity values, backed
   by an ordered value index with deterministic full-record tie accounting.
