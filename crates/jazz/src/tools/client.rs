@@ -1726,9 +1726,9 @@ fn core_row_provenance_to_public(
 ) -> crate::tools::metadata::RowProvenance {
     crate::tools::metadata::RowProvenance {
         created_by: provenance.created_by.0.to_string(),
-        created_at: provenance.created_at.physical_ms(),
+        created_at: provenance.created_at.0,
         updated_by: provenance.updated_by.0.to_string(),
-        updated_at: provenance.updated_at.physical_ms(),
+        updated_at: provenance.updated_at.0,
     }
 }
 
@@ -2311,8 +2311,8 @@ impl JazzClient {
                     )));
                 };
                 match column {
-                    "$createdAt" => Value::Timestamp(provenance.created_at.physical_ms()),
-                    "$updatedAt" => Value::Timestamp(provenance.updated_at.physical_ms()),
+                    "$createdAt" => Value::Timestamp(provenance.created_at.0),
+                    "$updatedAt" => Value::Timestamp(provenance.updated_at.0),
                     "$createdBy" => Value::Text(provenance.created_by.0.to_string()),
                     "$updatedBy" => Value::Text(provenance.updated_by.0.to_string()),
                     _ => unreachable!("matched provenance magic column"),
