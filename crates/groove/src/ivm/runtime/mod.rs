@@ -1821,6 +1821,44 @@ impl IvmRuntime {
     ) -> Result<CompiledNode, IvmRuntimeError> {
         let inferred_output = self.infer_builder_output_cached(graph, output_memo)?;
         match graph {
+            GraphBuilder::Table { .. }
+            | GraphBuilder::InlineRecords { .. }
+            | GraphBuilder::Index { .. }
+            | GraphBuilder::FrontierSource { .. }
+            | GraphBuilder::BindingSource { .. }
+            | GraphBuilder::Recursive { .. }
+            | GraphBuilder::CollectBy { .. } => {
+                self.add_dedup_source_graph(graph, inferred_output, output_memo)
+            }
+            GraphBuilder::ArgMaxBy { .. }
+            | GraphBuilder::ArgMinBy { .. }
+            | GraphBuilder::TopBy { .. } => {
+                self.add_dedup_ordering_graph(graph, inferred_output, output_memo)
+            }
+            GraphBuilder::Aggregate { .. }
+            | GraphBuilder::Filter { .. }
+            | GraphBuilder::Project { .. }
+            | GraphBuilder::UnwrapNullable { .. }
+            | GraphBuilder::Unnest { .. }
+            | GraphBuilder::Union { .. } => {
+                self.add_dedup_unary_graph(graph, inferred_output, output_memo)
+            }
+            GraphBuilder::Join { .. }
+            | GraphBuilder::SemiJoin { .. }
+            | GraphBuilder::AntiJoin { .. } => {
+                self.add_dedup_join_graph(graph, inferred_output, output_memo)
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn add_dedup_source_graph(
+        &mut self,
+        graph: &GraphBuilder,
+        inferred_output: RecordDescriptor,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        match graph {
             GraphBuilder::Table { table, scan } => {
                 let output = inferred_output;
                 let node = self.graph.dedup_node(
@@ -1948,6 +1986,21 @@ impl IvmRuntime {
                 self.initialize_node_runtime(node);
                 Ok(CompiledNode { output, node })
             }
+            GraphBuilder::CollectBy { input, collect } => {
+                self.add_collect_by_graph(input, collect, inferred_output, output_memo)
+            }
+            _ => unreachable!("dispatcher routes only source graph builders here"),
+        }
+    }
+
+    #[inline(never)]
+    fn add_dedup_ordering_graph(
+        &mut self,
+        graph: &GraphBuilder,
+        inferred_output: RecordDescriptor,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        match graph {
             GraphBuilder::ArgMaxBy {
                 input,
                 group_cols,
@@ -2169,9 +2222,18 @@ impl IvmRuntime {
                 self.initialize_node_runtime(node);
                 Ok(CompiledNode { output, node })
             }
-            GraphBuilder::CollectBy { input, collect } => {
-                self.add_collect_by_graph(input, collect, inferred_output, output_memo)
-            }
+            _ => unreachable!("dispatcher routes only ordering graph builders here"),
+        }
+    }
+
+    #[inline(never)]
+    fn add_dedup_unary_graph(
+        &mut self,
+        graph: &GraphBuilder,
+        inferred_output: RecordDescriptor,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        match graph {
             GraphBuilder::Aggregate {
                 input,
                 group_cols,
@@ -2331,6 +2393,18 @@ impl IvmRuntime {
                 self.initialize_node_runtime(node);
                 Ok(CompiledNode { output, node })
             }
+            _ => unreachable!("dispatcher routes only unary graph builders here"),
+        }
+    }
+
+    #[inline(never)]
+    fn add_dedup_join_graph(
+        &mut self,
+        graph: &GraphBuilder,
+        inferred_output: RecordDescriptor,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        match graph {
             GraphBuilder::Join {
                 left,
                 right,
@@ -2448,6 +2522,7 @@ impl IvmRuntime {
                 self.initialize_node_runtime(node);
                 Ok(CompiledNode { output, node })
             }
+            _ => unreachable!("dispatcher routes only join graph builders here"),
         }
     }
 
