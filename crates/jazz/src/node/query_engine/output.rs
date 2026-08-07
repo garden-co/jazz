@@ -167,7 +167,7 @@ pub(crate) enum ProgramFactKey {
     /// Root result-set membership rows.
     ResultMembership,
     /// Relation edge rows.
-    RelationEdges,
+    RelationLinks,
     /// Per-path correlation/cardinality coverage rows.
     PathCorrelationCoverage,
     /// Source/table coverage facts for a scope.

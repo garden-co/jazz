@@ -507,7 +507,7 @@ fn production_output_request(
             }),
             facts: if has_relation_paths {
                 BTreeSet::from([
-                    ProgramFactKey::RelationEdges,
+                    ProgramFactKey::RelationLinks,
                     ProgramFactKey::PathCorrelationCoverage,
                 ])
             } else {
@@ -1784,7 +1784,7 @@ fn correlated_path_projection_lowers_with_relation_fact_schemas() {
         output: RowSetOutputRequest {
             app_rows: None,
             facts: BTreeSet::from([
-                ProgramFactKey::RelationEdges,
+                ProgramFactKey::RelationLinks,
                 ProgramFactKey::PathCorrelationCoverage,
             ]),
         },
@@ -1823,9 +1823,9 @@ fn correlated_path_projection_lowers_with_relation_fact_schemas() {
         matches!(
             terminal,
             OutputTerminalSchema::Fact(ProgramFactOutput {
-                key: ProgramFactKey::RelationEdges,
+                key: ProgramFactKey::RelationLinks,
                 terminal: ProgramFactTerminal::Primary,
-                schema: ProgramFactSchema::RelationEdges(RelationEdgeSchema {
+                schema: ProgramFactSchema::RelationLinks(RelationLinkSchema {
                     role_field: Some(_),
                     depth_field: None,
                     ..
@@ -1861,7 +1861,7 @@ fn unordered_bounded_correlated_child_window_defaults_to_child_row_id_order() {
         CorrelationRequirement::Optional,
         row_set_output(BTreeSet::from([
             ProgramFactKey::ResultMembership,
-            ProgramFactKey::RelationEdges,
+            ProgramFactKey::RelationLinks,
         ])),
     );
     request.input.shape.nodes.insert(
@@ -1898,7 +1898,7 @@ fn unordered_bounded_correlated_child_window_defaults_to_child_row_id_order() {
     assert!(program.lowered.terminals.iter().any(|terminal| matches!(
         terminal.output,
         OutputTerminalSchema::Fact(ProgramFactOutput {
-            key: ProgramFactKey::RelationEdges,
+            key: ProgramFactKey::RelationLinks,
             ..
         })
     )));
@@ -2354,7 +2354,7 @@ fn correlated_path_app_rows_and_relation_facts_lower_to_sibling_sinks() {
     let request = correlated_path_request(
         CorrelationRequirement::Optional,
         row_set_output(BTreeSet::from([
-            ProgramFactKey::RelationEdges,
+            ProgramFactKey::RelationLinks,
             ProgramFactKey::PathCorrelationCoverage,
         ])),
     );
@@ -2404,9 +2404,9 @@ fn correlated_path_app_rows_and_relation_facts_lower_to_sibling_sinks() {
         matches!(
             terminal,
             OutputTerminalSchema::Fact(ProgramFactOutput {
-                key: ProgramFactKey::RelationEdges,
+                key: ProgramFactKey::RelationLinks,
                 terminal: ProgramFactTerminal::Primary,
-                schema: ProgramFactSchema::RelationEdges(_),
+                schema: ProgramFactSchema::RelationLinks(_),
             })
         )
     }));
@@ -2460,7 +2460,7 @@ fn production_output_profiles_lower_for_linear_and_correlated_shapes() {
                     matches!(
                         terminal,
                         OutputTerminalSchema::Fact(ProgramFactOutput {
-                            key: ProgramFactKey::RelationEdges,
+                            key: ProgramFactKey::RelationLinks,
                             ..
                         })
                     )
@@ -2662,7 +2662,7 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
         output: RowSetOutputRequest {
             app_rows: None,
             facts: BTreeSet::from([
-                ProgramFactKey::RelationEdges,
+                ProgramFactKey::RelationLinks,
                 ProgramFactKey::ResultMembership,
                 ProgramFactKey::PathCorrelationCoverage,
             ]),
@@ -2749,9 +2749,9 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
         matches!(
             terminal,
             OutputTerminalSchema::Fact(ProgramFactOutput {
-                key: ProgramFactKey::RelationEdges,
+                key: ProgramFactKey::RelationLinks,
                 terminal: ProgramFactTerminal::Primary,
-                schema: ProgramFactSchema::RelationEdges(RelationEdgeSchema {
+                schema: ProgramFactSchema::RelationLinks(RelationLinkSchema {
                     depth_field: Some(_),
                     ..
                 }),
@@ -2958,7 +2958,7 @@ fn recursive_relation_seed_claim_lowers_from_policy_context() {
         },
         output: RowSetOutputRequest {
             app_rows: None,
-            facts: BTreeSet::from([ProgramFactKey::RelationEdges]),
+            facts: BTreeSet::from([ProgramFactKey::RelationLinks]),
         },
     };
 
@@ -3349,7 +3349,7 @@ fn read_frontier_facts_are_outputs_not_delivery_profiles() {
 fn app_rows_are_separate_from_hidden_terminal_facts() {
     let request = row_set_output(BTreeSet::from([
         ProgramFactKey::ResultMembership,
-        ProgramFactKey::RelationEdges,
+        ProgramFactKey::RelationLinks,
         ProgramFactKey::SourceCoverage(program_scope()),
     ]));
 
@@ -3358,7 +3358,7 @@ fn app_rows_are_separate_from_hidden_terminal_facts() {
         app_rows.projection,
         PayloadProjection::ShapeDefault
     ));
-    assert!(request.facts.contains(&ProgramFactKey::RelationEdges));
+    assert!(request.facts.contains(&ProgramFactKey::RelationLinks));
 }
 
 #[test]

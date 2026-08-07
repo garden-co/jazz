@@ -336,7 +336,7 @@ fn fact_public_fields(
             fields.extend(schema.routing_param_fields.iter().cloned());
             Ok(fields)
         }
-        ProgramFactSchema::RelationEdges(schema) => {
+        ProgramFactSchema::RelationLinks(schema) => {
             let mut fields = Vec::new();
             fields.extend(versioned_row_ref_fields(&schema.source));
             fields.push(schema.path_field.clone());
@@ -385,7 +385,7 @@ fn fact_public_fields(
             ProgramFactSchema::AuthorizedRows(_)
             | ProgramFactSchema::ResultMembership(_)
             | ProgramFactSchema::AggregateResult(_)
-            | ProgramFactSchema::RelationEdges(_)
+            | ProgramFactSchema::RelationLinks(_)
             | ProgramFactSchema::VersionWitnesses(_)
             | ProgramFactSchema::ReplacementWitnesses(_) => unreachable!(),
         })),
@@ -515,8 +515,8 @@ fn version_identity_fields(schema: &VersionIdentityFields) -> Vec<String> {
 pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
     pub(crate) added: Vec<CurrentRow>,
     pub(crate) removed: Vec<(String, RowUuid)>,
-    pub(crate) added_edges: Vec<(RelationEdge, Option<CurrentRow>)>,
-    pub(crate) removed_edges: Vec<RelationEdge>,
+    pub(crate) added_edges: Vec<(RelationLink, Option<CurrentRow>)>,
+    pub(crate) removed_edges: Vec<RelationLink>,
 }
 
 enum CurrentQueryProgramOutput {
@@ -2637,7 +2637,7 @@ fn current_query_output_request(
             if !query.array_subqueries.is_empty() || !query.reachable.is_empty() =>
         {
             BTreeSet::from([
-                ProgramFactKey::RelationEdges,
+                ProgramFactKey::RelationLinks,
                 ProgramFactKey::PathCorrelationCoverage,
             ])
         }
@@ -2647,7 +2647,7 @@ fn current_query_output_request(
                 ProgramFactKey::ResultMembership,
                 ProgramFactKey::VersionWitnesses,
                 ProgramFactKey::ReplacementWitnesses,
-                ProgramFactKey::RelationEdges,
+                ProgramFactKey::RelationLinks,
             ])
         }
         CurrentQueryProgramOutput::MaintainedView => BTreeSet::from([
@@ -5124,10 +5124,10 @@ where
         let root_count = rows.len();
         let mut edges = Vec::new();
         for fact in program_facts {
-            let ProgramFactEntry::RelationEdge(edge) = fact else {
+            let ProgramFactEntry::RelationLink(edge) = fact else {
                 continue;
             };
-            edges.push(RelationEdge {
+            edges.push(RelationLink {
                 source_table: edge.source_table.to_string(),
                 source_row: edge.source_row,
                 relation: edge.path.clone(),
@@ -7512,8 +7512,8 @@ where
         }
         for fact in transitions.program_fact_removes {
             if local.program_facts.remove(&fact) {
-                if materialize_update && let ProgramFactEntry::RelationEdge(edge) = fact {
-                    removed_edges.push(RelationEdge {
+                if materialize_update && let ProgramFactEntry::RelationLink(edge) = fact {
+                    removed_edges.push(RelationLink {
                         source_table: edge.source_table.to_string(),
                         source_row: edge.source_row,
                         relation: edge.path,
@@ -7526,14 +7526,14 @@ where
         for fact in transitions.program_fact_adds {
             let edge = materialize_update
                 .then(|| match &fact {
-                    ProgramFactEntry::RelationEdge(edge) => Some(edge.clone()),
+                    ProgramFactEntry::RelationLink(edge) => Some(edge.clone()),
                     _ => None,
                 })
                 .flatten();
             if local.program_facts.insert(fact)
                 && let Some(edge) = edge
             {
-                let relation_edge = RelationEdge {
+                let relation_edge = RelationLink {
                     source_table: edge.source_table.to_string(),
                     source_row: edge.source_row,
                     relation: edge.path.clone(),
@@ -7585,10 +7585,10 @@ where
         let root_count = rows.len();
         let mut edges = Vec::with_capacity(local.program_facts.len());
         for fact in &local.program_facts {
-            let ProgramFactEntry::RelationEdge(edge) = fact else {
+            let ProgramFactEntry::RelationLink(edge) = fact else {
                 continue;
             };
-            edges.push(RelationEdge {
+            edges.push(RelationLink {
                 source_table: edge.source_table.to_string(),
                 source_row: edge.source_row,
                 relation: edge.path.clone(),
@@ -7633,7 +7633,7 @@ where
                 .or_insert_with(|| local.maintained.versions_by_tx(tx_id));
         }
         for fact in &local.program_facts {
-            let ProgramFactEntry::RelationEdge(edge) = fact else {
+            let ProgramFactEntry::RelationLink(edge) = fact else {
                 continue;
             };
             let Some(version) = &edge.target_version else {
@@ -8429,8 +8429,8 @@ where
             return Ok(snapshot);
         };
         #[derive(Clone)]
-        struct RelationEdgeCandidate {
-            edge: RelationEdge,
+        struct RelationLinkCandidate {
+            edge: RelationLink,
             target_tx_time: TxTime,
             target_tx_node: NodeAlias,
         }
@@ -8456,8 +8456,8 @@ where
             let target_row = RowUuid(record.get_uuid(target_row_idx)?);
             let target_tx_time = TxTime(record.get_u64(target_tx_time_idx)?);
             let target_tx_node = NodeAlias(record.get_u64(target_tx_node_idx)?);
-            candidates.push(RelationEdgeCandidate {
-                edge: RelationEdge {
+            candidates.push(RelationLinkCandidate {
+                edge: RelationLink {
                     source_table,
                     source_row,
                     relation,

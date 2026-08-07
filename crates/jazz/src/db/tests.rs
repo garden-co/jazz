@@ -212,7 +212,7 @@ fn delta_rows(event: SubscriptionEvent) -> (Vec<CurrentRow>, Vec<CurrentRow>, Ve
     }
 }
 
-fn snapshot_edges(event: &SubscriptionEvent) -> BTreeSet<RelationEdge> {
+fn snapshot_edges(event: &SubscriptionEvent) -> BTreeSet<RelationLink> {
     let event = event.clone();
     let mut snapshot = RelationSnapshot::default();
     apply_subscription_event(&mut snapshot, event);
@@ -1872,7 +1872,7 @@ fn branch_read_view_relation_snapshot_uses_query_engine_relation_edges() {
     );
     assert_eq!(
         snapshot.edges.into_iter().collect::<BTreeSet<_>>(),
-        BTreeSet::from([RelationEdge {
+        BTreeSet::from([RelationLink {
             source_table: "users".to_owned(),
             source_row: row(0xa1),
             relation: "todosViaOwner".to_owned(),
@@ -3066,7 +3066,7 @@ fn array_subquery_live_subscription_tracks_child_edges() {
     .unwrap();
     assert_eq!(
         snapshot_edges(&block_on(subscription.next_event()).unwrap()),
-        BTreeSet::from([RelationEdge {
+        BTreeSet::from([RelationLink {
             source_table: "users".to_owned(),
             source_row: row(0xa1),
             relation: "todosViaOwner".to_owned(),
@@ -3095,7 +3095,7 @@ fn array_subquery_live_subscription_tracks_child_edges() {
     .unwrap();
     assert_eq!(
         snapshot_edges(&block_on(subscription.next_event()).unwrap()),
-        BTreeSet::from([RelationEdge {
+        BTreeSet::from([RelationLink {
             source_table: "users".to_owned(),
             source_row: row(0xa1),
             relation: "todosViaOwner".to_owned(),

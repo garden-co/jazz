@@ -13,12 +13,12 @@ use super::codec::{
 };
 use super::query_engine::{
     AggregateResultSchema, AppRowSchema, OutputTerminalSchema, ProgramFactKey, ProgramFactSchema,
-    ProgramFactTerminal, QueryProgram, RelationEdgeSchema, ResultMembershipSchema,
+    ProgramFactTerminal, QueryProgram, RelationLinkSchema, ResultMembershipSchema,
     ResultMembershipVersionSchema, VersionWitnessSchema, VersionedRowRefSchema,
 };
 use crate::ids::{AuthorId, NodeAlias, NodeUuid, RowUuid};
 use crate::protocol::{
-    ProgramFactEntry, RealRowMemberEntry, RelationEdgeEntry, ResultMemberEntry,
+    ProgramFactEntry, RealRowMemberEntry, RelationLinkEntry, ResultMemberEntry,
     ResultMemberPayloadEntry, ResultRowLayer, ResultTree, ResultTreeNode, ResultTreeRelation,
     ResultTreeRow, ResultTreeUpdate, RowVersionRefEntry,
 };
@@ -149,7 +149,7 @@ pub(crate) enum DecodedMaintainedEvent {
     VersionDeletion(VersionRow),
     ReplacementContent(VersionRow),
     ReplacementDeletion(VersionRow),
-    RelationEdge(RelationEdgeEntry),
+    RelationLink(RelationLinkEntry),
     StructuredAppRow {
         root: RowUuid,
         record: OwnedRecord,
@@ -169,7 +169,7 @@ enum MaintainedTerminalKind {
     VersionDeletion(VersionWitnessSchema),
     ReplacementContent(VersionWitnessSchema),
     ReplacementDeletion(VersionWitnessSchema),
-    RelationEdge(RelationEdgeSchema),
+    RelationLink(RelationLinkSchema),
     StructuredAppRows(AppRowSchema),
 }
 
@@ -301,8 +301,8 @@ impl MaintainedSubscriptionView {
                     let key = ReplacementKey::for_row(&row, VersionLayer::Deletion);
                     NetEvent::Replacement(key, identity, row)
                 }
-                DecodedMaintainedEvent::RelationEdge(edge) => {
-                    NetEvent::ProgramFact(ProgramFactEntry::RelationEdge(edge))
+                DecodedMaintainedEvent::RelationLink(edge) => {
+                    NetEvent::ProgramFact(ProgramFactEntry::RelationLink(edge))
                 }
                 DecodedMaintainedEvent::StructuredAppRow { root, record } => {
                     NetEvent::StructuredAppRow(root, record)
@@ -740,10 +740,10 @@ impl MaintainedTerminalSchemas {
                     ProgramFactSchema::AggregateResult(schema),
                 ) => Some(MaintainedTerminalKind::AggregateResult(schema.clone())),
                 (
-                    ProgramFactKey::RelationEdges,
+                    ProgramFactKey::RelationLinks,
                     ProgramFactTerminal::Primary,
-                    ProgramFactSchema::RelationEdges(schema),
-                ) => Some(MaintainedTerminalKind::RelationEdge(schema.clone())),
+                    ProgramFactSchema::RelationLinks(schema),
+                ) => Some(MaintainedTerminalKind::RelationLink(schema.clone())),
                 (
                     ProgramFactKey::VersionWitnesses,
                     ProgramFactTerminal::VersionWitnessDeletion,
@@ -943,9 +943,9 @@ fn decode_typed_terminal_record(
             decode_typed_version_witness(record, schema, tables, decode_plan_cache)
                 .map(DecodedMaintainedEvent::ReplacementDeletion)
         }
-        MaintainedTerminalKind::RelationEdge(schema) => {
+        MaintainedTerminalKind::RelationLink(schema) => {
             decode_typed_relation_edge(record, schema, tables, node_aliases)
-                .map(DecodedMaintainedEvent::RelationEdge)
+                .map(DecodedMaintainedEvent::RelationLink)
         }
         MaintainedTerminalKind::StructuredAppRows(schema) => {
             let root = RowUuid(record.get_uuid(field_idx(record, "row_uuid")?)?);
@@ -959,10 +959,10 @@ fn decode_typed_terminal_record(
 
 fn decode_typed_relation_edge(
     record: BorrowedRecord<'_>,
-    schema: &RelationEdgeSchema,
+    schema: &RelationLinkSchema,
     tables: &TableSchemas,
     node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
-) -> Result<RelationEdgeEntry, super::Error> {
+) -> Result<RelationLinkEntry, super::Error> {
     let source_table = table_name_from_versioned_ref(record, &schema.source, tables)?;
     let target_table = table_name_from_versioned_ref(record, &schema.target, tables)?;
     let path = match record.get_idx(field_idx(record, &schema.path_field)?)? {
@@ -973,19 +973,19 @@ fn decode_typed_relation_edge(
             ));
         }
     };
-    Ok(RelationEdgeEntry {
+    Ok(RelationLinkEntry {
         path,
         source_table: source_table.clone().into(),
         source_row: RowUuid(record.get_uuid(field_idx(record, &schema.source.row.row_field)?)?),
         target_table: target_table.clone().into(),
         target_row: RowUuid(record.get_uuid(field_idx(record, &schema.target.row.row_field)?)?),
-        kind: Some(crate::protocol::RelationEdgeKind::Relation),
+        kind: Some(crate::protocol::RelationLinkKind::Relation),
         source_version: decode_relation_edge_version(record, &schema.source, node_aliases)?,
         target_version: decode_relation_edge_version(record, &schema.target, node_aliases)?,
         depth: None,
         edge_id: None,
         branch: None,
-        role: Some(crate::protocol::RelationEdgeRole::Terminal),
+        role: Some(crate::protocol::RelationLinkRole::Terminal),
         order: None,
         hole_state: None,
     })

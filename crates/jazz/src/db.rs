@@ -39,7 +39,7 @@ pub use crate::node::CommitUnitTrust;
 use crate::node::{
     CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LargeValueEditCommit, LargeValueEditOp,
     LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate, MergeableCommit,
-    NodeState, OpenTxId, PreparedQueryPlanHandle, QueryReadProfile, RelationEdge, RelationSnapshot,
+    NodeState, OpenTxId, PreparedQueryPlanHandle, QueryReadProfile, RelationLink, RelationSnapshot,
     RowProvenance, ViewUpdateParts,
 };
 use crate::peer::{PeerRole, PeerState};
@@ -3419,7 +3419,7 @@ struct SizeRelationSnapshot<'a> {
     cursor: u64,
     root_count: u64,
     rows: Vec<SizeRowBatch<'a>>,
-    edges: Vec<SizeRelationEdge>,
+    edges: Vec<SizeRelationLink>,
 }
 
 #[cfg(feature = "testing")]
@@ -3455,7 +3455,7 @@ struct SizeRemovedRow {
 
 #[cfg(feature = "testing")]
 #[derive(serde::Serialize)]
-struct SizeRelationEdge {
+struct SizeRelationLink {
     source_table: String,
     source_row_id: RowUuid,
     relation: String,
@@ -3517,8 +3517,8 @@ fn size_row<'a>(row: &CurrentRow, raw: &'a [u8]) -> SizeRow<'a> {
 }
 
 #[cfg(feature = "testing")]
-fn size_relation_edge(edge: &RelationEdge) -> SizeRelationEdge {
-    SizeRelationEdge {
+fn size_relation_edge(edge: &RelationLink) -> SizeRelationLink {
+    SizeRelationLink {
         source_table: edge.source_table.clone(),
         source_row_id: edge.source_row,
         relation: edge.relation.clone(),
@@ -8083,7 +8083,7 @@ struct SubscriptionState {
 struct RelationSnapshotIndex {
     roots: BTreeMap<OutputOccurrenceId, usize>,
     related: BTreeMap<(String, RowUuid), usize>,
-    edges: BTreeSet<RelationEdge>,
+    edges: BTreeSet<RelationLink>,
 }
 
 impl RelationSnapshotIndex {
@@ -8148,7 +8148,7 @@ impl std::ops::Deref for SubscriptionOutputRow {
 }
 
 /// Materialized relation edge removed from a subscription result.
-pub type RemovedRelationEdge = RelationEdge;
+pub type RemovedRelationLink = RelationLink;
 
 /// Delta event emitted by a database subscription stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -8173,9 +8173,9 @@ pub enum SubscriptionEvent {
         /// incremental deltas.
         added_related: Vec<CurrentRow>,
         /// Relation edges newly visible to the subscription.
-        added_edges: Vec<RelationEdge>,
+        added_edges: Vec<RelationLink>,
         /// Relation edges no longer visible to the subscription.
-        removed_edges: Vec<RemovedRelationEdge>,
+        removed_edges: Vec<RemovedRelationLink>,
         /// Whether the result is complete at the requested read tier.
         settled: bool,
         /// Read tier used to materialize the rows.

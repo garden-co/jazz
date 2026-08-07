@@ -3919,7 +3919,7 @@ where
         for (table, row_uuid, tx_id) in program_fact_adds
             .iter()
             .filter_map(|fact| match fact {
-                ProgramFactEntry::RelationEdge(edge) => Some(edge),
+                ProgramFactEntry::RelationLink(edge) => Some(edge),
                 _ => None,
             })
             .flat_map(|edge| {
@@ -4179,7 +4179,7 @@ pub struct RowProvenance {
 
 /// Directed relation edge emitted for an array-subquery payload.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RelationEdge {
+pub struct RelationLink {
     /// Source row table.
     pub source_table: String,
     /// Source row id.
@@ -4200,7 +4200,7 @@ pub struct RelationSnapshot {
     /// Root and related rows referenced by `edges`.
     pub rows: Vec<CurrentRow>,
     /// Relation edges between rows.
-    pub edges: Vec<RelationEdge>,
+    pub edges: Vec<RelationLink>,
 }
 
 impl CurrentRow {

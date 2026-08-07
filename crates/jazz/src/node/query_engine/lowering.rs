@@ -1913,7 +1913,7 @@ fn source_requirements(
                         .insert(SourceMetadataRequirement::Coverage);
                 }
             },
-            ProgramFactKey::RelationEdges | ProgramFactKey::PathCorrelationCoverage => {
+            ProgramFactKey::RelationLinks | ProgramFactKey::PathCorrelationCoverage => {
                 for source_requirements in requirements.values_mut() {
                     source_requirements
                         .metadata
@@ -5901,7 +5901,7 @@ fn fact_input_graph(
         (plan, key),
         (
             AnalyzedQueryPlan::CorrelatedPath(_),
-            ProgramFactKey::RelationEdges | ProgramFactKey::PathCorrelationCoverage
+            ProgramFactKey::RelationLinks | ProgramFactKey::PathCorrelationCoverage
         )
     ) {
         if let AnalyzedQueryPlan::CorrelatedPath(path) = plan {
@@ -6467,8 +6467,8 @@ fn fact_output_with_terminal(
                 deletion: Some(witness),
             })
         }
-        ProgramFactKey::RelationEdges => {
-            ProgramFactSchema::RelationEdges(relation_edge_schema(plan, source, resolved_sources)?)
+        ProgramFactKey::RelationLinks => {
+            ProgramFactSchema::RelationLinks(relation_edge_schema(plan, source, resolved_sources)?)
         }
         ProgramFactKey::PathCorrelationCoverage => ProgramFactSchema::PathCorrelationCoverage(
             path_correlation_coverage_schema(plan, source, resolved_sources)?,
@@ -6508,7 +6508,7 @@ fn fact_sink_name(key: &ProgramFactKey) -> String {
         ProgramFactKey::ResultMembership => "maintained.result_current".to_owned(),
         ProgramFactKey::VersionWitnesses => "maintained.version_content".to_owned(),
         ProgramFactKey::ReplacementWitnesses => "maintained.replacement_content".to_owned(),
-        ProgramFactKey::RelationEdges => "maintained.relation_edges".to_owned(),
+        ProgramFactKey::RelationLinks => "maintained.relation_edges".to_owned(),
         ProgramFactKey::PathCorrelationCoverage => "maintained.path_coverage".to_owned(),
         ProgramFactKey::SourceCoverage(_) => "maintained.source_coverage".to_owned(),
         other => format!("fact.{other:?}"),
@@ -6596,7 +6596,7 @@ fn fact_terminal_graph(
         ProgramFactKey::ReplacementWitnesses => {
             content_version_witness_graph(source, "replacement_content")
         }
-        ProgramFactKey::RelationEdges => {
+        ProgramFactKey::RelationLinks => {
             let _ = relation_edge_schema(plan, source, resolved_sources)?;
             relation_edge_graph(key, graph, plan, source, resolved_sources, request)
         }
@@ -7247,7 +7247,7 @@ fn relation_edge_schema(
     plan: &AnalyzedQueryPlan,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
-) -> CapabilityResult<RelationEdgeSchema> {
+) -> CapabilityResult<RelationLinkSchema> {
     let (source, target, depth_field) = match plan {
         AnalyzedQueryPlan::CorrelatedPath(path) => {
             let child = resolved_sources.get(&path.path.child).ok_or_else(|| {
@@ -7259,7 +7259,7 @@ fn relation_edge_schema(
                     explain: ExplainPlan::default(),
                 })
             })?;
-            return Ok(RelationEdgeSchema {
+            return Ok(RelationLinkSchema {
                 source: prefixed_versioned_row_ref_schema(root_source, "source")?,
                 path_field: "path".to_owned(),
                 target: prefixed_versioned_row_ref_schema(child, "target")?,
@@ -7301,7 +7301,7 @@ fn relation_edge_schema(
         AnalyzedQueryPlan::Linear(_) | AnalyzedQueryPlan::Union(_) => {
             return Err(Box::new(CapabilityReport {
                 gaps: vec![UnsupportedReason::Output(Box::new(
-                    ProgramFactKey::RelationEdges,
+                    ProgramFactKey::RelationLinks,
                 ))],
                 explain: ExplainPlan {
                     capabilities: vec![
@@ -7313,7 +7313,7 @@ fn relation_edge_schema(
         }
     };
 
-    Ok(RelationEdgeSchema {
+    Ok(RelationLinkSchema {
         source: versioned_row_ref_schema(source)?,
         path_field: "path".to_owned(),
         target: versioned_row_ref_schema(target)?,

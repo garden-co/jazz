@@ -189,7 +189,7 @@ struct WasmRelationSnapshot<'a> {
     cursor: u64,
     root_count: u64,
     rows: Vec<WasmRowBatch<'a>>,
-    edges: Vec<WasmRelationEdge>,
+    edges: Vec<WasmRelationLink>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -206,12 +206,12 @@ struct WasmRelationSubscriptionDelta<'a> {
     added: Vec<WasmRowBatch<'a>>,
     updated: Vec<WasmRowBatch<'a>>,
     removed: Vec<WasmRemovedRow>,
-    added_edges: Vec<WasmRelationEdge>,
-    removed_edges: Vec<WasmRelationEdge>,
+    added_edges: Vec<WasmRelationLink>,
+    removed_edges: Vec<WasmRelationLink>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct WasmRelationEdge {
+struct WasmRelationLink {
     source_table: String,
     source_row_id: RowUuid,
     relation: String,
@@ -2392,8 +2392,8 @@ fn encode_relation_subscription_delta<'a>(
     updated: &'a [jazz::node::CurrentRow],
     removed: &[jazz::db::RemovedRow],
     added_related: &'a [jazz::node::CurrentRow],
-    added_edges: &[jazz::node::RelationEdge],
-    removed_edges: &[jazz::db::RemovedRelationEdge],
+    added_edges: &[jazz::node::RelationLink],
+    removed_edges: &[jazz::db::RemovedRelationLink],
 ) -> Result<Vec<u8>, postcard::Error> {
     let mut relation_added = Vec::with_capacity(added.len() + added_related.len());
     relation_added.extend_from_slice(added);
@@ -2433,8 +2433,8 @@ fn row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<WasmRowBatch<'_>> {
     batches
 }
 
-fn wasm_relation_edge(edge: &jazz::node::RelationEdge) -> WasmRelationEdge {
-    WasmRelationEdge {
+fn wasm_relation_edge(edge: &jazz::node::RelationLink) -> WasmRelationLink {
+    WasmRelationLink {
         source_table: edge.source_table.clone(),
         source_row_id: edge.source_row,
         relation: edge.relation.clone(),

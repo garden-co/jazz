@@ -116,7 +116,7 @@ struct CoreRelationSnapshot<'a> {
     cursor: u64,
     root_count: u64,
     rows: Vec<CoreRowBatch<'a>>,
-    edges: Vec<CoreRelationEdge>,
+    edges: Vec<CoreRelationLink>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -133,8 +133,8 @@ struct CoreRelationSubscriptionDelta<'a> {
     added: Vec<CoreRowBatch<'a>>,
     updated: Vec<CoreRowBatch<'a>>,
     removed: Vec<CoreRemovedRow>,
-    added_edges: Vec<CoreRelationEdge>,
-    removed_edges: Vec<CoreRelationEdge>,
+    added_edges: Vec<CoreRelationLink>,
+    removed_edges: Vec<CoreRelationLink>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -144,7 +144,7 @@ struct CoreRemovedRow {
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
-struct CoreRelationEdge {
+struct CoreRelationLink {
     source_table: String,
     source_row_id: CoreRowUuid,
     relation: String,
@@ -1902,8 +1902,8 @@ fn encode_core_relation_subscription_delta<'a>(
     updated: &'a [jazz::node::CurrentRow],
     removed: &[jazz::db::RemovedRow],
     added_related: &'a [jazz::node::CurrentRow],
-    added_edges: &[jazz::node::RelationEdge],
-    removed_edges: &[jazz::db::RemovedRelationEdge],
+    added_edges: &[jazz::node::RelationLink],
+    removed_edges: &[jazz::db::RemovedRelationLink],
 ) -> std::result::Result<Vec<u8>, postcard::Error> {
     let mut relation_added = Vec::with_capacity(added.len() + added_related.len());
     relation_added.extend_from_slice(added);
@@ -1943,8 +1943,8 @@ fn core_row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<CoreRowBatch<'_>> {
     batches
 }
 
-fn core_relation_edge(edge: &jazz::node::RelationEdge) -> CoreRelationEdge {
-    CoreRelationEdge {
+fn core_relation_edge(edge: &jazz::node::RelationLink) -> CoreRelationLink {
+    CoreRelationLink {
         source_table: edge.source_table.clone(),
         source_row_id: edge.source_row,
         relation: edge.relation.clone(),

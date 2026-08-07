@@ -1156,7 +1156,7 @@ fn relation_snapshot_single_level_array_uses_query_engine_edges() {
     );
     assert_eq!(
         snapshot.edges.into_iter().collect::<BTreeSet<_>>(),
-        BTreeSet::from([RelationEdge {
+        BTreeSet::from([RelationLink {
             source_table: "users".to_owned(),
             source_row: alice,
             relation: "todosViaOwner".to_owned(),
@@ -1242,14 +1242,14 @@ fn relation_snapshot_materializes_reverse_array_edges() {
     assert_eq!(
         snapshot.edges.into_iter().collect::<BTreeSet<_>>(),
         BTreeSet::from([
-            RelationEdge {
+            RelationLink {
                 source_table: "users".to_owned(),
                 source_row: alice,
                 relation: "todosViaOwner".to_owned(),
                 target_table: "todos".to_owned(),
                 target_row: todo_a,
             },
-            RelationEdge {
+            RelationLink {
                 source_table: "todos".to_owned(),
                 source_row: todo_a,
                 relation: "commentsViaTodo".to_owned(),
@@ -1331,7 +1331,7 @@ fn relation_snapshot_array_subquery_filters_use_parent_binding_params() {
     );
     assert_eq!(
         snapshot.edges.into_iter().collect::<BTreeSet<_>>(),
-        BTreeSet::from([RelationEdge {
+        BTreeSet::from([RelationLink {
             source_table: "users".to_owned(),
             source_row: alice,
             relation: "todosViaOwner".to_owned(),
