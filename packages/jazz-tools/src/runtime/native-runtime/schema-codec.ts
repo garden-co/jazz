@@ -7,7 +7,7 @@ import type {
   Value,
   WasmSchema,
 } from "../../drivers/types.js";
-import { PostcardWriter, writeValueType, type ValueType } from "./native-codec.js";
+import { PostcardWriter, type ValueType } from "./native-codec.js";
 
 const OUTER_ROW_SESSION_PREFIX = "__jazz_outer_row";
 
@@ -84,7 +84,7 @@ export function encodeSchema(schema: WasmSchema): Uint8Array {
     table.vec((column, columnIndex) => {
       const columnSpec = definition.columns[columnIndex]!;
       column.string(columnSpec.name);
-      writeValueType(column, columnValueType(columnSpec));
+      writeColumnType(column, columnValueType(columnSpec));
       writeLargeValueKind(column, columnSpec);
       column.none();
       writeColumnDefault(column, columnSpec);
@@ -112,6 +112,33 @@ export function encodeSchema(schema: WasmSchema): Uint8Array {
 export function columnValueType(column: ColumnDescriptor): ValueType {
   const valueType = columnTypeToValueType(column.column_type);
   return column.nullable ? { tag: 12, inner: valueType } : valueType;
+}
+
+// JazzSchema columns use groove::schema::ColumnType's postcard layout, which
+// differs from groove::records::ValueType at tag 13: it is I64, not Record.
+function writeColumnType(writer: PostcardWriter, columnType: ValueType): void {
+  writer.enumUnit(columnType.tag);
+  if (columnType.tag === 9) {
+    if (!columnType.enumSchema) throw new Error("missing enum schema for Groove ColumnType::Enum");
+    writer.string(columnType.enumSchema.name);
+    writer.vec(
+      (variantWriter, index) => variantWriter.string(columnType.enumSchema!.variants[index]!),
+      columnType.enumSchema.variants.length,
+    );
+    return;
+  }
+  if (columnType.tag === 10) {
+    const members = columnType.members ?? (columnType.inner ? [columnType.inner] : []);
+    writer.vec(
+      (memberWriter, index) => writeColumnType(memberWriter, members[index]!),
+      members.length,
+    );
+    return;
+  }
+  if (columnType.tag === 11 || columnType.tag === 12) {
+    if (!columnType.inner) throw new Error(`missing inner column type for tag ${columnType.tag}`);
+    writeColumnType(writer, columnType.inner);
+  }
 }
 
 function writeLargeValueKind(writer: PostcardWriter, column: ColumnDescriptor) {
@@ -159,14 +186,14 @@ function writeDefaultValue(writer: PostcardWriter, columnType: ColumnType, value
       return;
     case "Integer":
       writer.u64(14); // groove::records::Value::I32
-      writer.i64(expectI32(value, "Integer"));
+      writer.i64(encodeSignedI32DefaultForStorage(expectI32(value, "Integer")));
       return;
     case "BigInt":
       if (value.type !== "BigInt" && value.type !== "Integer") {
         throw new Error("expected BigInt default");
       }
       writer.u64(13); // groove::records::Value::I64
-      writer.i64(value.value);
+      writer.i64(encodeSignedI64DefaultForStorage(BigInt(value.value)));
       return;
     case "Timestamp":
       if (value.type !== "Timestamp") throw new Error("expected Timestamp default");
@@ -208,6 +235,14 @@ function writeDefaultValue(writer: PostcardWriter, columnType: ColumnType, value
     case "Row":
       throw new Error("Core runtime schema defaults do not support Row values yet");
   }
+}
+
+function encodeSignedI32DefaultForStorage(value: number): number {
+  return (value ^ 0x8000_0000) | 0;
+}
+
+function encodeSignedI64DefaultForStorage(value: bigint): bigint {
+  return BigInt.asIntN(64, BigInt.asUintN(64, value) ^ (1n << 63n));
 }
 
 function writeIndexedColumns(writer: PostcardWriter, indexedColumns: string[] | undefined): void {

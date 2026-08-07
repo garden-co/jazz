@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "undici";
 import { afterEach, describe, expect, it } from "vitest";
-import type { WasmSchema } from "../drivers/types.js";
+import type { ColumnType, Value, WasmSchema } from "../drivers/types.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
 import { webSocketUrl } from "./native-runtime/websocket.js";
 import { openConfig } from "./native-runtime/native-codec.js";
@@ -35,6 +35,47 @@ const DEFAULTS_SCHEMA: WasmSchema = {
     ],
   },
 };
+
+const SIGNED_DEFAULT_CASES: Array<{
+  name: string;
+  columnType: ColumnType;
+  value: Value;
+}> = [
+  {
+    name: "i32 minimum",
+    columnType: { type: "Integer" },
+    value: { type: "Integer", value: -2_147_483_648 },
+  },
+  {
+    name: "i32 negative one",
+    columnType: { type: "Integer" },
+    value: { type: "Integer", value: -1 },
+  },
+  { name: "i32 zero", columnType: { type: "Integer" }, value: { type: "Integer", value: 0 } },
+  { name: "i32 one", columnType: { type: "Integer" }, value: { type: "Integer", value: 1 } },
+  {
+    name: "i32 maximum",
+    columnType: { type: "Integer" },
+    value: { type: "Integer", value: 2_147_483_647 },
+  },
+  {
+    name: "i64 minimum",
+    columnType: { type: "BigInt" },
+    value: { type: "BigInt", value: -(1n << 63n) },
+  },
+  {
+    name: "i64 negative one",
+    columnType: { type: "BigInt" },
+    value: { type: "BigInt", value: -1n },
+  },
+  { name: "i64 zero", columnType: { type: "BigInt" }, value: { type: "BigInt", value: 0n } },
+  { name: "i64 one", columnType: { type: "BigInt" }, value: { type: "BigInt", value: 1n } },
+  {
+    name: "i64 maximum",
+    columnType: { type: "BigInt" },
+    value: { type: "BigInt", value: (1n << 63n) - 1n },
+  },
+];
 
 const ALICE_ID = "00000000-0000-4000-8000-0000000000a1";
 const BOB_ID = "00000000-0000-4000-8000-0000000000b2";
@@ -373,6 +414,42 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     runtime.close();
   });
+
+  it.each(SIGNED_DEFAULT_CASES)(
+    "round-trips the $name schema default through a direct napi insert",
+    async ({ columnType, value }) => {
+      const { NapiDb } = await loadNapiModule();
+      const runtime = new NativeRuntimeAdapter(
+        { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+        {
+          signed_defaults: {
+            columns: [
+              { name: "title", column_type: { type: "Text" }, nullable: false },
+              { name: "value", column_type: columnType, nullable: false, default: value },
+            ],
+          },
+        },
+        deterministicBytes("jazz-napi-native-runtime-signed-defaults:node"),
+        deterministicBytes("jazz-napi-native-runtime-signed-defaults:author"),
+        1,
+        true,
+      );
+
+      const inserted = runtime.insert("signed_defaults", {
+        title: { type: "Text", value: "direct napi signed default row" },
+      });
+
+      await expect(runtime.query(JSON.stringify({ table: "signed_defaults" }))).resolves.toEqual([
+        {
+          id: inserted.id,
+          table: "signed_defaults",
+          values: [{ type: "Text", value: "direct napi signed default row" }, value],
+        },
+      ]);
+
+      runtime.close();
+    },
+  );
 
   it("delivers native NAPI subscription updates through the native handle", async () => {
     const { NapiDb } = await loadNapiModule();
