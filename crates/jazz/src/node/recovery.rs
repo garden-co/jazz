@@ -87,15 +87,24 @@ where
                 raw.record().get_u64(TransactionRowRecord::FIELD_TIME_IDX)?,
             ));
         }
-        for table in self.catalogue.schema.tables.clone() {
-            if let Some(raw) =
-                self.database
-                    .index_last_raw(&history_table_name(&table.name), "by_tx", &[])?
-            {
+        let physical_history_tables = self
+            .catalogue
+            .physical_mappings
+            .values()
+            .flat_map(|mapping| mapping.tables.values().map(|table| table.table_id))
+            .collect::<BTreeSet<_>>();
+        for table_id in physical_history_tables {
+            if let Some(raw) = self.database.index_last_raw(
+                &physical_history_table_name(table_id),
+                "by_tx",
+                &[],
+            )? {
                 self.merge_tx_time(TxTime(
                     raw.record().get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?,
                 ));
             }
+        }
+        for table in self.catalogue.schema.tables.clone() {
             if let Some(raw) =
                 self.database
                     .index_last_raw(&register_table_name(&table.name), "by_tx", &[])?

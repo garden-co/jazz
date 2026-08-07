@@ -181,8 +181,10 @@ where
     /// Subscribe to the raw history storage table.
     pub fn subscribe_history(&mut self, table: &str) -> Result<Subscription, Error> {
         self.table(table)?;
+        let schema_version = self.catalogue.current_schema_version_id;
+        let source = self.physical_history_source_graph(schema_version, table)?;
         self.database
-            .subscribe_query(select_all(&history_table_name(table)))
+            .subscribe_one_sink(source)
             .map_err(Error::Groove)
     }
 

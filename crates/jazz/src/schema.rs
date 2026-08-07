@@ -193,9 +193,7 @@ impl JazzSchema {
                 continue;
             };
             tables.push(table.rejected_versions_storage_table());
-            tables.push(table.history_storage_table());
             tables.push(table.register_storage_table());
-            tables.push(table.history_partition_storage_table(*schema_version));
             tables.push(table.register_partition_storage_table(*schema_version));
             if self
                 .tables
@@ -241,7 +239,8 @@ impl JazzSchema {
             lowered
                 .column_families()
                 .into_iter()
-                .chain(std::iter::once("indices")),
+                .chain(std::iter::once("indices"))
+                .chain((!self.tables.is_empty()).then_some("jazz_physical_history")),
         )
     }
 
@@ -270,7 +269,6 @@ impl JazzSchema {
                 .iter()
                 .map(TableSchema::rejected_versions_storage_table),
         );
-        tables.extend(self.tables.iter().map(TableSchema::history_storage_table));
         tables.extend(self.tables.iter().map(TableSchema::register_storage_table));
         tables.extend(
             self.tables
@@ -767,14 +765,6 @@ impl TableSchema {
         self.history_storage_table_named(format!("jazz_{}_history", self.name))
     }
 
-    /// Return a partitioned storage history table with an explicit physical name.
-    pub fn history_partition_storage_table(
-        &self,
-        schema_version: SchemaVersionId,
-    ) -> GrooveTableSchema {
-        self.history_storage_table_named(partition_history_table_name(&self.name, schema_version))
-    }
-
     /// Return a branch-overlay partitioned storage history table.
     pub fn branch_history_partition_storage_table(
         &self,
@@ -1052,10 +1042,6 @@ impl TableSchema {
             })),
         )
     }
-}
-
-pub(crate) fn partition_history_table_name(table: &str, schema_version: SchemaVersionId) -> String {
-    format!("jazz_{table}_{}_history", schema_version.0.simple())
 }
 
 pub(crate) fn partition_register_table_name(
@@ -1530,7 +1516,7 @@ mod tests {
     use groove::schema::ColumnType;
 
     #[test]
-    fn lowers_history_tables_with_composite_primary_keys() {
+    fn logical_history_descriptor_has_composite_primary_key() {
         let schema = JazzSchema::new([TableSchema::new(
             "todos",
             [ColumnSchema::new("title", ColumnType::String)],
@@ -1540,7 +1526,8 @@ mod tests {
         assert!(groove.table("jazz_nodes").is_some());
         assert!(groove.table("jazz_schema_versions").is_some());
         assert!(groove.table("jazz_transactions").is_some());
-        let table = groove.table("jazz_todos_history").unwrap();
+        assert!(groove.table("jazz_todos_history").is_none());
+        let table = schema.tables[0].history_storage_table();
         let primary_key = table.primary_key.as_ref().unwrap();
 
         assert_eq!(primary_key.columns.len(), 3);
@@ -1635,8 +1622,7 @@ mod tests {
             "notes",
             [ColumnSchema::text("body"), ColumnSchema::blob("attachment")],
         )]);
-        let groove = schema.lower_to_groove();
-        let history = groove.table("jazz_notes_history").unwrap();
+        let history = schema.tables[0].history_storage_table();
 
         assert_eq!(
             history
@@ -1796,10 +1782,12 @@ mod tests {
             .iter()
             .find(|table| table.name == "jazz_transactions")
             .unwrap();
-        let history = tables
-            .iter()
-            .find(|table| table.name == "jazz_todos_history")
-            .unwrap();
+        assert!(
+            tables
+                .iter()
+                .all(|table| table.name != "jazz_todos_history")
+        );
+        let history = schema.tables[0].history_storage_table();
         let register = tables
             .iter()
             .find(|table| table.name == "jazz_todos_register")

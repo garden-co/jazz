@@ -297,6 +297,7 @@ where
         self.persist_catalogue_schema(&schema)?;
         self.ensure_provisional_physical_mapping(schema.id)?;
         self.ensure_schema_version_alias(schema.id)?;
+        self.synchronize_physical_history_tables()?;
         if active_schema_changed {
             // Policy declarations are intentionally outside the schema version
             // identity. Invalidate maintained handles when that same-version
@@ -317,7 +318,7 @@ where
                 added_partition |= self.persist_partition(table.name.clone(), schema.id)?;
             }
             if added_partition {
-                self.rebuild_database_slot()?;
+                self.synchronize_partition_storage_tables()?;
             }
         }
         let updates = self.drain_parked_commit_units()?;
@@ -353,8 +354,35 @@ where
         }
         self.validate_migration_lens(&lens)?;
         let installed = !self.catalogue.catalogue_lenses.contains_key(&lens.id);
+        let target_mapping_is_authoritative =
+            self.catalogue.catalogue_lenses.values().any(|published| {
+                published.source == lens.target || published.target == lens.target
+            });
+        let provisional_table_ids = if installed {
+            self.catalogue
+                .physical_mappings
+                .get(&lens.target)
+                .into_iter()
+                .flat_map(|mapping| mapping.tables.values().map(|table| table.table_id))
+                .collect::<BTreeSet<_>>()
+        } else {
+            BTreeSet::new()
+        };
         let reconciled = if installed {
-            Some(self.reconcile_physical_mapping_for_lens(&lens)?)
+            let candidate = self.reconcile_physical_mapping_for_lens(&lens)?;
+            if target_mapping_is_authoritative {
+                let authoritative = self.catalogue.physical_mappings.get(&lens.target).ok_or(
+                    Error::InvalidStoredValue("authoritative physical mapping missing"),
+                )?;
+                if candidate != *authoritative {
+                    return Err(Error::InvalidCatalogueUpdate(
+                        "lens conflicts with authoritative physical mapping",
+                    ));
+                }
+                None
+            } else {
+                Some(candidate)
+            }
         } else {
             None
         };
@@ -371,8 +399,13 @@ where
         }
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
+        self.query.version_storage_sources_cache.clear();
+        self.query.query_shape_cache.clear();
+        self.query.read_policy_authorization_request_cache.clear();
+        self.query.policy_authorization_graph_cache.clear();
         if installed {
-            self.rebuild_database_slot()?;
+            self.discard_unmapped_physical_history_tables(provisional_table_ids)?;
+            self.synchronize_physical_history_tables()?;
         }
         Ok(vec![SyncMessage::CatalogueAck(CatalogueAck {
             revision: None,
@@ -429,7 +462,7 @@ where
                 added_partition |= self.persist_partition(table, pointer.schema)?;
             }
             if added_partition {
-                self.rebuild_database_slot()?;
+                self.synchronize_partition_storage_tables()?;
             }
         }
         Ok(vec![SyncMessage::CatalogueAck(CatalogueAck {
@@ -1538,9 +1571,7 @@ where
             for version in versions {
                 let author_schema = version.schema_version();
                 let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
-                let (table_schema, target_schema, stored) = if author_schema
-                    != self.catalogue.current_write_schema.schema
-                {
+                let stored = if author_schema != self.catalogue.current_write_schema.schema {
                     let mut target_table = version.table().to_owned();
                     let mut target_cells = source_table_schema
                         .columns
@@ -1561,7 +1592,7 @@ where
                     target_table = translated_table;
                     let table_schema = self.table_in_schema(&target_table, target_schema)?;
                     let schema_version_alias = self.ensure_schema_version_alias(target_schema)?;
-                    let stored = VersionRow::from_parts_with_schema_version(
+                    VersionRow::from_parts_with_schema_version(
                         &table_schema,
                         VersionRowParts {
                             table: target_table,
@@ -1579,11 +1610,10 @@ where
                         },
                         (target_schema != self.catalogue.current_schema_version_id)
                             .then_some(target_schema),
-                    )?;
-                    (table_schema, target_schema, stored)
+                    )?
                 } else {
                     let schema_version_alias = self.ensure_schema_version_alias(author_schema)?;
-                    let stored = VersionRow::from_wire_with_schema_version(
+                    VersionRow::from_wire_with_schema_version(
                         &source_table_schema,
                         version,
                         tx_node_alias,
@@ -1591,19 +1621,13 @@ where
                         tx.tx_id.time,
                         (author_schema != self.catalogue.current_schema_version_id)
                             .then_some(author_schema),
-                    )?;
-                    (source_table_schema, author_schema, stored)
+                    )?
                 };
-                let history_table = self.cached_version_storage_table_name_for_schema(
-                    &table_schema.name,
-                    stored.layer(),
-                    target_schema,
-                    self.catalogue.current_schema_version_id,
-                );
+                let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
                 batch.insert_raw(
                     history_table.as_ref(),
                     history_primary_key(&stored),
-                    stored.groove_record(),
+                    groove_record,
                 );
                 if stored.layer() == VersionLayer::Content {
                     content_versions.push(stored.clone());
@@ -2621,10 +2645,8 @@ where
         }
         for version in &rejected {
             self.write_ahead_current_delete(batch, version)?;
-            batch.delete(
-                version_storage_table_name(&version.table, version.layer()),
-                history_primary_key(version),
-            );
+            let history_table = self.version_storage_table_for_row(version)?;
+            batch.delete(history_table.as_ref(), history_primary_key(version));
         }
         for (table, row_uuid) in affected_content_rows {
             self.rewrite_merge_heads_excluding_tx(batch, &table, row_uuid, tx_id)?;
@@ -3561,7 +3583,7 @@ where
         tx_time: TxTime,
         tx_node_alias: NodeAlias,
     ) -> Result<Option<VersionRow>, Error> {
-        for (storage_table, descriptor) in self.version_storage_sources_for_layer(table, layer)? {
+        for storage_table in self.version_storage_sources_for_layer(table, layer)? {
             let raw = self.database.primary_key_get_raw_in_batch(
                 batch,
                 &storage_table,
@@ -3571,12 +3593,12 @@ where
                     Value::U64(tx_node_alias.0),
                 ],
             )?;
-            let raw = raw.map(|raw| raw.raw().to_vec());
-            let Some(raw) = raw else {
+            let record = raw.map(|raw| raw.owned_record());
+            let Some(record) = record else {
                 continue;
             };
             return self
-                .decode_history_record(table, BorrowedRecord::new(&raw, &descriptor))
+                .decode_history_owned_record(table, &storage_table, record)
                 .map(Some);
         }
         Ok(None)
@@ -3702,9 +3724,7 @@ where
         let Some(tx_node_alias) = self.node_aliases.get(&tx_id.node).copied() else {
             return Ok(versions);
         };
-        for (storage_table, descriptor) in
-            self.version_storage_sources_for_layer(table, VersionLayer::Content)?
-        {
+        for storage_table in self.version_storage_sources_for_layer(table, VersionLayer::Content)? {
             let Some(raw) = self.database.primary_key_get_raw_in_batch(
                 batch,
                 &storage_table,
@@ -3717,9 +3737,11 @@ where
             else {
                 continue;
             };
-            let raw = raw.raw().to_vec();
-            versions
-                .push(self.decode_history_record(table, BorrowedRecord::new(&raw, &descriptor))?);
+            versions.push(self.decode_history_owned_record(
+                table,
+                &storage_table,
+                raw.owned_record(),
+            )?);
         }
         Ok(versions)
     }
@@ -4490,12 +4512,7 @@ where
                     }
                 }
             }
-            let history_table = self.cached_version_storage_table_name_for_schema(
-                &table_schema.name,
-                stored.layer(),
-                target_schema,
-                self.catalogue.current_schema_version_id,
-            );
+            let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
             if tx_already_known {
                 let existing = self.database.primary_key_get_raw_in_batch(
                     batch,
@@ -4514,14 +4531,14 @@ where
                     batch.insert_raw(
                         history_table.as_ref(),
                         history_primary_key(&stored),
-                        stored.groove_record(),
+                        groove_record,
                     );
                 }
             } else {
                 batch.insert_raw_fresh(
                     history_table.as_ref(),
                     history_primary_key(&stored),
-                    stored.groove_record(),
+                    groove_record,
                 );
             }
             if update_current_indexes && !matches!(fate, Fate::Rejected(_)) && global_seq.is_none()

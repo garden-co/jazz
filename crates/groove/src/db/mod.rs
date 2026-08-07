@@ -206,6 +206,28 @@ where
         self.ivm_runtime.set_auto_direct_family_enabled(enabled);
     }
 
+    /// Return the live schema for a table.
+    pub fn table_schema(&self, table: &str) -> Result<&TableSchema, Error> {
+        self.table(table)
+    }
+
+    /// Append a new table to the live runtime schema.
+    ///
+    /// The backing storage layout must already be able to route the table's
+    /// logical family (for example through a shared class family).
+    pub fn register_table(&mut self, table: TableSchema) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        if self.ivm_runtime.table(&table.name).is_some() {
+            return Err(Error::TableAlreadyExists(table.name));
+        }
+        let mut updated = self.ivm_runtime.schema().clone();
+        updated.tables.push(table.clone());
+        validate_durable_key_schema(&updated)?;
+        self.ivm_runtime
+            .register_table(table)
+            .map_err(Error::IvmRuntime)
+    }
+
     /// Append one row layout to an already schema-variant table.
     ///
     /// Registration is process-local schema metadata. Callers must restore all
@@ -217,6 +239,20 @@ where
         table: &str,
         schema_version: TableSchemaVersion,
     ) -> Result<(), Error> {
+        self.register_table_schema_version_with_columns(table, [], schema_version)
+    }
+
+    /// Append stable catalogue fields and one row layout to a live variant table.
+    ///
+    /// Existing fields and layouts remain immutable. This is the live-schema
+    /// path for stores whose variant registry grows before the first row of a
+    /// newly registered version is written.
+    pub fn register_table_schema_version_with_columns(
+        &mut self,
+        table: &str,
+        columns: impl IntoIterator<Item = crate::schema::ColumnSchema>,
+        schema_version: TableSchemaVersion,
+    ) -> Result<(), Error> {
         self.ensure_not_poisoned()?;
         let mut updated = self.table(table)?.clone();
         if !updated.has_schema_variants() {
@@ -224,10 +260,30 @@ where
                 table.to_owned(),
             ));
         }
+        let mut added_columns = Vec::new();
+        for column in columns {
+            match updated
+                .columns
+                .iter()
+                .find(|existing| existing.name == column.name)
+            {
+                Some(existing) if existing == &column => {}
+                Some(_) => {
+                    return Err(Error::TableFieldDefinitionMismatch {
+                        table: table.to_owned(),
+                        field: column.name,
+                    });
+                }
+                None => {
+                    updated.columns.push(column.clone());
+                    added_columns.push(column);
+                }
+            }
+        }
         updated.schema_versions.push(schema_version.clone());
         validate_table_schema_variants(&updated)?;
         self.ivm_runtime
-            .register_table_schema_version(table, schema_version)
+            .register_table_schema_version_with_columns(table, added_columns, schema_version)
             .map_err(Error::IvmRuntime)
     }
 
@@ -4072,6 +4128,10 @@ pub enum Error {
     Storage(Box<crate::storage::Error>),
     #[error("table not found: {0}")]
     TableNotFound(String),
+    #[error("table already exists: {0}")]
+    TableAlreadyExists(String),
+    #[error("field definition does not match the live catalogue: {table}.{field}")]
+    TableFieldDefinitionMismatch { table: String, field: String },
     #[error("schema version {version} for table {table} omits primary-key column {column}")]
     SchemaVersionMissingPrimaryKey {
         table: String,

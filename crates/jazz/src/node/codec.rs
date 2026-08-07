@@ -10,8 +10,8 @@ use super::*;
 use crate::schema::{
     ColumnSchema, branch_partition_history_table_name, branch_partition_register_table_name,
     partition_ahead_current_table_name, partition_global_current_table_name,
-    partition_history_table_name, partition_register_ahead_current_table_name,
-    partition_register_global_current_table_name, partition_register_table_name,
+    partition_register_ahead_current_table_name, partition_register_global_current_table_name,
+    partition_register_table_name,
 };
 
 use groove::schema::TableSchema as GrooveTableSchema;
@@ -535,9 +535,7 @@ impl VersionRow {
             )
         } else {
             (
-                storage_schema_version
-                    .map(|version| table.history_partition_storage_table(version))
-                    .unwrap_or_else(|| table.history_storage_table()),
+                table.history_storage_table(),
                 history_values_from_parts(table, &parts)?,
             )
         };
@@ -570,9 +568,7 @@ impl VersionRow {
             )
         } else {
             (
-                storage_schema_version
-                    .map(|version| table.history_partition_storage_table(version))
-                    .unwrap_or_else(|| table.history_storage_table()),
+                table.history_storage_table(),
                 history_values_from_wire(
                     table,
                     version,
@@ -2049,10 +2045,6 @@ pub(super) fn tx_id_value(tx_id: TxId) -> Value {
     Value::Tuple(vec![Value::U64(tx_id.time.0), Value::Uuid(tx_id.node.0)])
 }
 
-pub(super) fn history_table_name(table: &str) -> String {
-    format!("jazz_{table}_history")
-}
-
 pub(super) fn rejected_versions_table_name(table: &str) -> String {
     format!("jazz_{table}_rejected_versions")
 }
@@ -2061,52 +2053,33 @@ pub(super) fn register_table_name(table: &str) -> String {
     format!("jazz_{table}_register")
 }
 
-pub(super) fn version_storage_table_name(table: &str, layer: VersionLayer) -> String {
-    match layer {
-        VersionLayer::Content => history_table_name(table),
-        VersionLayer::Deletion => register_table_name(table),
-    }
-}
-
-pub(super) fn version_storage_table_name_for_schema(
+pub(super) fn register_table_name_for_schema(
     table: &str,
-    layer: VersionLayer,
     schema_version: SchemaVersionId,
     base_schema_version: SchemaVersionId,
 ) -> String {
     if schema_version == base_schema_version {
-        return version_storage_table_name(table, layer);
+        return register_table_name(table);
     }
-    match layer {
-        VersionLayer::Content => partition_history_table_name(table, schema_version),
-        VersionLayer::Deletion => partition_register_table_name(table, schema_version),
-    }
+    partition_register_table_name(table, schema_version)
 }
 
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    pub(super) fn cached_version_storage_table_name_for_schema(
+    pub(super) fn cached_register_table_name_for_schema(
         &mut self,
         table: &str,
-        layer: VersionLayer,
         schema_version: SchemaVersionId,
         base_schema_version: SchemaVersionId,
     ) -> groove::Intern<String> {
         self.cached_physical_table_name(
             table,
-            PhysicalTableClass::VersionStorage(layer),
+            PhysicalTableClass::RegisterStorage,
             schema_version,
             base_schema_version,
-            |table| {
-                version_storage_table_name_for_schema(
-                    table,
-                    layer,
-                    schema_version,
-                    base_schema_version,
-                )
-            },
+            |table| register_table_name_for_schema(table, schema_version, base_schema_version),
         )
     }
 

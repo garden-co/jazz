@@ -294,7 +294,16 @@ This is mostly a dev-only concern: it's expected that devs experiment with schem
 We can handle this scenario in the following way:
 
 - `PublishSchema` allocates a database-local provisional mapping.
-- Publishing lenses may reconcile provisional mappings, preserving identities across renames and unchanged entities.
+- A mapping becomes authoritative when it is first used as a lens source or is
+  first reconciled as a lens target. Jazz derives this state from the durable
+  lens catalogue; it does not need a separate persisted flag.
+- The first lens targeting a provisional schema reconciles its mapping,
+  preserving identities across renames and unchanged entities. That result is
+  then immutable.
+- A later lens targeting that schema independently derives the mapping implied
+  by its source mapping and lens operations. Jazz accepts the lens only if the
+  result exactly matches the authoritative target mapping; otherwise
+  publication is rejected before either the lens or mapping is persisted.
 - When reconciliation replaces a provisional table identity, Jazz discards all
   storage scoped to the target/new physical table before installing the
   reconciled mapping.
@@ -328,25 +337,6 @@ Active subscriptions continue to use the schema they were created with for query
 
 This is what Jazz currently does for policy-only changes on the existing authorization schema. Moving the permission head to a different schema is not currently handled. We need to ensure this scenario works properly and add test coverage for it.
 
-### Conflicting lens paths may assign different physical identities
-
-A schema may be reachable through multiple lens paths. Those paths could disagree
-about whether a target table or column preserves an existing physical id or
-introduces a new one. The physical mapping cannot depend on whichever path a node
-happens to traverse: replicas must resolve a `SchemaVersionId` to the same
-physical identities.
-
-This proposal defers the graph-consistency rule. Possible solutions include:
-
-- reject publication unless every path produces the same identity mapping;
-- assign each schema one authoritative resolved mapping and validate later lenses
-  against it;
-- add an explicit identity-merge operation backed by a physical lineage
-  migration.
-
-Until this is resolved, the design assumes that all lens paths published for a
-storage-resolved schema agree on its physical table and column identities.
-
 ### Allowing old clients to update retired fields is a security decision
 
 Which policy authorizes old-schema writes to retired columns?
@@ -375,6 +365,8 @@ Jazz currently deliberately forbids automatic schema-partition GC for these reas
 ## Implementation Plan
 
 Overall approach: start preserving today’s copy-forward/default behavior, including its known data-loss limitation.
+Jazz is still alpha, so this storage cutover does not migrate, recognize, or
+remain compatible with databases written by the former per-schema history layout.
 
 1. Add physical identity metadata without changing storage behavior.
    **Status: complete (2026-08-03).** The mappings are durable shadow metadata;
@@ -421,6 +413,13 @@ Overall approach: start preserving today’s copy-forward/default behavior, incl
      point reads, indexes, and restart recovery before changing table placement.
 
 3. Connect Jazz's catalogue to Groove's live variant registry.
+   **Status: complete (2026-08-07).** Jazz now lowers stable history field
+   catalogues from `PhysicalColumnId`, restores every alias/layout and logical
+   projection on open, and extends live Groove tables, layouts, and projection
+   cases before enabling writes in a newly published schema. Publishing a lens
+   no longer rebuilds Groove merely to add a variant; an active history
+   subscription retains its output descriptor and runtime identity while
+   receiving writes stored under the new alias.
    - Build one stable Groove field catalogue per `PhysicalTableId`, naming user
      fields from `PhysicalColumnId` rather than logical column names.
    - Register every `SchemaVersionAlias` and compile its projection cases from
@@ -432,9 +431,17 @@ Overall approach: start preserving today’s copy-forward/default behavior, incl
      receives new-version writes without rehydration.
 
 4. Share immutable history first.
-   - Key content-history and deletion-register structures by `PhysicalTableId`.
-   - Replace `version_storage_sources()` fanout with one physical source and a
-     fixed-output `VariantProject` per consumer.
+   **Status: in progress (2026-08-07).** Content history is now one
+   schema-versioned Groove table per `PhysicalTableId`; ordinary per-schema
+   content-history tables and names have been removed. Writes derive the table
+   and descriptor from the row's stored alias, raw reads retain the actual
+   variant descriptor, and graph consumers use a fixed-output
+   `VariantProject`. Mixed-version history survives restart and a reconciled
+   lineage exposes one content source regardless of schema-version count.
+   Deletion registers are intentionally the next substep and remain partitioned.
+   - Key deletion-register structures by `PhysicalTableId`.
+   - Finish replacing combined `version_storage_sources()` fanout with one
+     physical source per layer and a fixed-output `VariantProject` per consumer.
    - Keep global/ahead-current and branch-overlay tables partitioned temporarily,
      giving us a contained vertical slice.
    - Prove mixed-version history survives restart and that physical-source count

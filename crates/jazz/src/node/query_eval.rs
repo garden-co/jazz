@@ -1631,9 +1631,8 @@ fn deletion_register_current_source_graph_for_schema(
         false,
     );
     GraphBuilder::join(
-        GraphBuilder::table(version_storage_table_name_for_schema(
+        GraphBuilder::table(register_table_name_for_schema(
             table,
-            VersionLayer::Deletion,
             schema_version,
             base_schema_version,
         )),
@@ -5295,17 +5294,15 @@ where
         projection: Option<&[String]>,
     ) -> Result<Option<CurrentRow>, Error> {
         let table = self.table(table_name)?.clone();
-        let content_descriptor = table.history_storage_table().record_schema();
         let Some(tx_node_alias) = self.node_aliases.get(&tx_id.node).copied() else {
             return Err(Error::MissingTransaction(tx_id));
         };
-        let Some(version) = self.query_version_by_alias_with_descriptor(
+        let Some(version) = self.query_version_by_alias(
             table_name,
             row_uuid,
             VersionLayer::Content,
             tx_id.time,
             tx_node_alias,
-            &content_descriptor,
         )?
         else {
             if self.query_transaction(tx_id)?.is_some() {
@@ -7074,7 +7071,6 @@ where
             .filter(|(entry_table, _, _)| entry_table.as_str() == table)
             .collect::<Vec<_>>();
         let table_schema = self.table(table)?.clone();
-        let content_descriptor = table_schema.history_storage_table().record_schema();
         let mut rows = Vec::with_capacity(row_entries.len());
         for (_, row_uuid, tx_id) in row_entries {
             let tx_node_alias = self
@@ -7083,13 +7079,12 @@ where
                 .copied()
                 .ok_or(Error::MissingTransaction(tx_id))?;
             let version = self
-                .query_version_by_alias_with_descriptor(
+                .query_version_by_alias(
                     table,
                     row_uuid,
                     VersionLayer::Content,
                     tx_id.time,
                     tx_node_alias,
-                    &content_descriptor,
                 )?
                 .ok_or(Error::MissingTransaction(tx_id))?;
             rows.push(self.current_row_from_materialized_version(&table_schema, &version)?);
@@ -7317,7 +7312,6 @@ where
         position: GlobalSeq,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table_schema = self.table(table)?.clone();
-        let content_descriptor = table_schema.history_storage_table().record_schema();
         let mut rows_by_uuid = BTreeMap::<
             RowUuid,
             (
@@ -7359,13 +7353,12 @@ where
                 continue;
             };
             let version = self
-                .query_version_by_alias_with_descriptor(
+                .query_version_by_alias(
                     table,
                     row_uuid,
                     VersionLayer::Content,
                     tx_time,
                     tx_node_alias,
-                    &content_descriptor,
                 )?
                 .ok_or(Error::InvalidStoredValue(
                     "historical content winner is missing",
@@ -8060,8 +8053,12 @@ where
                     cache.insert(tx_id, versions);
                     continue;
                 };
+                let mut scanned_sources = BTreeSet::new();
                 for table in &tables {
-                    for (storage_table, descriptor) in self.version_storage_sources(table)? {
+                    for storage_table in self.version_storage_sources(table)? {
+                        if !scanned_sources.insert(storage_table.clone()) {
+                            continue;
+                        }
                         let raws = self
                             .database
                             .index_scan_range_raw(
@@ -8071,13 +8068,11 @@ where
                                 &[Value::U64(end.0), Value::U64(0)],
                             )?
                             .into_iter()
-                            .map(|raw| raw.raw().to_vec())
+                            .map(|raw| raw.owned_record())
                             .collect::<Vec<_>>();
-                        for raw in raws {
-                            let version = self.decode_history_record(
-                                table,
-                                BorrowedRecord::new(&raw, &descriptor),
-                            )?;
+                        for record in raws {
+                            let version =
+                                self.decode_history_owned_record(table, &storage_table, record)?;
                             if version.tx_node_alias() != alias
                                 || !times.contains(&version.tx_time())
                             {
@@ -8695,13 +8690,12 @@ where
         target_tx_time: TxTime,
         target_tx_node: NodeAlias,
     ) -> Result<CurrentRow, Error> {
-        if let Some(version) = self.query_version_by_alias_with_descriptor(
+        if let Some(version) = self.query_version_by_alias(
             target_table_name,
             target_row,
             VersionLayer::Content,
             target_tx_time,
             target_tx_node,
-            &target_table.history_storage_table().record_schema(),
         )? {
             return self.current_row_from_materialized_version(target_table, &version);
         }
@@ -11595,7 +11589,11 @@ fn inline_branch_current_record(
 }
 
 #[cfg(test)]
-fn historical_current_graph_full_scan(table: &TableSchema, position: GlobalSeq) -> GraphBuilder {
+fn historical_current_graph_full_scan(
+    table: &TableSchema,
+    position: GlobalSeq,
+    history_rows: GraphBuilder,
+) -> GraphBuilder {
     let cut_predicate = PredicateExpr::And(vec![
         PredicateExpr::eq("table_name", Value::Bytes(table.name.as_bytes().to_vec())),
         PredicateExpr::LtEq {
@@ -11638,8 +11636,7 @@ fn historical_current_graph_full_scan(table: &TableSchema, position: GlobalSeq) 
     );
     let content_winners =
         GraphBuilder::arg_max_by(content_events, ["row_uuid"], ["tx_time", "tx_node_id"]);
-    let history_rows = GraphBuilder::table(history_table_name(&table.name))
-        .project(maintained_view_history_storage_field_names(table));
+    let history_rows = history_rows.project(maintained_view_history_storage_field_names(table));
     let content_current = GraphBuilder::join(
         history_rows,
         content_winners,
@@ -12421,9 +12418,16 @@ mod tests {
         table: &TableSchema,
         position: GlobalSeq,
     ) -> BTreeMap<RowUuid, Value> {
+        let history_source = node
+            .physical_history_source_graph(node.catalogue.current_schema_version_id, &table.name)
+            .expect("physical history source");
         let deltas = node
             .database
-            .query_graph(historical_current_graph_full_scan(table, position))
+            .query_graph(historical_current_graph_full_scan(
+                table,
+                position,
+                history_source,
+            ))
             .expect("full-scan historical graph");
         let rows = node
             .materialize_inline_current_query_rows(table, deltas)
@@ -12619,10 +12623,13 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(current_rows.len(), 1);
 
+        let history_source = node
+            .physical_history_source_graph(node.catalogue.current_schema_version_id, "issues")
+            .expect("physical history source");
         let history_deltas = node
             .database
             .query_graph(
-                GraphBuilder::table(history_table_name("issues"))
+                history_source
                     .project(maintained_view_history_storage_field_names(&table))
                     .filter(
                         PredicateExpr::And(vec![

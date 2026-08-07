@@ -204,9 +204,24 @@ impl IvmRuntime {
         self.table_descriptors.get(table)
     }
 
-    pub(crate) fn register_table_schema_version(
+    pub(crate) fn register_table(&mut self, table: TableSchema) -> Result<(), IvmRuntimeError> {
+        if self.schema.table(&table.name).is_some() {
+            return Err(IvmRuntimeError::TableAlreadyExists(table.name));
+        }
+        if !table.has_schema_variants() {
+            self.table_descriptors
+                .insert(table.name.clone(), table.record_schema());
+        }
+        self.schema.tables.push(table);
+        self.define_schema_index_variant_projections()?;
+        self.add_dedup_schema_indices()?;
+        Ok(())
+    }
+
+    pub(crate) fn register_table_schema_version_with_columns(
         &mut self,
         table: &str,
+        columns: Vec<crate::schema::ColumnSchema>,
         schema_version: crate::schema::TableSchemaVersion,
     ) -> Result<(), IvmRuntimeError> {
         let table_schema = self
@@ -223,6 +238,19 @@ impl IvmRuntime {
                 table: table.to_owned(),
                 version: schema_version.version,
             });
+        }
+        for column in columns {
+            if table_schema
+                .columns
+                .iter()
+                .any(|existing| existing.name == column.name)
+            {
+                return Err(IvmRuntimeError::TableFieldAlreadyExists {
+                    table: table.to_owned(),
+                    field: column.name,
+                });
+            }
+            table_schema.columns.push(column);
         }
         let version = schema_version.version;
         table_schema.schema_versions.push(schema_version);
@@ -9989,6 +10017,10 @@ pub enum IvmRuntimeError {
     },
     #[error("table not found: {0}")]
     TableNotFound(String),
+    #[error("table already exists: {0}")]
+    TableAlreadyExists(String),
+    #[error("field already exists in the live catalogue: {table}.{field}")]
+    TableFieldAlreadyExists { table: String, field: String },
     #[error("unknown schema version {version} for table {table}")]
     UnknownTableSchemaVersion { table: String, version: u64 },
     #[error("variant projection not found: {table}.{target}")]

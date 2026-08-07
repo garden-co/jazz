@@ -143,6 +143,96 @@ fn publishing_lens_reconciles_target_table_and_column_identities_durably() {
 }
 
 #[test]
+fn active_history_projection_accepts_a_new_schema_variant_without_rebuild() {
+    let base = schema();
+    let evolved = SchemaVersion::new(catalogue_evolved_schema());
+    let (dir, mut core) = open_node_with_schema(node(0x2e), base.clone());
+    let subscription = core.subscribe_history("todos").unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+    core.commit_mergeable(
+        MergeableCommit::new("todos", row(0x44), 900).cells(title_cells("old-title")),
+    )
+    .unwrap();
+    assert_eq!(
+        subscription
+            .recv()
+            .unwrap()
+            .iter()
+            .filter(|(_, weight)| *weight > 0)
+            .count(),
+        1,
+    );
+    let runtime = core.groove_runtime_token();
+
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(evolved.clone()),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::PublishLens {
+        author: AuthorId::SYSTEM,
+        lens: MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String(String::new()),
+                }],
+            }],
+        ),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
+        },
+    })
+    .unwrap();
+    assert_eq!(core.groove_runtime_token(), runtime);
+
+    core.commit_mergeable(
+        MergeableCommit::new("todos", row(0x45), 1_000).cells(BTreeMap::from([
+            ("title".to_owned(), Value::String("new-title".to_owned())),
+            ("body".to_owned(), Value::String("new-body".to_owned())),
+        ])),
+    )
+    .unwrap();
+
+    let deltas = subscription.recv().unwrap();
+    let rows = deltas.iter().filter(|(_, weight)| *weight > 0).collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].0.descriptor(),
+        base.tables[0].history_storage_table().record_schema(),
+    );
+    assert_eq!(
+        core.version_storage_sources_for_layer("todos", VersionLayer::Content)
+            .unwrap()
+            .len(),
+        1,
+    );
+
+    drop(subscription);
+    drop(core);
+    let mut reopened = reopen_node_at(&dir, node(0x2e), base);
+    let versions = reopened.query_table_versions("todos").unwrap();
+    assert_eq!(versions.len(), 2);
+    assert_eq!(
+        versions
+            .iter()
+            .map(VersionRow::schema_version_alias)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        2,
+    );
+}
+
+#[test]
 fn table_and_column_rename_reuses_the_existing_physical_identities() {
     let base = schema();
     let renamed = SchemaVersion::new(JazzSchema::new([TableSchema::new(
@@ -542,7 +632,7 @@ fn shape_registration_parks_until_schema_version_catalogue_arrives() {
         .contains_key(&shape.schema_version()));
 }
 #[test]
-fn current_write_pointer_flip_reopens_with_new_partition_tables() {
+fn current_write_pointer_flip_registers_new_partition_tables_live() {
     let base = schema();
     let evolved = catalogue_evolved_schema();
     let evolved_payload = SchemaVersion::new(evolved);
@@ -561,9 +651,10 @@ fn current_write_pointer_flip_reopens_with_new_partition_tables() {
     })
     .unwrap();
 
-    let suffix = evolved_payload.id.0.simple();
-    let history = format!("jazz_todos_{suffix}_history");
-    let register = format!("jazz_todos_{suffix}_register");
+    let history = physical_history_table_name(
+        core.catalogue.physical_mappings[&evolved_payload.id].tables["todos"].table_id,
+    );
+    let register = crate::schema::partition_register_table_name("todos", evolved_payload.id);
     assert!(core.database.primary_key_scan_raw(&history, &[]).is_ok());
     assert!(core.database.primary_key_scan_raw(&register, &[]).is_ok());
 }
@@ -798,7 +889,7 @@ fn partitioned_reads_project_natural_lenses_after_schema_agnostic_winner() {
 }
 
 #[test]
-fn lens_graph_uses_shortest_path_when_multiple_candidates_exist() {
+fn later_lens_cannot_change_an_authoritative_physical_mapping() {
     let v1 = schema();
     let v2 = catalogue_evolved_schema();
     let v3 = JazzSchema::new([TableSchema::new(
@@ -811,12 +902,6 @@ fn lens_graph_uses_shortest_path_when_multiple_candidates_exist() {
     let v2_payload = SchemaVersion::new(v2.clone());
     let v3_payload = SchemaVersion::new(v3.clone());
     let (_dir, mut core) = open_node_with_schema(node(0x3e), v1.clone());
-    let old_row = row(0x4e);
-    core.commit_mergeable(
-        MergeableCommit::new("todos", old_row, 10).cells(title_cells("old-title")),
-    )
-    .unwrap();
-
     for payload in [&v2_payload, &v3_payload] {
         core.apply_sync_message(SyncMessage::PublishSchema {
             author: AuthorId::SYSTEM,
@@ -878,33 +963,32 @@ fn lens_graph_uses_shortest_path_when_multiple_candidates_exist() {
             ],
         }],
     );
-    for lens in [long_first, long_second, shortest] {
+    for lens in [long_first, long_second] {
         core.apply_sync_message(SyncMessage::PublishLens {
             author: AuthorId::SYSTEM,
             lens,
         })
         .unwrap();
     }
+    let authoritative = core.catalogue.physical_mappings[&v3_payload.id].clone();
+    let published_lens_count = core.catalogue.catalogue_lenses.len();
 
-    let v3_shape = Query::from("todos").validate(&v3).unwrap();
+    let result = core.apply_sync_message(SyncMessage::PublishLens {
+        author: AuthorId::SYSTEM,
+        lens: shortest.clone(),
+    });
+    assert!(matches!(
+        result,
+        Err(Error::InvalidCatalogueUpdate(
+            "lens conflicts with authoritative physical mapping"
+        ))
+    ));
     assert_eq!(
-        core.query_rows(
-            &v3_shape,
-            &v3_shape.bind(BTreeMap::new()).unwrap(),
-            DurabilityTier::Local,
-        )
-        .unwrap()
-        .into_iter()
-        .map(current_row_pair)
-        .collect::<BTreeMap<_, _>>(),
-        BTreeMap::from([(
-            old_row,
-            BTreeMap::from([
-                ("name".to_owned(), v("old-title")),
-                ("search_name".to_owned(), v("via-shortest")),
-            ]),
-        )])
+        core.catalogue.physical_mappings[&v3_payload.id],
+        authoritative
     );
+    assert_eq!(core.catalogue.catalogue_lenses.len(), published_lens_count);
+    assert!(!core.catalogue.catalogue_lenses.contains_key(&shortest.id));
 }
 
 #[test]
@@ -1322,14 +1406,19 @@ fn local_writes_store_versions_under_current_write_schema_storage() {
         )
         .unwrap();
 
+    let base_history_table = physical_history_table_name(
+        core.catalogue.physical_mappings[&base.version_id()].tables["todos"].table_id,
+    );
+    let evolved_history_table = physical_history_table_name(
+        core.catalogue.physical_mappings[&evolved_payload.id].tables["todos"].table_id,
+    );
     let base_history = core
         .database
-        .primary_key_scan_raw("jazz_todos_history", &[])
+        .primary_key_scan_raw(&base_history_table, &[])
         .unwrap();
-    let suffix = evolved_payload.id.0.simple();
     let evolved_history = core
         .database
-        .primary_key_scan_raw(&format!("jazz_todos_{suffix}_history"), &[])
+        .primary_key_scan_raw(&evolved_history_table, &[])
         .unwrap();
     assert_eq!(base_history.len(), 1);
     assert_eq!(evolved_history.len(), 1);
@@ -1380,14 +1469,19 @@ fn exclusive_writes_store_versions_under_current_write_schema_storage() {
     .unwrap();
     let (exclusive_tx, _unit) = core.commit_exclusive(tx, AuthorId::SYSTEM, 11).unwrap();
 
+    let base_history_table = physical_history_table_name(
+        core.catalogue.physical_mappings[&base.version_id()].tables["todos"].table_id,
+    );
+    let evolved_history_table = physical_history_table_name(
+        core.catalogue.physical_mappings[&evolved_payload.id].tables["todos"].table_id,
+    );
     let base_history = core
         .database
-        .primary_key_scan_raw("jazz_todos_history", &[])
+        .primary_key_scan_raw(&base_history_table, &[])
         .unwrap();
-    let suffix = evolved_payload.id.0.simple();
     let evolved_history = core
         .database
-        .primary_key_scan_raw(&format!("jazz_todos_{suffix}_history"), &[])
+        .primary_key_scan_raw(&evolved_history_table, &[])
         .unwrap();
     assert_eq!(base_history.len(), 1);
     assert_eq!(evolved_history.len(), 1);
@@ -1435,10 +1529,12 @@ fn schema_version_partition_tables_survive_pointer_changes_and_reopen() {
     })
     .unwrap();
 
-    let suffix = evolved_payload.id.0.simple();
+    let evolved_history_table = physical_history_table_name(
+        core.catalogue.physical_mappings[&evolved_payload.id].tables["todos"].table_id,
+    );
     assert_eq!(
         core.database
-            .primary_key_scan_raw(&format!("jazz_todos_{suffix}_history"), &[])
+            .primary_key_scan_raw(&evolved_history_table, &[])
             .unwrap()
             .len(),
         1
@@ -1452,7 +1548,7 @@ fn schema_version_partition_tables_survive_pointer_changes_and_reopen() {
     assert_eq!(
         reopened
             .database
-            .primary_key_scan_raw(&format!("jazz_todos_{suffix}_history"), &[])
+            .primary_key_scan_raw(&evolved_history_table, &[])
             .unwrap()
             .len(),
         1

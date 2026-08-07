@@ -17,6 +17,7 @@ use groove::db::{
 };
 use groove::ivm::PreparedShapeId;
 use groove::ivm::ProjectField;
+#[cfg(test)]
 use groove::queries::{Query, Select, SelectItem, TableRef};
 use groove::records::{self, BorrowedRecord, OwnedRecord, Value};
 use groove::storage::{
@@ -330,12 +331,8 @@ struct QueryServing {
     tx_version_tables_cache_order: VecDeque<TxId>,
     /// Live membership for `tx_version_tables_cache_order`.
     tx_version_tables_cache_order_set: BTreeSet<TxId>,
-    /// Version storage source descriptors keyed by logical table and layer.
-    ///
-    /// These descriptors are static catalogue metadata. They are invalidated
-    /// whenever schema partitions or catalogue schemas change.
-    version_storage_sources_cache:
-        BTreeMap<(String, VersionLayer), Vec<(String, records::RecordDescriptor)>>,
+    /// Physical version-storage sources keyed by logical table and layer.
+    version_storage_sources_cache: BTreeMap<(String, VersionLayer), Vec<String>>,
     /// Interned physical table names for hot ingest/current-row paths.
     ///
     /// Keyed by logical table, physical class, and schema-version context. This
@@ -379,7 +376,7 @@ struct QueryServing {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum PhysicalTableClass {
-    VersionStorage(VersionLayer),
+    RegisterStorage,
     GlobalCurrent(VersionLayer),
     AheadCurrent(VersionLayer),
 }
@@ -561,7 +558,7 @@ where
         let current_schema_version_id = schema.version_id();
         let CatalogueOpenState {
             storage,
-            mut schemas,
+            schemas,
             lenses,
             schema_version_aliases,
             physical_mappings,
@@ -571,15 +568,15 @@ where
             partitions,
             branch_partitions,
         } = Self::open_catalogue_stage(schema.clone(), storage)?;
-        let had_base_schema = schemas.contains_key(&current_schema_version_id);
-        if !had_base_schema {
-            schemas.insert(
-                current_schema_version_id,
-                SchemaVersion::new(schema.clone()),
-            );
-        }
-        let database =
-            Self::open_full_database(&schema, &schemas, &partitions, &branch_partitions, storage)?;
+        let database = Self::open_full_database(
+            &schema,
+            &schemas,
+            &schema_version_aliases,
+            &physical_mappings,
+            &partitions,
+            &branch_partitions,
+            storage,
+        )?;
         let current_row_graphs = current_row_graphs(&schema);
         let current_schema_version_alias = schema_version_aliases
             .get(&current_schema_version_id)
@@ -671,6 +668,7 @@ where
         for schema_version in known_schema_versions {
             node.ensure_provisional_physical_mapping(schema_version)?;
         }
+        node.synchronize_physical_history_tables()?;
         node.recover_from_storage()?;
         node.recover_known_state_facts()?;
         node.rebuild_ahead_current_keys()?;
@@ -678,9 +676,6 @@ where
         node.self_node_alias = Some(self_node_alias);
         let schema_alias = node.ensure_schema_version_alias(current_schema_version_id)?;
         node.catalogue.current_schema_version_alias = Some(schema_alias);
-        if !had_base_schema {
-            node.persist_catalogue_schema(&SchemaVersion::new(schema.clone()))?;
-        }
         for table in schema.tables.iter().map(|table| table.name.clone()) {
             node.persist_partition(table, current_schema_version_id)?;
         }
@@ -690,33 +685,25 @@ where
     fn open_full_database(
         schema: &JazzSchema,
         catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
+        schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+        physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
         partitions: &BTreeSet<(String, SchemaVersionId)>,
         branch_partitions: &BTreeSet<(String, SchemaVersionId, BranchId)>,
         storage: S,
     ) -> Result<Database<S>, Error> {
         debug_assert_lowered_layouts(schema);
-        let lowered = schema.lower_to_groove_with_partitions(
+        let mut lowered = schema.lower_to_groove_with_partitions(
             catalogue_schemas,
             partitions,
             branch_partitions,
         );
-        let logical_cfs = lowered
-            .column_families()
-            .into_iter()
-            .chain(std::iter::once("indices"))
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let layout = StorageLayout::jazz_class_v1_for(logical_cfs.iter().map(String::as_str));
-        Database::new_with_storage_layout(
-            schema.lower_to_groove_with_partitions(
-                catalogue_schemas,
-                partitions,
-                branch_partitions,
-            ),
-            storage,
-            layout,
-        )
-        .map_err(Error::from)
+        lowered.tables.extend(physical_history_storage_tables(
+            catalogue_schemas,
+            schema_version_aliases,
+            physical_mappings,
+        )?);
+        let layout = StorageLayout::jazz_class_v1();
+        Database::new_with_storage_layout(lowered, storage, layout).map_err(Error::from)
     }
 
     /// Return the pure-storage large-value content store.
@@ -789,11 +776,14 @@ where
         let database = Self::open_full_database(
             &self.catalogue.schema,
             &self.catalogue.catalogue_schemas,
+            &self.catalogue.schema_version_aliases,
+            &self.catalogue.physical_mappings,
             &self.catalogue.partitions,
             &self.branches.branch_partitions,
             storage,
         )?;
         self.database.replace(database);
+        self.register_physical_history_variant_projections()?;
         self.groove_runtime_token = next_groove_runtime_token();
         self.rederive_restart_state()?;
         Ok(())
@@ -920,16 +910,10 @@ where
     ) -> Result<CatalogueOpenState<S>, Error> {
         let current_schema_version_id = schema.version_id();
         let meta_schema = schema.lower_catalogue_meta_to_groove();
-        let logical_cfs = meta_schema
-            .column_families()
-            .into_iter()
-            .chain(std::iter::once("indices"))
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let meta_database = Database::new_with_storage_layout(
+        let mut meta_database = Database::new_with_storage_layout(
             meta_schema,
             storage,
-            StorageLayout::jazz_class_v1_for(logical_cfs.iter().map(String::as_str)),
+            StorageLayout::jazz_class_v1(),
         )?;
         let mut catalogue_schemas = BTreeMap::new();
         let mut catalogue_lenses = BTreeMap::new();
@@ -993,6 +977,57 @@ where
                     next_physical_column_id = next_physical_column_id.max(column_successor);
                 }
             }
+        }
+        let had_current_schema = catalogue_schemas.contains_key(&current_schema_version_id);
+        if !had_current_schema {
+            catalogue_schemas.insert(
+                current_schema_version_id,
+                SchemaVersion::new(schema.clone()),
+            );
+        }
+        if !physical_mappings.contains_key(&current_schema_version_id)
+            || !schema_version_aliases.contains_key(&current_schema_version_id)
+        {
+            let mapping = match physical_mappings.get(&current_schema_version_id) {
+                Some(mapping) => mapping.clone(),
+                None => allocate_provisional_physical_mapping(
+                    &schema,
+                    &mut next_physical_table_id,
+                    &mut next_physical_column_id,
+                )?,
+            };
+            let alias = schema_version_aliases
+                .get(&current_schema_version_id)
+                .copied()
+                .unwrap_or(SchemaVersionAlias(
+                    schema_version_aliases
+                        .values()
+                        .map(|alias| alias.0)
+                        .max()
+                        .unwrap_or(0)
+                        .checked_add(1)
+                        .ok_or(Error::InvalidStoredValue("schema version alias exhausted"))?,
+                ));
+            let mut batch = meta_database.open_batch();
+            if !had_current_schema {
+                batch.update(
+                    "jazz_catalogue",
+                    vec![
+                        Value::Bytes(b"schema".to_vec()),
+                        Value::Uuid(current_schema_version_id.0),
+                        Value::Bytes(serde_json::to_vec(&SchemaVersion::new(schema.clone()))?),
+                    ],
+                );
+            }
+            Self::write_schema_version_mapping_to_batch(
+                &mut batch,
+                alias,
+                current_schema_version_id,
+                &mapping,
+            )?;
+            meta_database.commit_batch(batch)?;
+            schema_version_aliases.insert(current_schema_version_id, alias);
+            physical_mappings.insert(current_schema_version_id, mapping);
         }
         let mut current_write_schema = CurrentWriteSchema {
             revision: 0,
@@ -1275,15 +1310,11 @@ where
             let new_is_current =
                 version_wins_over_open_winner(&stored, tx_id, made_at, previous_winner);
             let _ = (new_is_current, previous_current);
+            let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
             batch.insert_raw(
-                version_storage_table_name_for_schema(
-                    &table_schema.name,
-                    stored.layer(),
-                    write_schema_version,
-                    self.catalogue.current_schema_version_id,
-                ),
+                history_table.as_ref(),
                 history_primary_key(&stored),
-                stored.groove_record(),
+                groove_record,
             );
             self.update_merge_heads_for_content_version(&mut batch, &stored)?;
             self.write_ahead_current_insert(&mut batch, &stored)?;
@@ -1436,15 +1467,11 @@ where
                 DurabilityTier::Local,
             ),
         );
+        let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
         batch.insert_raw(
-            version_storage_table_name_for_schema(
-                &table_schema.name,
-                stored.layer(),
-                write_schema_version,
-                self.catalogue.current_schema_version_id,
-            ),
+            history_table.as_ref(),
             history_primary_key(&stored),
-            stored.groove_record(),
+            groove_record,
         );
         self.update_merge_heads_for_content_version(&mut batch, &stored)?;
         self.write_ahead_current_insert(&mut batch, &stored)?;
@@ -2599,7 +2626,6 @@ where
                     .iter()
                     .filter_map(ResultMemberEntry::as_row)
                     .collect::<Vec<_>>();
-                let content_descriptor = table_schema.history_storage_table().record_schema();
                 let mut rows = Vec::new();
                 for (entry_table, row_uuid, tx_id) in row_entries {
                     if entry_table.as_str() != table {
@@ -2611,13 +2637,12 @@ where
                         .copied()
                         .ok_or(Error::MissingTransaction(tx_id))?;
                     let version = self
-                        .query_version_by_alias_with_descriptor(
+                        .query_version_by_alias(
                             table,
                             row_uuid,
                             VersionLayer::Content,
                             tx_id.time,
                             tx_node_alias,
-                            &content_descriptor,
                         )?
                         .ok_or(Error::MissingTransaction(tx_id))?;
                     rows.push(self.current_row_from_materialized_version(&table_schema, &version)?);
@@ -5450,6 +5475,7 @@ fn large_value_cache_key(
     (table.name.clone(), row_uuid, column.to_owned(), tx_id)
 }
 
+#[cfg(test)]
 fn select_all(table: &str) -> Query {
     Query::Select(Box::new(
         Select::new([SelectItem::Wildcard]).from([TableRef::named(table)]),

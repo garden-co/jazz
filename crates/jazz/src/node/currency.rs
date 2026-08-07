@@ -6,7 +6,7 @@
 //! node-level read layer over groove tables.
 
 use super::*;
-use crate::schema::{partition_history_table_name, partition_register_table_name};
+use crate::schema::partition_register_table_name;
 
 impl<S> NodeState<S>
 where
@@ -19,17 +19,15 @@ where
         row_uuid: RowUuid,
     ) -> Result<Vec<VersionRow>, Error> {
         let mut versions = Vec::new();
-        for (storage_table, descriptor) in self.version_storage_sources(table)? {
+        for storage_table in self.version_storage_sources(table)? {
             let raws = self
                 .database
                 .primary_key_scan_raw(&storage_table, &[Value::Uuid(row_uuid.0)])?
                 .into_iter()
-                .map(|raw| raw.raw().to_vec())
+                .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
-            for bytes in raws {
-                versions.push(
-                    self.decode_history_record(table, BorrowedRecord::new(&bytes, &descriptor))?,
-                );
+            for record in raws {
+                versions.push(self.decode_history_owned_record(table, &storage_table, record)?);
             }
         }
         let aliases = self.node_aliases.clone();
@@ -105,16 +103,15 @@ where
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
         let mut winner = None;
-        for (storage_table, descriptor) in self.version_storage_sources_for_layer(table, layer)? {
+        for storage_table in self.version_storage_sources_for_layer(table, layer)? {
             let Some(raw) = self
                 .database
                 .primary_key_last_raw(&storage_table, &[Value::Uuid(row_uuid.0)])?
-                .map(|raw| raw.raw().to_vec())
+                .map(|raw| raw.owned_record())
             else {
                 continue;
             };
-            let candidate =
-                self.decode_history_record(table, BorrowedRecord::new(&raw, &descriptor))?;
+            let candidate = self.decode_history_owned_record(table, &storage_table, raw)?;
             let candidate_tx = self.version_tx_id(&candidate)?;
             if winner.as_ref().is_none_or(|existing: &VersionRow| {
                 candidate.tx_time().sort_key(candidate_tx.node)
@@ -149,16 +146,15 @@ where
 
     pub(super) fn query_table_versions(&mut self, table: &str) -> Result<Vec<VersionRow>, Error> {
         let mut versions_by_key = BTreeMap::new();
-        for (storage_table, descriptor) in self.version_storage_sources(table)? {
+        for storage_table in self.version_storage_sources(table)? {
             let raws = self
                 .database
                 .primary_key_scan_raw(&storage_table, &[])?
                 .into_iter()
-                .map(|raw| raw.raw().to_vec())
+                .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
-            for bytes in raws {
-                let version =
-                    self.decode_history_record(table, BorrowedRecord::new(&bytes, &descriptor))?;
+            for record in raws {
+                let version = self.decode_history_owned_record(table, &storage_table, record)?;
                 let tx_id = self.version_tx_id(&version)?;
                 versions_by_key.insert((version.row_uuid(), tx_id, version.layer()), version);
             }
@@ -196,8 +192,12 @@ where
             .clone()
             .unwrap_or_else(|| self.tx_version_scan_tables());
         let mut versions = Vec::new();
+        let mut scanned_sources = BTreeSet::new();
         for table in tables {
-            for (storage_table, descriptor) in self.version_storage_sources(&table)? {
+            for storage_table in self.version_storage_sources(&table)? {
+                if !scanned_sources.insert(storage_table.clone()) {
+                    continue;
+                }
                 let raws = self
                     .database
                     .index_scan_raw(
@@ -206,11 +206,11 @@ where
                         &[Value::U64(tx_id.time.0), Value::U64(tx.node_alias.0)],
                     )?
                     .into_iter()
-                    .map(|raw| raw.raw().to_vec())
+                    .map(|raw| raw.owned_record())
                     .collect::<Vec<_>>();
-                for raw in raws {
+                for record in raws {
                     let version =
-                        self.decode_history_record(&table, BorrowedRecord::new(&raw, &descriptor))?;
+                        self.decode_history_owned_record(&table, &storage_table, record)?;
                     versions.push(version);
                 }
             }
@@ -273,10 +273,7 @@ where
             .collect()
     }
 
-    pub(super) fn version_storage_sources(
-        &mut self,
-        table: &str,
-    ) -> Result<Vec<(String, records::RecordDescriptor)>, Error> {
+    pub(super) fn version_storage_sources(&mut self, table: &str) -> Result<Vec<String>, Error> {
         let mut sources = Vec::new();
         sources.extend(self.version_storage_sources_for_layer(table, VersionLayer::Content)?);
         sources.extend(self.version_storage_sources_for_layer(table, VersionLayer::Deletion)?);
@@ -287,27 +284,27 @@ where
         &mut self,
         table: &str,
         layer: VersionLayer,
-    ) -> Result<Vec<(String, records::RecordDescriptor)>, Error> {
+    ) -> Result<Vec<String>, Error> {
         let cache_key = (table.to_owned(), layer);
         if let Some(sources) = self.query.version_storage_sources_cache.get(&cache_key) {
             return Ok(sources.clone());
         }
-        let mut sources = Vec::new();
-        if let Ok(base_table) =
-            self.table_in_schema(table, self.catalogue.current_schema_version_id)
-        {
-            sources.push(match layer {
-                VersionLayer::Content => (
-                    history_table_name(table),
-                    base_table.history_storage_table().record_schema(),
-                ),
-                VersionLayer::Deletion => (
-                    register_table_name(table),
-                    base_table.register_storage_table().record_schema(),
-                ),
-            });
-        }
-        sources.extend(self.partition_storage_sources_for_layer(table, layer)?);
+        let mut sources = match layer {
+            VersionLayer::Content => self.physical_content_history_sources(table),
+            VersionLayer::Deletion => {
+                let mut sources = Vec::new();
+                if self
+                    .table_in_schema(table, self.catalogue.current_schema_version_id)
+                    .is_ok()
+                {
+                    sources.push(register_table_name(table));
+                }
+                sources.extend(self.partition_register_storage_sources(table)?);
+                sources
+            }
+        };
+        sources.sort();
+        sources.dedup();
         if sources.is_empty() {
             return Err(Error::TableNotFound(table.to_owned()));
         }
@@ -317,32 +314,24 @@ where
         Ok(sources)
     }
 
-    fn partition_storage_sources_for_layer(
-        &mut self,
-        table: &str,
-        layer: VersionLayer,
-    ) -> Result<Vec<(String, records::RecordDescriptor)>, Error> {
+    fn physical_content_history_sources(&self, table: &str) -> Vec<String> {
+        self.catalogue
+            .physical_mappings
+            .values()
+            .filter_map(|mapping| mapping.tables.get(table))
+            .map(|mapping| physical_history_table_name(mapping.table_id))
+            .collect()
+    }
+
+    fn partition_register_storage_sources(&mut self, table: &str) -> Result<Vec<String>, Error> {
         let mut sources = Vec::new();
         for (logical_table, schema_version) in &self.catalogue.partitions {
             if logical_table != table || *schema_version == self.catalogue.current_schema_version_id
             {
                 continue;
             }
-            let table_schema = self.table_in_schema(table, *schema_version)?;
-            sources.push(match layer {
-                VersionLayer::Content => (
-                    partition_history_table_name(table, *schema_version),
-                    table_schema
-                        .history_partition_storage_table(*schema_version)
-                        .record_schema(),
-                ),
-                VersionLayer::Deletion => (
-                    partition_register_table_name(table, *schema_version),
-                    table_schema
-                        .register_partition_storage_table(*schema_version)
-                        .record_schema(),
-                ),
-            });
+            self.table_in_schema(table, *schema_version)?;
+            sources.push(partition_register_table_name(table, *schema_version));
         }
         Ok(sources)
     }
@@ -353,6 +342,47 @@ where
         table: &str,
         record: BorrowedRecord<'_>,
     ) -> Result<VersionRow, Error> {
+        self.decode_history_owned_record(
+            table,
+            "",
+            OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
+        )
+    }
+
+    pub(super) fn decode_history_owned_record(
+        &mut self,
+        requested_table: &str,
+        storage_table: &str,
+        record: OwnedRecord,
+    ) -> Result<VersionRow, Error> {
+        let record_view = record.borrowed();
+        let table = if record_view.descriptor().field_index("_deletion").is_some()
+            || !storage_table.starts_with("jazz_physical_")
+        {
+            requested_table.to_owned()
+        } else {
+            let alias = SchemaVersionAlias(
+                record_view.get_u64(HistoryRowRecord::FIELD_SCHEMA_VERSION_IDX)?,
+            );
+            let schema_version =
+                self.schema_version_for_alias(alias)
+                    .ok_or(Error::InvalidStoredValue(
+                        "history schema version alias must exist",
+                    ))?;
+            self.catalogue
+                .physical_mappings
+                .get(&schema_version)
+                .and_then(|mapping| {
+                    mapping.tables.iter().find_map(|(logical_table, mapping)| {
+                        (physical_history_table_name(mapping.table_id) == storage_table)
+                            .then(|| logical_table.clone())
+                    })
+                })
+                .ok_or(Error::InvalidStoredValue(
+                    "physical history logical table mapping missing",
+                ))?
+        };
+        let record = record.borrowed();
         let tx_node_alias = if record.descriptor().field_index("_deletion").is_some() {
             NodeAlias(record.get_u64(RegisterRowRecord::FIELD_TX_NODE_ID_IDX)?)
         } else {
@@ -372,7 +402,7 @@ where
         };
         let _ = TxId::new(tx_time, tx_node);
         Ok(VersionRow {
-            table: groove::Intern::new(table.to_owned()),
+            table: groove::Intern::new(table),
             record: OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
         })
     }
@@ -592,14 +622,13 @@ where
         tx_time: TxTime,
         tx_node_alias: NodeAlias,
     ) -> Result<Option<VersionRow>, Error> {
-        for (storage_table, descriptor) in self.version_storage_sources_for_layer(table, layer)? {
+        for storage_table in self.version_storage_sources_for_layer(table, layer)? {
             if let Some(version) = self.query_version_by_alias_with_storage(
                 table,
                 &storage_table,
                 row_uuid,
                 tx_time,
                 tx_node_alias,
-                &descriptor,
             )? {
                 return Ok(Some(version));
             }
@@ -614,7 +643,6 @@ where
         row_uuid: RowUuid,
         tx_time: TxTime,
         tx_node_alias: NodeAlias,
-        descriptor: &records::RecordDescriptor,
     ) -> Result<Option<VersionRow>, Error> {
         let raw = self
             .database
@@ -626,31 +654,11 @@ where
                     Value::U64(tx_node_alias.0),
                 ],
             )?
-            .map(|raw| raw.raw().to_vec());
-        let Some(raw) = raw else {
+            .map(|raw| raw.owned_record());
+        let Some(record) = raw else {
             return Ok(None);
         };
-        self.decode_history_record(table, BorrowedRecord::new(&raw, descriptor))
+        self.decode_history_owned_record(table, storage_table, record)
             .map(Some)
-    }
-
-    pub(super) fn query_version_by_alias_with_descriptor(
-        &mut self,
-        table: &str,
-        row_uuid: RowUuid,
-        layer: VersionLayer,
-        tx_time: TxTime,
-        tx_node_alias: NodeAlias,
-        descriptor: &records::RecordDescriptor,
-    ) -> Result<Option<VersionRow>, Error> {
-        let storage_table = version_storage_table_name(table, layer);
-        self.query_version_by_alias_with_storage(
-            table,
-            &storage_table,
-            row_uuid,
-            tx_time,
-            tx_node_alias,
-            descriptor,
-        )
     }
 }
