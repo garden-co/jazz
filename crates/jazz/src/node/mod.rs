@@ -279,8 +279,8 @@ struct SchemaCatalogue {
 struct Branches {
     /// In-memory branch records indexed by branch ID.
     branches: BTreeMap<BranchId, BranchRecord>,
-    /// Storage partitions materialized for table/schema-version/branch triples.
-    branch_partitions: BTreeSet<(String, SchemaVersionId, BranchId)>,
+    /// Storage partitions materialized for physical-table/branch pairs.
+    branch_partitions: BTreeSet<(PhysicalTableId, BranchId)>,
 }
 
 /// Local transaction clock and settled-global application progress.
@@ -663,19 +663,16 @@ where
         schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
         physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
         partitions: &BTreeSet<(String, SchemaVersionId)>,
-        branch_partitions: &BTreeSet<(String, SchemaVersionId, BranchId)>,
+        branch_partitions: &BTreeSet<(PhysicalTableId, BranchId)>,
         storage: S,
     ) -> Result<Database<S>, Error> {
         debug_assert_lowered_layouts(schema);
-        let mut lowered = schema.lower_to_groove_with_partitions(
-            catalogue_schemas,
-            partitions,
-            branch_partitions,
-        );
+        let mut lowered = schema.lower_to_groove_with_partitions(partitions);
         lowered.tables.extend(physical_version_storage_tables(
             catalogue_schemas,
             schema_version_aliases,
             physical_mappings,
+            branch_partitions,
         )?);
         let layout = StorageLayout::jazz_class_v1();
         Database::new_with_storage_layout(lowered, storage, layout).map_err(Error::from)
@@ -1033,18 +1030,12 @@ where
         let mut branch_partitions = BTreeSet::new();
         for raw in meta_database.primary_key_scan_raw("jazz_branch_partitions", &[])? {
             let record = raw.record();
-            let table = String::from_utf8(
-                record
-                    .get_bytes(BranchPartitionRowRecord::FIELD_TABLE_NAME_IDX)?
-                    .to_vec(),
-            )
-            .map_err(|_| Error::InvalidStoredValue("branch partition table name must be utf8"))?;
-            let schema_version = SchemaVersionId(
-                record.get_uuid(BranchPartitionRowRecord::FIELD_SCHEMA_VERSION_IDX)?,
+            let table_id = PhysicalTableId(
+                record.get_u64(BranchPartitionRowRecord::FIELD_PHYSICAL_TABLE_ID_IDX)?,
             );
             let branch_id =
                 BranchId(record.get_uuid(BranchPartitionRowRecord::FIELD_BRANCH_ID_IDX)?);
-            branch_partitions.insert((table, schema_version, branch_id));
+            branch_partitions.insert((table_id, branch_id));
         }
         Ok(CatalogueOpenState {
             storage: meta_database.into_storage(),
@@ -5094,7 +5085,7 @@ struct CatalogueOpenState<S> {
     next_physical_column_id: u64,
     current_write_schema: CurrentWriteSchema,
     partitions: BTreeSet<(String, SchemaVersionId)>,
-    branch_partitions: BTreeSet<(String, SchemaVersionId, BranchId)>,
+    branch_partitions: BTreeSet<(PhysicalTableId, BranchId)>,
 }
 
 struct DatabaseSlot<S> {

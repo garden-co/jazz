@@ -7,9 +7,7 @@
 
 use super::query_engine::{left_field, user_column_field};
 use super::*;
-use crate::schema::{
-    ColumnSchema, branch_partition_history_table_name, branch_partition_register_table_name,
-};
+use crate::schema::ColumnSchema;
 
 use groove::schema::TableSchema as GrooveTableSchema;
 
@@ -259,9 +257,8 @@ groove::define_record! {
 
 groove::define_record! {
     pub(super) struct BranchPartitionRowRecord {
-        0 => table_name: Vec<u8>,
-        1 => schema_version: SchemaVersionId,
-        2 => branch_id: BranchId,
+        0 => physical_table_id: u64,
+        1 => branch_id: BranchId,
     }
 }
 
@@ -407,6 +404,12 @@ pub(super) fn debug_assert_lowered_layouts(schema: &JazzSchema) {
             .expect("schema versions table")
             .record_schema();
         SchemaVersionAliasRowRecord::assert_layout(&schema_version_descriptor);
+
+        let branch_partition_descriptor = groove_schema
+            .table("jazz_branch_partitions")
+            .expect("branch partitions table")
+            .record_schema();
+        BranchPartitionRowRecord::assert_layout(&branch_partition_descriptor);
 
         let rejected_tx_descriptor = groove_schema
             .table("jazz_rejected_transactions")
@@ -2040,22 +2043,6 @@ pub(super) fn deletion_event_from_value(value: Value) -> Result<DeletionEvent, E
 
 pub(super) fn tx_id_value(tx_id: TxId) -> Value {
     Value::Tuple(vec![Value::U64(tx_id.time.0), Value::Uuid(tx_id.node.0)])
-}
-
-pub(super) fn branch_version_storage_table_name(
-    table: &str,
-    layer: VersionLayer,
-    schema_version: SchemaVersionId,
-    branch_id: BranchId,
-) -> String {
-    match layer {
-        VersionLayer::Content => {
-            branch_partition_history_table_name(table, schema_version, branch_id)
-        }
-        VersionLayer::Deletion => {
-            branch_partition_register_table_name(table, schema_version, branch_id)
-        }
-    }
 }
 
 pub(super) fn global_current_table_name(table: &str) -> String {

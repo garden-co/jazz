@@ -6,10 +6,7 @@
 //! sublayer beside the main global history path.
 
 use super::*;
-use crate::schema::{
-    branch_metadata_table_schema, branch_partition_history_table_name,
-    branch_partition_register_table_name,
-};
+use crate::schema::branch_metadata_table_schema;
 
 /// Durable branch metadata recovered from `jazz_branches`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,20 +99,36 @@ where
             return Err(Error::BranchClosed(branch_id));
         }
 
-        let mut versions = Vec::new();
         let write_schema_version = self.catalogue.current_write_schema.schema;
-        for table in self.catalogue.schema.tables.clone() {
-            let table_schema = self.table_in_schema(&table.name, write_schema_version)?;
-            for row_uuid in self.branch_overlay_row_ids(&table.name, branch_id)? {
+        let write_tables = self
+            .catalogue
+            .catalogue_schemas
+            .get(&write_schema_version)
+            .ok_or(Error::InvalidStoredValue("branch write schema missing"))?
+            .schema
+            .tables
+            .clone();
+        let mut versions = Vec::new();
+        for table_schema in write_tables {
+            for row_uuid in self.branch_overlay_row_ids_for_schema(
+                &table_schema.name,
+                branch_id,
+                write_schema_version,
+            )? {
                 for layer in [VersionLayer::Content, VersionLayer::Deletion] {
-                    let Some(winner) =
-                        self.branch_overlay_layer_winner(&table.name, row_uuid, layer, branch_id)?
+                    let Some(winner) = self.branch_overlay_layer_winner_for_schema(
+                        &table_schema.name,
+                        row_uuid,
+                        layer,
+                        branch_id,
+                        write_schema_version,
+                    )?
                     else {
                         continue;
                     };
                     let branch_tip = self.version_tx_id(&winner)?;
                     let parent_tip = self
-                        .query_local_layer_winner(&table.name, row_uuid, layer)?
+                        .query_local_layer_winner(&table_schema.name, row_uuid, layer)?
                         .map(|version| self.version_tx_id(&version))
                         .transpose()?;
                     let mut parents = parent_tip.into_iter().collect::<Vec<_>>();
@@ -123,11 +136,33 @@ where
                         parents.push(branch_tip);
                     }
                     parents.sort();
+                    let source_schema = self
+                        .schema_version_for_alias(winner.schema_version_alias())
+                        .ok_or(Error::InvalidStoredValue(
+                            "branch row schema version alias missing",
+                        ))?;
+                    let source_table = self.table_in_schema(winner.table(), source_schema)?.clone();
+                    let mut projected_cells = winner.cells(&source_table)?;
+                    let projected_table = self
+                        .translate_cells(
+                            source_schema,
+                            write_schema_version,
+                            winner.table(),
+                            &mut projected_cells,
+                        )?
+                        .ok_or(Error::InvalidStoredValue(
+                            "branch row has no lens path to write schema",
+                        ))?;
+                    if projected_table != table_schema.name {
+                        return Err(Error::InvalidStoredValue(
+                            "branch row projected to unexpected table",
+                        ));
+                    }
                     let cells = table_schema
                         .columns
                         .iter()
-                        .map(|column| winner.cell(&table_schema, &column.name))
-                        .collect::<Result<Vec<_>, _>>()?;
+                        .map(|column| projected_cells.remove(&column.name))
+                        .collect::<Vec<_>>();
                     versions.push(
                         VersionRecord::encode(
                             &table_schema,
@@ -212,7 +247,8 @@ where
         )? {
             return Err(Error::AuthorizationDenied);
         }
-        self.persist_branch_partition(commit.table.clone(), write_schema_version, branch_id)?;
+        let table_id = self.physical_table_id_for_schema(write_schema_version, &commit.table)?;
+        self.persist_branch_partition(table_id, branch_id)?;
         let tx_id = TxId::new(made_at, self.node_uuid);
         let tx = Transaction {
             tx_id,
@@ -248,6 +284,8 @@ where
             },
             None,
         )?;
+        let (branch_table, branch_record) =
+            self.branch_version_storage_write_binding(&stored, branch_id)?;
         let mut batch = self.database.open_batch();
         batch.insert(
             "jazz_transactions",
@@ -260,14 +298,9 @@ where
             ),
         );
         batch.insert_raw(
-            branch_version_storage_table_name(
-                &table_schema.name,
-                stored.layer(),
-                write_schema_version,
-                branch_id,
-            ),
+            branch_table.as_ref(),
             history_primary_key(&stored),
-            stored.groove_record(),
+            branch_record,
         );
         self.database.commit_batch(batch)?;
         Ok(tx_id)
@@ -473,7 +506,7 @@ where
         version: &VersionRecord,
     ) -> Result<Option<CurrentRow>, Error> {
         if let Some(row) = self
-            .branch_current_rows(&table.name, branch)?
+            .branch_current_rows_for_schema(&table.name, branch, version.schema_version())?
             .into_iter()
             .find(|row| row.row_uuid() == version.row_uuid())
         {
@@ -511,8 +544,18 @@ where
         table: &str,
         branch: &BranchRecord,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let table_schema = self.table(table)?.clone();
-        let overlay = self.branch_overlay_rows(table, &table_schema, branch.branch_id)?;
+        self.branch_current_rows_for_schema(table, branch, self.catalogue.current_schema_version_id)
+    }
+
+    fn branch_current_rows_for_schema(
+        &mut self,
+        table: &str,
+        branch: &BranchRecord,
+        read_schema_version: SchemaVersionId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let table_schema = self.table_in_schema(table, read_schema_version)?.clone();
+        let overlay =
+            self.branch_overlay_rows(table, &table_schema, branch.branch_id, read_schema_version)?;
         let overlay_row_ids = overlay
             .iter()
             .map(CurrentRow::row_uuid)
@@ -522,7 +565,16 @@ where
             .map(|row| (row.row_uuid(), row))
             .collect::<BTreeMap<_, _>>();
         if let Some(base) = &branch.base {
-            for row in self.current_rows_at(table, base.global_base)? {
+            let base_rows = if read_schema_version == self.catalogue.current_schema_version_id {
+                self.current_rows_at(table, base.global_base)?
+            } else {
+                self.projected_historical_current_rows(
+                    table,
+                    read_schema_version,
+                    base.global_base,
+                )?
+            };
+            for row in base_rows {
                 if !overlay_row_ids.contains(&row.row_uuid()) {
                     by_row.insert(row.row_uuid(), row);
                 }
@@ -547,87 +599,131 @@ where
         table: &str,
         table_schema: &TableSchema,
         branch_id: BranchId,
+        read_schema_version: SchemaVersionId,
     ) -> Result<Vec<CurrentRow>, Error> {
         let mut rows = Vec::new();
-        for row_uuid in self.branch_overlay_row_ids(table, branch_id)? {
+        for row_uuid in
+            self.branch_overlay_row_ids_for_schema(table, branch_id, read_schema_version)?
+        {
             if self
-                .branch_overlay_layer_winner(table, row_uuid, VersionLayer::Deletion, branch_id)?
+                .branch_overlay_layer_winner_for_schema(
+                    table,
+                    row_uuid,
+                    VersionLayer::Deletion,
+                    branch_id,
+                    read_schema_version,
+                )?
                 .is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted))
             {
                 continue;
             }
-            let Some(content) = self.branch_overlay_layer_winner(
+            let Some(content) = self.branch_overlay_layer_winner_for_schema(
                 table,
                 row_uuid,
                 VersionLayer::Content,
                 branch_id,
+                read_schema_version,
             )?
             else {
                 continue;
             };
-            rows.push(self.current_row_from_materialized_version(table_schema, &content)?);
+            let source_schema = self
+                .schema_version_for_alias(content.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "branch row schema version alias missing",
+                ))?;
+            let source_table = self
+                .table_in_schema(content.table(), source_schema)?
+                .clone();
+            let mut cells = self.materialized_cells_for_version(&source_table, &content)?;
+            let projected_table = self.translate_cells(
+                source_schema,
+                read_schema_version,
+                content.table(),
+                &mut cells,
+            )?;
+            if projected_table.as_deref() != Some(table) {
+                continue;
+            }
+            rows.push(current_row_from_materialized_cells(
+                table_schema,
+                &content,
+                &cells,
+            )?);
         }
         sort_current_rows(&mut rows);
         Ok(rows)
     }
 
-    fn branch_overlay_row_ids(
+    fn branch_overlay_row_ids_for_schema(
         &mut self,
         table: &str,
         branch_id: BranchId,
+        schema_version: SchemaVersionId,
     ) -> Result<BTreeSet<RowUuid>, Error> {
-        let mut row_ids = BTreeSet::new();
-        for (logical_table, schema_version, candidate_branch) in
-            self.branches.branch_partitions.clone()
+        let table_id = self.physical_table_id_for_schema(schema_version, table)?;
+        if !self
+            .branches
+            .branch_partitions
+            .contains(&(table_id, branch_id))
         {
-            if logical_table != table || candidate_branch != branch_id {
-                continue;
-            }
-            for storage_table in [
-                branch_partition_history_table_name(table, schema_version, branch_id),
-                branch_partition_register_table_name(table, schema_version, branch_id),
-            ] {
-                for raw in self.database.primary_key_scan_raw(&storage_table, &[])? {
-                    row_ids.insert(RowUuid(
-                        raw.record()
-                            .get_uuid(HistoryRowRecord::FIELD_ROW_UUID_IDX)?,
-                    ));
-                }
+            return Ok(BTreeSet::new());
+        }
+        let mut row_ids = BTreeSet::new();
+        for storage_table in [
+            physical_branch_history_table_name(table_id, branch_id),
+            physical_branch_register_table_name(table_id, branch_id),
+        ] {
+            for raw in self.database.primary_key_scan_raw(&storage_table, &[])? {
+                row_ids.insert(RowUuid(
+                    raw.record()
+                        .get_uuid(HistoryRowRecord::FIELD_ROW_UUID_IDX)?,
+                ));
             }
         }
         Ok(row_ids)
     }
 
-    fn branch_overlay_layer_winner(
+    fn branch_overlay_layer_winner_for_schema(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
         layer: VersionLayer,
         branch_id: BranchId,
+        schema_version: SchemaVersionId,
     ) -> Result<Option<VersionRow>, Error> {
-        let mut versions = Vec::new();
-        for (logical_table, schema_version, candidate_branch) in
-            self.branches.branch_partitions.clone()
+        let table_id = self.physical_table_id_for_schema(schema_version, table)?;
+        if !self
+            .branches
+            .branch_partitions
+            .contains(&(table_id, branch_id))
         {
-            if logical_table != table || candidate_branch != branch_id {
-                continue;
-            }
-            let schema_table = self.table_in_schema(table, schema_version)?;
-            let storage_table =
-                branch_version_storage_table_name(table, layer, schema_version, branch_id);
+            return Ok(None);
+        }
+        let storage_table = physical_branch_version_storage_table_name(table_id, layer, branch_id);
+        let raws = self
+            .database
+            .primary_key_scan_raw(&storage_table, &[Value::Uuid(row_uuid.0)])?
+            .into_iter()
+            .map(|raw| (SchemaVersionAlias(raw.schema_version()), raw.raw().to_vec()))
+            .collect::<Vec<_>>();
+        let mut versions = Vec::with_capacity(raws.len());
+        for (schema_alias, raw) in raws {
+            let schema_version =
+                self.schema_version_for_alias(schema_alias)
+                    .ok_or(Error::InvalidStoredValue(
+                        "branch row schema version alias missing",
+                    ))?;
+            let logical_table = self.logical_table_for_physical_alias(table_id, schema_alias)?;
+            let schema_table = self.table_in_schema(&logical_table, schema_version)?;
             let descriptor = match layer {
                 VersionLayer::Content => schema_table.history_storage_table().record_schema(),
                 VersionLayer::Deletion => schema_table.register_storage_table().record_schema(),
             };
-            for raw in self
-                .database
-                .primary_key_scan_raw(&storage_table, &[Value::Uuid(row_uuid.0)])?
-            {
-                versions.push(VersionRow {
-                    table: groove::Intern::new(table.to_owned()),
-                    record: OwnedRecord::new(raw.raw().to_vec(), descriptor),
-                });
-            }
+            versions.push(VersionRow {
+                table: groove::Intern::new(logical_table),
+                record: OwnedRecord::new(raw, descriptor),
+            });
         }
         let candidates = (0..versions.len()).collect::<Vec<_>>();
         Ok(
@@ -730,8 +826,7 @@ where
 
     fn persist_branch_partition(
         &mut self,
-        table: String,
-        schema_version: SchemaVersionId,
+        table_id: PhysicalTableId,
         branch_id: BranchId,
     ) -> Result<(), Error>
     where
@@ -740,18 +835,14 @@ where
         if !self
             .branches
             .branch_partitions
-            .insert((table.clone(), schema_version, branch_id))
+            .insert((table_id, branch_id))
         {
             return Ok(());
         }
         let mut batch = self.database.open_batch();
         batch.update(
             "jazz_branch_partitions",
-            vec![
-                Value::Bytes(table.as_bytes().to_vec()),
-                Value::Uuid(schema_version.0),
-                Value::Uuid(branch_id.0),
-            ],
+            vec![Value::U64(table_id.0), Value::Uuid(branch_id.0)],
         );
         self.database.commit_batch(batch)?;
         self.rebuild_database_slot()?;

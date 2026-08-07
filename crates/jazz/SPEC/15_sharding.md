@@ -23,19 +23,19 @@ Invariant digest:
 
 ### 15.1 "Partition" is already taken
 
-The term _partition_ already has a precise meaning in jazz: it names a physical,
-per-logical-table / per-schema-version groove storage table used by migration
-lenses (ch. 10) and branch overlays (ch. 11). Those storage partitions are
-registered in `jazz_partitions` / `jazz_branch_partitions` and are durable across
-reopen.
+The term _partition_ already has a precise storage meaning in jazz. The legacy
+`jazz_partitions` catalogue tracks logical table/schema pairs, while
+`jazz_branch_partitions` registers durable `(PhysicalTableId, BranchId)` overlay
+storage (ch. 10 / ch. 11). These identities survive reopen and are distinct from
+shard placement.
 
 Shard ownership needs a separate concept. A shard ownership key identifies where
 data is placed for authority and routing; it is not the same thing as an
 existing storage partition. For that reason, this chapter always distinguishes
-**schema-version storage partition** from **shard ownership partition** and does
-not use the bare word _partition_ for shard placement. The existing partition
-machinery is useful analogy and support, but it is not itself shard placement
-(its invariants live in ch. 10 / ch. 11).
+**storage partition** from **shard ownership partition** and does not use the
+bare word _partition_ for shard placement. The existing partition machinery is
+useful analogy and support, but it is not itself shard placement (its invariants
+live in ch. 10 / ch. 11).
 
 **Implementation status.** Shard ownership, shard cores, and cross-shard
 transactions are not implemented. The current core has one global sequencing and

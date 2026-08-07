@@ -222,8 +222,9 @@ logical Groove table names, for example
 `jazz_<table>_<schema-version>_history` and
 `jazz_<table>_<schema-version>_global_current`. Groove's class-CF layout embeds
 that logical table name in the physical KV key prefix. Durable secondary-index
-keys likewise begin with the logical table name and index name. Branch history
-and register table names contain both the branch id and schema version.
+keys likewise begin with the logical table name and index name. Before the
+branch-overlay cutover, branch history and register table names also contained
+both the branch id and schema version.
 
 Shared storage removes the schema-version dimension from all application-data
 row and index keys, including history, global current, ahead current, secondary
@@ -493,9 +494,16 @@ remain compatible with databases written by the former per-schema history layout
    - Add a storage-read receipt proving read cost stays constant as schema-version count increases.
 
 6. Convert the remaining schema-keyed storage.
-   **Status: in progress.** Rejected-version storage and global-change identity
-   are complete; branch overlays and the remaining key audit are still pending.
-   - Branch overlays: retain branch identity, remove schema identity.
+   **Status: in progress.** Rejected-version storage, global-change identity,
+   and branch overlays are complete; the remaining key audit is still pending.
+   - Branch overlays: each `(PhysicalTableId, BranchId)` owns one versioned
+     content-history table and one stable deletion-register table.
+     `jazz_branch_partitions` stores only those two identities. Writes retain
+     their authored `SchemaVersionAlias`; reads and merge-back project winners
+     into their requested schema, including across table and column renames.
+     The mapping and mixed-version rows survive restart. Discarding a
+     provisional physical lineage clears its branch rows and partition metadata
+     before that local ID can be reused.
    - Rejected versions: `jazz_rejected_transactions` remains global transaction
      metadata. Each `PhysicalTableId` now owns one schema-versioned rejected
      payload archive; logical-name payload tables are no longer lowered. Rows

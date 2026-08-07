@@ -52,6 +52,39 @@ pub(super) fn physical_rejected_versions_table_name(table_id: PhysicalTableId) -
     format!("jazz_physical_{}_rejected_versions", table_id.0)
 }
 
+pub(super) fn physical_branch_history_table_name(
+    table_id: PhysicalTableId,
+    branch_id: BranchId,
+) -> String {
+    format!(
+        "jazz_physical_{}_branch_{}_history",
+        table_id.0,
+        branch_id.0.simple()
+    )
+}
+
+pub(super) fn physical_branch_register_table_name(
+    table_id: PhysicalTableId,
+    branch_id: BranchId,
+) -> String {
+    format!(
+        "jazz_physical_{}_branch_{}_register",
+        table_id.0,
+        branch_id.0.simple()
+    )
+}
+
+pub(super) fn physical_branch_version_storage_table_name(
+    table_id: PhysicalTableId,
+    layer: VersionLayer,
+    branch_id: BranchId,
+) -> String {
+    match layer {
+        VersionLayer::Content => physical_branch_history_table_name(table_id, branch_id),
+        VersionLayer::Deletion => physical_branch_register_table_name(table_id, branch_id),
+    }
+}
+
 pub(super) fn physical_current_index_name(column_id: PhysicalColumnId) -> String {
     format!("by_physical_user_{}", column_id.0)
 }
@@ -543,6 +576,7 @@ where
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
             &self.catalogue.physical_mappings,
+            &self.branches.branch_partitions,
         )? {
             let existing = match self.database.table_schema(&desired.name) {
                 Ok(existing) => Some(existing.clone()),
@@ -590,11 +624,10 @@ where
     }
 
     pub(super) fn synchronize_partition_storage_tables(&mut self) -> Result<(), Error> {
-        let lowered = self.catalogue.schema.lower_to_groove_with_partitions(
-            &self.catalogue.catalogue_schemas,
-            &self.catalogue.partitions,
-            &self.branches.branch_partitions,
-        );
+        let lowered = self
+            .catalogue
+            .schema
+            .lower_to_groove_with_partitions(&self.catalogue.partitions);
         for table in lowered.tables {
             match self.database.table_schema(&table.name) {
                 Ok(_) => {}
@@ -620,6 +653,13 @@ where
             .difference(&live)
             .copied()
             .collect::<BTreeSet<_>>();
+        let discarded_branch_partitions = self
+            .branches
+            .branch_partitions
+            .iter()
+            .filter(|(table_id, _)| discarded.contains(table_id))
+            .copied()
+            .collect::<BTreeSet<_>>();
         let mut invalidated_rejections = BTreeMap::new();
         for table_id in &discarded {
             let table = physical_rejected_versions_table_name(*table_id);
@@ -641,14 +681,28 @@ where
         }
 
         for table_id in &discarded {
-            for (table, global_current) in [
+            let mut storage_tables = vec![
                 (physical_history_table_name(*table_id), false),
                 (physical_register_table_name(*table_id), false),
                 (physical_global_current_table_name(*table_id), true),
                 (physical_register_global_current_table_name(*table_id), true),
                 (physical_ahead_current_table_name(*table_id), false),
                 (physical_register_ahead_current_table_name(*table_id), false),
-            ] {
+            ];
+            for (_, branch_id) in discarded_branch_partitions
+                .iter()
+                .filter(|(candidate, _)| candidate == table_id)
+            {
+                storage_tables.push((
+                    physical_branch_history_table_name(*table_id, *branch_id),
+                    false,
+                ));
+                storage_tables.push((
+                    physical_branch_register_table_name(*table_id, *branch_id),
+                    false,
+                ));
+            }
+            for (table, global_current) in storage_tables {
                 let rows = match self.database.primary_key_scan_raw(&table, &[]) {
                     Ok(rows) => rows
                         .into_iter()
@@ -701,6 +755,23 @@ where
                 }
                 self.database.commit_batch(batch)?;
             }
+        }
+
+        if !discarded_branch_partitions.is_empty() {
+            let mut batch = self.database.open_batch();
+            for (table_id, branch_id) in &discarded_branch_partitions {
+                batch.delete(
+                    "jazz_branch_partitions",
+                    PrimaryKeyValue::Composite(vec![
+                        PrimaryKeyValue::U64(table_id.0),
+                        PrimaryKeyValue::Uuid(branch_id.0),
+                    ]),
+                );
+            }
+            self.database.commit_batch(batch)?;
+            self.branches
+                .branch_partitions
+                .retain(|partition| !discarded_branch_partitions.contains(partition));
         }
 
         if !invalidated_rejections.is_empty() {
@@ -970,12 +1041,35 @@ where
             groove::records::VersionedRecord::new(version.schema_version_alias().0, record),
         ))
     }
+
+    pub(super) fn branch_version_storage_write_binding(
+        &mut self,
+        version: &VersionRow,
+        branch_id: BranchId,
+    ) -> Result<(groove::Intern<String>, groove::records::VersionedRecord), Error> {
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "branch row schema version alias missing",
+            ))?;
+        let table_id = self.physical_table_id_for_schema(schema_version, version.table())?;
+        let (_, record) = self.version_storage_write_binding(version)?;
+        Ok((
+            groove::Intern::new(physical_branch_version_storage_table_name(
+                table_id,
+                version.layer(),
+                branch_id,
+            )),
+            record,
+        ))
+    }
 }
 
 pub(super) fn physical_version_storage_tables(
     catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
     schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
     physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    branch_partitions: &BTreeSet<(PhysicalTableId, BranchId)>,
 ) -> Result<Vec<GrooveTableSchema>, Error> {
     let mut lineages = BTreeMap::<
         PhysicalTableId,
@@ -1151,6 +1245,17 @@ pub(super) fn physical_version_storage_tables(
         }
         for (alias, fields) in rejected_layouts_by_alias {
             rejected = rejected.with_schema_version(alias.0, fields);
+        }
+        for (_, branch_id) in branch_partitions
+            .iter()
+            .filter(|(candidate, _)| *candidate == table_id)
+        {
+            let mut branch_history = physical.clone();
+            branch_history.name = physical_branch_history_table_name(table_id, *branch_id);
+            let mut branch_register = register.clone();
+            branch_register.name = physical_branch_register_table_name(table_id, *branch_id);
+            tables.push(branch_history);
+            tables.push(branch_register);
         }
         tables.push(physical);
         tables.push(register);

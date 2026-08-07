@@ -557,7 +557,7 @@ fn branch_creation_persists_no_overlay_partition_until_first_write() {
     assert!(
         !core.branches.branch_partitions
             .iter()
-            .any(|(_, _, existing)| *existing == branch_id),
+            .any(|(_, existing)| *existing == branch_id),
         "INV-BRANCH-12: branch creation must not eagerly create overlay partitions"
     );
 
@@ -566,12 +566,13 @@ fn branch_creation_persists_no_overlay_partition_until_first_write() {
         MergeableCommit::new("todos", row(1), 10).cells(title_cells("branch write")),
     )
     .unwrap();
+    let table_id = core
+        .physical_table_id_for_schema(core.current_write_schema().schema, "todos")
+        .unwrap();
     assert!(
-        core.branches.branch_partitions.iter().any(
-            |(table, schema_version, existing)| table == "todos"
-                && *schema_version == core.current_write_schema().schema
-                && *existing == branch_id
-        ),
+        core.branches
+            .branch_partitions
+            .contains(&(table_id, branch_id)),
         "INV-BRANCH-12: first branch write must create the overlay partition"
     );
 }
@@ -600,13 +601,243 @@ fn branch_overlay_partition_creation_rebuilds_live_database_without_storage_reop
         rows,
         BTreeMap::from([(row(0x22), title_cells("branch partition write"))])
     );
+    let table_id = core
+        .physical_table_id_for_schema(core.current_write_schema().schema, "todos")
+        .unwrap();
     assert!(
-        core.branches.branch_partitions.iter().any(
-            |(table, schema_version, existing)| table == "todos"
-                && *schema_version == core.current_write_schema().schema
-                && *existing == branch_id
-        ),
+        core.branches
+            .branch_partitions
+            .contains(&(table_id, branch_id)),
         "first branch write must create a live overlay partition without reopening storage"
+    );
+}
+
+#[test]
+fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
+    // Physical branch partition identity is internal storage topology; the
+    // branch read and merge-back assertions cover its user-visible semantics.
+    let base = schema();
+    let renamed = SchemaVersion::new(JazzSchema::new([TableSchema::new(
+        "tasks",
+        [ColumnSchema::new("name", ColumnType::String)],
+    )]));
+    let (dir, mut core) = open_history_complete_node_with_schema(node(0x23), base.clone());
+    let branch_id = branch(0x23);
+    core.create_root_branch(branch_id).unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row(0x23), 10).cells(title_cells("before rename")),
+    )
+    .unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row(0x26), 11).cells(title_cells("deleted after rename")),
+    )
+    .unwrap();
+
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(renamed.clone()),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::PublishLens {
+        author: AuthorId::SYSTEM,
+        lens: MigrationLens::new(
+            base.version_id(),
+            renamed.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "tasks".to_owned(),
+                ops: vec![
+                    LensOp::RenameTable {
+                        from: "todos".to_owned(),
+                        to: "tasks".to_owned(),
+                    },
+                    LensOp::RenameColumn {
+                        from: "title".to_owned(),
+                        to: "name".to_owned(),
+                    },
+                ],
+            }],
+        ),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: renamed.id,
+        },
+    })
+    .unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("tasks", row(0x24), 12)
+            .cells(BTreeMap::from([("name".to_owned(), v("after rename"))])),
+    )
+    .unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("tasks", row(0x26), 13).deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
+
+    let base_table_id = core.catalogue.physical_mappings[&base.version_id()].tables["todos"]
+        .table_id;
+    assert_eq!(
+        core.catalogue.physical_mappings[&renamed.id].tables["tasks"].table_id,
+        base_table_id
+    );
+    assert_eq!(
+        core.branches.branch_partitions,
+        BTreeSet::from([(base_table_id, branch_id)])
+    );
+    let stored = core
+        .database
+        .primary_key_scan_raw(
+            &physical_branch_history_table_name(base_table_id, branch_id),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(stored.len(), 3);
+    assert_eq!(
+        stored
+            .iter()
+            .map(|raw| raw.schema_version())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        2,
+        "one physical branch table must retain both authored schema variants"
+    );
+    assert_eq!(
+        core.database
+            .primary_key_scan_raw(
+                &physical_branch_register_table_name(base_table_id, branch_id),
+                &[],
+            )
+            .unwrap()
+            .len(),
+        1,
+        "the shared deletion register must accept the renamed schema variant"
+    );
+
+    let shape = Query::from("todos").validate(&base).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let expected = BTreeMap::from([
+        (row(0x23), title_cells("before rename")),
+        (row(0x24), title_cells("after rename")),
+    ]);
+    assert_eq!(
+        core.query_rows_on_branch(branch_id, &shape, &binding)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        expected
+    );
+
+    drop(core);
+    let mut reopened = reopen_node_at(&dir, node(0x23), base.clone());
+    assert_eq!(
+        reopened.query_rows_on_branch(branch_id, &shape, &binding)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        expected
+    );
+    let merge_back = reopened.merge_back_branch(branch_id).unwrap();
+    assert_eq!(
+        reopened
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        expected
+    );
+    assert_eq!(
+        reopened.transaction_record(merge_back).unwrap().source_branch,
+        Some(branch_id)
+    );
+}
+
+#[test]
+fn publishing_lens_discards_branch_overlay_for_replaced_provisional_lineage() {
+    // Provisional physical IDs and branch partition metadata are internal; an
+    // empty branch view is the observable result of the chosen discard policy.
+    let base = schema();
+    let target = SchemaVersion::new(catalogue_evolved_schema());
+    let (_dir, mut core) = open_history_complete_node_with_schema(node(0x25), base.clone());
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(target.clone()),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: target.id,
+        },
+    })
+    .unwrap();
+
+    let branch_id = branch(0x25);
+    core.create_root_branch(branch_id).unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row(0x25), 10).cells(BTreeMap::from([
+            ("title".to_owned(), v("provisional")),
+            ("body".to_owned(), v("branch body")),
+        ])),
+    )
+    .unwrap();
+    let provisional = core.catalogue.physical_mappings[&target.id].tables["todos"].table_id;
+    let provisional_table = physical_branch_history_table_name(provisional, branch_id);
+    assert_eq!(
+        core.database
+            .primary_key_scan_raw(&provisional_table, &[])
+            .unwrap()
+            .len(),
+        1
+    );
+
+    core.apply_sync_message(SyncMessage::PublishLens {
+        author: AuthorId::SYSTEM,
+        lens: MigrationLens::new(
+            base.version_id(),
+            target.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: v(""),
+                }],
+            }],
+        ),
+    })
+    .unwrap();
+
+    assert!(core.branches.branch_partitions.is_empty());
+    assert!(
+        core.database
+            .primary_key_scan_raw(&provisional_table, &[])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(core
+        .database
+        .primary_key_scan_raw("jazz_branch_partitions", &[])
+        .unwrap()
+        .is_empty());
+    let shape = Query::from("todos").validate(&base).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    assert!(
+        core.query_rows_on_branch(branch_id, &shape, &binding)
+            .unwrap()
+            .is_empty()
     );
 }
 
@@ -642,7 +873,7 @@ fn branch_writes_reject_unknown_and_closed_branches() {
     assert!(
         !core.branches.branch_partitions
             .iter()
-            .any(|(_, _, existing)| *existing == unknown || *existing == closed),
+            .any(|(_, existing)| *existing == unknown || *existing == closed),
         "INV-BRANCH-14: rejected branch writes must not create implicit partitions"
     );
 }

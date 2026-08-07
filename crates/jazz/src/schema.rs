@@ -16,7 +16,7 @@ use groove::schema::{
 };
 use groove::storage::StorageLayout;
 
-use crate::ids::{BranchId, SchemaVersionId};
+use crate::ids::SchemaVersionId;
 use crate::merge_strategy::ColumnSpecHash;
 use crate::query::{Query, claim, col, eq};
 
@@ -168,30 +168,12 @@ impl JazzSchema {
         self.with_jazz_direct_record_stores(GrooveDatabaseSchema::new(self.storage_tables()))
     }
 
-    /// Lower the schema plus registered schema-version partitions.
+    /// Lower the schema plus registered legacy schema-version partitions.
     pub fn lower_to_groove_with_partitions(
         &self,
-        catalogue_schemas: &BTreeMap<SchemaVersionId, crate::protocol::SchemaVersion>,
         _partitions: &std::collections::BTreeSet<(String, SchemaVersionId)>,
-        branch_partitions: &std::collections::BTreeSet<(String, SchemaVersionId, BranchId)>,
     ) -> GrooveDatabaseSchema {
-        let mut tables = self.storage_tables();
-        for (logical_table, schema_version, branch_id) in branch_partitions {
-            let Some(schema) = catalogue_schemas.get(schema_version) else {
-                continue;
-            };
-            let Some(table) = schema
-                .schema
-                .tables
-                .iter()
-                .find(|table| table.name == *logical_table)
-            else {
-                continue;
-            };
-            tables.push(table.branch_history_partition_storage_table(*schema_version, *branch_id));
-            tables.push(table.branch_register_partition_storage_table(*schema_version, *branch_id));
-        }
-        self.with_jazz_direct_record_stores(GrooveDatabaseSchema::new(tables))
+        self.lower_to_groove()
     }
 
     /// Lower only the fixed metadata tables needed for the first open stage.
@@ -721,19 +703,6 @@ impl TableSchema {
         self.history_storage_table_named(format!("jazz_{}_history", self.name))
     }
 
-    /// Return a branch-overlay partitioned storage history table.
-    pub fn branch_history_partition_storage_table(
-        &self,
-        schema_version: SchemaVersionId,
-        branch_id: BranchId,
-    ) -> GrooveTableSchema {
-        self.history_storage_table_named(branch_partition_history_table_name(
-            &self.name,
-            schema_version,
-            branch_id,
-        ))
-    }
-
     fn history_storage_table_named(&self, name: String) -> GrooveTableSchema {
         let mut columns = vec![
             column("row_uuid", GrooveColumnType::Uuid),
@@ -768,19 +737,6 @@ impl TableSchema {
     /// Return the storage table for deletion-register versions.
     pub fn register_storage_table(&self) -> GrooveTableSchema {
         self.register_storage_table_named(format!("jazz_{}_register", self.name))
-    }
-
-    /// Return a branch-overlay partitioned deletion-register table.
-    pub fn branch_register_partition_storage_table(
-        &self,
-        schema_version: SchemaVersionId,
-        branch_id: BranchId,
-    ) -> GrooveTableSchema {
-        self.register_storage_table_named(branch_partition_register_table_name(
-            &self.name,
-            schema_version,
-            branch_id,
-        ))
     }
 
     fn register_storage_table_named(&self, name: String) -> GrooveTableSchema {
@@ -972,30 +928,6 @@ impl TableSchema {
     }
 }
 
-pub(crate) fn branch_partition_history_table_name(
-    table: &str,
-    schema_version: SchemaVersionId,
-    branch_id: BranchId,
-) -> String {
-    format!(
-        "jazz_{table}_branch_{}_{}_history",
-        branch_id.0.simple(),
-        schema_version.0.simple()
-    )
-}
-
-pub(crate) fn branch_partition_register_table_name(
-    table: &str,
-    schema_version: SchemaVersionId,
-    branch_id: BranchId,
-) -> String {
-    format!(
-        "jazz_{table}_branch_{}_{}_register",
-        branch_id.0.simple(),
-        schema_version.0.simple()
-    )
-}
-
 fn schema_versions_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_schema_versions",
@@ -1066,14 +998,12 @@ fn branch_partitions_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_branch_partitions",
         [
-            column("table_name", GrooveColumnType::Bytes),
-            column("schema_version", GrooveColumnType::Uuid),
+            column("physical_table_id", GrooveColumnType::U64),
             column("branch_id", GrooveColumnType::Uuid),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::bytes("table_name"),
-        PrimaryKeyColumn::uuid("schema_version"),
+        PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
         PrimaryKeyColumn::uuid("branch_id"),
     ]))
 }

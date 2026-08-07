@@ -245,7 +245,7 @@ where
         Ok(rows)
     }
 
-    fn translate_cells(
+    pub(super) fn translate_cells(
         &mut self,
         source: SchemaVersionId,
         target: SchemaVersionId,
