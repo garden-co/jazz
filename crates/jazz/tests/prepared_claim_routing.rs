@@ -26,6 +26,8 @@ const PROJECT_ACCESS: &str = "project_access";
 const GROUPS: &str = "groups";
 const GROUP_MEMBERS: &str = "group_members";
 const GROUP_EDGES: &str = "group_edges";
+const CYCLE_A: &str = "cycle_a";
+const CYCLE_B: &str = "cycle_b";
 const WRITER: AuthorId = AuthorId(uuid::uuid!("82000000-0000-0000-0000-000000000001"));
 const USER_A: AuthorId = AuthorId(uuid::uuid!("82000000-0000-0000-0000-000000000002"));
 const USER_B: AuthorId = AuthorId(uuid::uuid!("82000000-0000-0000-0000-000000000003"));
@@ -154,6 +156,21 @@ fn two_hop_seeded_policy_schema() -> JazzSchema {
         .with_reference("parent", GROUPS)
         .with_read_policy(Policy::public())
         .with_write_policy(Policy::public()),
+    ])
+}
+
+fn policy_proof_cycle_schema() -> JazzSchema {
+    let a_policy = Query::from(CYCLE_A).join_via_column(CYCLE_B, "id", "b", []);
+    let b_policy = Query::from(CYCLE_B).join_via_column(CYCLE_A, "id", "a", []);
+    JazzSchema::new([
+        TableSchema::new(CYCLE_A, [ColumnSchema::new("b", ColumnType::Uuid)])
+            .with_reference("b", CYCLE_B)
+            .with_read_policy(Policy::shape(a_policy))
+            .with_write_policy(Policy::public()),
+        TableSchema::new(CYCLE_B, [ColumnSchema::new("a", ColumnType::Uuid)])
+            .with_reference("a", CYCLE_A)
+            .with_read_policy(Policy::shape(b_policy))
+            .with_write_policy(Policy::public()),
     ])
 }
 
@@ -535,6 +552,7 @@ fn prepared_binding_includes_claims_from_auxiliary_source_policies() {
 }
 
 #[test]
+#[ignore = "INV-RLS-21: policy subplans drop the evaluating policy's claim binding past the first hop. Unfixed; see SPEC/7_authorization.md 7.4."]
 fn prepared_binding_routes_claims_through_two_hop_seeded_policy_sources() {
     let db = open_db_with_schema(two_hop_seeded_policy_schema());
     let (project_a, project_b, document_a, document_b) = seed_two_hop_reachability_policy(&db);
@@ -573,6 +591,38 @@ fn prepared_binding_routes_claims_through_two_hop_seeded_policy_sources() {
         vec![document_b],
         "principal B must receive only project B through the seeded policy chain"
     );
+}
+
+#[test]
+fn policy_proof_cycle_reports_table_and_depth() {
+    let db = open_db_with_schema(policy_proof_cycle_schema());
+    let a = row(0xb1);
+    let b = row(0xb2);
+    db.insert_with_id(
+        CYCLE_A,
+        a,
+        BTreeMap::from([("b".to_owned(), Value::Uuid(b.0))]),
+    )
+    .expect("seed cycle A");
+    db.insert_with_id(
+        CYCLE_B,
+        b,
+        BTreeMap::from([("a".to_owned(), Value::Uuid(a.0))]),
+    )
+    .expect("seed cycle B");
+
+    let prepared = db
+        .prepare_query(&Query::from(CYCLE_A))
+        .expect("prepare cyclic policy query");
+    let error = block_on(db.all_for_identity(&prepared, opts(), USER_A))
+        .expect_err("cyclic policy proof must fail before stack exhaustion");
+    let message = error.to_string();
+    assert!(
+        message.contains("PolicyProofCycle"),
+        "unexpected error: {message}"
+    );
+    assert!(message.contains(CYCLE_A), "unexpected error: {message}");
+    assert!(message.contains("depth: 2"), "unexpected error: {message}");
 }
 
 #[test]

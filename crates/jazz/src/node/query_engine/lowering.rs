@@ -65,7 +65,7 @@ pub(crate) fn lower_query_program(
         let source_request = SourceRequest {
             source: source.clone(),
             visibility,
-            authorization: source_authorization_for_source(&request, &source)?,
+            authorization: source_authorization_for_source(&request, &plan, &source)?,
             requirements,
         };
         let resolved_source = match source_resolver.resolve_source(&source_request) {
@@ -327,11 +327,28 @@ fn explain_with_request(request: &QueryProgramRequest, mut explain: ExplainPlan)
 
 fn source_authorization_for_source(
     request: &QueryProgramRequest,
+    plan: &AnalyzedQueryPlan,
     source: &SourceId,
 ) -> CapabilityResult<SourceAuthorizationRequest> {
     match &request.policy {
         PolicyContext::System => Ok(SourceAuthorizationRequest::System),
-        PolicyContext::AuthorizationSubplan { .. } => Ok(SourceAuthorizationRequest::System),
+        PolicyContext::AuthorizationSubplan {
+            protected_source, ..
+        } if protected_source == source => Ok(SourceAuthorizationRequest::System),
+        PolicyContext::AuthorizationSubplan {
+            permission_subject, ..
+        } if analyzed_plan_sources(plan).contains(source) => {
+            Ok(SourceAuthorizationRequest::PolicyProof {
+                permission_subject: *permission_subject,
+                plan: PolicyAuthorizationPlan {
+                    protected_source: source.clone(),
+                    role: PolicyDecisionRole::Read,
+                    protected_row_field: "row_uuid".to_owned(),
+                    binding_source_shape: request.input.binding.source_shape.clone(),
+                    binding_user_params: binding_user_param_types(&request.input.binding)?,
+                },
+            })
+        }
         PolicyContext::Identity {
             permission_subject, ..
         } => Ok(SourceAuthorizationRequest::PolicyFiltered {
@@ -344,6 +361,9 @@ fn source_authorization_for_source(
                 binding_user_params: binding_user_param_types(&request.input.binding)?,
             },
         }),
+        // Auxiliary closure and payload sources do not establish policy
+        // membership, so proof compilation reads them under system authority.
+        PolicyContext::AuthorizationSubplan { .. } => Ok(SourceAuthorizationRequest::System),
     }
 }
 

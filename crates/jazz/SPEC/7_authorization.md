@@ -39,6 +39,9 @@ Invariant digest:
 - `INV-RLS-20`: Reads performed to execute a write MUST satisfy the target row's
   read policy; partial updates and upserts therefore require read permission,
   while full-row writes and row-id deletes do not.
+- `INV-RLS-21`: Policy proofs MUST authorize membership sources separately from
+  payload closure, include recursive seed/step sources, and reject proof cycles
+  with a named table-and-depth error.
 
 ## Details
 
@@ -206,6 +209,57 @@ shapes. It composes the root table's read policy into the subscribed shape and
 **binds the policy's claims from the server-authenticated identity, not from
 client-supplied binding values**, so a client cannot widen its visibility by
 choosing a different claim binding (`INV-RLS-10`).
+
+#### Policy-proof source authority
+
+An authorization subplan is a proof of membership, not a user-visible read.
+It has three source-authority modes: `System`, `PolicyFiltered`, and
+`PolicyProof`. `PolicyFiltered` is reserved for ordinary user-visible query
+sources. A proof suspends the policy target at its root, evaluates predicate
+membership sources with `PolicyProof`, and uses `System` for delivery-only
+sources. This distinction is required because applying ordinary source
+resolution while proving policy can re-enter include delivery and create a
+policy cycle.
+
+The classification is total for every source class in a normalized
+authorization subplan:
+
+1. The protected policy-root source is `System`. It is the row set whose policy
+   is being proved; filtering it with that same policy would be circular.
+2. Every analyzed relational membership source is `PolicyProof`: direct join
+   and source-lookup aliases, relation/union branch roots, policy-branch
+   sources, inherited-parent sources, reachable access sources, and every
+   recursive seed and recursive-step source. Each can change whether the
+   predicate holds, so excluding one is an authorization leak.
+3. The recursive frontier is not a table source and has no source-authority
+   decision. It contains only tuples emitted by the already-authorized seed or
+   prior step; its seed and step table sources are covered by item 2.
+4. Bound value sources (claims, query parameters, and literals) are not table
+   sources and have no source-authority decision. Their values remain bound by
+   the authenticated policy context rather than by client authority.
+5. Implicit reference closure targets and explicit include-path targets,
+   including correlated array/include children, are `System`. They ship or
+   validate payload closure after membership; they are not policy predicates.
+6. Auxiliary payload, result-member, version-witness, deletion-register,
+   coverage, provenance, and other metadata-only sources are `System`. They
+   support delivery and validation, not policy membership.
+7. A source occurrence shared by a membership expression and a delivery path
+   is classified by its occurrence, not merely its table name: the analyzed
+   membership occurrence is `PolicyProof` under item 2, while the separately
+   named closure occurrence is `System` under items 5–6.
+
+`PolicyProof` recursively builds only these membership graphs; it MUST NOT
+delegate to ordinary `PolicyFiltered` source resolution. Re-entering a table
+already active in the proof stack fails with `PolicyProofCycle`, naming the
+table and attempted depth, rather than exhausting the process stack
+(`INV-RLS-21`).
+
+**INV-RLS-21.** While proving a table read policy, Jazz MUST suspend the
+protected root policy, apply `PolicyProof` to every analyzed membership source
+(including recursive seed and step sources), and apply `System` only to the
+delivery-only source classes above. It MUST reject a revisited proof table with
+a named table-and-depth cycle error. No source class may be left implicitly
+authorized.
 
 Join policies extend that same identity-bound evaluation across relationships. A
 join policy passes when a matching global-current row in the joined table reaches

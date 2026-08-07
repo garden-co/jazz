@@ -730,10 +730,22 @@ where
             .node
             .table_in_schema_or_branch_metadata(&request.source.table, self.read_view.read_schema)
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        // A public membership table contributes directly to the proof. Avoid
+        // wrapping it in another trivial authorization graph, which keeps deep
+        // (but acyclic) policy chains bounded on the Rust stack.
+        let authorization = if matches!(
+            request.authorization,
+            SourceAuthorizationRequest::PolicyProof { .. }
+        ) && table.read_policy.is_none()
+        {
+            SourceAuthorizationRequest::System
+        } else {
+            request.authorization.clone()
+        };
         if let Some(rows) = self.inline_sources.get(&request.source) {
             if request.visibility != RowVisibility::Visible
                 || !request.requirements.metadata.is_empty()
-                || !matches!(request.authorization, SourceAuthorizationRequest::System)
+                || !matches!(authorization, SourceAuthorizationRequest::System)
             {
                 return Err(source_resolution_error(request, SourceGap::Coverage));
             }
@@ -808,9 +820,13 @@ where
             } else {
                 base
             };
-            let graph = match &request.authorization {
+            let graph = match &authorization {
                 SourceAuthorizationRequest::System => base,
                 SourceAuthorizationRequest::PolicyFiltered {
+                    permission_subject,
+                    plan,
+                }
+                | SourceAuthorizationRequest::PolicyProof {
                     permission_subject,
                     plan,
                 } => {
@@ -845,9 +861,7 @@ where
                                 source_resolution_error(request, SourceGap::HistoricalStorageCut)
                             })?,
                         )
-                        .map_err(|_| {
-                            source_resolution_error(request, SourceGap::HistoricalStorageCut)
-                        })?
+                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
                         .graph
                 }
             };
@@ -882,9 +896,13 @@ where
                 &request.requirements,
             )
             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let graph = match &request.authorization {
+            let graph = match &authorization {
                 SourceAuthorizationRequest::System => base,
                 SourceAuthorizationRequest::PolicyFiltered {
+                    permission_subject,
+                    plan,
+                }
+                | SourceAuthorizationRequest::PolicyProof {
                     permission_subject,
                     plan,
                 } => {
@@ -912,7 +930,7 @@ where
                             base,
                             &output_fields,
                         )
-                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
                         .graph
                 }
             };
@@ -946,7 +964,7 @@ where
                     &table,
                     graph_tier.expect("visible current source has a tier"),
                     &request.requirements,
-                    &request.authorization,
+                    &authorization,
                     self.read_view.policy_schema,
                     Some(source.graph),
                 )
@@ -957,9 +975,13 @@ where
                     &table,
                     graph_tier.expect("visible current source has a tier"),
                 )?;
-                let graph = match &request.authorization {
+                let graph = match &authorization {
                     SourceAuthorizationRequest::System => source.graph,
                     SourceAuthorizationRequest::PolicyFiltered {
+                        permission_subject,
+                        plan,
+                    }
+                    | SourceAuthorizationRequest::PolicyProof {
                         permission_subject,
                         plan,
                     } => {
@@ -987,7 +1009,9 @@ where
                                 source.graph,
                                 &current_row_fields(&table),
                             )
-                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                            .map_err(|error| {
+                                source_resolution_error_from_policy_proof(request, error)
+                            })?
                             .graph
                     }
                 };
@@ -1016,9 +1040,13 @@ where
                 .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
             let base = inline_include_deleted_current_graph(&table, rows)
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let graph = match &request.authorization {
+            let graph = match &authorization {
                 SourceAuthorizationRequest::System => base.clone(),
                 SourceAuthorizationRequest::PolicyFiltered {
+                    permission_subject,
+                    plan,
+                }
+                | SourceAuthorizationRequest::PolicyProof {
                     permission_subject,
                     plan,
                 } => {
@@ -1047,7 +1075,7 @@ where
                             base.clone(),
                             &output_fields,
                         )
-                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
                         .graph
                 }
             };
@@ -1060,9 +1088,13 @@ where
         } else if request.visibility == RowVisibility::IncludeDeleted {
             let tier = graph_tier.expect("visible current source has a tier");
             let base = include_deleted_current_graph(&table, tier);
-            let graph = match &request.authorization {
+            let graph = match &authorization {
                 SourceAuthorizationRequest::System => base,
                 SourceAuthorizationRequest::PolicyFiltered {
+                    permission_subject,
+                    plan,
+                }
+                | SourceAuthorizationRequest::PolicyProof {
                     permission_subject,
                     plan,
                 } => {
@@ -1091,7 +1123,7 @@ where
                             base,
                             &output_fields,
                         )
-                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
                         .graph
                 }
             };
@@ -1115,11 +1147,11 @@ where
                 &table,
                 graph_tier.expect("visible current source has a tier"),
                 &request.requirements,
-                &request.authorization,
+                &authorization,
                 self.read_view.policy_schema,
                 selected_base,
             )
-            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+            .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
         };
         let deletion_register = self.deletion_register_source_for_request(
             request,
@@ -2027,6 +2059,37 @@ fn source_resolution_error(request: &SourceRequest, gap: SourceGap) -> SourceRes
     }
 }
 
+fn source_resolution_error_from_policy_proof(
+    request: &SourceRequest,
+    error: Error,
+) -> SourceResolutionError {
+    match error {
+        Error::PolicyProofCycle { table, depth } => {
+            source_resolution_error(request, SourceGap::PolicyProofCycle { table, depth })
+        }
+        Error::QueryCapability(message) => {
+            let Some((table, depth)) = policy_proof_cycle_from_capability(&message) else {
+                return source_resolution_error(request, SourceGap::Coverage);
+            };
+            source_resolution_error(request, SourceGap::PolicyProofCycle { table, depth })
+        }
+        _ => source_resolution_error(request, SourceGap::Coverage),
+    }
+}
+
+fn policy_proof_cycle_from_capability(message: &str) -> Option<(String, usize)> {
+    let (_, suffix) = message.rsplit_once("PolicyProofCycle { table: \"")?;
+    let (table, suffix) = suffix.split_once('"')?;
+    let (_, suffix) = suffix.split_once(", depth: ")?;
+    let depth = suffix
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()?;
+    Some((table.to_owned(), depth))
+}
+
 fn capability_trace_enabled() -> bool {
     std::env::var_os("JAZZ_CAPABILITY_TRACE").is_some()
         || std::env::var_os("JAZZ_CAPABILITY_TRACE_FILE").is_some()
@@ -2199,6 +2262,10 @@ where
             (graph, BTreeSet::new())
         }
         SourceAuthorizationRequest::PolicyFiltered {
+            permission_subject,
+            plan,
+        }
+        | SourceAuthorizationRequest::PolicyProof {
             permission_subject,
             plan,
         } => {
@@ -5971,27 +6038,61 @@ where
         if let Some(graph) = self.query.policy_authorization_graph_cache.get(&cache_key) {
             return Ok(graph.clone());
         }
-        let program = self.compile_query_program_request(request)?;
-        let graph = lowered_terminal_graph(&program, "policy.authorized_rows")?;
-        let route_fields = program
-            .lowered
-            .terminals
-            .iter()
-            .find_map(|terminal| {
-                (terminal.sink == "policy.authorized_rows").then(|| match &terminal.output {
-                    OutputTerminalSchema::Fact(fact) => output_routing_fields_for_query_eval(fact),
-                    OutputTerminalSchema::AppRows(_) => BTreeSet::new(),
-                })
-            })
-            .unwrap_or_default();
-        let graph = PolicyAuthorizationGraph {
-            graph,
-            route_fields,
+        let proof_table = match &request.policy {
+            PolicyContext::AuthorizationSubplan {
+                protected_source, ..
+            } => Some(protected_source.table.clone()),
+            PolicyContext::System | PolicyContext::Identity { .. } => None,
         };
-        self.query
-            .policy_authorization_graph_cache
-            .insert(cache_key, graph.clone());
-        Ok(graph)
+        if let Some(table) = &proof_table {
+            let depth = self.query.policy_proof_stack.len();
+            if self
+                .query
+                .policy_proof_stack
+                .iter()
+                .any(|active| active == table)
+            {
+                return Err(Error::PolicyProofCycle {
+                    table: table.clone(),
+                    depth,
+                });
+            }
+            self.query.policy_proof_stack.push(table.clone());
+        }
+
+        let result = (|| {
+            let program = self.compile_query_program_request(request)?;
+            let graph = lowered_terminal_graph(&program, "policy.authorized_rows")?;
+            let route_fields = program
+                .lowered
+                .terminals
+                .iter()
+                .find_map(|terminal| {
+                    (terminal.sink == "policy.authorized_rows").then(|| match &terminal.output {
+                        OutputTerminalSchema::Fact(fact) => {
+                            output_routing_fields_for_query_eval(fact)
+                        }
+                        OutputTerminalSchema::AppRows(_) => BTreeSet::new(),
+                    })
+                })
+                .unwrap_or_default();
+            let graph = PolicyAuthorizationGraph {
+                graph,
+                route_fields,
+            };
+            self.query
+                .policy_authorization_graph_cache
+                .insert(cache_key, graph.clone());
+            Ok(graph)
+        })();
+
+        if proof_table.is_some() {
+            self.query
+                .policy_proof_stack
+                .pop()
+                .expect("policy proof stack entry is balanced");
+        }
+        result
     }
 
     pub(super) fn branch_read_policy_authorized_branch_ids(
@@ -6048,6 +6149,7 @@ where
                     claims,
                     attribution,
                 } => PolicyContext::AuthorizationSubplan {
+                    protected_source: root_source_id(policy_shape.query().table.as_str()),
                     mode,
                     permission_subject,
                     claims,
@@ -6589,6 +6691,7 @@ where
                 claims,
                 attribution,
             } => PolicyContext::AuthorizationSubplan {
+                protected_source: root_source_id(policy_shape.query().table.as_str()),
                 mode,
                 permission_subject,
                 claims,
@@ -9398,6 +9501,9 @@ where
             .policy_authorized_source_joins += 1;
         let authorized = match self.policy_authorization_row_id_graph(policy_request) {
             Ok(authorized) => authorized,
+            Err(Error::QueryCapability(err)) if err.contains("PolicyProofCycle") => {
+                return Err(Error::QueryCapability(err));
+            }
             Err(Error::QueryCapability(_err)) => PolicyAuthorizationGraph {
                 graph: empty_authorized_row_id_graph(),
                 route_fields: BTreeSet::new(),
@@ -9536,6 +9642,7 @@ where
                 claims,
                 attribution,
             } => PolicyContext::AuthorizationSubplan {
+                protected_source: root_source_id(policy_shape.query().table.as_str()),
                 mode,
                 permission_subject,
                 claims,
@@ -9676,6 +9783,7 @@ where
                 claims,
                 attribution,
             } => PolicyContext::AuthorizationSubplan {
+                protected_source: root_source_id(policy_shape.query().table.as_str()),
                 mode,
                 permission_subject,
                 claims,
@@ -9764,6 +9872,7 @@ where
                 claims,
                 attribution,
             } => PolicyContext::AuthorizationSubplan {
+                protected_source: root_source_id(policy_shape.query().table.as_str()),
                 mode,
                 permission_subject,
                 claims,
