@@ -57,6 +57,10 @@ pub(crate) struct AppPathProjection {
     pub(crate) cardinality: PathCardinality,
     /// Child public field projection.
     pub(crate) fields: FieldProjection,
+    /// Ordered child field projection. `fields` remains set-shaped for source
+    /// requirement merging; the collector uses this sequence when rendering
+    /// public records.
+    pub(crate) field_order: Vec<String>,
     /// Nested child path projections.
     pub(crate) children: Vec<AppPathProjection>,
     /// What app projection does when hidden relation facts show incomplete/null

@@ -7117,8 +7117,16 @@ fn validate_collect_by_key_types(
             .get(index)
             .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(index))?
             .value_type;
+        // Current-row storage carries nullable user columns even when the
+        // public schema declares a scalar column. A collector window must be
+        // able to rank those values just as `TopBy` does; their encoded
+        // nullable representation remains a deterministic scalar sort key.
+        let scalar_value_type = match value_type {
+            ValueType::Nullable(inner) => inner.as_ref(),
+            value_type => value_type,
+        };
         let scalar = matches!(
-            value_type,
+            scalar_value_type,
             ValueType::U8
                 | ValueType::U16
                 | ValueType::U32

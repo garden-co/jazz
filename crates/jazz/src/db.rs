@@ -1124,6 +1124,22 @@ where
                 author,
                 &opts.read_view,
             )?;
+        // Array resets are admitted only after the collector has rendered and
+        // validated each complete parent. This keeps the existing flat
+        // delivery carrier unchanged while ensuring an oversized structured
+        // parent cannot become a partial reset.
+        if !prepared.shape.query().array_subqueries.is_empty() {
+            self.node
+                .node
+                .borrow_mut()
+                .query_result_tree_for_link_in_read_view(
+                    &prepared.shape,
+                    &prepared.binding,
+                    read_tier,
+                    author,
+                    &opts.read_view,
+                )?;
+        }
         let (local_shape, local_binding, _local_plan) = self
             .node
             .node

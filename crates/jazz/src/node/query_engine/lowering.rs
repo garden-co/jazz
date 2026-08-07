@@ -2442,6 +2442,44 @@ fn lower_correlated_path_relation_graph_from_parent(
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
+    lower_correlated_path_relation_graph_from_parent_with_child_steps(
+        path,
+        parent,
+        parent_source,
+        resolved_sources,
+        request,
+        child_steps_for_relation_edges,
+    )
+}
+
+/// Lower an association source for `CollectBy`. Its child-local window is
+/// deliberately rendered by the collector terminal, not by the generic
+/// relation-edge input path.
+fn lower_correlated_path_relation_graph_for_collect_from_parent(
+    path: &CorrelatedPathPlan,
+    parent: GraphBuilder,
+    parent_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
+    lower_correlated_path_relation_graph_from_parent_with_child_steps(
+        path,
+        parent,
+        parent_source,
+        resolved_sources,
+        request,
+        child_steps_for_collect,
+    )
+}
+
+fn lower_correlated_path_relation_graph_from_parent_with_child_steps(
+    path: &CorrelatedPathPlan,
+    parent: GraphBuilder,
+    parent_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+    child_steps: fn(&[LinearStep]) -> Vec<LinearStep>,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
     let child_root = path
         .child
         .root
@@ -2455,7 +2493,7 @@ fn lower_correlated_path_relation_graph_from_parent(
     })?;
     let child_plan = LinearCurrentRoot {
         root: path.child.root.clone(),
-        steps: child_steps_for_relation_edges(&path.child.steps),
+        steps: child_steps(&path.child.steps),
     };
     let child = lower_linear_plan_steps(
         child_source.graph.clone(),
@@ -2503,6 +2541,14 @@ fn child_steps_for_relation_edges(steps: &[LinearStep]) -> Vec<LinearStep> {
         }
     }
     filtered
+}
+
+fn child_steps_for_collect(steps: &[LinearStep]) -> Vec<LinearStep> {
+    steps
+        .iter()
+        .filter(|step| !matches!(step, LinearStep::OrderBy(_) | LinearStep::Slice { .. }))
+        .cloned()
+        .collect()
 }
 
 fn unwrap_join_key_if_nullable(
@@ -5140,6 +5186,12 @@ struct CollectSlotLayout {
     path: ProgramPathId,
     collection_field: String,
     fields: Vec<CollectFlatField>,
+    /// Inputs used only to rank this slot. They deliberately do not become
+    /// child-record fields when the caller orders by an unprojected column.
+    sort_fields: Vec<CollectFlatField>,
+    order: Vec<(String, SortDirection)>,
+    offset: u64,
+    limit: TopByLimit,
     row_id_input: String,
     presence_input: String,
     children: Vec<CollectSlotLayout>,
@@ -5166,7 +5218,7 @@ fn lower_collect_by_app_rows(
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
 ) -> CapabilityResult<LoweredCollectByAppRows> {
-    let layout = collect_layout(projection, root_source, resolved_sources)?;
+    let layout = collect_layout(projection, plan, root_source, resolved_sources, request)?;
     let root_context = root_collect_context_graph(visible_root.clone(), &layout)?;
     let mut association_graphs = Vec::new();
     for slot in &layout.slots {
@@ -5223,9 +5275,12 @@ fn lower_collect_by_app_rows(
 
 fn collect_layout(
     projection: &AppProjectionTree,
+    plan: &AnalyzedQueryPlan,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
 ) -> CapabilityResult<CollectLayout> {
+    validate_collect_projection_depth(&projection.paths, 1)?;
     let root_fields = root_source
         .row_shape
         .descriptor
@@ -5243,13 +5298,37 @@ fn collect_layout(
         })
         .collect::<Vec<_>>();
     let mut next_slot = 0usize;
-    let slots = collect_slot_layouts(&projection.paths, resolved_sources, 1, &mut next_slot)?;
+    let slots = collect_slot_layouts(
+        &projection.paths,
+        plan,
+        resolved_sources,
+        request,
+        1,
+        &mut next_slot,
+    )?;
     Ok(CollectLayout { root_fields, slots })
+}
+
+fn validate_collect_projection_depth(
+    paths: &[AppPathProjection],
+    depth: usize,
+) -> CapabilityResult<()> {
+    if depth > MAX_COLLECT_BY_TREE_DEPTH {
+        return Err(single_gap_report(UnsupportedReason::Operator(format!(
+            "association projection depth {depth} exceeds Groove MAX_COLLECT_BY_TREE_DEPTH ({MAX_COLLECT_BY_TREE_DEPTH})"
+        ))));
+    }
+    for path in paths {
+        validate_collect_projection_depth(&path.children, depth + 1)?;
+    }
+    Ok(())
 }
 
 fn collect_slot_layouts(
     paths: &[AppPathProjection],
+    plan: &AnalyzedQueryPlan,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
     depth: usize,
     next_slot: &mut usize,
 ) -> CapabilityResult<Vec<CollectSlotLayout>> {
@@ -5270,7 +5349,13 @@ fn collect_slot_layouts(
             let slot_id = *next_slot;
             *next_slot += 1;
             let prefix = format!("__collect_path_{slot_id}");
-            let mut selected = BTreeSet::from([source.row_shape.row_uuid_field.clone()]);
+            let relation_plan = find_correlated_path(plan, &path.path).ok_or_else(|| {
+                single_gap_report(UnsupportedReason::Operator(format!(
+                    "app projection path {:?} is not a correlated path in the query shape",
+                    path.path
+                )))
+            })?;
+            let mut selected = vec![source.row_shape.row_uuid_field.clone()];
             match &path.fields {
                 FieldProjection::All => selected.extend(
                     source
@@ -5279,12 +5364,20 @@ fn collect_slot_layouts(
                         .iter()
                         .map(|column| user_column_field(&column.name)),
                 ),
-                FieldProjection::Fields(fields) => selected.extend(
-                    fields
-                        .iter()
-                        .filter(|field| field.as_str() != "id")
-                        .map(|field| user_column_field(field)),
-                ),
+                FieldProjection::Fields(fields) => {
+                    let order = if path.field_order.is_empty() {
+                        fields.iter().collect::<Vec<_>>()
+                    } else {
+                        path.field_order.iter().collect()
+                    };
+                    selected.extend(
+                        order
+                            .into_iter()
+                            .filter(|field| field.as_str() != "id")
+                            .filter(|field| fields.contains(field.as_str()))
+                            .map(|field| user_column_field(field)),
+                    );
+                }
             }
             let fields = selected
                 .into_iter()
@@ -5321,18 +5414,121 @@ fn collect_slot_layouts(
                 .expect("collector child projection always includes its row id")
                 .input
                 .clone();
+            let (order, offset, limit) = collect_slot_window(relation_plan, source, request)?;
+            let sort_fields = order
+                .iter()
+                .filter(|(source_field, _)| {
+                    !fields.iter().any(|field| field.source_field.as_deref() == Some(source_field))
+                })
+                .enumerate()
+                .map(|(index, (source_field, _))| {
+                    let value_type = source_field_type(source, source_field)
+                        .cloned()
+                        .ok_or_else(|| {
+                            single_gap_report(UnsupportedReason::Operator(format!(
+                                "association sort field {source_field:?} is not available"
+                            )))
+                        })?;
+                    Ok(CollectFlatField {
+                        input: format!("{prefix}_sort_{index}"),
+                        output: source_field.clone(),
+                        value_type,
+                        source_field: Some(source_field.clone()),
+                        is_row_id: false,
+                        is_presence: false,
+                    })
+                })
+                .collect::<CapabilityResult<Vec<_>>>()?;
+            let order = order
+                .into_iter()
+                .map(|(source_field, direction)| {
+                    let input = fields
+                        .iter()
+                        .chain(&sort_fields)
+                        .find(|field| field.source_field.as_deref() == Some(&source_field))
+                        .expect("collector sort fields retain every order source")
+                        .input
+                        .clone();
+                    (input, direction)
+                })
+                .collect();
             let presence_input = format!("{prefix}_present");
-            let children = collect_slot_layouts(&path.children, resolved_sources, depth + 1, next_slot)?;
+            let children = collect_slot_layouts(
+                &path.children,
+                plan,
+                resolved_sources,
+                request,
+                depth + 1,
+                next_slot,
+            )?;
             Ok(CollectSlotLayout {
                 path: path.path.clone(),
                 collection_field: path.field.clone(),
                 fields,
+                sort_fields,
+                order,
+                offset,
+                limit,
                 row_id_input,
                 presence_input,
                 children,
             })
         })
         .collect()
+}
+
+/// Return the child-local order and bound that the collector itself will
+/// render. The association input intentionally retains the complete matching
+/// group; applying its window here keeps selection/rendering proportional to
+/// the declared window instead of materializing then trimming a tree.
+fn collect_slot_window(
+    path: &CorrelatedPathPlan,
+    source: &ResolvedSource,
+    request: &QueryProgramRequest,
+) -> CapabilityResult<(Vec<(String, SortDirection)>, u64, TopByLimit)> {
+    let mut order_keys = None;
+    let mut slice = None;
+    for step in &path.child.steps {
+        match step {
+            LinearStep::OrderBy(keys) => order_keys = Some(keys),
+            LinearStep::Slice { limit, offset, .. } => slice = Some((limit, offset)),
+            LinearStep::Filter(_) | LinearStep::Join { .. } | LinearStep::Project(_) => {}
+            LinearStep::Aggregate { .. } => {
+                return Err(single_gap_report(UnsupportedReason::Operator(
+                    "collector relation windows cannot follow an aggregate".to_owned(),
+                )));
+            }
+        }
+    }
+    let order = match order_keys {
+        Some(keys) => keys
+            .iter()
+            .map(|key| {
+                Ok((
+                    lower_field_ref(
+                        &key.value,
+                        &path.child,
+                        source,
+                        request,
+                        "collector order key",
+                    )?,
+                    key.direction,
+                ))
+            })
+            .collect::<Result<Vec<_>, UnsupportedReason>>()
+            .map_err(single_gap_report)?,
+        None => vec![(source.row_shape.row_uuid_field.clone(), SortDirection::Asc)],
+    };
+    let (limit, offset) = match slice {
+        Some((limit, offset)) => (
+            limit
+                .map(|limit| TopByLimit::Finite(u64::from(limit)))
+                .unwrap_or(TopByLimit::Unbounded),
+            u64::from(*offset),
+        ),
+        None => (TopByLimit::Unbounded, 0),
+    };
+    Ok((order, offset, limit))
 }
 
 fn root_collect_context_graph(
@@ -5374,7 +5570,7 @@ fn lower_collect_slot_graphs(
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
 ) -> CapabilityResult<Vec<GraphBuilder>> {
-    let joined = lower_correlated_path_relation_graph_from_parent(
+    let joined = lower_correlated_path_relation_graph_for_collect_from_parent(
         path,
         parent_graph,
         parent_source,
@@ -5447,7 +5643,7 @@ fn collect_flat_projection(
         .collect::<Vec<_>>();
     for slot in collect_all_slots(&layout.slots) {
         let is_current = current_slot.is_some_and(|current| current.path == slot.path);
-        for field in &slot.fields {
+        for field in slot.fields.iter().chain(&slot.sort_fields) {
             fields.push(if is_current {
                 let source = right_field(
                     field
@@ -5531,6 +5727,7 @@ fn collect_all_slots(slots: &[CollectSlotLayout]) -> Vec<&CollectSlotLayout> {
 fn collect_slot_flat_field_names(slot: &CollectSlotLayout) -> BTreeSet<String> {
     slot.fields
         .iter()
+        .chain(&slot.sort_fields)
         .map(|field| field.input.clone())
         .chain(std::iter::once(slot.presence_input.clone()))
         .collect()
@@ -5546,10 +5743,13 @@ fn collect_slot_builder(slot: &CollectSlotLayout, parent_row_id: &str) -> Collec
         slot.children
             .iter()
             .map(|child| collect_slot_builder(child, &slot.row_id_input)),
-        [TopByOrder::asc(&slot.row_id_input)],
+        slot.order.iter().map(|(field, direction)| match direction {
+            SortDirection::Asc => TopByOrder::asc(field),
+            SortDirection::Desc => TopByOrder::desc(field),
+        }),
         [&slot.row_id_input],
-        0,
-        TopByLimit::Unbounded,
+        slot.offset,
+        slot.limit,
     )
     .with_presence_col(&slot.presence_input)
 }

@@ -2719,20 +2719,22 @@ fn app_row_path_projections(
             let mut child_path = path.to_vec();
             child_path.push(index);
             let child = correlated_child_source_id(owner, subquery, &child_path);
-            let fields = subquery
+            let field_order: Vec<String> = subquery
                 .select
                 .as_ref()
                 .map(|select| {
-                    FieldProjection::Fields(
-                        select
-                            .iter()
-                            .filter(|field| field.as_str() != "id")
-                            .filter(|field| !field.starts_with('$'))
-                            .cloned()
-                            .collect(),
-                    )
+                    select
+                        .iter()
+                        .filter(|field| field.as_str() != "id")
+                        .filter(|field| !field.starts_with('$'))
+                        .cloned()
+                        .collect()
                 })
-                .unwrap_or(FieldProjection::All);
+                .unwrap_or_default();
+            let fields = match &subquery.select {
+                Some(_) => FieldProjection::Fields(field_order.iter().cloned().collect()),
+                None => FieldProjection::All,
+            };
             super::query_engine::AppPathProjection {
                 path: ProgramPathId {
                     owner: owner.clone(),
@@ -2741,6 +2743,7 @@ fn app_row_path_projections(
                 field: subquery.column_name.clone(),
                 cardinality: PathCardinality::Many,
                 fields,
+                field_order,
                 children: app_row_path_projections(&child, &subquery.nested_arrays, &child_path),
                 hole_policy: PathHolePolicy::KeepParentWithHoles,
                 large_values: Vec::new(),
@@ -8344,6 +8347,7 @@ where
         let values = record.to_values()?;
         let mut fields = Vec::new();
         let mut row_values = Vec::new();
+        let mut cell_values = BTreeMap::new();
         let mut relations = BTreeMap::new();
         for (field, value) in record.descriptor().fields().iter().zip(values) {
             let name = field.name.clone().ok_or(Error::InvalidStoredValue(
@@ -8372,6 +8376,14 @@ where
                     relations.insert(name, crate::result_tree::ResultRelation::Array(children));
                 }
                 (_, value) => {
+                    let column = logical_user_column(&name);
+                    if table
+                        .columns
+                        .iter()
+                        .any(|candidate| candidate.name == column)
+                    {
+                        cell_values.insert(column.to_owned(), collector_cell_value(value.clone()));
+                    }
                     fields.push((name, field.value_type.clone()));
                     row_values.push(value);
                 }
@@ -8380,12 +8392,19 @@ where
         let descriptor = RecordDescriptor::new(fields);
         let record = OwnedRecord::new(descriptor.create(&row_values)?, descriptor);
         let row = decode_current_row(table, record.borrowed())?;
-        let row = self.materialize_current_row(table, row)?;
-        Ok(crate::result_tree::ResultNode {
+        let cells = table
+            .columns
+            .iter()
+            .map(|column| cell_values.remove(&column.name).flatten())
+            .collect::<Vec<_>>();
+        let row = current_row_from_positional_cells(table, row.row_uuid(), &cells)?;
+        let node = crate::result_tree::ResultNode {
             occurrence: OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0)),
             row,
             relations,
-        })
+        };
+        validate_collector_parent_size(&node, arrays)?;
+        Ok(node)
     }
 
     fn materialize_relation_snapshot_from_query_engine(
@@ -9682,6 +9701,53 @@ where
         let binding = shape.bind(binding_values)?;
         Ok(Some((shape, binding)))
     }
+}
+
+fn collector_cell_value(value: Value) -> Option<Value> {
+    match value {
+        Value::Nullable(value) => value.map(|value| *value),
+        value => Some(value),
+    }
+}
+
+/// The collector produces a complete replacement record before it crosses the
+/// Jazz result boundary. Validate that complete record there, before a caller
+/// can retain or publish any part of it.
+fn validate_collector_parent_size(
+    node: &crate::result_tree::ResultNode,
+    arrays: &[ArraySubquery],
+) -> Result<(), Error> {
+    let rendered_bytes = rendered_collector_node_bytes(node);
+    if rendered_bytes <= crate::result_tree::MAX_RESULT_TREE_PARENT_BYTES {
+        return Ok(());
+    }
+    let relation_path = arrays
+        .first()
+        .map(|array| array.column_name.clone())
+        .unwrap_or_default();
+    Err(Error::QueryLowering(
+        crate::result_tree::ParentTooLargeError {
+            parent: node.row.row_uuid(),
+            relation_path,
+            rendered_bytes,
+            limit: crate::result_tree::MAX_RESULT_TREE_PARENT_BYTES,
+        }
+        .to_string(),
+    ))
+}
+
+fn rendered_collector_node_bytes(node: &crate::result_tree::ResultNode) -> usize {
+    let mut bytes = node.row.encoded_record().1.len();
+    for (name, relation) in &node.relations {
+        bytes += name.len();
+        if let crate::result_tree::ResultRelation::Array(children) = relation {
+            bytes += children
+                .iter()
+                .map(rendered_collector_node_bytes)
+                .sum::<usize>();
+        }
+    }
+    bytes
 }
 
 impl<S> HistoricalRead<'_, S>

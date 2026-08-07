@@ -735,6 +735,7 @@ fn app_path_projection(
         field: field.to_owned(),
         cardinality: PathCardinality::Many,
         fields: FieldProjection::Fields(BTreeSet::from(["title".to_owned()])),
+        field_order: vec!["title".to_owned()],
         children,
         hole_policy: PathHolePolicy::KeepParentWithHoles,
         large_values: Vec::new(),

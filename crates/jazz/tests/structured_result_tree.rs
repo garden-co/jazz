@@ -383,6 +383,17 @@ fn parent_too_large_is_atomic() {
         )
         .expect("insert individually valid child");
     }
+    let one_child = db
+        .prepare_query(&child_query(
+            ArraySubquery::new("children", "children", "parent_id", "id")
+                .select(["label", "rank"])
+                .limit(1),
+        ))
+        .expect("prepare one individually valid child");
+    let one_child_tree =
+        block_on(db.all_result_tree(&one_child, ReadOpts::default())).expect("read one child");
+    assert_eq!(children(&one_child_tree.roots[0], "children").len(), 1);
+
     let prepared = db
         .prepare_query(&child_query(
             ArraySubquery::new("children", "children", "parent_id", "id")
