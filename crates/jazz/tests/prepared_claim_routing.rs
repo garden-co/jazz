@@ -9,9 +9,10 @@ use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::protocol::{CurrentWriteSchema, SchemaVersion};
 use jazz::query::{
-    OrderDirection, Query, any_of, claim, col, contains, eq, gt, gte, in_list, lt, lte, ne, not,
-    param,
+    OrderDirection, Query, any_of, claim, col, contains, eq, gt, gte, in_list, lit, lt, lte, ne,
+    not, param,
 };
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
@@ -20,6 +21,11 @@ const DOCUMENTS: &str = "documents";
 const MEMBERSHIPS: &str = "memberships";
 const RANKED_DOCUMENTS: &str = "ranked_documents";
 const TEAMS: &str = "teams";
+const PROJECTS: &str = "projects";
+const PROJECT_ACCESS: &str = "project_access";
+const GROUPS: &str = "groups";
+const GROUP_MEMBERS: &str = "group_members";
+const GROUP_EDGES: &str = "group_edges";
 const WRITER: AuthorId = AuthorId(uuid::uuid!("82000000-0000-0000-0000-000000000001"));
 const USER_A: AuthorId = AuthorId(uuid::uuid!("82000000-0000-0000-0000-000000000002"));
 const USER_B: AuthorId = AuthorId(uuid::uuid!("82000000-0000-0000-0000-000000000003"));
@@ -72,6 +78,100 @@ fn schema_with_membership_policy(membership_policy: Option<Query>) -> JazzSchema
     ])
 }
 
+fn two_hop_seeded_policy_schema() -> JazzSchema {
+    let document_policy = Query::from(DOCUMENTS).join_via_column(MEMBERSHIPS, "document", "id", []);
+    let membership_policy = Query::from(MEMBERSHIPS).join_via_row_id(PROJECTS, "project", []);
+    let project_policy = Query::from(PROJECTS)
+        .reachable_via(
+            PROJECT_ACCESS,
+            "project",
+            "group",
+            lit("seeded"),
+            GROUP_EDGES,
+            "member",
+            "parent",
+            [],
+        )
+        .seeded_by(GROUP_MEMBERS, "user", "sub", "group");
+
+    JazzSchema::new([
+        TableSchema::new(
+            DOCUMENTS,
+            [
+                ColumnSchema::new("project", ColumnType::Uuid),
+                ColumnSchema::new("updated_at", ColumnType::U64),
+            ],
+        )
+        .with_reference("project", PROJECTS)
+        .with_read_policy(Policy::shape(document_policy))
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            MEMBERSHIPS,
+            [
+                ColumnSchema::new("document", ColumnType::Uuid),
+                ColumnSchema::new("project", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("document", DOCUMENTS)
+        .with_reference("project", PROJECTS)
+        .with_read_policy(Policy::shape(membership_policy))
+        .with_write_policy(Policy::public()),
+        TableSchema::new(PROJECTS, [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::shape(project_policy))
+            .with_write_policy(Policy::public()),
+        TableSchema::new(GROUPS, [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            PROJECT_ACCESS,
+            [
+                ColumnSchema::new("project", ColumnType::Uuid),
+                ColumnSchema::new("group", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("project", PROJECTS)
+        .with_reference("group", GROUPS)
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            GROUP_MEMBERS,
+            [
+                ColumnSchema::new("group", ColumnType::Uuid),
+                ColumnSchema::new("user", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("group", GROUPS)
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            GROUP_EDGES,
+            [
+                ColumnSchema::new("member", ColumnType::Uuid),
+                ColumnSchema::new("parent", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("member", GROUPS)
+        .with_reference("parent", GROUPS)
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+    ])
+}
+
+fn evolved_schema() -> JazzSchema {
+    let mut schema = schema();
+    schema
+        .tables
+        .iter_mut()
+        .find(|table| table.name == DOCUMENTS)
+        .expect("documents table")
+        .columns
+        .push(
+            jazz::schema::ColumnSchema::new("generation", ColumnType::U64)
+                .with_default(Value::U64(0)),
+        );
+    schema
+}
+
 fn ranked_documents_schema(policy: Query) -> JazzSchema {
     JazzSchema::new([TableSchema::new(
         RANKED_DOCUMENTS,
@@ -89,6 +189,10 @@ fn open_db() -> BenchDb {
 }
 
 fn open_db_with_schema(schema: JazzSchema) -> BenchDb {
+    open_db_with_schema_as(schema, WRITER)
+}
+
+fn open_db_with_schema_as(schema: JazzSchema, author: AuthorId) -> BenchDb {
     let families = schema.column_families();
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(
@@ -97,12 +201,24 @@ fn open_db_with_schema(schema: JazzSchema) -> BenchDb {
             MemoryStorage::new(&family_refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x82; 16]),
-                author: WRITER,
+                author,
             },
         )
         .with_id_source(SeededRowIdSource::new(0x8200)),
     ))
     .expect("open prepared claim routing db")
+}
+
+fn row_ids_for_identity(
+    db: &BenchDb,
+    prepared: &jazz::db::PreparedQuery,
+    identity: AuthorId,
+) -> Vec<RowUuid> {
+    block_on(db.all_for_identity(prepared, opts(), identity))
+        .expect("read prepared query for identity")
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect()
 }
 
 fn opts() -> ReadOpts {
@@ -150,6 +266,86 @@ fn seed(db: &BenchDb, team_a: RowUuid, team_b: RowUuid, region_a: &str, region_b
         )
         .expect("seed document");
     }
+}
+
+fn seed_two_hop_reachability_policy(db: &BenchDb) -> (RowUuid, RowUuid, RowUuid, RowUuid) {
+    let project_a = row(0x51);
+    let project_b = row(0x52);
+    let document_a = row(0x61);
+    let document_b = row(0x62);
+    let group_a = row(0x71);
+    let group_b = row(0x72);
+
+    for (project, name) in [(project_a, "project-a"), (project_b, "project-b")] {
+        db.insert_with_id(
+            PROJECTS,
+            project,
+            BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+        )
+        .expect("seed project");
+    }
+    for (group, name) in [(group_a, "group-a"), (group_b, "group-b")] {
+        db.insert_with_id(
+            GROUPS,
+            group,
+            BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+        )
+        .expect("seed group");
+    }
+    for (document, project, updated_at) in
+        [(document_a, project_a, 10), (document_b, project_b, 20)]
+    {
+        db.insert_with_id(
+            DOCUMENTS,
+            document,
+            BTreeMap::from([
+                ("project".to_owned(), Value::Uuid(project.0)),
+                ("updated_at".to_owned(), Value::U64(updated_at)),
+            ]),
+        )
+        .expect("seed document");
+    }
+    for (membership, document, project) in [
+        (row(0x81), document_a, project_a),
+        (row(0x82), document_b, project_b),
+    ] {
+        db.insert_with_id(
+            MEMBERSHIPS,
+            membership,
+            BTreeMap::from([
+                ("document".to_owned(), Value::Uuid(document.0)),
+                ("project".to_owned(), Value::Uuid(project.0)),
+            ]),
+        )
+        .expect("seed membership");
+    }
+    for (access, project, group) in [
+        (row(0x91), project_a, group_a),
+        (row(0x92), project_b, group_b),
+    ] {
+        db.insert_with_id(
+            PROJECT_ACCESS,
+            access,
+            BTreeMap::from([
+                ("project".to_owned(), Value::Uuid(project.0)),
+                ("group".to_owned(), Value::Uuid(group.0)),
+            ]),
+        )
+        .expect("seed project access");
+    }
+    for (membership, group, user) in [(row(0xa1), group_a, USER_A), (row(0xa2), group_b, USER_B)] {
+        db.insert_with_id(
+            GROUP_MEMBERS,
+            membership,
+            BTreeMap::from([
+                ("group".to_owned(), Value::Uuid(group.0)),
+                ("user".to_owned(), Value::Uuid(user.0)),
+            ]),
+        )
+        .expect("seed reachability seed membership");
+    }
+
+    (project_a, project_b, document_a, document_b)
 }
 
 fn assert_call_order(
@@ -413,6 +609,123 @@ fn prepared_binding_includes_claims_from_auxiliary_source_policies() {
             .collect::<Vec<_>>();
         assert_eq!(rows, vec![expected]);
     }
+}
+
+#[test]
+fn prepared_binding_routes_claims_through_two_hop_seeded_policy_sources() {
+    let db = open_db_with_schema(two_hop_seeded_policy_schema());
+    let (project_a, project_b, document_a, document_b) = seed_two_hop_reachability_policy(&db);
+    let query = Query::from(DOCUMENTS).filter(eq(col("project"), param("project")));
+    let prepared_a = db
+        .prepare_query_bound(
+            &query,
+            BTreeMap::from([("project".to_owned(), Value::Uuid(project_a.0))]),
+        )
+        .expect("prepare project A binding");
+    let prepared_b = db
+        .prepare_query_bound(
+            &query,
+            BTreeMap::from([("project".to_owned(), Value::Uuid(project_b.0))]),
+        )
+        .expect("prepare project B binding");
+
+    assert_eq!(prepared_a.shape().shape_id(), prepared_b.shape().shape_id());
+    assert_eq!(
+        row_ids_for_identity(&db, &prepared_a, USER_A),
+        vec![document_a],
+        "principal A must receive only project A through the seeded policy chain"
+    );
+    assert_eq!(
+        row_ids_for_identity(&db, &prepared_a, USER_B),
+        Vec::<RowUuid>::new(),
+        "principal B's seed claim must not select principal A's document"
+    );
+    assert_eq!(
+        row_ids_for_identity(&db, &prepared_b, USER_A),
+        Vec::<RowUuid>::new(),
+        "principal A's seed claim must not select principal B's document"
+    );
+    assert_eq!(
+        row_ids_for_identity(&db, &prepared_b, USER_B),
+        vec![document_b],
+        "principal B must receive only project B through the seeded policy chain"
+    );
+}
+
+#[test]
+fn prepared_binding_reprepares_claim_routing_after_schema_change() {
+    let db = open_db_with_schema_as(schema(), AuthorId::SYSTEM);
+    let team_a = row(0x11);
+    let team_b = row(0x12);
+    let document_a = row(0x41);
+    let document_b = row(0x42);
+    seed(&db, team_a, team_b, "region-a", "region-b");
+    db.set_identity_claims(
+        USER_A,
+        BTreeMap::from([("region".to_owned(), Value::String("region-a".to_owned()))]),
+    );
+    db.set_identity_claims(
+        USER_B,
+        BTreeMap::from([("region".to_owned(), Value::String("region-b".to_owned()))]),
+    );
+    let query = Query::from(DOCUMENTS).filter(eq(col("team"), param("team")));
+    let prepared_v1 = db
+        .prepare_query_bound(
+            &query,
+            BTreeMap::from([("team".to_owned(), Value::Uuid(team_a.0))]),
+        )
+        .expect("prepare v1 team A binding");
+    assert_eq!(
+        row_ids_for_identity(&db, &prepared_v1, USER_A),
+        vec![document_a]
+    );
+    assert!(row_ids_for_identity(&db, &prepared_v1, USER_B).is_empty());
+
+    let v2 = SchemaVersion::new(evolved_schema());
+    db.publish_schema(v2.clone()).expect("publish v2 schema");
+    db.set_current_write_schema(CurrentWriteSchema {
+        revision: 1,
+        schema: v2.id,
+    })
+    .expect("select v2 schema");
+
+    let prepared_v2_a = db
+        .prepare_query_bound(
+            &query,
+            BTreeMap::from([("team".to_owned(), Value::Uuid(team_a.0))]),
+        )
+        .expect("reprepare v2 team A binding");
+    let prepared_v2_b = db
+        .prepare_query_bound(
+            &query,
+            BTreeMap::from([("team".to_owned(), Value::Uuid(team_b.0))]),
+        )
+        .expect("reprepare v2 team B binding");
+
+    assert_ne!(
+        prepared_v1.shape().shape_id(),
+        prepared_v2_a.shape().shape_id()
+    );
+    assert_eq!(
+        prepared_v2_a.shape().shape_id(),
+        prepared_v2_b.shape().shape_id()
+    );
+    assert_eq!(
+        row_ids_for_identity(&db, &prepared_v2_a, USER_A),
+        vec![document_a]
+    );
+    assert!(
+        row_ids_for_identity(&db, &prepared_v2_a, USER_B).is_empty(),
+        "principal B's claim must not select principal A's row after re-preparation"
+    );
+    assert!(
+        row_ids_for_identity(&db, &prepared_v2_b, USER_A).is_empty(),
+        "principal A's claim must not select principal B's row after re-preparation"
+    );
+    assert_eq!(
+        row_ids_for_identity(&db, &prepared_v2_b, USER_B),
+        vec![document_b]
+    );
 }
 
 #[test]
