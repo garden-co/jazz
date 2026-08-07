@@ -1103,7 +1103,8 @@ impl ClientDb {
                     if urgency == TickUrgency::Deferred {
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     }
-                    match inner.borrow().db.tick() {
+                    let tick_result = { inner.borrow().db.tick() };
+                    match tick_result {
                         Ok(()) => recovery_attempts = 0,
                         Err(error) => {
                             let class = classify_tick_driver_error(&error);
