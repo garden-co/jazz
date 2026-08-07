@@ -6553,10 +6553,8 @@ where
             .as_ref()
             .map(|(shape, binding)| (shape, binding))
             .unwrap_or((shape, binding));
-        let prepared_plan = prepared_plan.filter(|plan| {
-            self.can_use_prepared_current_query_plan(shape)
-                && !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker)
-        });
+        let prepared_plan = prepared_plan
+            .filter(|plan| !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker));
         let program = if prepared_plan.is_some() {
             None
         } else {
@@ -6676,10 +6674,8 @@ where
             .as_ref()
             .map(|(shape, binding)| (shape, binding))
             .unwrap_or((shape, binding));
-        let prepared_plan = prepared_plan.filter(|plan| {
-            self.can_use_prepared_current_query_plan(shape)
-                && !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker)
-        });
+        let prepared_plan = prepared_plan
+            .filter(|plan| !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker));
         let mut profile = QueryReadProfile {
             resolve_view: phase_started.elapsed(),
             ..Default::default()
@@ -6807,7 +6803,6 @@ where
 
     fn can_use_prepared_current_query_plan(&self, shape: &ValidatedQuery) -> bool {
         shape.schema_version() == self.catalogue.current_schema_version_id
-            && !self.query_uses_heterogeneous_physical_lineage(shape)
     }
 
     fn settled_binding_view_source_rows(
@@ -8579,75 +8574,6 @@ where
 
     pub(crate) fn uses_schema_projected_read(&self, shape: &ValidatedQuery) -> bool {
         shape.schema_version() != self.catalogue.current_schema_version_id
-            || self.query_uses_heterogeneous_physical_lineage(shape)
-    }
-
-    fn query_uses_heterogeneous_physical_lineage(&self, shape: &ValidatedQuery) -> bool {
-        let Some(tables) = self.query_storage_read_tables(shape) else {
-            return true;
-        };
-        tables.into_iter().any(|logical_table| {
-            let Ok(table_id) =
-                self.physical_table_id_for_schema(shape.schema_version(), &logical_table)
-            else {
-                return true;
-            };
-            self.catalogue
-                .physical_mappings
-                .iter()
-                .any(|(schema_version, mapping)| {
-                    *schema_version != shape.schema_version()
-                        && mapping
-                            .tables
-                            .values()
-                            .any(|table| table.table_id == table_id)
-                })
-        })
-    }
-
-    fn query_storage_read_tables(&self, shape: &ValidatedQuery) -> Option<BTreeSet<String>> {
-        let query = shape.query();
-        let read_schema_version = shape.schema_version();
-        let mut tables = BTreeSet::from([query.table.clone()]);
-        tables.extend(query.joins.iter().map(|join| join.table.clone()));
-        for reachable in &query.reachable {
-            tables.insert(reachable.access_table.clone());
-            tables.insert(reachable.edge_table.clone());
-            if let Some(seed) = &reachable.seed {
-                tables.insert(seed.table.clone());
-            }
-        }
-        self.collect_include_read_tables(
-            &query.table,
-            read_schema_version,
-            &query.includes,
-            &mut tables,
-        )?;
-        Some(tables)
-    }
-
-    fn collect_include_read_tables(
-        &self,
-        root_table: &str,
-        read_schema_version: SchemaVersionId,
-        includes: &[Include],
-        tables: &mut BTreeSet<String>,
-    ) -> Option<()> {
-        for include in includes {
-            if !include.require && include.join_mode != crate::query::JoinMode::Inner {
-                continue;
-            }
-            let mut current_table_name = root_table.to_owned();
-            for segment in include.path.split('.') {
-                let current_table = self
-                    .table_in_schema(&current_table_name, read_schema_version)
-                    .ok()?;
-                let target_table = current_table.references.get(segment)?.clone();
-                tables.insert(target_table.clone());
-                current_table_name = target_table;
-            }
-        }
-        Some(())
     }
 
     fn finish_engine_query_rows(

@@ -2165,7 +2165,7 @@ fn physical_schema_variants_survive_pointer_changes_and_reopen() {
 }
 
 #[test]
-fn heterogeneous_schema_projected_reads_bypass_prepared_plans() {
+fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
     let base = schema();
     let evolved = JazzSchema::new([TableSchema::new(
         "todos",
@@ -2242,7 +2242,7 @@ fn heterogeneous_schema_projected_reads_bypass_prepared_plans() {
         .unwrap();
 
     assert_eq!(rows.into_iter().map(current_row_pair).collect::<BTreeMap<_, _>>(), BTreeMap::from([(row(0x49), title_cells("projected"))]));
-    assert!(core.uses_schema_projected_read(&shape));
+    assert!(!core.uses_schema_projected_read(&shape));
     let rows = core
         .query_rows_local_preview(&shape, &binding, Some(&pre_lens_plan))
         .unwrap();
@@ -2251,7 +2251,7 @@ fn heterogeneous_schema_projected_reads_bypass_prepared_plans() {
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
         BTreeMap::from([(row(0x49), title_cells("projected"))]),
-        "a plan prepared before lens publication must be ignored once its physical lineage becomes heterogeneous"
+        "a plan prepared before lens publication must accept projection cases registered by the lens"
     );
 
     let join_base = JazzSchema::new([

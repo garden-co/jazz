@@ -29,7 +29,7 @@ Invariant digest:
 - `INV-LOWER-9`: Query lowering MUST begin from a resolved visible-current source and therefore MUST apply deletion visibility before user filters/joins/reachable traversal.
 - `INV-LOWER-10`: Parameterized query plans MUST be prepared as groove shapes with binding descriptor and stable name `jazz-query:<shape_id>`, then executed through `Database::bind_shape`; maintained subscription views with hidden routing provenance MUST prepare a clean output graph plus an internal routing graph through `Database::prepare_one_sink_with_routing`.
 - `INV-LOWER-11`: Prepared graph lowering MUST preserve the semantics of every accepted predicate shape and explicitly reject unsupported predicate shapes.
-- `INV-LOWER-12`: Schema projection MUST lower as a Groove source-boundary `VariantProject`. Until parameter-bound prepared snapshots preserve projected payload fields, queries that read a heterogeneous physical lineage MUST bypass the prepared cache and use the same unprepared lowered graph, never a semantic-oracle fallback.
+- `INV-LOWER-12`: Schema projection MUST lower as a Groove source-boundary `VariantProject`. Parameter-bound joins over projected rows MUST preserve their source descriptor and payload, and plans prepared before lens publication MUST remain valid as projection cases are registered.
 - `INV-LOWER-13`: Aggregation, ordinary read ordering, general pagination, and projection MUST be applied by the node after row materialization, not required from groove lowering, except maintained unordered `limit(1)` with offset `0` which MAY lower through groove `ArgMinBy` over `row_uuid`, and maintained ordered windows or ordered suffixes which MUST lower through groove `TopBy`.
 - `INV-LOWER-14`: Sync query updates SHOULD consume maintained terminal facts for result membership, path/correlation coverage, payload/replacement/version witnesses, policy witnesses, and read-frontier settlement; query-row recompute paths are migration/oracle debt, not an alternate production engine.
 - `INV-LOWER-15`: Whole-table current-row sync views MUST be represented as the normal table-rooted row-set shape, not a separate current-row serving engine; their result set must match the node's lowered `current_rows` result while migration code still exists.
@@ -258,13 +258,15 @@ ordered suffixes which lower through `TopBy`. For maintained subscriptions, ch.
 16 tracks
 aggregate/projection/predicate-policy lowering gaps separately from remaining
 window capability limits. `INV-LOWER-12` — schema projection is a Groove
-`VariantProject` source-boundary operation. A query that reads a heterogeneous
-physical lineage currently bypasses the prepared cache because Groove's
-parameter-bound snapshot loses projected payload fields; it still uses the same
-unprepared lowered graph. Historical current reads with filters and joins lower
-through the shared clause layer over a historical source; historical reachable
-still requires source-aware reachable lowering. These staged source gaps must
-not create a second query algebra. `INV-LOWER-11` — prepared lowering rejects `!=`
+`VariantProject` source-boundary operation. Heterogeneous physical lineages use
+the ordinary prepared path. When a parameter join unwraps a nullable source
+field, its projection restores that wrapper so the prepared terminal keeps the
+source descriptor and payload. Since projection cases are registered into the
+live node, a plan prepared before lens publication remains valid for rows of the
+new schema variant. Historical current reads with filters and joins lower through
+the shared clause layer over a historical source; historical reachable still
+requires source-aware reachable lowering. These staged source gaps must not
+create a second query algebra. `INV-LOWER-11` — prepared lowering rejects `!=`
 parameter predicates until supported.
 
 ### 14.5 Sync views & exclusive validation → groove

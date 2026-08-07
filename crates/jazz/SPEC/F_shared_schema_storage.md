@@ -347,7 +347,11 @@ Jazz does not currently support transforming columns through lenses, so this is 
 
 For dropped indexed columns, writes coming from previous schemas but translated to the new schema can still modify the "dropped" index (as they preserve the dropped columns from the previous schema).
 
-**TODO: Handle adding a new indexed column to tables with existing data**
+Adding an index to an existing physical column registers a new append-only
+physical index on the live versioned table. Groove backfills existing rows
+through each variant's projection case (`Ignore` emits no entry), and later
+schema variants extend the same index without rebuilding it; each logical
+schema's planner uses the index only when that schema declares it.
 
 ### Branches
 
@@ -490,15 +494,16 @@ remain compatible with databases written by the former per-schema history layout
    coverage writes a row before its physical index exists, proves live backfill,
    then adds another schema variant and verifies that the same query still reads
    exactly one physical index entry and one current row. Parameter-bound
-   prepared snapshots over a heterogeneous `VariantProject` remain a known
-   Groove limitation: the predicate sees the projected field, but the bound
-   terminal loses its payload. Until that is fixed, Jazz uses the ordinary
-   unprepared lowered graph for those lineages.
+   prepared snapshots work across heterogeneous `VariantProject` inputs: when
+   Jazz unwraps a nullable projected field to join it with a binding, it wraps
+   that field again in the join projection so the terminal retains the source
+   descriptor and payload.
    - Move global-current, ahead-current, and durable index prefixes to physical identities.
    - Replace the current union-and-`arg_max` path in
      [query_eval.rs](../src/node/query_eval.rs) with one source plus logical projection.
    - Re-enable the ordinary prepared-query path for heterogeneous physical
-     lineages once bound `VariantProject` terminals preserve projected payloads.
+     lineages while keeping plans prepared before lens publication valid as new
+     projection cases are registered.
    - Add a storage-read receipt proving read cost stays constant as schema-version count increases.
 
 6. Convert the remaining schema-keyed storage.
@@ -540,10 +545,8 @@ remain compatible with databases written by the former per-schema history layout
    - `jazz_partitions` has been removed. Reopen, transaction-scan enumeration,
      and query-routing decisions now derive from durable schema-version physical
      mappings. A separately mapped provisional schema no longer disables
-     base-schema prepared plans. A genuinely heterogeneous physical lineage
-     still takes the safe unprepared route because Groove's parameter-bound
-     prepared snapshot currently loses projected `VariantProject` payload
-     fields; that limitation is independent of the removed catalogue table.
+     base-schema prepared plans, and heterogeneous physical lineages use those
+     plans directly through their live-extensible `VariantProject` source.
 
 7. Implement unset/data-preservation semantics later.
 
