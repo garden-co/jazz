@@ -26,11 +26,15 @@ fn owned_docs_schema() -> jazz::tools::Schema {
         TableSchema::with_policies(
             RowDescriptor::new(vec![
                 ColumnDescriptor::new("owner_id", ColumnType::Uuid),
+                ColumnDescriptor::new("transfer_writer_id", ColumnType::Uuid),
                 ColumnDescriptor::new("title", ColumnType::Text),
             ]),
             TablePolicies::new()
                 .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+                .with_select(PolicyExpr::or(vec![
+                    PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+                    PolicyExpr::eq_session("transfer_writer_id", vec!["user_id".into()]),
+                ]))
                 .with_update(Some(PolicyExpr::True), PolicyExpr::True)
                 .with_delete(PolicyExpr::True),
         ),
@@ -88,7 +92,8 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
             let bob_owner_id = ObjectId::from_uuid(Uuid::new_v4());
             let bob_user_id = bob_owner_id.uuid().to_string();
             let alice_owner_id = ObjectId::from_uuid(Uuid::new_v4());
-            let writer_user_id = Uuid::new_v4().to_string();
+            let writer_reader_id = ObjectId::from_uuid(Uuid::new_v4());
+            let writer_user_id = writer_reader_id.uuid().to_string();
 
             let writer = JazzClient::connect(
                 server.make_client_context_for_user(schema.clone(), &writer_user_id),
@@ -107,7 +112,11 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
                 .for_session(Session::new(writer_user_id.clone()))
                 .insert(
                     "docs",
-                    row_input!("owner_id" => bob_owner_id, "title" => "visible-before-revoke"),
+                    row_input!(
+                        "owner_id" => bob_owner_id,
+                        "transfer_writer_id" => writer_reader_id,
+                        "title" => "visible-before-revoke",
+                    ),
                 )
                 .expect("trusted writer creates bob-visible doc");
             writer
@@ -126,10 +135,13 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
             )
             .await;
 
+            // An UPSERT needs read access to its target row. This writer has
+            // that access only through this row's transfer_writer_id, keeping
+            // Bob's owner-scoped revocation behavior intact.
             let revoke_batch = writer
                 .for_session(Session::new(writer_user_id))
                 .update(doc_id, vec![("owner_id".to_owned(), Value::Uuid(alice_owner_id))])
-                .expect("trusted writer transfers ownership away from bob");
+                .expect("narrowly authorized writer transfers ownership away from bob");
             writer
                 .wait_for_batch(revoke_batch, DurabilityTier::EdgeServer)
                 .await
