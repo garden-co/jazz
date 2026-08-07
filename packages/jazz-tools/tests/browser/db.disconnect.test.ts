@@ -7,7 +7,7 @@ import {
   publishStoredPermissions,
   publishStoredSchema,
 } from "../../src/runtime/schema-fetch.js";
-import { TestCleanup, uniqueDbName, waitForQuery, withTimeout } from "./support.js";
+import { TestCleanup, sleep, uniqueDbName, waitForQuery, withTimeout } from "./support.js";
 import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
 
 const schema = {
@@ -29,6 +29,7 @@ const allowAllPermissions = s.definePermissions(app, ({ policy }) => [
   policy.todos.allowDelete.always(),
 ]);
 
+const PENDING_ASSERTION_MS = 750;
 const LOCAL_OPERATION_TIMEOUT_MS = 2_000;
 const SYNC_OPERATION_TIMEOUT_MS = 10_000;
 
@@ -203,6 +204,88 @@ describe("Db disconnect/reconnect", () => {
         "edge",
       );
     }, 60_000);
+
+    it("resolves local waits and keeps edge/global waits pending while disconnected", async () => {
+      const { db } = await createDbPair(ctx, createWorkerDb);
+
+      await db.disconnect();
+
+      const localWait = db
+        .insert(todos, { title: "local wait", done: false })
+        .wait({ tier: "local" });
+      await withTimeout(
+        localWait,
+        LOCAL_OPERATION_TIMEOUT_MS,
+        "worker mode: local wait should resolve while disconnected",
+      );
+
+      const edgeWait = db.insert(todos, { title: "edge wait", done: false }).wait({ tier: "edge" });
+      await expectStillPending(
+        edgeWait,
+        PENDING_ASSERTION_MS,
+        "worker mode: edge wait while disconnected",
+      );
+
+      const globalWait = db
+        .insert(todos, { title: "global wait", done: false })
+        .wait({ tier: "global" });
+      await expectStillPending(
+        globalWait,
+        PENDING_ASSERTION_MS,
+        "worker mode: global wait while disconnected",
+      );
+
+      await db.reconnect();
+
+      await withTimeout(
+        edgeWait,
+        SYNC_OPERATION_TIMEOUT_MS,
+        "worker mode: edge wait did not settle after reconnect",
+      );
+      await withTimeout(
+        globalWait,
+        SYNC_OPERATION_TIMEOUT_MS,
+        "worker mode: global wait did not settle after reconnect",
+      );
+    }, 60_000);
+
+    it("resolves local reads and defers edge reads while disconnected", async () => {
+      const { db } = await createDbPair(ctx, createWorkerDb);
+
+      await db.disconnect();
+
+      const title = "read mode";
+      db.insert(todos, { title, done: true });
+
+      const localRows = await withTimeout(
+        db.all(todoByTitle(title), {
+          tier: "local",
+          localUpdates: "immediate",
+          propagation: "local-only",
+        }),
+        LOCAL_OPERATION_TIMEOUT_MS,
+        "worker mode: immediate local read while disconnected did not resolve",
+      );
+      expect(localRows.some((row) => row.title === title)).toBe(true);
+
+      const deferredRead = db.all(todoByTitle(title), {
+        tier: "edge",
+        localUpdates: "deferred",
+      });
+      await expectStillPending(
+        deferredRead,
+        PENDING_ASSERTION_MS,
+        "worker mode: deferred read while disconnected",
+      );
+
+      await db.reconnect();
+
+      await withTimeout(
+        deferredRead,
+        SYNC_OPERATION_TIMEOUT_MS,
+        "worker mode: deferred read did not resolve after reconnect",
+      );
+    }, 60_000);
   });
 });
 
@@ -250,6 +333,26 @@ async function createDbPair(ctx: TestCleanup, createDbForMode: DbFactory): Promi
 
 function todoByTitle(title: string): QueryBuilder<Todo> {
   return app.todos.where({ title: { eq: title } });
+}
+
+async function expectStillPending<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<void> {
+  const result = await Promise.race([
+    promise.then(
+      () => ({ state: "fulfilled" as const }),
+      (error) => ({ state: "rejected" as const, error }),
+    ),
+    sleep(timeoutMs).then(() => ({ state: "pending" as const })),
+  ]);
+
+  if (result.state === "pending") return;
+
+  const reason =
+    result.state === "rejected" && result.error instanceof Error ? `: ${result.error.message}` : "";
+  throw new Error(`${label} ${result.state}${reason}`);
 }
 
 async function waitForTodos(
