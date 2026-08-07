@@ -28,6 +28,16 @@ fn metrics_schema() -> Schema {
         .build()
 }
 
+fn nullable_metrics_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("metrics")
+                .column("bucket", ColumnType::Text)
+                .nullable_column("score", ColumnType::Integer),
+        )
+        .build()
+}
+
 fn bigint_metrics_schema() -> Schema {
     SchemaBuilder::new()
         .table(
@@ -198,6 +208,7 @@ impl ObservedSubscription {
                     .skip(1)
                     .take(self.descriptor.fields().len())
                     .map(|value| match value {
+                        GrooveValue::Nullable(None) => Value::Null,
                         GrooveValue::Nullable(Some(value)) => match *value {
                             GrooveValue::String(value) => Value::Text(value),
                             GrooveValue::I32(value) => Value::Integer(value),
@@ -298,6 +309,63 @@ fn aggregate_descriptor(
     fields: impl IntoIterator<Item = (&'static str, ValueType)>,
 ) -> RecordDescriptor {
     RecordDescriptor::new(fields)
+}
+
+async fn wait_for_one_shot_values(
+    client: &JazzClient,
+    query: jazz::tools::Query,
+    expected: Vec<Vec<Value>>,
+    label: &str,
+) {
+    wait_for_query(
+        client,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        label,
+        |rows| {
+            let mut actual = rows
+                .iter()
+                .map(|(_, values)| values.clone())
+                .collect::<Vec<_>>();
+            actual.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
+            (actual == expected).then_some(())
+        },
+    )
+    .await;
+}
+
+async fn wait_for_subscription_driven_values(
+    client: &JazzClient,
+    stream: &mut jazz::tools::SubscriptionStream,
+    query: jazz::tools::Query,
+    expected: Vec<Vec<Value>>,
+    label: &str,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let last_actual;
+    loop {
+        tokio::time::timeout_at(deadline, stream.next())
+            .await
+            .unwrap_or_else(|_| panic!("{label}: timed out waiting for subscription delta"))
+            .unwrap_or_else(|| panic!("{label}: subscription ended"));
+        let mut actual = client
+            .query(query.clone(), None)
+            .await
+            .unwrap_or_else(|err| panic!("{label}: query after subscription event failed: {err}"))
+            .into_iter()
+            .map(|(_, values)| values)
+            .collect::<Vec<_>>();
+        actual.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
+        if actual == expected {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            last_actual = actual;
+            break;
+        }
+    }
+    assert_eq!(last_actual, expected, "{label}");
 }
 
 async fn insert_metric(client: &JazzClient, bucket: &str, score: i32) {
@@ -424,6 +492,13 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
             count_stream
                 .wait_for_values(Vec::new(), "initial empty count")
                 .await;
+            wait_for_one_shot_values(
+                &client,
+                count_query.clone(),
+                vec![vec![Value::Timestamp(0)]],
+                "one-shot initial empty count",
+            )
+            .await;
 
             let (a1, _, batch) = writer
                 .insert("metrics", row_input!("bucket" => "a", "score" => 10))
@@ -496,6 +571,203 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 .wait_for_values(
                     vec![vec![Value::Text("b".to_owned()), Value::Integer(5)]],
                     "sum after delete a1",
+                )
+                .await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn aggregate_sum_public_boundary_preserves_nullable_results() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = nullable_metrics_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = JazzClient::connect(
+                server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa3"),
+            )
+            .await
+            .expect("connect client");
+            let sum_query = QueryBuilder::new("metrics").sum("score").build();
+            let mut stream = client
+                .subscribe(sum_query.clone())
+                .await
+                .expect("subscribe sum aggregate");
+
+            wait_for_values(
+                &client,
+                sum_query.clone(),
+                vec![vec![Value::Null]],
+                "one-shot empty sum is public null",
+            )
+            .await;
+            wait_for_subscription_driven_values(
+                &client,
+                &mut stream,
+                sum_query.clone(),
+                vec![vec![Value::Null]],
+                "subscription empty sum is public null",
+            )
+            .await;
+
+            let (_null_row, _, batch) = client
+                .insert(
+                    "metrics",
+                    row_input!("bucket" => "a", "score" => Value::Null),
+                )
+                .expect("insert null score");
+            client
+                .wait_for_batch(batch, DurabilityTier::Local)
+                .await
+                .expect("null score settles");
+            wait_for_values(
+                &client,
+                sum_query.clone(),
+                vec![vec![Value::Null]],
+                "one-shot all-null sum is public null",
+            )
+            .await;
+            wait_for_subscription_driven_values(
+                &client,
+                &mut stream,
+                sum_query,
+                vec![vec![Value::Null]],
+                "subscription all-null sum is public null",
+            )
+            .await;
+
+            // The mixed null/non-null case is not covered here: writing a
+            // non-null value into a nullable column through the public client
+            // currently fails because the public write path does not wrap the
+            // value using the schema's nullable type. That is independent of
+            // aggregate semantics; empty and all-NULL cases are the boundary
+            // this test owns.
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = nullable_metrics_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let writer = JazzClient::connect(server.make_client_context_for_user(
+                schema.clone(),
+                "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa7",
+            ))
+            .await
+            .expect("connect writer");
+            let client = JazzClient::connect(
+                server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa17"),
+            )
+            .await
+            .expect("connect subscriber");
+            let query = QueryBuilder::new("metrics")
+                .sum("score")
+                .count()
+                .group_by("bucket")
+                .build();
+            let mut stream = ObservedSubscription::new(
+                client
+                    .subscribe(query.clone())
+                    .await
+                    .expect("subscribe grouped nullable aggregate"),
+                aggregate_descriptor([
+                    ("bucket", ValueType::String),
+                    ("count", ValueType::U64),
+                    ("sum_score", ValueType::I32),
+                ]),
+            );
+            stream
+                .wait_for_values(Vec::new(), "initial grouped aggregate is empty")
+                .await;
+
+            let mut rows = Vec::new();
+            for bucket in ["null", "null", "gone", "changed"] {
+                let (row, _, batch) = writer
+                    .insert(
+                        "metrics",
+                        row_input!("bucket" => bucket, "score" => Value::Null),
+                    )
+                    .expect("insert nullable metric");
+                writer
+                    .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                    .await
+                    .expect("nullable metric settles");
+                rows.push(row);
+            }
+            stream
+                .wait_for_values(
+                    vec![
+                        vec![
+                            Value::Text("changed".to_owned()),
+                            Value::Timestamp(1),
+                            Value::Null,
+                        ],
+                        vec![
+                            Value::Text("gone".to_owned()),
+                            Value::Timestamp(1),
+                            Value::Null,
+                        ],
+                        vec![
+                            Value::Text("null".to_owned()),
+                            Value::Timestamp(2),
+                            Value::Null,
+                        ],
+                    ],
+                    "all-null groups remain delivered",
+                )
+                .await;
+
+            let batch = writer.delete(rows[2]).expect("delete gone group");
+            writer
+                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("gone group delete settles");
+            stream
+                .wait_for_values(
+                    vec![
+                        vec![
+                            Value::Text("changed".to_owned()),
+                            Value::Timestamp(1),
+                            Value::Null,
+                        ],
+                        vec![
+                            Value::Text("null".to_owned()),
+                            Value::Timestamp(2),
+                            Value::Null,
+                        ],
+                    ],
+                    "absent group is retracted without losing all-null group",
+                )
+                .await;
+
+            let (_, _, batch) = writer
+                .insert(
+                    "metrics",
+                    row_input!("bucket" => "changed", "score" => Value::Null),
+                )
+                .expect("replace changed aggregate group");
+            writer
+                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("changed group replacement settles");
+            stream
+                .wait_for_values(
+                    vec![
+                        vec![
+                            Value::Text("changed".to_owned()),
+                            Value::Timestamp(2),
+                            Value::Null,
+                        ],
+                        vec![
+                            Value::Text("null".to_owned()),
+                            Value::Timestamp(2),
+                            Value::Null,
+                        ],
+                    ],
+                    "present-null group can change after another group disappears",
                 )
                 .await;
         })
@@ -1006,6 +1278,59 @@ async fn bigint_aggregates_keep_signed_value_semantics() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn aggregate_sum_bigint_survives_public_client_boundary() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = bigint_metrics_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = JazzClient::connect(
+                server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa4"),
+            )
+            .await
+            .expect("connect client");
+            let sum_query = QueryBuilder::new("metrics").sum("score").build();
+
+            wait_for_values(
+                &client,
+                sum_query.clone(),
+                vec![vec![Value::Null]],
+                "empty bigint sum is public null",
+            )
+            .await;
+
+            let (_negative_row, _, batch) = client
+                .insert(
+                    "metrics",
+                    row_input!("bucket" => "a", "score" => Value::BigInt(-3)),
+                )
+                .expect("insert negative bigint score");
+            client
+                .wait_for_batch(batch, DurabilityTier::Local)
+                .await
+                .expect("negative bigint score settles");
+            let (_positive_row, _, batch) = client
+                .insert(
+                    "metrics",
+                    row_input!("bucket" => "a", "score" => Value::BigInt(5)),
+                )
+                .expect("insert positive bigint score");
+            client
+                .wait_for_batch(batch, DurabilityTier::Local)
+                .await
+                .expect("positive bigint score settles");
+
+            wait_for_values(
+                &client,
+                sum_query,
+                vec![vec![Value::BigInt(2)]],
+                "bigint sum decodes exact signed public value",
+            )
+            .await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn integer_counter_columns_merge_signed_public_values() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -1115,6 +1440,13 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
             spy_stream
                 .wait_for_values(Vec::new(), "spy initial count")
                 .await;
+            wait_for_one_shot_values(
+                &spy,
+                count_query.clone(),
+                vec![vec![Value::Timestamp(0)]],
+                "one-shot spy initial count",
+            )
+            .await;
 
             let (admin_row, _, batch) = admin
                 .insert(
@@ -1133,6 +1465,13 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
                     "spy count ignores admin row",
                 )
                 .await;
+            wait_for_one_shot_values(
+                &spy,
+                count_query.clone(),
+                vec![vec![Value::Timestamp(0)]],
+                "one-shot spy count ignores admin row",
+            )
+            .await;
 
             let batch = admin.delete(admin_row).expect("delete admin row");
             admin
@@ -1146,6 +1485,13 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
                     "spy count remains empty after invisible delete",
                 )
                 .await;
+            wait_for_one_shot_values(
+                &spy,
+                count_query,
+                vec![vec![Value::Timestamp(0)]],
+                "one-shot spy count remains zero after invisible delete",
+            )
+            .await;
         })
         .await;
 }

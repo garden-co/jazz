@@ -1268,11 +1268,31 @@ impl ClientDbInner {
                             .iter()
                             .map(|row| row.occurrence_id.clone())
                             .collect();
+                        // A local aggregate snapshot may retract while the
+                        // relay concurrently publishes its replacement.  The
+                        // relay correctly calls that replacement an update,
+                        // but it is an add relative to this facade's already
+                        // retracted snapshot. Normalize at this boundary so a
+                        // public stream never emits an update for an unknown
+                        // row.
+                        let surviving_rows = current_rows
+                            .iter()
+                            .filter(|row| {
+                                !removed
+                                    .iter()
+                                    .any(|removed| removed.occurrence_id == row.occurrence_id)
+                            })
+                            .map(|row| row.occurrence_id.clone())
+                            .collect::<std::collections::BTreeSet<_>>();
+                        let (effective_added, effective_updated) =
+                            normalize_subscription_updates(surviving_rows, added, updated, |row| {
+                                &row.occurrence_id
+                            });
                         JazzClient::apply_core_subscription_rows(
                             &mut current_rows,
                             reset,
-                            &added,
-                            &updated,
+                            &effective_added,
+                            &effective_updated,
                             &removed,
                         );
                         let rows_for_cache = current_rows
@@ -1290,8 +1310,8 @@ impl ClientDbInner {
                             JazzClient::core_subscription_change_delta(
                                 &db,
                                 &current_rows,
-                                &added,
-                                &updated,
+                                &effective_added,
+                                &effective_updated,
                                 &removed,
                             )
                         };
@@ -1412,6 +1432,26 @@ impl ClientDbInner {
                 .insert(ObjectId::from_uuid(row.row_uuid().0), table.to_string());
         }
     }
+}
+
+/// Convert updates against members absent after this delta's removals into
+/// additions. A relay replacement may cross a locally retracted aggregate
+/// member, so public streams may never observe that as an update.
+fn normalize_subscription_updates<T>(
+    surviving: std::collections::BTreeSet<OutputOccurrenceId>,
+    mut added: Vec<T>,
+    updated: Vec<T>,
+    occurrence_id: impl Fn(&T) -> &OutputOccurrenceId,
+) -> (Vec<T>, Vec<T>) {
+    let mut effective_updated = Vec::new();
+    for row in updated {
+        if surviving.contains(occurrence_id(&row)) {
+            effective_updated.push(row);
+        } else {
+            added.push(row);
+        }
+    }
+    (added, effective_updated)
 }
 
 /// Transaction-scoped Jazz client handle.
@@ -2842,6 +2882,34 @@ mod tests {
             public_to_core_value(Value::Integer(0)).expect("encode zero"),
             CoreValue::I32(0)
         );
+    }
+
+    // This narrow internal test is necessary because the wire crossing is an
+    // impossible state to inject through the public client API: it requires a
+    // local aggregate retraction racing a relay replacement. The public
+    // aggregate subscription tests cover ordinary delivery around it.
+    #[test]
+    fn aggregate_replacement_for_absent_member_is_normalized_to_an_add() {
+        let held = OutputOccurrenceId::single_source(ObjectId::from_uuid(Uuid::from_u128(1)));
+        let crossed = OutputOccurrenceId::single_source(ObjectId::from_uuid(Uuid::from_u128(2)));
+        let (added, updated) = normalize_subscription_updates(
+            std::collections::BTreeSet::from([held.clone()]),
+            Vec::<OutputOccurrenceId>::new(),
+            vec![crossed.clone()],
+            |id| id,
+        );
+
+        assert_eq!(added, vec![crossed]);
+        assert!(updated.is_empty());
+
+        let (added, updated) = normalize_subscription_updates(
+            std::collections::BTreeSet::from([held.clone()]),
+            Vec::<OutputOccurrenceId>::new(),
+            vec![held.clone()],
+            |id| id,
+        );
+        assert!(added.is_empty());
+        assert_eq!(updated, vec![held]);
     }
 
     #[test]

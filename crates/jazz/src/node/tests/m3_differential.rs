@@ -1676,7 +1676,15 @@ fn apply_aggregate_payload(values: &mut BTreeMap<u64, Value>, update: &SyncMessa
     }
     for fact in program_fact_adds {
         if let Some((bucket, value)) = aggregate_payload_value(fact, output) {
-            values.insert(bucket, value);
+            if let Some(value) = value {
+                values.insert(bucket, value);
+            } else {
+                // The aggregate payload is present, but its SQL result is
+                // NULL. Keep that distinct from a missing payload fact while
+                // matching the one-shot public boundary, which omits the
+                // null cell from this numeric comparison map.
+                values.remove(&bucket);
+            }
         }
     }
 }
@@ -1684,12 +1692,16 @@ fn apply_aggregate_payload(values: &mut BTreeMap<u64, Value>, update: &SyncMessa
 fn aggregate_payload_value(
     fact: &crate::protocol::ProgramFactEntry,
     output: &str,
-) -> Option<(u64, Value)> {
+) -> Option<(u64, Option<Value>)> {
     let crate::protocol::ProgramFactEntry::ResultPayload(payload) = fact else {
         return None;
     };
-    let table = payload.member.table_name()?;
-    if table != "docs_aggregate" {
+    // Aggregate payloads are identified by their synthetic group-key member,
+    // never by a source-derived synthetic table label.
+    if !matches!(
+        payload.member,
+        crate::protocol::ResultMemberEntry::Synthetic { .. }
+    ) {
         return None;
     }
     let fields: Vec<(Option<String>, groove::records::ValueType)> =
@@ -1703,7 +1715,12 @@ fn aggregate_payload_value(
     let Value::U64(bucket) = record.get("user_bucket").unwrap() else {
         panic!("aggregate bucket must be U64");
     };
-    Some((bucket, record.get(output).unwrap().clone()))
+    let value = match record.get(output).unwrap() {
+        Value::Nullable(None) => None,
+        Value::Nullable(Some(value)) => Some((*value).clone()),
+        value => Some(value.clone()),
+    };
+    Some((bucket, value))
 }
 
 fn one_shot_aggregate_values<S: OrderedKvStorage>(
@@ -1716,12 +1733,12 @@ fn one_shot_aggregate_values<S: OrderedKvStorage>(
     core.query_rows_for_link(shape, binding, DurabilityTier::Global, identity)
         .unwrap()
         .into_iter()
-        .map(|row| {
+        .filter_map(|row| {
             let cells = row.test_cells_by_descriptor();
             let Value::U64(bucket) = &cells["bucket"] else {
                 panic!("aggregate bucket must be U64");
             };
-            (*bucket, cells[output].clone())
+            cells.get(output).cloned().map(|value| (*bucket, value))
         })
         .collect()
 }
