@@ -335,10 +335,42 @@ replacement witness information for the peer state machine to emit the same net
 Aggregate functions are capability-gated by groove support. Maintained Jazz
 subscriptions should initially accept only deterministic, retractable summaries
 such as count, numeric sum, min, and max, with deterministic witness ties owned
-by groove. Floating-point accumulation, user-defined aggregates, approximate
-aggregates, and empty-global-row SQL compatibility stay outside the maintained
-subscription surface until their replay semantics and payload shape are
-specified.
+by groove. User-defined aggregates, approximate aggregates, and
+empty-global-row SQL compatibility stay outside the maintained subscription
+surface until their replay semantics and payload shape are specified.
+
+Floating-point accumulation IS inside the maintained surface, under a weaker
+agreement guarantee than the exact one above. Incremental maintenance sums in
+arrival order and subtracts on retraction, while a one-shot recompute sums from
+scratch, so the two cannot be required to agree bit-for-bit. They MUST agree
+approximately, as follows:
+
+- `count`, `min` and `max` MUST agree **exactly**, for every value type
+  including `F64`. They are counting and selection, not accumulation, so
+  floating point gives them no licence to differ.
+- Integer `sum` and `avg` MUST agree **exactly**. A divergence in exact integer
+  arithmetic is a maintenance defect, never a rounding artifact, and this
+  requirement is what makes the two distinguishable.
+- `F64` `sum` and `avg` MUST agree within a tolerance proportional to
+  `ε × (input rows + maintenance updates) × Σ|x|`, where `Σ|x|` is the sum of
+  absolute input magnitudes for the group.
+
+The tolerance is expressed against `Σ|x|` rather than against the result
+deliberately. Under catastrophic cancellation — inputs of opposite sign summing
+to near zero — the result approaches zero while the absolute error does not, so
+a result-relative tolerance is unbounded and cannot be enforced.
+
+Because the error term grows with maintenance updates, an implementation MUST
+bound update count, recomputing the group from its inputs after a bounded
+number of updates so that drift cannot accumulate without limit across a
+long-lived subscription. A subscription that never recomputes does not satisfy
+this contract.
+
+🔶 **Open question.** The constant of proportionality and the recomputation
+bound are not yet fixed. They should be set from measurement rather than
+assumption: the differential oracle reports observed divergence against update
+count, and those numbers should determine both. Until they are, the tolerance
+above is a shape, not a threshold.
 
 Policy composition happens before these operators. A policy row changing
 visibility must flow through the same `TopBy` or `Aggregate` state as a base row
