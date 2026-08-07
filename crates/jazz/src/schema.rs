@@ -1057,13 +1057,13 @@ fn merge_heads_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         MERGE_HEADS_TABLE,
         [
-            column("table_name", GrooveColumnType::Bytes),
+            column("physical_table_id", GrooveColumnType::U64),
             column("row_uuid", GrooveColumnType::Uuid),
             column("heads", GrooveColumnType::Bytes),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::bytes("table_name"),
+        PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
         PrimaryKeyColumn::uuid("row_uuid"),
     ]))
 }

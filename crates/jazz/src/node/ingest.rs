@@ -2587,8 +2587,14 @@ where
         let affected_content_rows = rejected
             .iter()
             .filter(|version| version.layer() == VersionLayer::Content)
-            .map(|version| (version.table().to_owned(), version.row_uuid()))
-            .collect::<BTreeSet<_>>();
+            .map(|version| {
+                Ok((
+                    self.physical_table_id_for_version(version)?,
+                    version.table().to_owned(),
+                    version.row_uuid(),
+                ))
+            })
+            .collect::<Result<BTreeSet<_>, Error>>()?;
         let mut rejected_payload = None;
         if tx_id.node == self.node_uuid
             && let Fate::Rejected(reason) = &tx.fate
@@ -2645,8 +2651,8 @@ where
             let history_table = self.version_storage_table_for_row(version)?;
             batch.delete(history_table.as_ref(), history_primary_key(version));
         }
-        for (table, row_uuid) in affected_content_rows {
-            self.rewrite_merge_heads_excluding_tx(batch, &table, row_uuid, tx_id)?;
+        for (table_id, table, row_uuid) in affected_content_rows {
+            self.rewrite_merge_heads_excluding_tx(batch, table_id, &table, row_uuid, tx_id)?;
         }
         self.invalidate_tx_version_tables_cache(tx_id);
         let _ = affected;
@@ -2697,12 +2703,15 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
-        let head_tx_ids = self.merge_head_tx_ids(table, row_uuid)?;
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_write_schema.schema, table)?;
+        let head_tx_ids = self.merge_head_tx_ids(table_id, row_uuid)?;
         if head_tx_ids.len() < 2 {
             return Ok(());
         }
-        let table_schema = self.table(table)?.clone();
-        let row_versions = self.query_row_versions(table, row_uuid)?;
+        let table_schema =
+            self.table_in_schema(table, self.catalogue.current_write_schema.schema)?;
+        let row_versions = self.query_physical_content_row_versions(table_id, table, row_uuid)?;
         let mut row_versions_by_tx = BTreeMap::new();
         for version in row_versions {
             row_versions_by_tx.insert(self.version_tx_id(&version)?, version);
@@ -3365,15 +3374,12 @@ where
 
     fn read_merge_heads(
         &mut self,
-        table: &str,
+        table_id: PhysicalTableId,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeSet<TxId>>, Error> {
         let row = self.database.primary_key_get_raw(
             MERGE_HEADS_TABLE,
-            &[
-                Value::Bytes(table.as_bytes().to_vec()),
-                Value::Uuid(row_uuid.0),
-            ],
+            &[Value::U64(table_id.0), Value::Uuid(row_uuid.0)],
         )?;
         let Some(row) = row else {
             return Ok(None);
@@ -3385,16 +3391,13 @@ where
     fn read_merge_heads_in_batch(
         &mut self,
         batch: &DatabaseBatch,
-        table: &str,
+        table_id: PhysicalTableId,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeSet<TxId>>, Error> {
         let row = self.database.primary_key_get_raw_in_batch(
             batch,
             MERGE_HEADS_TABLE,
-            &[
-                Value::Bytes(table.as_bytes().to_vec()),
-                Value::Uuid(row_uuid.0),
-            ],
+            &[Value::U64(table_id.0), Value::Uuid(row_uuid.0)],
         )?;
         let Some(row) = row else {
             return Ok(None);
@@ -3405,10 +3408,10 @@ where
 
     fn require_merge_heads(
         &mut self,
-        table: &str,
+        table_id: PhysicalTableId,
         row_uuid: RowUuid,
     ) -> Result<BTreeSet<TxId>, Error> {
-        self.read_merge_heads(table, row_uuid)?
+        self.read_merge_heads(table_id, row_uuid)?
             .ok_or(Error::InvalidStoredValue(
                 "merge head set missing for existing global current row",
             ))
@@ -3416,19 +3419,66 @@ where
 
     fn write_merge_heads(
         batch: &mut DatabaseBatch,
-        table: &str,
+        table_id: PhysicalTableId,
         row_uuid: RowUuid,
         heads: &BTreeSet<TxId>,
     ) -> Result<(), Error> {
         batch.update(
             MERGE_HEADS_TABLE,
             vec![
-                Value::Bytes(table.as_bytes().to_vec()),
+                Value::U64(table_id.0),
                 Value::Uuid(row_uuid.0),
                 Value::Bytes(Self::encode_merge_heads(heads)?),
             ],
         );
         Ok(())
+    }
+
+    fn query_physical_content_row_versions(
+        &mut self,
+        table_id: PhysicalTableId,
+        requested_table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Vec<VersionRow>, Error> {
+        let storage_table = physical_history_table_name(table_id);
+        let raws = self
+            .database
+            .primary_key_scan_raw(&storage_table, &[Value::Uuid(row_uuid.0)])?
+            .into_iter()
+            .map(|raw| raw.owned_record())
+            .collect::<Vec<_>>();
+        let mut versions = raws
+            .into_iter()
+            .map(|record| self.decode_history_owned_record(requested_table, &storage_table, record))
+            .collect::<Result<Vec<_>, Error>>()?;
+        let aliases = self.node_aliases.clone();
+        versions.sort_by_key(|version| {
+            version_tx_id_from_aliases(version, &aliases).expect("valid version tx id")
+        });
+        Ok(versions)
+    }
+
+    fn query_physical_content_layer_winner(
+        &mut self,
+        table_id: PhysicalTableId,
+        requested_table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<VersionRow>, Error> {
+        let mut winner = None;
+        for version in
+            self.query_physical_content_row_versions(table_id, requested_table, row_uuid)?
+        {
+            let candidate_tx = self.version_tx_id(&version)?;
+            let replaces_winner = winner.as_ref().is_none_or(|existing: &VersionRow| {
+                let existing_tx = self.version_tx_id(existing).expect("valid version tx id");
+                candidate_tx.time.sort_key(candidate_tx.node)
+                    > existing_tx.time.sort_key(existing_tx.node)
+            });
+            if replaces_winner {
+                winner = Some(version);
+            }
+        }
+        Ok(winner)
     }
 
     pub(super) fn update_merge_heads_for_content_version(
@@ -3439,14 +3489,15 @@ where
         if version.layer() != VersionLayer::Content {
             return Ok(());
         }
+        let table_id = self.physical_table_id_for_version(version)?;
         let new_tx = self.version_tx_id(version)?;
-        let mut heads = match self.read_merge_heads(version.table(), version.row_uuid())? {
+        let mut heads = match self.read_merge_heads(table_id, version.row_uuid())? {
             Some(existing) => existing,
             None => {
-                if let Some(previous) = self.query_local_layer_winner(
+                if let Some(previous) = self.query_physical_content_layer_winner(
+                    table_id,
                     version.table(),
                     version.row_uuid(),
-                    VersionLayer::Content,
                 )? {
                     let previous_tx = self.version_tx_id(&previous)?;
                     if previous_tx != new_tx {
@@ -3467,6 +3518,7 @@ where
             .map(|head| {
                 self.content_version_reaches_tx_in_batch(
                     batch,
+                    table_id,
                     version.table(),
                     version.row_uuid(),
                     head,
@@ -3479,7 +3531,7 @@ where
         if !dominated_by_existing_head {
             heads.insert(new_tx);
         }
-        Self::write_merge_heads(batch, version.table(), version.row_uuid(), &heads)
+        Self::write_merge_heads(batch, table_id, version.row_uuid(), &heads)
     }
 
     fn update_merge_heads_for_content_version_in_batch(
@@ -3490,42 +3542,40 @@ where
         if version.layer() != VersionLayer::Content {
             return Ok(());
         }
+        let table_id = self.physical_table_id_for_version(version)?;
         let new_tx = self.version_tx_id(version)?;
-        let mut heads =
-            match self.read_merge_heads_in_batch(batch, version.table(), version.row_uuid())? {
-                Some(existing) => existing,
-                None => {
-                    if let Some(previous) = self.query_local_layer_winner(
-                        version.table(),
-                        version.row_uuid(),
-                        VersionLayer::Content,
-                    )? {
-                        let previous_tx = self.version_tx_id(&previous)?;
-                        if previous_tx != new_tx {
-                            return Err(Error::InvalidStoredValue(
-                                "merge head set missing for existing content row",
-                            ));
-                        }
+        let mut heads = match self.read_merge_heads_in_batch(batch, table_id, version.row_uuid())? {
+            Some(existing) => existing,
+            None => {
+                if let Some(previous) = self.query_physical_content_layer_winner(
+                    table_id,
+                    version.table(),
+                    version.row_uuid(),
+                )? {
+                    let previous_tx = self.version_tx_id(&previous)?;
+                    if previous_tx != new_tx {
+                        return Err(Error::InvalidStoredValue(
+                            "merge head set missing for existing content row",
+                        ));
                     }
-                    BTreeSet::new()
                 }
-            };
+                BTreeSet::new()
+            }
+        };
         for parent in version.parents() {
             heads.remove(&parent);
         }
         let dominated_by_existing_head = heads
             .iter()
             .copied()
-            .map(|head| {
-                self.content_version_reaches_tx(version.table(), version.row_uuid(), head, new_tx)
-            })
+            .map(|head| self.content_version_reaches_tx(table_id, version.row_uuid(), head, new_tx))
             .collect::<Result<Vec<_>, Error>>()?
             .into_iter()
             .any(|reaches| reaches);
         if !dominated_by_existing_head {
             heads.insert(new_tx);
         }
-        Self::write_merge_heads(batch, version.table(), version.row_uuid(), &heads)
+        Self::write_merge_heads(batch, table_id, version.row_uuid(), &heads)
     }
 
     fn query_global_layer_winner_in_batch(
@@ -3600,23 +3650,26 @@ where
         batch: &mut DatabaseBatch,
         versions: &[VersionRow],
     ) -> Result<(), Error> {
-        let mut by_row = BTreeMap::<(String, RowUuid), Vec<&VersionRow>>::new();
+        let mut by_row = BTreeMap::<(PhysicalTableId, RowUuid), Vec<&VersionRow>>::new();
         for version in versions {
             if version.layer() == VersionLayer::Content {
+                let table_id = self.physical_table_id_for_version(version)?;
                 by_row
-                    .entry((version.table().to_owned(), version.row_uuid()))
+                    .entry((table_id, version.row_uuid()))
                     .or_default()
                     .push(version);
             }
         }
-        for ((table, row_uuid), mut row_versions) in by_row {
+        for ((table_id, row_uuid), mut row_versions) in by_row {
             row_versions.sort_by_key(|version| {
                 let tx_id = self
                     .version_tx_id(version)
                     .expect("bulk content version must have node alias");
                 tx_id.time.sort_key(tx_id.node)
             });
-            let mut heads = self.read_merge_heads(&table, row_uuid)?.unwrap_or_default();
+            let mut heads = self
+                .read_merge_heads(table_id, row_uuid)?
+                .unwrap_or_default();
             let mut staged_parents = BTreeMap::<TxId, Vec<TxId>>::new();
             for version in &row_versions {
                 staged_parents.insert(self.version_tx_id(version)?, version.parents());
@@ -3632,7 +3685,11 @@ where
                     .map(|head| {
                         content_version_reaches_tx_in_staged_parents(head, new_tx, &staged_parents)
                             .map_or_else(
-                                || self.content_version_reaches_tx(&table, row_uuid, head, new_tx),
+                                || {
+                                    self.content_version_reaches_tx(
+                                        table_id, row_uuid, head, new_tx,
+                                    )
+                                },
                                 Ok,
                             )
                     })
@@ -3643,14 +3700,14 @@ where
                     heads.insert(new_tx);
                 }
             }
-            Self::write_merge_heads(batch, &table, row_uuid, &heads)?;
+            Self::write_merge_heads(batch, table_id, row_uuid, &heads)?;
         }
         Ok(())
     }
 
     fn content_version_reaches_tx(
         &mut self,
-        table: &str,
+        table_id: PhysicalTableId,
         row_uuid: RowUuid,
         start: TxId,
         target: TxId,
@@ -3665,7 +3722,7 @@ where
                 continue;
             }
             for version in self.query_versions_for_tx(tx_id)? {
-                if version.table() == table
+                if self.physical_table_id_for_version(&version)? == table_id
                     && version.row_uuid() == row_uuid
                     && version.layer() == VersionLayer::Content
                 {
@@ -3679,6 +3736,7 @@ where
     fn content_version_reaches_tx_in_batch(
         &mut self,
         batch: &DatabaseBatch,
+        table_id: PhysicalTableId,
         table: &str,
         row_uuid: RowUuid,
         start: TxId,
@@ -3693,10 +3751,13 @@ where
             if !seen.insert(tx_id) {
                 continue;
             }
-            for version in
-                self.query_versions_for_tx_in_batch_for_row(batch, tx_id, table, row_uuid)?
+            for version in self
+                .query_versions_for_tx_in_batch_for_row(batch, tx_id, table_id, table, row_uuid)?
             {
-                if version.row_uuid() == row_uuid && version.layer() == VersionLayer::Content {
+                if self.physical_table_id_for_version(&version)? == table_id
+                    && version.row_uuid() == row_uuid
+                    && version.layer() == VersionLayer::Content
+                {
                     stack.extend(version.parents());
                 }
             }
@@ -3708,6 +3769,7 @@ where
         &mut self,
         batch: &DatabaseBatch,
         tx_id: TxId,
+        table_id: PhysicalTableId,
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Vec<VersionRow>, Error> {
@@ -3715,19 +3777,16 @@ where
         let Some(tx_node_alias) = self.node_aliases.get(&tx_id.node).copied() else {
             return Ok(versions);
         };
-        for storage_table in self.version_storage_sources_for_layer(table, VersionLayer::Content)? {
-            let Some(raw) = self.database.primary_key_get_raw_in_batch(
-                batch,
-                &storage_table,
-                &[
-                    Value::Uuid(row_uuid.0),
-                    Value::U64(tx_id.time.0),
-                    Value::U64(tx_node_alias.0),
-                ],
-            )?
-            else {
-                continue;
-            };
+        let storage_table = physical_history_table_name(table_id);
+        if let Some(raw) = self.database.primary_key_get_raw_in_batch(
+            batch,
+            &storage_table,
+            &[
+                Value::Uuid(row_uuid.0),
+                Value::U64(tx_id.time.0),
+                Value::U64(tx_node_alias.0),
+            ],
+        )? {
             versions.push(self.decode_history_owned_record(
                 table,
                 &storage_table,
@@ -3740,11 +3799,12 @@ where
     fn rewrite_merge_heads_excluding_tx(
         &mut self,
         batch: &mut DatabaseBatch,
+        table_id: PhysicalTableId,
         table: &str,
         row_uuid: RowUuid,
         excluded_tx: TxId,
     ) -> Result<(), Error> {
-        let versions = self.query_row_versions(table, row_uuid)?;
+        let versions = self.query_physical_content_row_versions(table_id, table, row_uuid)?;
         let candidate_indices = versions
             .iter()
             .enumerate()
@@ -3759,15 +3819,15 @@ where
         for idx in head_indices {
             heads.insert(self.version_tx_id(&versions[idx])?);
         }
-        Self::write_merge_heads(batch, table, row_uuid, &heads)
+        Self::write_merge_heads(batch, table_id, row_uuid, &heads)
     }
 
     fn merge_head_tx_ids(
         &mut self,
-        table: &str,
+        table_id: PhysicalTableId,
         row_uuid: RowUuid,
     ) -> Result<BTreeSet<TxId>, Error> {
-        self.require_merge_heads(table, row_uuid)
+        self.require_merge_heads(table_id, row_uuid)
     }
 
     #[cfg(test)]
@@ -3776,7 +3836,9 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<BTreeSet<TxId>, Error> {
-        let versions = self.query_row_versions(table, row_uuid)?;
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_write_schema.schema, table)?;
+        let versions = self.query_physical_content_row_versions(table_id, table, row_uuid)?;
         let mut candidate_indices = Vec::new();
         for (idx, version) in versions.iter().enumerate() {
             if version.layer() != VersionLayer::Content {
@@ -3805,8 +3867,10 @@ where
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
         let heads = self.recomputed_merge_heads_from_history_for_test(table, row_uuid)?;
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_write_schema.schema, table)?;
         let mut batch = self.database.open_batch();
-        Self::write_merge_heads(&mut batch, table, row_uuid, &heads)?;
+        Self::write_merge_heads(&mut batch, table_id, row_uuid, &heads)?;
         self.database.commit_batch(batch)?;
         Ok(())
     }
@@ -3818,7 +3882,9 @@ where
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
         let expected = self.recomputed_merge_heads_from_history_for_test(table, row_uuid)?;
-        let actual = self.require_merge_heads(table, row_uuid)?;
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_write_schema.schema, table)?;
+        let actual = self.require_merge_heads(table_id, row_uuid)?;
         if actual != expected {
             let versions = self
                 .query_row_versions(table, row_uuid)?

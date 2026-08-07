@@ -228,7 +228,10 @@ both the branch id and schema version.
 
 Shared storage removes the schema-version dimension from all application-data
 row and index keys, including history, global current, ahead current, secondary
-indexes and branch overlays. Keys should be scoped by stable physical identity instead.
+indexes, branch overlays, and derived merge-head records. Keys should be scoped
+by stable physical identity instead. In particular, `jazz_merge_heads` uses
+`(PhysicalTableId, RowUuid)`, so versions authored before and after a table
+rename participate in one causal-head set.
 
 ### Sync
 
@@ -495,7 +498,7 @@ remain compatible with databases written by the former per-schema history layout
 
 6. Convert the remaining schema-keyed storage.
    **Status: in progress.** Rejected-version storage, global-change identity,
-   and branch overlays are complete; the remaining key audit is still pending.
+   branch overlays, and merge-head identity are complete.
    - Branch overlays: each `(PhysicalTableId, BranchId)` owns one versioned
      content-history table and one stable deletion-register table.
      `jazz_branch_partitions` stores only those two identities. Writes retain
@@ -518,8 +521,16 @@ remain compatible with databases written by the former per-schema history layout
      span table renames without duplicating events or scanning schema variants.
      Discarding a provisional lineage also removes its change rows before that
      local physical ID can be reused.
-   - Audit large-value checkpoints and any remaining table/column-name-derived
-     keys.
+   - Merge heads: `jazz_merge_heads` now keys each derived causal-head set by
+     `(PhysicalTableId, RowUuid)`. Ancestry checks compare physical lineage, not
+     the authored logical table name. Renames and restart retain one head set;
+     unreconciled same-named lineages remain separate; discarding a provisional
+     lineage clears it before its local ID is reused.
+   - Large-value checkpoints remain keyed by logical table and column names.
+     Large-value handles embedded in row payloads and extent identifiers also
+     carry authored logical names and cross the public API/wire boundary, so
+     changing this subsystem is a separate protocol/API decision rather than a
+     mechanical local-key conversion.
    - Remove `jazz_partitions` only after recovery no longer depends on it.
 
 7. Implement unset/data-preservation semantics later.

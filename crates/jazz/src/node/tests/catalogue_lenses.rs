@@ -202,6 +202,13 @@ fn publishing_lens_discards_all_provisional_physical_rows() {
             .len(),
         1
     );
+    assert_eq!(
+        core.database
+            .primary_key_scan_raw("jazz_merge_heads", &[Value::U64(provisional.0)])
+            .unwrap()
+            .len(),
+        1
+    );
 
     core.apply_sync_message(SyncMessage::PublishLens {
         author: AuthorId::SYSTEM,
@@ -244,6 +251,13 @@ fn publishing_lens_discards_all_provisional_physical_rows() {
             "discarded provisional current table {table} must be empty"
         );
     }
+    assert!(
+        core.database
+            .primary_key_scan_raw("jazz_merge_heads", &[Value::U64(provisional.0)])
+            .unwrap()
+            .is_empty(),
+        "discarded provisional merge-head rows must be cleared before ID reuse"
+    );
 }
 
 #[test]

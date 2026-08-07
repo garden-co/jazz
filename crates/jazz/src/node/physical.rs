@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::ids::{PhysicalColumnId, PhysicalTableId};
+use crate::schema::MERGE_HEADS_TABLE;
 use groove::schema::{
     ColumnSchema as GrooveColumnSchema, IndexSchema as GrooveIndexSchema,
     TableSchema as GrooveTableSchema,
@@ -258,6 +259,18 @@ where
             .and_then(|mapping| mapping.tables.get(logical_table))
             .map(|mapping| mapping.table_id)
             .ok_or(Error::InvalidStoredValue("physical table mapping missing"))
+    }
+
+    pub(super) fn physical_table_id_for_version(
+        &self,
+        version: &VersionRow,
+    ) -> Result<PhysicalTableId, Error> {
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "stored row schema version alias missing",
+            ))?;
+        self.physical_table_id_for_schema(schema_version, version.table())
     }
 
     pub(super) fn physical_register_table_for_schema(
@@ -751,6 +764,26 @@ where
                     batch.delete(
                         "jazz_global_changes",
                         global_change_primary_key_from_record(&row.borrowed())?,
+                    );
+                }
+                self.database.commit_batch(batch)?;
+            }
+
+            let rows = self
+                .database
+                .primary_key_scan_raw(MERGE_HEADS_TABLE, &[Value::U64(table_id.0)])?
+                .into_iter()
+                .map(|row| row.owned_record())
+                .collect::<Vec<_>>();
+            if !rows.is_empty() {
+                let mut batch = self.database.open_batch();
+                for row in rows {
+                    batch.delete(
+                        MERGE_HEADS_TABLE,
+                        PrimaryKeyValue::Composite(vec![
+                            PrimaryKeyValue::U64(table_id.0),
+                            PrimaryKeyValue::Uuid(row.borrowed().get_uuid(1)?),
+                        ]),
                     );
                 }
                 self.database.commit_batch(batch)?;
