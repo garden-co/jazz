@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 
 use groove::ivm::{MultisinkDeltas, RecordDeltas};
-use groove::records::{BorrowedRecord, OwnedRecord, RecordDescriptor, RecordProjector, Value};
+use groove::records::{
+    BorrowedRecord, OwnedRecord, RecordDescriptor, RecordProjector, Value, ValueType,
+};
 
 use super::codec::{
     VersionLayer, VersionRow, VersionRowParts, deletion_event_from_value,
@@ -17,7 +19,8 @@ use super::query_engine::{
 use crate::ids::{AuthorId, NodeAlias, NodeUuid, RowUuid};
 use crate::protocol::{
     ProgramFactEntry, RealRowMemberEntry, RelationEdgeEntry, ResultMemberEntry,
-    ResultMemberPayloadEntry, ResultRowLayer, RowVersionRefEntry,
+    ResultMemberPayloadEntry, ResultRowLayer, ResultTree, ResultTreeNode, ResultTreeRelation,
+    ResultTreeRow, RowVersionRefEntry,
 };
 use crate::schema::TableSchema;
 use crate::time::{GlobalSeq, TxTime};
@@ -454,6 +457,93 @@ impl MaintainedSubscriptionView {
             .filter(|(_, weight)| **weight > 0)
             .map(|(raw, _)| OwnedRecord::new(raw.clone(), descriptor))
             .next()
+    }
+
+    /// Return the complete v4 tree directly from the collector terminal.
+    ///
+    /// `collect_by_tree` has already formed every parent/child relationship by
+    /// the time this method runs.  This is only an encoding-boundary
+    /// translation of that terminal value; no flat result set or edge graph is
+    /// consulted here.
+    #[allow(dead_code)] // The v4 peer carrier consumes this in the next migration stage.
+    pub(crate) fn structured_result_tree(&self) -> Result<ResultTree, super::Error> {
+        let Some(descriptor) = self.structured_app_row_descriptor else {
+            return Ok(ResultTree::default());
+        };
+        let roots = self
+            .structured_app_rows
+            .iter()
+            .filter_map(|(root, records)| {
+                records
+                    .iter()
+                    .find(|(_, weight)| **weight > 0)
+                    .map(|(raw, _)| (*root, OwnedRecord::new(raw.clone(), descriptor)))
+            })
+            .map(|(root, record)| Self::structured_result_node(root, record))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ResultTree { roots })
+    }
+
+    fn structured_result_node(
+        occurrence: RowUuid,
+        record: OwnedRecord,
+    ) -> Result<ResultTreeNode, super::Error> {
+        let values = record.to_values()?;
+        let mut fields = Vec::new();
+        let mut row_values = Vec::new();
+        let mut relations = BTreeMap::new();
+        for (field, value) in record.descriptor().fields().iter().zip(values) {
+            let Some(name) = field.name.clone() else {
+                return Err(super::Error::InvalidStoredValue(
+                    "structured collector field must be named",
+                ));
+            };
+            match (field.value_type.clone(), value) {
+                (ValueType::Array(element), Value::Array(children))
+                    if matches!(element.as_ref(), ValueType::Record(_)) =>
+                {
+                    let children = children
+                        .into_iter()
+                        .map(|value| match value {
+                            Value::Record(child) => {
+                                let child_id = child
+                                    .to_values()?
+                                    .into_iter()
+                                    .find_map(|value| match value {
+                                        Value::Uuid(id) => Some(RowUuid(id)),
+                                        _ => None,
+                                    })
+                                    .ok_or(super::Error::InvalidStoredValue(
+                                        "structured collector child is missing row identity",
+                                    ))?;
+                                Self::structured_result_node(child_id, child)
+                            }
+                            _ => Err(super::Error::InvalidStoredValue(
+                                "structured collector relation must contain records",
+                            )),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    relations.insert(name, ResultTreeRelation::Array(children));
+                }
+                (value_type, value) => {
+                    fields.push((name, value_type));
+                    row_values.push(value);
+                }
+            }
+        }
+        let descriptor = RecordDescriptor::new(fields);
+        Ok(ResultTreeNode {
+            occurrence: OutputOccurrenceId::single_source(ObjectId::from_uuid(occurrence.0)),
+            row: ResultTreeRow {
+                descriptor: postcard::to_allocvec(&descriptor).map_err(|_| {
+                    super::Error::InvalidStoredValue(
+                        "structured collector descriptor does not encode",
+                    )
+                })?,
+                record: descriptor.create(&row_values)?,
+            },
+            relations,
+        })
     }
 
     fn apply_structured_app_row_delta(&mut self, root: RowUuid, record: OwnedRecord, weight: i64) {
