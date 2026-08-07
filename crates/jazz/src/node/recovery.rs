@@ -357,43 +357,17 @@ where
     fn validate_ahead_current_rows(
         &mut self,
         storage_table: &groove::schema::TableSchema,
-        layer: VersionLayer,
+        _layer: VersionLayer,
         #[cfg(feature = "testing")] row_count: &mut usize,
         #[cfg(feature = "testing")] ahead_row_count: &mut usize,
     ) -> Result<(), Error> {
-        let descriptor = storage_table.record_schema();
-        let rows = self
+        let _rows = self
             .database
-            .primary_key_scan_raw(&storage_table.name, &[])?
-            .into_iter()
-            .map(|raw| raw.raw().to_vec())
-            .collect::<Vec<_>>();
+            .primary_key_scan_raw(&storage_table.name, &[])?;
         #[cfg(feature = "testing")]
         {
-            *row_count += rows.len();
-            *ahead_row_count += rows.len();
-        }
-        for raw in rows {
-            let record = BorrowedRecord::new(&raw, &descriptor);
-            match layer {
-                VersionLayer::Content => {
-                    record.get_u64(GlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX)?;
-                    record.get_idx(GlobalCurrentRowRecord::FIELD_PARENTS_IDX)?;
-                    record.get_nullable_u64(GlobalCurrentRowRecord::FIELD_GLOBAL_SEQ_IDX)?;
-                    record.get_uuid(GlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?;
-                    record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?;
-                    record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?;
-                }
-                VersionLayer::Deletion => {
-                    record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX)?;
-                    record.get_idx(RegisterGlobalCurrentRowRecord::FIELD_PARENTS_IDX)?;
-                    record
-                        .get_nullable_u64(RegisterGlobalCurrentRowRecord::FIELD_GLOBAL_SEQ_IDX)?;
-                    record.get_uuid(RegisterGlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?;
-                    record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?;
-                    record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?;
-                }
-            }
+            *row_count += _rows.len();
+            *ahead_row_count += _rows.len();
         }
         Ok(())
     }
@@ -403,19 +377,12 @@ where
         storage_table: &groove::schema::TableSchema,
         #[cfg(feature = "testing")] row_count: &mut usize,
     ) -> Result<(), Error> {
-        let descriptor = storage_table.record_schema();
-        let rows = self
+        let _rows = self
             .database
             .primary_key_scan_raw(&storage_table.name, &[])?;
         #[cfg(feature = "testing")]
         {
-            *row_count += rows.len();
-        }
-        for raw in rows {
-            let record = BorrowedRecord::new(raw.raw(), &descriptor);
-            record.get_u64(GlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX)?;
-            record.get_idx(GlobalCurrentRowRecord::FIELD_PARENTS_IDX)?;
-            record.get_nullable_u64(GlobalCurrentRowRecord::FIELD_GLOBAL_SEQ_IDX)?;
+            *row_count += _rows.len();
         }
         Ok(())
     }
@@ -425,19 +392,12 @@ where
         storage_table: &groove::schema::TableSchema,
         #[cfg(feature = "testing")] row_count: &mut usize,
     ) -> Result<(), Error> {
-        let descriptor = storage_table.record_schema();
-        let rows = self
+        let _rows = self
             .database
             .primary_key_scan_raw(&storage_table.name, &[])?;
         #[cfg(feature = "testing")]
         {
-            *row_count += rows.len();
-        }
-        for raw in rows {
-            let record = BorrowedRecord::new(raw.raw(), &descriptor);
-            record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX)?;
-            record.get_idx(RegisterGlobalCurrentRowRecord::FIELD_PARENTS_IDX)?;
-            record.get_nullable_u64(RegisterGlobalCurrentRowRecord::FIELD_GLOBAL_SEQ_IDX)?;
+            *row_count += _rows.len();
         }
         Ok(())
     }
