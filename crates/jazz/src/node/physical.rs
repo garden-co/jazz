@@ -609,23 +609,45 @@ where
         &mut self,
         candidates: impl IntoIterator<Item = PhysicalTableId>,
     ) -> Result<(), Error> {
+        let candidates = candidates.into_iter().collect::<BTreeSet<_>>();
         let live = self
             .catalogue
             .physical_mappings
             .values()
             .flat_map(|mapping| mapping.tables.values().map(|table| table.table_id))
             .collect::<BTreeSet<_>>();
-        for table_id in candidates {
-            if live.contains(&table_id) {
-                continue;
+        let discarded = candidates
+            .difference(&live)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let mut invalidated_rejections = BTreeMap::new();
+        for table_id in &discarded {
+            let table = physical_rejected_versions_table_name(*table_id);
+            let rows = match self.database.primary_key_scan_raw(&table, &[]) {
+                Ok(rows) => rows,
+                Err(GrooveDbError::TableNotFound(_)) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            for raw in rows {
+                let record = raw.record();
+                let time = TxTime(record.get_u64(RejectedVersionRowRecord::FIELD_TX_TIME_IDX)?);
+                let alias =
+                    NodeAlias(record.get_u64(RejectedVersionRowRecord::FIELD_TX_NODE_ID_IDX)?);
+                let node = self.node_for_alias(alias).ok_or(Error::InvalidStoredValue(
+                    "rejected transaction node alias missing",
+                ))?;
+                invalidated_rejections.insert(TxId::new(time, node), alias);
             }
+        }
+
+        for table_id in &discarded {
             for (table, global_current) in [
-                (physical_history_table_name(table_id), false),
-                (physical_register_table_name(table_id), false),
-                (physical_global_current_table_name(table_id), true),
-                (physical_register_global_current_table_name(table_id), true),
-                (physical_ahead_current_table_name(table_id), false),
-                (physical_register_ahead_current_table_name(table_id), false),
+                (physical_history_table_name(*table_id), false),
+                (physical_register_table_name(*table_id), false),
+                (physical_global_current_table_name(*table_id), true),
+                (physical_register_global_current_table_name(*table_id), true),
+                (physical_ahead_current_table_name(*table_id), false),
+                (physical_register_ahead_current_table_name(*table_id), false),
             ] {
                 let rows = match self.database.primary_key_scan_raw(&table, &[]) {
                     Ok(rows) => rows
@@ -662,27 +684,44 @@ where
                 }
                 self.database.commit_batch(batch)?;
             }
+        }
 
-            let table = physical_rejected_versions_table_name(table_id);
-            let rows = match self.database.primary_key_scan_raw(&table, &[]) {
-                Ok(rows) => rows
-                    .into_iter()
-                    .map(|row| row.owned_record())
-                    .collect::<Vec<_>>(),
-                Err(GrooveDbError::TableNotFound(_)) => continue,
-                Err(error) => return Err(error.into()),
-            };
-            if rows.is_empty() {
-                continue;
+        if !invalidated_rejections.is_empty() {
+            let archive_table_ids = live.union(&discarded).copied().collect::<BTreeSet<_>>();
+            let mut version_deletes = Vec::new();
+            for (tx_id, alias) in &invalidated_rejections {
+                for table_id in &archive_table_ids {
+                    let table = physical_rejected_versions_table_name(*table_id);
+                    let rows = match self.database.primary_key_scan_raw(
+                        &table,
+                        &[Value::U64(tx_id.time.0), Value::U64(alias.0)],
+                    ) {
+                        Ok(rows) => rows,
+                        Err(GrooveDbError::TableNotFound(_)) => continue,
+                        Err(error) => return Err(error.into()),
+                    };
+                    for raw in rows {
+                        version_deletes.push((
+                            table.clone(),
+                            rejected_version_primary_key_from_record(&raw.record())?,
+                        ));
+                    }
+                }
             }
             let mut batch = self.database.open_batch();
-            for row in rows {
+            for (tx_id, alias) in &invalidated_rejections {
                 batch.delete(
-                    &table,
-                    rejected_version_primary_key_from_record(&row.borrowed())?,
+                    "jazz_rejected_transactions",
+                    rejected_transaction_primary_key(*alias, *tx_id),
                 );
             }
+            for (table, key) in version_deletes {
+                batch.delete(table, key);
+            }
             self.database.commit_batch(batch)?;
+            for tx_id in invalidated_rejections.keys() {
+                self.rejections.rejected_transactions.remove(tx_id);
+            }
         }
         Ok(())
     }

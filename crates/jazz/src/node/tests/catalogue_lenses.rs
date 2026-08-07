@@ -247,6 +247,139 @@ fn publishing_lens_discards_all_provisional_physical_rows() {
 }
 
 #[test]
+fn publishing_lens_discards_an_entire_retry_payload_if_one_lineage_is_replaced() {
+    // Retry archives and provisional physical identities are intentionally
+    // internal. This verifies that an atomic exclusive retry never survives
+    // with only the versions from lineages that remained mapped.
+    let base = schema();
+    let target_schema = JazzSchema::new([
+        TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("body", ColumnType::String),
+            ],
+        ),
+        TableSchema::new("notes", [ColumnSchema::new("text", ColumnType::String)]),
+    ]);
+    let target = SchemaVersion::new(target_schema);
+    let (dir, mut core) = open_node_with_schema(node(0x36), base.clone());
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(target.clone()),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: target.id,
+        },
+    })
+    .unwrap();
+
+    let provisional_todos =
+        core.catalogue.physical_mappings[&target.id].tables["todos"].table_id;
+    let retained_notes = core.catalogue.physical_mappings[&target.id].tables["notes"].table_id;
+    let tx = core.open_exclusive().unwrap();
+    core.tx_write(
+        tx,
+        "todos",
+        row(0x36),
+        BTreeMap::from([
+            ("title".to_owned(), v("retry todo")),
+            ("body".to_owned(), v("body")),
+        ]),
+        None,
+    )
+    .unwrap();
+    core.tx_write(
+        tx,
+        "notes",
+        row(0x37),
+        BTreeMap::from([("text".to_owned(), v("retry note"))]),
+        None,
+    )
+    .unwrap();
+    let (rejected, _unit) = core.commit_exclusive(tx, AuthorId::SYSTEM, 10).unwrap();
+    core.apply_sync_message(SyncMessage::FateUpdate {
+        tx_id: rejected,
+        fate: Fate::Rejected(RejectionReason::ExclusiveConflict),
+        global_seq: None,
+        durability: None,
+    })
+    .unwrap();
+    for table_id in [provisional_todos, retained_notes] {
+        assert_eq!(
+            core.database
+                .primary_key_scan_raw(&physical_rejected_versions_table_name(table_id), &[])
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    core.apply_sync_message(SyncMessage::PublishLens {
+        author: AuthorId::SYSTEM,
+        lens: MigrationLens::new(
+            base.version_id(),
+            target.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: v(""),
+                }],
+            }],
+        ),
+    })
+    .unwrap();
+
+    assert_ne!(
+        core.catalogue.physical_mappings[&target.id].tables["todos"].table_id,
+        provisional_todos
+    );
+    assert_eq!(
+        core.catalogue.physical_mappings[&target.id].tables["notes"].table_id,
+        retained_notes
+    );
+    assert!(core.rejected_transaction(rejected).is_none());
+    assert!(matches!(
+        core.transaction_state(rejected),
+        Some((
+            Fate::Rejected(RejectionReason::ExclusiveConflict),
+            None,
+            _
+        ))
+    ));
+    assert!(core
+        .database
+        .primary_key_scan_raw("jazz_rejected_transactions", &[])
+        .unwrap()
+        .is_empty());
+    for table_id in [provisional_todos, retained_notes] {
+        assert!(core
+            .database
+            .primary_key_scan_raw(&physical_rejected_versions_table_name(table_id), &[])
+            .unwrap()
+            .is_empty());
+    }
+
+    drop(core);
+    let mut reopened = reopen_node_at(&dir, node(0x36), base);
+    assert!(reopened.rejected_transaction(rejected).is_none());
+    assert!(matches!(
+        reopened.transaction_state(rejected),
+        Some((
+            Fate::Rejected(RejectionReason::ExclusiveConflict),
+            None,
+            _
+        ))
+    ));
+}
+
+#[test]
 fn active_history_projection_accepts_a_new_schema_variant_without_rebuild() {
     let base = schema();
     let evolved = SchemaVersion::new(catalogue_evolved_schema());

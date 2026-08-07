@@ -501,6 +501,10 @@ remain compatible with databases written by the former per-schema history layout
      payload archive; logical-name payload tables are no longer lowered. Rows
      retain their authored `SchemaVersionAlias`, and recovery derives their
      authored logical table and descriptor from the alias plus physical lineage.
+     If lens publication discards a provisional lineage, Jazz discards every
+     retained retry payload touching that lineage as an atomic whole: its global
+     retry header and archived versions in all lineages. The ordinary rejected
+     transaction audit record remains.
    - Audit global-change keys, large-value checkpoints, and any remaining
      table/column-name-derived keys.
    - Remove `jazz_partitions` only after recovery no longer depends on it.
