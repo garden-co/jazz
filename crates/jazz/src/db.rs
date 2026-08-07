@@ -4696,6 +4696,16 @@ where
     }
 
     fn validate_inbound_session(&self, envelope: &WireEnvelope) -> Result<(), WireError> {
+        if envelope.protocol_version != WIRE_PROTOCOL_VERSION {
+            return Err(WireError::new(
+                WireErrorCode::UnsupportedProtocolVersion,
+                WireRetry::Never,
+                format!(
+                    "wire protocol v{} is not supported; this runtime requires v{}",
+                    envelope.protocol_version, WIRE_PROTOCOL_VERSION
+                ),
+            ));
+        }
         let Some(expected) = &self.session else {
             return Ok(());
         };

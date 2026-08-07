@@ -1415,7 +1415,7 @@ mod tests {
     }
 
     #[test]
-    fn negotiation_chooses_highest_common_version_and_feature_intersection() {
+    fn negotiation_rejects_v3_when_the_current_runtime_requires_v4() {
         let remote = WireHello {
             min_protocol_version: 1,
             max_protocol_version: 3,
@@ -1425,18 +1425,14 @@ mod tests {
 
         let negotiated = negotiate_wire(
             &remote,
-            2,
-            4,
+            WIRE_PROTOCOL_VERSION,
+            WIRE_PROTOCOL_VERSION,
             FEATURE_SESSION_FRAME | FEATURE_STRUCTURED_ERRORS,
-        )
-        .unwrap();
+        );
 
         assert_eq!(
-            negotiated,
-            WireNegotiated {
-                protocol_version: 3,
-                features: FEATURE_SESSION_FRAME
-            }
+            negotiated.unwrap_err().code,
+            WireErrorCode::UnsupportedProtocolVersion
         );
     }
 

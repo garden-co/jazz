@@ -4889,6 +4889,16 @@ fn encode_test_message_frame(session: Option<WireSession>) -> Vec<u8> {
     encode_frame(&WireFrame::Message(envelope)).unwrap()
 }
 
+fn encode_test_message_frame_at_version(protocol_version: u16) -> Vec<u8> {
+    let payload = encode_sync_message(&test_catalogue_ack()).unwrap();
+    encode_frame(&WireFrame::Message(WireEnvelope::new(
+        protocol_version,
+        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
+        payload,
+    )))
+    .unwrap()
+}
+
 fn expect_auth_failed_frame(transport: &mut ByteDuplexTransport, retry: WireRetry, message: &str) {
     let error = transport.try_recv_frame().expect("structured wire error");
     let frame = decode_frame(&error).unwrap();
@@ -4948,6 +4958,30 @@ fn wire_transport_adapter_reports_oversized_frame_without_decoding() {
         message.contains("wire frame size"),
         "unexpected error message: {message}"
     );
+}
+
+#[test]
+fn wire_transport_adapter_rejects_v3_message_frame_before_payload_decode() {
+    let (left, mut right) = byte_duplex_raw();
+    left.inbound
+        .borrow_mut()
+        .push_back(encode_test_message_frame_at_version(3));
+
+    let mut adapter = WireTransportAdapter::current(left);
+    assert!(adapter.try_recv().is_none());
+
+    let error = right.try_recv_frame().expect("structured wire error");
+    let WireFrame::Error(WireError {
+        code,
+        retry,
+        message,
+    }) = decode_frame(&error).unwrap()
+    else {
+        panic!("expected error frame");
+    };
+    assert_eq!(code, WireErrorCode::UnsupportedProtocolVersion);
+    assert_eq!(retry, WireRetry::Never);
+    assert!(message.contains("v3"));
 }
 
 #[test]
