@@ -364,13 +364,13 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     void this.connectionReady.catch(ignoreExpectedShutdown);
   }
 
-  disconnect(): Promise<void> {
+  disconnect(options?: { rejectWaiters?: boolean }): Promise<void> {
     this.connectionReady = null;
     if (this.closed) return Promise.resolve();
     return this.opened
       .then(() => {
         if (this.closed) return undefined;
-        return this.send("disconnect", []);
+        return this.send("disconnect", [options]);
       })
       .then(() => undefined);
   }

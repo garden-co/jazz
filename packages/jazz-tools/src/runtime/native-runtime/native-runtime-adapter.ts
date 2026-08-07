@@ -925,7 +925,10 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   connect(url: string, authJson: string): void {
-    this.disconnect();
+    // A new transport replaces the old one during a temporary reconnect. Server-tier
+    // waits are still meaningful across that transition, so only an explicit runtime
+    // shutdown is allowed to reject them.
+    void this.disconnect({ rejectWaiters: false });
     this.serverTransportError = null;
     this.serverEndpointUrl = url;
     const transport = this.db.connectUpstream();
