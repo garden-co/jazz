@@ -876,6 +876,17 @@ where
             }
             Err(error) => return Err(error),
         };
+        // v4 uses the same envelope for compatibility updates from scalar
+        // maintained views. Those views do not have a collector terminal yet,
+        // so their empty `result_tree` is not a reset snapshot. Relation
+        // shapes do have that terminal; for them even an empty tree is the
+        // authoritative structured state.
+        let accepts_structured_tree = is_structured_update
+            && self
+                .query
+                .registered_shapes
+                .get(&binding_view_key.shape_id)
+                .is_some_and(|shape| !shape.query().array_subqueries.is_empty());
         if let Some(progress) = authorization_progress {
             self.query
                 .authorization_progress_by_binding_view
@@ -960,7 +971,7 @@ where
             && result_member_removes.is_empty()
             && program_fact_adds.is_empty()
             && program_fact_removes.is_empty()
-            && !is_structured_update;
+            && !accepts_structured_tree;
         let persisted_member_adds = result_member_adds.clone();
         let persisted_member_removes = result_member_removes.clone();
         let persisted_fact_adds = program_fact_adds.clone();
@@ -990,7 +1001,8 @@ where
                 .entry(binding_view_key)
                 .or_default();
         }
-        let structured_tree_rewrite = if let Some(reset_tree) = result_tree {
+        let structured_tree_rewrite = if accepts_structured_tree {
+            let reset_tree = result_tree.expect("structured tree was checked above");
             let tree = if reset_result_set {
                 reset_tree
             } else {
