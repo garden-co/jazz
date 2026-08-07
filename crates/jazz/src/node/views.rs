@@ -623,6 +623,10 @@ where
         }
         let version_carriers = build_version_carriers_from_singletons(version_bundles)
             .map_err(|_| Error::InvalidStoredValue("failed to build version-bundle run"))?;
+        let peer_payload_inventory = PeerPayloadInventory {
+            complete_tx_payloads: peer_payload_inventory_refs,
+            authorization_progress: None,
+        };
         // The collector records touched roots while it applies its own -/+
         // replacements.  An incremental carrier renders only those complete
         // parents; it never diffs the retained tree or sends child deltas.
@@ -635,16 +639,38 @@ where
                     .structured_result_tree_replacements(&structured_app_row_changes)?,
             )
         };
+        // A no-op carries no structured state.  Keep the existing compact
+        // empty update rather than paying the v4 tree vocabulary's fixed
+        // envelope cost on cursor acknowledgements.
+        if !reset_result_set
+            && version_carriers.is_empty()
+            && peer_payload_inventory.complete_tx_payloads.is_empty()
+            && result_member_adds.is_empty()
+            && result_member_removes.is_empty()
+            && program_fact_adds.is_empty()
+            && program_fact_removes.is_empty()
+            && result_tree_updates.is_empty()
+        {
+            return Ok(SyncMessage::ViewUpdate {
+                subscription,
+                settled_through: self.clock.applied_global_watermark,
+                reset_result_set: false,
+                version_carriers,
+                version_bundles: Vec::new(),
+                peer_payload_inventory,
+                result_member_adds,
+                result_member_removes,
+                program_fact_adds,
+                program_fact_removes,
+            });
+        }
         Ok(SyncMessage::StructuredViewUpdate {
             subscription,
             settled_through: self.clock.applied_global_watermark,
             reset_result_set,
             version_carriers,
             version_bundles: Vec::new(),
-            peer_payload_inventory: PeerPayloadInventory {
-                complete_tx_payloads: peer_payload_inventory_refs,
-                authorization_progress: None,
-            },
+            peer_payload_inventory,
             result_member_adds: result_member_adds.into_iter().collect(),
             result_member_removes: result_member_removes.into_iter().collect(),
             program_fact_adds,
