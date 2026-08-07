@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use jazz::row_input;
+use jazz::tools::server::JazzServer;
 use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, OutputOccurrenceId, QueryBuilder, Schema,
     SchemaBuilder, SubscriptionStreamItem, TableSchema,
@@ -19,24 +20,47 @@ fn hydration_schema() -> Schema {
 async fn fresh_subscription_first_delivery_reduces_from_empty_to_initial_view() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let client = JazzClient::test_client(hydration_schema()).await;
-            let (first_id, _, first_batch) = client
+            let schema = hydration_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let writer = JazzClient::connect(server.make_client_context_for_user(
+                schema.clone(),
+                "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaa401",
+            ))
+            .await
+            .expect("connect writer");
+            let client = JazzClient::connect(
+                server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaa402"),
+            )
+            .await
+            .expect("connect subscriber");
+            let (first_id, _, first_batch) = writer
                 .insert("items", row_input!("label" => "first"))
                 .expect("insert first initial item");
-            let (second_id, _, second_batch) = client
+            let (second_id, _, second_batch) = writer
                 .insert("items", row_input!("label" => "second"))
                 .expect("insert second initial item");
-            client
-                .wait_for_batch(first_batch, DurabilityTier::Local)
+            writer
+                .wait_for_batch(first_batch, DurabilityTier::EdgeServer)
                 .await
                 .expect("first initial item settles");
-            client
-                .wait_for_batch(second_batch, DurabilityTier::Local)
+            writer
+                .wait_for_batch(second_batch, DurabilityTier::EdgeServer)
                 .await
                 .expect("second initial item settles");
 
+            let query = QueryBuilder::new("items").build();
+            let expected_ids = BTreeSet::from([first_id, second_id]);
+            let rows = client
+                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .await
+                .expect("subscriber reaches the initial edge view");
+            assert_eq!(
+                rows.into_iter().map(|(id, _)| id).collect::<BTreeSet<_>>(),
+                expected_ids,
+                "subscriber must see the complete initial edge view before attaching"
+            );
             let mut stream = client
-                .subscribe(QueryBuilder::new("items").build())
+                .subscribe(query)
                 .await
                 .expect("subscribe after initial rows exist");
             let item = tokio::time::timeout(Duration::from_secs(5), stream.next())
