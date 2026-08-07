@@ -1258,19 +1258,19 @@ impl ClientDbInner {
             while let Some(event) = stream.next_event().await {
                 match event {
                     CoreSubscriptionEvent::Delta {
-                        reset,
+                        reset: _,
                         added,
                         updated,
                         removed,
                         ..
                     } => {
-                        let previous_rows: Vec<OutputOccurrenceId> = current_rows
-                            .iter()
-                            .map(|row| row.occurrence_id.clone())
-                            .collect();
+                        // Core reset events retain delta-shaped row entries:
+                        // an existing occurrence may be reported in `updated`.
+                        // The public stream has no reset marker, so preserve
+                        // its tracked identity and relay those entries as the
+                        // observable add/update/remove changes they are.
                         JazzClient::apply_core_subscription_rows(
                             &mut current_rows,
-                            reset,
                             &added,
                             &updated,
                             &removed,
@@ -1280,21 +1280,13 @@ impl ClientDbInner {
                             .map(|row| row.row.clone())
                             .collect::<Vec<_>>();
                         inner.borrow_mut().remember_rows(&table, &rows_for_cache);
-                        let delta = if reset {
-                            JazzClient::core_subscription_reset_delta(
-                                &db,
-                                &previous_rows,
-                                &current_rows,
-                            )
-                        } else {
-                            JazzClient::core_subscription_change_delta(
-                                &db,
-                                &current_rows,
-                                &added,
-                                &updated,
-                                &removed,
-                            )
-                        };
+                        let delta = JazzClient::core_subscription_change_delta(
+                            &db,
+                            &current_rows,
+                            &added,
+                            &updated,
+                            &removed,
+                        );
                         let Ok(delta) = delta else {
                             break;
                         };
@@ -2157,54 +2149,12 @@ impl JazzClient {
         ))
     }
 
-    fn core_subscription_snapshot_delta(
-        db: &Backend,
-        rows: &[CoreSubscriptionOutputRow],
-    ) -> Result<OrderedRowDelta> {
-        let added = rows
-            .iter()
-            .enumerate()
-            .map(|(index, row)| {
-                let public = Self::core_subscription_row_to_public(db, row)?;
-                Ok(OrderedAdded {
-                    id: public.id.clone(),
-                    index,
-                    row: public,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(OrderedRowDelta {
-            added,
-            ..OrderedRowDelta::default()
-        })
-    }
-
-    fn core_subscription_reset_delta(
-        db: &Backend,
-        previous_rows: &[OutputOccurrenceId],
-        rows: &[CoreSubscriptionOutputRow],
-    ) -> Result<OrderedRowDelta> {
-        let removed = previous_rows
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(index, id)| OrderedRemoved { id, index })
-            .collect();
-        let mut delta = Self::core_subscription_snapshot_delta(db, rows)?;
-        delta.removed = removed;
-        Ok(delta)
-    }
-
     fn apply_core_subscription_rows(
         current_rows: &mut Vec<CoreSubscriptionOutputRow>,
-        reset: bool,
         added_rows: &[CoreSubscriptionOutputRow],
         updated_rows: &[CoreSubscriptionOutputRow],
         removed_rows: &[crate::db::RemovedRow],
     ) {
-        if reset {
-            current_rows.clear();
-        }
         current_rows.retain(|row| {
             !removed_rows
                 .iter()
