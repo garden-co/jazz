@@ -662,6 +662,16 @@ one-shot read, an initial snapshot, a maintained delta, and a settled subscriber
 read of the same aggregate at the same frontier MUST all reduce to the same
 represented result, per §6.4.2.
 
+Decision, Anselm 2026-08-07: a scalar global aggregate over no input rows
+delivers a present row — `0` for `count`, `NULL` for `sum`, `avg`, `min` and
+`max` — following SQL, on both the one-shot and the maintained path. This is a
+consequence of the reduction requirement above rather than an independent rule:
+`groove/SPEC/3_queries_operators.md` already specified the one-shot behaviour, so
+a maintained subscription that delivered nothing for the same query would make
+the two paths disagree. Ch. 16 §16.6 carries the maintained-side detail,
+including why this row is replaced rather than added or removed across the
+transition to and from a non-empty input.
+
 ### 6.5 Query-driven sync
 
 A subscription binds a shape to one binding in one read view. `RegisterShapeOptions`
@@ -830,19 +840,6 @@ parallel query identities.
   cut with the wire and schema consequences priced in, not as a quiet
   relaxation. What should decide it is whether real schemas aggregate narrow
   integer columns at all.
-- 🔶 **The empty global aggregate row, across the maintained boundary.**
-  `groove/SPEC/3_queries_operators.md` specifies that an empty global aggregate
-  reports `NULL` for `sum`/`avg`/`min`/`max` and `0` for `count`, following SQL.
-  Ch. 16 §16.6 places "empty-global-row SQL compatibility" outside the maintained
-  subscription surface until its replay semantics and payload shape are
-  specified. Both cannot hold: as written, a one-shot read of an empty global
-  aggregate returns a row and a maintained subscription over the same query does
-  not, which violates the reduction requirement in §6.4.3 and §6.4.2. Either the
-  maintained surface admits the empty global row — which requires saying what
-  its synthetic identity is when no group key exists to derive one — or the
-  one-shot path stops emitting it and Jazz diverges from SQL in a stated,
-  documented way. This is the one contradiction in the aggregate surface that
-  is visible today rather than latent.
 - 🔶 **SQL dialect boundary.** Define the first supported SQL subset, parameter
   syntax, error reporting, and escape-hatch rules, and prove it lowers to the
   same `Query` contract as the builder DSL.
