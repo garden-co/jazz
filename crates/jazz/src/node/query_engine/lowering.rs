@@ -520,14 +520,14 @@ fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDom
                         .entry(name.to_owned())
                         .or_insert_with(|| ClaimParameter {
                             path,
-                            ty: column_type_from_value_type(&field.value_type),
+                            ty: field.value_type.clone(),
                         });
                     domain.routing_params.insert(name.to_owned());
                 } else {
                     domain
                         .user_params
                         .entry(name.to_owned())
-                        .or_insert_with(|| column_type_from_value_type(&field.value_type));
+                        .or_insert_with(|| field.value_type.clone());
                     domain.routing_params.insert(route_param_field(name));
                 }
             }
@@ -560,37 +560,6 @@ fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDom
         | GraphBuilder::InlineRecords { .. }
         | GraphBuilder::Index { .. }
         | GraphBuilder::FrontierSource { .. } => {}
-    }
-}
-
-fn column_type_from_value_type(value_type: &ValueType) -> ColumnType {
-    match value_type {
-        ValueType::U8 => ColumnType::U8,
-        ValueType::U16 => ColumnType::U16,
-        ValueType::U32 => ColumnType::U32,
-        ValueType::U64 => ColumnType::U64,
-        ValueType::I32 => ColumnType::I32,
-        ValueType::I64 => ColumnType::I64,
-        ValueType::F64 => ColumnType::F64,
-        ValueType::Bool => ColumnType::Bool,
-        ValueType::String => ColumnType::String,
-        ValueType::Bytes => ColumnType::Bytes,
-        ValueType::Uuid => ColumnType::Uuid,
-        ValueType::Enum(schema) => ColumnType::Enum(schema.clone()),
-        ValueType::Tuple(members) => {
-            ColumnType::Tuple(members.iter().map(column_type_from_value_type).collect())
-        }
-        ValueType::Array(member) => {
-            ColumnType::Array(Box::new(column_type_from_value_type(member)))
-        }
-        ValueType::Nullable(inner) => {
-            ColumnType::Nullable(Box::new(column_type_from_value_type(inner)))
-        }
-        ValueType::Record(_) => {
-            panic!(
-                "record-valued Groove outputs are not part of the Jazz query schema in this stage"
-            )
-        }
     }
 }
 
@@ -3217,7 +3186,7 @@ fn value_source_descriptor(columns: &[ValueSourceColumn]) -> RecordDescriptor {
     RecordDescriptor::new(
         columns
             .iter()
-            .map(|column| (column.name.clone(), column.ty.value_type())),
+            .map(|column| (column.name.clone(), column.ty.clone())),
     )
 }
 
@@ -3253,7 +3222,7 @@ fn binding_source_descriptor_with_user_params(
     Ok(RecordDescriptor::new(
         binding_descriptor_params_with_user_params(request, additional_user_params)?
             .into_iter()
-            .map(|(name, column_type)| (name, column_type.value_type())),
+            .map(|(name, column_type)| (name, column_type.clone())),
     ))
 }
 
@@ -3319,7 +3288,7 @@ fn lower_value_source(
             let input_descriptor = RecordDescriptor::new(
                 params
                     .iter()
-                    .map(|(name, column_type)| (name.clone(), column_type.value_type())),
+                    .map(|(name, column_type)| (name.clone(), column_type.clone())),
             );
             let projected = columns
                 .iter()
@@ -3768,9 +3737,7 @@ fn lower_projection_field(
             field,
             nullable_depth,
         } => {
-            if nullable_depth > 0
-                && !matches!(column.output.ty.value_type(), ValueType::Nullable(_))
-            {
+            if nullable_depth > 0 && !matches!(column.output.ty.clone(), ValueType::Nullable(_)) {
                 unwrap_before_project.insert(field.clone(), nullable_depth);
             } else if nullable_depth > 0 {
                 nullable_after_project = Some((column.output.name.clone(), nullable_depth));
@@ -3958,10 +3925,7 @@ fn lower_equality_param_filter_joins(
         } else {
             binding_source_descriptor_with_user_params(
                 request,
-                [(
-                    join.param.clone(),
-                    column_type_from_value_type(&join.value_type),
-                )],
+                [(join.param.clone(), join.value_type.clone())],
             )?
         };
         let binding =
@@ -4570,7 +4534,7 @@ fn coerce_literal_for_source_field(
     else {
         return value;
     };
-    coerce_literal_for_value_type(value, &column.column_type.value_type())
+    coerce_literal_for_value_type(value, &column.column_type.clone())
 }
 
 fn non_null_value_type(mut value_type: &ValueType) -> &ValueType {
@@ -6435,9 +6399,7 @@ fn route_literal_project_field(
         let literal = domain
             .claim_params
             .get(route_field)
-            .map(|claim| {
-                coerce_literal_for_value_type(value.clone().into(), &claim.ty.value_type())
-            })
+            .map(|claim| coerce_literal_for_value_type(value.clone().into(), &claim.ty.clone()))
             .unwrap_or_else(|| value.into());
         return Ok(ProjectField::literal(route_field.to_owned(), literal));
     }
@@ -6454,7 +6416,7 @@ fn route_literal_project_field(
     let literal = domain
         .user_params
         .get(param)
-        .map(|ty| coerce_literal_for_value_type(value.clone().into(), &ty.value_type()))
+        .map(|ty| coerce_literal_for_value_type(value.clone().into(), &ty.clone()))
         .unwrap_or_else(|| value.clone().into());
     Ok(ProjectField::literal(route_field.to_owned(), literal))
 }
@@ -6850,7 +6812,7 @@ fn aggregate_typed_group_field(
     })?;
     Ok(TypedOutputField {
         name: field,
-        ty: column_type_from_value_type(&value_type),
+        ty: value_type,
     })
 }
 
@@ -6860,7 +6822,7 @@ fn aggregate_typed_output_field(
 ) -> CapabilityResult<TypedOutputField> {
     Ok(TypedOutputField {
         name: logical_user_column(&output.output.name).to_owned(),
-        ty: column_type_from_value_type(&aggregate_output_value_type(output, source)?),
+        ty: aggregate_output_value_type(output, source)?,
     })
 }
 
@@ -7037,7 +6999,7 @@ fn deletion_witness_fields_for_tagged_rows(
     fields.extend(source.table_schema.columns.iter().map(|column| {
         ProjectField::null_typed(
             table_user_column_field(&source.table_schema.name, &column.name),
-            ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
+            ValueType::Nullable(Box::new(column.column_type.clone())),
         )
     }));
     Ok(fields)

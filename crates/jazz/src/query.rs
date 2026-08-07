@@ -4201,19 +4201,19 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
 
 fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
     match ty {
-        ColumnType::U8 => bytes.push(1),
-        ColumnType::U16 => bytes.push(2),
-        ColumnType::U32 => bytes.push(3),
-        ColumnType::U64 => bytes.push(4),
-        ColumnType::I32 => bytes.push(15),
-        ColumnType::I64 => bytes.push(14),
-        ColumnType::F64 => bytes.push(5),
-        ColumnType::Bool => bytes.push(6),
-        ColumnType::String => bytes.push(7),
-        ColumnType::Bytes => bytes.push(8),
-        ColumnType::Uuid => bytes.push(9),
+        ColumnType::U8 => bytes.push(0),
+        ColumnType::U16 => bytes.push(1),
+        ColumnType::U32 => bytes.push(2),
+        ColumnType::U64 => bytes.push(3),
+        ColumnType::I32 => bytes.push(4),
+        ColumnType::I64 => bytes.push(5),
+        ColumnType::F64 => bytes.push(6),
+        ColumnType::Bool => bytes.push(7),
+        ColumnType::String => bytes.push(8),
+        ColumnType::Bytes => bytes.push(9),
+        ColumnType::Uuid => bytes.push(10),
         ColumnType::Enum(schema) => {
-            bytes.push(10);
+            bytes.push(11);
             put_str(bytes, &schema.name);
             put_len(bytes, schema.variants.len());
             for variant in &schema.variants {
@@ -4221,19 +4221,33 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
             }
         }
         ColumnType::Tuple(types) => {
-            bytes.push(11);
+            bytes.push(12);
             put_len(bytes, types.len());
             for ty in types {
                 put_column_type(bytes, ty);
             }
         }
         ColumnType::Array(member) => {
-            bytes.push(12);
+            bytes.push(13);
             put_column_type(bytes, member);
         }
         ColumnType::Nullable(inner) => {
-            bytes.push(13);
+            bytes.push(14);
             put_column_type(bytes, inner);
+        }
+        ColumnType::Record(descriptor) => {
+            bytes.push(15);
+            put_len(bytes, descriptor.fields().len());
+            for field in descriptor.fields() {
+                match &field.name {
+                    Some(name) => {
+                        bytes.push(1);
+                        put_str(bytes, name);
+                    }
+                    None => bytes.push(0),
+                }
+                put_column_type(bytes, &field.value_type);
+            }
         }
     }
 }

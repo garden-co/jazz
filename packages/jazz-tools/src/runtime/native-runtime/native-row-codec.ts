@@ -129,57 +129,21 @@ export function readNativeRelationSubscriptionEdge(
 export function writeDescriptor(writer: PostcardWriterLike, descriptor: DescriptorField[]): void {
   writer.vec((field, index) => {
     field.some((nameWriter) => nameWriter.string(descriptor[index].name ?? ""));
-    writeGrooveValueType(field, descriptor[index].valueType);
+    writeValueType(field, descriptor[index].valueType);
   }, descriptor.length);
 }
 
 export function readDescriptor(reader: PostcardReaderLike): DescriptorField[] {
   return reader.readVec((fieldReader) => ({
     name: fieldReader.option((nameReader) => nameReader.string()),
-    valueType: readGrooveValueType(fieldReader),
+    valueType: readValueType(fieldReader),
   }));
 }
 
 export function writeValueType(writer: PostcardWriterLike, valueType: ValueType): void {
   writer.enumUnit(valueType.tag);
-  if (valueType.tag === 10) {
-    const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
-    writer.vec(
-      (memberWriter, index) => writeValueType(memberWriter, members[index]),
-      members.length,
-    );
-    return;
-  }
-  if (valueType.tag === 11 || valueType.tag === 12) {
-    if (!valueType.inner) throw new Error(`missing inner value type for tag ${valueType.tag}`);
-    writeValueType(writer, valueType.inner);
-    return;
-  }
-  if (valueType.tag === 13) {
-    if (!valueType.record) throw new Error("missing inline record descriptor for tag 13");
-    writeDescriptor(writer, valueType.record);
-  }
-}
-
-export function readValueType(reader: PostcardReaderLike): ValueType {
-  const tag = reader.u64();
-  if (tag === 11 || tag === 12) {
-    return { tag, inner: readValueType(reader) };
-  }
-  if (tag === 10) {
-    const members = reader.readVec(readValueType);
-    return { tag, members, inner: members[0] };
-  }
-  if (tag === 13) {
-    return { tag, record: readDescriptor(reader) };
-  }
-  return { tag };
-}
-
-function writeGrooveValueType(writer: PostcardWriterLike, valueType: ValueType): void {
-  writer.enumUnit(valueType.tag);
-  if (valueType.tag === 9) {
-    if (!valueType.enumSchema) throw new Error("missing enum schema for Groove ValueType::Enum");
+  if (valueType.tag === 11) {
+    if (!valueType.enumSchema) throw new Error("missing enum schema for ValueType::Enum");
     writer.string(valueType.enumSchema.name);
     writer.vec(
       (variantWriter, index) => variantWriter.string(valueType.enumSchema!.variants[index]!),
@@ -187,29 +151,28 @@ function writeGrooveValueType(writer: PostcardWriterLike, valueType: ValueType):
     );
     return;
   }
-  if (valueType.tag === 10) {
+  if (valueType.tag === 12) {
     const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
     writer.vec(
-      (memberWriter, index) => writeGrooveValueType(memberWriter, members[index]!),
+      (memberWriter, index) => writeValueType(memberWriter, members[index]),
       members.length,
     );
     return;
   }
-  if (valueType.tag === 11 || valueType.tag === 12) {
+  if (valueType.tag === 13 || valueType.tag === 14) {
     if (!valueType.inner) throw new Error(`missing inner value type for tag ${valueType.tag}`);
-    writeGrooveValueType(writer, valueType.inner);
+    writeValueType(writer, valueType.inner);
     return;
   }
-  if (valueType.tag === 13) {
-    if (!valueType.record)
-      throw new Error("missing inline record descriptor for Groove ValueType::Record");
+  if (valueType.tag === 15) {
+    if (!valueType.record) throw new Error("missing inline record descriptor for tag 15");
     writeDescriptor(writer, valueType.record);
   }
 }
 
-function readGrooveValueType(reader: PostcardReaderLike): ValueType {
+export function readValueType(reader: PostcardReaderLike): ValueType {
   const tag = reader.u64();
-  if (tag === 9) {
+  if (tag === 11) {
     return {
       tag,
       enumSchema: {
@@ -218,14 +181,14 @@ function readGrooveValueType(reader: PostcardReaderLike): ValueType {
       },
     };
   }
-  if (tag === 11 || tag === 12) {
-    return { tag, inner: readGrooveValueType(reader) };
+  if (tag === 13 || tag === 14) {
+    return { tag, inner: readValueType(reader) };
   }
-  if (tag === 10) {
-    const members = reader.readVec(readGrooveValueType);
+  if (tag === 12) {
+    const members = reader.readVec(readValueType);
     return { tag, members, inner: members[0] };
   }
-  if (tag === 13) {
+  if (tag === 15) {
     return { tag, record: readDescriptor(reader) };
   }
   return { tag };
@@ -449,15 +412,15 @@ function decodeRecordValueWithLayout(
 }
 
 function unwrapValue(value: Uint8Array, valueType: ValueType): Uint8Array | null {
-  if (valueType.tag !== 12) return value;
+  if (valueType.tag !== 14) return value;
   const unwrapped = unwrapNullable(value);
   if (unwrapped == null) return null;
   return valueType.inner ? unwrapValue(unwrapped, valueType.inner) : unwrapped;
 }
 
 function formatValueType(valueType: ValueType): string {
-  if (valueType.tag === 11 || valueType.tag === 12) {
-    return `${valueType.tag === 11 ? "Array" : "Nullable"}<${valueType.inner ? formatValueType(valueType.inner) : "?"}>`;
+  if (valueType.tag === 13 || valueType.tag === 14) {
+    return `${valueType.tag === 13 ? "Array" : "Nullable"}<${valueType.inner ? formatValueType(valueType.inner) : "?"}>`;
   }
   return valueTypeName(valueType.tag);
 }
@@ -473,29 +436,29 @@ function valueTypeName(tag: number): string {
     case 3:
       return "U64";
     case 4:
-      return "F64";
-    case 5:
-      return "Bool";
-    case 6:
-      return "String";
-    case 7:
-      return "Bytes";
-    case 8:
-      return "Uuid";
-    case 9:
-      return "Enum";
-    case 10:
-      return "Tuple";
-    case 11:
-      return "Array";
-    case 12:
-      return "Nullable";
-    case 13:
-      return "Record";
-    case 14:
-      return "I64";
-    case 15:
       return "I32";
+    case 5:
+      return "I64";
+    case 6:
+      return "F64";
+    case 7:
+      return "Bool";
+    case 8:
+      return "String";
+    case 9:
+      return "Bytes";
+    case 10:
+      return "Uuid";
+    case 11:
+      return "Enum";
+    case 12:
+      return "Tuple";
+    case 13:
+      return "Array";
+    case 14:
+      return "Nullable";
+    case 15:
+      return "Record";
     default:
       return `unknown(${tag})`;
   }
@@ -650,33 +613,33 @@ function parseUuid(value: string): Uint8Array {
 
 export function storageColumnValueType(column: ColumnDescriptor): ValueType {
   const valueType = storageColumnTypeToValueType(column.column_type);
-  return column.nullable ? { tag: 12, inner: valueType } : valueType;
+  return column.nullable ? { tag: 14, inner: valueType } : valueType;
 }
 
 export function storageColumnTypeToValueType(type: ColumnType): ValueType {
   switch (type.type) {
     case "Boolean":
-      return { tag: 5 };
+      return { tag: 7 };
     case "Integer":
-      return { tag: 15 };
+      return { tag: 4 };
     case "BigInt":
-      return { tag: 14 };
+      return { tag: 5 };
     case "Timestamp":
       return { tag: 3 };
     case "Double":
-      return { tag: 4 };
+      return { tag: 6 };
     case "Text":
     case "Json":
     case "Enum":
-      return { tag: 6 };
-    case "Bytea":
-      return { tag: 7 };
-    case "Uuid":
       return { tag: 8 };
+    case "Bytea":
+      return { tag: 9 };
+    case "Uuid":
+      return { tag: 10 };
     case "Array":
-      return { tag: 11, inner: storageColumnTypeToValueType(type.element) };
+      return { tag: 13, inner: storageColumnTypeToValueType(type.element) };
     case "Row":
-      return { tag: 7 };
+      return { tag: 9 };
   }
 }
 
@@ -821,21 +784,21 @@ function formatUuid(bytes: Uint8Array): string {
 function fixedSize(valueType: ValueType): number | undefined {
   switch (valueType.tag) {
     case 0:
-    case 5:
-    case 9:
+    case 7:
+    case 11:
       return 1;
     case 1:
       return 2;
     case 2:
-    case 15:
+    case 4:
       return 4;
     case 3:
-    case 14:
-    case 4:
+    case 5:
+    case 6:
       return 8;
-    case 8:
+    case 10:
       return 16;
-    case 10: {
+    case 12: {
       const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
       return members.reduce<number | undefined>((total, member) => {
         if (total == null) return undefined;
@@ -843,9 +806,9 @@ function fixedSize(valueType: ValueType): number | undefined {
         return memberSize == null ? undefined : total + memberSize;
       }, 0);
     }
-    case 11:
+    case 13:
       return undefined;
-    case 12: {
+    case 14: {
       const innerSize = valueType.inner ? fixedSize(valueType.inner) : undefined;
       return innerSize == null ? undefined : innerSize + 1;
     }

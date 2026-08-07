@@ -5376,7 +5376,25 @@ function readPolicyOperandForTest(reader: PostcardReader): TestPolicyOperand {
 
 function skipSchemaValueType(reader: PostcardReader): void {
   const tag = reader.u64();
-  if (tag === 11 || tag === 12) skipSchemaValueType(reader);
+  if (tag === 11) {
+    reader.string();
+    reader.readVec((variant) => variant.string());
+    return;
+  }
+  if (tag === 12) {
+    reader.readVec(skipSchemaValueType);
+    return;
+  }
+  if (tag === 13 || tag === 14) {
+    skipSchemaValueType(reader);
+    return;
+  }
+  if (tag === 15) {
+    reader.readVec((field) => {
+      field.option((name) => name.string());
+      skipSchemaValueType(field);
+    });
+  }
 }
 
 function skipGrooveValue(reader: PostcardReader): void {
@@ -5634,7 +5652,7 @@ function writeRowBatches(writer: PostcardWriter, rows: EncodedTestRow[]): void {
       (row) => row.createdAt !== undefined || row.updatedAt !== undefined,
     );
     const descriptor = [
-      { name: "title", valueType: { tag: 6 } },
+      { name: "title", valueType: { tag: 8 } },
       ...(hasProvenance
         ? [
             { name: "$createdAt", valueType: { tag: 3 } },
@@ -5719,9 +5737,9 @@ function encodeUserWrappedSubscriptionDelta(row: {
   note: string;
 }): Uint8Array {
   const descriptor = [
-    { name: "row_uuid", valueType: { tag: 8 } },
-    { name: "user_title", valueType: { tag: 12, inner: { tag: 6 } } },
-    { name: "user_note", valueType: { tag: 12, inner: { tag: 12, inner: { tag: 6 } } } },
+    { name: "row_uuid", valueType: { tag: 10 } },
+    { name: "user_title", valueType: { tag: 14, inner: { tag: 8 } } },
+    { name: "user_note", valueType: { tag: 14, inner: { tag: 14, inner: { tag: 8 } } } },
     { name: "$createdAt", valueType: { tag: 3 } },
   ];
   const delta = new PostcardWriter();
@@ -5763,8 +5781,8 @@ function writeRelationEdge(writer: PostcardWriter, edge: NativeRelationSubscript
 
 function encodeBinaryLargeValueRows(): Uint8Array {
   const descriptor = [
-    { name: "chunk_refs", valueType: { tag: 11, inner: { tag: 8 } } },
-    { name: "chunk_sizes", valueType: { tag: 11, inner: { tag: 4 } } },
+    { name: "chunk_refs", valueType: { tag: 13, inner: { tag: 10 } } },
+    { name: "chunk_sizes", valueType: { tag: 13, inner: { tag: 6 } } },
   ];
   const writer = new PostcardWriter();
   writer.vec((batch) => {

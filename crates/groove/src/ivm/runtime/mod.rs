@@ -3537,12 +3537,12 @@ where
 }
 
 fn primary_key_descriptor(primary_key: &PrimaryKey) -> RecordDescriptor {
-    RecordDescriptor::new(primary_key.columns.iter().map(|column| {
-        (
-            column.column.clone(),
-            column.key_type.column_type().value_type(),
-        )
-    }))
+    RecordDescriptor::new(
+        primary_key
+            .columns
+            .iter()
+            .map(|column| (column.column.clone(), column.key_type.column_type().clone())),
+    )
 }
 
 fn validate_public_output_fields(
@@ -9596,8 +9596,8 @@ mod tests {
 
     fn reach_descriptor() -> RecordDescriptor {
         RecordDescriptor::new([
-            ("src", ColumnType::U64.value_type()),
-            ("dst", ColumnType::U64.value_type()),
+            ("src", ColumnType::U64.clone()),
+            ("dst", ColumnType::U64.clone()),
         ])
     }
 
