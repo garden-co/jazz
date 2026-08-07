@@ -430,8 +430,8 @@ pub(crate) struct SyntheticResultMembershipSchema {
     pub(crate) table_field: String,
     /// Stable synthetic row id field.
     pub(crate) row_field: String,
-    /// Synthetic revision/version field used for replacement deltas.
-    pub(crate) revision_field: String,
+    /// Opaque replacement-token field; not a result-row version.
+    pub(crate) replacement_field: String,
     /// Retained binding/routing parameter fields.
     pub(crate) routing_param_fields: BTreeSet<String>,
 }

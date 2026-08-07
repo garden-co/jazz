@@ -6725,7 +6725,7 @@ fn aggregate_result_schema(
         synthetic: SyntheticResultMembershipSchema {
             table_field: "table_name".to_owned(),
             row_field: "synthetic_row".to_owned(),
-            revision_field: "synthetic_revision".to_owned(),
+            replacement_field: "synthetic_replacement".to_owned(),
             routing_param_fields: routing_param_fields.clone(),
         },
         group_key_fields,
@@ -6758,9 +6758,12 @@ fn aggregate_result_membership_fields(
             explain: ExplainPlan::default(),
         }));
     }
+    // The synthetic table is only a protocol label. Aggregate identity is the
+    // group-key value below (or the fixed global token), never a source-table
+    // name or an aggregate value.
     let mut fields = vec![ProjectField::literal(
         "table_name",
-        Value::String(format!("{}_aggregate", source.table_schema.name)),
+        Value::String("aggregate_result".to_owned()),
     )];
     if let Some(group) = group_by.first() {
         fields.push(ProjectField::renamed(
@@ -6773,14 +6776,17 @@ fn aggregate_result_membership_fields(
             Value::String("global".to_owned()),
         ));
     }
+    // This runtime-only token pairs the aggregate operator's before/after
+    // records. It is wrapped as an opaque protocol type before it crosses the
+    // runtime boundary, so it cannot be mistaken for row version metadata.
     if let Some(first_output) = outputs.first() {
         fields.push(ProjectField::renamed(
             logical_user_column(&first_output.output.name),
-            "synthetic_revision",
+            "synthetic_replacement",
         ));
     } else {
         fields.push(ProjectField::literal(
-            "synthetic_revision",
+            "synthetic_replacement",
             Value::String("empty".to_owned()),
         ));
     }
@@ -6832,7 +6838,7 @@ fn aggregate_output_value_type(
 ) -> CapabilityResult<ValueType> {
     match output.function {
         AggregateFunction::Count => Ok(ValueType::U64),
-        AggregateFunction::Avg => Ok(ValueType::F64),
+        AggregateFunction::Avg => Ok(ValueType::Nullable(Box::new(ValueType::F64))),
         AggregateFunction::Sum | AggregateFunction::Min | AggregateFunction::Max => {
             let input = output.input.as_ref().ok_or_else(|| {
                 Box::new(CapabilityReport {
@@ -6843,13 +6849,17 @@ fn aggregate_output_value_type(
                 })
             })?;
             let field = aggregate_source_field_name(input, source)?;
-            source_field_type(source, &field).cloned().ok_or_else(|| {
+            let value_type = source_field_type(source, &field).cloned().ok_or_else(|| {
                 Box::new(CapabilityReport {
                     gaps: vec![UnsupportedReason::Runtime(format!(
                         "aggregate input field {field:?} is missing from resolved descriptor"
                     ))],
                     explain: ExplainPlan::default(),
                 })
+            })?;
+            Ok(match value_type {
+                ValueType::Nullable(inner) => ValueType::Nullable(inner),
+                value_type => ValueType::Nullable(Box::new(value_type)),
             })
         }
     }

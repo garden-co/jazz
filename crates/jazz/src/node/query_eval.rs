@@ -49,7 +49,7 @@ use crate::protocol::{
     BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry, ReadViewKey,
     ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry,
     ResultMemberPayloadEntry, RowVersionRef, ShapeAst, ShapeBody, Subscribe, SubscriptionKey,
-    SyncMessage,
+    SyncMessage, SyntheticReplacementToken,
 };
 use crate::protocol_limits::{MAX_KNOWN_STATE_EXACT_REFS, MAX_SYNC_MESSAGE_BYTES};
 use crate::query::{
@@ -62,21 +62,15 @@ use crate::schema::{ColumnSchema, branch_metadata_table_schema, global_current_i
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
 
-/// The maintained aggregate terminal deliberately names its synthetic relation
-/// after the source table.  Admit only that exact terminal as a public root:
-/// other synthetic members have protocol meanings that cannot be rendered as
-/// application rows.
+/// Aggregate terminal membership is structurally identified by the aggregate
+/// query plan and its synthetic group-key member. Its table label is not an
+/// identity and must not participate in public delivery decisions.
 fn is_public_aggregate_result_member(
     member: &ResultMemberEntry,
-    result_table: &str,
+    _result_table: &str,
     aggregate_query: bool,
 ) -> bool {
-    aggregate_query
-        && matches!(
-            member,
-            ResultMemberEntry::Synthetic { table, .. }
-                if table == &format!("{result_table}_aggregate")
-        )
+    aggregate_query && matches!(member, ResultMemberEntry::Synthetic { .. })
 }
 
 fn is_public_result_member(
@@ -368,7 +362,7 @@ fn fact_public_fields(
             let mut fields = vec![
                 schema.synthetic.table_field.clone(),
                 schema.synthetic.row_field.clone(),
-                schema.synthetic.revision_field.clone(),
+                schema.synthetic.replacement_field.clone(),
             ];
             fields.extend(
                 schema
@@ -3185,7 +3179,7 @@ fn normalized_aggregate_function(function: AggregateFunction) -> NormalizedAggre
 fn normalized_aggregate_output_type(aggregate: &Aggregate) -> ColumnType {
     match aggregate.function {
         AggregateFunction::Count => ColumnType::U64,
-        AggregateFunction::Avg => ColumnType::F64,
+        AggregateFunction::Avg => ColumnType::Nullable(Box::new(ColumnType::F64)),
         // Aggregate lowering is currently reported as an unsupported
         // query-engine capability before Groove needs the exact result type.
         AggregateFunction::Sum | AggregateFunction::Min | AggregateFunction::Max => {
@@ -5110,14 +5104,44 @@ where
             .filter(|fact| fact_is_visible(fact))
             .cloned()
             .collect::<BTreeSet<_>>();
+        let program_fact_adds = current_facts
+            .difference(&previous_facts)
+            .cloned()
+            .collect::<Vec<_>>();
+        let program_fact_removes = previous_facts
+            .difference(&current_facts)
+            .cloned()
+            .collect::<Vec<_>>();
+        // A synthetic aggregate member is meaningful only together with its
+        // payload fact. In particular, an empty aggregate has a member and a
+        // payload whose aggregate field is `Nullable(None)`; it is not a
+        // member with a missing payload. Carry both representations through
+        // the settled-view handoff so facade materialization can retain that
+        // distinction.
+        let result_payload_adds = program_fact_adds
+            .iter()
+            .filter_map(|fact| match fact {
+                ProgramFactEntry::ResultPayload(payload) => {
+                    Some((payload.member.clone(), payload.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let result_payload_removes = program_fact_removes
+            .iter()
+            .filter_map(|fact| match fact {
+                ProgramFactEntry::ResultPayload(payload) => Some(payload.member.clone()),
+                _ => None,
+            })
+            .collect();
         Ok(Some(
             super::maintained_subscription_view::ResultTransitions {
                 adds: current.difference(&previous).cloned().collect(),
                 removes: previous.difference(&current).cloned().collect(),
-                result_payload_adds: Vec::new(),
-                result_payload_removes: Vec::new(),
-                program_fact_adds: current_facts.difference(&previous_facts).cloned().collect(),
-                program_fact_removes: previous_facts.difference(&current_facts).cloned().collect(),
+                result_payload_adds,
+                result_payload_removes,
+                program_fact_adds,
+                program_fact_removes,
                 structured_app_row_changes: BTreeSet::new(),
                 allow_storage_witness_fallback: true,
                 observed_delta_batches: 0,
@@ -7241,14 +7265,12 @@ where
 
     fn materialize_aggregate_query_rows(
         &mut self,
-        _query: &crate::query::Query,
+        query: &crate::query::Query,
         table: &TableSchema,
         deltas: groove::ivm::RecordDeltas,
     ) -> Result<Vec<CurrentRow>, Error> {
         let mut rows = Vec::new();
-        for (index, (record, _weight)) in
-            deltas.iter().filter(|(_, weight)| *weight > 0).enumerate()
-        {
+        for (record, _weight) in deltas.iter().filter(|(_, weight)| *weight > 0) {
             let mut cells = BTreeMap::new();
             for field in record.descriptor().fields() {
                 let Some(name) = field.name.as_deref() else {
@@ -7264,12 +7286,14 @@ where
                         record.get_idx(record.descriptor().field_index(name).ok_or(
                             Error::InvalidStoredValue("aggregate record field missing"),
                         )?)?;
-                    cells.insert(column.name.clone(), value);
+                    if let Some(value) = aggregate_payload_cell_value(query, &column.name, value) {
+                        cells.insert(column.name.clone(), value);
+                    }
                 }
             }
             rows.push(current_row_from_cells(
                 table,
-                aggregate_row_uuid(index),
+                aggregate_query_row_uuid(query, &record)?,
                 &cells,
             )?);
         }
@@ -7619,6 +7643,28 @@ where
                 _ => {}
             }
         }
+        // Aggregate facts are the payload vocabulary for synthetic result
+        // members. Preserve their current values alongside membership while
+        // coalescing a multisink batch; otherwise a present NULL or a revised
+        // aggregate can be mistaken for an absent payload at materialization.
+        transitions.result_payload_adds = transitions
+            .program_fact_adds
+            .iter()
+            .filter_map(|fact| match fact {
+                ProgramFactEntry::ResultPayload(payload) => {
+                    Some((payload.member.clone(), payload.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        transitions.result_payload_removes = transitions
+            .program_fact_removes
+            .iter()
+            .filter_map(|fact| match fact {
+                ProgramFactEntry::ResultPayload(payload) => Some(payload.member.clone()),
+                _ => None,
+            })
+            .collect();
         Ok(Some(transitions))
     }
 
@@ -8337,7 +8383,10 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "aggregate result payload is missing an output column",
                 ))?;
-            cells.insert(column.name.clone(), payload_record.get_idx(index)?);
+            let value = payload_record.get_idx(index)?;
+            if let Some(value) = aggregate_payload_cell_value(query, &column.name, value) {
+                cells.insert(column.name.clone(), value);
+            }
         }
         current_row_from_cells(&table, aggregate_result_member_row_uuid(member)?, &cells)
     }
@@ -9856,6 +9905,33 @@ where
     }
 }
 
+/// Flatten the nullable aggregate-result representation into a current-row
+/// cell.  A non-count aggregate payload uses `Nullable(None)` for SQL NULL;
+/// the current row's outer nullable envelope represents that public NULL.
+/// This is deliberately called only after a [`ResultMemberPayloadEntry`] has
+/// been found, preserving the distinction between a present NULL and a
+/// genuinely missing payload.
+fn aggregate_payload_cell_value(
+    query: &crate::query::Query,
+    column: &str,
+    value: Value,
+) -> Option<Value> {
+    let aggregate = query.aggregate.as_ref().and_then(|aggregate| {
+        aggregate
+            .aggregates
+            .iter()
+            .find(|aggregate| aggregate.alias == column)
+    });
+    match aggregate {
+        Some(aggregate) if aggregate.function != AggregateFunction::Count => match value {
+            Value::Nullable(None) => None,
+            Value::Nullable(Some(value)) => Some(*value),
+            value => Some(value),
+        },
+        _ => Some(value),
+    }
+}
+
 impl<S> HistoricalRead<'_, S>
 where
     S: OrderedKvStorage,
@@ -11059,22 +11135,56 @@ fn aggregate_result_column_type(
                 .column
                 .as_ref()
                 .ok_or(Error::InvalidStoredValue("aggregate input column missing"))?;
-            source_table
+            let column_type = source_table
                 .columns
                 .iter()
                 .find(|candidate| &candidate.name == column)
                 .map(|column| column.column_type.clone())
-                .ok_or(Error::InvalidStoredValue("aggregate input column missing"))
+                .ok_or(Error::InvalidStoredValue("aggregate input column missing"))?;
+            // `CurrentRow` supplies the public nullable envelope.  The
+            // aggregate payload itself carries the SQL nullable layer, which
+            // `current_row_from_aggregate_result_payload` flattens before it
+            // reaches this synthetic table schema.
+            Ok(match column_type {
+                ColumnType::Nullable(inner) => *inner,
+                column_type => column_type,
+            })
         }
         AggregateFunction::Avg => Ok(ColumnType::F64),
     }
 }
 
-fn aggregate_row_uuid(index: usize) -> RowUuid {
-    let mut bytes = [0_u8; 16];
-    bytes[..8].copy_from_slice(b"jazzagg:");
-    bytes[8..].copy_from_slice(&(index as u64).to_be_bytes());
-    RowUuid::from_bytes(bytes)
+/// Use the same stable identity for direct aggregate reads and maintained
+/// aggregate delivery.  A global aggregate is keyed by `"global"`; grouped
+/// aggregates are keyed by their lowered group value.
+fn aggregate_query_row_uuid(
+    query: &crate::query::Query,
+    record: &BorrowedRecord<'_>,
+) -> Result<RowUuid, Error> {
+    let aggregate = query.aggregate.as_ref().ok_or(Error::InvalidStoredValue(
+        "aggregate query missing aggregate",
+    ))?;
+    let row_value = match &aggregate.group_by {
+        Some(group_by) => {
+            let field = user_column_field(group_by);
+            let index = record
+                .descriptor()
+                .field_index(&field)
+                .or_else(|| record.descriptor().field_index(group_by))
+                .ok_or(Error::InvalidStoredValue(
+                    "aggregate record is missing group identity",
+                ))?;
+            record.get_idx(index)?
+        }
+        None => Value::String("global".to_owned()),
+    };
+    let row = postcard::to_allocvec(&row_value)
+        .map_err(|_| Error::InvalidStoredValue("aggregate result row encoding failed"))?;
+    aggregate_result_member_row_uuid(&ResultMemberEntry::Synthetic {
+        table: "aggregate_result".to_owned(),
+        row,
+        replacement: SyntheticReplacementToken::from_encoded_record(Vec::new()),
+    })
 }
 
 fn apply_query_window(query: &crate::query::Query, rows: &mut Vec<CurrentRow>) {
@@ -12182,6 +12292,16 @@ mod tests {
         ])
     }
 
+    fn signed_metric_schema() -> JazzSchema {
+        JazzSchema::new([TableSchema::new(
+            "metrics",
+            [
+                ColumnSchema::new("bucket", ColumnType::String),
+                ColumnSchema::new("score", ColumnType::I64),
+            ],
+        )])
+    }
+
     fn owner_policy_schema() -> JazzSchema {
         JazzSchema::new([TableSchema::new(
             "issues",
@@ -12688,6 +12808,23 @@ mod tests {
                 ])),
         )
         .expect("commit issue");
+    }
+
+    fn commit_signed_metric(
+        node: &mut NodeState<RocksDbStorage>,
+        idx: usize,
+        bucket: &str,
+        score: i64,
+    ) {
+        node.commit_mergeable_unit(
+            MergeableCommit::new("metrics", row(idx), 1_000 + idx as u64)
+                .made_by(AuthorId::SYSTEM)
+                .cells(BTreeMap::from([
+                    ("bucket".to_owned(), Value::String(bucket.to_owned())),
+                    ("score".to_owned(), Value::I64(score)),
+                ])),
+        )
+        .expect("commit signed metric");
     }
 
     fn commit_global_issue(
@@ -13823,6 +13960,34 @@ mod tests {
         assert_eq!(cells["sum_priority"], Value::U64(6));
         assert_eq!(cells["min_priority"], Value::U64(0));
         assert_eq!(cells["max_priority"], Value::U64(4));
+    }
+
+    #[test]
+    fn aggregate_sum_avg_min_max_support_signed_i64_inputs() {
+        let schema = signed_metric_schema();
+        let (_dir, mut node) =
+            open_node_with_uuid(NodeUuid::from_bytes([0xb5; 16]), schema.clone());
+        commit_signed_metric(&mut node, 0x10, "a", -3);
+        commit_signed_metric(&mut node, 0x11, "a", 2);
+        let shape = Query::from("metrics")
+            .aggregate([
+                Aggregate::sum("score"),
+                Aggregate::avg("score"),
+                Aggregate::min("score"),
+                Aggregate::max("score"),
+            ])
+            .validate(&schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+
+        let rows = node
+            .query_rows(&shape, &binding, DurabilityTier::Local)
+            .unwrap();
+        let cells = rows[0].test_cells_by_descriptor();
+        assert_eq!(cells["sum_score"], Value::I64(-1));
+        assert_eq!(cells["avg_score"], Value::F64(-0.5));
+        assert_eq!(cells["min_score"], Value::I64(-3));
+        assert_eq!(cells["max_score"], Value::I64(2));
     }
 
     #[test]

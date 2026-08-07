@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use crate::db::{
     Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, Error as CoreDbError,
-    ExclusiveTxOps, LocalUpdates as CoreLocalUpdates, PeerConnection as CorePeerConnection,
-    Propagation as CorePropagation, ReadOpts as CoreReadOpts,
+    ErrorCode as CoreDbErrorCode, ExclusiveTxOps, LocalUpdates as CoreLocalUpdates,
+    PeerConnection as CorePeerConnection, Propagation as CorePropagation, ReadOpts as CoreReadOpts,
     SubscriptionEvent as CoreSubscriptionEvent, SubscriptionOutputRow as CoreSubscriptionOutputRow,
     TextEdit as CoreTextEdit, TickScheduler, TickUrgency, Transport as CoreTransport,
     WireTransportAdapter,
@@ -69,6 +69,9 @@ enum BackendConnection {
 const QUERY_COVERAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_TEST_WAIT_TIMEOUT_MULTIPLIER: u32 = 8;
 const LARGE_VALUE_HANDLE_MAGIC: &[u8] = b"JLVH1";
+const MAX_TICK_DRIVER_RECOVERY_ATTEMPTS: u32 = 12;
+const TICK_DRIVER_RETRY_BASE_DELAY: Duration = Duration::from_millis(50);
+const TICK_DRIVER_RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
 
 fn load_tolerant_test_timeout(timeout: Duration) -> Duration {
     let multiplier = std::env::var("JAZZ_TOOLS_TEST_WAIT_TIMEOUT_MULTIPLIER")
@@ -149,6 +152,70 @@ struct ClientDbInner {
     row_tables: HashMap<ObjectId, String>,
     transactions: HashMap<BatchId, ExclusiveTransactionState>,
     closed_transactions: HashMap<BatchId, ClosedTransactionState>,
+    tick_driver_error: Option<String>,
+    tick_driver_error_notify: Arc<tokio::sync::Notify>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TickDriverErrorClass {
+    Retry,
+    Reconnect,
+    Fatal,
+}
+
+fn classify_tick_driver_error(error: &CoreDbError) -> TickDriverErrorClass {
+    match error.code {
+        CoreDbErrorCode::Backpressure => TickDriverErrorClass::Retry,
+        CoreDbErrorCode::Protocol if error.message.starts_with("missing content extent:") => {
+            TickDriverErrorClass::Retry
+        }
+        CoreDbErrorCode::Protocol if error.message == "websocket pump is closed" => {
+            TickDriverErrorClass::Reconnect
+        }
+        _ => TickDriverErrorClass::Fatal,
+    }
+}
+
+fn tick_driver_retry_delay(attempt: u32) -> Duration {
+    let multiplier = 1u32 << attempt.saturating_sub(1).min(5);
+    TICK_DRIVER_RETRY_BASE_DELAY
+        .checked_mul(multiplier)
+        .unwrap_or(TICK_DRIVER_RETRY_MAX_DELAY)
+        .min(TICK_DRIVER_RETRY_MAX_DELAY)
+}
+
+async fn recover_tick_driver_error(
+    inner: &Rc<RefCell<ClientDbInner>>,
+    scheduler: &TickSchedulerImpl,
+    class: TickDriverErrorClass,
+    error: &CoreDbError,
+    attempts: &mut u32,
+) -> bool {
+    *attempts = attempts.saturating_add(1);
+    if *attempts > MAX_TICK_DRIVER_RECOVERY_ATTEMPTS {
+        inner.borrow_mut().record_tick_driver_failure(format!(
+            "recovery exhausted after {MAX_TICK_DRIVER_RECOVERY_ATTEMPTS} attempts for {error}"
+        ));
+        return false;
+    }
+
+    #[cfg(feature = "sync-autopsy")]
+    crate::db::sync_autopsy::record(format!(
+        "client tick driver retrying {class:?} error attempt {attempts}: {error}"
+    ));
+    tokio::time::sleep(tick_driver_retry_delay(*attempts)).await;
+
+    if class == TickDriverErrorClass::Reconnect {
+        inner.borrow_mut().disconnect_upstream();
+        if let Err(reconnect_error) = ClientDbInner::reconnect_upstream(inner).await {
+            #[cfg(feature = "sync-autopsy")]
+            crate::db::sync_autopsy::record(format!(
+                "client tick driver reconnect attempt {attempts} failed: {reconnect_error}"
+            ));
+        }
+    }
+    scheduler.wake(TickUrgency::Immediate);
+    true
 }
 
 #[derive(Clone)]
@@ -661,6 +728,7 @@ impl ClientDb {
         table: String,
         wait_for_coverage: bool,
     ) -> Result<Vec<crate::node::CurrentRow>> {
+        self.ensure_tick_driver_running()?;
         ClientDbInner::handle_query(&self.inner, query, opts, table, wait_for_coverage).await
     }
 
@@ -671,6 +739,7 @@ impl ClientDb {
         table: String,
         tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
     ) -> Result<()> {
+        self.ensure_tick_driver_running()?;
         ClientDbInner::handle_subscribe(&self.inner, query, opts, table, tx).await
     }
 
@@ -1002,19 +1071,20 @@ impl ClientDb {
     }
 
     async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
+        self.ensure_tick_driver_running()?;
         ClientDbInner::handle_wait_for_batch(&self.inner, batch_id, tier).await
     }
 
     fn disconnect_upstream(&self) -> bool {
-        let mut inner = self.inner.borrow_mut();
-        let Some(connection) = inner.upstream.take() else {
-            return false;
-        };
-        inner.db.detach_connection(&connection)
+        self.inner.borrow_mut().disconnect_upstream()
     }
 
     async fn reconnect_upstream(&self) -> Result<bool> {
         ClientDbInner::reconnect_upstream(&self.inner).await
+    }
+
+    fn ensure_tick_driver_running(&self) -> Result<()> {
+        self.inner.borrow().ensure_tick_driver_running()
     }
 
     fn spawn_local_tick_driver(
@@ -1023,6 +1093,7 @@ impl ClientDb {
     ) {
         let state = scheduler.wake_handle();
         tokio::task::spawn_local(async move {
+            let mut recovery_attempts = 0;
             loop {
                 state.notify.notified().await;
                 while let Some(urgency) = scheduler.take() {
@@ -1032,12 +1103,34 @@ impl ClientDb {
                     if urgency == TickUrgency::Deferred {
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     }
-                    if let Err(error) = inner.borrow().db.tick() {
-                        #[cfg(feature = "sync-autopsy")]
-                        crate::db::sync_autopsy::record(format!(
-                            "client tick driver exited after db.tick error: {error}"
-                        ));
-                        return;
+                    let tick_result = { inner.borrow().db.tick() };
+                    match tick_result {
+                        Ok(()) => recovery_attempts = 0,
+                        Err(error) => {
+                            let class = classify_tick_driver_error(&error);
+                            let should_exit = if class == TickDriverErrorClass::Fatal {
+                                inner
+                                    .borrow_mut()
+                                    .record_tick_driver_failure(error.to_string());
+                                true
+                            } else {
+                                !recover_tick_driver_error(
+                                    &inner,
+                                    &scheduler,
+                                    class,
+                                    &error,
+                                    &mut recovery_attempts,
+                                )
+                                .await
+                            };
+                            if should_exit {
+                                #[cfg(feature = "sync-autopsy")]
+                                crate::db::sync_autopsy::record(format!(
+                                    "client tick driver exited after db.tick error: {error}"
+                                ));
+                                return;
+                            }
+                        }
                     }
                 }
             }
@@ -1046,6 +1139,27 @@ impl ClientDb {
 }
 
 impl ClientDbInner {
+    fn disconnect_upstream(&mut self) -> bool {
+        let Some(connection) = self.upstream.take() else {
+            return false;
+        };
+        self.db.detach_connection(&connection)
+    }
+
+    fn ensure_tick_driver_running(&self) -> Result<()> {
+        match &self.tick_driver_error {
+            Some(error) => Err(JazzError::Sync(format!(
+                "client tick driver stopped: {error}"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    fn record_tick_driver_failure(&mut self, error: String) {
+        self.tick_driver_error = Some(error);
+        self.tick_driver_error_notify.notify_waiters();
+    }
+
     async fn open(
         schema: crate::schema::JazzSchema,
         storage: StorageBundle,
@@ -1079,6 +1193,8 @@ impl ClientDbInner {
             row_tables: HashMap::new(),
             transactions: HashMap::new(),
             closed_transactions: HashMap::new(),
+            tick_driver_error: None,
+            tick_driver_error_notify: Arc::new(tokio::sync::Notify::new()),
         };
         inner.connect_upstream_transport().await?;
         Ok(inner)
@@ -1220,6 +1336,7 @@ impl ClientDbInner {
         let deadline =
             tokio::time::Instant::now() + load_tolerant_test_timeout(QUERY_COVERAGE_TIMEOUT);
         loop {
+            inner.borrow().ensure_tick_driver_running()?;
             if inner.borrow().db.query_attachment_is_covered(attachment) {
                 return Ok(());
             }
@@ -1255,24 +1372,47 @@ impl ClientDbInner {
         tokio::task::spawn_local(async move {
             let mut stream = stream;
             let mut current_rows: Vec<CoreSubscriptionOutputRow> = Vec::new();
+            // Only a fresh subscription reduces its first reset from the empty
+            // result set. Later reset framing can carry ordinary delta-shaped
+            // entries for rows the facade already tracks.
+            let mut awaiting_initial_delivery = true;
             while let Some(event) = stream.next_event().await {
                 match event {
                     CoreSubscriptionEvent::Delta {
-                        reset: _,
+                        reset,
                         added,
                         updated,
                         removed,
                         ..
                     } => {
-                        // Core reset events retain delta-shaped row entries:
-                        // an existing occurrence may be reported in `updated`.
-                        // The public stream has no reset marker, so preserve
-                        // its tracked identity and relay those entries as the
-                        // observable add/update/remove changes they are.
+                        let previous_rows: Vec<OutputOccurrenceId> = current_rows
+                            .iter()
+                            .map(|row| row.occurrence_id.clone())
+                            .collect();
+                        // A local aggregate snapshot may retract while the
+                        // relay concurrently publishes its replacement.  The
+                        // relay correctly calls that replacement an update,
+                        // but it is an add relative to this facade's already
+                        // retracted snapshot. Normalize at this boundary so a
+                        // public stream never emits an update for an unknown
+                        // row.
+                        let surviving_rows = current_rows
+                            .iter()
+                            .filter(|row| {
+                                !removed
+                                    .iter()
+                                    .any(|removed| removed.occurrence_id == row.occurrence_id)
+                            })
+                            .map(|row| row.occurrence_id.clone())
+                            .collect::<std::collections::BTreeSet<_>>();
+                        let (effective_added, effective_updated) =
+                            normalize_subscription_updates(surviving_rows, added, updated, |row| {
+                                &row.occurrence_id
+                            });
                         JazzClient::apply_core_subscription_rows(
                             &mut current_rows,
-                            &added,
-                            &updated,
+                            &effective_added,
+                            &effective_updated,
                             &removed,
                         );
                         let rows_for_cache = current_rows
@@ -1280,13 +1420,22 @@ impl ClientDbInner {
                             .map(|row| row.row.clone())
                             .collect::<Vec<_>>();
                         inner.borrow_mut().remember_rows(&table, &rows_for_cache);
-                        let delta = JazzClient::core_subscription_change_delta(
-                            &db,
-                            &current_rows,
-                            &added,
-                            &updated,
-                            &removed,
-                        );
+                        let delta = if awaiting_initial_delivery && reset {
+                            JazzClient::core_subscription_reset_delta(
+                                &db,
+                                &previous_rows,
+                                &current_rows,
+                            )
+                        } else {
+                            JazzClient::core_subscription_change_delta(
+                                &db,
+                                &current_rows,
+                                &effective_added,
+                                &effective_updated,
+                                &removed,
+                            )
+                        };
+                        awaiting_initial_delivery = false;
                         let Ok(delta) = delta else {
                             break;
                         };
@@ -1342,6 +1491,7 @@ impl ClientDbInner {
         let desired = core_tier(tier);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
         loop {
+            inner.borrow().ensure_tick_driver_running()?;
             let tx_id = {
                 let borrowed = inner.borrow();
                 if let Some(tx_id) = borrowed.write_map.get(&batch_id).copied() {
@@ -1381,14 +1531,23 @@ impl ClientDbInner {
             if state.durability >= desired {
                 return Ok(());
             }
-            let db = inner.borrow().db.clone();
-            if tokio::time::timeout_at(deadline, db.next_write_state_change(tx_id))
-                .await
-                .is_err()
-            {
-                return Err(JazzError::Sync(format!(
-                    "timed out waiting for batch to reach {tier:?}"
-                )));
+            let (db, tick_driver_error_notify) = {
+                let inner = inner.borrow();
+                (
+                    inner.db.clone(),
+                    Arc::clone(&inner.tick_driver_error_notify),
+                )
+            };
+            let tick_driver_failure = tick_driver_error_notify.notified();
+            tokio::select! {
+                state_change = tokio::time::timeout_at(deadline, db.next_write_state_change(tx_id)) => {
+                    if state_change.is_err() {
+                        return Err(JazzError::Sync(format!(
+                            "timed out waiting for batch to reach {tier:?}"
+                        )));
+                    }
+                }
+                _ = tick_driver_failure => inner.borrow().ensure_tick_driver_running()?,
             }
         }
     }
@@ -1404,6 +1563,26 @@ impl ClientDbInner {
                 .insert(ObjectId::from_uuid(row.row_uuid().0), table.to_string());
         }
     }
+}
+
+/// Convert updates against members absent after this delta's removals into
+/// additions. A relay replacement may cross a locally retracted aggregate
+/// member, so public streams may never observe that as an update.
+fn normalize_subscription_updates<T>(
+    surviving: std::collections::BTreeSet<OutputOccurrenceId>,
+    mut added: Vec<T>,
+    updated: Vec<T>,
+    occurrence_id: impl Fn(&T) -> &OutputOccurrenceId,
+) -> (Vec<T>, Vec<T>) {
+    let mut effective_updated = Vec::new();
+    for row in updated {
+        if surviving.contains(occurrence_id(&row)) {
+            effective_updated.push(row);
+        } else {
+            added.push(row);
+        }
+    }
+    (added, effective_updated)
 }
 
 /// Transaction-scoped Jazz client handle.
@@ -1718,9 +1897,9 @@ fn core_row_provenance_to_public(
 ) -> crate::tools::metadata::RowProvenance {
     crate::tools::metadata::RowProvenance {
         created_by: provenance.created_by.0.to_string(),
-        created_at: provenance.created_at.physical_ms(),
+        created_at: provenance.created_at.0,
         updated_by: provenance.updated_by.0.to_string(),
-        updated_at: provenance.updated_at.physical_ms(),
+        updated_at: provenance.updated_at.0,
     }
 }
 
@@ -2261,8 +2440,8 @@ impl JazzClient {
                     )));
                 };
                 match column {
-                    "$createdAt" => Value::Timestamp(provenance.created_at.physical_ms()),
-                    "$updatedAt" => Value::Timestamp(provenance.updated_at.physical_ms()),
+                    "$createdAt" => Value::Timestamp(provenance.created_at.0),
+                    "$updatedAt" => Value::Timestamp(provenance.updated_at.0),
                     "$createdBy" => Value::Text(provenance.created_by.0.to_string()),
                     "$updatedBy" => Value::Text(provenance.updated_by.0.to_string()),
                     _ => unreachable!("matched provenance magic column"),
@@ -2625,8 +2804,10 @@ impl JazzClient {
 
     /// Fetch and materialize the bytes behind a large-value handle returned by a query.
     pub async fn hydrate_large_value(&self, handle: &LargeValueHandle) -> Result<Vec<u8>> {
+        self.db.ensure_tick_driver_running()?;
         let deadline = tokio::time::Instant::now() + QUERY_COVERAGE_TIMEOUT;
         loop {
+            self.db.ensure_tick_driver_running()?;
             match self.db.hydrate_large_value_handle(handle) {
                 Ok(bytes) => return Ok(bytes),
                 Err(error) => {
@@ -2794,6 +2975,34 @@ mod tests {
         );
     }
 
+    // This narrow internal test is necessary because the wire crossing is an
+    // impossible state to inject through the public client API: it requires a
+    // local aggregate retraction racing a relay replacement. The public
+    // aggregate subscription tests cover ordinary delivery around it.
+    #[test]
+    fn aggregate_replacement_for_absent_member_is_normalized_to_an_add() {
+        let held = OutputOccurrenceId::single_source(ObjectId::from_uuid(Uuid::from_u128(1)));
+        let crossed = OutputOccurrenceId::single_source(ObjectId::from_uuid(Uuid::from_u128(2)));
+        let (added, updated) = normalize_subscription_updates(
+            std::collections::BTreeSet::from([held.clone()]),
+            Vec::<OutputOccurrenceId>::new(),
+            vec![crossed.clone()],
+            |id| id,
+        );
+
+        assert_eq!(added, vec![crossed]);
+        assert!(updated.is_empty());
+
+        let (added, updated) = normalize_subscription_updates(
+            std::collections::BTreeSet::from([held.clone()]),
+            Vec::<OutputOccurrenceId>::new(),
+            vec![held.clone()],
+            |id| id,
+        );
+        assert!(added.is_empty());
+        assert_eq!(updated, vec![held]);
+    }
+
     #[test]
     fn default_session_from_context_uses_jwt_claims_for_user_clients() {
         let app_id = AppId::from_name("client-jwt-session");
@@ -2848,6 +3057,46 @@ mod tests {
             "backend/admin clients should keep using explicit session scopes"
         );
     }
+
+    // This is an internal fault-injection test because a real fatal tick error
+    // means corrupt local state; creating that through the public API would
+    // require deliberately corrupting a storage backend. The assertion itself
+    // is public: a normal `JazzClient::query` must report the stopped driver.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fatal_tick_driver_failure_is_reported_to_callers() {
+        let client = JazzClient::connect(make_offline_context(
+            AppId::from_name("fatal-tick-driver-error"),
+            TempDir::new().expect("tempdir").keep(),
+            declared_todo_schema(),
+        ))
+        .await
+        .expect("connect offline client");
+        let error = CoreDbError {
+            code: CoreDbErrorCode::Storage,
+            message: "simulated local storage corruption".to_string(),
+        };
+
+        assert_eq!(
+            classify_tick_driver_error(&error),
+            TickDriverErrorClass::Fatal,
+            "storage faults must not enter the retry loop"
+        );
+        client
+            .db
+            .inner
+            .borrow_mut()
+            .record_tick_driver_failure(error.to_string());
+
+        let error = client
+            .query(Query::new("todos"), Some(DurabilityTier::Local))
+            .await
+            .expect_err("a stopped tick driver must be visible to the caller");
+        assert!(
+            matches!(error, JazzError::Sync(ref message) if message.contains("client tick driver stopped") && message.contains("local storage corruption")),
+            "unexpected fatal tick-driver error: {error}"
+        );
+    }
+
     #[cfg(feature = "rocksdb")]
     #[tokio::test]
     async fn offline_persistent_client_rehydrates_rows_from_core_storage() {
