@@ -6889,32 +6889,10 @@ fn aggregate_output_value_type(
                     explain: ExplainPlan::default(),
                 })
             })?;
-            let mut value_type = value_type;
-            while let ValueType::Nullable(inner) = value_type {
-                value_type = *inner;
-            }
-            let output_type = match output.function {
-                AggregateFunction::Sum => match value_type {
-                    ValueType::U8 | ValueType::U16 | ValueType::U32 | ValueType::U64 => {
-                        ValueType::U64
-                    }
-                    ValueType::I32 | ValueType::I64 => ValueType::I64,
-                    ValueType::F64 => ValueType::F64,
-                    _ => {
-                        return Err(Box::new(CapabilityReport {
-                            gaps: vec![UnsupportedReason::Operator(
-                                "sum input must be numeric".to_owned(),
-                            )],
-                            explain: ExplainPlan::default(),
-                        }));
-                    }
-                },
-                AggregateFunction::Min | AggregateFunction::Max => value_type,
-                AggregateFunction::Count | AggregateFunction::Avg => unreachable!(
-                    "sum/min/max branch only handles aggregate functions with an input"
-                ),
-            };
-            Ok(ValueType::Nullable(Box::new(output_type)))
+            Ok(match value_type {
+                ValueType::Nullable(inner) => ValueType::Nullable(inner),
+                value_type => ValueType::Nullable(Box::new(value_type)),
+            })
         }
     }
 }
