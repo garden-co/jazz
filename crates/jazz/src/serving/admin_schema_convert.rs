@@ -246,6 +246,14 @@ fn convert_column(
         .get("merge_strategy")
         .map(|value| convert_merge_strategy(value, &format!("{path}.merge_strategy")))
         .transpose()?;
+    if merge_strategy == Some(MergeStrategy::GSet)
+        && !matches!(column.column_type, ColumnType::Array(_))
+    {
+        return Err(err(
+            format!("{path}.merge_strategy"),
+            "GSet merge strategy requires a non-nullable ARRAY column",
+        ));
+    }
     Ok((column, reference, indexed, merge_strategy))
 }
 

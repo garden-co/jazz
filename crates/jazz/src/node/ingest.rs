@@ -2670,10 +2670,14 @@ where
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
         let head_tx_ids = self.merge_head_tx_ids(table, row_uuid)?;
-        if head_tx_ids.len() < 2 {
+        let table_schema = self.table(table)?.clone();
+        let has_gset_column = table_schema
+            .columns
+            .iter()
+            .any(|column| table_schema.merge_strategy(&column.name) == MergeStrategy::GSet);
+        if head_tx_ids.len() < 2 && !has_gset_column {
             return Ok(());
         }
-        let table_schema = self.table(table)?.clone();
         let row_versions = self.query_row_versions(table, row_uuid)?;
         let mut row_versions_by_tx = BTreeMap::new();
         for version in row_versions {
@@ -2704,6 +2708,12 @@ where
             .collect::<Result<Vec<_>, Error>>()?;
         let (cells, recorded_strategy) =
             self.merge_cells_for_heads(&table_schema, &raw_heads, &row_versions_by_tx)?;
+        if raw_heads.len() == 1
+            && has_gset_column
+            && !gset_cells_need_materialization(&table_schema, &raw_heads[0], &cells)?
+        {
+            return Ok(());
+        }
         if cells.is_empty() {
             return Ok(());
         }
@@ -4933,6 +4943,35 @@ fn gset_merge_value(
         }
     }
     Ok(Value::Array(elements.into_values().collect()))
+}
+
+/// A linear write is materialized only when its GSet cells differ from the
+/// union of their ancestry. This prevents a no-op merge version from chaining
+/// forever while making an attempted removal immediately restore prior values.
+fn gset_cells_need_materialization(
+    table_schema: &TableSchema,
+    head: &VersionRow,
+    merged_cells: &BTreeMap<String, Value>,
+) -> Result<bool, Error> {
+    for column in table_schema
+        .columns
+        .iter()
+        .filter(|column| table_schema.merge_strategy(&column.name) == MergeStrategy::GSet)
+    {
+        let Some(current) = head.cell(table_schema, &column.name)? else {
+            return Ok(true);
+        };
+        let Some(merged) = merged_cells.get(&column.name) else {
+            return Ok(true);
+        };
+        let descriptor = records::RecordDescriptor::new([("cell", column.column_type.clone())]);
+        if descriptor.create(std::slice::from_ref(&current))?
+            != descriptor.create(std::slice::from_ref(merged))?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn raw_merge_head_tx_ids(
