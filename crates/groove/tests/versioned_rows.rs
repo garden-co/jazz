@@ -446,6 +446,112 @@ fn active_variant_index_accepts_a_live_schema_version_without_rebuilding()
 }
 
 #[test]
+fn live_variant_index_backfills_existing_rows_without_perturbing_subscriptions()
+-> Result<(), Box<dyn std::error::Error>> {
+    let table = TableSchema::new(
+        "items",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("email", ColumnType::String),
+            ColumnSchema::new("active", ColumnType::Bool),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+    .with_schema_version(1, ["email", "id"])
+    .with_schema_version(2, ["id", "email", "active"]);
+    let schema = DatabaseSchema::new([table.clone()]);
+    let mut column_families = schema.column_families();
+    column_families.push("indices");
+    let storage = MemoryStorage::new(&column_families);
+    let mut database = Database::new(schema.clone(), storage)?;
+    let projection = RecordDescriptor::new([
+        ("id", ColumnType::U64.value_type()),
+        ("email", ColumnType::String.value_type()),
+    ]);
+    database.define_variant_projection("items", "reader", projection)?;
+    for version in [1, 2] {
+        database.register_variant_projection_case(
+            "items",
+            "reader",
+            version,
+            [ProjectField::named("id"), ProjectField::named("email")],
+        )?;
+    }
+    let subscription =
+        database.subscribe_one_sink(GraphBuilder::variant_project("items", "reader"))?;
+    assert!(subscription.recv()?.is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "items",
+        row_for(
+            &schema,
+            1,
+            &[Value::String("old@example.com".into()), Value::U64(1)],
+        )?,
+    );
+    batch.insert(
+        "items",
+        row_for(
+            &schema,
+            2,
+            &[
+                Value::U64(2),
+                Value::String("new@example.com".into()),
+                Value::Bool(true),
+            ],
+        )?,
+    );
+    database.commit_batch(batch)?;
+    assert_eq!(subscription.recv()?.deltas.len(), 2);
+
+    let index = IndexSchema::new("items_by_active", ["active"]);
+    database.register_table_index("items", index.clone())?;
+    assert!(subscription.try_recv().is_err());
+    let indexed = database.index_get("items", "items_by_active", &[Value::Bool(true)])?;
+    assert_eq!(indexed.len(), 1);
+    assert_eq!(indexed[0].schema_version(), 2);
+    assert_eq!(indexed[0].get("id")?, Value::U64(2));
+
+    let mut batch = database.open_batch();
+    batch.update(
+        "items",
+        row_for(
+            &schema,
+            2,
+            &[
+                Value::U64(2),
+                Value::String("new@example.com".into()),
+                Value::Bool(false),
+            ],
+        )?,
+    );
+    database.commit_batch(batch)?;
+    assert!(
+        database
+            .index_get("items", "items_by_active", &[Value::Bool(true)])?
+            .is_empty()
+    );
+    assert_eq!(
+        database
+            .index_get("items", "items_by_active", &[Value::Bool(false)])?
+            .len(),
+        1
+    );
+
+    let storage = database.into_storage();
+    let reopened_schema = DatabaseSchema::new([table.with_index(index)]);
+    let reopened = Database::new(reopened_schema, storage)?;
+    assert_eq!(
+        reopened
+            .index_get("items", "items_by_active", &[Value::Bool(false)])?
+            .len(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
 fn mixed_schema_versions_survive_replacement_and_reopen() -> Result<(), Box<dyn std::error::Error>>
 {
     let mut database = open_database()?;

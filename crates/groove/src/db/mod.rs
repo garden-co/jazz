@@ -287,6 +287,54 @@ where
             .map_err(Error::IvmRuntime)
     }
 
+    /// Append and backfill one durable secondary index on a live table.
+    ///
+    /// Existing rows are indexed before this method returns. Schema-variant
+    /// tables use their registered layouts: variants missing any indexed field
+    /// are ignored, while later variants automatically register their own case.
+    /// Re-registering the same definition is idempotent; changing an existing
+    /// index definition is rejected. The storage supplied when opening the
+    /// database must already provide the shared `indices` column family.
+    pub fn register_table_index(&mut self, table: &str, index: IndexSchema) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        let existing = self.table(table)?.clone();
+        if let Some(registered) = existing
+            .indices
+            .iter()
+            .find(|registered| registered.name == index.name)
+        {
+            return if registered == &index {
+                Ok(())
+            } else {
+                Err(Error::TableIndexDefinitionMismatch {
+                    table: table.to_owned(),
+                    index: index.name,
+                })
+            };
+        }
+        for column in &index.columns {
+            if existing
+                .columns
+                .iter()
+                .all(|candidate| candidate.name != *column)
+            {
+                return Err(Error::TableIndexFieldNotFound {
+                    table: table.to_owned(),
+                    index: index.name,
+                    field: column.clone(),
+                });
+            }
+        }
+        if let Err(error) = self
+            .ivm_runtime
+            .register_table_index(table, index, &self.storage)
+        {
+            self.poisoned = true;
+            return Err(Error::IvmRuntime(error));
+        }
+        Ok(())
+    }
+
     /// Define one fixed-output projection family for a heterogeneous table.
     ///
     /// The family identity and output descriptor are immutable. Source-version
@@ -333,6 +381,20 @@ where
         self.ensure_not_poisoned()?;
         self.ivm_runtime
             .register_variant_projection_ignore_case(table, target, schema_version)
+            .map_err(Error::IvmRuntime)
+    }
+
+    /// Apply one registered fixed-output projection to an already decoded
+    /// heterogeneous row. `Ignore` returns `None`.
+    pub fn project_variant_record(
+        &self,
+        table: &str,
+        target: &str,
+        record: &VersionedRecord,
+    ) -> Result<Option<OwnedRecord>, Error> {
+        self.ensure_not_poisoned()?;
+        self.ivm_runtime
+            .project_variant_record(table, target, record)
             .map_err(Error::IvmRuntime)
     }
 
@@ -2777,7 +2839,7 @@ fn storage_index_write_destination(key: &[u8]) -> StorageWriteDestination {
     } else if table.starts_with("jazz_")
         && table.ends_with("_global_current")
         && !table.contains("_register_global_current")
-        && index.starts_with("by_user_")
+        && (index.starts_with("by_user_") || index.starts_with("by_physical_user_"))
     {
         StorageWriteDestination::GlobalCurrentIndexes
     } else if table.starts_with("jazz_") && table.ends_with("_history") && index == "by_tx" {
@@ -4132,6 +4194,14 @@ pub enum Error {
     TableAlreadyExists(String),
     #[error("field definition does not match the live catalogue: {table}.{field}")]
     TableFieldDefinitionMismatch { table: String, field: String },
+    #[error("index definition does not match the live catalogue: {table}.{index}")]
+    TableIndexDefinitionMismatch { table: String, index: String },
+    #[error("index {table}.{index} references unknown field {field}")]
+    TableIndexFieldNotFound {
+        table: String,
+        index: String,
+        field: String,
+    },
     #[error("schema version {version} for table {table} omits primary-key column {column}")]
     SchemaVersionMissingPrimaryKey {
         table: String,

@@ -193,17 +193,6 @@ impl JazzSchema {
                 continue;
             };
             tables.push(table.rejected_versions_storage_table());
-            if self
-                .tables
-                .iter()
-                .any(|base_table| base_table.name == *logical_table)
-            {
-                tables.extend(table.global_current_partition_storage_tables(*schema_version));
-                tables.extend(table.ahead_current_partition_storage_tables(*schema_version));
-            } else {
-                tables.extend(table.global_current_storage_tables());
-                tables.extend(table.ahead_current_storage_tables());
-            }
         }
         for (logical_table, schema_version, branch_id) in branch_partitions {
             let Some(schema) = catalogue_schemas.get(schema_version) else {
@@ -239,7 +228,9 @@ impl JazzSchema {
                 .into_iter()
                 .chain(std::iter::once("indices"))
                 .chain((!self.tables.is_empty()).then_some("jazz_physical_history"))
-                .chain((!self.tables.is_empty()).then_some("jazz_physical_register")),
+                .chain((!self.tables.is_empty()).then_some("jazz_physical_register"))
+                .chain((!self.tables.is_empty()).then_some("jazz_physical_global_current"))
+                .chain((!self.tables.is_empty()).then_some("jazz_physical_ahead_current")),
         )
     }
 
@@ -267,16 +258,6 @@ impl JazzSchema {
             self.tables
                 .iter()
                 .map(TableSchema::rejected_versions_storage_table),
-        );
-        tables.extend(
-            self.tables
-                .iter()
-                .flat_map(TableSchema::global_current_storage_tables),
-        );
-        tables.extend(
-            self.tables
-                .iter()
-                .flat_map(TableSchema::ahead_current_storage_tables),
         );
         tables.push(global_changes_table());
         tables
@@ -911,16 +892,6 @@ impl TableSchema {
         ]
     }
 
-    pub(crate) fn global_current_partition_storage_tables(
-        &self,
-        schema_version: SchemaVersionId,
-    ) -> Vec<GrooveTableSchema> {
-        let mut tables = self.global_current_storage_tables();
-        tables[0].name = partition_global_current_table_name(&self.name, schema_version);
-        tables[1].name = partition_register_global_current_table_name(&self.name, schema_version);
-        tables
-    }
-
     /// Return per-layer ahead-of-global candidate tables.
     pub fn ahead_current_storage_tables(&self) -> Vec<GrooveTableSchema> {
         let mut content_columns = vec![
@@ -980,16 +951,6 @@ impl TableSchema {
         ]
     }
 
-    pub(crate) fn ahead_current_partition_storage_tables(
-        &self,
-        schema_version: SchemaVersionId,
-    ) -> Vec<GrooveTableSchema> {
-        let mut tables = self.ahead_current_storage_tables();
-        tables[0].name = partition_ahead_current_table_name(&self.name, schema_version);
-        tables[1].name = partition_register_ahead_current_table_name(&self.name, schema_version);
-        tables
-    }
-
     /// Columns available for constrained global-current reads.
     pub fn global_current_indexed_columns(&self) -> BTreeSet<String> {
         self.references
@@ -1032,40 +993,6 @@ impl TableSchema {
             })),
         )
     }
-}
-
-pub(crate) fn partition_global_current_table_name(
-    table: &str,
-    schema_version: SchemaVersionId,
-) -> String {
-    format!("jazz_{table}_{}_global_current", schema_version.0.simple())
-}
-
-pub(crate) fn partition_register_global_current_table_name(
-    table: &str,
-    schema_version: SchemaVersionId,
-) -> String {
-    format!(
-        "jazz_{table}_{}_register_global_current",
-        schema_version.0.simple()
-    )
-}
-
-pub(crate) fn partition_ahead_current_table_name(
-    table: &str,
-    schema_version: SchemaVersionId,
-) -> String {
-    format!("jazz_{table}_{}_ahead_current", schema_version.0.simple())
-}
-
-pub(crate) fn partition_register_ahead_current_table_name(
-    table: &str,
-    schema_version: SchemaVersionId,
-) -> String {
-    format!(
-        "jazz_{table}_{}_register_ahead_current",
-        schema_version.0.simple()
-    )
 }
 
 pub(crate) fn branch_partition_history_table_name(
@@ -1773,14 +1700,15 @@ mod tests {
         );
         let history = schema.tables[0].history_storage_table();
         let register = schema.tables[0].register_storage_table();
-        let global_current = tables
-            .iter()
-            .find(|table| table.name == "jazz_todos_global_current")
-            .unwrap();
-        let register_global_current = tables
-            .iter()
-            .find(|table| table.name == "jazz_todos_register_global_current")
-            .unwrap();
+        assert!(tables.iter().all(|table| {
+            table.name != "jazz_todos_global_current"
+                && table.name != "jazz_todos_register_global_current"
+                && table.name != "jazz_todos_ahead_current"
+                && table.name != "jazz_todos_register_ahead_current"
+        }));
+        let current_tables = schema.tables[0].global_current_storage_tables();
+        let global_current = &current_tables[0];
+        let register_global_current = &current_tables[1];
 
         assert!(
             transactions

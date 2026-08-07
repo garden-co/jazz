@@ -133,6 +133,16 @@ Indexes are declared against stable field names/ids across the table's variants:
 - index rebuilds and query evaluation select each row's descriptor before
   reading indexed or projected fields.
 
+Physical indexes are append-only for the lifetime of a `PhysicalTableId`. The
+query planner only uses indexes declared by the requested Jazz schema, but an
+index remains available after a later schema stops declaring it. When a schema
+first declares an index for an existing physical column, Jazz registers that
+physical index on the live Groove table and Groove backfills retained rows
+before publication continues. This does not rebuild the database or disturb
+existing subscriptions. Variants missing the indexed field contribute no entry;
+future variants append their projection or `Ignore` case before their first row
+is stored.
+
 For each `PhysicalTableId`, Jazz derives the variant registry from its local schema
 catalogue and physical mappings. Variant fields use stable physical names derived
 from `PhysicalColumnId`, rather than application-facing names, so compatible
@@ -161,6 +171,16 @@ descriptor and every required projection case before storing the first row with
 that discriminator. Consequently case registration never needs to backfill rows
 that were already present, and active subscriptions can consume subsequent rows
 as ordinary incremental deltas without graph rebuilding or reset.
+
+Maintained query evaluation projects current rows into the subscription's
+logical schema, but sync bundles must preserve the immutable payload and schema
+under which each winning version was authored. For now, when a maintained
+witness's table or descriptor no longer matches its authored schema, Jazz uses
+its stable version identity `(row, layer, tx_time, tx_node)` to perform one exact
+lookup in the shared physical history table before serializing the bundle. This
+is an O(1) fallback independent of schema-version count and is not used for
+same-layout witnesses. If this point-read cost becomes material, Groove can
+later expose an opaque original-row witness through `VariantProject`.
 
 Each registered case is either a projection or `Ignore`. `Ignore` intentionally
 emits no row for that discriminator, while an unregistered discriminator remains
@@ -389,7 +409,7 @@ remain compatible with databases written by the former per-schema history layout
    heterogeneous IVM deltas and live-extensible, fixed-output variant projection
    are also implemented. Variant-aware durable indexes use explicit `Ignore`
    cases, enforce uniqueness across variants, survive reopen, and extend without
-   rebuilding active subscriptions. Jazz catalogue registration is the next step.
+   rebuilding active subscriptions.
    - Add generic schema-versioned tables to Groove, using a per-table `u64`
      version-to-descriptor registry.
    - Make IVM table deltas retain their source discriminator and descriptor.
@@ -442,15 +462,33 @@ remain compatible with databases written by the former per-schema history layout
    need no variant projection. Mixed content, deletes, and restores survive
    restart and table renames. Publishing a lens discards both immutable layers
    of a replaced provisional physical table.
-   - Keep global/ahead-current and branch-overlay tables partitioned temporarily,
-     giving us a contained vertical slice.
+   - At this stage global/ahead-current and branch-overlay tables remained
+     partitioned, giving the immutable-history cutover a contained vertical slice.
    - Current projection chooses content and deletion winners independently
      across the remaining schema partitions before applying the winning deletion
      state, so a restore in one schema can reveal content authored in another.
 
 5. Share current state and indexes.
+   **Status: complete (2026-08-07).** Each `PhysicalTableId` now owns shared
+   global-current and ahead-current content and deletion-register tables. Jazz
+   registers their version layouts and logical `VariantProject` cases alongside
+   immutable history, and all ordinary current reads, maintained subscriptions,
+   primary-key probes, and secondary-index probes use the physical lineage
+   directly. Content and deletion winners remain independent; a winning delete
+   hides content regardless of their relative timestamps, while a winning
+   restore reveals it. Cross-schema maintained witnesses use the bounded exact
+   history lookup described above to preserve authored sync payloads.
+
+   **Index lifecycle decision (2026-08-07):** physical indexes are append-only.
+   Groove supports registering and backfilling a new durable index on a live
+   versioned table; Jazz names it from `PhysicalColumnId`, while each logical
+   schema's planner only selects indexes declared by that schema. Integration
+   coverage writes a row before its physical index exists, proves live backfill,
+   then adds another schema variant and verifies that the same query still reads
+   exactly one physical index entry and one current row.
    - Move global-current, ahead-current, and durable index prefixes to physical identities.
-   - Replace the current union-and-`arg_max` path in [query_eval.rs](/Users/nicolasr/Desktop/Jazz/jazz2/crates/jazz/src/node/query_eval.rs:1256) with one source plus logical projection.
+   - Replace the current union-and-`arg_max` path in
+     [query_eval.rs](../src/node/query_eval.rs) with one source plus logical projection.
    - Re-enable the ordinary prepared-query path.
    - Add a storage-read receipt proving read cost stays constant as schema-version count increases.
 

@@ -143,7 +143,7 @@ fn publishing_lens_reconciles_target_table_and_column_identities_durably() {
 }
 
 #[test]
-fn publishing_lens_discards_provisional_physical_history_and_register_rows() {
+fn publishing_lens_discards_all_provisional_physical_rows() {
     let base = schema();
     let target = SchemaVersion::new(catalogue_evolved_schema());
     let (_dir, mut core) = open_node_with_schema(node(0x2a), base.clone());
@@ -188,6 +188,20 @@ fn publishing_lens_discards_provisional_physical_history_and_register_rows() {
             .len(),
         1
     );
+    assert_eq!(
+        core.database
+            .primary_key_scan_raw(&physical_ahead_current_table_name(provisional), &[])
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        core.database
+            .primary_key_scan_raw(&physical_register_ahead_current_table_name(provisional), &[])
+            .unwrap()
+            .len(),
+        1
+    );
 
     core.apply_sync_message(SyncMessage::PublishLens {
         author: AuthorId::SYSTEM,
@@ -216,6 +230,20 @@ fn publishing_lens_discards_provisional_physical_history_and_register_rows() {
         .primary_key_scan_raw(&physical_register_table_name(provisional), &[])
         .unwrap()
         .is_empty());
+    for table in [
+        physical_global_current_table_name(provisional),
+        physical_register_global_current_table_name(provisional),
+        physical_ahead_current_table_name(provisional),
+        physical_register_ahead_current_table_name(provisional),
+    ] {
+        assert!(
+            core.database
+                .primary_key_scan_raw(&table, &[])
+                .unwrap()
+                .is_empty(),
+            "discarded provisional current table {table} must be empty"
+        );
+    }
 }
 
 #[test]

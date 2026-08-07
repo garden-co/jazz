@@ -369,6 +369,20 @@ impl GraphBuilder {
         }
     }
 
+    /// Read a bounded range of a heterogeneous table through one fixed-output
+    /// projection target.
+    pub fn variant_project_scan(
+        table: impl Into<String>,
+        projection_target: impl Into<String>,
+        scan: StaticScanSpec,
+    ) -> Self {
+        Self::Table {
+            table: table.into(),
+            scan: Some(scan),
+            variant_projection: Some(projection_target.into()),
+        }
+    }
+
     pub fn inline_records(
         output: RecordDescriptor,
         records: impl IntoIterator<Item = Vec<u8>>,

@@ -262,6 +262,46 @@ impl IvmRuntime {
         Ok(())
     }
 
+    pub(crate) fn register_table_index<S>(
+        &mut self,
+        table: &str,
+        index: IndexSchema,
+        storage: &S,
+    ) -> Result<(), IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        let table_position = self
+            .schema
+            .tables
+            .iter()
+            .position(|candidate| candidate.name == table)
+            .ok_or_else(|| IvmRuntimeError::TableNotFound(table.to_owned()))?;
+        self.schema.tables[table_position]
+            .indices
+            .push(index.clone());
+        let table_schema = self.schema.tables[table_position].clone();
+        if table_schema.has_schema_variants() {
+            let target = VariantProjectionTarget::SchemaIndex(index.name.clone());
+            self.define_variant_projection_target(
+                table,
+                target,
+                schema_index_input_descriptor(&table_schema, &index)?,
+            )?;
+            for schema_version in &table_schema.schema_versions {
+                self.register_schema_index_variant_case(
+                    &table_schema,
+                    &index,
+                    schema_version.version,
+                )?;
+            }
+        }
+        let persist = self.add_dedup_schema_index(&table_schema, &index)?;
+        self.invalidate_table_inputs(table);
+        self.hydration_snapshot(persist, storage)?;
+        Ok(())
+    }
+
     pub(crate) fn define_variant_projection(
         &mut self,
         table: &str,
@@ -333,6 +373,69 @@ impl IvmRuntime {
             schema_version,
             None,
         )
+    }
+
+    pub(crate) fn project_variant_record(
+        &self,
+        table: &str,
+        target: &str,
+        record: &records::VersionedRecord,
+    ) -> Result<Option<OwnedRecord>, IvmRuntimeError> {
+        let key = VariantProjectionKey {
+            table: table.to_owned(),
+            target: VariantProjectionTarget::Named(target.to_owned()),
+        };
+        let projection = self.variant_projections.get(&key).ok_or_else(|| {
+            IvmRuntimeError::VariantProjectionNotFound {
+                table: table.to_owned(),
+                target: target.to_owned(),
+            }
+        })?;
+        let case = projection
+            .cases
+            .get(&record.schema_version())
+            .ok_or_else(|| IvmRuntimeError::VariantProjectionCaseNotFound {
+                table: table.to_owned(),
+                target: target.to_owned(),
+                version: record.schema_version(),
+            })?;
+        if case.source() != *record.record().descriptor() {
+            return Err(IvmRuntimeError::VariantProjectionSourceMismatch {
+                table: table.to_owned(),
+                target: target.to_owned(),
+                version: record.schema_version(),
+            });
+        }
+        let VariantProjectionCase::Project {
+            project,
+            raw_projection,
+            ..
+        } = case
+        else {
+            return Ok(None);
+        };
+        let input = RecordDeltas {
+            descriptor: *record.record().descriptor(),
+            deltas: vec![RecordDelta {
+                record: Bytes::copy_from_slice(record.record().raw()),
+                weight: 1,
+            }],
+        };
+        let projected = NodeState::update_map_project(
+            project,
+            projection.output,
+            &input,
+            raw_projection.as_deref(),
+        )?;
+        let record = projected
+            .deltas
+            .into_iter()
+            .next()
+            .ok_or(IvmRuntimeError::GraphOutputMismatch)?;
+        Ok(Some(OwnedRecord::new(
+            record.record.to_vec(),
+            projection.output,
+        )))
     }
 
     fn register_variant_projection_target_case(

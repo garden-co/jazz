@@ -135,6 +135,169 @@ fn parameterized_one_shot_index_read_does_not_fall_back_to_cached_full_scan() {
 }
 
 #[test]
+fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_count() {
+    // This is intentionally an internal receipt: schema evolution and query
+    // results use the public protocol/query APIs, while physical read counts
+    // and index names are implementation details with no public equivalent.
+    let base = JazzSchema::new([TableSchema::new(
+        "todos",
+        [ColumnSchema::new("title", ColumnType::String)],
+    )]);
+    let indexed = SchemaVersion::new(JazzSchema::new([
+        TableSchema::new(
+            "todos",
+            [ColumnSchema::new("title", ColumnType::String)],
+        )
+        .with_indexed_column("title"),
+    ]));
+    let extended = SchemaVersion::new(JazzSchema::new([
+        TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("body", ColumnType::String),
+            ],
+        )
+        .with_indexed_column("title"),
+    ]));
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0xb1), base.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0xb2), base.clone());
+    let existing = row(0xb3);
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", existing, 10).cells(title_cells("before-index")),
+    );
+
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(indexed.clone()),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::PublishLens {
+        author: AuthorId::SYSTEM,
+        lens: MigrationLens::new(
+            base.version_id(),
+            indexed.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![],
+            }],
+        ),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: indexed.id,
+        },
+    })
+    .unwrap();
+
+    let indexed_mapping = core.catalogue.physical_mappings[&indexed.id].tables["todos"].clone();
+    let physical_table = physical_global_current_table_name(indexed_mapping.table_id);
+    let physical_index = physical_current_index_name(indexed_mapping.columns["title"]);
+    assert!(
+        core.database
+            .table_schema(&physical_table)
+            .unwrap()
+            .indices
+            .iter()
+            .any(|index| index.name == physical_index),
+        "publishing the indexed variant must register its physical index"
+    );
+
+    let query = Query::from("todos").filter(eq(col("title"), lit("before-index")));
+    let shape = query.validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    core.reset_storage_read_metrics();
+    let rows = core
+        .query_rows_for_link(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorId::SYSTEM,
+        )
+        .unwrap();
+    let two_variant_reads = core.take_storage_read_metrics();
+    assert_eq!(
+        rows.into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![existing],
+        "the live index must backfill the row written before it existed"
+    );
+    assert_eq!(two_variant_reads.global_current_indexes.reads, 1);
+    assert_eq!(two_variant_reads.global_current_rows.reads, 1);
+
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(extended.clone()),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::PublishLens {
+        author: AuthorId::SYSTEM,
+        lens: MigrationLens::new(
+            indexed.id,
+            extended.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String(String::new()),
+                }],
+            }],
+        ),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 2,
+            schema: extended.id,
+        },
+    })
+    .unwrap();
+
+    assert_eq!(
+        core.catalogue.physical_mappings[&extended.id].tables["todos"].table_id,
+        indexed_mapping.table_id
+    );
+    let shape = query.validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    core.reset_storage_read_metrics();
+    let rows = core
+        .query_rows_for_link(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorId::SYSTEM,
+        )
+        .unwrap();
+    let three_variant_reads = core.take_storage_read_metrics();
+
+    assert_eq!(
+        rows.into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![existing]
+    );
+    assert_eq!(
+        three_variant_reads.global_current_indexes,
+        two_variant_reads.global_current_indexes,
+        "adding a schema variant must not add an index source"
+    );
+    assert_eq!(
+        three_variant_reads.global_current_rows,
+        two_variant_reads.global_current_rows,
+        "adding a schema variant must not add a current-row source"
+    );
+}
+
+#[test]
 fn one_shot_filtered_read_keeps_residual_filters_after_pushdown() {
     let schema = access_path_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());

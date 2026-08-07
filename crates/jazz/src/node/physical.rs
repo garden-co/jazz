@@ -2,7 +2,10 @@
 
 use super::*;
 use crate::ids::{PhysicalColumnId, PhysicalTableId};
-use groove::schema::{ColumnSchema as GrooveColumnSchema, TableSchema as GrooveTableSchema};
+use groove::schema::{
+    ColumnSchema as GrooveColumnSchema, IndexSchema as GrooveIndexSchema,
+    TableSchema as GrooveTableSchema,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(super) struct SchemaPhysicalMapping {
@@ -29,6 +32,26 @@ pub(super) fn physical_register_table_name(table_id: PhysicalTableId) -> String 
     format!("jazz_physical_{}_register", table_id.0)
 }
 
+pub(super) fn physical_global_current_table_name(table_id: PhysicalTableId) -> String {
+    format!("jazz_physical_{}_global_current", table_id.0)
+}
+
+pub(super) fn physical_register_global_current_table_name(table_id: PhysicalTableId) -> String {
+    format!("jazz_physical_{}_register_global_current", table_id.0)
+}
+
+pub(super) fn physical_ahead_current_table_name(table_id: PhysicalTableId) -> String {
+    format!("jazz_physical_{}_ahead_current", table_id.0)
+}
+
+pub(super) fn physical_register_ahead_current_table_name(table_id: PhysicalTableId) -> String {
+    format!("jazz_physical_{}_register_ahead_current", table_id.0)
+}
+
+pub(super) fn physical_current_index_name(column_id: PhysicalColumnId) -> String {
+    format!("by_physical_user_{}", column_id.0)
+}
+
 pub(super) fn physical_user_column_field(column_id: PhysicalColumnId) -> String {
     format!("user_{}", column_id.0)
 }
@@ -38,6 +61,25 @@ pub(super) fn physical_history_projection_target(
     logical_table: &str,
 ) -> String {
     format!("schema_{}_{}_history", schema_alias.0, logical_table)
+}
+
+pub(super) fn physical_current_projection_target(
+    schema_alias: SchemaVersionAlias,
+    logical_table: &str,
+) -> String {
+    format!("schema_{}_{}_current", schema_alias.0, logical_table)
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum PhysicalCurrentClass {
+    Global,
+    Ahead,
+}
+
+#[derive(Clone, Copy)]
+enum ContentProjectionShape {
+    History,
+    Current,
 }
 
 pub(super) fn allocate_provisional_physical_mapping(
@@ -102,26 +144,166 @@ pub(super) fn physical_history_binding(
     })
 }
 
+pub(super) fn physical_current_binding(
+    catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
+    physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    schema_version: SchemaVersionId,
+    logical_table: &str,
+    class: PhysicalCurrentClass,
+) -> Result<PhysicalHistoryBinding, Error> {
+    let schema = catalogue_schemas
+        .get(&schema_version)
+        .ok_or(Error::InvalidStoredValue("physical current schema missing"))?;
+    let table = schema
+        .schema
+        .tables
+        .iter()
+        .find(|table| table.name == logical_table)
+        .ok_or_else(|| Error::TableNotFound(logical_table.to_owned()))?;
+    let mapping = physical_mappings
+        .get(&schema_version)
+        .and_then(|mapping| mapping.tables.get(logical_table))
+        .ok_or(Error::InvalidStoredValue(
+            "physical current table mapping missing",
+        ))?;
+    let storage_table = match class {
+        PhysicalCurrentClass::Global => physical_global_current_table_name(mapping.table_id),
+        PhysicalCurrentClass::Ahead => physical_ahead_current_table_name(mapping.table_id),
+    };
+    Ok(PhysicalHistoryBinding {
+        storage_table,
+        descriptor: physical_current_descriptor(table, mapping)?,
+    })
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    pub(super) fn physical_table_id_for_schema(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+    ) -> Result<PhysicalTableId, Error> {
+        self.table_in_schema(logical_table, schema_version)?;
+        self.catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(logical_table))
+            .map(|mapping| mapping.table_id)
+            .ok_or(Error::InvalidStoredValue("physical table mapping missing"))
+    }
+
     pub(super) fn physical_register_table_for_schema(
         &self,
         schema_version: SchemaVersionId,
         logical_table: &str,
     ) -> Result<String, Error> {
-        self.table_in_schema(logical_table, schema_version)?;
-        let table_id = self
+        let table_id = self.physical_table_id_for_schema(schema_version, logical_table)?;
+        Ok(physical_register_table_name(table_id))
+    }
+
+    pub(super) fn physical_current_table_for_schema(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+        layer: VersionLayer,
+        class: PhysicalCurrentClass,
+    ) -> Result<String, Error> {
+        let table_id = self.physical_table_id_for_schema(schema_version, logical_table)?;
+        Ok(match (class, layer) {
+            (PhysicalCurrentClass::Global, VersionLayer::Content) => {
+                physical_global_current_table_name(table_id)
+            }
+            (PhysicalCurrentClass::Global, VersionLayer::Deletion) => {
+                physical_register_global_current_table_name(table_id)
+            }
+            (PhysicalCurrentClass::Ahead, VersionLayer::Content) => {
+                physical_ahead_current_table_name(table_id)
+            }
+            (PhysicalCurrentClass::Ahead, VersionLayer::Deletion) => {
+                physical_register_ahead_current_table_name(table_id)
+            }
+        })
+    }
+
+    pub(super) fn physical_current_source_graph(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+        class: PhysicalCurrentClass,
+    ) -> Result<GraphBuilder, Error> {
+        let alias = self
             .catalogue
+            .schema_version_aliases
+            .get(&schema_version)
+            .copied()
+            .ok_or(Error::InvalidStoredValue(
+                "physical current source schema alias missing",
+            ))?;
+        let binding = physical_current_binding(
+            &self.catalogue.catalogue_schemas,
+            &self.catalogue.physical_mappings,
+            schema_version,
+            logical_table,
+            class,
+        )?;
+        Ok(GraphBuilder::variant_project(
+            binding.storage_table,
+            physical_current_projection_target(alias, logical_table),
+        ))
+    }
+
+    pub(super) fn physical_current_source_scan_graph(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+        class: PhysicalCurrentClass,
+        scan: groove::ivm::StaticScanSpec,
+    ) -> Result<GraphBuilder, Error> {
+        let alias = self
+            .catalogue
+            .schema_version_aliases
+            .get(&schema_version)
+            .copied()
+            .ok_or(Error::InvalidStoredValue(
+                "physical current source schema alias missing",
+            ))?;
+        let binding = physical_current_binding(
+            &self.catalogue.catalogue_schemas,
+            &self.catalogue.physical_mappings,
+            schema_version,
+            logical_table,
+            class,
+        )?;
+        Ok(GraphBuilder::variant_project_scan(
+            binding.storage_table,
+            physical_current_projection_target(alias, logical_table),
+            scan,
+        ))
+    }
+
+    pub(super) fn logical_table_for_physical_alias(
+        &self,
+        table_id: PhysicalTableId,
+        alias: SchemaVersionAlias,
+    ) -> Result<String, Error> {
+        let schema_version =
+            self.schema_version_for_alias(alias)
+                .ok_or(Error::InvalidStoredValue(
+                    "physical row schema version alias missing",
+                ))?;
+        self.catalogue
             .physical_mappings
             .get(&schema_version)
-            .and_then(|mapping| mapping.tables.get(logical_table))
-            .map(|mapping| mapping.table_id)
+            .and_then(|mapping| {
+                mapping.tables.iter().find_map(|(logical_table, mapping)| {
+                    (mapping.table_id == table_id).then(|| logical_table.clone())
+                })
+            })
             .ok_or(Error::InvalidStoredValue(
-                "physical register table mapping missing",
-            ))?;
-        Ok(physical_register_table_name(table_id))
+                "physical row logical table mapping missing",
+            ))
     }
 
     pub(super) fn physical_history_source_graph(
@@ -229,6 +411,92 @@ where
         Ok(())
     }
 
+    pub(super) fn register_physical_current_variant_projections(&mut self) -> Result<(), Error> {
+        let targets = self
+            .catalogue
+            .physical_mappings
+            .iter()
+            .flat_map(|(schema_version, mapping)| {
+                mapping.tables.iter().map(|(logical_table, table)| {
+                    (*schema_version, logical_table.clone(), table.clone())
+                })
+            })
+            .collect::<Vec<_>>();
+        for (target_schema, target_table_name, target_mapping) in targets {
+            let target_alias = self
+                .catalogue
+                .schema_version_aliases
+                .get(&target_schema)
+                .copied()
+                .ok_or(Error::InvalidStoredValue(
+                    "physical current projection target schema alias missing",
+                ))?;
+            let target_table = self.table_in_schema(&target_table_name, target_schema)?;
+            let projection_target =
+                physical_current_projection_target(target_alias, &target_table_name);
+            let storage_tables = [
+                physical_global_current_table_name(target_mapping.table_id),
+                physical_ahead_current_table_name(target_mapping.table_id),
+            ];
+            for storage_table in &storage_tables {
+                self.database.define_variant_projection(
+                    storage_table,
+                    &projection_target,
+                    target_table.global_current_storage_tables()[0].record_schema(),
+                )?;
+            }
+
+            let sources = self
+                .catalogue
+                .physical_mappings
+                .iter()
+                .flat_map(|(schema_version, mapping)| {
+                    mapping
+                        .tables
+                        .iter()
+                        .filter(|(_, table)| table.table_id == target_mapping.table_id)
+                        .map(|(logical_table, table)| {
+                            (*schema_version, logical_table.clone(), table.clone())
+                        })
+                })
+                .collect::<Vec<_>>();
+            for (source_schema, source_table_name, source_mapping) in sources {
+                let source_alias = self
+                    .catalogue
+                    .schema_version_aliases
+                    .get(&source_schema)
+                    .copied()
+                    .ok_or(Error::InvalidStoredValue(
+                        "physical current projection source schema alias missing",
+                    ))?;
+                let fields = self.physical_current_projection_case(
+                    source_schema,
+                    &source_table_name,
+                    &source_mapping,
+                    target_schema,
+                    &target_table_name,
+                )?;
+                for storage_table in &storage_tables {
+                    if let Some(fields) = fields.clone() {
+                        self.database.register_variant_projection_case(
+                            storage_table,
+                            &projection_target,
+                            source_alias.0,
+                            fields,
+                        )?;
+                    } else {
+                        self.database.register_variant_projection_ignore_case(
+                            storage_table,
+                            &projection_target,
+                            source_alias.0,
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn synchronize_physical_version_tables(&mut self) -> Result<(), Error> {
         for desired in physical_version_storage_tables(
             &self.catalogue.catalogue_schemas,
@@ -265,8 +533,19 @@ where
                     schema_version,
                 )?;
             }
+            for index in desired.indices {
+                if existing
+                    .indices
+                    .iter()
+                    .any(|candidate| candidate.name == index.name)
+                {
+                    continue;
+                }
+                self.database.register_table_index(&desired.name, index)?;
+            }
         }
-        self.register_physical_history_variant_projections()
+        self.register_physical_history_variant_projections()?;
+        self.register_physical_current_variant_projections()
     }
 
     pub(super) fn synchronize_partition_storage_tables(&mut self) -> Result<(), Error> {
@@ -299,9 +578,13 @@ where
             if live.contains(&table_id) {
                 continue;
             }
-            for table in [
-                physical_history_table_name(table_id),
-                physical_register_table_name(table_id),
+            for (table, global_current) in [
+                (physical_history_table_name(table_id), false),
+                (physical_register_table_name(table_id), false),
+                (physical_global_current_table_name(table_id), true),
+                (physical_register_global_current_table_name(table_id), true),
+                (physical_ahead_current_table_name(table_id), false),
+                (physical_register_ahead_current_table_name(table_id), false),
             ] {
                 let rows = match self.database.primary_key_scan_raw(&table, &[]) {
                     Ok(rows) => rows
@@ -317,8 +600,11 @@ where
                 let mut batch = self.database.open_batch();
                 for row in rows {
                     let record = row.borrowed();
-                    batch.delete(
-                        &table,
+                    let key = if global_current {
+                        PrimaryKeyValue::Composite(vec![PrimaryKeyValue::Uuid(
+                            record.get_uuid(GlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?,
+                        )])
+                    } else {
                         PrimaryKeyValue::Composite(vec![
                             PrimaryKeyValue::Uuid(
                                 record.get_uuid(HistoryRowRecord::FIELD_ROW_UUID_IDX)?,
@@ -329,8 +615,9 @@ where
                             PrimaryKeyValue::U64(
                                 record.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?,
                             ),
-                        ]),
-                    );
+                        ])
+                    };
+                    batch.delete(&table, key);
                 }
                 self.database.commit_batch(batch)?;
             }
@@ -345,6 +632,43 @@ where
         source_mapping: &TablePhysicalMapping,
         target_schema: SchemaVersionId,
         target_table_name: &str,
+    ) -> Result<Option<Vec<ProjectField>>, Error> {
+        self.physical_content_projection_case(
+            source_schema,
+            source_table_name,
+            source_mapping,
+            target_schema,
+            target_table_name,
+            ContentProjectionShape::History,
+        )
+    }
+
+    fn physical_current_projection_case(
+        &mut self,
+        source_schema: SchemaVersionId,
+        source_table_name: &str,
+        source_mapping: &TablePhysicalMapping,
+        target_schema: SchemaVersionId,
+        target_table_name: &str,
+    ) -> Result<Option<Vec<ProjectField>>, Error> {
+        self.physical_content_projection_case(
+            source_schema,
+            source_table_name,
+            source_mapping,
+            target_schema,
+            target_table_name,
+            ContentProjectionShape::Current,
+        )
+    }
+
+    fn physical_content_projection_case(
+        &mut self,
+        source_schema: SchemaVersionId,
+        source_table_name: &str,
+        source_mapping: &TablePhysicalMapping,
+        target_schema: SchemaVersionId,
+        target_table_name: &str,
+        shape: ContentProjectionShape,
     ) -> Result<Option<Vec<ProjectField>>, Error> {
         #[derive(Clone)]
         enum CellProjection {
@@ -409,12 +733,21 @@ where
             }
         }
 
-        let mut fields = target_table
-            .history_storage_table()
+        let target_storage = match shape {
+            ContentProjectionShape::History => target_table.history_storage_table(),
+            ContentProjectionShape::Current => {
+                target_table.global_current_storage_tables()[0].clone()
+            }
+        };
+        let user_cells = match shape {
+            ContentProjectionShape::History => HistoryRowRecord::USER_CELLS,
+            ContentProjectionShape::Current => GlobalCurrentRowRecord::USER_CELLS,
+        };
+        let mut fields = target_storage
             .record_schema()
             .fields()
             .iter()
-            .take(HistoryRowRecord::USER_CELLS)
+            .take(user_cells)
             .map(|field| {
                 ProjectField::named(
                     field
@@ -530,7 +863,7 @@ pub(super) fn physical_version_storage_tables(
         }
     }
 
-    let mut tables = Vec::with_capacity(lineages.len());
+    let mut tables = Vec::with_capacity(lineages.len() * 6);
     for (table_id, variants) in lineages {
         let (_, template_table, _) = variants
             .first()
@@ -565,21 +898,69 @@ pub(super) fn physical_version_storage_tables(
         }
         let columns = system_columns
             .into_iter()
-            .chain(
-                physical_columns
-                    .into_iter()
-                    .map(|(column_id, column_type)| {
-                        GrooveColumnSchema::new(physical_user_column_field(column_id), column_type)
-                    }),
-            );
+            .chain(physical_columns.iter().map(|(column_id, column_type)| {
+                GrooveColumnSchema::new(physical_user_column_field(*column_id), column_type.clone())
+            }));
         let mut physical = GrooveTableSchema::new(physical_history_table_name(table_id), columns);
         physical.primary_key = template.primary_key.clone();
         physical.indices = template.indices.clone();
         let mut register = template_table.register_storage_table();
         register.name = physical_register_table_name(table_id);
 
+        let logical_global_tables = template_table.global_current_storage_tables();
+        let current_system_columns = logical_global_tables[0]
+            .columns
+            .iter()
+            .take(GlobalCurrentRowRecord::USER_CELLS)
+            .cloned()
+            .collect::<Vec<_>>();
+        let current_columns = || {
+            current_system_columns
+                .iter()
+                .cloned()
+                .chain(physical_columns.iter().map(|(column_id, column_type)| {
+                    GrooveColumnSchema::new(
+                        physical_user_column_field(*column_id),
+                        column_type.clone(),
+                    )
+                }))
+        };
+        let mut physical_global = GrooveTableSchema::new(
+            physical_global_current_table_name(table_id),
+            current_columns(),
+        );
+        physical_global.primary_key = logical_global_tables[0].primary_key.clone();
+        let indexed_columns = variants
+            .iter()
+            .flat_map(|(_, logical_table, mapping)| {
+                logical_table
+                    .global_current_indexed_columns()
+                    .into_iter()
+                    .filter_map(|column| mapping.columns.get(&column).copied())
+            })
+            .collect::<BTreeSet<_>>();
+        for column_id in indexed_columns {
+            physical_global = physical_global.with_index(GrooveIndexSchema::new(
+                physical_current_index_name(column_id),
+                [physical_user_column_field(column_id)],
+            ));
+        }
+        let mut register_global = logical_global_tables[1].clone();
+        register_global.name = physical_register_global_current_table_name(table_id);
+
+        let logical_ahead_tables = template_table.ahead_current_storage_tables();
+        let mut physical_ahead = GrooveTableSchema::new(
+            physical_ahead_current_table_name(table_id),
+            current_columns(),
+        );
+        physical_ahead.primary_key = logical_ahead_tables[0].primary_key.clone();
+        physical_ahead.indices = logical_ahead_tables[0].indices.clone();
+        let mut register_ahead = logical_ahead_tables[1].clone();
+        register_ahead.name = physical_register_ahead_current_table_name(table_id);
+
         let mut layouts_by_alias = BTreeMap::new();
-        for (schema_version, logical_table, mapping) in variants {
+        let mut current_layouts_by_alias = BTreeMap::new();
+        for (schema_version, logical_table, mapping) in &variants {
             let alias = schema_version_aliases.get(&schema_version).copied().ok_or(
                 Error::InvalidStoredValue("physical history schema alias missing"),
             )?;
@@ -589,12 +970,26 @@ pub(super) fn physical_version_storage_tables(
                     "schema maps multiple logical tables to one physical lineage",
                 ));
             }
+            let fields = physical_current_field_names(logical_table, mapping)?;
+            if current_layouts_by_alias.insert(alias, fields).is_some() {
+                return Err(Error::InvalidStoredValue(
+                    "schema maps multiple logical tables to one physical lineage",
+                ));
+            }
         }
         for (alias, fields) in layouts_by_alias {
             physical = physical.with_schema_version(alias.0, fields);
         }
+        for (alias, fields) in current_layouts_by_alias {
+            physical_global = physical_global.with_schema_version(alias.0, fields.clone());
+            physical_ahead = physical_ahead.with_schema_version(alias.0, fields);
+        }
         tables.push(physical);
         tables.push(register);
+        tables.push(physical_global);
+        tables.push(register_global);
+        tables.push(physical_ahead);
+        tables.push(register_ahead);
     }
     Ok(tables)
 }
@@ -609,6 +1004,27 @@ fn physical_history_descriptor(
     if logical_descriptor.fields().len() != physical_names.len() {
         return Err(Error::InvalidStoredValue(
             "physical history descriptor width mismatch",
+        ));
+    }
+    Ok(records::RecordDescriptor::new(
+        physical_names.into_iter().zip(
+            logical_descriptor
+                .fields()
+                .iter()
+                .map(|field| field.value_type.clone()),
+        ),
+    ))
+}
+
+fn physical_current_descriptor(
+    table: &TableSchema,
+    mapping: &TablePhysicalMapping,
+) -> Result<records::RecordDescriptor, Error> {
+    let logical_descriptor = table.global_current_storage_tables()[0].record_schema();
+    let physical_names = physical_current_field_names(table, mapping)?;
+    if logical_descriptor.fields().len() != physical_names.len() {
+        return Err(Error::InvalidStoredValue(
+            "physical current descriptor width mismatch",
         ));
     }
     Ok(records::RecordDescriptor::new(
@@ -644,6 +1060,35 @@ fn physical_history_field_names(
                 .copied()
                 .ok_or(Error::InvalidStoredValue(
                     "physical history column mapping missing",
+                ))?;
+        fields.push(physical_user_column_field(column_id));
+    }
+    Ok(fields)
+}
+
+fn physical_current_field_names(
+    table: &TableSchema,
+    mapping: &TablePhysicalMapping,
+) -> Result<Vec<String>, Error> {
+    let logical_descriptor = table.global_current_storage_tables()[0].record_schema();
+    let mut fields = logical_descriptor
+        .fields()
+        .iter()
+        .take(GlobalCurrentRowRecord::USER_CELLS)
+        .map(|field| {
+            field.name.clone().ok_or(Error::InvalidStoredValue(
+                "physical current system field unnamed",
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for column in &table.columns {
+        let column_id =
+            mapping
+                .columns
+                .get(&column.name)
+                .copied()
+                .ok_or(Error::InvalidStoredValue(
+                    "physical current column mapping missing",
                 ))?;
         fields.push(physical_user_column_field(column_id));
     }

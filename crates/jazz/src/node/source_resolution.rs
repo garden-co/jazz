@@ -63,10 +63,10 @@ where
         }
         let mut rows = Vec::new();
         for (row_uuid, version) in content {
-            if deletions.get(&row_uuid).is_some_and(|deletion| {
-                deletion.deletion() == Some(DeletionEvent::Deleted)
-                    && deletion.tx_time() > version.tx_time()
-            }) {
+            if deletions
+                .get(&row_uuid)
+                .is_some_and(|deletion| deletion.deletion() == Some(DeletionEvent::Deleted))
+            {
                 continue;
             }
             let source_schema = self
@@ -134,10 +134,10 @@ where
         }
         let mut rows = Vec::new();
         for (row_uuid, content) in content {
-            if deletions.get(&row_uuid).is_some_and(|deletion| {
-                deletion.deletion() == Some(DeletionEvent::Deleted)
-                    && deletion.tx_time() > content.tx_time()
-            }) {
+            if deletions
+                .get(&row_uuid)
+                .is_some_and(|deletion| deletion.deletion() == Some(DeletionEvent::Deleted))
+            {
                 continue;
             }
             let source_schema = self
@@ -227,10 +227,9 @@ where
                 continue;
             };
             if projected_table == table {
-                let deleted = deletions.get(&row_uuid).is_some_and(|deletion| {
-                    deletion.deletion() == Some(DeletionEvent::Deleted)
-                        && deletion.tx_time() > version.tx_time()
-                });
+                let deleted = deletions
+                    .get(&row_uuid)
+                    .is_some_and(|deletion| deletion.deletion() == Some(DeletionEvent::Deleted));
                 rows.push((
                     current_row_from_cells(&read_table, row_uuid, &cells)?,
                     deleted,

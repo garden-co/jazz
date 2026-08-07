@@ -312,8 +312,6 @@ struct Parking {
 /// Query registration, cache, current-row graph, and settled-result state.
 #[derive(Clone, Debug, Default)]
 struct QueryServing {
-    /// Prepared current-row graph per table and durability tier.
-    current_row_graphs: BTreeMap<(String, DurabilityTier), GraphBuilder>,
     /// Prepared query plans keyed by shape, durability tier, and parameter
     /// descriptor signature.
     query_shape_cache:
@@ -333,11 +331,6 @@ struct QueryServing {
     tx_version_tables_cache_order_set: BTreeSet<TxId>,
     /// Physical version-storage sources keyed by logical table and layer.
     version_storage_sources_cache: BTreeMap<(String, VersionLayer), Vec<String>>,
-    /// Interned physical table names for hot ingest/current-row paths.
-    ///
-    /// Keyed by logical table, physical class, and schema-version context. This
-    /// is pure memoization: the mapping key fully determines the name.
-    physical_table_name_cache: BTreeMap<PhysicalTableNameKey, groove::Intern<String>>,
     /// Registered validated query shapes keyed by stable shape ID.
     registered_shapes: BTreeMap<ShapeId, ValidatedQuery>,
     /// Registered query binding values keyed by shape and usage-site binding ID.
@@ -372,20 +365,6 @@ struct QueryServing {
     /// Binding views whose settled state was replaced by an authoritative
     /// server-provided reset since the last facade refresh.
     pending_authoritative_reset_binding_views: BTreeSet<BindingViewKey>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-enum PhysicalTableClass {
-    GlobalCurrent(VersionLayer),
-    AheadCurrent(VersionLayer),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-struct PhysicalTableNameKey {
-    table: String,
-    class: PhysicalTableClass,
-    schema_version: SchemaVersionId,
-    base_schema_version: SchemaVersionId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -576,7 +555,6 @@ where
             &branch_partitions,
             storage,
         )?;
-        let current_row_graphs = current_row_graphs(&schema);
         let current_schema_version_alias = schema_version_aliases
             .get(&current_schema_version_id)
             .copied();
@@ -610,7 +588,6 @@ where
             },
             parking: Parking::default(),
             query: QueryServing {
-                current_row_graphs,
                 query_shape_cache: BTreeMap::new(),
                 read_policy_authorization_request_cache: BTreeMap::new(),
                 policy_authorization_graph_cache: BTreeMap::new(),
@@ -619,7 +596,6 @@ where
                 tx_version_tables_cache_order: VecDeque::new(),
                 tx_version_tables_cache_order_set: BTreeSet::new(),
                 version_storage_sources_cache: BTreeMap::new(),
-                physical_table_name_cache: BTreeMap::new(),
                 registered_shapes: BTreeMap::new(),
                 registered_bindings: BTreeMap::new(),
                 settled_result_sets: BTreeMap::new(),
@@ -783,6 +759,7 @@ where
         )?;
         self.database.replace(database);
         self.register_physical_history_variant_projections()?;
+        self.register_physical_current_variant_projections()?;
         self.groove_runtime_token = next_groove_runtime_token();
         self.rederive_restart_state()?;
         Ok(())
@@ -799,7 +776,6 @@ where
         self.rejections.child_txs_by_parent.clear();
         self.rejections.rejected_transactions.clear();
         self.branches.branches.clear();
-        self.query.current_row_graphs = current_row_graphs(&self.catalogue.schema);
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
@@ -1584,42 +1560,67 @@ where
         self.ahead_current_keys.clear();
         self.ahead_current_rows.clear();
         self.ahead_current_latest.clear();
-        for table in self.catalogue.schema.tables.clone() {
-            let storage_tables = table.ahead_current_storage_tables();
+        let physical_table_ids = self
+            .catalogue
+            .physical_mappings
+            .values()
+            .flat_map(|mapping| mapping.tables.values().map(|table| table.table_id))
+            .collect::<BTreeSet<_>>();
+        for table_id in physical_table_ids {
             let content_rows = self
                 .database
-                .primary_key_scan_raw(&storage_tables[0].name, &[])?
+                .primary_key_scan_raw(&physical_ahead_current_table_name(table_id), &[])?
                 .into_iter()
-                .map(|raw| raw.raw().to_vec())
-                .collect::<Vec<_>>();
-            let content_descriptor = storage_tables[0].record_schema();
-            for raw in content_rows {
-                let record = BorrowedRecord::new(&raw, &content_descriptor);
+                .map(|raw| {
+                    let record = raw.record();
+                    Ok((
+                        SchemaVersionAlias(
+                            record.get_u64(GlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX)?,
+                        ),
+                        RowUuid(record.get_uuid(GlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?),
+                        TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?),
+                        NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?),
+                    ))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            for (alias, row_uuid, tx_time, tx_node_alias) in content_rows {
                 self.insert_ahead_current_key(
-                    table.name.clone(),
+                    self.logical_table_for_physical_alias(table_id, alias)?,
                     VersionLayer::Content,
-                    RowUuid(record.get_uuid(GlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?),
-                    TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?),
-                    NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?),
+                    row_uuid,
+                    tx_time,
+                    tx_node_alias,
                 );
             }
-            let deletion_descriptor = storage_tables[1].record_schema();
             let deletion_rows = self
                 .database
-                .primary_key_scan_raw(&storage_tables[1].name, &[])?
+                .primary_key_scan_raw(&physical_register_ahead_current_table_name(table_id), &[])?
                 .into_iter()
-                .map(|raw| raw.raw().to_vec())
-                .collect::<Vec<_>>();
-            for raw in deletion_rows {
-                let record = BorrowedRecord::new(&raw, &deletion_descriptor);
+                .map(|raw| {
+                    let record = raw.record();
+                    Ok((
+                        SchemaVersionAlias(
+                            record.get_u64(
+                                RegisterGlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX,
+                            )?,
+                        ),
+                        RowUuid(
+                            record.get_uuid(RegisterGlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?,
+                        ),
+                        TxTime(record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?),
+                        NodeAlias(
+                            record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?,
+                        ),
+                    ))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            for (alias, row_uuid, tx_time, tx_node_alias) in deletion_rows {
                 self.insert_ahead_current_key(
-                    table.name.clone(),
+                    self.logical_table_for_physical_alias(table_id, alias)?,
                     VersionLayer::Deletion,
-                    RowUuid(record.get_uuid(RegisterGlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?),
-                    TxTime(record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?),
-                    NodeAlias(
-                        record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?,
-                    ),
+                    row_uuid,
+                    tx_time,
+                    tx_node_alias,
                 );
             }
         }
@@ -2280,36 +2281,34 @@ where
         table: &TableSchema,
         row_uuid: RowUuid,
     ) -> Result<Option<(CurrentRow, (TxTime, NodeUuid))>, Error> {
-        let mut candidates = Vec::new();
-        let global_tables = table.global_current_storage_tables();
-        if let Some(raw) = self
+        let schema_version = self.catalogue.current_write_schema.schema;
+        let prefix = vec![groove::ivm::LiteralValue::from(Value::Uuid(row_uuid.0))];
+        let global = self.physical_current_source_scan_graph(
+            schema_version,
+            &table.name,
+            PhysicalCurrentClass::Global,
+            groove::ivm::StaticScanSpec::Point(prefix.clone()),
+        )?;
+        let ahead = self.physical_current_source_scan_graph(
+            schema_version,
+            &table.name,
+            PhysicalCurrentClass::Ahead,
+            groove::ivm::StaticScanSpec::Prefix(prefix),
+        )?;
+        let result = self
             .database
-            .primary_key_get_raw(&global_tables[0].name, &[Value::Uuid(row_uuid.0)])?
-        {
-            let record = raw.record();
-            let tx = self.current_record_sort_key(&table.name, row_uuid, record)?;
-            candidates.push((decode_current_row(table, record)?, tx));
-        }
-        let ahead_tables = table.ahead_current_storage_tables();
-        if let Some((tx_time, tx_node_alias)) = self
-            .ahead_current_latest
-            .get(&(table.name.clone(), VersionLayer::Content, row_uuid))
-            .copied()
-        {
-            if let Some(raw) = self.database.primary_key_get_raw(
-                &ahead_tables[0].name,
-                &[
-                    Value::Uuid(row_uuid.0),
-                    Value::U64(tx_time.0),
-                    Value::U64(tx_node_alias.0),
-                ],
-            )? {
-                let record = raw.record();
-                let tx = self.current_record_sort_key(&table.name, row_uuid, record)?;
-                candidates.push((decode_current_row(table, record)?, tx));
-            }
-        }
-        Ok(candidates.into_iter().max_by_key(|(_, tx)| *tx))
+            .query_graph(GraphBuilder::arg_max_by(
+                GraphBuilder::union([global, ahead]),
+                ["row_uuid"],
+                ["tx_time", "tx_node_id"],
+            ))
+            .map_err(|error| Self::malformed_current_query_error(&table.name, row_uuid, error))?;
+        let Some(delta) = result.deltas.into_iter().find(|delta| delta.weight > 0) else {
+            return Ok(None);
+        };
+        let record = BorrowedRecord::new(&delta.record, &result.descriptor);
+        let tx = self.current_record_sort_key(&table.name, row_uuid, record)?;
+        Ok(Some((decode_current_row(table, record)?, tx)))
     }
 
     fn local_current_deletion_candidate(
@@ -2317,44 +2316,35 @@ where
         table: &TableSchema,
         row_uuid: RowUuid,
     ) -> Result<Option<(DeletionEvent, (TxTime, NodeUuid))>, Error> {
-        let mut candidates = Vec::new();
-        let global_tables = table.global_current_storage_tables();
-        if let Some(raw) = self
+        let schema_version = self.catalogue.current_write_schema.schema;
+        let table_id = self.physical_table_id_for_schema(schema_version, &table.name)?;
+        let prefix = vec![groove::ivm::LiteralValue::from(Value::Uuid(row_uuid.0))];
+        let global = GraphBuilder::table_scan(
+            physical_register_global_current_table_name(table_id),
+            groove::ivm::StaticScanSpec::Point(prefix.clone()),
+        );
+        let ahead = GraphBuilder::table_scan(
+            physical_register_ahead_current_table_name(table_id),
+            groove::ivm::StaticScanSpec::Prefix(prefix),
+        );
+        let result = self
             .database
-            .primary_key_get_raw(&global_tables[1].name, &[Value::Uuid(row_uuid.0)])?
-        {
-            let record = raw.record();
-            candidates.push((
-                deletion_event_from_value(
-                    record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
-                )?,
-                self.current_record_sort_key(&table.name, row_uuid, record)?,
-            ));
-        }
-        let ahead_tables = table.ahead_current_storage_tables();
-        if let Some((tx_time, tx_node_alias)) = self
-            .ahead_current_latest
-            .get(&(table.name.clone(), VersionLayer::Deletion, row_uuid))
-            .copied()
-        {
-            if let Some(raw) = self.database.primary_key_get_raw(
-                &ahead_tables[1].name,
-                &[
-                    Value::Uuid(row_uuid.0),
-                    Value::U64(tx_time.0),
-                    Value::U64(tx_node_alias.0),
-                ],
-            )? {
-                let record = raw.record();
-                candidates.push((
-                    deletion_event_from_value(
-                        record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
-                    )?,
-                    self.current_record_sort_key(&table.name, row_uuid, record)?,
-                ));
-            }
-        }
-        Ok(candidates.into_iter().max_by_key(|(_, tx)| *tx))
+            .query_graph(GraphBuilder::arg_max_by(
+                GraphBuilder::union([global, ahead]),
+                ["row_uuid"],
+                ["tx_time", "tx_node_id"],
+            ))
+            .map_err(|error| Self::malformed_current_query_error(&table.name, row_uuid, error))?;
+        let Some(delta) = result.deltas.into_iter().find(|delta| delta.weight > 0) else {
+            return Ok(None);
+        };
+        let record = BorrowedRecord::new(&delta.record, &result.descriptor);
+        Ok(Some((
+            deletion_event_from_value(
+                record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
+            )?,
+            self.current_record_sort_key(&table.name, row_uuid, record)?,
+        )))
     }
 
     fn current_record_sort_key(
@@ -2388,6 +2378,25 @@ where
                 "current row references unknown node alias",
             ))?;
         Ok((tx_time, tx_node))
+    }
+
+    fn malformed_current_query_error(
+        table: &str,
+        row_uuid: RowUuid,
+        error: GrooveDbError,
+    ) -> Error {
+        let source = match error {
+            GrooveDbError::RecordEncoding(source)
+            | GrooveDbError::IvmRuntime(groove::ivm::IvmRuntimeError::RecordEncoding(source)) => {
+                source
+            }
+            error => return Error::Groove(error),
+        };
+        Error::MalformedCurrentRow(Box::new(MalformedCurrentRow {
+            table: table.to_owned(),
+            row_uuid,
+            source,
+        }))
     }
 
     fn current_row_from_materialized_version(

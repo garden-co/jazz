@@ -57,7 +57,7 @@ use crate::query::{
     Include, JoinTarget, JoinVia, Operand, OrderDirection, Predicate, Query as JazzQuery,
     QueryError, ShapeId, ValidatedQuery, binding_id_for_values, relation_query_to_query,
 };
-use crate::schema::{ColumnSchema, branch_metadata_table_schema, global_current_index_name};
+use crate::schema::{ColumnSchema, branch_metadata_table_schema};
 
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
@@ -584,17 +584,9 @@ struct CurrentSourceGraph {
 }
 
 #[derive(Clone, Debug)]
-struct ProjectedCurrentPartition {
-    schema_version: SchemaVersionId,
-    base_for_current_names: SchemaVersionId,
-    table: TableSchema,
-    lens_path: Option<CompiledLensPath>,
-}
-
-#[derive(Clone, Debug)]
 enum CurrentAccessPath {
     PrimaryKey(Vec<Value>),
-    Index { index: String, prefix: Vec<Value> },
+    Index { column: String, prefix: Vec<Value> },
 }
 
 impl<S> SourceResolver for CurrentQuerySourceResolver<'_, S>
@@ -1000,16 +992,7 @@ where
                 (graph, source.descriptor, source.metadata, BTreeSet::new())
             }
         } else if request.visibility == RowVisibility::IncludeDeleted
-            && (self.read_view.read_schema != self.node.catalogue.current_schema_version_id
-                || self
-                    .node
-                    .catalogue
-                    .partitions
-                    .iter()
-                    .any(|(logical, version)| {
-                        logical == &request.source.table
-                            && *version != self.node.catalogue.current_schema_version_id
-                    }))
+            && self.needs_projected_current_source(&request.source.table)
         {
             let tier = graph_tier.expect("visible current source has a tier");
             let rows = self
@@ -1179,13 +1162,18 @@ where
                     table, tier, prefix,
                 )))
             }
-            CurrentAccessPath::Index { index, prefix } => {
+            CurrentAccessPath::Index { column, prefix } => {
                 if tier != DurabilityTier::Global {
                     return Ok(None);
                 }
                 let rows = self
                     .node
-                    .global_current_rows_for_index_scan(table, &index, &prefix)
+                    .physical_global_current_source_for_index_scan(
+                        table,
+                        self.read_view.read_schema,
+                        &column,
+                        &prefix,
+                    )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 self.node.query_engine_read_metrics.source_index_probes += 1;
                 Ok(Some(rows))
@@ -1272,7 +1260,8 @@ where
         }
         if self.needs_projected_current_source(&request.source.table) {
             return Ok(Some(ContentVersionSource {
-                graph: self.projected_content_current_source_graph(request, table, tier, false)?,
+                graph: self
+                    .projected_content_current_source_graph(request, table, tier, false, false)?,
                 row_uuid_field: "row_uuid".to_owned(),
             }));
         }
@@ -1288,7 +1277,7 @@ where
         table: &TableSchema,
         position: GlobalSeq,
     ) -> Result<GraphBuilder, SourceResolutionError> {
-        if self.uses_current_schema_partition(&request.source.table) {
+        if self.can_use_bounded_historical_source(&request.source.table) {
             self.node
                 .query_engine_read_metrics
                 .source_global_seq_range_scans += 1;
@@ -1319,7 +1308,7 @@ where
         tier: DurabilityTier,
     ) -> Result<CurrentSourceGraph, SourceResolutionError> {
         Ok(CurrentSourceGraph {
-            graph: self.projected_content_current_source_graph(request, table, tier, true)?,
+            graph: self.projected_content_current_source_graph(request, table, tier, true, true)?,
             descriptor: current_row_descriptor(table),
             metadata: BTreeMap::new(),
         })
@@ -1331,55 +1320,89 @@ where
         read_table: &TableSchema,
         tier: DurabilityTier,
         include_global_seq: bool,
+        exclude_deleted: bool,
     ) -> Result<GraphBuilder, SourceResolutionError> {
-        let partitions = self.projected_current_partitions(request)?;
-        let read_schema_alias = self
-            .node
-            .ensure_schema_version_alias(self.read_view.read_schema)
-            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
-            .0;
-        let inputs = partitions
-            .iter()
-            .map(|partition| {
-                let graph = content_current_with_version_graph_for_schema(
-                    &partition.table,
-                    partition.schema_version,
-                    partition.base_for_current_names,
-                    tier,
-                    include_global_seq,
-                );
-                graph.project_fields(project_current_content_fields(
-                    &partition.table,
-                    read_table,
-                    partition.lens_path.as_ref(),
-                    read_schema_alias,
-                    include_global_seq,
-                ))
-            })
-            .collect::<Vec<_>>();
-        let graph = match inputs.as_slice() {
-            [] => {
-                return Err(source_resolution_error(
-                    request,
-                    SourceGap::SchemaProjection,
-                ));
+        let fields = global_current_storage_fields(read_table, true, include_global_seq);
+        let access_path = self.access_paths.get(&request.source).cloned();
+        let global = match &access_path {
+            Some(CurrentAccessPath::PrimaryKey(prefix)) => {
+                self.node.query_engine_read_metrics.source_primary_key_scans += 1;
+                self.node
+                    .physical_current_source_scan_graph(
+                        self.read_view.read_schema,
+                        &request.source.table,
+                        PhysicalCurrentClass::Global,
+                        static_scan_for_prefix(prefix.clone(), 1),
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
             }
-            [single] => single.clone(),
-            _ => GraphBuilder::union(inputs),
+            Some(CurrentAccessPath::Index { column, prefix }) if tier == DurabilityTier::Global => {
+                self.node.query_engine_read_metrics.source_index_probes += 1;
+                self.node
+                    .physical_global_current_source_for_index_scan(
+                        read_table,
+                        self.read_view.read_schema,
+                        column,
+                        prefix,
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+            }
+            _ => {
+                self.node.query_engine_read_metrics.source_full_scans += 1;
+                self.node
+                    .physical_current_source_graph(
+                        self.read_view.read_schema,
+                        &request.source.table,
+                        PhysicalCurrentClass::Global,
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
+            }
         };
-        let content =
-            GraphBuilder::arg_max_by(graph, ["row_uuid"], ["tx_time", "tx_node_id"]).project(
-                global_current_storage_fields(read_table, true, include_global_seq),
-            );
+        let content = if tier == DurabilityTier::Global {
+            global
+        } else {
+            let global = global.project(fields.clone());
+            let ahead = match &access_path {
+                Some(CurrentAccessPath::PrimaryKey(prefix)) => {
+                    self.node.physical_current_source_scan_graph(
+                        self.read_view.read_schema,
+                        &request.source.table,
+                        PhysicalCurrentClass::Ahead,
+                        static_scan_for_prefix(prefix.clone(), 3),
+                    )
+                }
+                _ => self.node.physical_current_source_graph(
+                    self.read_view.read_schema,
+                    &request.source.table,
+                    PhysicalCurrentClass::Ahead,
+                ),
+            }
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+            let ahead = if tier == DurabilityTier::Edge {
+                edge_visible_ahead_current_source_graph(ahead, fields.clone())
+            } else {
+                ahead.project(fields.clone())
+            };
+            GraphBuilder::arg_max_by(
+                GraphBuilder::union([global, ahead]),
+                ["row_uuid"],
+                ["tx_time", "tx_node_id"],
+            )
+            .project(fields.clone())
+        };
+        if !exclude_deleted {
+            return Ok(content.project(fields));
+        }
         let deleted_winners = self
             .projected_deletion_register_current_source_graph(request, tier)?
             .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
             .project(["row_uuid"]);
-        Ok(
-            GraphBuilder::anti_join(content, deleted_winners, ["row_uuid"], ["row_uuid"]).project(
-                global_current_storage_fields(read_table, true, include_global_seq),
-            ),
-        )
+        Ok(GraphBuilder::anti_join(
+            content,
+            deleted_winners,
+            ["row_uuid"],
+            ["row_uuid"],
+        ))
     }
 
     fn projected_deletion_register_current_source_graph(
@@ -1387,113 +1410,28 @@ where
         request: &SourceRequest,
         tier: DurabilityTier,
     ) -> Result<GraphBuilder, SourceResolutionError> {
-        let partitions = self.projected_current_partitions(request)?;
-        let inputs = partitions
-            .iter()
-            .map(|partition| {
-                let register_table = self
-                    .node
-                    .physical_register_table_for_schema(
-                        partition.schema_version,
-                        &partition.table.name,
-                    )
-                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-                Ok(deletion_register_current_source_graph_for_schema(
-                    &partition.table.name,
-                    &register_table,
-                    partition.schema_version,
-                    partition.base_for_current_names,
-                    tier,
-                ))
-            })
-            .collect::<Result<Vec<_>, SourceResolutionError>>()?;
-        let graph = match inputs.as_slice() {
-            [] => {
-                return Err(source_resolution_error(
-                    request,
-                    SourceGap::SchemaProjection,
-                ));
-            }
-            [single] => single.clone(),
-            _ => GraphBuilder::union(inputs),
+        let table_id = self
+            .node
+            .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let fields = register_storage_fields_for_query_engine("");
+        let global = GraphBuilder::table(physical_register_global_current_table_name(table_id));
+        if tier == DurabilityTier::Global {
+            return Ok(global);
+        }
+        let global = global.project_fields(fields.clone());
+        let ahead = GraphBuilder::table(physical_register_ahead_current_table_name(table_id));
+        let ahead = if tier == DurabilityTier::Edge {
+            edge_visible_ahead_current_source_graph(ahead, register_storage_field_names())
+        } else {
+            ahead.project_fields(fields.clone())
         };
-        Ok(
-            GraphBuilder::arg_max_by(graph, ["row_uuid"], ["tx_time", "tx_node_id"])
-                .project_fields(register_storage_fields_for_query_engine("")),
+        Ok(GraphBuilder::arg_max_by(
+            GraphBuilder::union([global, ahead]),
+            ["row_uuid"],
+            ["tx_time", "tx_node_id"],
         )
-    }
-
-    fn projected_current_partitions(
-        &mut self,
-        request: &SourceRequest,
-    ) -> Result<Vec<ProjectedCurrentPartition>, SourceResolutionError> {
-        let candidates = self.node.catalogue.partitions.clone();
-        let mut partitions = Vec::new();
-        for (logical_table, schema_version) in candidates {
-            let Ok(source_table) = self.node.table_in_schema(&logical_table, schema_version) else {
-                continue;
-            };
-            let lens_path = if schema_version == self.read_view.read_schema
-                && logical_table == request.source.table
-            {
-                None
-            } else if let Some(path) = self
-                .node
-                .compiled_lens_path(
-                    schema_version,
-                    self.read_view.read_schema,
-                    LensPathDirection::Forward,
-                    &logical_table,
-                )
-                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
-            {
-                if path.target_table != request.source.table {
-                    continue;
-                }
-                Some(path)
-            } else if let Some(path) = self
-                .node
-                .compiled_lens_path(
-                    schema_version,
-                    self.read_view.read_schema,
-                    LensPathDirection::Reverse,
-                    &logical_table,
-                )
-                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
-            {
-                if path.target_table != request.source.table {
-                    continue;
-                }
-                Some(path)
-            } else {
-                continue;
-            };
-            let base_for_current_names = if self
-                .node
-                .table_in_schema(
-                    &source_table.name,
-                    self.node.catalogue.current_schema_version_id,
-                )
-                .is_ok()
-            {
-                self.node.catalogue.current_schema_version_id
-            } else {
-                schema_version
-            };
-            partitions.push(ProjectedCurrentPartition {
-                schema_version,
-                base_for_current_names,
-                table: source_table,
-                lens_path,
-            });
-        }
-        if partitions.is_empty() {
-            return Err(source_resolution_error(
-                request,
-                SourceGap::SchemaProjection,
-            ));
-        }
-        Ok(partitions)
+        .project_fields(fields))
     }
 
     fn projected_visible_current_source_graph(
@@ -1503,11 +1441,10 @@ where
         tier: DurabilityTier,
     ) -> Result<CurrentSourceGraph, SourceResolutionError> {
         Ok(CurrentSourceGraph {
-            // Resolve projected sources directly from their storage partitions.
-            // Calling `current_rows_for_schema` here re-enters query compilation;
-            // a renamed table maps back to this resolver and recurses forever.
+            // Project heterogeneous physical rows at the source boundary so the
+            // rest of the query graph retains the requested logical descriptor.
             graph: self
-                .projected_content_current_source_graph(request, table, tier, false)?
+                .projected_content_current_source_graph(request, table, tier, false, true)?
                 .project_fields(storage_to_canonical_current_source_fields(
                     table, true, false,
                 )),
@@ -1516,45 +1453,28 @@ where
         })
     }
 
-    fn uses_current_schema_partition(&mut self, table: &str) -> bool {
-        !self.needs_projected_current_source(table)
+    fn can_use_bounded_historical_source(&self, table: &str) -> bool {
+        if self.read_view.read_schema != self.node.catalogue.current_schema_version_id {
+            return false;
+        }
+        let Ok(table_id) = self
+            .node
+            .physical_table_id_for_schema(self.read_view.read_schema, table)
+        else {
+            return false;
+        };
+        self.node
+            .catalogue
+            .physical_mappings
+            .values()
+            .flat_map(|mapping| &mapping.tables)
+            .all(|(logical_table, mapping)| mapping.table_id != table_id || logical_table == table)
     }
 
     fn needs_projected_current_source(&mut self, table: &str) -> bool {
-        self.read_view.read_schema != self.node.catalogue.current_schema_version_id
-            || self
-                .node
-                .catalogue
-                .partitions
-                .iter()
-                .any(|(logical, version)| {
-                    logical == table && *version != self.node.catalogue.current_schema_version_id
-                })
-            || self
-                .node
-                .catalogue
-                .partitions
-                .clone()
-                .into_iter()
-                .any(|(logical, version)| {
-                    if logical == table {
-                        return false;
-                    }
-                    [LensPathDirection::Forward, LensPathDirection::Reverse]
-                        .into_iter()
-                        .any(|direction| {
-                            self.node
-                                .compiled_lens_path(
-                                    version,
-                                    self.read_view.read_schema,
-                                    direction,
-                                    &logical,
-                                )
-                                .is_ok_and(|path| {
-                                    path.is_some_and(|path| path.target_table == table)
-                                })
-                        })
-                })
+        self.node
+            .physical_table_id_for_schema(self.read_view.read_schema, table)
+            .is_ok()
     }
 }
 
@@ -1577,117 +1497,12 @@ fn deletion_register_current_source_graph(
     .project_fields(register_storage_fields_for_query_engine("left."))
 }
 
-fn content_current_with_version_graph_for_schema(
-    table: &TableSchema,
-    schema_version: SchemaVersionId,
-    base_schema_version: SchemaVersionId,
-    tier: DurabilityTier,
-    include_global_seq: bool,
+fn edge_visible_ahead_current_source_graph(
+    source: GraphBuilder,
+    fields: Vec<String>,
 ) -> GraphBuilder {
-    let fields = global_current_storage_fields(table, true, include_global_seq);
-    let content_current = if tier == DurabilityTier::Global {
-        GraphBuilder::table(global_current_table_name_for_schema(
-            &table.name,
-            schema_version,
-            base_schema_version,
-        ))
-        .project(fields.clone())
-    } else {
-        let ahead = if tier == DurabilityTier::Edge {
-            edge_visible_ahead_current_graph(
-                ahead_current_table_name_for_schema(
-                    &table.name,
-                    schema_version,
-                    base_schema_version,
-                ),
-                fields.clone(),
-            )
-        } else {
-            GraphBuilder::table(ahead_current_table_name_for_schema(
-                &table.name,
-                schema_version,
-                base_schema_version,
-            ))
-            .project(fields.clone())
-        };
-        GraphBuilder::arg_max_by(
-            GraphBuilder::union([
-                GraphBuilder::table(global_current_table_name_for_schema(
-                    &table.name,
-                    schema_version,
-                    base_schema_version,
-                ))
-                .project(fields.clone()),
-                ahead,
-            ]),
-            ["row_uuid"],
-            ["tx_time", "tx_node_id"],
-        )
-        .project(fields.clone())
-    };
-    content_current.project(fields)
-}
-
-fn deletion_register_current_source_graph_for_schema(
-    table: &str,
-    physical_register_table: &str,
-    schema_version: SchemaVersionId,
-    base_schema_version: SchemaVersionId,
-    tier: DurabilityTier,
-) -> GraphBuilder {
-    if tier == DurabilityTier::Global {
-        return GraphBuilder::table(register_global_current_table_name_for_schema(
-            table,
-            schema_version,
-            base_schema_version,
-        ))
-        .project_fields(register_storage_fields_for_query_engine(""));
-    }
-    let current_keys = deletion_register_current_keys_graph_for_schema(
-        table,
-        schema_version,
-        base_schema_version,
-        tier,
-    );
     GraphBuilder::join(
-        GraphBuilder::table(physical_register_table),
-        current_keys,
-        ["row_uuid", "tx_time", "tx_node_id"],
-        ["row_uuid", "tx_time", "tx_node_id"],
-    )
-    .project_fields(register_storage_fields_for_query_engine("left."))
-}
-
-fn deletion_register_current_keys_graph_for_schema(
-    table: &str,
-    schema_version: SchemaVersionId,
-    base_schema_version: SchemaVersionId,
-    tier: DurabilityTier,
-) -> GraphBuilder {
-    let key_fields = ["row_uuid", "tx_time", "tx_node_id"];
-    let global_table =
-        register_global_current_table_name_for_schema(table, schema_version, base_schema_version);
-    if tier == DurabilityTier::Global {
-        return GraphBuilder::table(global_table).project(key_fields);
-    }
-    let ahead_table =
-        register_ahead_current_table_name_for_schema(table, schema_version, base_schema_version);
-    let ahead = if tier == DurabilityTier::Edge {
-        edge_visible_ahead_current_graph(ahead_table, key_fields.map(str::to_owned).to_vec())
-    } else {
-        GraphBuilder::table(ahead_table).project(key_fields)
-    };
-    GraphBuilder::arg_max_by(
-        GraphBuilder::union([GraphBuilder::table(global_table).project(key_fields), ahead]),
-        ["row_uuid"],
-        ["tx_time", "tx_node_id"],
-    )
-    .project(key_fields)
-}
-
-fn edge_visible_ahead_current_graph(table_name: String, fields: Vec<String>) -> GraphBuilder {
-    GraphBuilder::join(
-        GraphBuilder::table(table_name).project(fields.clone()),
+        source.project(fields.clone()),
         GraphBuilder::table("jazz_transactions")
             .filter(
                 PredicateExpr::And(vec![
@@ -1709,96 +1524,6 @@ fn edge_visible_ahead_current_graph(table_name: String, fields: Vec<String>) -> 
             .into_iter()
             .map(|field| ProjectField::renamed(left_field(&field), field)),
     )
-}
-
-fn project_current_content_fields(
-    source_table: &TableSchema,
-    read_table: &TableSchema,
-    lens_path: Option<&CompiledLensPath>,
-    read_schema_alias: u64,
-    include_global_seq: bool,
-) -> Vec<ProjectField> {
-    let mut column_fields = source_table
-        .columns
-        .iter()
-        .map(|column| {
-            (
-                column.name.clone(),
-                ProjectField::named(user_column_field(&column.name)),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    if let Some(path) = lens_path {
-        for op in &path.ops {
-            match op {
-                CompiledLensOp::Rename { from, to } => {
-                    if let Some(mut field) = column_fields.remove(from) {
-                        field.output_name = user_column_field(to);
-                        column_fields.insert(to.clone(), field);
-                    }
-                }
-                CompiledLensOp::Copy { from, to } => {
-                    if let Some(field) = column_fields.get(from) {
-                        let mut copy = field.clone();
-                        copy.output_name = user_column_field(to);
-                        column_fields.insert(to.clone(), copy);
-                    }
-                }
-                CompiledLensOp::Add { column, default } => {
-                    column_fields.insert(
-                        column.clone(),
-                        ProjectField::literal_typed(
-                            user_column_field(column),
-                            Value::Nullable(Some(Box::new(default.clone()))),
-                            read_table
-                                .columns
-                                .iter()
-                                .find(|candidate| candidate.name == *column)
-                                .map(|candidate| {
-                                    ValueType::Nullable(Box::new(
-                                        candidate.column_type.clone().value_type(),
-                                    ))
-                                })
-                                // A multi-lens path can add a temporary column
-                                // and remove it again before reaching the read
-                                // schema. It still needs a type while we carry
-                                // the intermediate projection.
-                                .unwrap_or_else(|| ValueType::Nullable(Box::new(ValueType::Bytes))),
-                        ),
-                    );
-                }
-                CompiledLensOp::Drop { column } => {
-                    column_fields.remove(column);
-                }
-            }
-        }
-    }
-
-    let mut fields = vec![
-        ProjectField::named("row_uuid"),
-        ProjectField::literal("schema_version", Value::U64(read_schema_alias)),
-        ProjectField::named("parents"),
-    ];
-    fields.extend(read_table.columns.iter().map(|column| {
-        column_fields.remove(&column.name).unwrap_or_else(|| {
-            ProjectField::null_typed(
-                user_column_field(&column.name),
-                ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
-            )
-        })
-    }));
-    fields.extend([
-        ProjectField::named("created_by"),
-        ProjectField::named("created_at"),
-        ProjectField::named("updated_by"),
-        ProjectField::named("updated_at"),
-        ProjectField::named("tx_time"),
-        ProjectField::named("tx_node_id"),
-    ]);
-    if include_global_seq {
-        fields.push(ProjectField::named("global_seq"));
-    }
-    fields
 }
 
 fn content_version_current_source_graph(
@@ -2011,6 +1736,13 @@ fn selected_visible_current_primary_key_graph(
 }
 
 fn register_storage_fields_for_query_engine(prefix: &str) -> Vec<ProjectField> {
+    register_storage_field_names()
+        .into_iter()
+        .map(|field| ProjectField::renamed(format!("{prefix}{field}"), field))
+        .collect()
+}
+
+fn register_storage_field_names() -> Vec<String> {
     [
         "row_uuid",
         "tx_time",
@@ -2024,7 +1756,7 @@ fn register_storage_fields_for_query_engine(prefix: &str) -> Vec<ProjectField> {
         "_deletion",
     ]
     .into_iter()
-    .map(|field| ProjectField::renamed(format!("{prefix}{field}"), field))
+    .map(str::to_owned)
     .collect()
 }
 
@@ -2900,7 +2632,7 @@ fn select_current_access_path(
     for column in table.global_current_indexed_columns() {
         if let Some(value) = equalities.get(&column).cloned() {
             return Some(CurrentAccessPath::Index {
-                index: global_current_index_name(&column),
+                column,
                 prefix: vec![Value::Nullable(Some(Box::new(value)))],
             });
         }
@@ -5260,19 +4992,29 @@ where
         row_uuid: RowUuid,
     ) -> Result<Option<CurrentRow>, Error> {
         let table = self.table(table_name)?.clone();
-        let global_tables = table.global_current_storage_tables();
-        let Some(content_raw) = self
+        let schema_version = self.catalogue.current_schema_version_id;
+        let table_id = self.physical_table_id_for_schema(schema_version, table_name)?;
+        let content_graph = self.physical_current_source_scan_graph(
+            schema_version,
+            table_name,
+            PhysicalCurrentClass::Global,
+            StaticScanSpec::Point(vec![groove::ivm::LiteralValue::from(Value::Uuid(
+                row_uuid.0,
+            ))]),
+        )?;
+        let content = self
             .database
-            .primary_key_get_raw(&global_tables[0].name, &[Value::Uuid(row_uuid.0)])?
-        else {
+            .query_graph(content_graph)
+            .map_err(|error| Self::malformed_current_query_error(table_name, row_uuid, error))?;
+        let Some(content_delta) = content.deltas.into_iter().find(|delta| delta.weight > 0) else {
             return Ok(None);
         };
-        let content_record = content_raw.record();
+        let content_record = BorrowedRecord::new(&content_delta.record, &content.descriptor);
         let content_tx = self.current_record_sort_key(table_name, row_uuid, content_record)?;
-        if let Some(deletion_raw) = self
-            .database
-            .primary_key_get_raw(&global_tables[1].name, &[Value::Uuid(row_uuid.0)])?
-        {
+        if let Some(deletion_raw) = self.database.primary_key_get_raw(
+            &physical_register_global_current_table_name(table_id),
+            &[Value::Uuid(row_uuid.0)],
+        )? {
             let deletion_record = deletion_raw.record();
             let deletion_tx =
                 self.current_record_sort_key(table_name, row_uuid, deletion_record)?;
@@ -5669,40 +5411,58 @@ where
         Ok(())
     }
 
-    fn global_current_rows_for_index_scan(
+    fn physical_global_current_source_for_index_scan(
         &self,
         table: &TableSchema,
-        index: &str,
+        schema_version: SchemaVersionId,
+        column: &str,
         prefix: &[Value],
     ) -> Result<GraphBuilder, Error> {
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(&table.name))
+            .ok_or(Error::InvalidStoredValue(
+                "physical current index table mapping missing",
+            ))?;
+        let column_id = mapping
+            .columns
+            .get(column)
+            .copied()
+            .ok_or(Error::InvalidStoredValue(
+                "physical current index column mapping missing",
+            ))?;
+        let storage_table = physical_global_current_table_name(mapping.table_id);
+        let alias = self
+            .catalogue
+            .schema_version_aliases
+            .get(&schema_version)
+            .copied()
+            .ok_or(Error::InvalidStoredValue(
+                "physical current index schema alias missing",
+            ))?;
+        let target = physical_current_projection_target(alias, &table.name);
+        let indexed = self.database.index_scan_raw(
+            &storage_table,
+            &physical_current_index_name(column_id),
+            prefix,
+        )?;
+        let mut records = Vec::with_capacity(indexed.len());
+        for raw in indexed {
+            let schema_version = raw.schema_version();
+            let record = groove::records::VersionedRecord::new(schema_version, raw.owned_record());
+            if let Some(projected) =
+                self.database
+                    .project_variant_record(&storage_table, &target, &record)?
+            {
+                records.push(projected.raw().to_vec());
+            }
+        }
         Ok(GraphBuilder::inline_records(
             table.global_current_storage_tables()[0].record_schema(),
-            self.global_current_row_records_for_index_scan(table, index, prefix)?,
+            records,
         ))
-    }
-
-    fn global_current_row_records_for_index_scan(
-        &self,
-        table: &TableSchema,
-        index: &str,
-        prefix: &[Value],
-    ) -> Result<Vec<Vec<u8>>, Error> {
-        let storage_table = global_current_table_name(&table.name);
-        self.encoded_records_for_index_scan(&storage_table, index, prefix)
-    }
-
-    fn encoded_records_for_index_scan(
-        &self,
-        storage_table: &str,
-        index: &str,
-        prefix: &[Value],
-    ) -> Result<Vec<Vec<u8>>, Error> {
-        Ok(self
-            .database
-            .index_scan_raw(storage_table, index, prefix)?
-            .into_iter()
-            .map(|raw| raw.record().raw().to_vec())
-            .collect())
     }
 
     fn compile_historical_query_program(
@@ -9751,50 +9511,66 @@ where
         table: &TableSchema,
         tier: DurabilityTier,
     ) -> Result<GraphBuilder, Error> {
-        if tier == DurabilityTier::Global {
-            let content = GraphBuilder::table(global_current_table_name(&table.name))
-                .project(global_current_storage_fields(table, true, true));
-            let deleted = GraphBuilder::table(register_global_current_table_name(&table.name))
-                .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
-                .project(["row_uuid"]);
-            return Ok(GraphBuilder::anti_join(
-                content,
-                deleted,
-                ["row_uuid"],
-                ["row_uuid"],
-            ));
-        }
-        let payload = content_version_current_source_graph(table, tier, true).project([
-            "row_uuid",
-            "tx_time",
-            "tx_node_id",
-            "schema_version",
-            "parents",
-            "global_seq",
-        ]);
-        Ok(GraphBuilder::join(
-            visible_current_graph(table, tier),
-            payload,
-            ["row_uuid", "tx_time", "tx_node_id"],
-            ["row_uuid", "tx_time", "tx_node_id"],
-        )
-        .project_fields(
-            std::iter::once(ProjectField::renamed("left.row_uuid", "row_uuid"))
-                .chain(table.columns.iter().map(|column| {
-                    let field = user_column_field(&column.name);
-                    ProjectField::renamed(left_field(&field), field)
-                }))
-                .chain([
-                    ProjectField::renamed("left.$createdBy", "created_by"),
-                    ProjectField::renamed("left.$createdAt", "created_at"),
-                    ProjectField::renamed("left.$updatedBy", "updated_by"),
-                    ProjectField::renamed("left.$updatedAt", "updated_at"),
-                    ProjectField::renamed("left.tx_time", "tx_time"),
-                    ProjectField::renamed("left.tx_node_id", "tx_node_id"),
-                    ProjectField::renamed("right.schema_version", "schema_version"),
-                    ProjectField::renamed("right.parents", "parents"),
-                    ProjectField::renamed("right.global_seq", "global_seq"),
-                ]),
+        let schema_version = self.catalogue.current_schema_version_id;
+        let table_id = self.physical_table_id_for_schema(schema_version, &table.name)?;
+        let content_fields = global_current_storage_fields(table, true, true);
+        let global_content = self
+            .physical_current_source_graph(
+                schema_version,
+                &table.name,
+                PhysicalCurrentClass::Global,
+            )?
+            .project(content_fields.clone());
+        let global_deletion =
+            GraphBuilder::table(physical_register_global_current_table_name(table_id))
+                .project_fields(register_storage_fields_for_query_engine(""));
+
+        let (content, deletion) = if tier == DurabilityTier::Global {
+            (global_content, global_deletion)
+        } else {
+            let ahead_content = self.physical_current_source_graph(
+                schema_version,
+                &table.name,
+                PhysicalCurrentClass::Ahead,
+            )?;
+            let ahead_content = if tier == DurabilityTier::Edge {
+                edge_visible_ahead_current_source_graph(ahead_content, content_fields.clone())
+            } else {
+                ahead_content.project(content_fields.clone())
+            };
+            let ahead_deletion =
+                GraphBuilder::table(physical_register_ahead_current_table_name(table_id));
+            let ahead_deletion = if tier == DurabilityTier::Edge {
+                edge_visible_ahead_current_source_graph(
+                    ahead_deletion,
+                    register_storage_field_names(),
+                )
+            } else {
+                ahead_deletion.project_fields(register_storage_fields_for_query_engine(""))
+            };
+            (
+                GraphBuilder::arg_max_by(
+                    GraphBuilder::union([global_content, ahead_content]),
+                    ["row_uuid"],
+                    ["tx_time", "tx_node_id"],
+                )
+                .project(content_fields),
+                GraphBuilder::arg_max_by(
+                    GraphBuilder::union([global_deletion, ahead_deletion]),
+                    ["row_uuid"],
+                    ["tx_time", "tx_node_id"],
+                )
+                .project_fields(register_storage_fields_for_query_engine("")),
+            )
+        };
+        let deleted = deletion
+            .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+            .project(["row_uuid"]);
+        Ok(GraphBuilder::anti_join(
+            content,
+            deleted,
+            ["row_uuid"],
+            ["row_uuid"],
         ))
     }
 
@@ -11894,7 +11670,6 @@ fn maintained_view_history_storage_field_names(table: &TableSchema) -> Vec<Strin
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use groove::ivm::{FieldRef, ProjectExpr};
     use groove::schema::{ColumnSchema, ColumnType};
     use groove::storage::{Durability, RocksDbStorage};
 
@@ -11927,41 +11702,6 @@ mod tests {
                 .get("comments")
                 .map(|window| (window.offset, window.limit)),
             Some((1, Some(2)))
-        );
-    }
-
-    #[test]
-    fn chained_renames_preserve_the_original_projection_source() {
-        let source_table =
-            TableSchema::new("users", [ColumnSchema::new("email", ColumnType::String)]);
-        let read_table = TableSchema::new(
-            "users",
-            [ColumnSchema::new("contact_email", ColumnType::String)],
-        );
-        let lens_path = CompiledLensPath {
-            target_table: "users".to_owned(),
-            ops: vec![
-                CompiledLensOp::Rename {
-                    from: "email".to_owned(),
-                    to: "email_address".to_owned(),
-                },
-                CompiledLensOp::Rename {
-                    from: "email_address".to_owned(),
-                    to: "contact_email".to_owned(),
-                },
-            ],
-        };
-
-        let fields =
-            project_current_content_fields(&source_table, &read_table, Some(&lens_path), 7, false);
-        let contact_email = fields
-            .iter()
-            .find(|field| field.output_name == user_column_field("contact_email"))
-            .expect("projected read column");
-
-        assert_eq!(
-            contact_email.expression,
-            ProjectExpr::Field(FieldRef::name(user_column_field("email"))),
         );
     }
 
@@ -12030,8 +11770,10 @@ mod tests {
                 metadata: BTreeSet::from([SourceMetadataRequirement::VersionPayloads]),
             },
         };
-        let expected_people_current =
-            global_current_table_name_for_schema("people", evolved_payload.id, evolved_payload.id);
+        let expected_people_current = physical_global_current_table_name(
+            node.physical_table_id_for_schema(evolved_payload.id, "people")
+                .unwrap(),
+        );
         let mut resolver = CurrentQuerySourceResolver {
             node: &mut node,
             read_view: &read_view,
@@ -12047,11 +11789,11 @@ mod tests {
 
         assert!(
             format!("{:?}", resolved.graph).contains(&expected_people_current),
-            "membership source must include the reverse-lens people partition"
+            "membership source must include the shared physical current table"
         );
         assert!(
             format!("{:?}", content_version.graph).contains(&expected_people_current),
-            "content-version source must include the reverse-lens people partition"
+            "content-version source must include the shared physical current table"
         );
     }
 
@@ -12609,13 +12351,17 @@ mod tests {
         .expect("accept second version");
 
         let table = node.table("issues").expect("issues table").clone();
+        let current_source = node
+            .physical_current_source_graph(
+                node.catalogue.current_schema_version_id,
+                "issues",
+                PhysicalCurrentClass::Global,
+            )
+            .expect("physical current source")
+            .project(maintained_view_history_storage_field_names(&table));
         let current_deltas = node
             .database
-            .query_graph(content_version_current_source_graph(
-                &table,
-                DurabilityTier::Global,
-                false,
-            ))
+            .query_graph(current_source)
             .expect("query denormalized current payload");
         let current_rows = current_deltas
             .iter()

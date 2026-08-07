@@ -65,9 +65,10 @@ fn opening_defers_malformed_current_row_to_read() {
             Some(DurabilityTier::Global),
         )
         .unwrap();
-        let table = schema.tables[0].global_current_storage_tables()[0]
-            .name
-            .clone();
+        let table = physical_global_current_table_name(
+            node.physical_table_id_for_schema(schema.version_id(), "todos")
+                .unwrap(),
+        );
         let raw = node
             .database
             .primary_key_get_raw(&table, &[Value::Uuid(row(0xff).0)])

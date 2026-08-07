@@ -56,31 +56,21 @@ where
         row_uuid: RowUuid,
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
-        let (schema_version, base_for_current_names) = if self
+        let schema_version = if self
             .table_in_schema(table, self.catalogue.current_schema_version_id)
             .is_ok()
         {
-            (
-                self.catalogue.current_schema_version_id,
-                self.catalogue.current_schema_version_id,
-            )
+            self.catalogue.current_schema_version_id
         } else {
             self.table_in_schema(table, self.catalogue.current_write_schema.schema)?;
-            (
-                self.catalogue.current_write_schema.schema,
-                self.catalogue.current_write_schema.schema,
-            )
+            self.catalogue.current_write_schema.schema
         };
-        let current_table = match layer {
-            VersionLayer::Content => {
-                global_current_table_name_for_schema(table, schema_version, base_for_current_names)
-            }
-            VersionLayer::Deletion => register_global_current_table_name_for_schema(
-                table,
-                schema_version,
-                base_for_current_names,
-            ),
-        };
+        let current_table = self.physical_current_table_for_schema(
+            schema_version,
+            table,
+            layer,
+            PhysicalCurrentClass::Global,
+        )?;
         let raw = self
             .database
             .primary_key_get_raw(&current_table, &[Value::Uuid(row_uuid.0)])?;

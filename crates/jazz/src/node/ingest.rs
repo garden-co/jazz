@@ -292,7 +292,6 @@ where
         self.query.policy_authorization_graph_cache.clear();
         if schema.id == self.catalogue.current_schema_version_id {
             self.catalogue.schema = schema.schema.clone();
-            self.query.current_row_graphs = current_row_graphs(&self.catalogue.schema);
         }
         self.persist_catalogue_schema(&schema)?;
         self.ensure_provisional_physical_mapping(schema.id)?;
@@ -449,7 +448,6 @@ where
                 ))?;
             if pointer.schema == self.catalogue.current_schema_version_id {
                 self.catalogue.schema = active_schema.schema.clone();
-                self.query.current_row_graphs = current_row_graphs(&self.catalogue.schema);
             }
             let tables = active_schema
                 .schema
@@ -3538,30 +3536,24 @@ where
         row_uuid: RowUuid,
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
-        let (schema_version, base_for_current_names) = if self
+        let schema_version = if self
             .table_in_schema(table, self.catalogue.current_schema_version_id)
             .is_ok()
         {
-            (
-                self.catalogue.current_schema_version_id,
-                self.catalogue.current_schema_version_id,
-            )
+            self.catalogue.current_schema_version_id
         } else {
             self.table_in_schema(table, self.catalogue.current_write_schema.schema)?;
-            (
-                self.catalogue.current_write_schema.schema,
-                self.catalogue.current_write_schema.schema,
-            )
+            self.catalogue.current_write_schema.schema
         };
-        let current_table = self.cached_global_current_table_name_for_schema(
+        let current_table = self.physical_current_table_for_schema(
+            schema_version,
             table,
             layer,
-            schema_version,
-            base_for_current_names,
-        );
+            PhysicalCurrentClass::Global,
+        )?;
         let raw = self.database.primary_key_get_raw_in_batch(
             batch,
-            current_table.as_ref(),
+            &current_table,
             &[Value::Uuid(row_uuid.0)],
         )?;
         let Some(raw) = raw else {
@@ -3940,34 +3932,26 @@ where
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
-        let base_for_current_names = if self
-            .table_in_schema(version.table(), self.catalogue.current_schema_version_id)
-            .is_ok()
-        {
-            self.catalogue.current_schema_version_id
-        } else {
-            schema_version
-        };
         let table = self.table_in_schema(version.table(), schema_version)?;
         let storage_tables = table.global_current_storage_tables();
         let (current_table, current_schema, expected_values) = match version.layer() {
             VersionLayer::Content => (
-                self.cached_global_current_table_name_for_schema(
+                groove::Intern::new(self.physical_current_table_for_schema(
+                    schema_version,
                     version.table(),
                     VersionLayer::Content,
-                    schema_version,
-                    base_for_current_names,
-                ),
+                    PhysicalCurrentClass::Global,
+                )?),
                 &storage_tables[0],
                 global_current_values(&table, version, Some(global_seq))?,
             ),
             VersionLayer::Deletion => (
-                self.cached_global_current_table_name_for_schema(
+                groove::Intern::new(self.physical_current_table_for_schema(
+                    schema_version,
                     version.table(),
                     VersionLayer::Deletion,
-                    schema_version,
-                    base_for_current_names,
-                ),
+                    PhysicalCurrentClass::Global,
+                )?),
                 &storage_tables[1],
                 register_global_current_values(version, Some(global_seq)),
             ),
@@ -4057,41 +4041,38 @@ where
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
-        let base_for_current_names = if self
-            .table_in_schema(version.table(), self.catalogue.current_schema_version_id)
-            .is_ok()
-        {
-            self.catalogue.current_schema_version_id
-        } else {
-            schema_version
-        };
         match version.layer() {
             VersionLayer::Content => {
                 let table = self.table_in_schema(version.table(), schema_version)?;
-                let current_table = global_current_table_name_for_schema(
-                    version.table(),
+                let binding = physical_current_binding(
+                    &self.catalogue.catalogue_schemas,
+                    &self.catalogue.physical_mappings,
                     schema_version,
-                    base_for_current_names,
-                );
+                    version.table(),
+                    PhysicalCurrentClass::Global,
+                )?;
+                let logical = owned_record_from_storage_values(
+                    &table.global_current_storage_tables()[0],
+                    global_current_values(&table, version, Some(global_seq))
+                        .expect("valid global current values"),
+                )
+                .expect("valid global current row");
                 batch.update_raw(
-                    current_table,
+                    binding.storage_table,
                     global_current_primary_key(version.row_uuid()),
-                    version.bind_groove_record(
-                        owned_record_from_storage_values(
-                            &table.global_current_storage_tables()[0],
-                            global_current_values(&table, version, Some(global_seq))
-                                .expect("valid global current values"),
-                        )
-                        .expect("valid global current row"),
+                    groove::records::VersionedRecord::new(
+                        version.schema_version_alias().0,
+                        OwnedRecord::new(logical.raw().to_vec(), binding.descriptor),
                     ),
                 );
             }
             VersionLayer::Deletion => batch.update_raw(
-                register_global_current_table_name_for_schema(
-                    version.table(),
+                self.physical_current_table_for_schema(
                     schema_version,
-                    base_for_current_names,
-                ),
+                    version.table(),
+                    VersionLayer::Deletion,
+                    PhysicalCurrentClass::Global,
+                )?,
                 global_current_primary_key(version.row_uuid()),
                 version.bind_groove_record(
                     owned_record_from_storage_values(
@@ -4119,44 +4100,38 @@ where
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
-        let base_for_current_names = if self
-            .table_in_schema(version.table(), self.catalogue.current_schema_version_id)
-            .is_ok()
-        {
-            self.catalogue.current_schema_version_id
-        } else {
-            schema_version
-        };
         match version.layer() {
             VersionLayer::Content => {
                 let table = self.table_in_schema(version.table(), schema_version)?;
+                let binding = physical_current_binding(
+                    &self.catalogue.catalogue_schemas,
+                    &self.catalogue.physical_mappings,
+                    schema_version,
+                    version.table(),
+                    PhysicalCurrentClass::Ahead,
+                )?;
+                let logical = owned_record_from_storage_values(
+                    &table.ahead_current_storage_tables()[0],
+                    global_current_values(&table, version, None)
+                        .expect("valid ahead current values"),
+                )
+                .expect("valid ahead current row");
                 batch.insert_raw(
-                    self.cached_ahead_current_table_name_for_schema(
-                        version.table(),
-                        VersionLayer::Content,
-                        schema_version,
-                        base_for_current_names,
-                    )
-                    .as_ref(),
+                    binding.storage_table,
                     history_primary_key(version),
-                    version.bind_groove_record(
-                        owned_record_from_storage_values(
-                            &table.ahead_current_storage_tables()[0],
-                            global_current_values(&table, version, None)
-                                .expect("valid ahead current values"),
-                        )
-                        .expect("valid ahead current row"),
+                    groove::records::VersionedRecord::new(
+                        version.schema_version_alias().0,
+                        OwnedRecord::new(logical.raw().to_vec(), binding.descriptor),
                     ),
                 );
             }
             VersionLayer::Deletion => batch.insert_raw(
-                self.cached_ahead_current_table_name_for_schema(
+                self.physical_current_table_for_schema(
+                    schema_version,
                     version.table(),
                     VersionLayer::Deletion,
-                    schema_version,
-                    base_for_current_names,
-                )
-                .as_ref(),
+                    PhysicalCurrentClass::Ahead,
+                )?,
                 history_primary_key(version),
                 version.bind_groove_record(
                     owned_record_from_storage_values(
@@ -4187,21 +4162,13 @@ where
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
-        let base_for_current_names = if self
-            .table_in_schema(version.table(), self.catalogue.current_schema_version_id)
-            .is_ok()
-        {
-            self.catalogue.current_schema_version_id
-        } else {
-            schema_version
-        };
-        let table = self.cached_ahead_current_table_name_for_schema(
+        let table = self.physical_current_table_for_schema(
+            schema_version,
             version.table(),
             version.layer(),
-            schema_version,
-            base_for_current_names,
-        );
-        batch.delete(table.as_ref(), history_primary_key(version));
+            PhysicalCurrentClass::Ahead,
+        )?;
+        batch.delete(table, history_primary_key(version));
         self.remove_ahead_current_key(
             version.table(),
             version.layer(),
