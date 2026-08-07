@@ -773,6 +773,14 @@ fn relation_snapshot_policy_schema() -> JazzSchema {
         .with_reference("owner_id", "users")
         .with_read_policy(Policy::owner_only("todos", "owner_id"))
         .with_write_policy(Policy::owner_only("todos", "owner_id")),
+        TableSchema::new(
+            "comments",
+            [
+                ColumnSchema::new("body", ColumnType::String),
+                ColumnSchema::new("todo_id", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("todo_id", "todos"),
     ])
 }
 
@@ -1417,6 +1425,7 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
     let bob_parent = row(0xb1);
     let visible_child = row(0x11);
     let denied_child = row(0x12);
+    let visible_grandchild = row(0x21);
 
     for (parent, name, time) in [(alice_parent, "alice", 10), (bob_parent, "bob", 11)] {
         node.commit_mergeable(
@@ -1425,6 +1434,13 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
         )
         .unwrap();
     }
+    node.commit_mergeable(
+        MergeableCommit::new("comments", visible_grandchild, 14).cells(BTreeMap::from([
+            ("body".to_owned(), v("visible nested")),
+            ("todo_id".to_owned(), Value::Uuid(visible_child.0)),
+        ])),
+    )
+    .unwrap();
     for (child, owner, title, time) in [
         (visible_child, alice, "visible", 12),
         (denied_child, bob, "denied", 13),
@@ -1442,7 +1458,12 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
         .array_subquery(
             ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id")
                 .select(["title"])
-                .unbounded(),
+                .unbounded()
+                .nested(
+                    ArraySubquery::new("commentsViaTodo", "comments", "todo_id", "id")
+                        .select(["body"])
+                        .unbounded(),
+                ),
         )
         .validate(&schema)
         .unwrap();
@@ -1472,6 +1493,20 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
         panic!("collector relation must be an array");
     };
     assert_eq!(alice_children.len(), 1, "planted authorized child is retained");
+    let Value::Record(visible_child_tree) = &alice_children[0] else {
+        panic!("collector relation member must be a record");
+    };
+    let Value::Array(visible_grandchildren) = visible_child_tree
+        .get("commentsViaTodo")
+        .expect("collector nested relation field")
+    else {
+        panic!("collector nested relation must be an array");
+    };
+    assert_eq!(
+        visible_grandchildren.len(),
+        1,
+        "collector recursively retains the planted nested child"
+    );
     let bob_tree = maintained
         .structured_app_row(bob_parent)
         .expect("collector retained bob parent tree");
@@ -1488,7 +1523,7 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
     let bob_before = bob_tree.raw().to_vec();
 
     node.commit_mergeable(
-        MergeableCommit::new("todos", row(0x13), 14).cells(BTreeMap::from([
+        MergeableCommit::new("todos", row(0x13), 15).cells(BTreeMap::from([
             ("title".to_owned(), v("new visible")),
             ("owner_id".to_owned(), Value::Uuid(alice.0)),
         ])),
