@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use groove::ivm::{LiteralValue, PreparedShapeId, RoutedMultisinkTerminal, StaticScanSpec};
 use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas};
-use groove::records::{BorrowedRecord, OwnedRecord, RecordDescriptor, ValueType};
+use groove::records::{BorrowedRecord, OwnedRecord, RecordDescriptor, Value, ValueType};
 use groove::schema::ColumnType;
 
 use super::maintained_subscription_view::{MaintainedSubscriptionView, MaintainedTerminalSchemas};
@@ -57,6 +57,7 @@ use crate::query::{
     QueryError, ShapeId, ValidatedQuery, binding_id_for_values, relation_query_to_query,
 };
 use crate::schema::{ColumnSchema, branch_metadata_table_schema, global_current_index_name};
+use crate::tools::{ObjectId, OutputOccurrenceId};
 
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
@@ -2664,7 +2665,11 @@ fn current_query_output_request(
         .then(|| AppRowOutputRequest {
             projection: app_row_payload_projection(
                 query,
-                matches!(output, CurrentQueryProgramOutput::MaintainedView),
+                matches!(
+                    output,
+                    CurrentQueryProgramOutput::RelationSnapshot
+                        | CurrentQueryProgramOutput::MaintainedView
+                ),
             ),
             large_values: Vec::new(),
         }),
@@ -8281,6 +8286,109 @@ where
             .query_graphs(lowered_program_sinks(&program))
             .map_err(Error::Groove)?;
         self.materialize_relation_snapshot_from_query_engine(shape, read_view, &snapshots)
+    }
+
+    /// Evaluate a relation query through its collector terminal and return the
+    /// already-structured output.  In particular, this must not go through a
+    /// row/edge carrier: the collector owns the recursive association shape.
+    pub(crate) fn query_result_tree_for_link_in_read_view(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        read_view: &ReadViewSpec,
+    ) -> Result<crate::result_tree::ResultTree, Error> {
+        let program = self.compile_current_query_program_for_read_view(
+            shape,
+            binding,
+            tier,
+            identity,
+            CurrentQueryProgramOutput::RelationSnapshot,
+            read_view,
+        )?;
+        let snapshots = self
+            .database
+            .query_graphs(lowered_program_sinks(&program))
+            .map_err(Error::Groove)?;
+        let app_rows = snapshots
+            .get(JAZZ_APP_ROWS_SINK)
+            .ok_or(Error::QueryLowering(
+                "structured result program did not emit collector terminal".to_owned(),
+            ))?;
+        let table = self
+            .table_in_schema(&shape.query().table, shape.schema_version())?
+            .clone();
+        let mut roots = Vec::new();
+        for (record, weight) in app_rows.iter() {
+            if weight <= 0 {
+                continue;
+            }
+            roots.push(self.result_tree_node_from_collector(
+                &table,
+                &shape.query().array_subqueries,
+                shape.schema_version(),
+                OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
+            )?);
+        }
+        // The runtime terminal is transport-key ordered.  Keep this explicit
+        // rather than recovering order from a flat snapshot later.
+        roots.sort_by(|left, right| left.row.row_uuid().cmp(&right.row.row_uuid()));
+        Ok(crate::result_tree::ResultTree { roots })
+    }
+
+    fn result_tree_node_from_collector(
+        &mut self,
+        table: &TableSchema,
+        arrays: &[ArraySubquery],
+        schema_version: SchemaVersionId,
+        record: OwnedRecord,
+    ) -> Result<crate::result_tree::ResultNode, Error> {
+        let values = record.to_values()?;
+        let mut fields = Vec::new();
+        let mut row_values = Vec::new();
+        let mut relations = BTreeMap::new();
+        for (field, value) in record.descriptor().fields().iter().zip(values) {
+            let name = field.name.clone().ok_or(Error::InvalidStoredValue(
+                "structured collector field must be named",
+            ))?;
+            let subquery = arrays.iter().find(|subquery| subquery.column_name == name);
+            match (subquery, value) {
+                (Some(subquery), Value::Array(children)) => {
+                    let child_table = self
+                        .table_in_schema(&subquery.table, schema_version)?
+                        .clone();
+                    let children = children
+                        .into_iter()
+                        .map(|value| match value {
+                            Value::Record(child) => self.result_tree_node_from_collector(
+                                &child_table,
+                                &subquery.nested_arrays,
+                                schema_version,
+                                child,
+                            ),
+                            _ => Err(Error::InvalidStoredValue(
+                                "structured collector relation must contain records",
+                            )),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    relations.insert(name, crate::result_tree::ResultRelation::Array(children));
+                }
+                (_, value) => {
+                    fields.push((name, field.value_type.clone()));
+                    row_values.push(value);
+                }
+            }
+        }
+        let descriptor = RecordDescriptor::new(fields);
+        let record = OwnedRecord::new(descriptor.create(&row_values)?, descriptor);
+        let row = decode_current_row(table, record.borrowed())?;
+        let row = self.materialize_current_row(table, row)?;
+        Ok(crate::result_tree::ResultNode {
+            occurrence: OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0)),
+            row,
+            relations,
+        })
     }
 
     fn materialize_relation_snapshot_from_query_engine(
