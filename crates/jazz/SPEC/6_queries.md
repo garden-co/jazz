@@ -640,6 +640,29 @@ rather than incidental: a `sum` over a narrow column no longer fails at a
 width the caller never chose, and the residual overflow error fires only at a
 genuine 64-bit overflow, where no representable answer exists.
 
+**`INV-QUERY-36`** — A 64-bit integer aggregate result crossing into a language
+whose ordinary number type cannot represent it exactly MUST be delivered as
+that ordinary type when the value is exactly representable, and MUST fail with
+a named error when it is not. It MUST NOT be silently rounded, and the delivered
+type MUST NOT vary with the value. An exact wide accessor MAY be offered
+alongside, and MUST be opt-in.
+
+Decision, Anselm 2026-08-07: for TypeScript this means `sum` and `count` deliver
+`number`, error above `Number.MAX_SAFE_INTEGER`, and expose an opt-in accessor
+for the exact `BigInt`. The rejected alternative is instructive: returning
+`number | bigint` depending on magnitude looks accommodating and is the worst of
+the three, because the delivered type then varies with the data. Such a binding
+works throughout development on small datasets and breaks in production on large
+ones, which is why the invariant forbids a value-dependent type rather than
+merely discouraging it. Always-`BigInt` is correct but taxes every consumer for
+a case almost none reach — exceeding `Number.MAX_SAFE_INTEGER` by summing `I32`
+values takes on the order of two million rows at full width.
+
+This is the same rule as the widening decision above, applied one layer out:
+make the common case comfortable, and fail loudly at the boundary where no
+faithful answer exists. A caller who hits the error learns something true about
+their data; a caller handed a silently rounded total does not.
+
 **`INV-QUERY-32`** — There are two distinct nullable layers, and exactly one
 place where they merge. The payload layer carries SQL `NULL` as
 `Nullable(None)`; the public cell layer carries a caller-visible absent value.
