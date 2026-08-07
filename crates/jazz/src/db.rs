@@ -871,6 +871,17 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<ResultTree, Error> {
+        self.all_result_tree_for_identity(prepared, opts, self.identity.author)
+            .await
+    }
+
+    /// Tier-gated canonical structured result read evaluated as `author`.
+    pub async fn all_result_tree_for_identity(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<ResultTree, Error> {
         ensure_supported_read_view(&opts)?;
         if opts.include_deleted {
             return Err(Error::new(
@@ -886,7 +897,7 @@ where
                 &prepared.shape,
                 &prepared.binding,
                 tier,
-                self.identity.author,
+                author,
                 &opts.read_view,
             )
             .map_err(Into::into)
