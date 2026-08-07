@@ -1013,7 +1013,7 @@ impl PeerState {
                 tier,
                 read_view,
             )?;
-        let structured_app_row_changes = transitions.structured_app_row_changes.clone();
+        let reset_structured_app_row_changes = transitions.structured_app_row_changes.clone();
         let open_elapsed = open_start.elapsed();
         let open_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         let raw_add_count = transitions.adds.len();
@@ -1097,6 +1097,20 @@ impl PeerState {
             None
         } else {
             known_state.clone()
+        };
+        // A cursor-resume rebuild has no prior collector instance to drain.
+        // Its authoritative membership delta still identifies newly delivered
+        // output roots, so use that bounded set instead of treating every root
+        // in the rebuilt snapshot as changed. Ordinary maintained ticks above
+        // retain their collector-provided changed-root set.
+        let structured_app_row_changes = if reset_result_set {
+            reset_structured_app_row_changes
+        } else {
+            result_member_adds
+                .iter()
+                .filter_map(ResultMemberEntry::output_occurrence_id)
+                .map(|occurrence| RowUuid(*occurrence.root().uuid()))
+                .collect()
         };
         let filter_elapsed = filter_start.elapsed();
         let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
