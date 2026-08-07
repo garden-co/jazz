@@ -655,6 +655,8 @@ where
             OpType::TableSource(table) => self.eval_table_source(table, output_desc),
             OpType::IndexSource(index) => super::NodeState::update_index_source(
                 index,
+                self.schema,
+                self.variant_projections,
                 &output_desc,
                 &[],
                 Some(self.storage),

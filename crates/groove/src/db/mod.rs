@@ -74,7 +74,7 @@ fn validate_table_schema_variants(table: &TableSchema) -> Result<(), Error> {
     if !table.has_schema_variants() {
         return Ok(());
     }
-    if !table.indices.is_empty() || !table.foreign_keys.is_empty() {
+    if !table.foreign_keys.is_empty() {
         return Err(Error::UnsupportedSchemaVariantTableFeature(
             table.name.clone(),
         ));
@@ -259,6 +259,24 @@ where
         let fields = fields.into_iter().collect::<Vec<_>>();
         self.ivm_runtime
             .register_variant_projection_case(table, target, schema_version, &fields)
+            .map_err(Error::IvmRuntime)
+    }
+
+    /// Mark one source version as intentionally absent from a fixed-output
+    /// projection.
+    ///
+    /// An `Ignore` case emits no rows. This remains distinct from an
+    /// unregistered case, which is an error when that source version is read or
+    /// written.
+    pub fn register_variant_projection_ignore_case(
+        &mut self,
+        table: &str,
+        target: &str,
+        schema_version: u64,
+    ) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        self.ivm_runtime
+            .register_variant_projection_ignore_case(table, target, schema_version)
             .map_err(Error::IvmRuntime)
     }
 
@@ -818,7 +836,7 @@ where
         table: &str,
         index_name: &str,
         key: &[Value],
-    ) -> Result<Vec<Record<'_>>, Error> {
+    ) -> Result<Vec<VersionedRecord>, Error> {
         let index = self.index(table, index_name)?;
         if key.len() != index.columns.len() {
             return Err(Error::IndexKeyArity {
@@ -863,7 +881,7 @@ where
         table: &str,
         index_name: &str,
         prefix: &[Value],
-    ) -> Result<Vec<Record<'_>>, Error> {
+    ) -> Result<Vec<VersionedRecord>, Error> {
         let index = self.index(table, index_name)?;
         if prefix.len() > index.columns.len() {
             return Err(Error::IndexKeyArity {
@@ -923,7 +941,7 @@ where
         index_name: &str,
         start: &[Value],
         end: &[Value],
-    ) -> Result<Vec<Record<'_>>, Error> {
+    ) -> Result<Vec<VersionedRecord>, Error> {
         let index = self.index(table, index_name)?;
         if start.len() > index.columns.len() {
             return Err(Error::IndexKeyArity {
@@ -948,15 +966,12 @@ where
         table: &str,
         index_name: &str,
         raw_entries: Vec<EncodedKeyValue<'_>>,
-    ) -> Result<Vec<Record<'_>>, Error> {
-        let descriptor = self
-            .ivm_runtime
-            .table_descriptor(table)
-            .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
+    ) -> Result<Vec<VersionedRecord>, Error> {
+        self.table(table)?;
         let _ = index_name;
         Ok(raw_entries
             .into_iter()
-            .map(|entry| descriptor.bind_owned(entry.into_parts().1))
+            .map(|entry| entry.into_versioned_parts().1)
             .collect())
     }
 
@@ -1631,15 +1646,12 @@ where
         T: OrderedKvStorage,
     {
         let table_schema = self.table(table)?;
-        let descriptor = self
-            .ivm_runtime
-            .table_descriptor(table)
-            .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
+        let storage_descriptor = table_schema.record_schema();
         let key_descriptor = table_schema
             .primary_key
             .as_ref()
             .map(primary_key_descriptor);
-        let store = record_store_for_table(storage, table, key_descriptor, descriptor);
+        let store = record_store_for_table(storage, table, key_descriptor, &storage_descriptor);
         let index_descriptor = index_record_descriptor();
         let mut records = Vec::new();
         for (storage_key, persisted_record) in raw_entries {
@@ -4066,7 +4078,7 @@ pub enum Error {
         version: u64,
         column: String,
     },
-    #[error("schema-variant table uses indices or foreign keys, which are not supported yet: {0}")]
+    #[error("schema-variant table uses foreign keys, which are not supported yet: {0}")]
     UnsupportedSchemaVariantTableFeature(String),
     #[error("record descriptor does not match schema version {version} for table {table}")]
     SchemaVersionDescriptorMismatch { table: String, version: u64 },

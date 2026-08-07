@@ -29,7 +29,18 @@ pub struct TableSourceOp {
     /// Fixed-output projection applied while heterogeneous table deltas enter
     /// the graph. The target names an append-only runtime registry whose cases
     /// are deliberately outside this node's structural identity.
-    pub variant_projection: Option<String>,
+    pub variant_projection: Option<VariantProjectionTarget>,
+}
+
+/// Runtime registry namespace selected by a heterogeneous table source.
+///
+/// Named projections are caller-defined query boundaries. Schema-index
+/// projections are private, derived boundaries shared by durable maintenance
+/// and live index sources.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum VariantProjectionTarget {
+    Named(String),
+    SchemaIndex(String),
 }
 
 /// Source node for a schema-declared durable index arrangement.
@@ -37,6 +48,11 @@ pub struct TableSourceOp {
 pub struct IndexSourceOp {
     pub table: String,
     pub index: String,
+    /// Fixed descriptor consumed by `IndexBy` after optional variant
+    /// projection. For homogeneous tables this is the ordinary table
+    /// descriptor.
+    pub input_descriptor: RecordDescriptor,
+    pub variant_projection: Option<VariantProjectionTarget>,
     pub key_fields: Vec<usize>,
     pub value_fields: Vec<usize>,
     pub unique: bool,

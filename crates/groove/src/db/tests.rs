@@ -11566,7 +11566,7 @@ fn table_pairs_from_query(
         .collect()
 }
 
-fn record_values(records: Vec<Record<'_>>) -> Vec<Vec<Value>> {
+fn record_values(records: Vec<VersionedRecord>) -> Vec<Vec<Value>> {
     records
         .into_iter()
         .map(|record| record.to_values().unwrap())

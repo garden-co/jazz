@@ -162,6 +162,12 @@ that discriminator. Consequently case registration never needs to backfill rows
 that were already present, and active subscriptions can consume subsequent rows
 as ordinary incremental deltas without graph rebuilding or reset.
 
+Each registered case is either a projection or `Ignore`. `Ignore` intentionally
+emits no row for that discriminator, while an unregistered discriminator remains
+a configuration error. Durable indexes use private fixed-output projection
+families: variants containing every indexed field project those fields plus the
+primary key, and variants missing any indexed field register `Ignore`.
+
 #### Avoiding data loss
 
 Jazz currently selects a winning content version across all writes. If that version omits a retired column,
@@ -384,13 +390,14 @@ Overall approach: start preserving today’s copy-forward/default behavior, incl
      safely be defined using logical names.
 
 2. Add schema-versioned Groove storage and IVM support.
-   **Status: in progress (2026-08-06).** Groove's stable field catalogue,
+   **Status: complete (2026-08-07).** Groove's stable field catalogue,
    per-version ordered layouts, common batch insert/update/get/scan paths, mixed-version
    replacement, reopen coverage, window preservation, and Jazz
    `SchemaVersionAlias` binding are implemented. Groove's descriptor-correct
    heterogeneous IVM deltas and live-extensible, fixed-output variant projection
-   are also implemented. Variant-aware indexes and Jazz catalogue registration
-   remain.
+   are also implemented. Variant-aware durable indexes use explicit `Ignore`
+   cases, enforce uniqueness across variants, survive reopen, and extend without
+   rebuilding active subscriptions. Jazz catalogue registration is the next step.
    - Add generic schema-versioned tables to Groove, using a per-table `u64`
      version-to-descriptor registry.
    - Make IVM table deltas retain their source discriminator and descriptor.
@@ -402,7 +409,8 @@ Overall approach: start preserving today’s copy-forward/default behavior, incl
    - Require Jazz to register the descriptor and projection cases for a schema
      version before accepting rows authored in that version.
    - Build durable indexes on fixed variant projections. A variant missing any
-     indexed field emits no index entry; uniqueness spans all variants.
+     indexed field registers `Ignore` and emits no index entry; an unregistered
+     case is an error, and uniqueness spans all projected variants.
    - Make primary-key reads/scans, index rebuilding, and query field resolution
      select the row descriptor through its schema version.
    - Use `SchemaVersionAlias` as Jazz's discriminator and derive physical field
