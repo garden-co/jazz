@@ -484,7 +484,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                     .expect("subscribe grouped sum aggregate"),
                 aggregate_descriptor([
                     ("bucket", ValueType::String),
-                    ("sum_score", ValueType::I32),
+                    ("sum_score", ValueType::I64),
                 ]),
             );
 
@@ -511,7 +511,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 .await;
             sum_stream
                 .wait_for_values(
-                    vec![vec![Value::Text("a".to_owned()), Value::Integer(10)]],
+                    vec![vec![Value::Text("a".to_owned()), Value::BigInt(10)]],
                     "sum after a1",
                 )
                 .await;
@@ -529,8 +529,8 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
             sum_stream
                 .wait_for_values(
                     vec![
-                        vec![Value::Text("a".to_owned()), Value::Integer(10)],
-                        vec![Value::Text("b".to_owned()), Value::Integer(7)],
+                        vec![Value::Text("a".to_owned()), Value::BigInt(10)],
+                        vec![Value::Text("b".to_owned()), Value::BigInt(7)],
                     ],
                     "sum after b1",
                 )
@@ -551,8 +551,8 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
             sum_stream
                 .wait_for_values(
                     vec![
-                        vec![Value::Text("a".to_owned()), Value::Integer(10)],
-                        vec![Value::Text("b".to_owned()), Value::Integer(5)],
+                        vec![Value::Text("a".to_owned()), Value::BigInt(10)],
+                        vec![Value::Text("b".to_owned()), Value::BigInt(5)],
                     ],
                     "sum after repopulating b",
                 )
@@ -568,7 +568,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 .await;
             sum_stream
                 .wait_for_values(
-                    vec![vec![Value::Text("b".to_owned()), Value::Integer(5)]],
+                    vec![vec![Value::Text("b".to_owned()), Value::BigInt(5)]],
                     "sum after delete a1",
                 )
                 .await;
@@ -673,7 +673,7 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
                     .expect("subscribe grouped sum aggregate"),
                 aggregate_descriptor([
                     ("bucket", ValueType::String),
-                    ("sum_score", ValueType::I32),
+                    ("sum_score", ValueType::I64),
                 ]),
             );
 
@@ -686,7 +686,7 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
                 .expect("first metric settles");
             sum_stream
                 .wait_for_values(
-                    vec![vec![Value::Text("same".to_owned()), Value::Integer(10)]],
+                    vec![vec![Value::Text("same".to_owned()), Value::BigInt(10)]],
                     "sum after first same-group delta",
                 )
                 .await;
@@ -700,7 +700,7 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
                 .expect("second metric settles");
             sum_stream
                 .wait_for_values(
-                    vec![vec![Value::Text("same".to_owned()), Value::Integer(17)]],
+                    vec![vec![Value::Text("same".to_owned()), Value::BigInt(17)]],
                     "sum accumulates a second same-group delta",
                 )
                 .await;
@@ -712,7 +712,7 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
                 .expect("first delete settles");
             sum_stream
                 .wait_for_values(
-                    vec![vec![Value::Text("same".to_owned()), Value::Integer(7)]],
+                    vec![vec![Value::Text("same".to_owned()), Value::BigInt(7)]],
                     "sum subtracts a signed deletion delta",
                 )
                 .await;
@@ -967,9 +967,9 @@ async fn integer_sum_uses_public_signed_values_for_multi_row_groups() {
                     .group_by("bucket")
                     .build(),
                 vec![
-                    vec![Value::Text("mixed".to_owned()), Value::Integer(3)],
-                    vec![Value::Text("negative".to_owned()), Value::Integer(-10)],
-                    vec![Value::Text("positive".to_owned()), Value::Integer(17)],
+                    vec![Value::Text("mixed".to_owned()), Value::BigInt(3)],
+                    vec![Value::Text("negative".to_owned()), Value::BigInt(-10)],
+                    vec![Value::Text("positive".to_owned()), Value::BigInt(17)],
                 ],
                 "integer grouped sum uses public signed values",
             )

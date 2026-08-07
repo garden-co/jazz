@@ -1891,8 +1891,24 @@ fn aggregate_output_column_type(
             Ok(Some(ColumnType::Timestamp))
         }
         crate::tools::public_api::query::AggregateFunction::Avg => Ok(Some(ColumnType::Double)),
-        crate::tools::public_api::query::AggregateFunction::Sum
-        | crate::tools::public_api::query::AggregateFunction::Min
+        crate::tools::public_api::query::AggregateFunction::Sum => {
+            let column = output
+                .column
+                .as_deref()
+                .expect("aggregate has an input column");
+            let idx = table_schema.columns.column_index(column).ok_or_else(|| {
+                JazzError::Query(format!(
+                    "unknown aggregate column {column} on table {table}"
+                ))
+            })?;
+            Ok(Some(match &table_schema.columns.columns[idx].column_type {
+                ColumnType::Integer | ColumnType::BigInt => ColumnType::BigInt,
+                ColumnType::Double => ColumnType::Double,
+                ColumnType::Timestamp => ColumnType::Timestamp,
+                column_type => column_type.clone(),
+            }))
+        }
+        crate::tools::public_api::query::AggregateFunction::Min
         | crate::tools::public_api::query::AggregateFunction::Max => {
             let column = output
                 .column

@@ -3151,6 +3151,7 @@ fn normalized_aggregate_group_by(
 }
 
 fn normalized_aggregate_outputs(
+    schema: &JazzSchema,
     source: &SourceId,
     aggregate: &AggregateQuery,
 ) -> Result<Vec<NormalizedAggregateExpr>, Error> {
@@ -3161,7 +3162,7 @@ fn normalized_aggregate_outputs(
             Ok(NormalizedAggregateExpr {
                 output: typed_output_field(
                     user_column_field(&aggregate.alias),
-                    normalized_aggregate_output_type(aggregate),
+                    normalized_aggregate_output_type(schema, source, aggregate)?,
                 ),
                 function: normalized_aggregate_function(aggregate.function),
                 input: aggregate
@@ -3184,16 +3185,54 @@ fn normalized_aggregate_function(function: AggregateFunction) -> NormalizedAggre
     }
 }
 
-fn normalized_aggregate_output_type(aggregate: &Aggregate) -> ColumnType {
-    match aggregate.function {
+fn normalized_aggregate_output_type(
+    schema: &JazzSchema,
+    source: &SourceId,
+    aggregate: &Aggregate,
+) -> Result<ColumnType, Error> {
+    Ok(match aggregate.function {
         AggregateFunction::Count => ColumnType::U64,
         AggregateFunction::Avg => ColumnType::Nullable(Box::new(ColumnType::F64)),
-        // Aggregate lowering is currently reported as an unsupported
-        // query-engine capability before Groove needs the exact result type.
-        AggregateFunction::Sum | AggregateFunction::Min | AggregateFunction::Max => {
-            ColumnType::Nullable(Box::new(ColumnType::Bytes))
-        }
+        AggregateFunction::Sum => ColumnType::Nullable(Box::new(sum_result_column_type(
+            aggregate_input_column_type(schema, source, aggregate)?,
+        )?)),
+        AggregateFunction::Min | AggregateFunction::Max => ColumnType::Nullable(Box::new(
+            non_nullable_column_type(aggregate_input_column_type(schema, source, aggregate)?),
+        )),
+    })
+}
+
+fn aggregate_input_column_type(
+    schema: &JazzSchema,
+    source: &SourceId,
+    aggregate: &Aggregate,
+) -> Result<ColumnType, Error> {
+    let column = aggregate
+        .column
+        .as_ref()
+        .ok_or(Error::InvalidStoredValue("aggregate input column missing"))?;
+    table_schema(schema, &source.table)?
+        .columns
+        .iter()
+        .find(|candidate| &candidate.name == column)
+        .map(|column| column.column_type.clone())
+        .ok_or(Error::InvalidStoredValue("aggregate input column missing"))
+}
+
+fn non_nullable_column_type(column_type: ColumnType) -> ColumnType {
+    match column_type {
+        ColumnType::Nullable(inner) => *inner,
+        column_type => column_type,
     }
+}
+
+fn sum_result_column_type(column_type: ColumnType) -> Result<ColumnType, Error> {
+    Ok(match non_nullable_column_type(column_type) {
+        ColumnType::U8 | ColumnType::U16 | ColumnType::U32 | ColumnType::U64 => ColumnType::U64,
+        ColumnType::I32 | ColumnType::I64 => ColumnType::I64,
+        ColumnType::F64 => ColumnType::F64,
+        _ => return Err(Error::QueryLowering("sum input must be numeric".to_owned())),
+    })
 }
 
 fn normalization_gap(message: impl Into<String>) -> Error {
@@ -6385,7 +6424,7 @@ where
                 RowSetExpr::Aggregate {
                     input: current,
                     group_by: normalized_aggregate_group_by(&root_source, aggregate)?,
-                    outputs: normalized_aggregate_outputs(&root_source, aggregate)?,
+                    outputs: normalized_aggregate_outputs(schema, &root_source, aggregate)?,
                 },
             );
             current = aggregate_node;
@@ -11153,10 +11192,11 @@ fn aggregate_result_column_type(
             // aggregate payload itself carries the SQL nullable layer, which
             // `current_row_from_aggregate_result_payload` flattens before it
             // reaches this synthetic table schema.
-            Ok(match column_type {
-                ColumnType::Nullable(inner) => *inner,
-                column_type => column_type,
-            })
+            if aggregate.function == AggregateFunction::Sum {
+                sum_result_column_type(column_type)
+            } else {
+                Ok(non_nullable_column_type(column_type))
+            }
         }
         AggregateFunction::Avg => Ok(ColumnType::F64),
     }
@@ -13850,6 +13890,42 @@ mod tests {
             normalized.nodes.get(&normalized.root),
             Some(RowSetExpr::Aggregate { .. })
         ));
+    }
+
+    #[test]
+    fn normalized_sum_output_types_follow_input_signedness() {
+        // Internal-only: normalized output fields are query-engine capability
+        // metadata and are not exposed by a public client API. The public
+        // aggregate subscription tests cover the emitted descriptor/value pair.
+        let schema = JazzSchema::new([
+            TableSchema::new("u8_metrics", [ColumnSchema::new("score", ColumnType::U8)]),
+            TableSchema::new("i32_metrics", [ColumnSchema::new("score", ColumnType::I32)]),
+            TableSchema::new("f64_metrics", [ColumnSchema::new("score", ColumnType::F64)]),
+        ]);
+        for (table, expected) in [
+            (
+                "u8_metrics",
+                ColumnType::Nullable(Box::new(ColumnType::U64)),
+            ),
+            (
+                "i32_metrics",
+                ColumnType::Nullable(Box::new(ColumnType::I64)),
+            ),
+            (
+                "f64_metrics",
+                ColumnType::Nullable(Box::new(ColumnType::F64)),
+            ),
+        ] {
+            assert_eq!(
+                normalized_aggregate_output_type(
+                    &schema,
+                    &root_source_id(table),
+                    &Aggregate::sum("score"),
+                )
+                .unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]
