@@ -219,8 +219,17 @@ pub enum SyncMessage {
         program_fact_adds: Vec<ProgramFactEntry>,
         /// Program fact removals.
         program_fact_removes: Vec<ProgramFactEntry>,
-        /// Complete output from the producer's retained collector terminal.
+        /// Ordered recursive snapshot when `reset_result_set` is true.
+        ///
+        /// Incremental updates leave this empty and carry only complete
+        /// touched-parent replacements in `result_tree_updates`.
         result_tree: ResultTree,
+        /// Tagged whole-parent replacements for an incremental update.
+        ///
+        /// Each item is addressed by its output occurrence and contains the
+        /// entire recursively ordered parent.  This deliberately has no
+        /// child-delta interpretation.
+        result_tree_updates: Vec<ResultTreeUpdate>,
     },
     /// One chunk of a v4 structured view update.
     ///
@@ -249,8 +258,10 @@ pub enum SyncMessage {
         program_fact_adds: Vec<ProgramFactEntry>,
         /// Program fact removals.
         program_fact_removes: Vec<ProgramFactEntry>,
-        /// Complete output from the producer's retained collector terminal.
+        /// Ordered recursive snapshot when `reset_result_set` is true.
         result_tree: ResultTree,
+        /// Tagged whole-parent replacements for an incremental update.
+        result_tree_updates: Vec<ResultTreeUpdate>,
     },
 }
 

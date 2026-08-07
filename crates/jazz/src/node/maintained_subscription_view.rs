@@ -20,7 +20,7 @@ use crate::ids::{AuthorId, NodeAlias, NodeUuid, RowUuid};
 use crate::protocol::{
     ProgramFactEntry, RealRowMemberEntry, RelationEdgeEntry, ResultMemberEntry,
     ResultMemberPayloadEntry, ResultRowLayer, ResultTree, ResultTreeNode, ResultTreeRelation,
-    ResultTreeRow, RowVersionRefEntry,
+    ResultTreeRow, ResultTreeUpdate, RowVersionRefEntry,
 };
 use crate::schema::TableSchema;
 use crate::time::{GlobalSeq, TxTime};
@@ -482,6 +482,37 @@ impl MaintainedSubscriptionView {
             .map(|(root, record)| Self::structured_result_node(root, record))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(ResultTree { roots })
+    }
+
+    /// Render whole-parent replacements for exactly the collector roots
+    /// touched in the current tick.  The retained collector state is already
+    /// grouped by root, so this does not compare or scan the complete tree to
+    /// discover changes.
+    pub(crate) fn structured_result_tree_replacements(
+        &self,
+        changed_roots: &BTreeSet<RowUuid>,
+    ) -> Result<Vec<ResultTreeUpdate>, super::Error> {
+        let Some(descriptor) = self.structured_app_row_descriptor else {
+            return Ok(Vec::new());
+        };
+        changed_roots
+            .iter()
+            .filter_map(|root| {
+                self.structured_app_rows.get(root).and_then(|records| {
+                    records
+                        .iter()
+                        .find(|(_, weight)| **weight > 0)
+                        .map(|(raw, _)| (*root, OwnedRecord::new(raw.clone(), descriptor)))
+                })
+            })
+            .map(|(root, record)| {
+                let parent = Self::structured_result_node(root, record)?;
+                Ok(ResultTreeUpdate::ReplaceParent {
+                    occurrence: parent.occurrence.clone(),
+                    parent,
+                })
+            })
+            .collect()
     }
 
     fn structured_result_node(

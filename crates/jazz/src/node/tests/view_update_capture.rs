@@ -439,6 +439,7 @@ impl MaintainedSubscriptionViewSubscription {
         let mut update = core.view_update_for_maintained_result_members(
             crate::node::MaintainedViewBundleInputs {
                 subscription: subscription_key,
+                reset_result_set,
                 peer_complete_tx_payloads: self.peer_complete_tx_payloads.clone(),
                 known_state: None,
                 complete_exclusive_payloads: false,
@@ -453,6 +454,7 @@ impl MaintainedSubscriptionViewSubscription {
                     .collect(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
+                structured_app_row_changes: BTreeSet::new(),
                 identity,
                 tier: DurabilityTier::Global,
                 maintained_facts: &self.maintained,

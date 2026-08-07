@@ -229,10 +229,20 @@ where
                 program_fact_adds,
                 program_fact_removes,
                 result_tree,
+                result_tree_updates,
             } => {
                 validate_structured_result_tree(&result_tree).map_err(|_| {
                     Error::MalformedViewUpdate("structured result exceeds receive limits")
                 })?;
+                for update in &result_tree_updates {
+                    let crate::protocol::ResultTreeUpdate::ReplaceParent { parent, .. } = update;
+                    validate_structured_result_tree(&crate::protocol::ResultTree {
+                        roots: vec![parent.clone()],
+                    })
+                    .map_err(|_| {
+                        Error::MalformedViewUpdate("structured result exceeds receive limits")
+                    })?;
+                }
                 self.apply_view_update(ViewUpdateParts {
                     subscription,
                     settled_through,
@@ -262,10 +272,20 @@ where
                 program_fact_adds,
                 program_fact_removes,
                 result_tree,
+                result_tree_updates,
             } => {
                 validate_structured_result_tree(&result_tree).map_err(|_| {
                     Error::MalformedViewUpdate("structured result exceeds receive limits")
                 })?;
+                for update in &result_tree_updates {
+                    let crate::protocol::ResultTreeUpdate::ReplaceParent { parent, .. } = update;
+                    validate_structured_result_tree(&crate::protocol::ResultTree {
+                        roots: vec![parent.clone()],
+                    })
+                    .map_err(|_| {
+                        Error::MalformedViewUpdate("structured result exceeds receive limits")
+                    })?;
+                }
                 self.apply_view_update(ViewUpdateParts {
                     subscription,
                     settled_through,

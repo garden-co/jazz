@@ -662,7 +662,7 @@ impl PeerState {
             result_payload_removes: _,
             program_fact_adds,
             program_fact_removes,
-            structured_app_row_changes: _,
+            structured_app_row_changes,
             allow_storage_witness_fallback,
             observed_delta_batches: _,
             observed_result_delta_batches,
@@ -681,6 +681,7 @@ impl PeerState {
             && result_member_removes.is_empty()
             && program_fact_adds.is_empty()
             && program_fact_removes.is_empty()
+            && structured_app_row_changes.is_empty()
         {
             let tier = self
                 .subscriptions
@@ -778,6 +779,7 @@ impl PeerState {
             node.view_update_for_maintained_result_members(
                 crate::node::MaintainedViewBundleInputs {
                     subscription,
+                    reset_result_set: false,
                     peer_complete_tx_payloads,
                     known_state,
                     complete_exclusive_payloads: self.ship_complete_exclusive_payloads,
@@ -786,6 +788,7 @@ impl PeerState {
                     result_member_removes,
                     program_fact_adds,
                     program_fact_removes,
+                    structured_app_row_changes,
                     identity: self.identity(),
                     tier,
                     maintained_facts: maintained,
@@ -1010,6 +1013,7 @@ impl PeerState {
                 tier,
                 read_view,
             )?;
+        let structured_app_row_changes = transitions.structured_app_row_changes.clone();
         let open_elapsed = open_start.elapsed();
         let open_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         let raw_add_count = transitions.adds.len();
@@ -1112,6 +1116,7 @@ impl PeerState {
         let update = node.view_update_for_maintained_result_members(
             crate::node::MaintainedViewBundleInputs {
                 subscription,
+                reset_result_set,
                 peer_complete_tx_payloads,
                 known_state: bundle_known_state,
                 complete_exclusive_payloads: self.ship_complete_exclusive_payloads,
@@ -1120,6 +1125,7 @@ impl PeerState {
                 result_member_removes,
                 program_fact_adds,
                 program_fact_removes,
+                structured_app_row_changes,
                 identity: self.identity(),
                 tier,
                 maintained_facts: &maintained,
@@ -1380,6 +1386,7 @@ impl PeerState {
             node.view_update_for_maintained_result_members(
                 crate::node::MaintainedViewBundleInputs {
                     subscription: target_subscription,
+                    reset_result_set,
                     peer_complete_tx_payloads,
                     known_state,
                     complete_exclusive_payloads: self.ship_complete_exclusive_payloads,
@@ -1388,6 +1395,7 @@ impl PeerState {
                     result_member_removes: Vec::new(),
                     program_fact_adds: Vec::new(),
                     program_fact_removes: Vec::new(),
+                    structured_app_row_changes: BTreeSet::new(),
                     identity: self.identity(),
                     tier,
                     maintained_facts: maintained,
@@ -1807,14 +1815,22 @@ impl PeerState {
     }
 
     fn record_outgoing_view_update_metadata(&mut self, update: &SyncMessage) {
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             version_carriers,
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            version_carriers,
+            version_bundles,
+            peer_payload_inventory,
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = update
         else {
             return;
         };
@@ -1961,7 +1977,7 @@ impl PeerState {
     }
 
     fn apply_outgoing_view_update_result_set(&mut self, update: &SyncMessage) {
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             subscription,
             reset_result_set,
             result_member_adds,
@@ -1969,7 +1985,16 @@ impl PeerState {
             program_fact_adds,
             program_fact_removes,
             ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            subscription,
+            reset_result_set,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+            ..
+        }) = update
         else {
             return;
         };
@@ -2241,9 +2266,12 @@ fn storage_read_bucket_field(name: &str, bucket: StorageReadBucket) -> String {
 }
 
 fn view_update_reset_result_set(update: &mut SyncMessage) {
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         reset_result_set, ..
-    } = update
+    }
+    | SyncMessage::StructuredViewUpdate {
+        reset_result_set, ..
+    }) = update
     else {
         return;
     };

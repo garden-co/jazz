@@ -262,10 +262,25 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
         .validate_version_carriers()
         .map_err(|_| postcard::Error::DeserializeBadOption)?;
     match &message {
-        SyncMessage::StructuredViewUpdate { result_tree, .. }
-        | SyncMessage::StructuredViewUpdateChunk { result_tree, .. } => {
+        SyncMessage::StructuredViewUpdate {
+            result_tree,
+            result_tree_updates,
+            ..
+        }
+        | SyncMessage::StructuredViewUpdateChunk {
+            result_tree,
+            result_tree_updates,
+            ..
+        } => {
             validate_structured_result_tree(result_tree)
                 .map_err(|_| postcard::Error::DeserializeBadOption)?;
+            for update in result_tree_updates {
+                let crate::protocol::ResultTreeUpdate::ReplaceParent { parent, .. } = update;
+                validate_structured_result_tree(&crate::protocol::ResultTree {
+                    roots: vec![parent.clone()],
+                })
+                .map_err(|_| postcard::Error::DeserializeBadOption)?;
+            }
         }
         _ => {}
     }

@@ -11,7 +11,7 @@ use super::*;
 use crate::ids::SchemaVersionId;
 use crate::node::maintained_subscription_view::MaintainedSubscriptionView;
 use crate::protocol::{
-    KnownStateDeclaration, PeerPayloadInventory, ProgramFactEntry, ResultMemberEntry,
+    KnownStateDeclaration, PeerPayloadInventory, ProgramFactEntry, ResultMemberEntry, ResultTree,
     RowVersionRef, VersionBundle, VersionBundleRef, VersionCarrier, VersionRecord,
     build_version_carriers_from_singletons,
 };
@@ -150,6 +150,9 @@ fn relation_edge_version_rows_for_bundle(
 
 pub(crate) struct MaintainedViewBundleInputs<'a> {
     pub(crate) subscription: SubscriptionKey,
+    /// Resets carry the complete ordered collector snapshot.  Incremental
+    /// updates carry only the touched complete parents below.
+    pub(crate) reset_result_set: bool,
     /// Peer inventory of transactions whose full row-version payload has
     /// already shipped on this link. Partial payload coverage is not recorded
     /// here, even when it is enough for a subscription-scoped exclusive result.
@@ -164,6 +167,9 @@ pub(crate) struct MaintainedViewBundleInputs<'a> {
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
     pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
+    /// Collector roots changed while draining this tick.  This is the
+    /// authoritative touched-parent set; do not discover it by tree diffing.
+    pub(crate) structured_app_row_changes: BTreeSet<RowUuid>,
     pub(crate) identity: AuthorId,
     pub(crate) tier: DurabilityTier,
     /// Maintained fact and collector state. The current carrier consumes its
@@ -325,10 +331,12 @@ where
             .collect::<Vec<_>>();
         let update = self.view_update_for_maintained_result_members(MaintainedViewBundleInputs {
             subscription,
+            reset_result_set: true,
             result_member_adds,
             result_member_removes,
             program_fact_adds: transitions.program_fact_adds,
             program_fact_removes: transitions.program_fact_removes,
+            structured_app_row_changes: transitions.structured_app_row_changes,
             peer_complete_tx_payloads,
             known_state: None,
             complete_exclusive_payloads: false,
@@ -348,6 +356,7 @@ where
     ) -> Result<SyncMessage, Error> {
         let MaintainedViewBundleInputs {
             subscription,
+            reset_result_set,
             peer_complete_tx_payloads,
             known_state,
             complete_exclusive_payloads,
@@ -356,6 +365,7 @@ where
             result_member_removes,
             mut program_fact_adds,
             program_fact_removes,
+            structured_app_row_changes,
             identity: _identity,
             tier: _tier,
             maintained_facts,
@@ -613,14 +623,22 @@ where
         }
         let version_carriers = build_version_carriers_from_singletons(version_bundles)
             .map_err(|_| Error::InvalidStoredValue("failed to build version-bundle run"))?;
-        // The tree is rendered directly from the maintained collector output.
-        // Do this after collector construction and before any carrier framing;
-        // no row/edge materialization is involved in this path.
-        let result_tree = maintained_facts.structured_result_tree()?;
+        // The collector records touched roots while it applies its own -/+
+        // replacements.  An incremental carrier renders only those complete
+        // parents; it never diffs the retained tree or sends child deltas.
+        let (result_tree, result_tree_updates) = if reset_result_set {
+            (maintained_facts.structured_result_tree()?, Vec::new())
+        } else {
+            (
+                ResultTree::default(),
+                maintained_facts
+                    .structured_result_tree_replacements(&structured_app_row_changes)?,
+            )
+        };
         Ok(SyncMessage::StructuredViewUpdate {
             subscription,
             settled_through: self.clock.applied_global_watermark,
-            reset_result_set: false,
+            reset_result_set,
             version_carriers,
             version_bundles: Vec::new(),
             peer_payload_inventory: PeerPayloadInventory {
@@ -632,6 +650,7 @@ where
             program_fact_adds,
             program_fact_removes,
             result_tree,
+            result_tree_updates,
         })
     }
 
