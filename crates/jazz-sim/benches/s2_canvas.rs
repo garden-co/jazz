@@ -2549,6 +2549,20 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
             result_member_adds,
             result_member_removes,
             ..
+        }
+        | SyncMessage::StructuredViewUpdate {
+            version_bundles,
+            peer_payload_inventory,
+            result_member_adds,
+            result_member_removes,
+            ..
+        }
+        | SyncMessage::StructuredViewUpdateChunk {
+            version_bundles,
+            peer_payload_inventory,
+            result_member_adds,
+            result_member_removes,
+            ..
         } => {
             version_bundles
                 .iter()
