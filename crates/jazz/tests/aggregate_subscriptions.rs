@@ -174,15 +174,38 @@ impl ObservedSubscription {
     }
 
     fn values(&self) -> Vec<Vec<Value>> {
+        // Public aggregate subscription rows use a synthetic row id plus the
+        // query columns. The observer removes only that id envelope, then
+        // decodes the user-visible aggregate columns from delivered bytes.
+        let descriptor = RecordDescriptor::new(
+            std::iter::once(("row_uuid".to_owned(), ValueType::Uuid)).chain(
+                self.descriptor.fields().iter().map(|field| {
+                    (
+                        field.name.clone().expect("named aggregate field"),
+                        ValueType::Nullable(Box::new(field.value_type.clone())),
+                    )
+                }),
+            ),
+        );
         let mut values = self
             .rows
             .iter()
             .map(|row| {
-                BorrowedRecord::new(row.data.as_ref(), &self.descriptor)
+                BorrowedRecord::new(row.data.as_ref(), &descriptor)
                     .to_values()
                     .unwrap_or_else(|err| panic!("decode delivered subscription row: {err}"))
                     .into_iter()
+                    .skip(1)
+                    .take(self.descriptor.fields().len())
                     .map(|value| match value {
+                        GrooveValue::Nullable(Some(value)) => match *value {
+                            GrooveValue::String(value) => Value::Text(value),
+                            GrooveValue::I32(value) => Value::Integer(value),
+                            GrooveValue::I64(value) => Value::BigInt(value),
+                            GrooveValue::U64(value) => Value::Timestamp(value),
+                            GrooveValue::F64(value) => Value::Double(value),
+                            other => panic!("unsupported delivered aggregate value: {other:?}"),
+                        },
                         GrooveValue::String(value) => Value::Text(value),
                         GrooveValue::I32(value) => Value::Integer(value),
                         GrooveValue::I64(value) => Value::BigInt(value),
@@ -691,6 +714,84 @@ async fn maintained_double_sum_and_avg_replace_a_multi_row_group_after_insert() 
                         Value::Double(1.75 / 3.0),
                     ]],
                     "double avg replaces the prior group result after insert",
+                )
+                .await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn maintained_min_and_max_replace_multi_row_groups() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = metrics_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let writer = JazzClient::connect(server.make_client_context_for_user(
+                schema.clone(),
+                "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa15",
+            ))
+            .await
+            .expect("connect writer");
+            let client = JazzClient::connect(
+                server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa16"),
+            )
+            .await
+            .expect("connect client");
+            insert_metric_at_tier(&writer, "same", 10, DurabilityTier::EdgeServer).await;
+            insert_metric_at_tier(&writer, "same", 4, DurabilityTier::EdgeServer).await;
+            let mut min_stream = ObservedSubscription::new(
+                client
+                    .subscribe(
+                        QueryBuilder::new("metrics")
+                            .min("score")
+                            .group_by("bucket")
+                            .build(),
+                    )
+                    .await
+                    .expect("subscribe grouped min"),
+                aggregate_descriptor([
+                    ("bucket", ValueType::String),
+                    ("min_score", ValueType::I32),
+                ]),
+            );
+            let mut max_stream = ObservedSubscription::new(
+                client
+                    .subscribe(
+                        QueryBuilder::new("metrics")
+                            .max("score")
+                            .group_by("bucket")
+                            .build(),
+                    )
+                    .await
+                    .expect("subscribe grouped max"),
+                aggregate_descriptor([
+                    ("bucket", ValueType::String),
+                    ("max_score", ValueType::I32),
+                ]),
+            );
+            min_stream
+                .wait_for_values(
+                    vec![vec![Value::Text("same".to_owned()), Value::Integer(4)]],
+                    "initial multi-row min",
+                )
+                .await;
+            max_stream
+                .wait_for_values(
+                    vec![vec![Value::Text("same".to_owned()), Value::Integer(10)]],
+                    "initial multi-row max",
+                )
+                .await;
+            insert_metric_at_tier(&writer, "same", 1, DurabilityTier::EdgeServer).await;
+            min_stream
+                .wait_for_values(
+                    vec![vec![Value::Text("same".to_owned()), Value::Integer(1)]],
+                    "min replacement",
+                )
+                .await;
+            max_stream
+                .wait_for_values(
+                    vec![vec![Value::Text("same".to_owned()), Value::Integer(10)]],
+                    "max remains stable",
                 )
                 .await;
         })

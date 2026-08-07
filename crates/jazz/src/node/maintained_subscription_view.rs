@@ -470,6 +470,35 @@ impl MaintainedSubscriptionView {
         }
     }
 
+    /// Rebase aggregate terminal state after an authoritative remote reset.
+    /// The local IVM may still emit the matching before/after pair while its
+    /// source catches up; retaining an obsolete synthetic revision here would
+    /// otherwise turn that harmless pair into a later public removal.
+    pub(crate) fn replace_aggregate_result_state(
+        &mut self,
+        members: &BTreeSet<ResultMemberEntry>,
+        facts: &BTreeSet<ProgramFactEntry>,
+    ) {
+        self.result_weights
+            .retain(|member, _| !matches!(member, ResultMemberEntry::Synthetic { .. }));
+        self.result_payloads
+            .retain(|member, _| !matches!(member, ResultMemberEntry::Synthetic { .. }));
+        for member in members {
+            if matches!(member, ResultMemberEntry::Synthetic { .. }) {
+                self.result_weights.insert(member.clone(), 1);
+            }
+        }
+        for fact in facts {
+            let ProgramFactEntry::ResultPayload(payload) = fact else {
+                continue;
+            };
+            if matches!(payload.member, ResultMemberEntry::Synthetic { .. }) {
+                self.result_payloads
+                    .insert(payload.member.clone(), payload.clone());
+            }
+        }
+    }
+
     fn apply_result_delta(
         &mut self,
         entry: ResultMemberEntry,
@@ -527,7 +556,7 @@ impl MaintainedSubscriptionView {
         {
             transitions.removes.push(old_member.clone());
             self.result_weights.remove(&old_member);
-            if let Some(existing) = old_payload {
+            if let Some(existing) = self.result_payloads.remove(&old_member).or(old_payload) {
                 transitions
                     .program_fact_removes
                     .push(ProgramFactEntry::ResultPayload(existing));
