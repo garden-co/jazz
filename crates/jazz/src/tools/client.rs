@@ -1372,11 +1372,11 @@ impl ClientDbInner {
         tokio::task::spawn_local(async move {
             let mut stream = stream;
             let mut current_rows: Vec<CoreSubscriptionOutputRow> = Vec::new();
-            // Only a fresh subscription reduces its first reset from the empty
-            // result set. Core can send non-reset setup deltas before that
-            // reset; later reset framing can carry ordinary delta-shaped
-            // entries for rows the facade already tracks.
-            let mut awaiting_initial_reset = true;
+            // A fresh subscription may be hydrated by consecutive reset
+            // frames. Each such frame replaces the still-initial result set.
+            // Once ordinary delivery begins, later reset framing retains its
+            // delta-shaped relation to the facade's tracked rows.
+            let mut initial_hydration = true;
             while let Some(event) = stream.next_event().await {
                 match event {
                     CoreSubscriptionEvent::Delta {
@@ -1390,12 +1390,8 @@ impl ClientDbInner {
                             .iter()
                             .map(|row| row.occurrence_id.clone())
                             .collect();
-                        let is_initial_reset = awaiting_initial_reset && reset;
-                        // The initial reset reduces from empty by definition.
-                        // Clearing here (and only here) discards any core setup
-                        // entries that preceded initial hydration; later resets
-                        // keep their delta-shaped relation to tracked rows.
-                        if is_initial_reset {
+                        let reset_replaces_initial_view = initial_hydration && reset;
+                        if reset_replaces_initial_view {
                             current_rows.clear();
                         }
                         // A local aggregate snapshot may retract while the
@@ -1429,7 +1425,7 @@ impl ClientDbInner {
                             .map(|row| row.row.clone())
                             .collect::<Vec<_>>();
                         inner.borrow_mut().remember_rows(&table, &rows_for_cache);
-                        let delta = if is_initial_reset {
+                        let delta = if reset_replaces_initial_view {
                             JazzClient::core_subscription_reset_delta(
                                 &db,
                                 &previous_rows,
@@ -1444,8 +1440,8 @@ impl ClientDbInner {
                                 &removed,
                             )
                         };
-                        if reset {
-                            awaiting_initial_reset = false;
+                        if !reset {
+                            initial_hydration = false;
                         }
                         let Ok(delta) = delta else {
                             break;
