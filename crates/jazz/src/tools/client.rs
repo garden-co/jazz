@@ -2328,6 +2328,44 @@ impl JazzClient {
         ))
     }
 
+    fn core_subscription_snapshot_delta(
+        db: &Backend,
+        rows: &[CoreSubscriptionOutputRow],
+    ) -> Result<OrderedRowDelta> {
+        let added = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let public = Self::core_subscription_row_to_public(db, row)?;
+                Ok(OrderedAdded {
+                    id: public.id.clone(),
+                    index,
+                    row: public,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(OrderedRowDelta {
+            added,
+            ..OrderedRowDelta::default()
+        })
+    }
+
+    fn core_subscription_reset_delta(
+        db: &Backend,
+        previous_rows: &[OutputOccurrenceId],
+        rows: &[CoreSubscriptionOutputRow],
+    ) -> Result<OrderedRowDelta> {
+        let removed = previous_rows
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, id)| OrderedRemoved { id, index })
+            .collect();
+        let mut delta = Self::core_subscription_snapshot_delta(db, rows)?;
+        delta.removed = removed;
+        Ok(delta)
+    }
+
     fn apply_core_subscription_rows(
         current_rows: &mut Vec<CoreSubscriptionOutputRow>,
         added_rows: &[CoreSubscriptionOutputRow],
