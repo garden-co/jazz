@@ -1373,9 +1373,10 @@ impl ClientDbInner {
             let mut stream = stream;
             let mut current_rows: Vec<CoreSubscriptionOutputRow> = Vec::new();
             // Only a fresh subscription reduces its first reset from the empty
-            // result set. Later reset framing can carry ordinary delta-shaped
+            // result set. Core can send non-reset setup deltas before that
+            // reset; later reset framing can carry ordinary delta-shaped
             // entries for rows the facade already tracks.
-            let mut awaiting_initial_delivery = true;
+            let mut awaiting_initial_reset = true;
             while let Some(event) = stream.next_event().await {
                 match event {
                     CoreSubscriptionEvent::Delta {
@@ -1420,7 +1421,7 @@ impl ClientDbInner {
                             .map(|row| row.row.clone())
                             .collect::<Vec<_>>();
                         inner.borrow_mut().remember_rows(&table, &rows_for_cache);
-                        let delta = if awaiting_initial_delivery && reset {
+                        let delta = if awaiting_initial_reset && reset {
                             JazzClient::core_subscription_reset_delta(
                                 &db,
                                 &previous_rows,
@@ -1435,7 +1436,9 @@ impl ClientDbInner {
                                 &removed,
                             )
                         };
-                        awaiting_initial_delivery = false;
+                        if reset {
+                            awaiting_initial_reset = false;
+                        }
                         let Ok(delta) = delta else {
                             break;
                         };
