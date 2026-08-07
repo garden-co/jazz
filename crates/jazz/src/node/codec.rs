@@ -11,7 +11,6 @@ use crate::schema::{
     ColumnSchema, branch_partition_history_table_name, branch_partition_register_table_name,
     partition_ahead_current_table_name, partition_global_current_table_name,
     partition_register_ahead_current_table_name, partition_register_global_current_table_name,
-    partition_register_table_name,
 };
 
 use groove::schema::TableSchema as GrooveTableSchema;
@@ -524,13 +523,11 @@ impl VersionRow {
     pub(super) fn from_parts_with_schema_version(
         table: &TableSchema,
         parts: VersionRowParts,
-        storage_schema_version: Option<SchemaVersionId>,
+        _storage_schema_version: Option<SchemaVersionId>,
     ) -> Result<Self, Error> {
         let (storage_table, values) = if parts.deletion.is_some() {
             (
-                storage_schema_version
-                    .map(|version| table.register_partition_storage_table(version))
-                    .unwrap_or_else(|| table.register_storage_table()),
+                table.register_storage_table(),
                 register_values_from_parts(&parts)?,
             )
         } else {
@@ -551,13 +548,11 @@ impl VersionRow {
         tx_node_alias: NodeAlias,
         schema_version_alias: SchemaVersionAlias,
         tx_time: TxTime,
-        storage_schema_version: Option<SchemaVersionId>,
+        _storage_schema_version: Option<SchemaVersionId>,
     ) -> Result<Self, Error> {
         let (storage_table, values) = if let Some(deletion) = version.deletion() {
             (
-                storage_schema_version
-                    .map(|version| table.register_partition_storage_table(version))
-                    .unwrap_or_else(|| table.register_storage_table()),
+                table.register_storage_table(),
                 register_values_from_wire(
                     version,
                     tx_node_alias,
@@ -2049,40 +2044,10 @@ pub(super) fn rejected_versions_table_name(table: &str) -> String {
     format!("jazz_{table}_rejected_versions")
 }
 
-pub(super) fn register_table_name(table: &str) -> String {
-    format!("jazz_{table}_register")
-}
-
-pub(super) fn register_table_name_for_schema(
-    table: &str,
-    schema_version: SchemaVersionId,
-    base_schema_version: SchemaVersionId,
-) -> String {
-    if schema_version == base_schema_version {
-        return register_table_name(table);
-    }
-    partition_register_table_name(table, schema_version)
-}
-
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    pub(super) fn cached_register_table_name_for_schema(
-        &mut self,
-        table: &str,
-        schema_version: SchemaVersionId,
-        base_schema_version: SchemaVersionId,
-    ) -> groove::Intern<String> {
-        self.cached_physical_table_name(
-            table,
-            PhysicalTableClass::RegisterStorage,
-            schema_version,
-            base_schema_version,
-            |table| register_table_name_for_schema(table, schema_version, base_schema_version),
-        )
-    }
-
     pub(super) fn cached_global_current_table_name_for_schema(
         &mut self,
         table: &str,

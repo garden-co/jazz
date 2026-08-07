@@ -87,13 +87,13 @@ where
                 raw.record().get_u64(TransactionRowRecord::FIELD_TIME_IDX)?,
             ));
         }
-        let physical_history_tables = self
+        let physical_table_ids = self
             .catalogue
             .physical_mappings
             .values()
             .flat_map(|mapping| mapping.tables.values().map(|table| table.table_id))
             .collect::<BTreeSet<_>>();
-        for table_id in physical_history_tables {
+        for table_id in physical_table_ids {
             if let Some(raw) = self.database.index_last_raw(
                 &physical_history_table_name(table_id),
                 "by_tx",
@@ -103,12 +103,11 @@ where
                     raw.record().get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?,
                 ));
             }
-        }
-        for table in self.catalogue.schema.tables.clone() {
-            if let Some(raw) =
-                self.database
-                    .index_last_raw(&register_table_name(&table.name), "by_tx", &[])?
-            {
+            if let Some(raw) = self.database.index_last_raw(
+                &physical_register_table_name(table_id),
+                "by_tx",
+                &[],
+            )? {
                 self.merge_tx_time(TxTime(
                     raw.record().get_u64(RegisterRowRecord::FIELD_TX_TIME_IDX)?,
                 ));

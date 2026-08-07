@@ -6,8 +6,6 @@
 //! node-level read layer over groove tables.
 
 use super::*;
-use crate::schema::partition_register_table_name;
-
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -289,20 +287,7 @@ where
         if let Some(sources) = self.query.version_storage_sources_cache.get(&cache_key) {
             return Ok(sources.clone());
         }
-        let mut sources = match layer {
-            VersionLayer::Content => self.physical_content_history_sources(table),
-            VersionLayer::Deletion => {
-                let mut sources = Vec::new();
-                if self
-                    .table_in_schema(table, self.catalogue.current_schema_version_id)
-                    .is_ok()
-                {
-                    sources.push(register_table_name(table));
-                }
-                sources.extend(self.partition_register_storage_sources(table)?);
-                sources
-            }
-        };
+        let mut sources = self.physical_version_storage_sources(table, layer);
         sources.sort();
         sources.dedup();
         if sources.is_empty() {
@@ -314,26 +299,16 @@ where
         Ok(sources)
     }
 
-    fn physical_content_history_sources(&self, table: &str) -> Vec<String> {
+    fn physical_version_storage_sources(&self, table: &str, layer: VersionLayer) -> Vec<String> {
         self.catalogue
             .physical_mappings
             .values()
             .filter_map(|mapping| mapping.tables.get(table))
-            .map(|mapping| physical_history_table_name(mapping.table_id))
+            .map(|mapping| match layer {
+                VersionLayer::Content => physical_history_table_name(mapping.table_id),
+                VersionLayer::Deletion => physical_register_table_name(mapping.table_id),
+            })
             .collect()
-    }
-
-    fn partition_register_storage_sources(&mut self, table: &str) -> Result<Vec<String>, Error> {
-        let mut sources = Vec::new();
-        for (logical_table, schema_version) in &self.catalogue.partitions {
-            if logical_table != table || *schema_version == self.catalogue.current_schema_version_id
-            {
-                continue;
-            }
-            self.table_in_schema(table, *schema_version)?;
-            sources.push(partition_register_table_name(table, *schema_version));
-        }
-        Ok(sources)
     }
 
     #[allow(dead_code)] // Stage 1 read primitive; production reads switch in Stage 2.
@@ -356,34 +331,39 @@ where
         record: OwnedRecord,
     ) -> Result<VersionRow, Error> {
         let record_view = record.borrowed();
-        let table = if record_view.descriptor().field_index("_deletion").is_some()
-            || !storage_table.starts_with("jazz_physical_")
-        {
+        let is_deletion = record_view.descriptor().field_index("_deletion").is_some();
+        let table = if !storage_table.starts_with("jazz_physical_") {
             requested_table.to_owned()
         } else {
-            let alias = SchemaVersionAlias(
-                record_view.get_u64(HistoryRowRecord::FIELD_SCHEMA_VERSION_IDX)?,
-            );
+            let alias = SchemaVersionAlias(record_view.get_u64(if is_deletion {
+                RegisterRowRecord::FIELD_SCHEMA_VERSION_IDX
+            } else {
+                HistoryRowRecord::FIELD_SCHEMA_VERSION_IDX
+            })?);
             let schema_version =
                 self.schema_version_for_alias(alias)
                     .ok_or(Error::InvalidStoredValue(
-                        "history schema version alias must exist",
+                        "version storage schema version alias must exist",
                     ))?;
             self.catalogue
                 .physical_mappings
                 .get(&schema_version)
                 .and_then(|mapping| {
                     mapping.tables.iter().find_map(|(logical_table, mapping)| {
-                        (physical_history_table_name(mapping.table_id) == storage_table)
-                            .then(|| logical_table.clone())
+                        let expected = if is_deletion {
+                            physical_register_table_name(mapping.table_id)
+                        } else {
+                            physical_history_table_name(mapping.table_id)
+                        };
+                        (expected == storage_table).then(|| logical_table.clone())
                     })
                 })
                 .ok_or(Error::InvalidStoredValue(
-                    "physical history logical table mapping missing",
+                    "physical version storage logical table mapping missing",
                 ))?
         };
         let record = record.borrowed();
-        let tx_node_alias = if record.descriptor().field_index("_deletion").is_some() {
+        let tx_node_alias = if is_deletion {
             NodeAlias(record.get_u64(RegisterRowRecord::FIELD_TX_NODE_ID_IDX)?)
         } else {
             NodeAlias(record.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?)
@@ -395,7 +375,7 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "history tx node alias must exist",
             ))?;
-        let tx_time = if record.descriptor().field_index("_deletion").is_some() {
+        let tx_time = if is_deletion {
             TxTime(record.get_u64(RegisterRowRecord::FIELD_TX_TIME_IDX)?)
         } else {
             TxTime(record.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?)

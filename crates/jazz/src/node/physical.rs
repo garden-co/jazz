@@ -25,6 +25,10 @@ pub(super) fn physical_history_table_name(table_id: PhysicalTableId) -> String {
     format!("jazz_physical_{}_history", table_id.0)
 }
 
+pub(super) fn physical_register_table_name(table_id: PhysicalTableId) -> String {
+    format!("jazz_physical_{}_register", table_id.0)
+}
+
 pub(super) fn physical_user_column_field(column_id: PhysicalColumnId) -> String {
     format!("user_{}", column_id.0)
 }
@@ -102,6 +106,24 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    pub(super) fn physical_register_table_for_schema(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+    ) -> Result<String, Error> {
+        self.table_in_schema(logical_table, schema_version)?;
+        let table_id = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(logical_table))
+            .map(|mapping| mapping.table_id)
+            .ok_or(Error::InvalidStoredValue(
+                "physical register table mapping missing",
+            ))?;
+        Ok(physical_register_table_name(table_id))
+    }
+
     pub(super) fn physical_history_source_graph(
         &self,
         schema_version: SchemaVersionId,
@@ -207,8 +229,8 @@ where
         Ok(())
     }
 
-    pub(super) fn synchronize_physical_history_tables(&mut self) -> Result<(), Error> {
-        for desired in physical_history_storage_tables(
+    pub(super) fn synchronize_physical_version_tables(&mut self) -> Result<(), Error> {
+        for desired in physical_version_storage_tables(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
             &self.catalogue.physical_mappings,
@@ -263,7 +285,7 @@ where
         Ok(())
     }
 
-    pub(super) fn discard_unmapped_physical_history_tables(
+    pub(super) fn discard_unmapped_physical_version_tables(
         &mut self,
         candidates: impl IntoIterator<Item = PhysicalTableId>,
     ) -> Result<(), Error> {
@@ -277,35 +299,41 @@ where
             if live.contains(&table_id) {
                 continue;
             }
-            let table = physical_history_table_name(table_id);
-            let rows = match self.database.primary_key_scan_raw(&table, &[]) {
-                Ok(rows) => rows
-                    .into_iter()
-                    .map(|row| row.owned_record())
-                    .collect::<Vec<_>>(),
-                Err(GrooveDbError::TableNotFound(_)) => continue,
-                Err(error) => return Err(error.into()),
-            };
-            if rows.is_empty() {
-                continue;
+            for table in [
+                physical_history_table_name(table_id),
+                physical_register_table_name(table_id),
+            ] {
+                let rows = match self.database.primary_key_scan_raw(&table, &[]) {
+                    Ok(rows) => rows
+                        .into_iter()
+                        .map(|row| row.owned_record())
+                        .collect::<Vec<_>>(),
+                    Err(GrooveDbError::TableNotFound(_)) => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                if rows.is_empty() {
+                    continue;
+                }
+                let mut batch = self.database.open_batch();
+                for row in rows {
+                    let record = row.borrowed();
+                    batch.delete(
+                        &table,
+                        PrimaryKeyValue::Composite(vec![
+                            PrimaryKeyValue::Uuid(
+                                record.get_uuid(HistoryRowRecord::FIELD_ROW_UUID_IDX)?,
+                            ),
+                            PrimaryKeyValue::U64(
+                                record.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?,
+                            ),
+                            PrimaryKeyValue::U64(
+                                record.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?,
+                            ),
+                        ]),
+                    );
+                }
+                self.database.commit_batch(batch)?;
             }
-            let mut batch = self.database.open_batch();
-            for row in rows {
-                let record = row.borrowed();
-                batch.delete(
-                    &table,
-                    PrimaryKeyValue::Composite(vec![
-                        PrimaryKeyValue::Uuid(
-                            record.get_uuid(HistoryRowRecord::FIELD_ROW_UUID_IDX)?,
-                        ),
-                        PrimaryKeyValue::U64(record.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?),
-                        PrimaryKeyValue::U64(
-                            record.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?,
-                        ),
-                    ]),
-                );
-            }
-            self.database.commit_batch(batch)?;
         }
         Ok(())
     }
@@ -425,10 +453,8 @@ where
                 "stored row schema version alias missing",
             ))?;
         if version.layer() == VersionLayer::Deletion {
-            return Ok(self.cached_register_table_name_for_schema(
-                version.table(),
-                schema_version,
-                self.catalogue.current_schema_version_id,
+            return Ok(groove::Intern::new(
+                self.physical_register_table_for_schema(schema_version, version.table())?,
             ));
         }
         Ok(groove::Intern::new(
@@ -472,7 +498,7 @@ where
     }
 }
 
-pub(super) fn physical_history_storage_tables(
+pub(super) fn physical_version_storage_tables(
     catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
     schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
     physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
@@ -549,6 +575,8 @@ pub(super) fn physical_history_storage_tables(
         let mut physical = GrooveTableSchema::new(physical_history_table_name(table_id), columns);
         physical.primary_key = template.primary_key.clone();
         physical.indices = template.indices.clone();
+        let mut register = template_table.register_storage_table();
+        register.name = physical_register_table_name(table_id);
 
         let mut layouts_by_alias = BTreeMap::new();
         for (schema_version, logical_table, mapping) in variants {
@@ -566,6 +594,7 @@ pub(super) fn physical_history_storage_tables(
             physical = physical.with_schema_version(alias.0, fields);
         }
         tables.push(physical);
+        tables.push(register);
     }
     Ok(tables)
 }

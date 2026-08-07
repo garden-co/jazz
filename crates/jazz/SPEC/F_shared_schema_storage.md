@@ -206,7 +206,7 @@ keys likewise begin with the logical table name and index name. Branch history
 and register table names contain both the branch id and schema version.
 
 Shared storage removes the schema-version dimension from all application-data
-row and index keys, inclusing history, global current, ahead current, secondary
+row and index keys, including history, global current, ahead current, secondary
 indexes and branch overlays. Keys should be scoped by stable physical identity instead.
 
 ### Sync
@@ -431,21 +431,22 @@ remain compatible with databases written by the former per-schema history layout
      receives new-version writes without rehydration.
 
 4. Share immutable history first.
-   **Status: in progress (2026-08-07).** Content history is now one
-   schema-versioned Groove table per `PhysicalTableId`; ordinary per-schema
-   content-history tables and names have been removed. Writes derive the table
-   and descriptor from the row's stored alias, raw reads retain the actual
-   variant descriptor, and graph consumers use a fixed-output
-   `VariantProject`. Mixed-version history survives restart and a reconciled
-   lineage exposes one content source regardless of schema-version count.
-   Deletion registers are intentionally the next substep and remain partitioned.
-   - Key deletion-register structures by `PhysicalTableId`.
-   - Finish replacing combined `version_storage_sources()` fanout with one
-     physical source per layer and a fixed-output `VariantProject` per consumer.
+   **Status: complete (2026-08-07).** Each `PhysicalTableId` now owns one
+   schema-versioned content-history table and one deletion-register table;
+   ordinary per-schema history/register tables and names have been removed.
+   Writes derive both tables from the row's stored alias, raw reads recover the
+   originating logical table from that alias and the physical lineage, and each
+   logical lineage exposes exactly one source per immutable layer regardless of
+   schema-version count. Content uses `VariantProject` because its payload
+   descriptor varies; deletion rows share one stable system-only descriptor and
+   need no variant projection. Mixed content, deletes, and restores survive
+   restart and table renames. Publishing a lens discards both immutable layers
+   of a replaced provisional physical table.
    - Keep global/ahead-current and branch-overlay tables partitioned temporarily,
      giving us a contained vertical slice.
-   - Prove mixed-version history survives restart and that physical-source count
-     is independent of schema-version count.
+   - Current projection chooses content and deletion winners independently
+     across the remaining schema partitions before applying the winning deletion
+     state, so a restore in one schema can reveal content authored in another.
 
 5. Share current state and indexes.
    - Move global-current, ahead-current, and durable index prefixes to physical identities.

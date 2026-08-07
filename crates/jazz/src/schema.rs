@@ -193,8 +193,6 @@ impl JazzSchema {
                 continue;
             };
             tables.push(table.rejected_versions_storage_table());
-            tables.push(table.register_storage_table());
-            tables.push(table.register_partition_storage_table(*schema_version));
             if self
                 .tables
                 .iter()
@@ -240,7 +238,8 @@ impl JazzSchema {
                 .column_families()
                 .into_iter()
                 .chain(std::iter::once("indices"))
-                .chain((!self.tables.is_empty()).then_some("jazz_physical_history")),
+                .chain((!self.tables.is_empty()).then_some("jazz_physical_history"))
+                .chain((!self.tables.is_empty()).then_some("jazz_physical_register")),
         )
     }
 
@@ -269,7 +268,6 @@ impl JazzSchema {
                 .iter()
                 .map(TableSchema::rejected_versions_storage_table),
         );
-        tables.extend(self.tables.iter().map(TableSchema::register_storage_table));
         tables.extend(
             self.tables
                 .iter()
@@ -814,14 +812,6 @@ impl TableSchema {
         self.register_storage_table_named(format!("jazz_{}_register", self.name))
     }
 
-    /// Return a partitioned deletion-register table with an explicit physical name.
-    pub fn register_partition_storage_table(
-        &self,
-        schema_version: SchemaVersionId,
-    ) -> GrooveTableSchema {
-        self.register_storage_table_named(partition_register_table_name(&self.name, schema_version))
-    }
-
     /// Return a branch-overlay partitioned deletion-register table.
     pub fn branch_register_partition_storage_table(
         &self,
@@ -1042,13 +1032,6 @@ impl TableSchema {
             })),
         )
     }
-}
-
-pub(crate) fn partition_register_table_name(
-    table: &str,
-    schema_version: SchemaVersionId,
-) -> String {
-    format!("jazz_{table}_{}_register", schema_version.0.simple())
 }
 
 pub(crate) fn partition_global_current_table_name(
@@ -1785,13 +1768,11 @@ mod tests {
         assert!(
             tables
                 .iter()
-                .all(|table| table.name != "jazz_todos_history")
+                .all(|table| table.name != "jazz_todos_history"
+                    && table.name != "jazz_todos_register")
         );
         let history = schema.tables[0].history_storage_table();
-        let register = tables
-            .iter()
-            .find(|table| table.name == "jazz_todos_register")
-            .unwrap();
+        let register = schema.tables[0].register_storage_table();
         let global_current = tables
             .iter()
             .find(|table| table.name == "jazz_todos_global_current")

@@ -143,6 +143,82 @@ fn publishing_lens_reconciles_target_table_and_column_identities_durably() {
 }
 
 #[test]
+fn publishing_lens_discards_provisional_physical_history_and_register_rows() {
+    let base = schema();
+    let target = SchemaVersion::new(catalogue_evolved_schema());
+    let (_dir, mut core) = open_node_with_schema(node(0x2a), base.clone());
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(target.clone()),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: target.id,
+        },
+    })
+    .unwrap();
+
+    let provisional = core.catalogue.physical_mappings[&target.id].tables["todos"].table_id;
+    let row_uuid = row(0x4a);
+    core.commit_mergeable(
+        MergeableCommit::new("todos", row_uuid, 10).cells(BTreeMap::from([
+            ("title".to_owned(), v("provisional")),
+            ("body".to_owned(), v("body")),
+        ])),
+    )
+    .unwrap();
+    core.commit_mergeable(
+        MergeableCommit::new("todos", row_uuid, 11).deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
+    assert_eq!(
+        core.database
+            .primary_key_scan_raw(&physical_history_table_name(provisional), &[])
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        core.database
+            .primary_key_scan_raw(&physical_register_table_name(provisional), &[])
+            .unwrap()
+            .len(),
+        1
+    );
+
+    core.apply_sync_message(SyncMessage::PublishLens {
+        author: AuthorId::SYSTEM,
+        lens: MigrationLens::new(
+            base.version_id(),
+            target.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: v(""),
+                }],
+            }],
+        ),
+    })
+    .unwrap();
+
+    assert!(core
+        .database
+        .primary_key_scan_raw(&physical_history_table_name(provisional), &[])
+        .unwrap()
+        .is_empty());
+    assert!(core
+        .database
+        .primary_key_scan_raw(&physical_register_table_name(provisional), &[])
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn active_history_projection_accepts_a_new_schema_variant_without_rebuild() {
     let base = schema();
     let evolved = SchemaVersion::new(catalogue_evolved_schema());
@@ -273,6 +349,133 @@ fn table_and_column_rename_reuses_the_existing_physical_identities() {
     let target = &core.catalogue.physical_mappings[&renamed.id].tables["tasks"];
     assert_eq!(target.table_id, source.table_id);
     assert_eq!(target.columns["name"], source.columns["title"]);
+}
+
+#[test]
+fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
+    let base = schema();
+    let renamed_schema = JazzSchema::new([TableSchema::new(
+        "tasks",
+        [ColumnSchema::new("name", ColumnType::String)],
+    )]);
+    let renamed = SchemaVersion::new(renamed_schema.clone());
+    let (dir, mut core) = open_node_with_schema(node(0x2b), base.clone());
+    let row_uuid = row(0x4b);
+    core.commit_mergeable(
+        MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("shared")),
+    )
+    .unwrap();
+    core.commit_mergeable(
+        MergeableCommit::new("todos", row_uuid, 11).deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
+
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(renamed.clone()),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::PublishLens {
+        author: AuthorId::SYSTEM,
+        lens: MigrationLens::new(
+            base.version_id(),
+            renamed.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "tasks".to_owned(),
+                ops: vec![
+                    LensOp::RenameTable {
+                        from: "todos".to_owned(),
+                        to: "tasks".to_owned(),
+                    },
+                    LensOp::RenameColumn {
+                        from: "title".to_owned(),
+                        to: "name".to_owned(),
+                    },
+                ],
+            }],
+        ),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: renamed.id,
+        },
+    })
+    .unwrap();
+    core.commit_mergeable(
+        MergeableCommit::new("tasks", row_uuid, 12).deletion(DeletionEvent::Restored),
+    )
+    .unwrap();
+
+    let table_id = core.catalogue.physical_mappings[&base.version_id()].tables["todos"].table_id;
+    assert_eq!(
+        core.catalogue.physical_mappings[&renamed.id].tables["tasks"].table_id,
+        table_id
+    );
+    for logical_table in ["todos", "tasks"] {
+        assert_eq!(
+            core.version_storage_sources_for_layer(logical_table, VersionLayer::Deletion)
+                .unwrap(),
+            vec![physical_register_table_name(table_id)]
+        );
+    }
+    assert_eq!(
+        core.database
+            .primary_key_scan_raw(&physical_register_table_name(table_id), &[])
+            .unwrap()
+            .len(),
+        2
+    );
+    let deletion_versions = core
+        .query_table_versions("tasks")
+        .unwrap()
+        .into_iter()
+        .filter(|version| version.layer() == VersionLayer::Deletion)
+        .collect::<Vec<_>>();
+    assert_eq!(deletion_versions.len(), 2);
+    assert_eq!(
+        deletion_versions
+            .iter()
+            .map(VersionRow::schema_version_alias)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        2
+    );
+
+    let shape = Query::from("tasks").validate(&renamed_schema).unwrap();
+    assert_eq!(
+        core.query_rows(
+            &shape,
+            &shape.bind(BTreeMap::new()).unwrap(),
+            DurabilityTier::Local,
+        )
+        .unwrap()
+        .into_iter()
+        .map(current_row_pair)
+        .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row_uuid, BTreeMap::from([("name".to_owned(), v("shared"))]))])
+    );
+
+    drop(core);
+    let mut reopened = reopen_node_at(&dir, node(0x2b), base);
+    assert_eq!(
+        reopened
+            .version_storage_sources_for_layer("tasks", VersionLayer::Deletion)
+            .unwrap(),
+        vec![physical_register_table_name(table_id)]
+    );
+    assert_eq!(
+        reopened
+            .query_table_versions("tasks")
+            .unwrap()
+            .into_iter()
+            .filter(|version| version.layer() == VersionLayer::Deletion)
+            .count(),
+        2
+    );
 }
 
 #[test]
@@ -654,7 +857,9 @@ fn current_write_pointer_flip_registers_new_partition_tables_live() {
     let history = physical_history_table_name(
         core.catalogue.physical_mappings[&evolved_payload.id].tables["todos"].table_id,
     );
-    let register = crate::schema::partition_register_table_name("todos", evolved_payload.id);
+    let register = physical_register_table_name(
+        core.catalogue.physical_mappings[&evolved_payload.id].tables["todos"].table_id,
+    );
     assert!(core.database.primary_key_scan_raw(&history, &[]).is_ok());
     assert!(core.database.primary_key_scan_raw(&register, &[]).is_ok());
 }

@@ -297,7 +297,7 @@ where
         self.persist_catalogue_schema(&schema)?;
         self.ensure_provisional_physical_mapping(schema.id)?;
         self.ensure_schema_version_alias(schema.id)?;
-        self.synchronize_physical_history_tables()?;
+        self.synchronize_physical_version_tables()?;
         if active_schema_changed {
             // Policy declarations are intentionally outside the schema version
             // identity. Invalidate maintained handles when that same-version
@@ -404,8 +404,8 @@ where
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         if installed {
-            self.discard_unmapped_physical_history_tables(provisional_table_ids)?;
-            self.synchronize_physical_history_tables()?;
+            self.discard_unmapped_physical_version_tables(provisional_table_ids)?;
+            self.synchronize_physical_version_tables()?;
         }
         Ok(vec![SyncMessage::CatalogueAck(CatalogueAck {
             revision: None,

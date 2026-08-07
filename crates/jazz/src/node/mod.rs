@@ -376,7 +376,6 @@ struct QueryServing {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum PhysicalTableClass {
-    RegisterStorage,
     GlobalCurrent(VersionLayer),
     AheadCurrent(VersionLayer),
 }
@@ -668,7 +667,7 @@ where
         for schema_version in known_schema_versions {
             node.ensure_provisional_physical_mapping(schema_version)?;
         }
-        node.synchronize_physical_history_tables()?;
+        node.synchronize_physical_version_tables()?;
         node.recover_from_storage()?;
         node.recover_known_state_facts()?;
         node.rebuild_ahead_current_keys()?;
@@ -697,7 +696,7 @@ where
             partitions,
             branch_partitions,
         );
-        lowered.tables.extend(physical_history_storage_tables(
+        lowered.tables.extend(physical_version_storage_tables(
             catalogue_schemas,
             schema_version_aliases,
             physical_mappings,
