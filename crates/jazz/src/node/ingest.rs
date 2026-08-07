@@ -2670,7 +2670,14 @@ where
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
         let head_tx_ids = self.merge_head_tx_ids(table, row_uuid)?;
-        let table_schema = self.table(table)?.clone();
+        // Schema migrations can leave a single historical head under a table
+        // name that no longer exists. Preserve the old one-head fast path for
+        // that case; only a live table can need GSet materialization.
+        let table_schema = match self.table(table) {
+            Ok(table_schema) => table_schema.clone(),
+            Err(Error::TableNotFound(_)) if head_tx_ids.len() < 2 => return Ok(()),
+            Err(error) => return Err(error),
+        };
         let has_gset_column = table_schema
             .columns
             .iter()
