@@ -64,9 +64,13 @@ function pushU32(target: number[], value: number): void {
 function nativeRowData(name: string, count: number): Uint8Array {
   const text = new TextEncoder().encode(name);
   const data = new Uint8Array(4 + text.byteLength);
-  new DataView(data.buffer).setInt32(0, count, true);
+  new DataView(data.buffer).setUint32(0, encodeSignedI32ForStorage(count), true);
   data.set(text, 4);
   return data;
+}
+
+function encodeSignedI32ForStorage(value: number): number {
+  return (value ^ 0x80000000) >>> 0;
 }
 
 function nativeAddedRecord(id: string, index: number, name: string, count: number): Uint8Array {
