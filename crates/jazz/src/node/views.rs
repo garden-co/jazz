@@ -6,6 +6,7 @@
 //! [`super::query_eval`]. It sits on the node side of the protocol boundary and
 //! emits [`crate::protocol::SyncMessage`] values.
 
+use super::ingest::validate_received_view_bundle_global_seq_durability;
 use super::policy::ViewEvaluationContext;
 use super::*;
 use crate::ids::SchemaVersionId;
@@ -629,6 +630,7 @@ where
 
     /// Apply a downstream current-row view update.
     pub(super) fn apply_view_update(&mut self, update: ViewUpdateParts) -> Result<(), Error> {
+        self.validate_received_view_update_global_seq_durability(&update)?;
         self.apply_view_update_inner(update, None)
     }
 
@@ -638,6 +640,9 @@ where
     ) -> Result<(), Error> {
         if updates.is_empty() {
             return Ok(());
+        }
+        for update in &updates {
+            self.validate_received_view_update_global_seq_durability(update)?;
         }
         if updates.iter().any(|update| update.reset_result_set) {
             self.begin_initial_sync_flush_cadence()?;
@@ -1026,6 +1031,7 @@ where
     }
 
     fn ingest_view_bundle(&mut self, bundle: VersionBundle) -> Result<(), Error> {
+        validate_received_view_bundle_global_seq_durability(bundle.global_seq, bundle.durability)?;
         if bundle.tx.kind != TxKind::Exclusive {
             return self.ingest_known_transaction(
                 bundle.tx,
@@ -1109,6 +1115,7 @@ where
         staged_tx_ids: &mut BTreeSet<TxId>,
         staged_global_seqs: &mut Vec<GlobalSeq>,
     ) -> Result<bool, Error> {
+        validate_received_view_bundle_global_seq_durability(bundle.global_seq, bundle.durability)?;
         if bundle.tx.kind == TxKind::Exclusive {
             let complete_len = usize::try_from(bundle.tx.n_total_writes).map_err(|_| {
                 Error::InvalidStoredValue("exclusive transaction write count does not fit usize")
@@ -1133,6 +1140,21 @@ where
             staged_global_seqs,
         )?;
         Ok(true)
+    }
+
+    fn validate_received_view_update_global_seq_durability(
+        &self,
+        update: &ViewUpdateParts,
+    ) -> Result<(), Error> {
+        for bundle in
+            version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
+        {
+            validate_received_view_bundle_global_seq_durability(
+                bundle.global_seq,
+                bundle.durability,
+            )?;
+        }
+        Ok(())
     }
 
     pub(crate) fn whole_table_subscription_key(

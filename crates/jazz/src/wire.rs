@@ -1057,11 +1057,9 @@ mod tests {
                     ],
                     fate: Fate::Accepted,
                     global_seq: Some(GlobalSeq(10_000 + index as u64)),
-                    durability: if index % 3 == 0 {
-                        DurabilityTier::Edge
-                    } else {
-                        DurabilityTier::Global
-                    },
+                    // A sequence is the global-authority receipt, and so its
+                    // companion durability is Global in every valid fixture.
+                    durability: DurabilityTier::Global,
                 }
             })
             .collect()

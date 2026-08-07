@@ -402,6 +402,262 @@ fn recovery_rebuilds_global_clock_from_accepted_transactions() {
 }
 
 #[test]
+fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
+    // This is necessarily an internal recovery test: old receivers could
+    // persist this malformed peer state before admission validation existed.
+    // Opening must surface it, never rewrite the durable audit history.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        let tx_id = node
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(3), 10).cells(title_cells("persisted")),
+            )
+            .unwrap();
+        let stored = node.query_transaction(tx_id).unwrap().unwrap();
+        let mut batch = node.database.open_batch();
+        batch.update(
+            "jazz_transactions",
+            transaction_values(
+                stored.node_alias,
+                &stored.tx,
+                Fate::Accepted,
+                Some(GlobalSeq(7)),
+                DurabilityTier::Edge,
+            ),
+        );
+        node.database.commit_batch(batch).unwrap();
+    }
+
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    let error = match NodeState::new(node(1), schema, storage) {
+        Ok(_) => panic!("reopen must refuse impossible persisted durability"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("global sequence requires Global durability")
+    ));
+}
+
+// This is necessarily an internal mechanism regression test: the public API
+// exposes the restored upload queue but not candidate-record work. It seeds
+// transaction states through node ingest APIs, then compares the null-slice
+// lookup against the former full-decode predicate.
+fn pending_replay_fixture_transaction(tx_id: TxId, made_by: AuthorId) -> Transaction {
+    Transaction {
+        tx_id,
+        kind: TxKind::Mergeable,
+        n_total_writes: 0,
+        made_by,
+        permission_subject: None,
+        base_snapshot: None,
+        row_read_set: None,
+        absent_read_set: None,
+        predicate_read_set: None,
+        user_metadata_json: None,
+        source_branch: None,
+        merge_strategy: None,
+    }
+}
+
+fn seed_pending_replay_state(
+    node: &mut NodeState<RocksDbStorage>,
+    tx_id: TxId,
+    made_by: AuthorId,
+    fate: Fate,
+    global_seq: Option<GlobalSeq>,
+    durability: DurabilityTier,
+) {
+    node.ingest_relay_commit_unit(pending_replay_fixture_transaction(tx_id, made_by), Vec::new())
+        .unwrap();
+    if !matches!(fate, Fate::Pending) || global_seq.is_some() || durability != DurabilityTier::Local
+    {
+        node.apply_fate_update(tx_id, fate, global_seq, Some(durability))
+            .unwrap();
+    }
+}
+
+fn legacy_pending_transaction_ids_for(
+    node: &mut NodeState<RocksDbStorage>,
+    local_node: NodeUuid,
+    author: AuthorId,
+) -> PendingTransactionScan {
+    let mut scan = PendingTransactionScan::default();
+    for tx_id in node.transaction_ids().unwrap() {
+        scan.records_visited += 1;
+        let transaction = node.query_transaction(tx_id).unwrap().unwrap();
+        scan.full_transactions_decoded += 1;
+        if transaction.tx.tx_id.node == local_node
+            && transaction.tx.made_by == author
+            && matches!(transaction.fate, Fate::Pending | Fate::Accepted)
+            && transaction.durability < DurabilityTier::Global
+        {
+            scan.tx_ids.push(tx_id);
+        }
+    }
+    scan.tx_ids.sort();
+    scan
+}
+
+#[test]
+fn pending_replay_null_slice_is_a_superset_then_filters_fate_and_identity() {
+    let (_dir, mut node_under_test) = open_node();
+    let local_node = node(1);
+    let local_author = AuthorId::from_bytes([0xa1; 16]);
+    let other_author = AuthorId::from_bytes([0xb2; 16]);
+    let other_node = node(2);
+    let states = [
+        (local_node, local_author, Fate::Pending, None, DurabilityTier::Local),
+        (local_node, local_author, Fate::Accepted, None, DurabilityTier::Edge),
+        (
+            local_node,
+            local_author,
+            Fate::Accepted,
+            Some(GlobalSeq(7)),
+            DurabilityTier::Global,
+        ),
+        (
+            local_node,
+            local_author,
+            Fate::Rejected(RejectionReason::AuthorizationDenied),
+            None,
+            DurabilityTier::Local,
+        ),
+        (local_node, other_author, Fate::Pending, None, DurabilityTier::Local),
+        (other_node, local_author, Fate::Pending, None, DurabilityTier::Local),
+    ];
+    for (offset, (tx_node, author, fate, global_seq, durability)) in states.into_iter().enumerate()
+    {
+        seed_pending_replay_state(
+            &mut node_under_test,
+            TxId::new(TxTime::from((offset + 1) as u64), tx_node),
+            author,
+            fate,
+            global_seq,
+            durability,
+        );
+    }
+
+    let legacy = legacy_pending_transaction_ids_for(&mut node_under_test, local_node, local_author);
+    let null_slice = node_under_test
+        .pending_transaction_scan_for(local_node, local_author)
+        .unwrap();
+    assert_eq!(null_slice.tx_ids, legacy.tx_ids);
+    assert_eq!(null_slice.tx_ids.len(), 2);
+    assert_eq!(null_slice.records_visited, 5);
+    assert_eq!(null_slice.full_transactions_decoded, 0);
+}
+
+const SERVER_UNSETTLED_OTHER_IDENTITIES: usize = 256;
+const SERVER_REJECTED_NULL_SEQUENCE: usize = 16;
+
+fn pending_replay_lookup_work(settled_history: usize) -> (PendingTransactionScan, PendingTransactionScan) {
+    let (_dir, mut node_under_test) = open_node();
+    let local_node = node(1);
+    let local_author = AuthorId::from_bytes([0xa1; 16]);
+    for offset in 0..settled_history {
+        seed_pending_replay_state(
+            &mut node_under_test,
+            TxId::new(TxTime::from((offset + 1) as u64), local_node),
+            local_author,
+            Fate::Accepted,
+            Some(GlobalSeq((offset + 1) as u64)),
+            DurabilityTier::Global,
+        );
+    }
+    for offset in 0..SERVER_UNSETTLED_OTHER_IDENTITIES {
+        seed_pending_replay_state(
+            &mut node_under_test,
+            TxId::new(TxTime::from(10_000 + offset as u64), node(0x40 + (offset / 4) as u8)),
+            AuthorId::from_bytes([offset as u8; 16]),
+            Fate::Pending,
+            None,
+            DurabilityTier::Local,
+        );
+    }
+    for offset in 0..SERVER_REJECTED_NULL_SEQUENCE {
+        seed_pending_replay_state(
+            &mut node_under_test,
+            TxId::new(TxTime::from(20_000 + offset as u64), node(0xe0)),
+            AuthorId::from_bytes([0xf0; 16]),
+            Fate::Rejected(RejectionReason::AuthorizationDenied),
+            None,
+            DurabilityTier::Local,
+        );
+    }
+    for (offset, fate, durability) in [
+        (0, Fate::Pending, DurabilityTier::Local),
+        (1, Fate::Accepted, DurabilityTier::Edge),
+    ] {
+        seed_pending_replay_state(
+            &mut node_under_test,
+            TxId::new(TxTime::from(30_000 + offset), local_node),
+            local_author,
+            fate,
+            None,
+            durability,
+        );
+    }
+    let legacy = legacy_pending_transaction_ids_for(&mut node_under_test, local_node, local_author);
+    let null_slice = node_under_test
+        .pending_transaction_scan_for(local_node, local_author)
+        .unwrap();
+    (legacy, null_slice)
+}
+
+#[test]
+fn pending_replay_null_slice_work_is_independent_of_settled_history() {
+    let (legacy_empty, null_empty) = pending_replay_lookup_work(0);
+    let (legacy_small, null_small) = pending_replay_lookup_work(8);
+    let (legacy_large, null_large) = pending_replay_lookup_work(128);
+    let server_null_slice = SERVER_UNSETTLED_OTHER_IDENTITIES + SERVER_REJECTED_NULL_SEQUENCE + 2;
+
+    assert_eq!(null_empty.records_visited, server_null_slice);
+    assert_eq!(null_small.records_visited, server_null_slice);
+    assert_eq!(null_large.records_visited, server_null_slice);
+    assert_eq!(null_empty.full_transactions_decoded, 0);
+    assert_eq!(null_small.full_transactions_decoded, 0);
+    assert_eq!(null_large.full_transactions_decoded, 0);
+    assert_eq!(null_large.tx_ids.len(), 2);
+    // The #1295 replay-state index would visit these two local candidates.
+    // The existing full scan visits and reconstructs every retained record.
+    assert_eq!(legacy_empty.records_visited, server_null_slice);
+    assert_eq!(legacy_small.records_visited, server_null_slice + 8);
+    assert_eq!(legacy_large.records_visited, server_null_slice + 128);
+    assert_eq!(legacy_large.full_transactions_decoded, legacy_large.records_visited);
+    assert!(legacy_large.records_visited > legacy_small.records_visited);
+}
+
+#[test]
+fn reopen_replay_lookup_keeps_local_pending_write() {
+    let schema = schema();
+    let (node_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let tx_id = writer
+        .commit_mergeable(MergeableCommit::new("todos", row(4), 10).cells(title_cells("keep me")))
+        .unwrap();
+    drop(writer);
+
+    let mut reopened = reopen_node_at(&node_dir, node(1), schema);
+    assert_eq!(
+        reopened.pending_transaction_ids_for(node(1), AuthorId::SYSTEM).unwrap(),
+        vec![tx_id]
+    );
+    assert_eq!(
+        reopened
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(4), title_cells("keep me"))])
+    );
+}
+
+#[test]
 fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer() {
     let (_dir, mut core) = open_node_with_uuid(node(0x3a));
     let mut peer = PeerState::new();

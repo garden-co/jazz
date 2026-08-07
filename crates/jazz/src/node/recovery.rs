@@ -122,12 +122,20 @@ where
             .index_scan_raw("jazz_transactions", "by_global_seq", &[])?
         {
             let record = raw.record();
+            let global_seq = record.get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_SEQ_IDX)?;
+            if global_seq.is_some()
+                && durability_from_discriminant(
+                    record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
+                )? != DurabilityTier::Global
+            {
+                return Err(Error::InvalidStoredValue(
+                    "global sequence requires Global durability",
+                ));
+            }
             if !matches!(fate_from_encoded_fields(record)?, Fate::Accepted) {
                 continue;
             }
-            if let Some(global_seq) =
-                record.get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_SEQ_IDX)?
-            {
+            if let Some(global_seq) = global_seq {
                 accepted_global_seqs.push(GlobalSeq(global_seq));
             }
         }
