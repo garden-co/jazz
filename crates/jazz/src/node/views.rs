@@ -104,6 +104,44 @@ fn version_bundle_record_key(version: &VersionRecord) -> (String, RowUuid, Schem
     )
 }
 
+/// Reduce a complete parent replacement into the retained wire tree.
+///
+/// This deliberately never looks at a child's previous representation. A
+/// replacement supplies the complete recursive parent value, so the only
+/// operation is locating that occurrence and swapping the whole node.
+fn reduce_result_tree_update(tree: &mut ResultTree, update: crate::protocol::ResultTreeUpdate) {
+    let crate::protocol::ResultTreeUpdate::ReplaceParent { occurrence, parent } = update;
+    if replace_result_tree_node(&mut tree.roots, &occurrence, parent.clone()) {
+        return;
+    }
+    // Producer replacements are normally roots. If an occurrence is newly
+    // visible, appending its complete parent keeps root ordering untouched for
+    // every existing parent.
+    tree.roots.push(parent);
+}
+
+fn replace_result_tree_node(
+    nodes: &mut [crate::protocol::ResultTreeNode],
+    occurrence: &crate::tools::OutputOccurrenceId,
+    replacement: crate::protocol::ResultTreeNode,
+) -> bool {
+    for node in nodes {
+        if node.occurrence == *occurrence {
+            *node = replacement;
+            return true;
+        }
+        for relation in node.relations.values_mut() {
+            let crate::protocol::ResultTreeRelation::Array(children) = relation else {
+                continue;
+            };
+            if replace_result_tree_node(children, occurrence, replacement.clone()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn content_row_members_for_bundle(
     members: &[ResultMemberEntry],
     context: &'static str,
@@ -799,7 +837,27 @@ where
             result_member_removes,
             program_fact_adds,
             program_fact_removes,
+            result_tree,
+            result_tree_updates,
         } = update;
+        let is_structured_update = result_tree.is_some();
+        if !reset_result_set
+            && result_tree
+                .as_ref()
+                .is_some_and(|tree| !tree.roots.is_empty())
+        {
+            return Err(Error::MalformedViewUpdate(
+                "incremental structured update must not carry a reset tree",
+            ));
+        }
+        for update in &result_tree_updates {
+            let crate::protocol::ResultTreeUpdate::ReplaceParent { occurrence, parent } = update;
+            if occurrence != &parent.occurrence {
+                return Err(Error::MalformedViewUpdate(
+                    "structured parent replacement address does not match parent",
+                ));
+            }
+        }
         let version_bundle_refs =
             version_bundle_refs_for_carriers(&version_bundles, &version_carriers)?;
         let binding_view_key = match self.binding_view_key_for_subscription(subscription) {
@@ -901,7 +959,8 @@ where
             && result_member_adds.is_empty()
             && result_member_removes.is_empty()
             && program_fact_adds.is_empty()
-            && program_fact_removes.is_empty();
+            && program_fact_removes.is_empty()
+            && !is_structured_update;
         let persisted_member_adds = result_member_adds.clone();
         let persisted_member_removes = result_member_removes.clone();
         let persisted_fact_adds = program_fact_adds.clone();
@@ -920,6 +979,7 @@ where
         if reset_cleared_shared_state {
             self.clear_settled_result_view(binding_view_key);
             self.query.settled_program_facts.remove(&binding_view_key);
+            self.clear_settled_result_tree(binding_view_key);
             self.query
                 .settled_through_by_binding_view
                 .remove(&binding_view_key);
@@ -930,6 +990,31 @@ where
                 .entry(binding_view_key)
                 .or_default();
         }
+        let structured_tree_rewrite = if let Some(reset_tree) = result_tree {
+            let tree = if reset_result_set {
+                reset_tree
+            } else {
+                let mut tree = self
+                    .query
+                    .settled_result_trees
+                    .get(&binding_view_key)
+                    .cloned()
+                    .unwrap_or_default();
+                for update in result_tree_updates {
+                    reduce_result_tree_update(&mut tree, update);
+                }
+                tree
+            };
+            self.query
+                .settled_result_trees
+                .insert(binding_view_key, tree.clone());
+            Some(tree)
+        } else {
+            if reset_cleared_shared_state {
+                self.clear_settled_result_tree(binding_view_key);
+            }
+            None
+        };
         let mut result_members_need_rewrite = false;
         let member_rewrite;
         let fact_rewrite;
@@ -991,7 +1076,9 @@ where
             // it carries retractions. The public subscription materializes its
             // replacement snapshot below, rather than attempting to apply a
             // removal after the reset has cleared the cached result set.
-            if reset_result_set && !preserve_existing_shared_state {
+            if (reset_result_set && !preserve_existing_shared_state)
+                || (is_structured_update && structured_tree_rewrite.is_some())
+            {
                 self.query
                     .pending_authoritative_reset_binding_views
                     .insert(binding_view_key);
@@ -1024,6 +1111,11 @@ where
                 &persisted_fact_removes,
                 fact_rewrite.as_ref(),
             )?;
+            if let Some(tree) = structured_tree_rewrite.as_ref() {
+                self.persist_settled_result_tree(binding_view_key, tree)?;
+            } else if reset_cleared_shared_state {
+                self.delete_settled_result_tree(binding_view_key)?;
+            }
             self.persist_known_state_fact(binding_view_key, settled_through)?;
         }
         if self

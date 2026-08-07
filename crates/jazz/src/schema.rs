@@ -36,6 +36,12 @@ pub const KNOWN_STATE_FACTS_STORE: &str = "jazz_known_state_facts";
 pub const SETTLED_RESULT_MEMBERS_STORE: &str = "jazz_settled_result_members";
 /// Direct groove record store used for persisted settled program facts.
 pub const SETTLED_PROGRAM_FACTS_STORE: &str = "jazz_settled_program_facts";
+/// Direct groove record store used for persisted structured subscription trees.
+///
+/// The tree is the receiver's authoritative view state for v4 subscriptions;
+/// the older member/fact stores remain as compatibility state until the flat
+/// delivery family is removed.
+pub const SETTLED_RESULT_TREES_STORE: &str = "jazz_settled_result_trees";
 /// Direct groove record store used to distinguish clean shutdown from crash
 /// recovery windows for bounded startup repair.
 pub const CLEAN_CLOSE_MARKERS_STORE: &str = "jazz_clean_close_markers";
@@ -375,6 +381,15 @@ impl JazzSchema {
                     ("fact", ValueType::Bytes),
                 ]),
                 RecordDescriptor::new([("present", ValueType::U64)]),
+            ))
+            .with_direct_record_store(DirectRecordStoreSchema::new(
+                SETTLED_RESULT_TREES_STORE,
+                RecordDescriptor::new([
+                    ("shape_id", ValueType::Uuid),
+                    ("binding_id", ValueType::Uuid),
+                    ("read_view_id", ValueType::Uuid),
+                ]),
+                RecordDescriptor::new([("tree", ValueType::Bytes)]),
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 CLEAN_CLOSE_MARKERS_STORE,

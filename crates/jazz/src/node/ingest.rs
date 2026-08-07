@@ -185,6 +185,8 @@ where
                     result_member_removes,
                     program_fact_adds,
                     program_fact_removes,
+                    result_tree: None,
+                    result_tree_updates: Vec::new(),
                 })?;
                 Ok(Vec::new())
             }
@@ -214,6 +216,8 @@ where
                     result_member_removes,
                     program_fact_adds,
                     program_fact_removes,
+                    result_tree: None,
+                    result_tree_updates: Vec::new(),
                 })?;
                 Ok(Vec::new())
             }
@@ -256,6 +260,8 @@ where
                     result_member_removes,
                     program_fact_adds,
                     program_fact_removes,
+                    result_tree: Some(result_tree),
+                    result_tree_updates,
                 })?;
                 Ok(Vec::new())
             }
@@ -299,6 +305,8 @@ where
                     result_member_removes,
                     program_fact_adds,
                     program_fact_removes,
+                    result_tree: Some(result_tree),
+                    result_tree_updates,
                 })?;
                 Ok(Vec::new())
             }

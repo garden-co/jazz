@@ -6241,6 +6241,8 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             result_member_removes,
             program_fact_adds,
             program_fact_removes,
+            result_tree: None,
+            result_tree_updates: Vec::new(),
         },
         SyncMessage::ViewUpdateChunk {
             subscription,
@@ -6267,6 +6269,8 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             result_member_removes,
             program_fact_adds,
             program_fact_removes,
+            result_tree: None,
+            result_tree_updates: Vec::new(),
         },
         // The receiver validates the recursive tree at admission.  Settled
         // membership/witness application remains shared with ordinary updates;
@@ -6282,7 +6286,8 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             result_member_removes,
             program_fact_adds,
             program_fact_removes,
-            ..
+            result_tree,
+            result_tree_updates,
         } => ViewUpdateParts {
             subscription,
             settled_through,
@@ -6296,6 +6301,8 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             result_member_removes,
             program_fact_adds,
             program_fact_removes,
+            result_tree: Some(result_tree),
+            result_tree_updates,
         },
         SyncMessage::StructuredViewUpdateChunk {
             subscription,
@@ -6309,7 +6316,8 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             result_member_removes,
             program_fact_adds,
             program_fact_removes,
-            ..
+            result_tree,
+            result_tree_updates,
         } => ViewUpdateParts {
             subscription,
             settled_through,
@@ -6323,6 +6331,8 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             result_member_removes,
             program_fact_adds,
             program_fact_removes,
+            result_tree: Some(result_tree),
+            result_tree_updates,
         },
         _ => unreachable!("expected view update message"),
     }
@@ -6406,6 +6416,23 @@ fn merge_view_update_chunk_parts(
     accumulated
         .program_fact_removes
         .append(&mut next.program_fact_removes);
+    if let Some(current) = accumulated.result_tree.as_mut() {
+        if let Some(next_tree) = next.result_tree {
+            if current.roots.is_empty() {
+                *current = next_tree;
+            } else if !next_tree.roots.is_empty() {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    "structured view-update chunks carried multiple reset trees",
+                ));
+            }
+        }
+    } else {
+        accumulated.result_tree = next.result_tree;
+    }
+    accumulated
+        .result_tree_updates
+        .append(&mut next.result_tree_updates);
     Ok(())
 }
 

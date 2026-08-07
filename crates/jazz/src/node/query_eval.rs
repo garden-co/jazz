@@ -4940,8 +4940,12 @@ where
 
     pub(crate) fn has_settled_result_set(&self, binding_view_key: BindingViewKey) -> bool {
         self.query
-            .settled_result_sets
+            .settled_result_trees
             .contains_key(&binding_view_key)
+            || self
+                .query
+                .settled_result_sets
+                .contains_key(&binding_view_key)
     }
 
     #[cfg(test)]
@@ -5072,11 +5076,160 @@ where
         ))
     }
 
+    /// Project the retained v4 tree into the legacy facade snapshot shape.
+    ///
+    /// The traversal reads each complete node already retained by the receiver.
+    /// It never joins rows, consults relation facts, or combines child deltas to
+    /// form a parent: parent structure and order are owned by the tree.
+    fn relation_snapshot_from_retained_result_tree(
+        &mut self,
+        shape: &ValidatedQuery,
+        tree: &crate::protocol::ResultTree,
+    ) -> Result<RelationSnapshot, Error> {
+        let root_table = self
+            .table_in_schema(&shape.query().table, shape.schema_version())?
+            .clone();
+        let mut rows = Vec::new();
+        let mut row_keys = BTreeSet::new();
+        let mut rendered_roots = Vec::with_capacity(tree.roots.len());
+        for root in &tree.roots {
+            let row = self.current_row_from_retained_result_tree_node(&root_table, root)?;
+            if row_keys.insert((row.table().to_owned(), row.row_uuid())) {
+                rows.push(row.clone());
+            }
+            rendered_roots.push((root, row));
+        }
+        let root_count = rows.len();
+        let mut edges = Vec::new();
+        for (root, row) in rendered_roots {
+            self.append_retained_result_tree_relations(
+                root,
+                &row,
+                &shape.query().array_subqueries,
+                shape.schema_version(),
+                &mut rows,
+                &mut row_keys,
+                &mut edges,
+            )?;
+        }
+        Ok(RelationSnapshot {
+            root_count,
+            rows,
+            edges,
+        })
+    }
+
+    fn retained_result_tree_rows_for_table(
+        &mut self,
+        shape: &ValidatedQuery,
+        tree: &crate::protocol::ResultTree,
+        table: &str,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        Ok(self
+            .relation_snapshot_from_retained_result_tree(shape, tree)?
+            .rows
+            .into_iter()
+            .filter(|row| row.table() == table)
+            .collect())
+    }
+
+    fn append_retained_result_tree_relations(
+        &mut self,
+        node: &crate::protocol::ResultTreeNode,
+        source: &CurrentRow,
+        arrays: &[ArraySubquery],
+        schema_version: SchemaVersionId,
+        rows: &mut Vec<CurrentRow>,
+        row_keys: &mut BTreeSet<(String, RowUuid)>,
+        edges: &mut Vec<RelationEdge>,
+    ) -> Result<(), Error> {
+        for array in arrays {
+            let relation =
+                node.relations
+                    .get(&array.column_name)
+                    .ok_or(Error::MalformedViewUpdate(
+                        "structured result omitted declared relation",
+                    ))?;
+            let crate::protocol::ResultTreeRelation::Array(children) = relation else {
+                continue;
+            };
+            let child_table = self.table_in_schema(&array.table, schema_version)?.clone();
+            for child in children {
+                let child_row =
+                    self.current_row_from_retained_result_tree_node(&child_table, child)?;
+                edges.push(RelationEdge {
+                    source_table: source.table().to_owned(),
+                    source_row: source.row_uuid(),
+                    relation: array.column_name.clone(),
+                    target_table: child_row.table().to_owned(),
+                    target_row: child_row.row_uuid(),
+                });
+                if row_keys.insert((child_row.table().to_owned(), child_row.row_uuid())) {
+                    rows.push(child_row.clone());
+                }
+                self.append_retained_result_tree_relations(
+                    child,
+                    &child_row,
+                    &array.nested_arrays,
+                    schema_version,
+                    rows,
+                    row_keys,
+                    edges,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn current_row_from_retained_result_tree_node(
+        &self,
+        table: &TableSchema,
+        node: &crate::protocol::ResultTreeNode,
+    ) -> Result<CurrentRow, Error> {
+        let descriptor =
+            postcard::from_bytes::<RecordDescriptor>(&node.row.descriptor).map_err(|_| {
+                Error::MalformedViewUpdate("structured result row descriptor does not decode")
+            })?;
+        let record = OwnedRecord::new(node.row.record.clone(), descriptor);
+        let values = record.to_values()?;
+        let mut cell_values = BTreeMap::new();
+        for (field, value) in record.descriptor().fields().iter().zip(values) {
+            let name = field.name.as_deref().ok_or(Error::MalformedViewUpdate(
+                "structured result row field must be named",
+            ))?;
+            let column = logical_user_column(name);
+            if table
+                .columns
+                .iter()
+                .any(|candidate| candidate.name == column)
+            {
+                cell_values.insert(column.to_owned(), collector_cell_value(value));
+            }
+        }
+        let row = decode_current_row(table, record.borrowed())?;
+        let cells = table
+            .columns
+            .iter()
+            .map(|column| cell_values.remove(&column.name).flatten())
+            .collect::<Vec<_>>();
+        current_row_from_positional_cells(table, row.row_uuid(), &cells)
+    }
+
     pub(crate) fn authoritative_reset_snapshot_for_binding_view(
         &mut self,
         shape: &ValidatedQuery,
         binding_view_key: BindingViewKey,
     ) -> Result<Option<RelationSnapshot>, Error> {
+        if let Some(tree) = self
+            .query
+            .settled_result_trees
+            .get(&binding_view_key)
+            .cloned()
+        {
+            return self
+                .relation_snapshot_from_retained_result_tree(shape, &tree)
+                .map(Some);
+        }
         let Some(result_members) = self
             .query
             .settled_result_sets
@@ -6975,11 +7128,15 @@ where
             binding.binding_id(),
             ReadViewKey::default(),
         );
-        Ok(self
+        Ok((self
             .query
-            .settled_result_sets
+            .settled_result_trees
             .contains_key(&binding_view_key)
-            .then_some(binding_view_key))
+            || self
+                .query
+                .settled_result_sets
+                .contains_key(&binding_view_key))
+        .then_some(binding_view_key))
     }
 
     fn can_use_prepared_current_query_plan(&self, shape: &ValidatedQuery) -> bool {
@@ -6995,6 +7152,17 @@ where
         table: &str,
         binding_view: BindingViewKey,
     ) -> Result<Vec<CurrentRow>, Error> {
+        if let Some(tree) = self.query.settled_result_trees.get(&binding_view).cloned() {
+            let shape = self
+                .query
+                .registered_shapes
+                .get(&binding_view.shape_id)
+                .cloned()
+                .ok_or(Error::InvalidStoredValue(
+                    "structured binding view referenced unregistered shape",
+                ))?;
+            return self.retained_result_tree_rows_for_table(&shape, &tree, table);
+        }
         let Some(row_result_set) = self.query.settled_result_sets.get(&binding_view) else {
             return Ok(Vec::new());
         };

@@ -32,16 +32,17 @@ use crate::ids::{
 use crate::merge_strategy::{CanonicalizeInput, MergeStrategy as TextMergeStrategy};
 use crate::protocol::{
     BindingViewKey, CurrentWriteSchema, LensOp, MigrationLens, ProgramFactEntry, ReadViewKey,
-    ResultMemberEntry, ResultRowEntry, RowVersionRef, SchemaVersion, ShapeAst, Subscribe,
-    SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier, VersionRecord, ViewFactEntry,
-    expand_version_carriers,
+    ResultMemberEntry, ResultRowEntry, ResultTree, RowVersionRef, SchemaVersion, ShapeAst,
+    Subscribe, SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier, VersionRecord,
+    ViewFactEntry, expand_version_carriers,
 };
 use crate::protocol_limits::MAX_CONTENT_EXTENT_BYTES;
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{
     CLEAN_CLOSE_MARKERS_STORE, ColumnSchema, JazzSchema, KNOWN_STATE_FACTS_STORE, LargeValueKind,
     MergeStrategy, SETTLED_PROGRAM_FACTS_STORE, SETTLED_RESULT_MEMBERS_STORE,
-    STORAGE_CONSISTENCY_MARKERS_STORE, TableSchema, registered_column_transform,
+    SETTLED_RESULT_TREES_STORE, STORAGE_CONSISTENCY_MARKERS_STORE, TableSchema,
+    registered_column_transform,
 };
 use crate::text_merge::{Run as PlainTextRun, TextOp as PlainTextOp};
 use crate::time::{GlobalSeq, TxTime};
@@ -348,6 +349,10 @@ struct QueryServing {
         BTreeMap<BindingViewKey, BTreeMap<ResultRowMembershipKey, ResultMemberEntry>>,
     /// Subscriber-side settled non-row facts by canonical query binding/view.
     settled_program_facts: BTreeMap<BindingViewKey, BTreeSet<ViewFactEntry>>,
+    /// Receiver-owned, recursively ordered v4 result state.  Unlike the
+    /// compatibility member/fact maps above, this is a complete rendered tree
+    /// and is reduced only by complete parent replacements.
+    settled_result_trees: BTreeMap<BindingViewKey, ResultTree>,
     /// Server-stamped settled-through cursor for each canonical binding view.
     settled_through_by_binding_view: BTreeMap<BindingViewKey, GlobalSeq>,
     /// Server-stamped authorization generation paired with settled fast state.
@@ -611,6 +616,7 @@ where
                 settled_result_sets: BTreeMap::new(),
                 settled_result_row_index: BTreeMap::new(),
                 settled_program_facts: BTreeMap::new(),
+                settled_result_trees: BTreeMap::new(),
                 settled_through_by_binding_view: BTreeMap::new(),
                 authorization_progress_by_binding_view: BTreeMap::new(),
                 known_state_declared_binding_views: BTreeSet::new(),
@@ -796,6 +802,7 @@ where
         self.query.settled_result_sets.clear();
         self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
+        self.query.settled_result_trees.clear();
         self.query.settled_through_by_binding_view.clear();
         self.query.authorization_progress_by_binding_view.clear();
         self.query.known_state_declared_binding_views.clear();
@@ -886,6 +893,10 @@ where
         self.query
             .settled_result_row_index
             .remove(&binding_view_key);
+    }
+
+    fn clear_settled_result_tree(&mut self, binding_view_key: BindingViewKey) {
+        self.query.settled_result_trees.remove(&binding_view_key);
     }
 
     fn open_catalogue_stage(
@@ -2716,6 +2727,32 @@ where
         Ok(())
     }
 
+    pub(crate) fn persist_settled_result_tree(
+        &self,
+        binding_view_key: BindingViewKey,
+        tree: &ResultTree,
+    ) -> Result<(), Error> {
+        let tree = postcard::to_allocvec(tree)
+            .map_err(|_| Error::InvalidStoredValue("settled result tree must encode"))?;
+        self.database
+            .direct_record_store(SETTLED_RESULT_TREES_STORE)?
+            .set(
+                &binding_view_store_prefix(binding_view_key),
+                &[Value::Bytes(tree)],
+            )?;
+        Ok(())
+    }
+
+    pub(crate) fn delete_settled_result_tree(
+        &self,
+        binding_view_key: BindingViewKey,
+    ) -> Result<(), Error> {
+        self.database
+            .direct_record_store(SETTLED_RESULT_TREES_STORE)?
+            .delete(&binding_view_store_prefix(binding_view_key))?;
+        Ok(())
+    }
+
     fn persist_settled_result_members_delta(
         &self,
         binding_view_key: BindingViewKey,
@@ -2835,7 +2872,11 @@ where
     }
 
     fn clear_all_settled_result_state(&mut self) -> Result<(), Error> {
-        for store_name in [SETTLED_RESULT_MEMBERS_STORE, SETTLED_PROGRAM_FACTS_STORE] {
+        for store_name in [
+            SETTLED_RESULT_MEMBERS_STORE,
+            SETTLED_PROGRAM_FACTS_STORE,
+            SETTLED_RESULT_TREES_STORE,
+        ] {
             let store = self.database.direct_record_store(store_name)?;
             let keys = store
                 .prefix_entries(&[])?
@@ -2849,6 +2890,7 @@ where
         self.query.settled_result_sets.clear();
         self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
+        self.query.settled_result_trees.clear();
         Ok(())
     }
 
@@ -2955,6 +2997,7 @@ where
         self.query.settled_result_sets.clear();
         self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
+        self.query.settled_result_trees.clear();
         let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
         for entry in store.prefix_entries(&[])? {
             if entry.key.len() != 3 {
@@ -3073,6 +3116,34 @@ where
                 .entry(binding_view_key)
                 .or_default()
                 .insert(fact);
+        }
+        let store = self
+            .database
+            .direct_record_store(SETTLED_RESULT_TREES_STORE)?;
+        for entry in store.prefix_entries(&[])? {
+            if entry.key.len() != 3 {
+                return Err(Error::InvalidStoredValue(
+                    "settled result tree key must have three columns",
+                ));
+            }
+            let binding_view_key = binding_view_key_from_store_key(
+                &entry.key,
+                "settled result tree binding key must be valid",
+            )?;
+            let tree_bytes = match entry.value.get_idx(0)? {
+                Value::Bytes(bytes) => bytes,
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "settled result tree payload must be bytes",
+                    ));
+                }
+            };
+            let tree = postcard::from_bytes::<ResultTree>(&tree_bytes).map_err(|_| {
+                Error::InvalidStoredValue("settled result tree payload must decode")
+            })?;
+            self.query
+                .settled_result_trees
+                .insert(binding_view_key, tree);
         }
         Ok(())
     }
@@ -4721,6 +4792,11 @@ pub(crate) struct ViewUpdateParts {
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ViewFactEntry>,
     pub(crate) program_fact_removes: Vec<ViewFactEntry>,
+    /// `Some` marks a v4 structured carrier, including an intentionally empty
+    /// reset tree. Flat carriers leave this as `None`.
+    pub(crate) result_tree: Option<ResultTree>,
+    /// Complete parent replacements for the retained v4 tree.
+    pub(crate) result_tree_updates: Vec<crate::protocol::ResultTreeUpdate>,
 }
 
 #[derive(Default)]
