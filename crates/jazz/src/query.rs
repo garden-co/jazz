@@ -4201,19 +4201,19 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
 
 fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
     match ty {
-        ColumnType::U8 => bytes.push(1),
-        ColumnType::U16 => bytes.push(2),
-        ColumnType::U32 => bytes.push(3),
-        ColumnType::U64 => bytes.push(4),
-        ColumnType::I32 => bytes.push(15),
-        ColumnType::I64 => bytes.push(14),
-        ColumnType::F64 => bytes.push(5),
-        ColumnType::Bool => bytes.push(6),
-        ColumnType::String => bytes.push(7),
-        ColumnType::Bytes => bytes.push(8),
-        ColumnType::Uuid => bytes.push(9),
+        ColumnType::U8 => bytes.push(0),
+        ColumnType::U16 => bytes.push(1),
+        ColumnType::U32 => bytes.push(2),
+        ColumnType::U64 => bytes.push(3),
+        ColumnType::I32 => bytes.push(4),
+        ColumnType::I64 => bytes.push(5),
+        ColumnType::F64 => bytes.push(6),
+        ColumnType::Bool => bytes.push(7),
+        ColumnType::String => bytes.push(8),
+        ColumnType::Bytes => bytes.push(9),
+        ColumnType::Uuid => bytes.push(10),
         ColumnType::Enum(schema) => {
-            bytes.push(10);
+            bytes.push(11);
             put_str(bytes, &schema.name);
             put_len(bytes, schema.variants.len());
             for variant in &schema.variants {
@@ -4221,19 +4221,33 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
             }
         }
         ColumnType::Tuple(types) => {
-            bytes.push(11);
+            bytes.push(12);
             put_len(bytes, types.len());
             for ty in types {
                 put_column_type(bytes, ty);
             }
         }
         ColumnType::Array(member) => {
-            bytes.push(12);
+            bytes.push(13);
             put_column_type(bytes, member);
         }
         ColumnType::Nullable(inner) => {
-            bytes.push(13);
+            bytes.push(14);
             put_column_type(bytes, inner);
+        }
+        ColumnType::Record(descriptor) => {
+            bytes.push(15);
+            put_len(bytes, descriptor.fields().len());
+            for field in descriptor.fields() {
+                match &field.name {
+                    Some(name) => {
+                        bytes.push(1);
+                        put_str(bytes, name);
+                    }
+                    None => bytes.push(0),
+                }
+                put_column_type(bytes, &field.value_type);
+            }
         }
     }
 }
@@ -4926,9 +4940,13 @@ mod tests {
             .include("project.org")
             .validate(&schema())
             .unwrap();
+        // Regenerated for the unified 0..=15 tag space (Anselm 2026-08-07).
+        // Shape ids are content-addressed over the canonical column-type tags,
+        // so unifying that numbering with `ValueType` changes every shape id.
+        // Deliberate, and safe only because this lands as one breaking cut.
         assert_eq!(
             validated.shape_id().0.to_string(),
-            "dd92ae54-eeec-57e1-be75-f3957227bed8"
+            "3525b634-18b9-5967-8773-96b1f87a39ef"
         );
     }
 }

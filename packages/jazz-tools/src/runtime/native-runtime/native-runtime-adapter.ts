@@ -3494,21 +3494,21 @@ function encodeNullValue(valueType: ValueType): Uint8Array {
 function fixedValueSize(valueType: ValueType): number | undefined {
   switch (valueType.tag) {
     case 0:
-    case 5:
-    case 9:
+    case 7:
+    case 11:
       return 1;
     case 1:
       return 2;
     case 2:
-    case 15:
+    case 4:
       return 4;
     case 3:
-    case 14:
-    case 4:
+    case 5:
+    case 6:
       return 8;
-    case 8:
+    case 10:
       return 16;
-    case 10: {
+    case 12: {
       const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
       return members.reduce<number | undefined>((total, member) => {
         if (total == null) return undefined;
@@ -3516,7 +3516,7 @@ function fixedValueSize(valueType: ValueType): number | undefined {
         return memberSize == null ? undefined : total + memberSize;
       }, 0);
     }
-    case 12: {
+    case 14: {
       const innerSize = valueType.inner ? fixedValueSize(valueType.inner) : undefined;
       return innerSize == null ? undefined : innerSize + 1;
     }
@@ -4396,7 +4396,7 @@ function createRawNativeFrameRowEncoder(
 }
 
 function encodeFrameColumnValue(decoded: Uint8Array, outputValueType: ValueType): Uint8Array {
-  if (outputValueType.tag !== 12) return decoded;
+  if (outputValueType.tag !== 14) return decoded;
   const output = new Uint8Array(decoded.length + 1);
   output[0] = 1;
   output.set(decoded, 1);

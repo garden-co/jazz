@@ -28,9 +28,9 @@ describe("native row codec", () => {
     writeDescriptor(writer, [
       {
         name: "nested",
-        valueType: { tag: 13, record: [{ name: "label", valueType: { tag: 6 } }] },
+        valueType: { tag: 15, record: [{ name: "label", valueType: { tag: 8 } }] },
       },
-      { name: "count", valueType: { tag: 15 } },
+      { name: "count", valueType: { tag: 4 } },
     ]);
     writer.u64(42);
 
@@ -38,9 +38,9 @@ describe("native row codec", () => {
     expect(readDescriptor(reader)).toEqual([
       {
         name: "nested",
-        valueType: { tag: 13, record: [{ name: "label", valueType: { tag: 6 } }] },
+        valueType: { tag: 15, record: [{ name: "label", valueType: { tag: 8 } }] },
       },
-      { name: "count", valueType: { tag: 15 } },
+      { name: "count", valueType: { tag: 4 } },
     ]);
     expect(reader.u64()).toBe(42);
   });
@@ -59,15 +59,15 @@ describe("native row codec", () => {
       new Set(Array.from({ length: 16 }, (_, tag) => tag)),
     );
     expect(descriptor[9]?.valueType).toMatchObject({
-      tag: 9,
+      tag: 11,
       enumSchema: { name: "mode", variants: ["low", "high"] },
     });
-    expect(descriptor[10]?.valueType.members?.map((member) => member.tag)).toEqual([0, 14, 12, 15]);
+    expect(descriptor[10]?.valueType.members?.map((member) => member.tag)).toEqual([0, 5, 14, 4]);
     expect(descriptor[13]?.valueType).toMatchObject({
-      tag: 12,
-      inner: { tag: 11, inner: { tag: 12 } },
+      tag: 14,
+      inner: { tag: 13, inner: { tag: 14 } },
     });
-    expect(descriptor[15]?.valueType).toMatchObject({ tag: 11, inner: { tag: 13 } });
+    expect(descriptor[15]?.valueType).toMatchObject({ tag: 13, inner: { tag: 15 } });
 
     const descriptorWriter = new PostcardWriter();
     writeDescriptor(descriptorWriter, descriptor);

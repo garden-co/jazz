@@ -4341,9 +4341,7 @@ impl CurrentRow {
                 .chain(projected_columns.iter().map(|column| {
                     (
                         user_column_field(&column.name),
-                        records::ValueType::Nullable(Box::new(
-                            column.column_type.clone().value_type(),
-                        )),
+                        records::ValueType::Nullable(Box::new(column.column_type.clone())),
                     )
                 }))
                 .chain([
