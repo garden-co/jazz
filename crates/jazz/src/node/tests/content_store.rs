@@ -504,7 +504,7 @@ fn evicted_content_bytes_are_restored_by_fetch_and_known_state_rehydrate() {
 
     let update = peer.reset_current_rows(&mut core, "docs").unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate { .. } = &update else {
+    let (SyncMessage::ViewUpdate { .. } | SyncMessage::StructuredViewUpdate { .. }) = &update else {
         panic!("expected view update");
     };
     assert_eq!(version_bundles.len(), 1);

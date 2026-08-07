@@ -410,9 +410,11 @@ fn cold_reset_bulk_ingest_matches_incremental_ingest() {
     let mut peer = PeerState::new();
     let update = peer.rehydrate_current_rows(&mut core, "todos").unwrap();
     let mut incremental_update = update.clone();
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         reset_result_set, ..
-    } = &mut incremental_update
+    } | SyncMessage::StructuredViewUpdate {
+        reset_result_set, ..
+    }) = &mut incremental_update
     else {
         panic!("expected view update");
     };
@@ -466,7 +468,7 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
 
     let update = core.view_update_for_current_rows("todos").unwrap();
     let mut version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         subscription,
         settled_through,
         peer_payload_inventory,
@@ -475,7 +477,16 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
         program_fact_adds,
         program_fact_removes,
         ..
-    } = update
+    } | SyncMessage::StructuredViewUpdate {
+        subscription,
+        settled_through,
+        peer_payload_inventory,
+        result_member_adds,
+        result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
+        ..
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -1619,12 +1630,17 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
         .unwrap();
 
     let mut update = core.view_update_for_current_rows("todos").unwrap();
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         version_carriers,
         version_bundles,
         result_member_adds,
         ..
-    } = &mut update
+    } | SyncMessage::StructuredViewUpdate {
+        version_carriers,
+        version_bundles,
+        result_member_adds,
+        ..
+    }) = &mut update
     else {
         panic!("expected view update");
     };
@@ -2023,11 +2039,15 @@ fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
     let serve_start = std::time::Instant::now();
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let serve_elapsed = serve_start.elapsed();
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         result_member_adds,
         version_bundles,
         ..
-    } = &update
+    } | SyncMessage::StructuredViewUpdate {
+        result_member_adds,
+        version_bundles,
+        ..
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -2442,10 +2462,13 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
         )
         .unwrap();
     let control_version_bundles = version_bundles_for_update(&control_update);
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         result_member_adds: control_result_member_adds,
         ..
-    } = &control_update
+    } | SyncMessage::StructuredViewUpdate {
+        result_member_adds: control_result_member_adds,
+        ..
+    }) = &control_update
     else {
         panic!("expected control view update");
     };
@@ -2471,12 +2494,17 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
         )
         .unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         settled_through,
         reset_result_set,
         result_member_adds,
         ..
-    } = &update
+    } | SyncMessage::StructuredViewUpdate {
+        settled_through,
+        reset_result_set,
+        result_member_adds,
+        ..
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -2551,13 +2579,19 @@ fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
         )
         .unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         settled_through,
         reset_result_set,
         result_member_adds,
         result_member_removes,
         ..
-    } = &update
+    } | SyncMessage::StructuredViewUpdate {
+        settled_through,
+        reset_result_set,
+        result_member_adds,
+        result_member_removes,
+        ..
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -2635,10 +2669,13 @@ fn exact_known_state_rehydrate_skips_known_bodies_but_preserves_membership() {
         )
         .unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         result_member_adds,
         ..
-    } = &update
+    } | SyncMessage::StructuredViewUpdate {
+        result_member_adds,
+        ..
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -2688,12 +2725,17 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_for_warm_reader() {
         )
         .unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         reset_result_set,
         result_member_adds,
         result_member_removes,
         ..
-    } = &update
+    } | SyncMessage::StructuredViewUpdate {
+        reset_result_set,
+        result_member_adds,
+        result_member_removes,
+        ..
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -2777,12 +2819,17 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
         )
         .unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         reset_result_set,
         result_member_adds,
         result_member_removes,
         ..
-    } = &update
+    } | SyncMessage::StructuredViewUpdate {
+        reset_result_set,
+        result_member_adds,
+        result_member_removes,
+        ..
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -2971,10 +3018,13 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
         )
         .unwrap();
     let control_bundles = version_bundles_for_update(&control_update);
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         result_member_adds: control_members,
         ..
-    } = &control_update
+    } | SyncMessage::StructuredViewUpdate {
+        result_member_adds: control_members,
+        ..
+    }) = &control_update
     else {
         panic!("expected control update");
     };
@@ -2993,10 +3043,13 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
         )
         .unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         result_member_adds,
         ..
-    } = &update
+    } | SyncMessage::StructuredViewUpdate {
+        result_member_adds,
+        ..
+    }) = &update
     else {
         panic!("expected declared update");
     };
@@ -3066,10 +3119,13 @@ fn over_cap_slow_known_state_declaration_degrades_to_full_ship() {
         )
         .unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         result_member_adds,
         ..
-    } = update
+    } | SyncMessage::StructuredViewUpdate {
+        result_member_adds,
+        ..
+    }) = update
     else {
         panic!("expected full update");
     };
@@ -3223,10 +3279,13 @@ fn known_state_declaration_never_skips_unfated_edge_members() {
         .rehydrate_query_for_subscription_with_opts(&mut edge, subscription, &shape, &binding, opts)
         .unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         result_member_adds,
         ..
-    } = update
+    } | SyncMessage::StructuredViewUpdate {
+        result_member_adds,
+        ..
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -3266,7 +3325,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
 
     let update = core.view_update_for_current_rows("todos").unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         subscription,
         settled_through,
         reset_result_set,
@@ -3277,7 +3336,18 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    } | SyncMessage::StructuredViewUpdate {
+        subscription,
+        settled_through,
+        reset_result_set,
+        peer_payload_inventory:
+            crate::protocol::PeerPayloadInventory {
+                complete_tx_payloads: peer_payload_inventory_refs, ..
+            },
+        result_member_adds,
+        result_member_removes,
+        ..
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -3285,7 +3355,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
         subscription,
         core.whole_table_subscription_key("todos").unwrap()
     );
-    assert!(!reset_result_set);
+    assert!(reset_result_set, "structured current-row delivery is a snapshot");
     assert_eq!(result_member_adds.len(), 1);
     assert!(result_member_removes.is_empty());
     assert_eq!(version_bundles.len(), 1);
@@ -3296,7 +3366,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
             subscription,
             settled_through,
             defer_settlement: false,
-            reset_result_set: false,
+            reset_result_set,
             version_carriers: Vec::new(),
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
@@ -3336,7 +3406,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
 
     let initial = core.view_update_for_current_rows("todos").unwrap();
     let version_bundles = version_bundles_for_update(&initial);
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         subscription,
         settled_through,
         reset_result_set,
@@ -3347,17 +3417,28 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         result_member_adds,
         result_member_removes,
         ..
-    } = initial
+    } | SyncMessage::StructuredViewUpdate {
+        subscription,
+        settled_through,
+        reset_result_set,
+        peer_payload_inventory:
+            crate::protocol::PeerPayloadInventory {
+                complete_tx_payloads: peer_payload_inventory_refs, ..
+            },
+        result_member_adds,
+        result_member_removes,
+        ..
+    }) = initial
     else {
         panic!("expected view update");
     };
-    assert!(!reset_result_set);
+    assert!(reset_result_set, "structured current-row delivery is a snapshot");
     reader
         .apply_view_update(ViewUpdateParts {
             subscription,
             settled_through,
             defer_settlement: false,
-            reset_result_set: false,
+            reset_result_set,
             version_carriers: Vec::new(),
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
@@ -3380,7 +3461,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         )
         .unwrap();
     let version_bundles = version_bundles_for_update(&deduped);
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         settled_through,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
@@ -3389,7 +3470,16 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         result_member_adds,
         result_member_removes,
         ..
-    } = deduped
+    } | SyncMessage::StructuredViewUpdate {
+        settled_through,
+        peer_payload_inventory:
+            crate::protocol::PeerPayloadInventory {
+                complete_tx_payloads: peer_payload_inventory_refs, ..
+            },
+        result_member_adds,
+        result_member_removes,
+        ..
+    }) = deduped
     else {
         panic!("expected view update");
     };

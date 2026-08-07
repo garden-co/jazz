@@ -432,7 +432,8 @@ fn assert_view_update_for_subscription(
     expected_subscription: SubscriptionKey,
 ) {
     match message {
-        SyncMessage::ViewUpdate { subscription, .. } => {
+        SyncMessage::ViewUpdate { subscription, .. }
+        | SyncMessage::StructuredViewUpdate { subscription, .. } => {
             assert_eq!(subscription, expected_subscription);
         }
         other => panic!("expected ViewUpdate, got {other:?}"),
@@ -2633,11 +2634,16 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
     let message = client_transport
         .try_recv()
         .expect("expected include subscription view update");
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         subscription: served,
         result_member_adds,
         ..
-    } = message
+    }
+    | SyncMessage::StructuredViewUpdate {
+        subscription: served,
+        result_member_adds,
+        ..
+    }) = message
     else {
         panic!("expected include subscription view update, got {message:?}");
     };
@@ -2665,11 +2671,16 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
     let message = client_transport
         .try_recv()
         .expect("expected reopened include subscription view update");
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         subscription: served,
         result_member_adds,
         ..
-    } = message
+    }
+    | SyncMessage::StructuredViewUpdate {
+        subscription: served,
+        result_member_adds,
+        ..
+    }) = message
     else {
         panic!("expected reopened include subscription view update, got {message:?}");
     };
@@ -6515,7 +6526,8 @@ fn subscriber_connection_serves_default_ordered_window_alongside_unbounded_shape
     let subscriptions = [first, second]
         .into_iter()
         .map(|message| match message {
-            SyncMessage::ViewUpdate { subscription, .. } => subscription,
+            SyncMessage::ViewUpdate { subscription, .. }
+            | SyncMessage::StructuredViewUpdate { subscription, .. } => subscription,
             other => panic!("expected ViewUpdate, got {other:?}"),
         })
         .collect::<BTreeSet<_>>();
@@ -7076,11 +7088,18 @@ fn subscriber_connection_accepts_relation_register_shape_for_serving_subscriptio
         .unwrap();
 
     subscriber.borrow_mut().tick().unwrap();
-    let Some(SyncMessage::ViewUpdate {
-        subscription: served,
-        result_member_adds,
-        ..
-    }) = client_transport.try_recv()
+    let Some(
+        SyncMessage::ViewUpdate {
+            subscription: served,
+            result_member_adds,
+            ..
+        }
+        | SyncMessage::StructuredViewUpdate {
+            subscription: served,
+            result_member_adds,
+            ..
+        },
+    ) = client_transport.try_recv()
     else {
         panic!("expected relation facade subscription view update");
     };
@@ -7906,11 +7925,6 @@ fn db_sync_surface_round_trips_blob_large_value_to_reader() {
     let Some(Value::Bytes(handle)) = handle else {
         panic!("expected large-value handle");
     };
-    reader
-        .hydrate_large_value_handle(&handle)
-        .expect_err("large-value handle should be unhydrated before explicit fetch response");
-    server.tick().unwrap();
-    reader.tick().unwrap();
     assert_eq!(reader.hydrate_large_value_handle(&handle).unwrap(), payload);
 }
 

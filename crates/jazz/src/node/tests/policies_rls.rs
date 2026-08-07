@@ -443,14 +443,21 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
         .rehydrate_query(&mut core, &shape, &binding)
         .unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads, ..
             },
         result_member_adds,
         ..
-    } = &update
+    } | SyncMessage::StructuredViewUpdate {
+        peer_payload_inventory:
+            crate::protocol::PeerPayloadInventory {
+                complete_tx_payloads, ..
+            },
+        result_member_adds,
+        ..
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -512,7 +519,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
 
     let tx_b = commit_core_owner_fixture(&mut core, row_uuid, author_b, "owned by B", 11);
     let update = link_a.current_rows_update(&mut core, "todos").unwrap();
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         version_bundles,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
@@ -521,7 +528,16 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
         result_member_adds,
         result_member_removes,
         ..
-    } = &update
+    } | SyncMessage::StructuredViewUpdate {
+        version_bundles,
+        peer_payload_inventory:
+            crate::protocol::PeerPayloadInventory {
+                complete_tx_payloads: complete_tx_payload_refs, ..
+            },
+        result_member_adds,
+        result_member_removes,
+        ..
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -716,9 +732,11 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     let revoked_update = invited_link
         .current_rows_update(&mut core, "canvases")
         .unwrap();
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         result_member_removes, ..
-    } = &revoked_update
+    } | SyncMessage::StructuredViewUpdate {
+        result_member_removes, ..
+    }) = &revoked_update
     else {
         panic!("expected view update");
     };
@@ -1277,6 +1295,9 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
             SyncMessage::ViewUpdate {
                 result_member_adds: ref adds,
                 ..
+        } | SyncMessage::StructuredViewUpdate {
+                result_member_adds: ref adds,
+                ..
         } if adds.iter().any(|entry| entry == &("messages".to_owned().into(), bob_message, bob_message_tx))
     ));
     let _ = bob_membership_tx;
@@ -1607,6 +1628,9 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
             SyncMessage::ViewUpdate {
                 result_member_adds: ref adds,
                 ..
+        } | SyncMessage::StructuredViewUpdate {
+                result_member_adds: ref adds,
+                ..
         } if adds.iter().any(|entry| entry == &("messages".to_owned().into(), seed_message, seed_tx))
     ));
 }
@@ -1722,6 +1746,10 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
                 result_member_adds: ref adds,
                 reset_result_set: true,
                 ..
+        } | SyncMessage::StructuredViewUpdate {
+                result_member_adds: ref adds,
+                reset_result_set: true,
+                ..
         } if adds.iter().any(|entry| entry == &("messages".to_owned().into(), seed_message, seed_tx))
     ));
 
@@ -1755,11 +1783,15 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
     let rehydrated = alice_peer
         .rehydrate_query_with_opts(&mut core, &shape, &binding, opts)
         .unwrap();
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         result_member_adds,
         reset_result_set,
         ..
-    } = rehydrated
+    } | SyncMessage::StructuredViewUpdate {
+        result_member_adds,
+        reset_result_set,
+        ..
+    }) = rehydrated
     else {
         panic!("expected rehydrate view update");
     };
@@ -1919,11 +1951,17 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
         SyncMessage::ViewUpdate {
             result_member_adds: ref adds,
             ..
+        } | SyncMessage::StructuredViewUpdate {
+            result_member_adds: ref adds,
+            ..
         } if adds.is_empty()
     ));
     assert!(matches!(
         spy_initial,
         SyncMessage::ViewUpdate {
+            result_member_adds: ref adds,
+            ..
+        } | SyncMessage::StructuredViewUpdate {
             result_member_adds: ref adds,
             ..
         } if adds.is_empty()
@@ -1957,11 +1995,15 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let grant_update = invited_link
         .query_update(&mut core, &shape, &binding)
         .unwrap();
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         result_member_adds,
         result_member_removes,
         ..
-    } = grant_update
+    } | SyncMessage::StructuredViewUpdate {
+        result_member_adds,
+        result_member_removes,
+        ..
+    }) = grant_update
     else {
         panic!("expected grant update");
     };
@@ -1979,6 +2021,10 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     assert!(matches!(
         spy_update,
         SyncMessage::ViewUpdate {
+            result_member_adds: ref adds,
+            result_member_removes: ref removes,
+            ..
+        } | SyncMessage::StructuredViewUpdate {
             result_member_adds: ref adds,
             result_member_removes: ref removes,
             ..
@@ -2002,11 +2048,15 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let revoke_update = invited_link
         .query_update(&mut core, &shape, &binding)
         .unwrap();
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         result_member_adds,
         result_member_removes,
         ..
-    } = revoke_update
+    } | SyncMessage::StructuredViewUpdate {
+        result_member_adds,
+        result_member_removes,
+        ..
+    }) = revoke_update
     else {
         panic!("expected revoke update");
     };
@@ -2423,12 +2473,17 @@ fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
         )
         .unwrap();
 
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         reset_result_set,
         result_member_adds,
         version_bundles,
         ..
-    } = update
+    } | SyncMessage::StructuredViewUpdate {
+        reset_result_set,
+        result_member_adds,
+        version_bundles,
+        ..
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -2727,11 +2782,15 @@ fn seed_multi_segment_include_fixture(
 }
 
 fn canonical_view_update_rows(update: &SyncMessage) -> (Vec<ResultRowEntry>, Vec<ResultRowEntry>) {
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    } | SyncMessage::StructuredViewUpdate {
+        result_member_adds,
+        result_member_removes,
+        ..
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -2899,9 +2958,11 @@ fn prepared_subscription_multi_segment_forward_include_keeps_root_delta() {
     .unwrap();
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         result_member_adds, ..
-    } = update
+    } | SyncMessage::StructuredViewUpdate {
+        result_member_adds, ..
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -4230,11 +4291,15 @@ fn assert_view_update_rows<const A: usize, const R: usize>(
     expected_adds: [(&str, RowUuid, TxId); A],
     expected_removes: [(&str, RowUuid, TxId); R],
 ) {
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    } | SyncMessage::StructuredViewUpdate {
+        result_member_adds,
+        result_member_removes,
+        ..
+    }) = update
     else {
         panic!("expected view update");
     };

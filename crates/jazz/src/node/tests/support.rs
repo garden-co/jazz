@@ -18,6 +18,16 @@ fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
             version_carriers,
             version_bundles,
             ..
+        }
+        | SyncMessage::StructuredViewUpdate {
+            version_carriers,
+            version_bundles,
+            ..
+        }
+        | SyncMessage::StructuredViewUpdateChunk {
+            version_carriers,
+            version_bundles,
+            ..
         } => {
             let mut bundles = version_bundles.clone();
             bundles.extend(
@@ -752,7 +762,7 @@ impl PerNodeKnowledge {
     }
 
     fn record_view_delivery(&mut self, message: &SyncMessage) {
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             reset_result_set,
             version_carriers,
             version_bundles,
@@ -762,7 +772,18 @@ impl PerNodeKnowledge {
             program_fact_adds,
             program_fact_removes,
             ..
-        } = message
+        }
+        | SyncMessage::StructuredViewUpdate {
+            reset_result_set,
+            version_carriers,
+            version_bundles,
+            peer_payload_inventory,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+            ..
+        }) = message
         else {
             return;
         };
@@ -875,13 +896,20 @@ fn assert_global_rows_match_known_oracle(
 }
 fn assert_view_update_result_set_matches_current_rows(node: &mut NodeState<RocksDbStorage>) {
     let update = node.view_update_for_current_rows("todos").unwrap();
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         version_bundles: _,
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }
+    | SyncMessage::StructuredViewUpdate {
+        version_bundles: _,
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
+        result_member_adds,
+        result_member_removes,
+        ..
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -1229,10 +1257,14 @@ fn commit_core_owner_fixture(
     tx_id
 }
 fn assert_view_update_only_references_rows(update: &SyncMessage, expected_rows: BTreeSet<RowUuid>) {
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         result_member_adds,
         ..
-    } = update
+    }
+    | SyncMessage::StructuredViewUpdate {
+        result_member_adds,
+        ..
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -1250,7 +1282,10 @@ fn assert_view_update_only_references_rows(update: &SyncMessage, expected_rows: 
     assert_eq!(referenced_rows, expected_rows);
 }
 fn assert_view_update_only_ships_rows(update: &SyncMessage, expected_rows: BTreeSet<RowUuid>) {
-    if !matches!(update, SyncMessage::ViewUpdate { .. }) {
+    if !matches!(
+        update,
+        SyncMessage::ViewUpdate { .. } | SyncMessage::StructuredViewUpdate { .. }
+    ) {
         panic!("expected view update");
     }
     let version_bundles = version_bundles_for_update(update);
@@ -1285,7 +1320,7 @@ fn enqueue_rehydrate_with_dedup_assertion(
     let subscription = core.whole_table_subscription_key("todos").unwrap();
     peer.forget_subscription(subscription);
     let update = peer.reset_current_rows(core, "todos").unwrap();
-    let SyncMessage::ViewUpdate { .. } = &update else {
+    let (SyncMessage::ViewUpdate { .. } | SyncMessage::StructuredViewUpdate { .. }) = &update else {
         panic!("expected view update");
     };
     let version_bundles = version_bundles_for_update(&update);

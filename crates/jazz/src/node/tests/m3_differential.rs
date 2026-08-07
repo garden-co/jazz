@@ -911,12 +911,17 @@ fn one_shot_rows(
 }
 
 fn apply_result_members(rows: &mut BTreeSet<(String, RowUuid)>, update: &SyncMessage, root_table: &str) {
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         reset_result_set,
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    } | SyncMessage::StructuredViewUpdate {
+        reset_result_set,
+        result_member_adds,
+        result_member_removes,
+        ..
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -940,11 +945,15 @@ fn apply_result_members(rows: &mut BTreeSet<(String, RowUuid)>, update: &SyncMes
 }
 
 fn apply_aggregate_payload(value: &mut Value, update: &SyncMessage) {
-    let SyncMessage::ViewUpdate {
+    let (SyncMessage::ViewUpdate {
         reset_result_set,
         program_fact_adds,
         ..
-    } = update
+    } | SyncMessage::StructuredViewUpdate {
+        reset_result_set,
+        program_fact_adds,
+        ..
+    }) = update
     else {
         panic!("expected view update");
     };

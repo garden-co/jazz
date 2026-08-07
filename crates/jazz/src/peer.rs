@@ -2925,6 +2925,16 @@ mod tests {
                 version_carriers,
                 version_bundles,
                 ..
+            }
+            | SyncMessage::StructuredViewUpdate {
+                version_carriers,
+                version_bundles,
+                ..
+            }
+            | SyncMessage::StructuredViewUpdateChunk {
+                version_carriers,
+                version_bundles,
+                ..
             } => {
                 let mut bundles = version_bundles.clone();
                 bundles.extend(
@@ -3007,12 +3017,18 @@ mod tests {
     }
 
     fn view_update_added_rows(update: SyncMessage) -> BTreeSet<RowUuid> {
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             reset_result_set,
             result_member_adds,
             result_member_removes,
             ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            reset_result_set,
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = update
         else {
             panic!("expected view update");
         };
@@ -3030,11 +3046,16 @@ mod tests {
         expected_adds: Vec<(&str, RowUuid, TxId)>,
         expected_removes: Vec<(&str, RowUuid, TxId)>,
     ) {
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds,
             result_member_removes,
             ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = update
         else {
             panic!("expected view update");
         };
@@ -3061,11 +3082,16 @@ mod tests {
         expected_adds: Vec<(&str, RowUuid, TxId)>,
         expected_removes: Vec<(&str, RowUuid, TxId)>,
     ) {
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds,
             result_member_removes,
             ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = update
         else {
             panic!("expected view update");
         };
@@ -3142,9 +3168,12 @@ mod tests {
             .rehydrate_query(&mut core, &shape, &binding)
             .unwrap();
 
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             version_carriers, ..
-        } = &run_update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            version_carriers, ..
+        }) = &run_update
         else {
             panic!("expected view update");
         };
@@ -3230,11 +3259,16 @@ mod tests {
                 .unsupported_skips_out,
             0
         );
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds,
             result_member_removes,
             ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = update
         else {
             panic!("expected view update");
         };
@@ -3286,9 +3320,12 @@ mod tests {
 
         let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds, ..
-        } = &update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds, ..
+        }) = &update
         else {
             panic!("expected view update");
         };
@@ -3379,9 +3416,12 @@ mod tests {
             .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
             .unwrap();
 
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds, ..
-        } = &update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds, ..
+        }) = &update
         else {
             panic!("expected view update");
         };
@@ -3456,9 +3496,12 @@ mod tests {
             .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
             .unwrap();
 
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds, ..
-        } = &update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds, ..
+        }) = &update
         else {
             panic!("expected view update");
         };
@@ -3530,11 +3573,16 @@ mod tests {
             .unwrap();
         accept_global(&mut core, delete_first_tx, 3);
         let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds,
             result_member_removes,
             ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = update
         else {
             panic!("expected view update");
         };
@@ -3555,11 +3603,16 @@ mod tests {
             .unwrap();
         accept_global(&mut core, new_first_tx, 4);
         let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds,
             result_member_removes,
             ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = update
         else {
             panic!("expected view update");
         };
@@ -4212,14 +4265,22 @@ mod tests {
         let update = peer
             .rehydrate_query(&mut core, &aggregate_shape, &aggregate_binding)
             .unwrap();
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             reset_result_set,
             result_member_adds,
             result_member_removes,
             program_fact_adds,
             program_fact_removes,
             ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            reset_result_set,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+            ..
+        }) = update
         else {
             panic!("expected view update");
         };
@@ -4256,9 +4317,12 @@ mod tests {
         let mut peer = PeerState::new();
 
         let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             program_fact_adds, ..
-        } = initial
+        }
+        | SyncMessage::StructuredViewUpdate {
+            program_fact_adds, ..
+        }) = initial
         else {
             panic!("expected view update");
         };
@@ -4276,14 +4340,22 @@ mod tests {
         let update = peer
             .query_update_for_subscription(&mut core, subscription, &shape, &binding)
             .unwrap();
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             reset_result_set,
             result_member_adds,
             result_member_removes,
             program_fact_adds,
             program_fact_removes,
             ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            reset_result_set,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+            ..
+        }) = update
         else {
             panic!("expected view update");
         };
@@ -4487,11 +4559,16 @@ mod tests {
         accept_global(&mut core, added, 3);
 
         let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds,
             result_member_removes,
             ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = update
         else {
             panic!("expected view update");
         };
@@ -4533,11 +4610,16 @@ mod tests {
         accept_global(&mut core, added, 3);
 
         let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds,
             result_member_removes,
             ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = update
         else {
             panic!("expected view update");
         };
@@ -4617,11 +4699,16 @@ mod tests {
         accept_global(&mut core, still_excluded, 4);
 
         let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds,
             result_member_removes,
             ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = update
         else {
             panic!("expected view update");
         };
@@ -4899,11 +4986,16 @@ mod tests {
 
         let update = peer.query_update(&mut core, &shape, &binding).unwrap();
         let version_bundles = version_bundles_for_update(&update);
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds,
             result_member_removes,
             ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = update
         else {
             panic!("expected view update");
         };
@@ -4935,7 +5027,7 @@ mod tests {
 
         let update = peer.query_update(&mut core, &shape, &binding).unwrap();
         let version_bundles = version_bundles_for_update(&update);
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: complete_tx_payload_refs,
@@ -4944,7 +5036,17 @@ mod tests {
             result_member_adds,
             result_member_removes,
             ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            peer_payload_inventory:
+                crate::protocol::PeerPayloadInventory {
+                    complete_tx_payloads: complete_tx_payload_refs,
+                    ..
+                },
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = update
         else {
             panic!("expected view update");
         };
@@ -4982,7 +5084,7 @@ mod tests {
 
         let update = peer.query_update(&mut core, &shape, &binding).unwrap();
         let version_bundles = version_bundles_for_update(&update);
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: complete_tx_payload_refs,
@@ -4991,7 +5093,17 @@ mod tests {
             result_member_adds,
             result_member_removes,
             ..
-        } = &update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            peer_payload_inventory:
+                crate::protocol::PeerPayloadInventory {
+                    complete_tx_payloads: complete_tx_payload_refs,
+                    ..
+                },
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = &update
         else {
             panic!("expected view update");
         };
@@ -5078,9 +5190,12 @@ mod tests {
         let mut peer = PeerState::new();
         let update = peer.current_rows_update(&mut core, "orderLines").unwrap();
         let version_bundles = version_bundles_for_update(&update);
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds, ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds, ..
+        }) = update
         else {
             panic!("expected view update");
         };
@@ -5128,7 +5243,7 @@ mod tests {
         core.reset_query_engine_read_metrics();
         let update = peer.current_rows_update(&mut core, "docs").unwrap();
         let version_bundles = version_bundles_for_update(&update);
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: complete_tx_payload_refs,
@@ -5137,7 +5252,17 @@ mod tests {
             result_member_adds,
             result_member_removes,
             ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            peer_payload_inventory:
+                crate::protocol::PeerPayloadInventory {
+                    complete_tx_payloads: complete_tx_payload_refs,
+                    ..
+                },
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = update
         else {
             panic!("expected view update");
         };
@@ -5193,9 +5318,12 @@ mod tests {
             .expect("replacement maintained subscription missing");
         assert_ne!(old_id, new_id);
         assert!(!core.unsubscribe_groove_subscription(old_id));
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             reset_result_set, ..
-        } = &rehydrate
+        }
+        | SyncMessage::StructuredViewUpdate {
+            reset_result_set, ..
+        }) = &rehydrate
         else {
             panic!("expected view update");
         };
@@ -5247,12 +5375,18 @@ mod tests {
                 other_tx,
             )]))
         );
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds,
             result_member_removes,
             reset_result_set,
             ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds,
+            result_member_removes,
+            reset_result_set,
+            ..
+        }) = update
         else {
             panic!("expected view update");
         };
@@ -5276,7 +5410,7 @@ mod tests {
 
         let first = peer.current_rows_update(&mut core, "todos").unwrap();
         let version_bundles = version_bundles_for_update(&first);
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: complete_tx_payload_refs,
@@ -5285,7 +5419,17 @@ mod tests {
             result_member_adds,
             result_member_removes,
             ..
-        } = first
+        }
+        | SyncMessage::StructuredViewUpdate {
+            peer_payload_inventory:
+                crate::protocol::PeerPayloadInventory {
+                    complete_tx_payloads: complete_tx_payload_refs,
+                    ..
+                },
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = first
         else {
             panic!("expected view update");
         };
@@ -5299,7 +5443,7 @@ mod tests {
 
         let second = peer.current_rows_update(&mut core, "todos").unwrap();
         let version_bundles = version_bundles_for_update(&second);
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: complete_tx_payload_refs,
@@ -5308,7 +5452,17 @@ mod tests {
             result_member_adds,
             result_member_removes,
             ..
-        } = second
+        }
+        | SyncMessage::StructuredViewUpdate {
+            peer_payload_inventory:
+                crate::protocol::PeerPayloadInventory {
+                    complete_tx_payloads: complete_tx_payload_refs,
+                    ..
+                },
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = second
         else {
             panic!("expected view update");
         };
@@ -5409,7 +5563,7 @@ mod tests {
         let mut peer = PeerState::client_link(user);
         let first_update = peer.current_rows_update(&mut core, "docs").unwrap();
         let version_bundles = version_bundles_for_update(&first_update);
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: complete_tx_payload_refs,
@@ -5417,7 +5571,16 @@ mod tests {
                 },
             result_member_adds,
             ..
-        } = &first_update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            peer_payload_inventory:
+                crate::protocol::PeerPayloadInventory {
+                    complete_tx_payloads: complete_tx_payload_refs,
+                    ..
+                },
+            result_member_adds,
+            ..
+        }) = &first_update
         else {
             panic!("expected view update");
         };
@@ -5452,7 +5615,7 @@ mod tests {
 
         let grant_update = peer.current_rows_update(&mut core, "docs").unwrap();
         let version_bundles = version_bundles_for_update(&grant_update);
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: complete_tx_payload_refs,
@@ -5461,7 +5624,17 @@ mod tests {
             result_member_adds,
             result_member_removes,
             ..
-        } = &grant_update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            peer_payload_inventory:
+                crate::protocol::PeerPayloadInventory {
+                    complete_tx_payloads: complete_tx_payload_refs,
+                    ..
+                },
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = &grant_update
         else {
             panic!("expected view update");
         };
@@ -5501,9 +5674,12 @@ mod tests {
 
         let empty = peer.current_rows_update(&mut core, "todos").unwrap();
         let version_bundles = version_bundles_for_update(&empty);
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds, ..
-        } = empty
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds, ..
+        }) = empty
         else {
             panic!("expected view update");
         };
@@ -5520,7 +5696,7 @@ mod tests {
 
         let update = peer.current_rows_update(&mut core, "todos").unwrap();
         let version_bundles = version_bundles_for_update(&update);
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds,
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
@@ -5529,7 +5705,17 @@ mod tests {
                 },
             result_member_removes,
             ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds,
+            peer_payload_inventory:
+                crate::protocol::PeerPayloadInventory {
+                    complete_tx_payloads: complete_tx_payload_refs,
+                    ..
+                },
+            result_member_removes,
+            ..
+        }) = update
         else {
             panic!("expected view update");
         };
@@ -5566,7 +5752,7 @@ mod tests {
         assert!(peer.subscription_result_sets(subscription).is_none());
         let rehydrated = peer.current_rows_update(&mut core, "todos").unwrap();
         let version_bundles = version_bundles_for_update(&rehydrated);
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: complete_tx_payload_refs,
@@ -5575,7 +5761,17 @@ mod tests {
             result_member_adds,
             result_member_removes,
             ..
-        } = rehydrated
+        }
+        | SyncMessage::StructuredViewUpdate {
+            peer_payload_inventory:
+                crate::protocol::PeerPayloadInventory {
+                    complete_tx_payloads: complete_tx_payload_refs,
+                    ..
+                },
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = rehydrated
         else {
             panic!("expected view update");
         };
@@ -5628,10 +5824,14 @@ mod tests {
             .unwrap();
         accept_global(&mut core, deletion_tx, 3);
         let missed_remove = peer.current_rows_update(&mut core, "todos").unwrap();
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_removes,
             ..
-        } = &missed_remove
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_removes,
+            ..
+        }) = &missed_remove
         else {
             panic!("expected view update");
         };
@@ -5642,7 +5842,7 @@ mod tests {
 
         let rehydrated = peer.reset_current_rows(&mut core, "todos").unwrap();
         let version_bundles = version_bundles_for_update(&rehydrated);
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             reset_result_set,
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
@@ -5652,7 +5852,18 @@ mod tests {
             result_member_adds,
             result_member_removes,
             ..
-        } = &rehydrated
+        }
+        | SyncMessage::StructuredViewUpdate {
+            reset_result_set,
+            peer_payload_inventory:
+                crate::protocol::PeerPayloadInventory {
+                    complete_tx_payloads: complete_tx_payload_refs,
+                    ..
+                },
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = &rehydrated
         else {
             panic!("expected view update");
         };
@@ -5712,11 +5923,16 @@ mod tests {
             .unwrap();
         accept_global(&mut core, deletion_tx, 2);
         let removed = peer.current_rows_update(&mut core, "todos").unwrap();
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds,
             result_member_removes,
             ..
-        } = &removed
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = &removed
         else {
             panic!("expected view update");
         };
@@ -5773,7 +5989,7 @@ mod tests {
         accept_global(&mut core, restore_tx, 3);
         let restored = peer.current_rows_update(&mut core, "todos").unwrap();
         let version_bundles = version_bundles_for_update(&restored);
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: complete_tx_payload_refs,
@@ -5782,7 +5998,17 @@ mod tests {
             result_member_adds,
             result_member_removes,
             ..
-        } = &restored
+        }
+        | SyncMessage::StructuredViewUpdate {
+            peer_payload_inventory:
+                crate::protocol::PeerPayloadInventory {
+                    complete_tx_payloads: complete_tx_payload_refs,
+                    ..
+                },
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = &restored
         else {
             panic!("expected view update");
         };
@@ -5853,11 +6079,16 @@ mod tests {
             .unwrap();
         accept_global(&mut core, second_tx, 2);
         let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds,
             result_member_removes,
             ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = update
         else {
             panic!("expected query view update");
         };
@@ -5909,11 +6140,16 @@ mod tests {
         accept_global(&mut core, unmatch_tx, 2);
 
         let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds,
             result_member_removes,
             ..
-        } = &update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = &update
         else {
             panic!("expected query view update");
         };
@@ -5978,11 +6214,16 @@ mod tests {
         accept_global(&mut core, second_match_tx, 3);
 
         let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds,
             result_member_removes,
             ..
-        } = &update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = &update
         else {
             panic!("expected query view update");
         };
@@ -6078,11 +6319,16 @@ mod tests {
         accept_global(&mut core, second_line_tx, 4);
 
         let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds,
             result_member_removes,
             ..
-        } = update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds,
+            result_member_removes,
+            ..
+        }) = update
         else {
             panic!("expected query view update");
         };

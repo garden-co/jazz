@@ -12823,6 +12823,9 @@ mod tests {
             SyncMessage::ViewUpdate {
                 result_member_adds,
                 ..
+            } | SyncMessage::StructuredViewUpdate {
+                result_member_adds,
+                ..
             } if result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, _)| row_uuid == resource1)
                 && result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).all(|(_, row_uuid, _)| row_uuid != resource2)
         ));
@@ -12846,6 +12849,10 @@ mod tests {
                 result_member_adds,
                 result_member_removes,
                 ..
+            } | SyncMessage::StructuredViewUpdate {
+                result_member_adds,
+                result_member_removes,
+                ..
             } if result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, _)| row_uuid == resource2)
                 && result_member_removes.is_empty()
         ));
@@ -12855,6 +12862,10 @@ mod tests {
         assert!(matches!(
             revoke,
             SyncMessage::ViewUpdate {
+                result_member_adds,
+                result_member_removes,
+                ..
+            } | SyncMessage::StructuredViewUpdate {
                 result_member_adds,
                 result_member_removes,
                 ..
@@ -14190,15 +14201,22 @@ mod tests {
                 result_member_adds,
                 result_member_removes,
                 ..
+            } | SyncMessage::StructuredViewUpdate {
+                result_member_adds,
+                result_member_removes,
+                ..
             } if result_member_adds.is_empty() && result_member_removes.is_empty()
         ));
 
         let reset = peer
             .rehydrate_query(&mut server, &shape, &alice_binding)
             .unwrap();
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             reset_result_set, ..
-        } = &reset
+        }
+        | SyncMessage::StructuredViewUpdate {
+            reset_result_set, ..
+        }) = &reset
         else {
             panic!("expected view update");
         };
@@ -14368,9 +14386,12 @@ mod tests {
         register_shape_binding_for_receiver(&mut reader, &shape, &binding);
         let mut peer = PeerState::new();
         let update = peer.rehydrate_query(&mut server, &shape, &binding).unwrap();
-        let SyncMessage::ViewUpdate {
+        let (SyncMessage::ViewUpdate {
             result_member_adds, ..
-        } = &update
+        }
+        | SyncMessage::StructuredViewUpdate {
+            result_member_adds, ..
+        }) = &update
         else {
             panic!("expected view update");
         };
