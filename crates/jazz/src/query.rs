@@ -4940,9 +4940,13 @@ mod tests {
             .include("project.org")
             .validate(&schema())
             .unwrap();
+        // Regenerated for the unified 0..=15 tag space (Anselm 2026-08-07).
+        // Shape ids are content-addressed over the canonical column-type tags,
+        // so unifying that numbering with `ValueType` changes every shape id.
+        // Deliberate, and safe only because this lands as one breaking cut.
         assert_eq!(
             validated.shape_id().0.to_string(),
-            "dd92ae54-eeec-57e1-be75-f3957227bed8"
+            "3525b634-18b9-5967-8773-96b1f87a39ef"
         );
     }
 }
