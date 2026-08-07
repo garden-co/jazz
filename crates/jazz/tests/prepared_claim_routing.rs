@@ -539,6 +539,22 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
         .map(|row| row.row_uuid())
         .collect::<Vec<_>>();
     assert_eq!(rows, vec![public]);
+
+    let windowed = db
+        .prepare_query(
+            &Query::from(DOCUMENTS)
+                .order_by("visibility", OrderDirection::Desc)
+                .limit(1),
+        )
+        .expect("prepare finite mixed-policy window");
+    for identity in [USER_A, USER_B] {
+        let rows = block_on(db.all_for_identity(&windowed, opts(), identity))
+            .expect("read finite claimless policy branch")
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![public]);
+    }
 }
 
 fn assert_retained_subscription_regions(region_a: &str, region_b: &str) {
