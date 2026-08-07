@@ -1927,6 +1927,69 @@ pub struct RelationEdgeEntry {
     pub hole_state: Option<PathHoleState>,
 }
 
+/// A row carried inside a structured result tree.
+///
+/// Structured output is self-contained: unlike a `ResultMemberEntry`, its
+/// projected record is not reconstructed from the receiver's flat result-set
+/// cache.  Keeping the descriptor beside the bytes also lets the tree cross
+/// bindings without depending on a local version-bundle lookup.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ResultTreeRow {
+    /// Descriptor for decoding `record`.
+    pub descriptor: Vec<u8>,
+    /// Encoded projected record.
+    pub record: Vec<u8>,
+}
+
+/// One recursively rendered output occurrence on the v4 wire.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ResultTreeNode {
+    /// Stable output-occurrence address used for whole-parent replacement.
+    pub occurrence: OutputOccurrenceId,
+    /// Projected parent or child row.
+    pub row: ResultTreeRow,
+    /// Named relation values, retaining their declared order and null/hole
+    /// state. `BTreeMap` gives a canonical wire order for relation names.
+    pub relations: BTreeMap<String, ResultTreeRelation>,
+}
+
+/// One named relation in a recursively rendered result.
+///
+/// Variants are deliberately declared in their v4 wire order.  New variants
+/// must be appended: postcard serializes enum discriminants positionally.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum ResultTreeRelation {
+    /// A resolved relation, including a deliberately empty ordered array.
+    Array(Vec<ResultTreeNode>),
+    /// An optional relation explicitly resolved to null.
+    Null,
+    /// A relation target unavailable at this replica.
+    Hole,
+}
+
+/// Complete ordered recursive snapshot carried by a v4 view update.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ResultTree {
+    /// Root output occurrences in query order.
+    pub roots: Vec<ResultTreeNode>,
+}
+
+/// Extensible v4 output mutation.
+///
+/// A replacement always names the rendered parent occurrence and carries the
+/// complete recursive parent.  It is intentionally not a child-delta format.
+/// Variants are append-only for postcard compatibility.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum ResultTreeUpdate {
+    /// Replace one complete rendered parent occurrence.
+    ReplaceParent {
+        /// Parent output occurrence to retract/add atomically.
+        occurrence: OutputOccurrenceId,
+        /// Complete new parent value.
+        parent: ResultTreeNode,
+    },
+}
+
 /// Concrete row-version reference used by facts.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
 pub struct RowVersionRefEntry {
