@@ -45,7 +45,7 @@ export const runtimeTransactionRecordStubs = {
   waitForTransaction: async () => {},
   rollbackTransaction: () => false,
   connect: () => {},
-  disconnect: () => {},
+  disconnect: async () => {},
   updateAuth: () => {},
   onAuthFailure: () => {},
 };
