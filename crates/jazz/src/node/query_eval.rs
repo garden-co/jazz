@@ -47,8 +47,9 @@ use super::query_engine::{
 };
 use crate::protocol::{
     BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry, ReadViewKey,
-    ReadViewSourceSpec, ReadViewSpec, ResultMemberEntry, ResultMemberPayloadEntry, RowVersionRef,
-    ShapeAst, ShapeBody, Subscribe, SubscriptionKey, SyncMessage,
+    ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry,
+    ResultMemberPayloadEntry, RowVersionRef, ShapeAst, ShapeBody, Subscribe, SubscriptionKey,
+    SyncMessage,
 };
 use crate::protocol_limits::{MAX_KNOWN_STATE_EXACT_REFS, MAX_SYNC_MESSAGE_BYTES};
 use crate::query::{
@@ -60,6 +61,49 @@ use crate::schema::{ColumnSchema, branch_metadata_table_schema, global_current_i
 
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
+
+/// The maintained aggregate terminal deliberately names its synthetic relation
+/// after the source table.  Admit only that exact terminal as a public root:
+/// other synthetic members have protocol meanings that cannot be rendered as
+/// application rows.
+fn is_public_aggregate_result_member(
+    member: &ResultMemberEntry,
+    result_table: &str,
+    aggregate_query: bool,
+) -> bool {
+    aggregate_query
+        && matches!(
+            member,
+            ResultMemberEntry::Synthetic { table, .. }
+                if table == &format!("{result_table}_aggregate")
+        )
+}
+
+fn is_public_result_member(
+    member: &ResultMemberEntry,
+    result_table: &str,
+    aggregate_query: bool,
+) -> bool {
+    member.table_name() == Some(result_table)
+        || is_public_aggregate_result_member(member, result_table, aggregate_query)
+}
+
+fn aggregate_result_member_row_uuid(member: &ResultMemberEntry) -> Result<RowUuid, Error> {
+    let ResultMemberEntry::Synthetic { table, row, .. } = member else {
+        return Err(Error::InvalidStoredValue(
+            "aggregate result member must be synthetic",
+        ));
+    };
+    let mut identity = b"jazz:aggregate-result:v1".to_vec();
+    identity.extend_from_slice(&(table.len() as u64).to_be_bytes());
+    identity.extend_from_slice(table.as_bytes());
+    identity.extend_from_slice(&(row.len() as u64).to_be_bytes());
+    identity.extend_from_slice(row);
+    Ok(RowUuid(uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        &identity,
+    )))
+}
 
 #[derive(Clone, Copy)]
 struct RelationSnapshotWindow {
@@ -75,6 +119,7 @@ pub(crate) struct LocalMaintainedViewSubscription {
     tables: BTreeMap<String, TableSchema>,
     result_query: JazzQuery,
     result_table: String,
+    binding_view_key: BindingViewKey,
     result_select: Option<Vec<String>>,
     result_set: BTreeSet<ResultMemberEntry>,
     result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
@@ -2578,7 +2623,14 @@ fn query_read_set_for_read_view(
     tier: DurabilityTier,
     read_view: &ReadViewSpec,
     settled_binding_view: Option<BindingViewKey>,
+    aggregate_query: bool,
 ) -> Result<RequestedReadSet, Error> {
+    // A settled binding view stores aggregate output as synthetic result
+    // members, not source-table rows. Re-feeding it through the source graph
+    // would turn an aggregate replacement into an empty source and retract
+    // the public row. Its authoritative result is materialized directly by
+    // the subscription facade instead.
+    let settled_binding_view = (!aggregate_query).then_some(settled_binding_view).flatten();
     if settled_binding_view.is_some() {
         if !read_view.is_default() {
             return Err(Error::QueryCapability(
@@ -5008,6 +5060,17 @@ where
         output_tables: &BTreeMap<String, TableSchema>,
     ) -> Result<Option<super::maintained_subscription_view::ResultTransitions>, Error> {
         let binding_view_key = self.binding_view_key_for_subscription(subscription)?;
+        // Settled binding views are shared by canonical query binding, while a
+        // table read policy is identity-scoped. Never relay a synthetic
+        // aggregate from that shared cache across an identity boundary; the
+        // per-peer maintained program remains the authority for policy-shaped
+        // aggregate output.
+        let shared_view_has_read_policy = self
+            .query
+            .registered_shapes
+            .get(&subscription.shape_id)
+            .and_then(|shape| self.table(shape.query().table.as_str()).ok())
+            .is_some_and(|table| table.read_policy.is_some());
         let Some(settled_members) = self.query.settled_result_sets.get(&binding_view_key) else {
             return Ok(None);
         };
@@ -5023,7 +5086,8 @@ where
             };
             result_table_filter.is_none_or(|table| table_name == table)
                 && (output_tables.contains_key(table_name)
-                    || matches!(member, ResultMemberEntry::Synthetic { .. }))
+                    || (matches!(member, ResultMemberEntry::Synthetic { .. })
+                        && !shared_view_has_read_policy))
         };
         let current = settled_members
             .iter()
@@ -5096,12 +5160,14 @@ where
         let result_table = shape.query().table.as_str();
         let mut rows = Vec::new();
         let mut row_keys = BTreeSet::new();
-        for member in result_members
-            .iter()
-            .filter(|member| member.table_name() == Some(result_table))
-        {
-            let Some(row) =
-                self.materialize_authoritative_reset_member(member, &result_payloads)?
+        for member in result_members.iter().filter(|member| {
+            is_public_result_member(member, result_table, shape.query().aggregate.is_some())
+        }) {
+            let Some(row) = self.materialize_authoritative_reset_member(
+                shape.query(),
+                member,
+                &result_payloads,
+            )?
             else {
                 continue;
             };
@@ -5147,9 +5213,20 @@ where
 
     fn materialize_authoritative_reset_member(
         &mut self,
+        query: &crate::query::Query,
         member: &ResultMemberEntry,
         result_payloads: &BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     ) -> Result<Option<CurrentRow>, Error> {
+        if is_public_aggregate_result_member(
+            member,
+            query.table.as_str(),
+            query.aggregate.is_some(),
+        ) && let Some(payload) = result_payloads.get(member)
+        {
+            return self
+                .current_row_from_aggregate_result_payload(query, member, payload)
+                .map(Some);
+        }
         if member.as_row().is_none()
             && let Some(payload) = result_payloads.get(member)
         {
@@ -6043,6 +6120,7 @@ where
                 tier,
                 read_view,
                 settled_binding_view,
+                shape.query().aggregate.is_some(),
             )?,
             policy,
             input,
@@ -7317,6 +7395,15 @@ where
             tables,
             result_query: shape.query().clone(),
             result_table: shape.query().table.clone(),
+            binding_view_key: BindingViewKey::new(
+                shape.shape_id(),
+                binding.binding_id(),
+                RegisterShapeOptions {
+                    tier,
+                    read_view: read_view.clone(),
+                }
+                .read_view_key(),
+            ),
             result_select: shape.query().select.clone(),
             result_set: BTreeSet::new(),
             result_payloads: BTreeMap::new(),
@@ -7369,12 +7456,21 @@ where
             .get(&binding_view_key)
             .cloned()
             .unwrap_or_default();
+        if local.result_query.aggregate.is_some() {
+            local
+                .maintained
+                .replace_aggregate_result_state(&local.result_set, &local.program_facts);
+        }
         local.result_payloads = local
             .program_facts
             .iter()
             .filter_map(|fact| match fact {
                 ProgramFactEntry::ResultPayload(payload)
-                    if payload.member.table_name() == Some(local.result_table.as_str()) =>
+                    if is_public_result_member(
+                        &payload.member,
+                        local.result_table.as_str(),
+                        local.result_query.aggregate.is_some(),
+                    ) =>
                 {
                     Some((payload.member.clone(), payload.clone()))
                 }
@@ -7387,6 +7483,80 @@ where
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
     ) -> Result<Option<super::maintained_subscription_view::ResultTransitions>, Error> {
+        if local.result_query.aggregate.is_some()
+            && let Some(remote_members) =
+                self.query.settled_result_sets.get(&local.binding_view_key)
+            && let Some(remote_facts) = self
+                .query
+                .settled_program_facts
+                .get(&local.binding_view_key)
+        {
+            let visible_members = remote_members
+                .iter()
+                .filter(|member| {
+                    is_public_result_member(
+                        member,
+                        local.result_table.as_str(),
+                        local.result_query.aggregate.is_some(),
+                    )
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let visible_facts = remote_facts
+                .iter()
+                .filter(|fact| match fact {
+                    ProgramFactEntry::ResultPayload(payload) => is_public_result_member(
+                        &payload.member,
+                        local.result_table.as_str(),
+                        local.result_query.aggregate.is_some(),
+                    ),
+                    _ => false,
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if visible_members != local.result_set || visible_facts != local.program_facts {
+                let mut transitions = super::maintained_subscription_view::ResultTransitions {
+                    adds: visible_members
+                        .difference(&local.result_set)
+                        .cloned()
+                        .collect(),
+                    removes: local
+                        .result_set
+                        .difference(&visible_members)
+                        .cloned()
+                        .collect(),
+                    program_fact_adds: visible_facts
+                        .difference(&local.program_facts)
+                        .cloned()
+                        .collect(),
+                    program_fact_removes: local
+                        .program_facts
+                        .difference(&visible_facts)
+                        .cloned()
+                        .collect(),
+                    ..Default::default()
+                };
+                transitions.result_payload_adds = transitions
+                    .program_fact_adds
+                    .iter()
+                    .filter_map(|fact| match fact {
+                        ProgramFactEntry::ResultPayload(payload) => {
+                            Some((payload.member.clone(), payload.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                transitions.result_payload_removes = transitions
+                    .program_fact_removes
+                    .iter()
+                    .filter_map(|fact| match fact {
+                        ProgramFactEntry::ResultPayload(payload) => Some(payload.member.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                return Ok(Some(transitions));
+            }
+        }
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
         let mut fact_states = BTreeMap::<ProgramFactEntry, (bool, bool)>::new();
         loop {
@@ -7468,6 +7638,18 @@ where
         transitions: super::maintained_subscription_view::ResultTransitions,
         materialize_update: bool,
     ) -> Result<LocalMaintainedViewSubscriptionUpdate, Error> {
+        let aggregate_replacements = transitions
+            .adds
+            .iter()
+            .filter(|member| {
+                is_public_aggregate_result_member(
+                    member,
+                    local.result_table.as_str(),
+                    local.result_query.aggregate.is_some(),
+                )
+            })
+            .map(aggregate_result_member_row_uuid)
+            .collect::<Result<BTreeSet<_>, _>>()?;
         let mut added = Vec::new();
         let mut removed = Vec::new();
         let mut added_edges = Vec::new();
@@ -7476,12 +7658,20 @@ where
             local.result_payloads.remove(&member);
         }
         for (member, payload) in transitions.result_payload_adds {
-            if member.table_name() == Some(local.result_table.as_str()) {
+            if is_public_result_member(
+                &member,
+                local.result_table.as_str(),
+                local.result_query.aggregate.is_some(),
+            ) {
                 local.result_payloads.insert(member, payload);
             }
         }
         for member in transitions.adds {
-            if member.table_name() != Some(local.result_table.as_str()) {
+            if !is_public_result_member(
+                &member,
+                local.result_table.as_str(),
+                local.result_query.aggregate.is_some(),
+            ) {
                 continue;
             }
             if local.result_set.insert(member.clone()) && materialize_update {
@@ -7493,12 +7683,35 @@ where
             }
         }
         for member in transitions.removes {
-            if member.table_name() != Some(local.result_table.as_str()) {
+            if !is_public_result_member(
+                &member,
+                local.result_table.as_str(),
+                local.result_query.aggregate.is_some(),
+            ) {
                 continue;
             }
             if local.result_set.remove(&member) {
-                if materialize_update && let Some((table, row_uuid, _)) = member.as_row() {
-                    removed.push((table.to_string(), row_uuid));
+                if materialize_update {
+                    if let Some((table, row_uuid, _)) = member.as_row() {
+                        removed.push((table.to_string(), row_uuid));
+                    } else if is_public_aggregate_result_member(
+                        &member,
+                        local.result_table.as_str(),
+                        local.result_query.aggregate.is_some(),
+                    ) {
+                        let row_uuid = aggregate_result_member_row_uuid(&member)?;
+                        let replacement_is_current = local.result_set.iter().any(|candidate| {
+                            is_public_aggregate_result_member(
+                                candidate,
+                                local.result_table.as_str(),
+                                local.result_query.aggregate.is_some(),
+                            ) && aggregate_result_member_row_uuid(candidate)
+                                .is_ok_and(|candidate_uuid| candidate_uuid == row_uuid)
+                        });
+                        if !aggregate_replacements.contains(&row_uuid) && !replacement_is_current {
+                            removed.push((local.result_table.clone(), row_uuid));
+                        }
+                    }
                 }
             }
         }
@@ -7686,6 +7899,21 @@ where
         local: &LocalMaintainedViewSubscription,
         member: &ResultMemberEntry,
     ) -> Result<Option<CurrentRow>, Error> {
+        if is_public_aggregate_result_member(
+            member,
+            local.result_table.as_str(),
+            local.result_query.aggregate.is_some(),
+        ) {
+            let payload = local
+                .result_payloads
+                .get(member)
+                .ok_or(Error::InvalidStoredValue(
+                    "aggregate result member is missing its payload",
+                ))?;
+            return self
+                .current_row_from_aggregate_result_payload(&local.result_query, member, payload)
+                .map(Some);
+        }
         let Some(entry) = member.as_row() else {
             return Err(Error::InvalidStoredValue(
                 "local maintained subscription cannot materialize non-row result member yet",
@@ -7733,6 +7961,21 @@ where
         member: &ResultMemberEntry,
         cache: &mut LocalMaintainedMaterializationCache,
     ) -> Result<Option<CurrentRow>, Error> {
+        if is_public_aggregate_result_member(
+            member,
+            local.result_table.as_str(),
+            local.result_query.aggregate.is_some(),
+        ) {
+            let payload = local
+                .result_payloads
+                .get(member)
+                .ok_or(Error::InvalidStoredValue(
+                    "aggregate result member is missing its payload",
+                ))?;
+            return self
+                .current_row_from_aggregate_result_payload(&local.result_query, member, payload)
+                .map(Some);
+        }
         let Some(entry) = member.as_row() else {
             return Err(Error::InvalidStoredValue(
                 "local maintained subscription cannot materialize non-row result member yet",
@@ -8063,6 +8306,42 @@ where
         refs.sort();
         refs.dedup();
         Ok(refs)
+    }
+
+    fn current_row_from_aggregate_result_payload(
+        &mut self,
+        query: &crate::query::Query,
+        member: &ResultMemberEntry,
+        payload: &ResultMemberPayloadEntry,
+    ) -> Result<CurrentRow, Error> {
+        let source_table = self.table(query.table.as_str())?.clone();
+        let table = aggregate_result_table(query, &source_table)?;
+        let fields: Vec<(Option<String>, ValueType)> = postcard::from_bytes(&payload.descriptor)
+            .map_err(|_| Error::InvalidStoredValue("result payload descriptor is invalid"))?;
+        let payload_descriptor = RecordDescriptor::new(
+            fields
+                .into_iter()
+                .map(|(name, value_type)| {
+                    name.map(|name| (name, value_type))
+                        .ok_or(Error::InvalidStoredValue(
+                            "result payload descriptor field must be named",
+                        ))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        let payload_record = BorrowedRecord::new(&payload.record, &payload_descriptor);
+        let mut cells = BTreeMap::new();
+        for column in &table.columns {
+            let field = user_column_field(&column.name);
+            let index = payload_descriptor
+                .field_index(&field)
+                .or_else(|| payload_descriptor.field_index(&column.name))
+                .ok_or(Error::InvalidStoredValue(
+                    "aggregate result payload is missing an output column",
+                ))?;
+            cells.insert(column.name.clone(), payload_record.get_idx(index)?);
+        }
+        current_row_from_cells(&table, aggregate_result_member_row_uuid(member)?, &cells)
     }
 
     fn current_row_from_result_payload(

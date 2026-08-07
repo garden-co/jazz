@@ -832,7 +832,7 @@ impl PeerState {
     fn drain_maintained_subscription_view_changes<S>(
         &mut self,
         node: &mut NodeState<S>,
-        _shape: &ValidatedQuery,
+        shape: &ValidatedQuery,
         subscription: SubscriptionKey,
         result_table_filter: Option<&str>,
         flush_query_runtime: bool,
@@ -859,6 +859,11 @@ impl PeerState {
             .and_then(|state| state.maintained_subscription_view.as_ref())
             .map(|maintained| maintained.tables.clone())
             .unwrap_or_default();
+        let aggregate_is_policy_scoped = shape.query().aggregate.is_some()
+            && node
+                .table(shape.query().table.as_str())?
+                .read_policy
+                .is_some();
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
         let mut program_fact_adds = Vec::new();
         let mut program_fact_removes = Vec::new();
@@ -955,7 +960,8 @@ impl PeerState {
                 continue;
             }
             if !output_tables.contains_key(table_name)
-                && !matches!(member, ResultMemberEntry::Synthetic { .. })
+                && (!matches!(member, ResultMemberEntry::Synthetic { .. })
+                    || aggregate_is_policy_scoped)
             {
                 continue;
             }
@@ -1017,6 +1023,11 @@ impl PeerState {
         let raw_fact_add_count = transitions.program_fact_adds.len();
         let filter_start = Instant::now();
         let output_tables = tables.clone();
+        let aggregate_is_policy_scoped = shape.query().aggregate.is_some()
+            && node
+                .table(shape.query().table.as_str())?
+                .read_policy
+                .is_some();
         let known_state = self
             .subscriptions
             .get(&subscription)
@@ -1040,7 +1051,8 @@ impl PeerState {
                 };
                 result_table_filter.is_none_or(|table| table_name == table)
                     && (output_tables.contains_key(table_name)
-                        || matches!(member, ResultMemberEntry::Synthetic { .. }))
+                        || (matches!(member, ResultMemberEntry::Synthetic { .. })
+                            && !aggregate_is_policy_scoped))
             })
             .collect::<Vec<_>>();
         let current_member_result_set = result_member_adds.iter().cloned().collect::<BTreeSet<_>>();
