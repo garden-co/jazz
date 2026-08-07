@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import type { ColumnDescriptor, NativeRowDelta, WasmSchema } from "../../drivers/types.js";
 import {
@@ -4082,6 +4082,15 @@ describe("NativeRuntimeAdapter server transport", () => {
     };
     const expectedBytes = new Uint8Array(readFileSync(new URL("schema.native.bin", fixtureDir)));
     const encoded = encodeSchema(source.mergedSchema);
+
+    if (process.env.JAZZ_UPDATE_POLICY_GRAPH_PERF_NATIVE_SCHEMA) {
+      writeFileSync(new URL("schema.native.bin", fixtureDir), encoded);
+      writeFileSync(
+        new URL("schema.native.hex", fixtureDir),
+        `${Buffer.from(encoded).toString("hex")}\n`,
+      );
+      return;
+    }
 
     expect(encoded).toEqual(expectedBytes);
   });
