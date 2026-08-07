@@ -19,6 +19,7 @@ use crate::text_merge::{
     EventId as TextEventId, TextEvent, TextEventGraph, TieBreak as TextTieBreak,
 };
 use crate::time::TxTimeSortKey;
+use groove::records::ValueType;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct CommitUnitParkMode {
@@ -2817,6 +2818,18 @@ where
                         counter_value_from_i128(&column.column_type, value)?,
                     );
                 }
+                MergeStrategy::GSet => {
+                    let value = gset_merge_value(
+                        table_schema,
+                        &column.name,
+                        row_versions_by_tx,
+                        &heads
+                            .iter()
+                            .map(|version| self.version_tx_id(version))
+                            .collect::<Result<Vec<_>, Error>>()?,
+                    )?;
+                    cells.insert(column.name.clone(), value);
+                }
             }
         }
         Ok((cells, recorded_strategy))
@@ -4872,6 +4885,54 @@ fn counter_head_tx_ids(
         .copied()
         .filter(|tx_id| !dominated.contains(tx_id))
         .collect()
+}
+
+/// Merge every array value reachable from the current heads.  A GSet is
+/// deliberately history-based rather than last-write-based: omitting an
+/// element in a later write cannot remove an element introduced by any parent.
+/// Elements are keyed and ordered by Groove's deterministic record encoding;
+/// this preserves distinct valid float bit patterns such as `+0.0` and `-0.0`.
+fn gset_merge_value(
+    table_schema: &TableSchema,
+    column: &str,
+    row_versions_by_tx: &BTreeMap<TxId, VersionRow>,
+    head_tx_ids: &[TxId],
+) -> Result<Value, Error> {
+    let column_schema = table_schema
+        .columns
+        .iter()
+        .find(|candidate| candidate.name == column)
+        .ok_or(Error::InvalidStoredValue(
+            "g-set column is missing from schema",
+        ))?;
+    let ValueType::Array(element_type) = &column_schema.column_type else {
+        return Err(Error::InvalidStoredValue(
+            "g-set merge strategy requires an array column",
+        ));
+    };
+    let element_descriptor =
+        records::RecordDescriptor::new([("element", element_type.as_ref().clone())]);
+
+    let mut pending = head_tx_ids.to_vec();
+    let mut visited = BTreeSet::new();
+    let mut elements = BTreeMap::<Vec<u8>, Value>::new();
+    while let Some(tx_id) = pending.pop() {
+        if !visited.insert(tx_id) {
+            continue;
+        }
+        let version = row_versions_by_tx
+            .get(&tx_id)
+            .ok_or(Error::MissingTransaction(tx_id))?;
+        pending.extend(version.parents());
+        let Some(Value::Array(values)) = version.cell(table_schema, column)? else {
+            continue;
+        };
+        for value in values {
+            let key = element_descriptor.create(std::slice::from_ref(&value))?;
+            elements.entry(key).or_insert(value);
+        }
+    }
+    Ok(Value::Array(elements.into_values().collect()))
 }
 
 fn raw_merge_head_tx_ids(

@@ -256,10 +256,7 @@ fn convert_merge_strategy(
     match value.as_str() {
         Some("Counter") => Ok(MergeStrategy::Counter),
         Some("Lww") | Some("LWW") => Ok(MergeStrategy::Lww),
-        Some("GSet") => Err(err(
-            path,
-            "GSet merge strategy is not supported by core schema conversion yet",
-        )),
+        Some("GSet") => Ok(MergeStrategy::GSet),
         Some(other) => Err(err(path, format!("unsupported merge strategy {other:?}"))),
         None => Err(err(path, "merge_strategy must be a string")),
     }
@@ -492,8 +489,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_merge_strategy() {
-        let err = convert_admin_schema(&json!({
+    fn converts_public_gset_merge_strategy() {
+        let schema = convert_admin_schema(&json!({
             "sets": {
                 "columns": [
                     {
@@ -504,9 +501,12 @@ mod tests {
                 ]
             }
         }))
-        .unwrap_err();
+        .expect("schema converts");
 
-        assert!(err.to_string().contains("GSet merge strategy"));
+        assert_eq!(
+            schema.tables[0].merge_strategies.get("tags"),
+            Some(&MergeStrategy::GSet)
+        );
     }
 
     #[test]

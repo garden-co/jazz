@@ -113,6 +113,14 @@ impl JazzSchema {
                             column.name
                         );
                     }
+                    MergeStrategy::GSet => {
+                        assert!(
+                            is_gset_column_type(&column.column_type),
+                            "g-set merge strategy requires a non-nullable array column: {}.{}",
+                            table.name,
+                            column.name
+                        );
+                    }
                 }
             }
             for column in &table.columns {
@@ -417,6 +425,8 @@ pub enum MergeStrategy {
     Lww,
     /// Concurrent integer deltas from observed bases are summed.
     Counter,
+    /// Array elements grow monotonically by union over the version DAG.
+    GSet,
 }
 
 fn is_counter_column_type(column_type: &GrooveColumnType) -> bool {
@@ -429,6 +439,10 @@ fn is_counter_column_type(column_type: &GrooveColumnType) -> bool {
             | GrooveColumnType::I32
             | GrooveColumnType::I64
     )
+}
+
+fn is_gset_column_type(column_type: &GrooveColumnType) -> bool {
+    matches!(column_type, GrooveColumnType::Array(_))
 }
 
 /// Jazz-level large-value column kind.
@@ -1420,6 +1434,7 @@ fn put_merge_strategy(bytes: &mut Vec<u8>, strategy: MergeStrategy) {
     bytes.push(match strategy {
         MergeStrategy::Lww => 0,
         MergeStrategy::Counter => 1,
+        MergeStrategy::GSet => 2,
     });
 }
 

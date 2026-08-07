@@ -644,9 +644,14 @@ fn convert_merge_strategy(
 ) -> Result<MergeStrategy, SchemaConversionError> {
     match strategy {
         ColumnMergeStrategy::Counter => Ok(MergeStrategy::Counter),
+        ColumnMergeStrategy::GSet
+            if !column.nullable && matches!(column.column_type, ColumnType::Array { .. }) =>
+        {
+            Ok(MergeStrategy::GSet)
+        }
         ColumnMergeStrategy::GSet => Err(err(
             format!("$.{}.{}", table.as_str(), column.name.as_str()),
-            "GSet merge strategy is not supported by core schema conversion yet",
+            "GSet merge strategy requires a non-nullable ARRAY column",
         )),
     }
 }
