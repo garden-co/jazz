@@ -360,17 +360,32 @@ deliberately. Under catastrophic cancellation — inputs of opposite sign summin
 to near zero — the result approaches zero while the absolute error does not, so
 a result-relative tolerance is unbounded and cannot be enforced.
 
-Because the error term grows with maintenance updates, an implementation MUST
-bound update count, recomputing the group from its inputs after a bounded
-number of updates so that drift cannot accumulate without limit across a
-long-lived subscription. A subscription that never recomputes does not satisfy
-this contract.
+The error term grows with maintenance updates, and an implementation is NOT
+currently required to bound it. Drift may accumulate across a long-lived
+subscription; a maintained `F64` `sum` or `avg` is permitted to move further
+from its one-shot value the longer the subscription runs.
 
-🔶 **Open question.** The constant of proportionality and the recomputation
-bound are not yet fixed. They should be set from measurement rather than
-assumption: the differential oracle reports observed divergence against update
-count, and those numbers should determine both. Until they are, the tolerance
-above is a shape, not a threshold.
+🔶 **Open question: the constant of proportionality, and whether to bound
+drift at all.** Both are deliberately unfixed.
+
+The first is a measurement problem: the differential oracle reports observed
+divergence against update count, and that data should set the constant rather
+than an assumed value.
+
+The second is a design decision with a consequence worth stating plainly. With
+update count unbounded, the `ε × (input rows + maintenance updates) × Σ|x|`
+term is unbounded too, so the guarantee weakens toward vacuity over a
+sufficiently long-lived subscription — it constrains a young view tightly and
+an old one barely at all. That is an accepted trade for now, on the grounds
+that no current workload runs a single maintained `F64` aggregate long enough
+for the drift to matter, and that recomputation has its own cost.
+
+The remedy, when it is wanted, is to recompute a group from its inputs after a
+bounded number of updates, which converts unbounded drift into a stated bound.
+What should decide it is evidence: the oracle's divergence-versus-update-count
+curve, together with a real workload's observed update volume per group. If a
+maintained aggregate is ever surfaced as a number a user acts on — a dashboard
+total, a billing figure — this should be revisited before that ships.
 
 Policy composition happens before these operators. A policy row changing
 visibility must flow through the same `TopBy` or `Aggregate` state as a base row
