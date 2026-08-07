@@ -8672,7 +8672,7 @@ fn aggregate_sum(
             }
             Value::F64(value) => {
                 kind.get_or_insert(ValueType::F64);
-                f64_sum += value * (*weight as f64);
+                f64_sum = add_weighted_f64(f64_sum, value, *weight)?;
             }
             _ => return Err(IvmRuntimeError::UnsupportedOperator),
         }
@@ -8772,6 +8772,15 @@ fn add_weighted_i64(current: i64, value: i64, weight: i64) -> Result<i64, IvmRun
                 .ok_or(IvmRuntimeError::AggregateSumOverflow)?,
         )
         .ok_or(IvmRuntimeError::AggregateSumOverflow)
+}
+
+fn add_weighted_f64(current: f64, value: f64, weight: i64) -> Result<f64, IvmRuntimeError> {
+    let weighted = value * (weight as f64);
+    let sum = current + weighted;
+    if current.is_finite() && value.is_finite() && (!weighted.is_finite() || !sum.is_finite()) {
+        return Err(IvmRuntimeError::AggregateSumOverflow);
+    }
+    Ok(sum)
 }
 
 fn numeric_value_as_f64(value: &Value) -> Result<f64, IvmRuntimeError> {

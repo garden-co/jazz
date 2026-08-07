@@ -443,10 +443,11 @@ fn nullable_sum_skips_null_inputs_while_count_and_all_null_groups_keep_sql_seman
 }
 
 #[test]
-fn one_shot_and_maintained_sum_agree_on_named_u64_and_i64_overflow() {
+fn one_shot_and_maintained_sum_agree_on_named_overflow() {
     for (score_type, first, second) in [
         (ColumnType::U64, Value::U64(u64::MAX), Value::U64(1)),
         (ColumnType::I64, Value::I64(i64::MAX), Value::I64(1)),
+        (ColumnType::F64, Value::F64(f64::MAX), Value::F64(f64::MAX)),
     ] {
         let storage = MemoryStorage::new(&["metrics"]);
         let mut one_shot = Database::new(metric_schema(score_type.clone()), storage).unwrap();
