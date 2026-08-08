@@ -302,16 +302,6 @@ fn prepared_params_from_domain(
                 source: PreparedQueryParamSource::Claim(claim.path.clone()),
             }),
     );
-    // Groove matches terminal route fields to the leading binding values by
-    // position, so routed parameters must form the binding descriptor prefix
-    // in the same route-field order.
-    params.sort_by_key(|param| {
-        let route_field = prepared_param_route_field(param);
-        (
-            !parameters.routing_params.contains(&route_field),
-            route_field,
-        )
-    });
     params
 }
 
@@ -323,7 +313,11 @@ fn prepared_param_route_field(param: &PreparedQueryParam) -> String {
 }
 
 fn prepared_route_param_names(parameters: &super::query_engine::ParameterDomain) -> Vec<String> {
-    parameters.routing_params.iter().cloned().collect()
+    prepared_params_from_domain(parameters)
+        .iter()
+        .map(prepared_param_route_field)
+        .filter(|field| parameters.routing_params.contains(field))
+        .collect()
 }
 
 fn terminal_route_fields(route_params: &[String], route_eligible_fields: &[String]) -> Vec<String> {
@@ -6036,7 +6030,26 @@ where
         };
         let input_shape = self.normalized_row_set_shape(shape, binding)?;
         let policy = self.query_program_policy_context(identity);
-        let binding_claim_params = binding_claim_params_for_shape(&input_shape);
+        let policy_schema_version = self.read_policy_schema_for_table_name(
+            &shape.query().table,
+            shape.schema_version(),
+            &input_shape,
+        );
+        let mut binding_claim_params = binding_claim_params_for_shape(&input_shape);
+        if use_prepared_binding_source {
+            let policy_schema = self
+                .catalogue
+                .catalogue_schemas
+                .get(&policy_schema_version)
+                .ok_or(Error::InvalidStoredValue(
+                    "policy schema version is unknown",
+                ))?;
+            collect_schema_policy_claim_params(
+                &policy_schema.schema,
+                &policy,
+                &mut binding_claim_params,
+            )?;
+        }
         let source_shape = use_prepared_binding_source
             .then(|| {
                 query_binding_source_shape_for_parts_if_needed(
@@ -6060,11 +6073,7 @@ where
             reads: query_read_set_for_read_view(
                 &input.shape,
                 shape.schema_version(),
-                self.read_policy_schema_for_table_name(
-                    &shape.query().table,
-                    shape.schema_version(),
-                    &input.shape,
-                ),
+                policy_schema_version,
                 tier,
                 read_view,
                 settled_binding_view,
@@ -8780,7 +8789,7 @@ where
             let key = (
                 shape.shape_id(),
                 tier,
-                query_binding_value_signature(&binding),
+                policy_plan_cache_signature(&binding, identity),
             );
             if let Some(plan) = self.query.query_shape_cache.get(&key) {
                 plan.clone()
@@ -9344,7 +9353,7 @@ where
         let key = (
             shape.shape_id(),
             tier,
-            query_binding_value_signature(binding),
+            policy_plan_cache_signature(binding, identity),
         );
         if let Some(plan) = self.query.query_shape_cache.get(&key)
             && !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker)
@@ -9414,7 +9423,7 @@ where
     ) -> Result<PreparedQueryPlan, Error> {
         let app_row_fields = app_row_terminal_fields(&program.lowered.output)?;
         let graph = lowered_app_rows_graph(&program)?;
-        let mut params = prepared_params_from_domain(&program.lowered.parameters);
+        let params = prepared_params_from_domain(&program.lowered.parameters);
         let route_eligible_fields =
             app_row_terminal_route_eligible_fields(&program.lowered.output)?;
         let route_eligible_fields = route_eligible_fields.into_iter().collect::<BTreeSet<_>>();
@@ -9422,10 +9431,6 @@ where
         // example, an include policy can consume a claim without routing the
         // app-row terminal by it). Keep that terminal's routes as the exact
         // binding-value prefix Groove zips against.
-        params.sort_by_key(|param| {
-            let route_field = prepared_param_route_field(param);
-            (!route_eligible_fields.contains(&route_field), route_field)
-        });
         let route_params = params
             .iter()
             .map(prepared_param_route_field)
@@ -10828,6 +10833,42 @@ fn collect_reachable_seed_claim_params(
     Ok(())
 }
 
+fn collect_schema_policy_claim_params(
+    schema: &JazzSchema,
+    policy: &PolicyContext,
+    params: &mut BTreeMap<String, ProgramClaimParam>,
+) -> Result<(), Error> {
+    let claims = match policy {
+        PolicyContext::Identity { claims, .. }
+        | PolicyContext::AuthorizationSubplan { claims, .. } => claims,
+        PolicyContext::System => return Ok(()),
+    };
+    for table in &schema.tables {
+        let mut query = authorization_query_from_read_policy(table);
+        let mut values = BTreeMap::new();
+        bind_scope_claim_operands(&mut query, claims, &mut values);
+        let shape = query.validate(schema)?;
+        for (name, ty) in shape.params() {
+            let Some(path) = claim_path_from_param_field(name) else {
+                continue;
+            };
+            let candidate = ProgramClaimParam {
+                path,
+                ty: ty.clone(),
+            };
+            if let Some(existing) = params.get(name)
+                && existing != &candidate
+            {
+                return Err(Error::QueryCapability(format!(
+                    "policy claim parameter '{name}' has conflicting schema types"
+                )));
+            }
+            params.insert(name.clone(), candidate);
+        }
+    }
+    Ok(())
+}
+
 fn collect_claim_field_params_from_node(
     node: &RowSetExpr,
     params: &mut BTreeMap<String, ProgramClaimParam>,
@@ -11173,6 +11214,16 @@ fn query_binding_value_signature(binding: &Binding) -> String {
         .cloned()
         .collect::<Vec<_>>()
         .join(",")
+}
+
+fn policy_plan_cache_signature(binding: &Binding, identity: AuthorId) -> String {
+    // Authorization lowering still embeds the permission subject in source
+    // plans. Claim values are routed at bind time, but plans from different
+    // subjects are not interchangeable until that subject is parameterized.
+    format!(
+        "{}|subject={identity:?}",
+        query_binding_value_signature(binding)
+    )
 }
 
 fn exact_known_state_declaration_if_within_limits(

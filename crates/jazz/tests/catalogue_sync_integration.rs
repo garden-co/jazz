@@ -296,10 +296,7 @@ fn current_join_provenance_permission_schema() -> jazz::tools::Schema {
                 .policies(
                     TablePolicies::new()
                         .with_insert(PolicyExpr::True)
-                        .with_select(PolicyExpr::eq_session(
-                            "viewer_name",
-                            vec!["user_id".into()],
-                        )),
+                        .with_select(PolicyExpr::True),
                 ),
         )
         .table(
@@ -310,7 +307,10 @@ fn current_join_provenance_permission_schema() -> jazz::tools::Schema {
                 .policies(
                     TablePolicies::new()
                         .with_insert(PolicyExpr::True)
-                        .with_select(PolicyExpr::True),
+                        .with_select(PolicyExpr::eq_session(
+                            "viewer_name",
+                            vec!["user_id".into()],
+                        )),
                 ),
         )
         .build()

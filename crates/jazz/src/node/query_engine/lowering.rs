@@ -426,6 +426,16 @@ fn parameter_domain_for_request(
     request: &QueryProgramRequest,
 ) -> Result<ParameterDomain, UnsupportedReason> {
     let mut domain = parameter_domain(&request.input.shape);
+    for (name, ty) in &request.input.binding.extra_user_params {
+        if let Some(existing) = domain.user_params.get(name)
+            && existing != ty
+        {
+            return Err(UnsupportedReason::Runtime(format!(
+                "binding parameter '{name}' has inconsistent validated types"
+            )));
+        }
+        domain.user_params.insert(name.clone(), ty.clone());
+    }
     if request.input.binding.claim_params.is_empty() {
         return Ok(domain);
     }
@@ -3261,7 +3271,7 @@ fn binding_descriptor_params_with_user_params(
 ) -> Result<Vec<(String, ColumnType)>, UnsupportedReason> {
     let domain = parameter_domain_for_request(request)?;
     let mut user_params = request.input.binding.extra_user_params.clone();
-    user_params.extend(domain.user_params);
+    user_params.extend(domain.user_params.clone());
     user_params.extend(additional_user_params);
     Ok(user_params
         .into_iter()
