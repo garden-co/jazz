@@ -24,6 +24,7 @@ use groove::records::ValueType;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct CommitUnitParkMode {
     ingest_context: Option<CommitUnitIngestContext>,
+    relay: bool,
     edge_authority_mergeable: bool,
     edge_accepted_mergeable: bool,
 }
@@ -321,6 +322,7 @@ where
             }
         }
         let updates = self.drain_parked_commit_units()?;
+        self.drain_parked_relay_commit_units()?;
         self.drain_parked_shape_registrations()?;
         let mut out = vec![SyncMessage::CatalogueAck(CatalogueAck {
             revision: None,
@@ -975,24 +977,35 @@ where
                 "commit unit version count does not match transaction n_total_writes",
             ));
         }
-        if self.park_commit_unit_if_missing_schema_versions(
+        let relay_mode = CommitUnitParkMode {
+            relay: true,
+            ..CommitUnitParkMode::default()
+        };
+        if self.park_commit_unit_if_missing_schema_versions_with_mode(
             &tx,
             &versions,
             u64::MAX - SKEW_TOLERANCE_MS,
+            relay_mode,
         )? {
             return Ok(());
         }
 
         let mut memo = IngestMemo::default();
-        if self.park_commit_unit_if_missing_parents(
+        if self.park_commit_unit_if_missing_parents_with_mode(
             &tx,
             &versions,
             u64::MAX - SKEW_TOLERANCE_MS,
             &mut memo,
+            relay_mode,
         )? {
             return Ok(());
         }
-        if self.park_commit_unit_if_missing_content(&tx, &versions, u64::MAX - SKEW_TOLERANCE_MS)? {
+        if self.park_commit_unit_if_missing_content_with_mode(
+            &tx,
+            &versions,
+            u64::MAX - SKEW_TOLERANCE_MS,
+            relay_mode,
+        )? {
             return Ok(());
         }
 
@@ -2136,22 +2149,6 @@ where
         None
     }
 
-    pub(super) fn park_commit_unit_if_missing_parents(
-        &mut self,
-        tx: &Transaction,
-        versions: &[VersionRecord],
-        now_ms: u64,
-        memo: &mut IngestMemo,
-    ) -> Result<bool, Error> {
-        self.park_commit_unit_if_missing_parents_with_mode(
-            tx,
-            versions,
-            now_ms,
-            memo,
-            CommitUnitParkMode::default(),
-        )
-    }
-
     pub(super) fn park_commit_unit_if_missing_parents_with_mode(
         &mut self,
         tx: &Transaction,
@@ -2170,6 +2167,7 @@ where
             if existing.ingest_context != mode.ingest_context {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
+            existing.relay |= mode.relay;
             existing.edge_authority_mergeable |= mode.edge_authority_mergeable;
             existing.edge_accepted_mergeable |= mode.edge_accepted_mergeable;
             return Ok(true);
@@ -2182,25 +2180,12 @@ where
                 versions: versions.to_vec(),
                 now_ms,
                 ingest_context: mode.ingest_context,
+                relay: mode.relay,
                 edge_authority_mergeable: mode.edge_authority_mergeable,
                 edge_accepted_mergeable: mode.edge_accepted_mergeable,
             },
         );
         Ok(true)
-    }
-
-    pub(super) fn park_commit_unit_if_missing_schema_versions(
-        &mut self,
-        tx: &Transaction,
-        versions: &[VersionRecord],
-        now_ms: u64,
-    ) -> Result<bool, Error> {
-        self.park_commit_unit_if_missing_schema_versions_with_mode(
-            tx,
-            versions,
-            now_ms,
-            CommitUnitParkMode::default(),
-        )
     }
 
     pub(super) fn park_commit_unit_if_missing_schema_versions_with_mode(
@@ -2225,6 +2210,7 @@ where
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
             existing.edge_authority_mergeable |= mode.edge_authority_mergeable;
+            existing.relay |= mode.relay;
             existing.edge_accepted_mergeable |= mode.edge_accepted_mergeable;
             return Ok(true);
         }
@@ -2238,25 +2224,12 @@ where
                 versions: versions.to_vec(),
                 now_ms,
                 ingest_context: mode.ingest_context,
+                relay: mode.relay,
                 edge_authority_mergeable: mode.edge_authority_mergeable,
                 edge_accepted_mergeable: mode.edge_accepted_mergeable,
             },
         );
         Ok(true)
-    }
-
-    pub(super) fn park_commit_unit_if_missing_content(
-        &mut self,
-        tx: &Transaction,
-        versions: &[VersionRecord],
-        now_ms: u64,
-    ) -> Result<bool, Error> {
-        self.park_commit_unit_if_missing_content_with_mode(
-            tx,
-            versions,
-            now_ms,
-            CommitUnitParkMode::default(),
-        )
     }
 
     pub(super) fn park_commit_unit_if_missing_content_with_mode(
@@ -2277,6 +2250,7 @@ where
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
             existing.edge_authority_mergeable |= mode.edge_authority_mergeable;
+            existing.relay |= mode.relay;
             existing.edge_accepted_mergeable |= mode.edge_accepted_mergeable;
             return Ok(true);
         }
@@ -2288,6 +2262,7 @@ where
                 versions: versions.to_vec(),
                 now_ms,
                 ingest_context: mode.ingest_context,
+                relay: mode.relay,
                 edge_authority_mergeable: mode.edge_authority_mergeable,
                 edge_accepted_mergeable: mode.edge_accepted_mergeable,
             },
@@ -2359,6 +2334,7 @@ where
                 .parking
                 .parked_commit_units
                 .iter()
+                .filter(|(_, unit)| !unit.relay)
                 .map(|(tx_id, unit)| (*tx_id, unit.versions.clone()))
                 .collect::<Vec<_>>();
             let mut ready = Vec::new();
@@ -2413,12 +2389,16 @@ where
         Ok(updates)
     }
 
-    pub(super) fn drain_parked_relay_commit_units(&mut self) -> Result<(), Error> {
+    pub(super) fn drain_parked_relay_commit_units(&mut self) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
         loop {
             let parked = self
                 .parking
                 .parked_commit_units
                 .iter()
+                .filter(|(_, unit)| unit.relay)
                 .map(|(tx_id, unit)| (*tx_id, unit.versions.clone()))
                 .collect::<Vec<_>>();
             let mut ready = Vec::new();
@@ -2437,6 +2417,9 @@ where
                 break;
             }
             for tx_id in ready {
+                if let Some(unit) = self.parking.parked_commit_units.get(&tx_id).cloned() {
+                    self.prepare_branch_target_partitions_if_ready(&unit.tx, &unit.versions)?;
+                }
                 let Some(unit) = self.parking.parked_commit_units.remove(&tx_id) else {
                     continue;
                 };

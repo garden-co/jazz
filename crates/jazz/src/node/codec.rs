@@ -857,6 +857,7 @@ pub(super) struct ParkedCommitUnit {
     pub(super) versions: Vec<VersionRecord>,
     pub(super) now_ms: u64,
     pub(super) ingest_context: Option<CommitUnitIngestContext>,
+    pub(super) relay: bool,
     pub(super) edge_authority_mergeable: bool,
     pub(super) edge_accepted_mergeable: bool,
 }
