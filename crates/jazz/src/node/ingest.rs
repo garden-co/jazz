@@ -640,9 +640,10 @@ where
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
-        if installed {
-            self.synchronize_physical_version_tables()?;
-        }
+        // Both endpoint schemas are already Active and their agreeing physical
+        // projection cases were registered during activation. A cross-lens adds
+        // a catalogue path only; re-registering those cases is unnecessary and
+        // Groove rejects it as a duplicate variant projection.
         Ok(vec![SyncMessage::CatalogueAck(CatalogueAck {
             revision: None,
             schema: None,

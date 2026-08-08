@@ -1399,10 +1399,21 @@ fn catalogue_current_write_schema_revision_is_core_ordered() {
     let evolved = catalogue_evolved_schema();
     let evolved_payload = SchemaVersion::new(evolved);
     let (_dir, mut core) = open_node_with_schema(node(0x38), base.clone());
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
+    publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved_payload.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![],
+            }],
+        ),
+        ["notes"],
+        Vec::<String>::new(),
+    )
     .unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
@@ -1709,10 +1720,21 @@ fn transaction_version_scans_recover_table_names_from_physical_mappings() {
     ]);
     let evolved_payload = SchemaVersion::new(evolved);
     let (dir, mut core) = open_node_with_schema(node(0x3f), base.clone());
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
+    publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved_payload.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![],
+            }],
+        ),
+        ["notes"],
+        Vec::<String>::new(),
+    )
     .unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
@@ -1754,14 +1776,10 @@ fn shared_physical_reads_project_natural_lenses_after_schema_agnostic_winner() {
         MergeableCommit::new("todos", old_row, 10).cells(title_cells("old-title")),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
             base.version_id(),
             evolved_payload.id,
             vec![TableLens {
@@ -1779,7 +1797,9 @@ fn shared_physical_reads_project_natural_lenses_after_schema_agnostic_winner() {
                 ],
             }],
         ),
-    })
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
@@ -1876,9 +1896,15 @@ fn shared_physical_reads_project_natural_lenses_after_schema_agnostic_winner() {
 }
 
 #[test]
-fn later_lens_cannot_change_an_authoritative_physical_mapping() {
+fn agreeing_cross_lens_keeps_the_authoritative_physical_mapping() {
     let v1 = schema();
-    let v2 = catalogue_evolved_schema();
+    let v2 = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("name", ColumnType::String),
+            ColumnSchema::new("body", ColumnType::String),
+        ],
+    )]);
     let v3 = JazzSchema::new([TableSchema::new(
         "todos",
         [
@@ -1889,13 +1915,6 @@ fn later_lens_cannot_change_an_authoritative_physical_mapping() {
     let v2_payload = SchemaVersion::new(v2.clone());
     let v3_payload = SchemaVersion::new(v3.clone());
     let (_dir, mut core) = open_node_with_schema(node(0x3e), v1.clone());
-    for payload in [&v2_payload, &v3_payload] {
-        core.apply_sync_message(SyncMessage::PublishSchema {
-            author: AuthorId::SYSTEM,
-            schema: Box::new(payload.clone()),
-        })
-        .unwrap();
-    }
     let long_first = MigrationLens::new(
         v1.version_id(),
         v2_payload.id,
@@ -1950,32 +1969,39 @@ fn later_lens_cannot_change_an_authoritative_physical_mapping() {
             ],
         }],
     );
-    for lens in [long_first, long_second] {
-        core.apply_sync_message(SyncMessage::PublishLens {
-            author: AuthorId::SYSTEM,
-            lens,
-        })
-        .unwrap();
-    }
+    publish_schema_lineage(
+        &mut core,
+        v2_payload.clone(),
+        long_first,
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    publish_schema_lineage(
+        &mut core,
+        v3_payload.clone(),
+        long_second,
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
     let authoritative = core.catalogue.physical_mappings[&v3_payload.id].clone();
     let published_lens_count = core.catalogue.catalogue_lenses.len();
 
-    let result = core.apply_sync_message(SyncMessage::PublishLens {
+    core.apply_sync_message(SyncMessage::PublishLens {
         author: AuthorId::SYSTEM,
         lens: shortest.clone(),
-    });
-    assert!(matches!(
-        result,
-        Err(Error::InvalidCatalogueUpdate(
-            "lens conflicts with authoritative physical mapping"
-        ))
-    ));
+    })
+    .unwrap();
     assert_eq!(
         core.catalogue.physical_mappings[&v3_payload.id],
         authoritative
     );
-    assert_eq!(core.catalogue.catalogue_lenses.len(), published_lens_count);
-    assert!(!core.catalogue.catalogue_lenses.contains_key(&shortest.id));
+    assert_eq!(
+        core.catalogue.catalogue_lenses.len(),
+        published_lens_count + 1
+    );
+    assert!(core.catalogue.catalogue_lenses.contains_key(&shortest.id));
 }
 
 #[test]
@@ -1991,14 +2017,10 @@ fn old_schema_commit_units_copy_on_write_into_current_physical_lineage() {
     let evolved_payload = SchemaVersion::new(evolved.clone());
     let (_writer_dir, mut writer) = open_node_with_schema(node(0x43), base.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(0x44), base.clone());
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
             base.version_id(),
             evolved_payload.id,
             vec![TableLens {
@@ -2016,7 +2038,9 @@ fn old_schema_commit_units_copy_on_write_into_current_physical_lineage() {
                 ],
             }],
         ),
-    })
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
@@ -2098,14 +2122,10 @@ fn rls_policy_under_lenses_evaluates_translated_data_against_pinned_policy() {
     let (_core_dir, mut core) = open_node_with_schema(node(0x47), pinned.clone());
     let author = user(0xa1);
     let other = user(0xb2);
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
             pinned.version_id(),
             evolved_payload.id,
             vec![TableLens {
@@ -2127,7 +2147,9 @@ fn rls_policy_under_lenses_evaluates_translated_data_against_pinned_policy() {
                 ],
             }],
         ),
-    })
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
