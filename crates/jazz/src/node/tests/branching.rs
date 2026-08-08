@@ -660,7 +660,7 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,

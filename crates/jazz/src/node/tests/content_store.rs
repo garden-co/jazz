@@ -714,7 +714,7 @@ fn authored_schema_qualified_handle_hydrates_after_table_and_column_rename() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,

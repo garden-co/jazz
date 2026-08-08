@@ -4153,6 +4153,24 @@ where
         Ok(())
     }
 
+    fn remove_pending_schema_lineage(
+        &mut self,
+        catalogue_seq: u64,
+        publication_id: SchemaLineagePublicationId,
+    ) -> Result<(), Error> {
+        let mut batch = self.database.open_batch();
+        batch.delete(
+            "jazz_catalogue",
+            PrimaryKeyValue::Composite(vec![
+                PrimaryKeyValue::Bytes(b"schema_lineage_pending".to_vec()),
+                PrimaryKeyValue::Uuid(publication_id.0),
+            ]),
+        );
+        self.database.commit_batch(batch)?;
+        self.catalogue.pending_lineages.remove(&catalogue_seq);
+        Ok(())
+    }
+
     fn write_active_schema_lineage_to_batch(
         batch: &mut DatabaseBatch,
         staged: &StagedSchemaLineage,

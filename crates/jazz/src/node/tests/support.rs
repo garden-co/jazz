@@ -180,7 +180,7 @@ where
         new_tables.into_iter().map(Into::into),
         dropped_tables.into_iter().map(Into::into),
     );
-    core.apply_sync_message(SyncMessage::PublishSchemaWithLens {
+    core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: core.active_catalogue_seq().saturating_add(1),
         publication: Box::new(publication),
@@ -247,24 +247,20 @@ fn run_lens_parallel_materialization_seed(seed: u64) {
     let (_core_dir, mut core) = open_node_with_schema(node(0x59), schemas[0].clone());
     let mut oracle = ParallelMaterializationOracle::new();
     oracle.publish_schema(schemas[0].version_id());
-    for schema in schemas.iter().skip(1) {
+    for (schema, lens) in schemas.iter().skip(1).zip(lenses) {
         let payload = SchemaVersion::new(schema.clone());
         oracle.publish_schema(payload.id);
-        core.apply_sync_message(SyncMessage::PublishSchema {
-            author: AuthorId::SYSTEM,
-            schema: Box::new(payload),
-        })
-        .unwrap();
-    }
-    for lens in lenses {
         oracle.publish_lens(lens.clone());
-        core.apply_sync_message(SyncMessage::PublishLens {
-            author: AuthorId::SYSTEM,
+        publish_schema_lineage(
+            &mut core,
+            payload,
             lens,
-        })
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
         .unwrap();
     }
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 4,

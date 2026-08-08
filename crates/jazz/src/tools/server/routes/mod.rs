@@ -1750,9 +1750,9 @@ mod tests {
         let v1_hash = SchemaHash::compute(&v1);
         let v2_hash = SchemaHash::compute(&v2);
 
-        let state = make_state_with_schema(v2).await;
+        let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
-        publish_schema_for_test(&app, v1).await;
+        publish_schema_for_test(&app, v2).await;
 
         let request_body = serde_json::json!({
             "fromHash": v1_hash.to_string(),
@@ -1780,7 +1780,16 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(created.status(), StatusCode::CREATED);
+        let created_status = created.status();
+        let created_body = body::to_bytes(created.into_body(), usize::MAX)
+            .await
+            .expect("migration response body");
+        assert_eq!(
+            created_status,
+            StatusCode::CREATED,
+            "{}",
+            String::from_utf8_lossy(&created_body)
+        );
 
         let lens = state
             .catalogue_store
@@ -1836,9 +1845,9 @@ mod tests {
         let v1_hash = SchemaHash::compute(&v1);
         let v2_hash = SchemaHash::compute(&v2);
 
-        let state = make_state_with_schema(v2.clone()).await;
+        let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
-        publish_schema_for_test(&app, v1.clone()).await;
+        publish_schema_for_test(&app, v2.clone()).await;
 
         let request_body = serde_json::json!({
             "fromHash": v1_hash.to_string(),

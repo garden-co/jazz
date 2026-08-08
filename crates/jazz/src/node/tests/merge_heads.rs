@@ -237,7 +237,7 @@ fn merge_heads_share_physical_identity_across_table_rename_and_restart() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,

@@ -831,7 +831,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn admin_publish_schema_wires_local_runtime_catalogue_and_keeps_raw_get_response() {
+    fn admin_publish_schema_stores_draft_without_runtime_activation_and_keeps_raw_get_response() {
         let mut headers = HashMap::new();
         headers.insert("x-jazz-admin-secret".to_owned(), "secret".to_owned());
         let body = json!({
@@ -846,6 +846,9 @@ mod tests {
                 ]
             }
         });
+        let local_schema_id = convert_admin_schema(&body["schema"])
+            .expect("test schema converts")
+            .version_id();
         let mut state = LoopbackState {
             shell: InMemoryServerShell::start(default_config()).expect("start shell"),
             sessions: HashMap::new(),
@@ -864,11 +867,8 @@ mod tests {
         let response = handle_admin_publish_schema(&request.path, &request, &mut state);
         assert_eq!(response_status(&response), 201);
         let published = response_json(&response);
-        let local_schema_id = state
-            .shell
-            .last_published_runtime_schema()
-            .expect("schema was published into the runtime catalogue");
-        assert_eq!(state.shell.runtime_write_schema_revision(), 1);
+        assert_eq!(state.shell.last_published_runtime_schema(), None);
+        assert_eq!(state.shell.runtime_write_schema_revision(), 0);
 
         let hash = published["hash"].as_str().expect("hash");
         let get_request = HttpRequest {
@@ -891,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn admin_schema_store_reload_publishes_stored_schemas_into_runtime_catalogue() {
+    fn admin_schema_store_reload_validates_drafts_without_runtime_activation() {
         let schemas = HashMap::from([(
             "app-a".to_owned(),
             vec![
@@ -935,8 +935,8 @@ mod tests {
 
         reload_admin_schema_catalogue(&mut shell, &schemas).expect("reload stored schemas");
 
-        assert!(shell.last_published_runtime_schema().is_some());
-        assert_eq!(shell.runtime_write_schema_revision(), 2);
+        assert_eq!(shell.last_published_runtime_schema(), None);
+        assert_eq!(shell.runtime_write_schema_revision(), 0);
     }
 
     fn response_status(response: &[u8]) -> u16 {

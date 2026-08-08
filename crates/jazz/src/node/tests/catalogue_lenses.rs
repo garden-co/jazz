@@ -105,7 +105,7 @@ fn non_genesis_schema_activates_only_with_its_ordered_lineage_bundle() {
     );
     let (dir, mut core) = open_node_with_schema(node(0x2e), base.clone());
 
-    let standalone = core.apply_sync_message(SyncMessage::PublishSchema {
+    let standalone = core.apply_trusted_catalogue_message(SyncMessage::PublishSchema {
         author: AuthorId::SYSTEM,
         schema: Box::new(target.clone()),
     });
@@ -118,7 +118,7 @@ fn non_genesis_schema_activates_only_with_its_ordered_lineage_bundle() {
     assert!(!core.catalogue_schemas().contains_key(&target.id));
 
     let ack = core
-        .apply_sync_message(SyncMessage::PublishSchemaWithLens {
+        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(publication.clone()),
@@ -139,7 +139,7 @@ fn non_genesis_schema_activates_only_with_its_ordered_lineage_bundle() {
     assert_eq!(activated.columns["title"], source.columns["title"]);
 
     let duplicate = core
-        .apply_sync_message(SyncMessage::PublishSchemaWithLens {
+        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(publication),
@@ -218,7 +218,7 @@ fn pending_lineage_reserves_its_target_and_sequence() {
     let (_dir, mut core) = open_node_with_schema(node(0x2b), base);
 
     assert!(
-        core.apply_sync_message(SyncMessage::PublishSchemaWithLens {
+        core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 2,
             publication: Box::new(publication.clone()),
@@ -242,7 +242,7 @@ fn pending_lineage_reserves_its_target_and_sequence() {
         Err(Error::UnauthorizedCatalogueUpdate)
     ));
     assert!(matches!(
-        core.apply_sync_message(SyncMessage::PublishSchemaWithLens {
+        core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 2,
             publication: Box::new(conflict.clone()),
@@ -252,7 +252,7 @@ fn pending_lineage_reserves_its_target_and_sequence() {
         ))
     ));
     assert!(matches!(
-        core.apply_sync_message(SyncMessage::PublishSchemaWithLens {
+        core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 3,
             publication: Box::new(conflict),
@@ -287,7 +287,7 @@ fn lineage_operations_must_exhaustively_reproduce_target_columns_before_staging(
     let next_column = core.catalogue.next_physical_column_id;
 
     assert!(matches!(
-        core.apply_sync_message(SyncMessage::PublishSchemaWithLens {
+        core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(publication),
@@ -300,6 +300,31 @@ fn lineage_operations_must_exhaustively_reproduce_target_columns_before_staging(
     assert!(core.catalogue.staged_lineages.is_empty());
     assert_eq!(core.catalogue.next_physical_table_id, next_table);
     assert_eq!(core.catalogue.next_physical_column_id, next_column);
+
+    let correction = SchemaLineagePublication::new(
+        target.clone(),
+        MigrationLens::new(
+            core.catalogue.schema.version_id(),
+            target.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String(String::new()),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        author: AuthorId::SYSTEM,
+        catalogue_seq: 1,
+        publication: Box::new(correction),
+    })
+    .unwrap();
+    assert!(core.catalogue_schemas().contains_key(&target.id));
 }
 
 #[test]
@@ -353,7 +378,7 @@ fn schema_lineage_gaps_and_inactive_sources_park_durably_then_drain_in_order() {
     let (dir, mut core) = open_node_with_schema(node(0x2c), v1.clone());
 
     let parked = core
-        .apply_sync_message(SyncMessage::PublishSchemaWithLens {
+        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 2,
             publication: Box::new(publication_2),
@@ -367,7 +392,7 @@ fn schema_lineage_gaps_and_inactive_sources_park_durably_then_drain_in_order() {
     let mut reopened = reopen_node_at(&dir, node(0x2c), v1);
     assert!(!reopened.catalogue_schemas().contains_key(&v3.id));
     let drained = reopened
-        .apply_sync_message(SyncMessage::PublishSchemaWithLens {
+        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(publication_1),
@@ -382,6 +407,99 @@ fn schema_lineage_gaps_and_inactive_sources_park_durably_then_drain_in_order() {
     );
     assert!(reopened.catalogue_schemas().contains_key(&v2.id));
     assert!(reopened.catalogue_schemas().contains_key(&v3.id));
+}
+
+#[test]
+fn malformed_unknown_source_bundle_is_quarantined_when_parent_arrives() {
+    let v1 = schema();
+    let v2 = SchemaVersion::new(catalogue_evolved_schema());
+    let v3 = SchemaVersion::new(JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("body", ColumnType::String),
+            ColumnSchema::new("archived", ColumnType::Bool),
+        ],
+    )]));
+    let parent = SchemaLineagePublication::new(
+        v2.clone(),
+        MigrationLens::new(
+            v1.version_id(),
+            v2.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String(String::new()),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    let malformed = SchemaLineagePublication::new(
+        v3.clone(),
+        MigrationLens::new(
+            v2.id,
+            v3.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: Vec::new(),
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    let valid = SchemaLineagePublication::new(
+        v3.clone(),
+        MigrationLens::new(
+            v2.id,
+            v3.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "archived".to_owned(),
+                    default: Value::Bool(false),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    let (dir, mut core) = open_node_with_schema(node(0x2d), v1.clone());
+
+    assert!(core
+        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 2,
+            publication: Box::new(malformed),
+        })
+        .unwrap()
+        .is_empty());
+    core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        author: AuthorId::SYSTEM,
+        catalogue_seq: 1,
+        publication: Box::new(parent),
+    })
+    .unwrap();
+    assert!(core.catalogue_schemas().contains_key(&v2.id));
+    assert!(!core.catalogue_schemas().contains_key(&v3.id));
+    assert!(!core.catalogue.pending_lineages.contains_key(&2));
+    drop(core);
+
+    let mut core = reopen_node_at(&dir, node(0x2d), v1);
+    assert!(!core.catalogue.pending_lineages.contains_key(&2));
+
+    core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        author: AuthorId::SYSTEM,
+        catalogue_seq: 2,
+        publication: Box::new(valid),
+    })
+    .unwrap();
+    assert!(core.catalogue_schemas().contains_key(&v3.id));
 }
 
 #[test]
@@ -414,7 +532,7 @@ fn staged_lineage_resumes_after_each_activation_crash_boundary() {
         core.set_catalogue_activation_failpoint(failpoint);
 
         assert!(matches!(
-            core.apply_sync_message(SyncMessage::PublishSchemaWithLens {
+            core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
                 author: AuthorId::SYSTEM,
                 catalogue_seq: 1,
                 publication: Box::new(publication),
@@ -423,7 +541,7 @@ fn staged_lineage_resumes_after_each_activation_crash_boundary() {
         ));
         assert!(!core.catalogue_schemas().contains_key(&target.id));
         assert!(matches!(
-            core.apply_sync_message(SyncMessage::PublishSchema {
+            core.apply_trusted_catalogue_message(SyncMessage::PublishSchema {
                 author: AuthorId::SYSTEM,
                 schema: Box::new(target.clone()),
             }),
@@ -549,7 +667,7 @@ fn active_history_projection_accepts_a_new_schema_variant_without_rebuild() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -672,7 +790,7 @@ fn rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen() 
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -792,7 +910,7 @@ fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -917,14 +1035,34 @@ fn catalogue_schema_publish_replicates_and_is_idempotent() {
     let base = schema();
     let evolved = catalogue_evolved_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(0x33), base.clone());
-    let (_client_dir, mut client) = open_node_with_schema(node(0x34), base);
+    let (_client_dir, mut client) = open_node_with_schema(node(0x34), base.clone());
     let payload = SchemaVersion::new(evolved.clone());
-    let publish = SyncMessage::PublishSchema {
+    let lens = MigrationLens::new(
+        base.version_id(),
+        payload.id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "body".to_owned(),
+                default: Value::String(String::new()),
+            }],
+        }],
+    );
+    let publish = SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
-        schema: Box::new(payload.clone()),
+        catalogue_seq: 1,
+        publication: Box::new(SchemaLineagePublication::new(
+            payload.clone(),
+            lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )),
     };
 
-    let ack = core.apply_sync_message(publish.clone()).unwrap();
+    let ack = core
+        .apply_trusted_catalogue_message(publish.clone())
+        .unwrap();
     assert!(matches!(
         ack.as_slice(),
         [SyncMessage::CatalogueAck(crate::protocol::CatalogueAck {
@@ -935,7 +1073,9 @@ fn catalogue_schema_publish_replicates_and_is_idempotent() {
     ));
     assert!(core.catalogue_schemas().contains_key(&payload.id));
 
-    let second = core.apply_sync_message(publish.clone()).unwrap();
+    let second = core
+        .apply_trusted_catalogue_message(publish.clone())
+        .unwrap();
     assert!(matches!(
         second.as_slice(),
         [SyncMessage::CatalogueAck(crate::protocol::CatalogueAck {
@@ -946,7 +1086,7 @@ fn catalogue_schema_publish_replicates_and_is_idempotent() {
     ));
     assert_eq!(core.catalogue_schemas().len(), 2);
 
-    client.apply_sync_message(publish).unwrap();
+    client.apply_trusted_catalogue_message(publish).unwrap();
     assert_eq!(
         client
             .catalogue_schemas()
@@ -962,27 +1102,29 @@ fn catalogue_lens_publish_validates_admin_id_and_known_endpoints() {
     let (_dir, mut core) = open_node_with_schema(node(0x35), base.clone());
     let source = SchemaVersion::new(base);
     let target = SchemaVersion::new(evolved);
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(target.clone()),
-    })
-    .unwrap();
     let lens = MigrationLens::new(
         source.id,
         target.id,
         vec![TableLens {
             source_table: "todos".to_owned(),
             target_table: "todos".to_owned(),
-            ops: vec![LensOp::DropColumn {
+            ops: vec![LensOp::AddColumn {
                 column: "body".to_owned(),
-                backwards_default: Value::String(String::new()),
+                default: Value::String(String::new()),
             }],
         }],
     );
 
-    let non_admin = core.apply_sync_message(SyncMessage::PublishLens {
+    let publication = SchemaLineagePublication::new(
+        target.clone(),
+        lens.clone(),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    let non_admin = core.apply_sync_message(SyncMessage::PublishSchemaWithLens {
         author: user(7),
-        lens: lens.clone(),
+        catalogue_seq: 1,
+        publication: Box::new(publication.clone()),
     });
     assert!(matches!(non_admin, Err(Error::UnauthorizedCatalogueUpdate)));
 
@@ -991,7 +1133,7 @@ fn catalogue_lens_publish_validates_admin_id_and_known_endpoints() {
         SchemaVersionId::from_bytes([0x99; 16]),
         Vec::new(),
     );
-    let unknown_result = core.apply_sync_message(SyncMessage::PublishLens {
+    let unknown_result = core.apply_trusted_catalogue_message(SyncMessage::PublishLens {
         author: AuthorId::SYSTEM,
         lens: unknown,
     });
@@ -1001,9 +1143,10 @@ fn catalogue_lens_publish_validates_admin_id_and_known_endpoints() {
     ));
 
     let ack = core
-        .apply_sync_message(SyncMessage::PublishLens {
+        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
-            lens: lens.clone(),
+            catalogue_seq: 1,
+            publication: Box::new(publication),
         })
         .unwrap();
     assert!(matches!(
@@ -1060,12 +1203,25 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
     assert_eq!(core.sync_metrics().parked_catalogue_orphans, 1);
     assert!(core.query_transaction(tx.tx_id).unwrap().is_none());
 
-    let updates = core
-        .apply_sync_message(SyncMessage::PublishSchema {
-            author: AuthorId::SYSTEM,
-            schema: Box::new(SchemaVersion::new(evolved)),
-        })
-        .unwrap();
+    let updates = publish_schema_lineage(
+        &mut core,
+        SchemaVersion::new(evolved),
+        MigrationLens::new(
+            base.version_id(),
+            evolved_id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String(String::new()),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
     assert_eq!(core.sync_metrics().parked_catalogue_orphans_resolved, 1);
     assert!(updates.iter().any(|message| matches!(
         message,
@@ -1091,14 +1247,17 @@ fn catalogue_current_write_schema_revision_is_core_ordered() {
             vec![TableLens {
                 source_table: "todos".to_owned(),
                 target_table: "todos".to_owned(),
-                ops: vec![],
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String(String::new()),
+                }],
             }],
         ),
-        ["notes"],
+        Vec::<String>::new(),
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 2,
@@ -1109,7 +1268,7 @@ fn catalogue_current_write_schema_revision_is_core_ordered() {
     assert_eq!(core.current_write_schema().revision, 2);
     assert_eq!(core.current_write_schema().schema, evolved_payload.id);
 
-    let stale = core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    let stale = core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -1126,7 +1285,7 @@ fn catalogue_current_write_schema_revision_is_core_ordered() {
     ));
     assert_eq!(core.current_write_schema().revision, 2);
 
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 3,
@@ -1163,7 +1322,7 @@ fn durable_catalogue_values_pointer_and_physical_mappings_survive_restart() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 4,
@@ -1280,7 +1439,7 @@ fn publishing_schema_registers_new_physical_tables_live() {
     assert!(core.database.primary_key_scan_raw(&history, &[]).is_ok());
     assert!(core.database.primary_key_scan_raw(&register, &[]).is_ok());
 
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -1318,7 +1477,7 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -1419,7 +1578,7 @@ fn transaction_version_scans_recover_table_names_from_physical_mappings() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -1484,7 +1643,7 @@ fn shared_physical_reads_project_natural_lenses_after_schema_agnostic_winner() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -1671,7 +1830,7 @@ fn agreeing_cross_lens_keeps_the_authoritative_physical_mapping() {
     let authoritative = core.catalogue.physical_mappings[&v3_payload.id].clone();
     let published_lens_count = core.catalogue.catalogue_lenses.len();
 
-    core.apply_sync_message(SyncMessage::PublishLens {
+    core.apply_trusted_catalogue_message(SyncMessage::PublishLens {
         author: AuthorId::SYSTEM,
         lens: shortest.clone(),
     })
@@ -1725,7 +1884,7 @@ fn old_schema_commit_units_copy_on_write_into_current_physical_lineage() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -1834,7 +1993,7 @@ fn rls_policy_under_lenses_evaluates_translated_data_against_pinned_policy() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -2089,7 +2248,7 @@ fn local_writes_store_versions_under_current_write_schema_storage() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -2161,7 +2320,7 @@ fn exclusive_writes_store_versions_under_current_write_schema_storage() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -2235,7 +2394,7 @@ fn physical_schema_variants_survive_pointer_changes_and_reopen() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -2250,7 +2409,7 @@ fn physical_schema_variants_survive_pointer_changes_and_reopen() {
         ])),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 2,
@@ -2341,7 +2500,7 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
     Vec::<String>::new(),
 )
 .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -2428,7 +2587,7 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
     )
     .unwrap();
     join_core
-        .apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
@@ -2516,7 +2675,7 @@ fn schema_projected_reads_ignore_settled_result_set_materialization_cache() {
     Vec::<String>::new(),
 )
 .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -2662,7 +2821,7 @@ fn schema_projected_current_reachable_filters_translate_old_names() {
     Vec::<String>::new(),
 )
 .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -2776,7 +2935,7 @@ fn include_deleted_schema_projected_root_filters_translate_old_names() {
     Vec::<String>::new(),
 )
 .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -2872,7 +3031,7 @@ fn include_deleted_schema_projected_join_filters_translate_old_names() {
     Vec::<String>::new(),
 )
 .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -3010,7 +3169,7 @@ fn include_deleted_schema_projected_reachable_filters_translate_old_names() {
     Vec::<String>::new(),
 )
 .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -3130,7 +3289,7 @@ fn historical_schema_projected_reads_use_projected_snapshot_source() {
     Vec::<String>::new(),
 )
 .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -3249,7 +3408,7 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
     Vec::<String>::new(),
 )
 .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -3444,7 +3603,7 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
     Vec::<String>::new(),
 )
 .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,

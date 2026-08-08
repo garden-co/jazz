@@ -78,6 +78,10 @@ pub(crate) async fn publish_runtime_catalogue(
         return Ok(());
     };
     let mut schema = known_schema(state, &supplied_schemas, permissions.head.schema_hash)?;
+    let structural_runtime = public_schema_convert::convert_public_schema(&schema)
+        .map_err(|error| format!("convert permissions lineage source schema: {error}"))?;
+    let lineage_source = structural_runtime.version_id();
+    let runtime_shell = runtime_shell(state, &mut shell, structural_runtime)?;
     for (table_name, policies) in permissions.permissions {
         let table = schema.get_mut(&table_name).ok_or_else(|| {
             format!(
@@ -90,9 +94,8 @@ pub(crate) async fn publish_runtime_catalogue(
     }
     let runtime_schema = public_schema_convert::convert_public_schema(&schema)
         .map_err(|error| format!("convert permissions head schema for runtime: {error}"))?;
-    let runtime_shell = runtime_shell(state, &mut shell, runtime_schema.clone())?;
     runtime_shell
-        .publish_permissions_schema(runtime_schema)
+        .publish_permissions_schema(runtime_schema, lineage_source)
         .await
         .map_err(|error| format!("publish permissions head to runtime shell: {error}"))?;
     Ok(())
@@ -163,7 +166,13 @@ fn convert_lens(lens: &Lens, source: &Schema, target: &Schema) -> Result<Migrati
                 .then(|| TableLens {
                     source_table: source_name.to_owned(),
                     target_table: target_name.to_owned(),
-                    ops: Vec::new(),
+                    ops: (source_name != target_name)
+                        .then(|| CoreLensOp::RenameTable {
+                            from: source_name.to_owned(),
+                            to: target_name.to_owned(),
+                        })
+                        .into_iter()
+                        .collect(),
                 })
         })
         .collect::<Vec<_>>();

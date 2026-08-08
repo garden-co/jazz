@@ -11965,25 +11965,29 @@ mod tests {
         )]);
         let evolved_payload = SchemaVersion::new(evolved);
         let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xa2; 16]), base.clone());
-        node.apply_sync_message(SyncMessage::PublishSchema {
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
-            schema: Box::new(evolved_payload.clone()),
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                evolved_payload.clone(),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved_payload.id,
+                    vec![TableLens {
+                        source_table: "users".to_owned(),
+                        target_table: "people".to_owned(),
+                        ops: vec![LensOp::RenameTable {
+                            from: "users".to_owned(),
+                            to: "people".to_owned(),
+                        }],
+                    }],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
         })
         .unwrap();
-        node.apply_sync_message(SyncMessage::PublishLens {
-            author: AuthorId::SYSTEM,
-            lens: MigrationLens::new(
-                base.version_id(),
-                evolved_payload.id,
-                vec![TableLens {
-                    source_table: "users".to_owned(),
-                    target_table: "people".to_owned(),
-                    ops: vec![],
-                }],
-            ),
-        })
-        .unwrap();
-        node.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,

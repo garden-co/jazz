@@ -49,7 +49,7 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,

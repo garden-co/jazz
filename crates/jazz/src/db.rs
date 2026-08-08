@@ -2155,7 +2155,7 @@ where
         self.node
             .node
             .borrow_mut()
-            .apply_sync_message(SyncMessage::PublishSchema {
+            .apply_trusted_catalogue_message(SyncMessage::PublishSchema {
                 author: self.identity.author,
                 schema: Box::new(schema),
             })
@@ -2172,7 +2172,7 @@ where
         self.node
             .node
             .borrow_mut()
-            .apply_sync_message(SyncMessage::PublishSchemaWithLens {
+            .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
                 author: self.identity.author,
                 catalogue_seq,
                 publication: Box::new(publication),
@@ -2186,7 +2186,7 @@ where
         self.node
             .node
             .borrow_mut()
-            .apply_sync_message(SyncMessage::PublishLens {
+            .apply_trusted_catalogue_message(SyncMessage::PublishLens {
                 author: self.identity.author,
                 lens,
             })
@@ -2202,7 +2202,7 @@ where
         self.node
             .node
             .borrow_mut()
-            .apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+            .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
                 author: self.identity.author,
                 pointer,
             })

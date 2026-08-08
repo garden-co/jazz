@@ -160,12 +160,13 @@ impl ServerShellHandle {
     pub(crate) async fn publish_permissions_schema(
         &self,
         schema: JazzSchema,
+        lineage_source: SchemaVersionId,
     ) -> Result<SchemaVersionId, String> {
         let activity_tx = self.activity_tx.clone();
         let result = self
             .run(move |shell| {
                 shell
-                    .publish_permissions_schema(schema)
+                    .publish_permissions_schema(schema, lineage_source)
                     .map_err(|error| error.to_string())
             })
             .await;

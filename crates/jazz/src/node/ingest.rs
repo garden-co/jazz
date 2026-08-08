@@ -119,6 +119,24 @@ where
         self.apply_sync_message_with_ingest_context(message, None)
     }
 
+    /// Apply a catalogue mutation from the trusted local administrative lane.
+    pub fn apply_trusted_catalogue_message(
+        &mut self,
+        message: SyncMessage,
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        self.apply_sync_message_with_ingest_context(
+            message,
+            Some(CommitUnitIngestContext {
+                identity: AuthorId::SYSTEM,
+                trust: CommitUnitTrust::TrustedBackend,
+                edge_authority: false,
+            }),
+        )
+    }
+
     /// Apply one sync message from a connection-authenticated upload path.
     pub fn apply_sync_message_with_ingest_context(
         &mut self,
@@ -410,6 +428,16 @@ where
                 ));
             }
         } else {
+            if let Some(source) = self.catalogue.catalogue_schemas.get(&lens.source) {
+                self.validate_migration_lens_between(lens, source, schema)?;
+                self.validate_lineage_table_partition(
+                    &source.schema,
+                    &schema.schema,
+                    lens,
+                    &publication.new_tables,
+                    &publication.dropped_tables,
+                )?;
+            }
             if self
                 .catalogue
                 .pending_lineages
@@ -456,14 +484,21 @@ where
             else {
                 break;
             };
-            self.validate_migration_lens_between(&publication.lens, &source, &publication.schema)?;
-            self.validate_lineage_table_partition(
-                &source.schema,
-                &publication.schema.schema,
-                &publication.lens,
-                &publication.new_tables,
-                &publication.dropped_tables,
-            )?;
+            let validation = self
+                .validate_migration_lens_between(&publication.lens, &source, &publication.schema)
+                .and_then(|()| {
+                    self.validate_lineage_table_partition(
+                        &source.schema,
+                        &publication.schema.schema,
+                        &publication.lens,
+                        &publication.new_tables,
+                        &publication.dropped_tables,
+                    )
+                });
+            if validation.is_err() {
+                self.remove_pending_schema_lineage(next, publication.id)?;
+                break;
+            }
             if self
                 .catalogue
                 .active_lineages_by_target
@@ -728,13 +763,15 @@ where
 
     fn require_catalogue_admin(
         &self,
-        claimed_author: AuthorId,
+        _claimed_author: AuthorId,
         ingest_context: Option<CommitUnitIngestContext>,
     ) -> Result<(), Error> {
-        let authenticated_author = ingest_context
-            .map(|context| context.identity)
-            .unwrap_or(claimed_author);
-        if authenticated_author == AuthorId::SYSTEM {
+        if matches!(
+            ingest_context,
+            Some(context)
+                if context.identity == AuthorId::SYSTEM
+                    && context.trust == CommitUnitTrust::TrustedBackend
+        ) {
             Ok(())
         } else {
             Err(Error::UnauthorizedCatalogueUpdate)

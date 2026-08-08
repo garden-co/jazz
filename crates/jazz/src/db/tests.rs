@@ -5581,7 +5581,7 @@ impl CoreDb {
         self.server
             .node()
             .borrow_mut()
-            .apply_sync_message(SyncMessage::PublishSchema {
+            .apply_trusted_catalogue_message(SyncMessage::PublishSchema {
                 author: self.author,
                 schema: Box::new(schema),
             })
@@ -5596,7 +5596,7 @@ impl CoreDb {
         self.server
             .node()
             .borrow_mut()
-            .apply_sync_message(SyncMessage::PublishSchemaWithLens {
+            .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
                 author: self.author,
                 catalogue_seq,
                 publication: Box::new(publication),
@@ -5611,7 +5611,7 @@ impl CoreDb {
         self.server
             .node()
             .borrow_mut()
-            .apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+            .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
                 author: self.author,
                 pointer,
             })
@@ -6397,6 +6397,55 @@ fn db_subscription_stream_surfaces_upstream_rejection_after_open() {
         }) => assert_eq!(detail, "server does not support this maintained shape"),
         other => panic!("expected stream-carried rejection, got {other:?}"),
     }
+}
+
+#[test]
+fn upstream_transport_rejects_forged_system_catalogue_publication() {
+    let base = schema();
+    let client_author = AuthorId::from_bytes([0x51; 16]);
+    let client = open_db(0x51, client_author, &base);
+    let (client_transport, mut upstream_transport) = duplex();
+    let upstream = client.connect_upstream(client_transport);
+    let target = SchemaVersion::new(JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("done", ColumnType::Bool),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+            ColumnSchema::new("body", ColumnType::String),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public())]));
+    let lens = MigrationLens::new(
+        base.version_id(),
+        target.id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "body".to_owned(),
+                default: Value::String(String::new()),
+            }],
+        }],
+    );
+    upstream_transport
+        .send(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                target.clone(),
+                lens,
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .unwrap();
+
+    let error = upstream.borrow_mut().tick().unwrap_err();
+    assert_eq!(error.code, ErrorCode::Protocol);
+    assert!(error.message.contains("unauthorized catalogue update"));
+    assert!(client.catalogue_schema(target.id).is_none());
 }
 
 #[test]
@@ -8174,7 +8223,7 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
         .server
         .node()
         .borrow_mut()
-        .apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
