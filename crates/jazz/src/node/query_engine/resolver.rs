@@ -27,6 +27,15 @@ pub(crate) enum SourceAuthorizationRequest {
         /// Query-engine-owned authorization plan for the protected source.
         plan: PolicyAuthorizationPlan,
     },
+    /// A membership-only authorization proof used while compiling another
+    /// table's policy. Unlike `PolicyFiltered`, this never re-enters ordinary
+    /// user-visible source resolution.
+    PolicyProof {
+        /// Identity whose row-level read permission gates the proof source.
+        permission_subject: AuthorId,
+        /// Query-engine-owned authorization plan for the proof source.
+        plan: PolicyAuthorizationPlan,
+    },
 }
 
 /// Logical authorization requirement for one protected source.
@@ -227,6 +236,15 @@ pub(crate) struct SourceResolutionError {
 /// Source-resolution gap.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SourceGap {
+    /// Recursive policy proof compilation revisited a table already on the
+    /// proof stack. This must surface as a diagnostic rather than consuming
+    /// the process stack.
+    PolicyProofCycle {
+        /// Revisited policy table.
+        table: String,
+        /// Stack depth at the attempted re-entry.
+        depth: usize,
+    },
     /// Storage source for a historical global cut cannot yet be built.
     HistoricalStorageCut,
     /// Snapshot source includes local overlays or dots not yet represented.

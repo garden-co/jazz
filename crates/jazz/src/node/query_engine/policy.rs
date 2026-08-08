@@ -182,9 +182,12 @@ pub(crate) enum PolicyContext {
         attribution: Option<AuthorId>,
     },
     /// A policy-authorization subplan evaluates claim-dependent policy logic
-    /// for an identity, but its own source reads are system-authorized to avoid
-    /// recursively applying the same row policy to the policy proof.
+    /// for an identity. Its root source is system-authorized to suspend the
+    /// policy being proved; predicate membership sources use `PolicyProof`.
     AuthorizationSubplan {
+        /// The source whose policy this subplan proves. Its own read policy is
+        /// suspended to avoid recursive policy evaluation.
+        protected_source: SourceId,
         /// Missing-policy behavior.
         mode: PolicyEnforcementMode,
         /// Identity whose permissions are being evaluated.
