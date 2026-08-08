@@ -46,22 +46,36 @@ fn physical_identity_mapping_and_live_id_recovery_are_durable_catalogue_metadata
     assert_ne!(todos.columns["title"].0, 0);
     drop(left);
 
-    let mut reopened = reopen_node_at(&left_dir, node(0x2d), schema);
+    let mut reopened = reopen_node_at(&left_dir, node(0x2d), schema.clone());
     assert_eq!(
         reopened.catalogue.physical_mappings[&schema_version],
         left_mapping
     );
 
     let evolved = SchemaVersion::new(catalogue_evolved_schema());
-    reopened
-        .apply_sync_message(SyncMessage::PublishSchema {
-            author: AuthorId::SYSTEM,
-            schema: Box::new(evolved.clone()),
-        })
-        .unwrap();
+    publish_schema_lineage(
+        &mut reopened,
+        evolved.clone(),
+        MigrationLens::new(
+            schema.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: v(""),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
     let next = &reopened.catalogue.physical_mappings[&evolved.id].tables["todos"];
-    assert!(next.table_id.0 > todos.table_id.0);
-    assert!(next.columns["title"].0 > todos.columns["title"].0);
+    assert_eq!(next.table_id, todos.table_id);
+    assert_eq!(next.columns["title"], todos.columns["title"]);
+    assert!(next.columns["body"].0 > todos.columns["title"].0);
 }
 
 #[test]
@@ -432,17 +446,7 @@ fn publishing_lens_reconciles_target_table_and_column_identities_durably() {
     let source_id = base.version_id();
     let target = SchemaVersion::new(evolved);
     let (dir, mut core) = open_node_with_schema(node(0x2f), base.clone());
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(target.clone()),
-    })
-    .unwrap();
-
     let source_table = core.catalogue.physical_mappings[&source_id].tables["todos"].clone();
-    let provisional_target =
-        core.catalogue.physical_mappings[&target.id].tables["todos"].clone();
-    assert_ne!(source_table.table_id, provisional_target.table_id);
-    assert_ne!(source_table.columns["title"], provisional_target.columns["title"]);
 
     let lens = MigrationLens::new(
         source_id,
@@ -456,22 +460,26 @@ fn publishing_lens_reconciles_target_table_and_column_identities_durably() {
             }],
         }],
     );
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
+    publish_schema_lineage(
+        &mut core,
+        target.clone(),
         lens,
-    })
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
 
     let reconciled = core.catalogue.physical_mappings[&target.id].tables["todos"].clone();
     assert_eq!(reconciled.table_id, source_table.table_id);
     assert_eq!(reconciled.columns["title"], source_table.columns["title"]);
-    assert_eq!(
-        reconciled.columns["body"],
-        provisional_target.columns["body"],
-        "AddColumn must retain its fresh target physical identity"
-    );
+    assert_ne!(reconciled.columns["body"], source_table.columns["title"]);
     let mapping = core.catalogue.physical_mappings[&target.id].clone();
-    let discarded_table_id = provisional_target.table_id;
+    let max_live_table_id = mapping
+        .tables
+        .values()
+        .map(|table| table.table_id.0)
+        .max()
+        .unwrap();
     let max_live_column_id = mapping
         .tables
         .values()
@@ -487,17 +495,16 @@ fn publishing_lens_reconciles_target_table_and_column_identities_durably() {
         "notes",
         [ColumnSchema::new("text", ColumnType::String)],
     )]));
-    reopened
-        .apply_sync_message(SyncMessage::PublishSchema {
-            author: AuthorId::SYSTEM,
-            schema: Box::new(later.clone()),
-    })
+    publish_schema_lineage(
+        &mut reopened,
+        later.clone(),
+        MigrationLens::new(target.id, later.id, vec![]),
+        ["notes"],
+        ["todos"],
+    )
     .unwrap();
     let later_table = &reopened.catalogue.physical_mappings[&later.id].tables["notes"];
-    assert_eq!(
-        later_table.table_id, discarded_table_id,
-        "an unreferenced provisional table id may be reused after restart"
-    );
+    assert!(later_table.table_id.0 > max_live_table_id);
     assert!(later_table.columns["text"].0 > max_live_column_id);
 }
 
