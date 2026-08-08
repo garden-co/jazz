@@ -2568,6 +2568,7 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
         SyncMessage::RegisterShape { .. }
         | SyncMessage::Subscribe(_)
         | SyncMessage::PublishSchema { .. }
+        | SyncMessage::PublishSchemaWithLens { .. }
         | SyncMessage::PublishLens { .. }
         | SyncMessage::SetCurrentWriteSchema { .. }
         | SyncMessage::CatalogueAck(_)
