@@ -169,28 +169,14 @@ fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_c
         MergeableCommit::new("todos", existing, 10).cells(title_cells("before-index")),
     );
 
-    publish_schema_lineage(
-        &mut core,
-        indexed.clone(),
-        MigrationLens::new(
-            base.version_id(),
-            indexed.id,
-            vec![TableLens {
-                source_table: "todos".to_owned(),
-                target_table: "todos".to_owned(),
-                ops: vec![],
-            }],
-        ),
-        Vec::<String>::new(),
-        Vec::<String>::new(),
-    )
-    .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    assert_eq!(
+        indexed.id,
+        base.version_id(),
+        "physical indexes are deliberately outside content-addressed schema identity"
+    );
+    core.apply_trusted_catalogue_message(SyncMessage::PublishSchema {
         author: AuthorId::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: indexed.id,
-        },
+        schema: Box::new(indexed.clone()),
     })
     .unwrap();
 
@@ -219,7 +205,7 @@ fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_c
             AuthorId::SYSTEM,
         )
         .unwrap();
-    let two_variant_reads = core.take_storage_read_metrics();
+    let indexed_reads = core.take_storage_read_metrics();
     assert_eq!(
         rows.into_iter()
             .map(|row| row.row_uuid())
@@ -227,8 +213,8 @@ fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_c
         vec![existing],
         "the live index must backfill the row written before it existed"
     );
-    assert_eq!(two_variant_reads.global_current_indexes.reads, 1);
-    assert_eq!(two_variant_reads.global_current_rows.reads, 1);
+    assert_eq!(indexed_reads.global_current_indexes.reads, 1);
+    assert_eq!(indexed_reads.global_current_rows.reads, 1);
 
     publish_schema_lineage(
         &mut core,
@@ -283,12 +269,12 @@ fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_c
     );
     assert_eq!(
         three_variant_reads.global_current_indexes,
-        two_variant_reads.global_current_indexes,
+        indexed_reads.global_current_indexes,
         "adding a schema variant must not add an index source"
     );
     assert_eq!(
         three_variant_reads.global_current_rows,
-        two_variant_reads.global_current_rows,
+        indexed_reads.global_current_rows,
         "adding a schema variant must not add a current-row source"
     );
 }

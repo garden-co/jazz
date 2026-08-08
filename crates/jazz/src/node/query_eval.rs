@@ -3247,7 +3247,6 @@ fn normalize_reachable(
         binding_source_shape,
         param_types,
     )?;
-
     let frontier_node = RowSetNodeId(format!("{reachable_id}:frontier"));
     nodes.insert(
         frontier_node.clone(),
@@ -3584,7 +3583,13 @@ fn normalize_reachable_seed(
             ));
         }
         let seed_source = reachable_seed_source_id(seed, reachable_id);
-        let columns = reachable_seed_frontier_columns(schema, &seed_source, seed)?;
+        let mut columns = reachable_seed_frontier_columns(schema, &seed_source, seed)?;
+        let edge_route_columns = reachable_edge_route_columns(reachable, param_types)?;
+        for column in &edge_route_columns {
+            if !columns.iter().any(|existing| existing.name == column.name) {
+                columns.push(column.clone());
+            }
+        }
         let user_column_ty = seed
             .user_column
             .as_ref()
@@ -3668,6 +3673,10 @@ fn normalize_reachable_seed(
                 value: NormalizedValueRef::Param(claim_field.clone()),
             });
         }
+        seed_columns.extend(edge_route_columns.into_iter().map(|column| RowProjection {
+            output: typed_output_field(&column.name, column.ty),
+            value: column.value,
+        }));
         nodes.insert(
             seed_project_node.clone(),
             RowSetExpr::Project {
@@ -3678,7 +3687,12 @@ fn normalize_reachable_seed(
         return Ok((seed_project_node, columns));
     }
 
-    let columns = reachable_frontier_columns(&reachable.from, param_types)?;
+    let mut columns = reachable_frontier_columns(&reachable.from, param_types)?;
+    for column in reachable_edge_route_columns(reachable, param_types)? {
+        if !columns.iter().any(|existing| existing.name == column.name) {
+            columns.push(column);
+        }
+    }
     let seed_node = RowSetNodeId(format!("{reachable_id}:seed"));
     nodes.insert(
         seed_node.clone(),
@@ -3689,6 +3703,25 @@ fn normalize_reachable_seed(
         },
     );
     Ok((seed_node, columns))
+}
+
+fn reachable_edge_route_columns(
+    reachable: &crate::query::ReachableVia,
+    param_types: &BTreeMap<String, ColumnType>,
+) -> Result<Vec<ValueSourceColumn>, Error> {
+    predicate_params(&reachable.edge_filters)
+        .into_iter()
+        .map(|param| {
+            let ty = param_types.get(&param).cloned().ok_or_else(|| {
+                Error::QueryLowering(format!("unknown reachable edge parameter {param}"))
+            })?;
+            Ok(ValueSourceColumn {
+                name: route_param_field(&param),
+                value: NormalizedValueRef::Param(param),
+                ty,
+            })
+        })
+        .collect()
 }
 
 fn reachable_seed_frontier_columns(
@@ -7088,7 +7121,9 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<Option<BindingViewKey>, Error> {
-        if !self.can_use_prepared_current_query_plan(shape) {
+        if !self.can_use_prepared_current_query_plan(shape)
+            || self.query_uses_heterogeneous_physical_lineage(shape)
+        {
             return Ok(None);
         }
         let binding_view_key = BindingViewKey::new(
@@ -7105,6 +7140,74 @@ where
 
     fn can_use_prepared_current_query_plan(&self, shape: &ValidatedQuery) -> bool {
         shape.schema_version() == self.catalogue.current_schema_version_id
+    }
+
+    fn query_uses_heterogeneous_physical_lineage(&self, shape: &ValidatedQuery) -> bool {
+        let Some(tables) = self.query_storage_read_tables(shape) else {
+            return true;
+        };
+        tables.into_iter().any(|logical_table| {
+            let Ok(table_id) =
+                self.physical_table_id_for_schema(shape.schema_version(), &logical_table)
+            else {
+                return true;
+            };
+            self.catalogue
+                .physical_mappings
+                .iter()
+                .any(|(schema_version, mapping)| {
+                    *schema_version != shape.schema_version()
+                        && mapping
+                            .tables
+                            .values()
+                            .any(|table| table.table_id == table_id)
+                })
+        })
+    }
+
+    fn query_storage_read_tables(&self, shape: &ValidatedQuery) -> Option<BTreeSet<String>> {
+        let query = shape.query();
+        let read_schema_version = shape.schema_version();
+        let mut tables = BTreeSet::from([query.table.clone()]);
+        tables.extend(query.joins.iter().map(|join| join.table.clone()));
+        for reachable in &query.reachable {
+            tables.insert(reachable.access_table.clone());
+            tables.insert(reachable.edge_table.clone());
+            if let Some(seed) = &reachable.seed {
+                tables.insert(seed.table.clone());
+            }
+        }
+        self.collect_include_read_tables(
+            &query.table,
+            read_schema_version,
+            &query.includes,
+            &mut tables,
+        )?;
+        Some(tables)
+    }
+
+    fn collect_include_read_tables(
+        &self,
+        root_table: &str,
+        read_schema_version: SchemaVersionId,
+        includes: &[Include],
+        tables: &mut BTreeSet<String>,
+    ) -> Option<()> {
+        for include in includes {
+            if !include.require && include.join_mode != crate::query::JoinMode::Inner {
+                continue;
+            }
+            let mut current_table_name = root_table.to_owned();
+            for segment in include.path.split('.') {
+                let current_table = self
+                    .table_in_schema(&current_table_name, read_schema_version)
+                    .ok()?;
+                let target_table = current_table.references.get(segment)?.clone();
+                tables.insert(target_table.clone());
+                current_table_name = target_table;
+            }
+        }
+        Some(())
     }
 
     fn settled_binding_view_source_rows(
