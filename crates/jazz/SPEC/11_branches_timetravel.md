@@ -45,6 +45,7 @@ Invariant digest:
 - `INV-BRANCH-33`: The calculator MUST consume an exact current-schema contribution view containing projected values, authored presence, and strategy operations; when storage/lenses cannot supply that view exactly, or the initiator cannot prove source-read authorization for every included content/deletion contribution, it MUST fail locally before minting the ordinary transaction.
 - `INV-BRANCH-34`: A source contribution is target-known only when it is already present in the exact target-parent contribution closure or an exact field substitution names that dot; sharing a `TxId`, appearing inside `from_frontier`/`through_frontier`, or transferring another field from the same source version MUST NOT suppress an omitted row, layer, column, or operation, and a reducing strategy's substitution MUST name every novel dot reduced into its output, including losing concurrent dots.
 - `INV-BRANCH-35`: Every transaction MUST carry one canonical operational target lineage (`Root` or a stable `BranchId`); all ordinary persistence, recovery, synchronization, authorization, fate, and exact-retransmission paths MUST route its complete commit unit to that lineage without interpreting branch-merge provenance.
+- `INV-BRANCH-36`: Before a receiver may admit a commit unit or view payload targeted at a branch, trusted transport MUST deliver the durable branch record needed to route that lineage. A receiver that observes data first MUST park it, request the bounded missing branch record, and drain it only after exact idempotent metadata admission; a branch record received without a currently requested readable view reveals no branch row payload.
 
 ## Details
 
@@ -139,12 +140,23 @@ effects are written. Consequently a target reader can process a merge as an
 ordinary transaction once routing has selected its target partition, without
 source-branch knowledge.
 
+**Synchronization.** Branch metadata is a durable routing prerequisite, not a
+replacement transaction format. Cores and edges may retain every branch record
+and branch-target transaction. When a client registers a branch read view, the
+serving node first applies the branch-row read gate, then sends the exact branch
+record before any branch-target version or view payload. A client parks an
+out-of-order branch-target unit, requests the missing record through the
+ordinary bounded repair lane, and resumes normal ingest after idempotent
+metadata admission (`INV-BRANCH-36`). The branch target remains solely the
+ordinary transaction's `target_lineage`; metadata never reconstructs a facade
+state or gives an unauthorized client branch rows.
+
 **Implementation status.** The current branch write model rejects exclusive
 branch writes: `open_exclusive_on_branch` returns
 `UnsupportedBranchExclusive`, and `branch_exclusive_returns_v1_error` covers
 that behavior. Branch subscriptions are not yet implemented. Their intended
-contract is `INV-BRANCH-16`. A write to a non-open or unknown branch fails
-rather than creating an implicit branch (`INV-BRANCH-14`).
+contract is `INV-BRANCH-16` and `INV-BRANCH-36`. A write to a non-open or
+unknown branch fails rather than creating an implicit branch (`INV-BRANCH-14`).
 
 _Further invariants._ `INV-BRANCH-10` — branch metadata (including the frozen
 `base_global` cut) is durably recoverable across reopen. `INV-BRANCH-12` —
