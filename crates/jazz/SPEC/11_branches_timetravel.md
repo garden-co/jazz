@@ -43,7 +43,7 @@ Invariant digest:
 - `INV-BRANCH-31`: Contribution closure and subtraction MUST be tracked per exact `(table, row, layer, column-or-operation)` dot, never transaction-wide; sharing a multi-row `TxId` MUST NOT make unrelated dots known.
 - `INV-BRANCH-32`: Every supported merge strategy MUST provide local `extract_native(parent contribution closure, stored value/ops)` and `encode_target_relative(novel contribution, target frontier)` semantics; merge calculation MUST fail locally when either capability is absent.
 - `INV-BRANCH-33`: The calculator MUST consume an exact current-schema contribution view containing projected values, authored presence, and strategy operations; when storage/lenses cannot supply that view exactly, or the initiator cannot prove source-read authorization for every included content/deletion contribution, it MUST fail locally before minting the ordinary transaction.
-- `INV-BRANCH-34`: A source contribution is target-known only when an exact validated field substitution names that dot; sharing a `TxId`, appearing inside `from_frontier`/`through_frontier`, or transferring another field from the same source version MUST NOT suppress an omitted row, layer, column, or operation.
+- `INV-BRANCH-34`: A source contribution is target-known only when it is already present in the exact target-parent contribution closure or an exact validated field substitution names that dot; sharing a `TxId`, appearing inside `from_frontier`/`through_frontier`, or transferring another field from the same source version MUST NOT suppress an omitted row, layer, column, or operation, and a reducing strategy's substitution MUST name every novel dot reduced into its output, including losing concurrent dots.
 
 ## Details
 
@@ -241,8 +241,11 @@ dots through ordinary lineage-parent edges and prior validated field
 substitutions. It subtracts exactly the dots already represented by the target
 snapshot from the source dots reachable at the examined source cut. The
 remaining set is the **novel contribution set**. `from_frontier` and
-`through_frontier` summarize cuts examined by the calculator, but only explicit
-field substitutions establish target-known dots.
+`through_frontier` summarize cuts examined by the calculator. A dot is known to
+the target only through the exact target-parent closure or an explicit validated
+field substitution. A reducing strategy such as LWW names every novel dot it
+reduced into the emitted field, not merely the dot whose value won, so a losing
+concurrent write cannot echo in a later merge.
 
 This recursive expansion is what prevents bidirectional and transitive echo.
 For example, after main→B imports a main counter increment and text operation,
