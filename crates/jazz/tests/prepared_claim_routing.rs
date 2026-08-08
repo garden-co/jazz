@@ -497,13 +497,7 @@ fn policy_dependency_reads_do_not_expose_dependency_rows() {
     seed(&db, team_a, team_b, "region-a", "region-b");
     db.set_identity_claims(
         USER_A,
-        BTreeMap::from([
-            ("region".to_owned(), Value::String("region-a".to_owned())),
-            (
-                "membership_region".to_owned(),
-                Value::String("not-region-a".to_owned()),
-            ),
-        ]),
+        BTreeMap::from([("region".to_owned(), Value::String("region-a".to_owned()))]),
     );
     db.set_identity_claims(
         USER_B,

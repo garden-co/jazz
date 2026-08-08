@@ -54,6 +54,14 @@ pub(crate) fn claim_param_field(path: &ClaimPath) -> String {
 
 pub(crate) fn claim_path_from_param_field(field: &str) -> Option<ClaimPath> {
     let mut rest = field.strip_prefix(CLAIM_PARAM_PREFIX)?;
+    if let Some(typed) = rest.strip_prefix("typed:") {
+        let (len, tail) = typed.split_once(':')?;
+        let len = len.parse::<usize>().ok()?;
+        if tail.len() <= len || tail.as_bytes().get(len) != Some(&b':') {
+            return None;
+        }
+        return claim_path_from_param_field(&tail[len + 1..]);
+    }
     if !rest.starts_with("v1:") {
         return Some(ClaimPath(rest.split('_').map(str::to_owned).collect()));
     }

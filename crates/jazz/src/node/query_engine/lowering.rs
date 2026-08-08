@@ -357,6 +357,9 @@ fn binding_user_param_types(
 ) -> CapabilityResult<BTreeMap<String, ColumnType>> {
     let mut params = binding.extra_user_params.clone();
     for name in binding.values.keys() {
+        if binding.claim_params.contains_key(name) {
+            continue;
+        }
         let Some(ty) = binding.param_types.get(name) else {
             return Err(single_gap_report(UnsupportedReason::Runtime(format!(
                 "binding parameter '{name}' is missing a validated type"

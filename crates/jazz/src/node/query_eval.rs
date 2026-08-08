@@ -6113,12 +6113,7 @@ where
             | PolicyContext::AuthorizationSubplan { claims, .. } => claims,
             PolicyContext::System => return Ok(()),
         };
-        let mut pending = normalized_source_tables(input);
-        let mut visited = BTreeSet::new();
-        while let Some(table_name) = pending.pop_first() {
-            if !visited.insert(table_name.clone()) {
-                continue;
-            }
+        for table_name in normalized_source_tables(input) {
             let table = schema
                 .tables
                 .iter()
@@ -6127,32 +6122,11 @@ where
             let mut query = authorization_query_from_read_policy(table);
             let mut values = BTreeMap::new();
             bind_scope_claim_operands(&mut query, claims, &mut values);
-            let shape = query.validate(schema)?;
-            for (name, ty) in shape.params() {
-                let Some(path) = claim_path_from_param_field(name) else {
-                    continue;
-                };
-                let candidate = ProgramClaimParam {
-                    path,
-                    ty: ty.clone(),
-                };
-                if let Some(existing) = params.get(name)
-                    && existing != &candidate
-                {
-                    return Err(Error::QueryCapability(format!(
-                        "policy claim parameter '{name}' has conflicting schema types"
-                    )));
-                }
-                params.insert(name.clone(), candidate);
-            }
-            coerce_binding_values_for_shape(&shape, &mut values);
-            let binding = shape.bind(values)?;
-            let normalized = self.normalized_row_set_shape(&shape, &binding)?;
-            pending.extend(
-                normalized_source_tables(&normalized)
-                    .difference(&visited)
-                    .cloned(),
-            );
+            params.extend(disambiguate_policy_claim_params(
+                &mut query,
+                schema,
+                &mut values,
+            )?);
         }
         Ok(())
     }
@@ -10019,6 +9993,11 @@ where
                 "maintained subscription view policy slice does not support include policies",
             ));
         }
+        let declared_claim_params = disambiguate_policy_claim_params(
+            &mut query,
+            policy_schema,
+            &mut policy_binding_values,
+        )?;
         let policy_shape = query.validate(policy_schema)?;
         coerce_binding_values_for_shape(&policy_shape, &mut policy_binding_values);
         let policy_binding = policy_shape.bind(policy_binding_values.clone())?;
@@ -10045,6 +10024,7 @@ where
             self.normalized_row_set_shape(&policy_shape, &binding)?
         };
         let mut claim_params = binding_claim_params_for_shape(&input_shape);
+        claim_params.extend(declared_claim_params);
         collect_reachable_seed_claim_params(
             policy_schema,
             policy_shape.query(),
@@ -10601,6 +10581,129 @@ fn bind_scope_claim_operand(
     let param = claim_param_field(&ClaimPath(vec![name.clone()]));
     binding_values.insert(param.clone(), value);
     *operand = Operand::Param(param);
+}
+
+fn disambiguate_policy_claim_params(
+    query: &mut JazzQuery,
+    schema: &JazzSchema,
+    binding_values: &mut BTreeMap<String, Value>,
+) -> Result<BTreeMap<String, ProgramClaimParam>, Error> {
+    let shape = query.validate(schema)?;
+    let mut aliases = BTreeMap::new();
+    let mut claims = BTreeMap::new();
+    for (name, ty) in shape.params() {
+        let Some(path) = claim_path_from_param_field(name) else {
+            continue;
+        };
+        let alias = typed_claim_param_alias(name, ty);
+        aliases.insert(name.clone(), alias.clone());
+        claims.insert(
+            alias,
+            ProgramClaimParam {
+                path,
+                ty: ty.clone(),
+            },
+        );
+    }
+    rename_query_params(query, &aliases);
+    for (name, alias) in aliases {
+        if let Some(value) = binding_values.remove(&name) {
+            binding_values.insert(alias, value);
+        }
+    }
+    Ok(claims)
+}
+
+fn typed_claim_param_alias(name: &str, ty: &ColumnType) -> String {
+    let ty = format!("{ty:?}");
+    format!("__jazz_claim_typed:{}:{ty}:{name}", ty.len())
+}
+
+fn rename_query_params(query: &mut JazzQuery, aliases: &BTreeMap<String, String>) {
+    for predicate in &mut query.filters {
+        rename_predicate_params(predicate, aliases);
+    }
+    for join in &mut query.joins {
+        rename_join_params(join, aliases);
+    }
+    for reachable in &mut query.reachable {
+        rename_reachable_params(reachable, aliases);
+    }
+    for branch in &mut query.policy_branches {
+        for predicate in &mut branch.filters {
+            rename_predicate_params(predicate, aliases);
+        }
+        for join in &mut branch.joins {
+            rename_join_params(join, aliases);
+        }
+        for reachable in &mut branch.reachable {
+            rename_reachable_params(reachable, aliases);
+        }
+    }
+}
+
+fn rename_join_params(join: &mut JoinVia, aliases: &BTreeMap<String, String>) {
+    for predicate in &mut join.filters {
+        rename_predicate_params(predicate, aliases);
+    }
+    for join in &mut join.nested_joins {
+        rename_join_params(join, aliases);
+    }
+}
+
+fn rename_reachable_params(
+    reachable: &mut crate::query::ReachableVia,
+    aliases: &BTreeMap<String, String>,
+) {
+    rename_operand_param(&mut reachable.from, aliases);
+    for predicate in &mut reachable.access_filters {
+        rename_predicate_params(predicate, aliases);
+    }
+    for predicate in &mut reachable.edge_filters {
+        rename_predicate_params(predicate, aliases);
+    }
+    if let Some(seed) = &mut reachable.seed {
+        for predicate in &mut seed.filters {
+            rename_predicate_params(predicate, aliases);
+        }
+    }
+}
+
+fn rename_predicate_params(predicate: &mut Predicate, aliases: &BTreeMap<String, String>) {
+    match predicate {
+        Predicate::All(predicates) | Predicate::Any(predicates) => {
+            for predicate in predicates {
+                rename_predicate_params(predicate, aliases);
+            }
+        }
+        Predicate::Not(predicate) => rename_predicate_params(predicate, aliases),
+        Predicate::Eq(left, right)
+        | Predicate::Ne(left, right)
+        | Predicate::Gt(left, right)
+        | Predicate::Gte(left, right)
+        | Predicate::Lt(left, right)
+        | Predicate::Lte(left, right)
+        | Predicate::Contains(left, right) => {
+            rename_operand_param(left, aliases);
+            rename_operand_param(right, aliases);
+        }
+        Predicate::In(left, values) => {
+            rename_operand_param(left, aliases);
+            for value in values {
+                rename_operand_param(value, aliases);
+            }
+        }
+        Predicate::IsNull(operand) => rename_operand_param(operand, aliases),
+    }
+}
+
+fn rename_operand_param(operand: &mut Operand, aliases: &BTreeMap<String, String>) {
+    let Operand::Param(name) = operand else {
+        return;
+    };
+    if let Some(alias) = aliases.get(name) {
+        *name = alias.clone();
+    }
 }
 
 fn false_predicate() -> Predicate {
@@ -12732,6 +12835,43 @@ mod tests {
         assert_ne!(
             first,
             query_binding_source_shape_for_parts(&params, &different_claims)
+        );
+    }
+
+    #[test]
+    fn one_claim_path_has_distinct_prepared_slots_per_numeric_width() {
+        let field = claim_param_field(&ClaimPath(vec!["access_level".to_owned()]));
+        let i32_alias = typed_claim_param_alias(&field, &ColumnType::I32);
+        let i64_alias = typed_claim_param_alias(&field, &ColumnType::I64);
+
+        assert_ne!(i32_alias, i64_alias);
+        assert_eq!(
+            claim_path_from_param_field(&i32_alias),
+            Some(ClaimPath(vec!["access_level".to_owned()]))
+        );
+        let slots = BTreeMap::from([
+            (
+                i32_alias,
+                ProgramClaimParam {
+                    path: ClaimPath(vec!["access_level".to_owned()]),
+                    ty: ColumnType::I32,
+                },
+            ),
+            (
+                i64_alias,
+                ProgramClaimParam {
+                    path: ClaimPath(vec!["access_level".to_owned()]),
+                    ty: ColumnType::I64,
+                },
+            ),
+        ]);
+        assert_eq!(slots.len(), 2);
+        assert_eq!(
+            slots
+                .values()
+                .map(|slot| slot.path.clone())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([ClaimPath(vec!["access_level".to_owned()])])
         );
     }
 
