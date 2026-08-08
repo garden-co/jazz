@@ -773,16 +773,6 @@ where
                 .iter()
                 .find(|table| table.name == table_lens.target_table)
                 .ok_or(Error::InvalidCatalogueUpdate("table lens is unknown"))?;
-            let table_has_large_values = source_table
-                .columns
-                .iter()
-                .chain(&target_table.columns)
-                .any(|column| column.large_value.is_some());
-            if table_has_large_values && source_table.name != target_table.name {
-                return Err(Error::InvalidCatalogueUpdate(
-                    "large-value table rename requires schema-qualified handles",
-                ));
-            }
             let mut columns = source_table
                 .columns
                 .iter()
@@ -804,17 +794,6 @@ where
                         saw_table_rename = true;
                     }
                     LensOp::RenameColumn { from, to } => {
-                        if from != to
-                            && source_table
-                                .columns
-                                .iter()
-                                .find(|column| column.name == *from)
-                                .is_some_and(|column| column.large_value.is_some())
-                        {
-                            return Err(Error::InvalidCatalogueUpdate(
-                                "large-value column rename requires schema-qualified handles",
-                            ));
-                        }
                         if columns.contains_key(to) {
                             return Err(Error::InvalidCatalogueUpdate(
                                 "column rename collides with existing column",
@@ -3389,6 +3368,11 @@ where
             self.materialize_large_value_column(table_schema, primary_version, column)?;
         let ops = text_oplog::diff(&primary_value, &merged);
         let ops = self.extent_back_text_ops(
+            self.schema_version_for_alias(primary_version.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "large-value schema alias is unknown",
+                ))?,
+            &table_schema.name,
             AuthorId(self.node_uuid.0),
             primary_version.row_uuid(),
             column,
@@ -3531,15 +3515,22 @@ where
                 content: TextContent::Inline(merged),
             });
         } else {
-            merge_ops.extend(self.extent_back_text_ops(
-                AuthorId(self.node_uuid.0),
-                primary_version.row_uuid(),
-                column,
-                vec![TextOp::Insert {
-                    pos: 0,
-                    content: TextContent::Inline(merged),
-                }],
-            )?);
+            merge_ops.extend(
+                self.extent_back_text_ops(
+                    self.schema_version_for_alias(primary_version.schema_version_alias())
+                        .ok_or(Error::InvalidStoredValue(
+                            "large-value schema alias is unknown",
+                        ))?,
+                    &table_schema.name,
+                    AuthorId(self.node_uuid.0),
+                    primary_version.row_uuid(),
+                    column,
+                    vec![TextOp::Insert {
+                        pos: 0,
+                        content: TextContent::Inline(merged),
+                    }],
+                )?,
+            );
         }
         Ok(Some(LargeValueMergeCell {
             value: Value::Bytes(encode_extent_text_ops(&merge_ops)),

@@ -1612,7 +1612,14 @@ fn content_extent_fetch_rejects_row_context_mismatch_and_invisible_content() {
     let other_row = row(8);
     let extent = node
         .content_store()
-        .append(author, visible_row, "title", b"unreferenced")
+        .append(
+            schema().version_id(),
+            "todos",
+            author,
+            visible_row,
+            "title",
+            b"unreferenced",
+        )
         .unwrap();
     let mut peer = PeerState::client_link(author);
 

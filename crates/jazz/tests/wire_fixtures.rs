@@ -102,6 +102,8 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         read_view: Default::default(),
     };
     let content_extent = Extent {
+        schema: schema_version,
+        table: "docs".to_owned(),
         writer: author,
         row,
         column: "body".to_owned(),

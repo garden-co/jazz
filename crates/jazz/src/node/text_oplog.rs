@@ -1,6 +1,6 @@
 //! Pure operation-log algebra for large text/blob column values.
 
-use crate::ids::{AuthorId, NodeUuid, RowUuid};
+use crate::ids::{AuthorId, NodeUuid, RowUuid, SchemaVersionId};
 use crate::time::TxTime;
 
 use super::Error;
@@ -301,6 +301,11 @@ fn encode_content(bytes: &mut Vec<u8>, content: &Content) {
         }
         Content::Ref(extent) => {
             bytes.push(CONTENT_REF);
+            bytes.extend_from_slice(extent.schema.0.as_bytes());
+            let table = extent.table.as_bytes();
+            let table_len = u32::try_from(table.len()).expect("table name length exceeds u32");
+            bytes.extend_from_slice(&table_len.to_be_bytes());
+            bytes.extend_from_slice(table);
             bytes.extend_from_slice(extent.writer.as_bytes());
             bytes.extend_from_slice(extent.row.as_bytes());
             let column = extent.column.as_bytes();
@@ -320,6 +325,26 @@ fn decode_content(cursor: &mut Cursor<'_>) -> Result<Content, Error> {
             Ok(Content::Inline(cursor.read_bytes(len)?.to_vec()))
         }
         CONTENT_REF => {
+            let schema = SchemaVersionId(uuid::Uuid::from_bytes(
+                cursor
+                    .read_bytes(UUID_LEN)?
+                    .try_into()
+                    .map_err(|_| Error::InvalidStoredValue("invalid content schema"))?,
+            ));
+            let table_len = u32::from_be_bytes(
+                cursor
+                    .read_bytes(U32_LEN)?
+                    .try_into()
+                    .map_err(|_| Error::InvalidStoredValue("invalid content table length"))?,
+            );
+            let table = String::from_utf8(
+                cursor
+                    .read_bytes(usize::try_from(table_len).map_err(|_| {
+                        Error::InvalidStoredValue("content table length too large")
+                    })?)?
+                    .to_vec(),
+            )
+            .map_err(|_| Error::InvalidStoredValue("content table is not utf-8"))?;
             let writer = AuthorId(uuid::Uuid::from_bytes(
                 cursor
                     .read_bytes(UUID_LEN)?
@@ -349,6 +374,8 @@ fn decode_content(cursor: &mut Cursor<'_>) -> Result<Content, Error> {
             let offset = cursor.read_u64()?;
             let len = cursor.read_u64()?;
             Ok(Content::Ref(Extent {
+                schema,
+                table,
                 writer,
                 row,
                 column,

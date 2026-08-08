@@ -48,29 +48,46 @@ fn content_store_appends_reads_isolates_and_survives_reopen() {
 
     let first = opened
         .content_store()
-        .append(writer, row_id, "body", b"hello ")
+        .append(schema().version_id(), "todos", writer, row_id, "body", b"hello ")
         .unwrap();
     let second = opened
         .content_store()
-        .append(writer, row_id, "body", b"world")
+        .append(schema().version_id(), "todos", writer, row_id, "body", b"world")
         .unwrap();
     let other_column = opened
         .content_store()
-        .append(writer, row_id, "notes", b"column")
+        .append(schema().version_id(), "todos", writer, row_id, "notes", b"column")
         .unwrap();
     let other_row_extent = opened
         .content_store()
-        .append(writer, other_row, "body", b"row")
+        .append(schema().version_id(), "todos", writer, other_row, "body", b"row")
         .unwrap();
     let other_writer_extent = opened
         .content_store()
-        .append(other_writer, row_id, "body", b"writer")
+        .append(schema().version_id(), "todos", other_writer, row_id, "body", b"writer")
+        .unwrap();
+    let readded_schema = SchemaVersionId::from_bytes([0x9a; 16]);
+    let readded_extent = opened
+        .content_store()
+        .append(
+            readded_schema,
+            "todos",
+            writer,
+            row_id,
+            "body",
+            b"new epoch",
+        )
         .unwrap();
 
     assert_eq!(first.offset, 0);
     assert_eq!(first.len, 6);
     assert_eq!(second.offset, 6);
     assert_eq!(second.len, 5);
+    assert_eq!(readded_extent.offset, 0);
+    assert_eq!(
+        opened.content_store().read(&readded_extent).unwrap(),
+        b"new epoch"
+    );
     assert_eq!(opened.content_store().read(&first).unwrap(), b"hello ");
     assert_eq!(opened.content_store().read(&second).unwrap(), b"world");
     assert_eq!(
@@ -92,7 +109,7 @@ fn content_store_appends_reads_isolates_and_survives_reopen() {
     assert_eq!(reopened.content_store().read(&second).unwrap(), b"world");
     let third = reopened
         .content_store()
-        .append(writer, row_id, "body", b"!")
+        .append(schema().version_id(), "todos", writer, row_id, "body", b"!")
         .unwrap();
     assert_eq!(third.offset, 11);
     assert_eq!(reopened.content_store().read(&third).unwrap(), b"!");
@@ -107,21 +124,21 @@ fn content_store_checkpoints_are_versioned_and_survive_reopen() {
 
     opened
         .content_store()
-        .put_checkpoint("notes", row_id, "body", first, b"first")
+        .put_checkpoint(schema().version_id(), "notes", row_id, "body", first, b"first")
         .unwrap();
     opened
         .content_store()
-        .put_checkpoint("notes", row_id, "body", second, b"second")
+        .put_checkpoint(schema().version_id(), "notes", row_id, "body", second, b"second")
         .unwrap();
     opened
         .content_store()
-        .put_checkpoint("notes", row_id, "summary", first, b"summary")
+        .put_checkpoint(schema().version_id(), "notes", row_id, "summary", first, b"summary")
         .unwrap();
 
     assert_eq!(
         opened
             .content_store()
-            .checkpoint("notes", row_id, "body", first)
+            .checkpoint(schema().version_id(), "notes", row_id, "body", first)
             .unwrap()
             .as_deref(),
         Some(b"first".as_slice())
@@ -129,7 +146,7 @@ fn content_store_checkpoints_are_versioned_and_survive_reopen() {
     assert_eq!(
         opened
             .content_store()
-            .checkpoint("notes", row_id, "body", second)
+            .checkpoint(schema().version_id(), "notes", row_id, "body", second)
             .unwrap()
             .as_deref(),
         Some(b"second".as_slice())
@@ -137,14 +154,14 @@ fn content_store_checkpoints_are_versioned_and_survive_reopen() {
     assert_eq!(
         opened
             .content_store()
-            .checkpoint("notes", row_id, "summary", first)
+            .checkpoint(schema().version_id(), "notes", row_id, "summary", first)
             .unwrap()
             .as_deref(),
         Some(b"summary".as_slice())
     );
     assert!(opened
         .content_store()
-        .checkpoint("notes", row_id, "missing", first)
+        .checkpoint(schema().version_id(), "notes", row_id, "missing", first)
         .unwrap()
         .is_none());
 
@@ -153,7 +170,7 @@ fn content_store_checkpoints_are_versioned_and_survive_reopen() {
     assert_eq!(
         reopened
             .content_store()
-            .checkpoint("notes", row_id, "body", second)
+            .checkpoint(schema().version_id(), "notes", row_id, "body", second)
             .unwrap()
             .as_deref(),
         Some(b"second".as_slice())
@@ -164,6 +181,8 @@ fn content_store_checkpoints_are_versioned_and_survive_reopen() {
 fn content_store_put_extent_is_idempotent_and_rejects_conflicting_bytes() {
     let (_temp_dir, node) = open_node();
     let extent = crate::node::content_store::Extent {
+        schema: schema().version_id(),
+        table: "todos".to_owned(),
         writer: user(0xa1),
         row: row(0x44),
         column: "body".to_owned(),
@@ -186,6 +205,8 @@ fn content_store_reads_fail_closed_on_missing_or_gapped_ranges() {
     let writer = user(0xa2);
     let row_id = row(0x45);
     let first = crate::node::content_store::Extent {
+        schema: schema().version_id(),
+        table: "todos".to_owned(),
         writer,
         row: row_id,
         column: "body".to_owned(),
@@ -193,6 +214,8 @@ fn content_store_reads_fail_closed_on_missing_or_gapped_ranges() {
         len: 3,
     };
     let second = crate::node::content_store::Extent {
+        schema: schema().version_id(),
+        table: "todos".to_owned(),
         writer,
         row: row_id,
         column: "body".to_owned(),
@@ -203,6 +226,8 @@ fn content_store_reads_fail_closed_on_missing_or_gapped_ranges() {
     node.content_store().put_extent(&second, b"fg").unwrap();
 
     let missing_tail = crate::node::content_store::Extent {
+        schema: schema().version_id(),
+        table: "todos".to_owned(),
         writer,
         row: row_id,
         column: "body".to_owned(),
@@ -216,6 +241,8 @@ fn content_store_reads_fail_closed_on_missing_or_gapped_ranges() {
     assert!(!node.content_store().contains(&missing_tail).unwrap());
 
     let absent = crate::node::content_store::Extent {
+        schema: schema().version_id(),
+        table: "todos".to_owned(),
         writer,
         row: row_id,
         column: "body".to_owned(),
@@ -235,12 +262,26 @@ fn evict_cold_removes_content_bytes_and_preserves_pin_set() {
     let row_uuid = row(0x46);
     let extent = opened
         .content_store()
-        .append(user(0xa1), row_uuid, "body", b"evict me")
+        .append(
+            schema().version_id(),
+            "todos",
+            user(0xa1),
+            row_uuid,
+            "body",
+            b"evict me",
+        )
         .unwrap();
     let checkpoint_tx = TxId::new(crate::time::TxTime(46), node(1));
     opened
         .content_store()
-        .put_checkpoint("todos", row_uuid, "body", checkpoint_tx, b"checkpoint")
+        .put_checkpoint(
+            schema().version_id(),
+            "todos",
+            row_uuid,
+            "body",
+            checkpoint_tx,
+            b"checkpoint",
+        )
         .unwrap();
 
     let pending_tx = opened
@@ -620,6 +661,66 @@ fn large_value_schema() -> JazzSchema {
     )])
 }
 
+#[test]
+fn authored_schema_qualified_handle_hydrates_after_table_and_column_rename() {
+    let base = large_value_schema();
+    let target = SchemaVersion::new(JazzSchema::new([TableSchema::new(
+        "articles",
+        [crate::schema::ColumnSchema::blob("content")],
+    )]));
+    let row_uuid = row(0x64);
+    let (_dir, mut core) = open_node_with_schema(node(0x64), base.clone());
+    let tx_id = core
+        .commit_mergeable(
+            MergeableCommit::new("docs", row_uuid, 10).cells(BTreeMap::from([(
+                "body".to_owned(),
+                Value::Bytes(b"schema-qualified".to_vec()),
+            )])),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit(tx_id).unwrap();
+    let old_table = &base.tables[0];
+    let handle = core
+        .current_rows("docs", DurabilityTier::Global)
+        .unwrap()
+        .remove(0)
+        .cell(old_table, "body");
+    let Some(Value::Bytes(handle)) = handle else {
+        panic!("expected large-value handle");
+    };
+
+    publish_schema_lineage(
+        &mut core,
+        target.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            target.id,
+            vec![TableLens {
+                source_table: "docs".to_owned(),
+                target_table: "articles".to_owned(),
+                ops: vec![
+                    LensOp::RenameTable {
+                        from: "docs".to_owned(),
+                        to: "articles".to_owned(),
+                    },
+                    LensOp::RenameColumn {
+                        from: "body".to_owned(),
+                        to: "content".to_owned(),
+                    },
+                ],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        core.hydrate_large_value_handle(&handle).unwrap(),
+        b"schema-qualified"
+    );
+}
+
 fn text_large_value_schema() -> JazzSchema {
     JazzSchema::new([TableSchema::new(
         "docs",
@@ -770,12 +871,12 @@ fn accepted_large_value_ingestion_places_checkpoint_at_interval() {
 
     assert!(node
         .content_store()
-        .checkpoint("docs", row_uuid, "body", tx_ids[2])
+        .checkpoint(large_value_schema().version_id(), "docs", row_uuid, "body", tx_ids[2])
         .unwrap()
         .is_some());
     assert!(node
         .content_store()
-        .checkpoint("docs", row_uuid, "body", tx_ids[3])
+        .checkpoint(large_value_schema().version_id(), "docs", row_uuid, "body", tx_ids[3])
         .unwrap()
         .is_none());
     assert_eq!(node.large_value_metrics().checkpoint_writes, 1);
@@ -867,7 +968,7 @@ fn sequential_text_document_crosses_extent_limit_and_replays_from_checkpoint_suf
     assert!(expected.len() > MAX_CONTENT_EXTENT_BYTES);
     assert!(opened
         .content_store()
-        .checkpoint("docs", row_uuid, "body", second_tx)
+        .checkpoint(large_value_schema().version_id(), "docs", row_uuid, "body", second_tx)
         .unwrap()
         .is_some());
     assert_eq!(
@@ -966,7 +1067,7 @@ fn concurrent_text_document_merge_over_extent_limit_is_extent_backed_and_checkpo
     let merge_tx = core.version_tx_id(&merge).unwrap();
     assert!(core
         .content_store()
-        .checkpoint("docs", row_uuid, "body", merge_tx)
+        .checkpoint(large_value_schema().version_id(), "docs", row_uuid, "body", merge_tx)
         .unwrap()
         .is_some());
 
@@ -1182,7 +1283,7 @@ fn registered_markdown_strategy_merge_over_extent_limit_is_extent_backed() {
     let merge_tx = core.version_tx_id(&merge).unwrap();
     assert!(core
         .content_store()
-        .checkpoint("docs", row_uuid, "body", merge_tx)
+        .checkpoint(large_value_schema().version_id(), "docs", row_uuid, "body", merge_tx)
         .unwrap()
         .is_some());
     assert_eq!(
@@ -1354,7 +1455,7 @@ fn registered_json_strategy_merge_over_extent_limit_is_extent_backed() {
     let merge_tx = core.version_tx_id(&merge).unwrap();
     assert!(core
         .content_store()
-        .checkpoint("docs", row_uuid, "body", merge_tx)
+        .checkpoint(large_value_schema().version_id(), "docs", row_uuid, "body", merge_tx)
         .unwrap()
         .is_some());
     assert_eq!(
@@ -1749,7 +1850,13 @@ fn merged_concurrent_large_value_body(left_first: bool) -> Option<Value> {
     assert_eq!(merge.parents().len(), 2);
     assert!(core
         .content_store()
-        .checkpoint("docs", row_uuid, "body", core.version_tx_id(&merge).unwrap())
+        .checkpoint(
+            large_value_schema().version_id(),
+            "docs",
+            row_uuid,
+            "body",
+            core.version_tx_id(&merge).unwrap(),
+        )
         .unwrap()
         .is_some());
 

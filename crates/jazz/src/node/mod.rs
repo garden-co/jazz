@@ -53,7 +53,7 @@ use crate::tx::{
 };
 
 const TEXT_EXTENT_OPS_MAGIC: &[u8] = b"JTXTREF1";
-const LARGE_VALUE_HANDLE_MAGIC: &[u8] = b"JLVH1";
+const LARGE_VALUE_HANDLE_MAGIC: &[u8] = b"JLVH2";
 const CLEAN_CLOSE_MARKER_NAME: &str = "node-clean-close";
 const CLEAN_CLOSE_MARKER_VERSION: u64 = 1;
 const STORAGE_CONSISTENCY_MARKER_NAME: &str = "settled-ahead-current-clean-through";
@@ -1555,12 +1555,26 @@ where
         let cell_payload = match column.large_value {
             Some(LargeValueKind::Text) => {
                 let text_ops = large_value_edit_ops_to_legacy_text_ops(inline_ops);
-                let ops = self.extent_back_text_ops(made_by, row_uuid, &column_name, text_ops)?;
+                let ops = self.extent_back_text_ops(
+                    write_schema_version,
+                    &table,
+                    made_by,
+                    row_uuid,
+                    &column_name,
+                    text_ops,
+                )?;
                 encode_extent_text_ops(&ops)
             }
             Some(LargeValueKind::Blob) => {
                 let text_ops = large_value_edit_ops_to_legacy_text_ops(inline_ops);
-                let ops = self.extent_back_text_ops(made_by, row_uuid, &column_name, text_ops)?;
+                let ops = self.extent_back_text_ops(
+                    write_schema_version,
+                    &table,
+                    made_by,
+                    row_uuid,
+                    &column_name,
+                    text_ops,
+                )?;
                 text_oplog::encode(&ops)
             }
             None => {
@@ -1892,7 +1906,14 @@ where
                     let ops = text_oplog::diff(&parent_value, &new_value)
                         .into_iter()
                         .collect::<Vec<_>>();
-                    let ops = self.extent_back_text_ops(writer, row_uuid, &column.name, ops)?;
+                    let ops = self.extent_back_text_ops(
+                        schema_version,
+                        &table.name,
+                        writer,
+                        row_uuid,
+                        &column.name,
+                        ops,
+                    )?;
                     cells.insert(
                         column.name.clone(),
                         Value::Bytes(encode_extent_text_ops(&ops)),
@@ -1902,7 +1923,14 @@ where
                     let ops = text_oplog::diff(&parent_value, &new_value)
                         .into_iter()
                         .collect::<Vec<_>>();
-                    let ops = self.extent_back_text_ops(writer, row_uuid, &column.name, ops)?;
+                    let ops = self.extent_back_text_ops(
+                        schema_version,
+                        &table.name,
+                        writer,
+                        row_uuid,
+                        &column.name,
+                        ops,
+                    )?;
                     cells.insert(column.name.clone(), Value::Bytes(text_oplog::encode(&ops)));
                 }
                 None => {}
@@ -1945,6 +1973,8 @@ where
 
     fn extent_back_text_ops(
         &self,
+        schema: SchemaVersionId,
+        table: &str,
         writer: AuthorId,
         row_uuid: RowUuid,
         column: &str,
@@ -1960,7 +1990,7 @@ where
                     for chunk in bytes.chunks(MAX_CONTENT_EXTENT_BYTES) {
                         let extent = self
                             .content_store()
-                            .append(writer, row_uuid, column, chunk)?;
+                            .append(schema, table, writer, row_uuid, column, chunk)?;
                         ops.push(TextOp::Insert {
                             pos,
                             content: TextContent::Ref(extent),
@@ -2008,9 +2038,16 @@ where
                         && version.layer() == VersionLayer::Content
                 })
                 .ok_or(Error::MissingTransaction(current))?;
-            if let Some(value) =
-                self.large_value_checkpoint(table, version.row_uuid(), column, current)?
-            {
+            if let Some(value) = self.large_value_checkpoint(
+                self.schema_version_for_alias(version.schema_version_alias())
+                    .ok_or(Error::InvalidStoredValue(
+                        "large-value schema alias is unknown",
+                    ))?,
+                table,
+                version.row_uuid(),
+                column,
+                current,
+            )? {
                 checkpoint = Some(value);
                 self.large_value_metrics.checkpoint_hits =
                     self.large_value_metrics.checkpoint_hits.saturating_add(1);
@@ -2134,13 +2171,14 @@ where
 
     fn large_value_checkpoint(
         &self,
+        schema: SchemaVersionId,
         table: &TableSchema,
         row_uuid: RowUuid,
         column: &str,
         version: TxId,
     ) -> Result<Option<Vec<u8>>, Error> {
         self.content_store()
-            .checkpoint(&table.name, row_uuid, column, version)
+            .checkpoint(schema, &table.name, row_uuid, column, version)
     }
 
     fn put_large_value_checkpoint(
@@ -2151,8 +2189,17 @@ where
         value: &[u8],
     ) -> Result<(), Error> {
         let tx_id = self.version_tx_id(version)?;
-        self.content_store()
-            .put_checkpoint(&table.name, version.row_uuid(), column, tx_id, value)
+        self.content_store().put_checkpoint(
+            self.schema_version_for_alias(version.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "large-value schema alias is unknown",
+                ))?,
+            &table.name,
+            version.row_uuid(),
+            column,
+            tx_id,
+            value,
+        )
     }
 
     pub(super) fn checkpoint_large_values_for_tx(&mut self, tx_id: TxId) -> Result<(), Error> {
@@ -2210,7 +2257,16 @@ where
                 })
                 .ok_or(Error::MissingTransaction(current))?;
             if self
-                .large_value_checkpoint(table, version.row_uuid(), column, current)?
+                .large_value_checkpoint(
+                    self.schema_version_for_alias(version.schema_version_alias())
+                        .ok_or(Error::InvalidStoredValue(
+                            "large-value schema alias is unknown",
+                        ))?,
+                    table,
+                    version.row_uuid(),
+                    column,
+                    current,
+                )?
                 .is_some()
             {
                 return Ok(replayed_ops);
@@ -2255,9 +2311,16 @@ where
                         && version.layer() == VersionLayer::Content
                 })
                 .ok_or(Error::MissingTransaction(current))?;
-            if let Some(value) =
-                self.large_value_checkpoint(table, version.row_uuid(), column, current)?
-            {
+            if let Some(value) = self.large_value_checkpoint(
+                self.schema_version_for_alias(version.schema_version_alias())
+                    .ok_or(Error::InvalidStoredValue(
+                        "large-value schema alias is unknown",
+                    ))?,
+                table,
+                version.row_uuid(),
+                column,
+                current,
+            )? {
                 checkpoint_len = Some(value.len());
                 break;
             }
@@ -2621,7 +2684,19 @@ where
         let len = self.large_value_column_len(table, version, column)?;
         let refs = self.large_value_extent_refs_for_version(table, version, column, kind)?;
         let tx_id = self.version_tx_id(version)?;
-        encode_large_value_handle(table, version.row_uuid(), column, tx_id, kind, len, refs)
+        encode_large_value_handle(
+            self.schema_version_for_alias(version.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "large-value schema alias is unknown",
+                ))?,
+            table,
+            version.row_uuid(),
+            column,
+            tx_id,
+            kind,
+            len,
+            refs,
+        )
     }
 
     fn large_value_extent_refs_for_version(
@@ -2679,7 +2754,21 @@ where
     /// Materialize the bytes referenced by a large-value handle returned in a row cell.
     pub fn hydrate_large_value_handle(&mut self, handle: &[u8]) -> Result<Vec<u8>, Error> {
         let handle = decode_large_value_handle(handle)?;
-        let table = self.table(&handle.table)?.clone();
+        let table = self
+            .catalogue
+            .catalogue_schemas
+            .get(&handle.schema)
+            .and_then(|schema| {
+                schema
+                    .schema
+                    .tables
+                    .iter()
+                    .find(|table| table.name == handle.table)
+            })
+            .cloned()
+            .ok_or(Error::InvalidStoredValue(
+                "large-value handle authored schema path is unknown",
+            ))?;
         let version = self
             .query_versions_for_tx(handle.tx_id)?
             .into_iter()
@@ -5497,6 +5586,7 @@ fn encode_extent_text_ops(ops: &[TextOp]) -> Vec<u8> {
 }
 
 fn encode_large_value_handle(
+    schema: SchemaVersionId,
     table: &TableSchema,
     row_uuid: RowUuid,
     column: &str,
@@ -5506,6 +5596,7 @@ fn encode_large_value_handle(
     refs: Vec<content_store::Extent>,
 ) -> Result<Vec<u8>, Error> {
     let mut bytes = Vec::from(LARGE_VALUE_HANDLE_MAGIC);
+    bytes.extend_from_slice(schema.0.as_bytes());
     write_handle_string(&mut bytes, &table.name)?;
     bytes.extend_from_slice(row_uuid.as_bytes());
     write_handle_string(&mut bytes, column)?;
@@ -5526,6 +5617,8 @@ fn encode_large_value_handle(
             .to_be_bytes(),
     );
     for extent in refs {
+        bytes.extend_from_slice(extent.schema.0.as_bytes());
+        write_handle_string(&mut bytes, &extent.table)?;
         bytes.extend_from_slice(extent.writer.as_bytes());
         bytes.extend_from_slice(extent.row.as_bytes());
         let column = extent.column.as_bytes();
@@ -5564,6 +5657,7 @@ fn content_refs_in_text_ops(ops: Vec<TextOp>) -> Vec<content_store::Extent> {
 }
 
 struct DecodedLargeValueHandle {
+    schema: SchemaVersionId,
     table: String,
     row_uuid: RowUuid,
     column: String,
@@ -5577,6 +5671,7 @@ fn decode_large_value_handle(bytes: &[u8]) -> Result<DecodedLargeValueHandle, Er
             .strip_prefix(LARGE_VALUE_HANDLE_MAGIC)
             .ok_or(Error::InvalidStoredValue("invalid large-value handle"))?,
     );
+    let schema = SchemaVersionId(uuid::Uuid::from_bytes(cursor.read_array()?));
     let table = cursor.read_string()?;
     let row_uuid = RowUuid(uuid::Uuid::from_bytes(cursor.read_array()?));
     let column = cursor.read_string()?;
@@ -5590,6 +5685,8 @@ fn decode_large_value_handle(bytes: &[u8]) -> Result<DecodedLargeValueHandle, Er
     let _len = cursor.read_u64()?;
     let refs = cursor.read_u64()?;
     for _ in 0..refs {
+        let _schema = SchemaVersionId(uuid::Uuid::from_bytes(cursor.read_array()?));
+        let _table = cursor.read_string()?;
         let _writer = AuthorId(uuid::Uuid::from_bytes(cursor.read_array()?));
         let _row = RowUuid(uuid::Uuid::from_bytes(cursor.read_array()?));
         let _column = cursor.read_string()?;
@@ -5602,6 +5699,7 @@ fn decode_large_value_handle(bytes: &[u8]) -> Result<DecodedLargeValueHandle, Er
         ));
     }
     Ok(DecodedLargeValueHandle {
+        schema,
         table,
         row_uuid,
         column,

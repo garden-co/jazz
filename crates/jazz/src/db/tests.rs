@@ -1795,6 +1795,8 @@ fn oversized_content_extent_is_rejected_at_admission() {
     let schema = schema();
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let extent = crate::node::content_store::Extent {
+        schema: schema.version_id(),
+        table: "todos".to_owned(),
         writer: AuthorId::from_bytes([0xa1; 16]),
         row: row(0x42),
         column: "body".to_owned(),

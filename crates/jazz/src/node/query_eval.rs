@@ -8069,7 +8069,19 @@ where
             table, version, column, kind, cache,
         )?;
         let tx_id = self.version_tx_id(version)?;
-        encode_large_value_handle(table, version.row_uuid(), column, tx_id, kind, len, refs)
+        encode_large_value_handle(
+            self.schema_version_for_alias(version.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "large-value schema alias is unknown",
+                ))?,
+            table,
+            version.row_uuid(),
+            column,
+            tx_id,
+            kind,
+            len,
+            refs,
+        )
     }
 
     fn large_value_column_len_with_materialization_cache(
@@ -8093,9 +8105,16 @@ where
                 })
                 .cloned()
                 .ok_or(Error::MissingTransaction(current))?;
-            if let Some(value) =
-                self.large_value_checkpoint(table, version.row_uuid(), column, current)?
-            {
+            if let Some(value) = self.large_value_checkpoint(
+                self.schema_version_for_alias(version.schema_version_alias())
+                    .ok_or(Error::InvalidStoredValue(
+                        "large-value schema alias is unknown",
+                    ))?,
+                table,
+                version.row_uuid(),
+                column,
+                current,
+            )? {
                 checkpoint_len = Some(value.len());
                 break;
             }
