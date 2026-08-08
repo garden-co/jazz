@@ -1,6 +1,7 @@
 use groove::db::{Database, GraphBuilder, ProjectField};
 use groove::records::{
-    RecordDescriptor, Value, VariantRecord, encode_variant_record, split_variant_record,
+    RecordDescriptor, UnionCase, UnionSchema, Value, ValueType, VariantRecord,
+    encode_variant_record, split_variant_record,
 };
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema,
@@ -29,6 +30,174 @@ fn union_schema() -> DatabaseSchema {
     .with_variant(2, ["id", "owner", "url"])
     .with_variant(3, ["id", "owner", "body", "edited"])
     .with_variant(4, ["id", "owner", "url", "alt"])])
+}
+
+fn union_projection_schema() -> DatabaseSchema {
+    let table = TableSchema::new("events", [ColumnSchema::new("id", ColumnType::U64)])
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+        // Two layout generations × two logical cases. `value` is deliberately
+        // case-local: its type differs between text and metric cases.
+        .with_variant_payload(
+            1,
+            [
+                TableVariantField::shared("id", ColumnType::U64, "id"),
+                TableVariantField::local("value", ColumnType::String),
+            ],
+        )
+        .with_variant_payload(
+            2,
+            [
+                TableVariantField::shared("id", ColumnType::U64, "id"),
+                TableVariantField::local("value", ColumnType::U64),
+            ],
+        )
+        .with_variant_payload(
+            3,
+            [
+                TableVariantField::shared("id", ColumnType::U64, "id"),
+                TableVariantField::local("value", ColumnType::String),
+                TableVariantField::local("layout_note", ColumnType::Bool),
+            ],
+        )
+        .with_variant_payload(
+            4,
+            [
+                TableVariantField::shared("id", ColumnType::U64, "id"),
+                TableVariantField::local("value", ColumnType::U64),
+                TableVariantField::local("layout_note", ColumnType::Bool),
+            ],
+        );
+    DatabaseSchema::new([table])
+}
+
+#[test]
+fn variant_union_projection_normalizes_layout_tags_and_matches_named_case()
+-> Result<(), Box<dyn std::error::Error>> {
+    let schema = union_projection_schema();
+    let storage = MemoryStorage::new(&schema.column_families());
+    let mut database = Database::new(schema.clone(), storage)?;
+    let event = UnionSchema::new(
+        "event",
+        [
+            UnionCase::new(
+                "text",
+                RecordDescriptor::new([("value", ValueType::String)]),
+            ),
+            UnionCase::new("metric", RecordDescriptor::new([("value", ValueType::U64)])),
+        ],
+    )?;
+    let normalized = RecordDescriptor::new([("event", ValueType::Union(Box::new(event.clone())))]);
+    database.define_variant_projection("events", "logical-event", normalized)?;
+    for (tag, case) in [(1, "text"), (2, "metric"), (3, "text"), (4, "metric")] {
+        database.register_variant_union_case(
+            "events",
+            "logical-event",
+            tag,
+            "event",
+            &event,
+            case,
+            [ProjectField::named("value")],
+        )?;
+    }
+
+    let projected = GraphBuilder::variant_project("events", "logical-event");
+    let subscription =
+        database.subscribe_one_sink(projected.clone().union_match("event", "text"))?;
+    assert!(subscription.recv()?.is_empty());
+
+    let descriptors = (1..=4)
+        .map(|tag| {
+            schema
+                .table("events")
+                .unwrap()
+                .record_schema_for_variant(tag)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "events",
+        VariantRecord::create(
+            1,
+            descriptors[0],
+            &[Value::U64(1), Value::String("first".into())],
+        )?,
+    );
+    batch.insert(
+        "events",
+        VariantRecord::create(2, descriptors[1], &[Value::U64(2), Value::U64(7)])?,
+    );
+    batch.insert(
+        "events",
+        VariantRecord::create(
+            3,
+            descriptors[2],
+            &[
+                Value::U64(3),
+                Value::String("second".into()),
+                Value::Bool(true),
+            ],
+        )?,
+    );
+    batch.insert(
+        "events",
+        VariantRecord::create(
+            4,
+            descriptors[3],
+            &[Value::U64(4), Value::U64(9), Value::Bool(true)],
+        )?,
+    );
+    database.commit_batch(batch)?;
+
+    let all = database.query_graph(projected.clone())?.to_values()?;
+    assert_eq!(all.len(), 4);
+    let mut tags = all
+        .iter()
+        .map(|(values, _)| match &values[0] {
+            Value::Union(value) => value.tag(),
+            value => panic!("expected union, got {value:?}"),
+        })
+        .collect::<Vec<_>>();
+    tags.sort_unstable();
+    assert_eq!(
+        tags,
+        vec![0, 0, 1, 1],
+        "physical tags normalize to logical case tags"
+    );
+    let mut text_deltas = subscription.recv()?.to_values()?;
+    text_deltas.sort_by(|(left, _), (right, _)| format!("{left:?}").cmp(&format!("{right:?}")));
+    assert_eq!(
+        text_deltas,
+        vec![
+            (vec![Value::String("first".into())], 1),
+            (vec![Value::String("second".into())], 1),
+        ]
+    );
+
+    let mut batch = database.open_batch();
+    batch.update(
+        "events",
+        VariantRecord::create(
+            3,
+            descriptors[2],
+            &[
+                Value::U64(3),
+                Value::String("revised".into()),
+                Value::Bool(false),
+            ],
+        )?,
+    );
+    database.commit_batch(batch)?;
+    let mut revised_deltas = subscription.recv()?.to_values()?;
+    revised_deltas.sort_by_key(|(_, weight)| *weight);
+    assert_eq!(
+        revised_deltas,
+        vec![
+            (vec![Value::String("second".into())], -1),
+            (vec![Value::String("revised".into())], 1),
+        ]
+    );
+    Ok(())
 }
 
 #[test]

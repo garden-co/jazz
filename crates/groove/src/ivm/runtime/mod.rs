@@ -29,12 +29,12 @@ use crate::ivm::{
     JoinOpKind, LiteralValue, MAX_COLLECT_BY_TREE_DEPTH, MapProjectOp, NodeDescriptor,
     NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField,
     ProjectionExpr, RecursiveOp, Retainer, StaticScanSpec, TableSourceOp, TopByDirection,
-    TopByLimit, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp, ValueComparison,
-    VariantProjectionTarget,
+    TopByLimit, TopByOp, TopByOrderField, UnionMatchOp, UnnestOp, UnwrapNullableOp,
+    ValueComparison, VariantProjectionTarget,
 };
 use crate::records::{
     self, BorrowedRecord, OwnedRecord, RawProjectionField, RawProjectionScratch, RecordDescriptor,
-    Value, ValueType,
+    UnionSchema, UnionValue, Value, ValueType,
 };
 use crate::schema::{DatabaseSchema, IndexSchema, TableSchema};
 use crate::storage::{
@@ -79,12 +79,21 @@ enum VariantProjectionCase {
     Ignore {
         source: RecordDescriptor,
     },
+    Union {
+        source: RecordDescriptor,
+        tag: u32,
+        payload: RecordDescriptor,
+        project: MapProjectOp,
+        raw_projection: Option<Arc<[RawProjectionField]>>,
+    },
 }
 
 impl VariantProjectionCase {
     fn source(&self) -> RecordDescriptor {
         match self {
-            Self::Project { source, .. } | Self::Ignore { source } => *source,
+            Self::Project { source, .. } | Self::Ignore { source } | Self::Union { source, .. } => {
+                *source
+            }
         }
     }
 }
@@ -353,6 +362,125 @@ impl IvmRuntime {
         )
     }
 
+    /// Append a physical source case that constructs one stable logical union
+    /// value. The outer projection descriptor stays fixed; the selected union
+    /// case owns the dense payload descriptor used for this source layout.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn register_variant_projection_union_case(
+        &mut self,
+        table: &str,
+        target: &str,
+        schema_version: u64,
+        union_field: &str,
+        union_schema: &UnionSchema,
+        union_case: &str,
+        fields: &[ProjectField],
+    ) -> Result<(), IvmRuntimeError> {
+        let source = self
+            .schema
+            .table(table)
+            .ok_or_else(|| IvmRuntimeError::TableNotFound(table.to_owned()))?
+            .record_schema_for_version(schema_version)
+            .ok_or_else(|| IvmRuntimeError::UnknownTableSchemaVersion {
+                table: table.to_owned(),
+                version: schema_version,
+            })?;
+        let key = VariantProjectionKey {
+            table: table.to_owned(),
+            target: VariantProjectionTarget::Named(target.to_owned()),
+        };
+        let projection = self.variant_projections.get_mut(&key).ok_or_else(|| {
+            IvmRuntimeError::VariantProjectionNotFound {
+                table: table.to_owned(),
+                target: target.to_owned(),
+            }
+        })?;
+        let output_fields = projection.output.fields();
+        let Some(union_idx) = projection.output.field_index(union_field) else {
+            return Err(IvmRuntimeError::VariantProjectionUnionFieldNotFound {
+                table: table.to_owned(),
+                target: target.to_owned(),
+                field: union_field.to_owned(),
+            });
+        };
+        if output_fields.len() != 1 {
+            return Err(
+                IvmRuntimeError::VariantProjectionUnionOutputMustBeSingleField {
+                    table: table.to_owned(),
+                    target: target.to_owned(),
+                },
+            );
+        }
+        let ValueType::Union(output_schema) = &output_fields[union_idx].value_type else {
+            return Err(IvmRuntimeError::VariantProjectionUnionFieldTypeMismatch {
+                table: table.to_owned(),
+                target: target.to_owned(),
+                field: union_field.to_owned(),
+            });
+        };
+        if output_schema.as_ref() != union_schema {
+            return Err(IvmRuntimeError::VariantProjectionUnionSchemaMismatch {
+                table: table.to_owned(),
+                target: target.to_owned(),
+                field: union_field.to_owned(),
+            });
+        }
+        let tag = union_schema.tag(union_case)?;
+        let payload = union_schema.case(tag)?.payload;
+        let projected = project_descriptor(&source, fields)?;
+        if projected != payload {
+            return Err(IvmRuntimeError::VariantProjectionUnionPayloadMismatch {
+                table: table.to_owned(),
+                target: target.to_owned(),
+                case: union_case.to_owned(),
+            });
+        }
+        let mapping = fields
+            .iter()
+            .filter_map(|field| {
+                field.source().map(|source_field| {
+                    resolve_field_ref(&source, source_field).map(|idx| (0, idx))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let project = MapProjectOp {
+            expressions: fields
+                .iter()
+                .map(|field| {
+                    project_field_expr(&source, field).map(|expression| ProjectionExpr {
+                        expression,
+                        output_name: Some(field.output_name.clone()),
+                    })
+                })
+                .collect::<Result<Vec<_>, IvmRuntimeError>>()?,
+            mapping,
+        };
+        let raw_projection = raw_projection_fields(&project, &source, payload)?
+            .map(Arc::<[RawProjectionField]>::from);
+        let case = VariantProjectionCase::Union {
+            source,
+            tag,
+            payload,
+            project,
+            raw_projection,
+        };
+        match projection.cases.entry(schema_version) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(case);
+            }
+            std::collections::hash_map::Entry::Occupied(entry) if entry.get() == &case => {}
+            std::collections::hash_map::Entry::Occupied(_) => {
+                return Err(IvmRuntimeError::VariantProjectionCaseAlreadyRegistered {
+                    table: table.to_owned(),
+                    target: target.to_owned(),
+                    version: schema_version,
+                });
+            }
+        }
+        self.invalidate_table_inputs(table);
+        Ok(())
+    }
+
     pub(crate) fn register_variant_projection_ignore_case(
         &mut self,
         table: &str,
@@ -398,14 +526,6 @@ impl IvmRuntime {
                 version: record.schema_version(),
             });
         }
-        let VariantProjectionCase::Project {
-            project,
-            raw_projection,
-            ..
-        } = case
-        else {
-            return Ok(None);
-        };
         let input = RecordDeltas {
             descriptor: *record.record().descriptor(),
             deltas: vec![RecordDelta {
@@ -413,12 +533,33 @@ impl IvmRuntime {
                 weight: 1,
             }],
         };
-        let projected = NodeState::update_map_project(
-            project,
-            projection.output,
-            &input,
-            raw_projection.as_deref(),
-        )?;
+        let projected = match case {
+            VariantProjectionCase::Project {
+                project,
+                raw_projection,
+                ..
+            } => NodeState::update_map_project(
+                project,
+                projection.output,
+                &input,
+                raw_projection.as_deref(),
+            )?,
+            VariantProjectionCase::Union {
+                tag,
+                payload,
+                project,
+                raw_projection,
+                ..
+            } => NodeState::update_variant_union_project(
+                *tag,
+                *payload,
+                project,
+                projection.output,
+                &input,
+                raw_projection.as_deref(),
+            )?,
+            VariantProjectionCase::Ignore { .. } => return Ok(None),
+        };
         let record = projected
             .deltas
             .into_iter()
@@ -1867,6 +2008,10 @@ impl IvmRuntime {
                 let field_idx = resolve_field_ref(&input, array_field)?;
                 unnest_descriptor(&input, field_idx, element_field)
             }
+            GraphBuilder::UnionMatch { input, field, case } => {
+                let input = self.infer_builder_output_cached(input, output_memo)?;
+                union_match_descriptor(&input, field, case)
+            }
             GraphBuilder::Project { input, fields } => {
                 let input = self.infer_builder_output_cached(input, output_memo)?;
                 project_descriptor(&input, fields)
@@ -2375,6 +2520,7 @@ impl IvmRuntime {
             | GraphBuilder::Project { .. }
             | GraphBuilder::UnwrapNullable { .. }
             | GraphBuilder::Unnest { .. }
+            | GraphBuilder::UnionMatch { .. }
             | GraphBuilder::Union { .. } => {
                 self.add_dedup_unary_graph(graph, inferred_output, output_memo)
             }
@@ -2962,6 +3108,33 @@ impl IvmRuntime {
                     node,
                     root_ordering_node: compiled_input.root_ordering_node,
                 })
+            }
+            GraphBuilder::UnionMatch { input, field, case } => {
+                let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
+                let input_node = compiled_input.node;
+                let input_output = compiled_input.output;
+                let field_idx = resolve_field_ref(&input_output, field)?;
+                let ValueType::Union(schema) = &input_output.fields()[field_idx].value_type else {
+                    return Err(IvmRuntimeError::UnionMatchFieldTypeMismatch {
+                        field: field_ref_name(&input_output, field)?,
+                    });
+                };
+                let tag = schema.tag(case)?;
+                let output = inferred_output;
+                let node = self.graph.dedup_node(
+                    NodeDescriptor::new(
+                        OpType::UnionMatch(UnionMatchOp {
+                            field: field_ref_name(&input_output, field)?,
+                            field_idx,
+                            tag,
+                        }),
+                        [input_node],
+                        output,
+                    ),
+                    NodeDurability::Ephemeral,
+                );
+                self.initialize_node_runtime(node);
+                Ok(CompiledNode { output, node })
             }
             GraphBuilder::Union { inputs } => {
                 let mut input_nodes = Vec::with_capacity(inputs.len());
@@ -4674,6 +4847,7 @@ fn count_builder_nodes(graph: &GraphBuilder) -> usize {
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
+        | GraphBuilder::UnionMatch { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
@@ -4698,6 +4872,7 @@ fn builder_contains_binding_source(graph: &GraphBuilder) -> bool {
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
+        | GraphBuilder::UnionMatch { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
@@ -4767,6 +4942,7 @@ fn collect_builder_field_names(
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
+        | GraphBuilder::UnionMatch { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
@@ -5055,7 +5231,7 @@ fn lift_literal_filter(
             }))
         }
         GraphBuilder::Recursive { .. } => Ok(None),
-        GraphBuilder::Union { .. } => Ok(None),
+        GraphBuilder::Union { .. } | GraphBuilder::UnionMatch { .. } => Ok(None),
         GraphBuilder::UnwrapNullable { input, field } => {
             let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? else {
                 return Ok(None);
@@ -5327,7 +5503,9 @@ fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
         GraphBuilder::Union { inputs } => inputs
             .iter()
             .any(|input| graph_outputs_binding(input, binding_field)),
-        GraphBuilder::Table { .. } | GraphBuilder::Index { .. } => false,
+        GraphBuilder::Table { .. }
+        | GraphBuilder::Index { .. }
+        | GraphBuilder::UnionMatch { .. } => false,
     }
 }
 
@@ -5474,7 +5652,8 @@ fn propagate_binding_through_frontier(
         | GraphBuilder::TopBy { .. }
         | GraphBuilder::CollectBy { .. }
         | GraphBuilder::Aggregate { .. }
-        | GraphBuilder::Union { .. } => None,
+        | GraphBuilder::Union { .. }
+        | GraphBuilder::UnionMatch { .. } => None,
     }
 }
 
@@ -5638,7 +5817,12 @@ impl NodeState {
         let table_schema = schema
             .table(&input.table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(input.table.clone()))?;
-        let primary_key_fields = primary_key_field_indices(table_schema, output_desc)?;
+        let primary_key_fields = input
+            .scan
+            .as_ref()
+            .map(|_| primary_key_field_indices(table_schema, output_desc))
+            .transpose()?
+            .unwrap_or_default();
         let mut deltas = Vec::new();
         let projection = input
             .variant_projection
@@ -5695,6 +5879,26 @@ impl NodeState {
                         ..
                     } => {
                         projected = Self::update_map_project(
+                            project,
+                            *output_desc,
+                            &RecordDeltas {
+                                descriptor: delta.descriptor,
+                                deltas: delta.deltas.clone(),
+                            },
+                            raw_projection.as_deref(),
+                        )?;
+                        &projected.deltas
+                    }
+                    VariantProjectionCase::Union {
+                        tag,
+                        payload,
+                        project,
+                        raw_projection,
+                        ..
+                    } => {
+                        projected = Self::update_variant_union_project(
+                            *tag,
+                            *payload,
                             project,
                             *output_desc,
                             &RecordDeltas {
@@ -5905,6 +6109,65 @@ impl NodeState {
         })
     }
 
+    fn update_variant_union_project(
+        tag: u32,
+        payload_desc: RecordDescriptor,
+        project: &MapProjectOp,
+        output_desc: RecordDescriptor,
+        input: &RecordDeltas,
+        raw_projection: Option<&[RawProjectionField]>,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
+        let payloads = Self::update_map_project(project, payload_desc, input, raw_projection)?;
+        let mut deltas = Vec::with_capacity(payloads.deltas.len());
+        for payload in payloads.deltas {
+            let value = Value::Union(UnionValue::new(
+                tag,
+                OwnedRecord::new(payload.record.to_vec(), payload_desc),
+            ));
+            deltas.push(RecordDelta {
+                record: output_desc.create(&[value])?.into(),
+                weight: payload.weight,
+            });
+        }
+        Ok(RecordDeltas {
+            descriptor: output_desc,
+            deltas,
+        })
+    }
+
+    fn update_union_match(
+        union_match: &UnionMatchOp,
+        output_desc: RecordDescriptor,
+        input: &RecordDeltas,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
+        let mut deltas = Vec::new();
+        for delta in &input.deltas {
+            let value = delta
+                .borrowed(&input.descriptor)
+                .get_idx(union_match.field_idx)?;
+            let Value::Union(value) = value else {
+                return Err(IvmRuntimeError::UnionMatchFieldTypeMismatch {
+                    field: union_match.field.clone(),
+                });
+            };
+            if value.tag() == union_match.tag {
+                if *value.record().descriptor() != output_desc {
+                    return Err(IvmRuntimeError::UnionMatchPayloadMismatch {
+                        field: union_match.field.clone(),
+                    });
+                }
+                deltas.push(RecordDelta {
+                    record: Bytes::copy_from_slice(value.record().raw()),
+                    weight: delta.weight,
+                });
+            }
+        }
+        Ok(RecordDeltas {
+            descriptor: output_desc,
+            deltas,
+        })
+    }
+
     fn update_unwrap_nullable(
         unwrap: &UnwrapNullableOp,
         output_desc: RecordDescriptor,
@@ -6104,6 +6367,7 @@ fn builder_contains_recursive(graph: &GraphBuilder) -> bool {
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
+        | GraphBuilder::UnionMatch { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
@@ -6651,6 +6915,10 @@ where
             OpType::Unnest(unnest) => {
                 let input = self.update_unary_input(graph_node, node)?;
                 NodeState::update_unnest(unnest, output_desc, &input)
+            }
+            OpType::UnionMatch(union_match) => {
+                let input = self.update_unary_input(graph_node, node)?;
+                NodeState::update_union_match(union_match, output_desc, &input)
             }
             OpType::ArgMaxBy(arg_max_by) => {
                 let input = self.update_unary_input(graph_node, node)?;
@@ -8634,6 +8902,7 @@ fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<(), IvmRuntim
             | GraphBuilder::Project { input, .. }
             | GraphBuilder::UnwrapNullable { input, .. }
             | GraphBuilder::Unnest { input, .. }
+            | GraphBuilder::UnionMatch { input, .. }
             | GraphBuilder::ArgMaxBy { input, .. }
             | GraphBuilder::ArgMinBy { input, .. }
             | GraphBuilder::TopBy { input, .. }
@@ -8671,6 +8940,7 @@ fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<(), IvmRuntim
         }
         GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
+        | GraphBuilder::UnionMatch { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
@@ -8922,6 +9192,24 @@ fn unnest_descriptor(
         .collect::<Vec<_>>();
     fields.push((element_field.to_owned(), (**element_type).clone()));
     Ok(RecordDescriptor::new(fields))
+}
+
+fn union_match_descriptor(
+    input: &RecordDescriptor,
+    field: &FieldRef,
+    case: &str,
+) -> Result<RecordDescriptor, IvmRuntimeError> {
+    let field_idx = resolve_field_ref(input, field)?;
+    let union_field = input
+        .fields()
+        .get(field_idx)
+        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?;
+    let ValueType::Union(schema) = &union_field.value_type else {
+        return Err(IvmRuntimeError::UnionMatchFieldTypeMismatch {
+            field: field_ref_name(input, field)?,
+        });
+    };
+    Ok(schema.case(schema.tag(case)?)?.payload)
 }
 
 fn aggregate_descriptor(
@@ -11473,6 +11761,38 @@ pub enum IvmRuntimeError {
         target: String,
         version: u64,
     },
+    #[error("variant projection union field not found: {table}.{target}.{field}")]
+    VariantProjectionUnionFieldNotFound {
+        table: String,
+        target: String,
+        field: String,
+    },
+    #[error("variant projection union output must contain exactly one field: {table}.{target}")]
+    VariantProjectionUnionOutputMustBeSingleField { table: String, target: String },
+    #[error("variant projection field is not a union: {table}.{target}.{field}")]
+    VariantProjectionUnionFieldTypeMismatch {
+        table: String,
+        target: String,
+        field: String,
+    },
+    #[error(
+        "variant projection union schema does not match fixed output: {table}.{target}.{field}"
+    )]
+    VariantProjectionUnionSchemaMismatch {
+        table: String,
+        target: String,
+        field: String,
+    },
+    #[error("variant projection payload does not match union case: {table}.{target}.{case}")]
+    VariantProjectionUnionPayloadMismatch {
+        table: String,
+        target: String,
+        case: String,
+    },
+    #[error("union match field is not a union: {field}")]
+    UnionMatchFieldTypeMismatch { field: String },
+    #[error("union match payload descriptor does not match its declared case: {field}")]
+    UnionMatchPayloadMismatch { field: String },
     #[error("unique index violation: {index}")]
     UniqueIndexViolation { index: String },
     #[error("unsupported join key")]

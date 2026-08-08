@@ -22,8 +22,8 @@ use crate::ivm::{
 };
 use crate::queries::Query;
 use crate::records::{
-    self, BorrowedRecord, OwnedRecord, Record, RecordDescriptor, Value, VersionedRecord,
-    encode_versioned_record, split_versioned_record,
+    self, BorrowedRecord, OwnedRecord, Record, RecordDescriptor, UnionSchema, Value,
+    VersionedRecord, encode_versioned_record, split_versioned_record,
 };
 use crate::schema::{
     ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType, PrimaryKey,
@@ -414,6 +414,60 @@ where
         fields: impl IntoIterator<Item = ProjectField>,
     ) -> Result<(), Error> {
         self.register_variant_projection_case(table, target, u64::from(variant_tag), fields)
+    }
+
+    /// Append a physical source case that constructs one stable logical union
+    /// value in the projection's fixed output descriptor.
+    ///
+    /// The output must consist of `union_field: Union(union_schema)`. `fields`
+    /// select and name the dense source payload for the selected named case.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_variant_projection_union_case(
+        &mut self,
+        table: &str,
+        target: &str,
+        schema_version: u64,
+        union_field: &str,
+        union_schema: &UnionSchema,
+        case: &str,
+        fields: impl IntoIterator<Item = ProjectField>,
+    ) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        let fields = fields.into_iter().collect::<Vec<_>>();
+        self.ivm_runtime
+            .register_variant_projection_union_case(
+                table,
+                target,
+                schema_version,
+                union_field,
+                union_schema,
+                case,
+                &fields,
+            )
+            .map_err(Error::IvmRuntime)
+    }
+
+    /// `u32`-tag convenience alias for generic table variants.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_variant_union_case(
+        &mut self,
+        table: &str,
+        target: &str,
+        variant_tag: u32,
+        union_field: &str,
+        union_schema: &UnionSchema,
+        case: &str,
+        fields: impl IntoIterator<Item = ProjectField>,
+    ) -> Result<(), Error> {
+        self.register_variant_projection_union_case(
+            table,
+            target,
+            u64::from(variant_tag),
+            union_field,
+            union_schema,
+            case,
+            fields,
+        )
     }
 
     /// Mark one source version as intentionally absent from a fixed-output
