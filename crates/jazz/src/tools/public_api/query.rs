@@ -1411,6 +1411,7 @@ impl ArraySubqueryBuilder {
     ///    .with_array("comments", |sub2| {
     ///        sub2.from("comments")
     ///            .correlate("post_id", "posts.id")
+    ///            .unbounded()
     ///    })
     /// ```
     pub fn with_array<F>(mut self, column_name: impl Into<String>, builder_fn: F) -> Self
