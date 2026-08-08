@@ -375,6 +375,24 @@ pub(super) fn allocate_physical_payload_variant_cases(
         .ok_or(Error::InvalidStoredValue(
             "variant-case target physical mapping missing",
         ))?;
+    let existing_payloads = mapping
+        .variant_cases
+        .iter()
+        .filter_map(|case| {
+            case.user_case
+                .as_ref()
+                .map(|user_case| (user_case.as_str(), &case.payload_fields))
+        })
+        .collect::<BTreeMap<_, _>>();
+    for (user_case, payload_fields) in &requested {
+        if let Some(existing) = existing_payloads.get(user_case.as_str())
+            && *existing != payload_fields
+        {
+            return Err(Error::InvalidStoredValue(
+                "physical table variant payload descriptor changed",
+            ));
+        }
+    }
     let logical_by_physical = mapping
         .columns
         .iter()
@@ -2116,10 +2134,82 @@ mod variant_case_tests {
             .tag;
 
         let encoded = serde_json::to_vec(&mappings).unwrap();
-        let reopened: BTreeMap<SchemaVersionId, SchemaPhysicalMapping> =
+        let mut reopened: BTreeMap<SchemaVersionId, SchemaPhysicalMapping> =
             serde_json::from_slice(&encoded).unwrap();
         assert_eq!(reopened, mappings);
         validate_physical_variant_cases(&reopened, &aliases).unwrap();
+
+        // Model an already-persisted row before a second catalogue reopen. A
+        // tag's complete dense payload descriptor is durable format, including
+        // case-local fields that do not participate in shared identities.
+        let text_descriptor = records::RecordDescriptor::new(
+            allocated
+                .iter()
+                .find(|case| case.tag == text_tag)
+                .unwrap()
+                .payload_fields
+                .iter()
+                .map(|field| (field.name.clone(), field.value_type.clone())),
+        );
+        let stored = records::VariantRecord::create(
+            text_tag.into(),
+            text_descriptor,
+            &[
+                records::Value::U64(41),
+                records::Value::String("old text".to_owned()),
+            ],
+        )
+        .unwrap()
+        .into_stored_bytes();
+
+        let unchanged = reopened.clone();
+        let mut changed_cases = payload_cases();
+        changed_cases
+            .iter_mut()
+            .find(|(case, _)| case == "text")
+            .unwrap()
+            .1[1]
+            .value_type = records::ValueType::U64;
+        assert!(matches!(
+            allocate_physical_payload_variant_cases(
+                &mut reopened,
+                &aliases,
+                v1,
+                "entries",
+                changed_cases,
+            ),
+            Err(Error::InvalidStoredValue(
+                "physical table variant payload descriptor changed"
+            ))
+        ));
+        assert_eq!(reopened, unchanged);
+
+        // Reopening again after the rejected admission keeps the original
+        // descriptor, so the old row still decodes as text rather than U64.
+        let encoded = serde_json::to_vec(&reopened).unwrap();
+        let reopened: BTreeMap<SchemaVersionId, SchemaPhysicalMapping> =
+            serde_json::from_slice(&encoded).unwrap();
+        let persisted_text = reopened[&v1].tables["entries"]
+            .variant_cases
+            .iter()
+            .find(|case| case.tag == text_tag)
+            .unwrap();
+        let descriptor = records::RecordDescriptor::new(
+            persisted_text
+                .payload_fields
+                .iter()
+                .map(|field| (field.name.clone(), field.value_type.clone())),
+        );
+        let (tag, payload) = records::split_variant_record(&stored).unwrap();
+        assert_eq!(tag, text_tag);
+        let old = records::OwnedRecord::new(payload.to_vec(), descriptor);
+        assert_eq!(
+            old.to_values().unwrap(),
+            [
+                records::Value::U64(41),
+                records::Value::String("old text".to_owned()),
+            ]
+        );
 
         let jazz = JazzSchema::new([TableSchema::new(
             "entries",
