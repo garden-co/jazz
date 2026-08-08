@@ -226,11 +226,16 @@ authorization subplan:
 
 1. The protected policy-root source is `System`. It is the row set whose policy
    is being proved; filtering it with that same policy would be circular.
-2. Every analyzed relational membership source is `PolicyProof`: direct join
-   and source-lookup aliases, relation/union branch roots, policy-branch
-   sources, inherited-parent sources, reachable access sources, and every
-   recursive seed and recursive-step source. Each can change whether the
-   predicate holds, so excluding one is an authorization leak.
+2. Every analyzed relational membership source whose table declares a read
+   policy is `PolicyProof`: direct join and source-lookup aliases,
+   relation/union branch roots, policy-branch sources, inherited-parent
+   sources, reachable access sources, and every recursive seed and
+   recursive-step source. Each can change whether the predicate holds, so
+   excluding a protected source is an authorization leak. A membership source
+   whose table has no read policy may lower directly to `System`: by
+   `INV-RLS-15` that source is public, so an unrestricted root is equivalent to
+   a trivial policy proof. This optimization MUST NOT apply when the source
+   table declares a read policy.
 3. The recursive frontier is not a table source and has no source-authority
    decision. It contains only tuples emitted by the already-authorized seed or
    prior step; its seed and step table sources are covered by item 2.
@@ -255,10 +260,12 @@ table and attempted depth, rather than exhausting the process stack
 (`INV-RLS-21`).
 
 **INV-RLS-21.** While proving a table read policy, Jazz MUST suspend the
-protected root policy, apply `PolicyProof` to every analyzed membership source
-(including recursive seed and step sources), and apply `System` only to the
-delivery-only source classes above. It MUST reject a revisited proof table with
-a named table-and-depth cycle error. No source class may be left implicitly
+protected root policy and apply `PolicyProof` semantics to every analyzed
+membership source, including recursive seed and step sources. A membership
+table with no read policy MAY use the equivalent `System` public-source fast
+path; a membership table with a read policy MUST NOT. Delivery-only source
+classes above use `System`. Jazz MUST reject a revisited proof table with a
+named table-and-depth cycle error. No source class may be left implicitly
 authorized.
 
 Join policies extend that same identity-bound evaluation across relationships. A
