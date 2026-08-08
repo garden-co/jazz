@@ -772,22 +772,14 @@ where
         )?;
         self.database.replace(database);
         self.groove_runtime_token = next_groove_runtime_token();
-        self.rederive_restart_state()?;
+        self.invalidate_runtime_handles_after_database_rebuild();
         Ok(())
     }
 
-    fn rederive_restart_state(&mut self) -> Result<(), Error> {
-        self.self_node_alias = None;
-        self.catalogue.current_schema_version_alias = None;
-        self.clock.tx_time = TxTime::default();
-        self.clock.next_global_seq = GlobalSeq(1);
-        self.clock.applied_global_watermark = GlobalSeq(0);
-        self.clock.applied_global_above_watermark.clear();
-        self.node_aliases.clear();
-        self.catalogue.schema_version_aliases.clear();
-        self.rejections.child_txs_by_parent.clear();
-        self.rejections.rejected_transactions.clear();
-        self.branches.branches.clear();
+    /// A catalogue change rebuilds Groove's in-memory graph registry, but it
+    /// does not restart this node. Keep recovered durable facts intact while
+    /// dropping handles and plans that were compiled against the old registry.
+    fn invalidate_runtime_handles_after_database_rebuild(&mut self) {
         self.query.current_row_graphs = current_row_graphs(&self.catalogue.schema);
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
@@ -806,16 +798,6 @@ where
         self.query.initial_hydration_binding_views.clear();
         self.query.deferred_publication_binding_views.clear();
         self.query.pending_authoritative_reset_binding_views.clear();
-        self.parking.parked_shape_registrations.clear();
-        self.parking.parked_binding_deltas.clear();
-        self.recover_from_storage()?;
-        self.recover_known_state_facts()?;
-        let self_node_alias = self.ensure_node_alias(self.node_uuid)?;
-        self.self_node_alias = Some(self_node_alias);
-        let schema_alias =
-            self.ensure_schema_version_alias(self.catalogue.current_schema_version_id)?;
-        self.catalogue.current_schema_version_alias = Some(schema_alias);
-        Ok(())
     }
 
     fn result_member_row_key(member: &ResultMemberEntry) -> Option<ResultRowMembershipKey> {

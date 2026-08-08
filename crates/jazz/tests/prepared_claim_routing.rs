@@ -9,7 +9,7 @@ use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::protocol::{CurrentWriteSchema, SchemaVersion};
+use jazz::protocol::{CurrentWriteSchema, LensOp, MigrationLens, SchemaVersion, TableLens};
 use jazz::query::{OrderDirection, Query, claim, col, eq, lit, param};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
@@ -649,7 +649,6 @@ fn mutually_referential_dependency_policies_do_not_recurse() {
 }
 
 #[test]
-#[ignore = "prepared claim routing is unlanded; tracked separately from INV-RLS-21."]
 fn prepared_binding_reprepares_claim_routing_after_schema_change() {
     let db = open_db_with_schema_as(schema(), AuthorId::SYSTEM);
     let team_a = row(0x11);
@@ -677,9 +676,48 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
         vec![document_a]
     );
     assert!(row_ids_for_identity(&db, &prepared_v1, USER_B).is_empty());
+    let prepared_team_v1 = db
+        .prepare_query_bound(
+            &Query::from(TEAMS).filter(eq(col("name"), param("name"))),
+            BTreeMap::from([("name".to_owned(), Value::String("Team A".to_owned()))]),
+        )
+        .expect("prepare v1 team binding");
+    assert_eq!(
+        db.read(&prepared_team_v1)
+            .expect("read prepared v1 team before schema change")
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![team_a]
+    );
 
     let v2 = SchemaVersion::new(evolved_schema());
     db.publish_schema(v2.clone()).expect("publish v2 schema");
+    db.publish_lens(MigrationLens::new(
+        schema().version_id(),
+        v2.id,
+        vec![
+            TableLens {
+                source_table: DOCUMENTS.to_owned(),
+                target_table: DOCUMENTS.to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "generation".to_owned(),
+                    default: Value::U64(0),
+                }],
+            },
+            TableLens {
+                source_table: TEAMS.to_owned(),
+                target_table: TEAMS.to_owned(),
+                ops: Vec::new(),
+            },
+            TableLens {
+                source_table: MEMBERSHIPS.to_owned(),
+                target_table: MEMBERSHIPS.to_owned(),
+                ops: Vec::new(),
+            },
+        ],
+    ))
+    .expect("publish v1-to-v2 lens");
     db.set_current_write_schema(CurrentWriteSchema {
         revision: 1,
         schema: v2.id,
@@ -710,6 +748,18 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
     assert_eq!(
         row_ids_for_identity(&db, &prepared_v2_a, USER_A),
         vec![document_a]
+    );
+    let projected = block_on(db.all_for_identity(&prepared_v2_a, opts(), USER_A))
+        .expect("read v2 defaulted document");
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0].cell_at(2), Some(Value::U64(0)));
+    assert_eq!(
+        db.read(&prepared_team_v1)
+            .expect("invalidate stale v1 Groove handle after catalogue rebuild")
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![team_a]
     );
     assert!(
         row_ids_for_identity(&db, &prepared_v2_a, USER_B).is_empty(),
