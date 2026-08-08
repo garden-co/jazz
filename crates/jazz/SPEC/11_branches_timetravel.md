@@ -35,10 +35,11 @@ Invariant digest:
 - `INV-BRANCH-23`: For each row/layer/column touched by novel source contributions, the local calculator MUST derive the equivalent ordinary target write contribution under that column's normal merge strategy, including cumulative explicit authorship and explicit writes equal to their prior value, while excluding inherited materialized cells.
 - `INV-BRANCH-24`: Branch-merge provenance MUST carry a source lineage plus canonical `from_frontier` and `through_frontier` source pointers as local calculation metadata; those pointers MUST NOT be interpreted as an authoritative cursor, CAS, transaction parent, admission prerequisite, or global duplicate-prevention record.
 - `INV-BRANCH-25`: Once minted, a branch merge transaction MUST use ordinary transaction identity, limits, fate, authorization, storage, synchronization, rejection, and exact-retransmission idempotency; receivers MUST NOT need branch metadata or source history to apply it.
-- `INV-BRANCH-26`: Trusted cores and edges MAY inspect all source-branch history needed to validate and construct an import, while client-facing branch data remains permission-scoped; target readers MUST be able to ingest the accepted squash without receiving any source-branch transaction or payload.
+- `INV-BRANCH-26`: Trusted cores and edges MAY inspect all source-branch history needed to calculate a merge for an authorized initiator, while client-facing branch data remains permission-scoped; target readers MUST be able to ingest the resulting ordinary transaction without receiving any source-branch transaction or payload.
 - `INV-BRANCH-27`: Branch merge calculation MUST read both source and target through one current-schema view and emit one ordinary transaction in that schema; branch provenance MUST NOT introduce cross-schema authored-presence or lens protocol semantics.
 - `INV-BRANCH-28`: A source frontier MUST be the canonical sorted de-duplicated maximal antichain of eligible transactions in that lineage's own version-parent graph; frozen-base and cross-lineage transaction parents are not source-frontier edges, while merge provenance contributes only to the separate contribution graph.
 - `INV-BRANCH-29`: The local calculator MUST subtract every prior merge provenance visible in its target snapshot, but the system MUST NOT claim globally coordinated exactly-once behavior for independently calculated offline/concurrent merges; unobserved duplicate attempts are ordinary concurrent writes and coordination or reconciliation remains the merger's responsibility.
+- `INV-BRANCH-30`: A local calculator MUST expand a received merge-provenance edge only after deterministically recomputing the declared novel source contribution against the merge transaction's recorded target-parent snapshot and verifying an exact ordinary payload match; unvalidated, malformed, missing-history, or mixed-edit provenance MUST NOT suppress any contribution.
 
 ## Details
 
@@ -197,6 +198,21 @@ admission prerequisite, or global duplicate-prevention mechanism
 (`INV-BRANCH-19`, `INV-BRANCH-24`). A calculated merge transaction cannot also
 contain unrelated new user edits; conflict-resolution edits are separate
 ordinary transactions so their native contribution dots remain unambiguous.
+
+Provenance is untrusted advisory transaction metadata. Ordinary admission
+persists and forwards it but does not attest to its truth. Before a future local
+calculator follows such an edge, it reconstructs the declared source novel
+contribution from retained history, reconstructs the target snapshot named by
+the transaction's complete row/layer parents, runs the same deterministic local
+strategy calculation, and requires an exact match of version set, parents,
+authored presence, cells, deletion events, and large-value operations/extents.
+Only a matching edge may replace the derived payload with its original
+contribution dots. Missing history, a forged source cut, malformed frontier,
+extra or missing payload, or a transaction mixing calculated import cells with
+unrelated user edits makes that local merge calculation fail without minting a
+transaction. It must never suppress a contribution merely because metadata
+claims it was imported (`INV-BRANCH-30`). A node may cache successful validation
+as derived state, but the cache is not wire authority.
 
 To calculate source→target, the merger recursively expands native contribution
 dots through both ordinary lineage-parent edges and prior merge-provenance
