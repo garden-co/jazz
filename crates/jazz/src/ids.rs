@@ -98,6 +98,19 @@ impl MigrationLensId {
     }
 }
 
+/// Content-addressed atomic schema-lineage publication identity.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct SchemaLineagePublicationId(pub uuid::Uuid);
+
+impl SchemaLineagePublicationId {
+    /// Borrow the UUID bytes in wire order.
+    pub fn as_bytes(&self) -> &[u8; 16] {
+        self.0.as_bytes()
+    }
+}
+
 /// Stable branch identity used to address snapshot-overlay branches.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,

@@ -636,6 +636,9 @@ where
         self.register_physical_current_variant_projections()
     }
 
+    // Retained while the legacy provisional-publication path is retired in the
+    // following catalogue cleanup commit.
+    #[allow(dead_code)]
     pub(super) fn discard_unmapped_physical_version_tables(
         &mut self,
         candidates: impl IntoIterator<Item = PhysicalTableId>,

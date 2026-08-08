@@ -28,14 +28,14 @@ use thiserror::Error;
 use self::query_engine::user_column_field;
 use crate::ids::{
     AuthorId, BranchId, MigrationLensId, NodeAlias, NodeUuid, PhysicalColumnId, PhysicalTableId,
-    RowUuid, SchemaVersionAlias, SchemaVersionId,
+    RowUuid, SchemaLineagePublicationId, SchemaVersionAlias, SchemaVersionId,
 };
 use crate::merge_strategy::{CanonicalizeInput, MergeStrategy as TextMergeStrategy};
 use crate::protocol::{
     BindingViewKey, CurrentWriteSchema, LensOp, MigrationLens, ProgramFactEntry, ReadViewKey,
-    ResultMemberEntry, ResultRowEntry, RowVersionRef, SchemaVersion, ShapeAst, Subscribe,
-    SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier, VersionRecord, ViewFactEntry,
-    expand_version_carriers,
+    ResultMemberEntry, ResultRowEntry, RowVersionRef, SchemaLineagePublication, SchemaVersion,
+    ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier,
+    VersionRecord, ViewFactEntry, expand_version_carriers,
 };
 use crate::protocol_limits::MAX_CONTENT_EXTENT_BYTES;
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
@@ -260,6 +260,16 @@ struct SchemaCatalogue {
     catalogue_lenses: BTreeMap<MigrationLensId, MigrationLens>,
     /// Resolved logical-to-physical identity mapping for every known schema.
     physical_mappings: BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    /// Durable, not-yet-visible schema bundles awaiting ordered activation.
+    staged_lineages: BTreeMap<u64, StagedSchemaLineage>,
+    /// Ordered bundle payloads waiting for an earlier sequence or active source.
+    pending_lineages: BTreeMap<u64, PendingSchemaLineage>,
+    /// Canonical bundle that first activated each non-genesis target schema.
+    active_lineages_by_target: BTreeMap<SchemaVersionId, StagedSchemaLineage>,
+    /// Highest contiguously activated schema catalogue position.
+    active_catalogue_seq: u64,
+    /// Durable write-pointer updates waiting for their schema to become Active.
+    pending_write_pointers: BTreeMap<u64, CurrentWriteSchema>,
     /// Next database-local physical table id.
     next_physical_table_id: u64,
     /// Next database-local physical column id.
@@ -517,7 +527,10 @@ where
         schema: JazzSchema,
         storage: S,
         history_complete: bool,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Error>
+    where
+        S: ReopenableStorage,
+    {
         Self::new_with_options(
             node_uuid,
             schema,
@@ -533,27 +546,68 @@ where
         storage: S,
         history_complete: bool,
         large_value_checkpoint_op_interval: usize,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Error>
+    where
+        S: ReopenableStorage,
+    {
         let current_schema_version_id = schema.version_id();
         let CatalogueOpenState {
             storage,
-            schemas,
-            lenses,
-            schema_version_aliases,
-            physical_mappings,
+            mut schemas,
+            mut lenses,
+            mut schema_version_aliases,
+            mut physical_mappings,
+            mut staged_lineages,
+            pending_lineages,
+            mut active_lineages_by_target,
+            mut active_catalogue_seq,
+            pending_write_pointers,
             next_physical_table_id,
             next_physical_column_id,
             current_write_schema,
             branch_partitions,
         } = Self::open_catalogue_stage(schema.clone(), storage)?;
-        let database = Self::open_full_database(
+        let mut registration_schemas = schemas.clone();
+        let mut registration_aliases = schema_version_aliases.clone();
+        let mut registration_mappings = physical_mappings.clone();
+        for staged in staged_lineages.values() {
+            registration_schemas.insert(
+                staged.publication.schema.id,
+                staged.publication.schema.clone(),
+            );
+            registration_aliases.insert(staged.publication.schema.id, staged.alias);
+            registration_mappings.insert(staged.publication.schema.id, staged.mapping.clone());
+        }
+        let mut database = Self::open_full_database(
             &schema,
-            &schemas,
-            &schema_version_aliases,
-            &physical_mappings,
+            &registration_schemas,
+            &registration_aliases,
+            &registration_mappings,
             &branch_partitions,
             storage,
         )?;
+        loop {
+            let next = active_catalogue_seq.saturating_add(1);
+            let Some(staged) = staged_lineages.get(&next).cloned() else {
+                break;
+            };
+            if !schemas.contains_key(&staged.publication.lens.source) {
+                break;
+            }
+            let mut batch = database.open_batch();
+            Self::write_active_schema_lineage_to_batch(&mut batch, &staged)?;
+            database.commit_batch(batch)?;
+            schemas.insert(
+                staged.publication.schema.id,
+                staged.publication.schema.clone(),
+            );
+            lenses.insert(staged.publication.lens.id, staged.publication.lens.clone());
+            schema_version_aliases.insert(staged.publication.schema.id, staged.alias);
+            physical_mappings.insert(staged.publication.schema.id, staged.mapping.clone());
+            active_lineages_by_target.insert(staged.publication.schema.id, staged.clone());
+            staged_lineages.remove(&next);
+            active_catalogue_seq = next;
+        }
         let current_schema_version_alias = schema_version_aliases
             .get(&current_schema_version_id)
             .copied();
@@ -568,6 +622,11 @@ where
                 catalogue_schemas: schemas,
                 catalogue_lenses: lenses,
                 physical_mappings,
+                staged_lineages,
+                pending_lineages,
+                active_lineages_by_target,
+                active_catalogue_seq,
+                pending_write_pointers,
                 next_physical_table_id,
                 next_physical_column_id,
                 lens_path_cache: BTreeMap::new(),
@@ -643,6 +702,8 @@ where
             node.ensure_provisional_physical_mapping(schema_version)?;
         }
         node.synchronize_physical_version_tables()?;
+        node.drain_pending_schema_lineages()?;
+        node.drain_pending_catalogue_pointers()?;
         node.recover_from_storage()?;
         node.recover_known_state_facts()?;
         node.rebuild_ahead_current_keys()?;
@@ -883,6 +944,11 @@ where
         )?;
         let mut catalogue_schemas = BTreeMap::new();
         let mut catalogue_lenses = BTreeMap::new();
+        let mut staged_lineages_by_id = BTreeMap::new();
+        let mut pending_lineages = BTreeMap::new();
+        let mut active_lineage_ids = BTreeSet::new();
+        let mut active_catalogue_seq = 0;
+        let mut pending_write_pointers = BTreeMap::new();
         for raw in meta_database.primary_key_scan_raw("jazz_catalogue", &[])? {
             let record = raw.record();
             match record.get_bytes(CatalogueRowRecord::FIELD_KIND_IDX)? {
@@ -908,7 +974,69 @@ where
                     }
                     catalogue_lenses.insert(lens.id, lens);
                 }
+                b"schema_lineage_staged" => {
+                    let staged: StagedSchemaLineage = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if staged.publication.id.0
+                        != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
+                        || staged.publication.id != staged.publication.content_id()
+                    {
+                        return Err(Error::InvalidStoredValue(
+                            "staged schema lineage id mismatch",
+                        ));
+                    }
+                    staged_lineages_by_id.insert(staged.publication.id, staged);
+                }
+                b"schema_lineage_pending" => {
+                    let pending: PendingSchemaLineage = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if pending.publication.id.0
+                        != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
+                        || pending.publication.id != pending.publication.content_id()
+                        || pending_lineages
+                            .insert(pending.catalogue_seq, pending)
+                            .is_some()
+                    {
+                        return Err(Error::InvalidStoredValue(
+                            "pending schema lineage identity conflict",
+                        ));
+                    }
+                }
+                b"schema_lineage_active" => {
+                    let active: SchemaLineageActivation = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if active.id.0 != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)? {
+                        return Err(Error::InvalidStoredValue(
+                            "active schema lineage id mismatch",
+                        ));
+                    }
+                    active_catalogue_seq = active_catalogue_seq.max(active.catalogue_seq);
+                    active_lineage_ids.insert(active.id);
+                }
+                b"write_pointer_pending" => {
+                    let pointer: CurrentWriteSchema = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    pending_write_pointers.insert(pointer.revision, pointer);
+                }
                 _ => return Err(Error::InvalidStoredValue("unknown catalogue kind")),
+            }
+        }
+        let mut staged_lineages = BTreeMap::new();
+        let mut active_lineages_by_target = BTreeMap::new();
+        for staged in staged_lineages_by_id.into_values() {
+            if active_lineage_ids.contains(&staged.publication.id) {
+                active_lineages_by_target.insert(staged.publication.schema.id, staged);
+            } else if staged_lineages
+                .insert(staged.catalogue_seq, staged)
+                .is_some()
+            {
+                return Err(Error::InvalidStoredValue(
+                    "duplicate staged catalogue sequence",
+                ));
             }
         }
         let mut schema_version_aliases = BTreeMap::new();
@@ -941,6 +1069,25 @@ where
                         .checked_add(1)
                         .ok_or(Error::InvalidStoredValue("physical column id exhausted"))?;
                     next_physical_column_id = next_physical_column_id.max(column_successor);
+                }
+            }
+        }
+        for staged in staged_lineages.values() {
+            for table in staged.mapping.tables.values() {
+                next_physical_table_id = next_physical_table_id.max(
+                    table
+                        .table_id
+                        .0
+                        .checked_add(1)
+                        .ok_or(Error::InvalidStoredValue("physical table id exhausted"))?,
+                );
+                for column in table.columns.values() {
+                    next_physical_column_id = next_physical_column_id.max(
+                        column
+                            .0
+                            .checked_add(1)
+                            .ok_or(Error::InvalidStoredValue("physical column id exhausted"))?,
+                    );
                 }
             }
         }
@@ -1024,6 +1171,11 @@ where
             lenses: catalogue_lenses,
             schema_version_aliases,
             physical_mappings,
+            staged_lineages,
+            pending_lineages,
+            active_lineages_by_target,
+            active_catalogue_seq,
+            pending_write_pointers,
             next_physical_table_id,
             next_physical_column_id,
             current_write_schema,
@@ -3491,6 +3643,19 @@ where
         Ok(())
     }
 
+    fn next_schema_version_alias(&self) -> Result<SchemaVersionAlias, Error> {
+        Ok(SchemaVersionAlias(
+            self.catalogue
+                .schema_version_aliases
+                .values()
+                .map(|alias| alias.0)
+                .max()
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or(Error::InvalidStoredValue("schema version alias exhausted"))?,
+        ))
+    }
+
     fn allocate_physical_table_id(&mut self) -> Result<PhysicalTableId, Error> {
         let id = PhysicalTableId(self.catalogue.next_physical_table_id);
         self.catalogue.next_physical_table_id = self
@@ -3515,18 +3680,36 @@ where
         &mut self,
         lens: &MigrationLens,
     ) -> Result<SchemaPhysicalMapping, Error> {
+        let target_mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&lens.target)
+            .ok_or(Error::InvalidStoredValue("target physical mapping missing"))?
+            .clone();
+        let target_schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&lens.target)
+            .ok_or(Error::InvalidStoredValue(
+                "target physical mapping schema missing",
+            ))?
+            .clone();
+        self.reconcile_physical_mapping_for_lens_payload(lens, &target_schema, &target_mapping)
+    }
+
+    fn reconcile_physical_mapping_for_lens_payload(
+        &mut self,
+        lens: &MigrationLens,
+        target_schema_version: &SchemaVersion,
+        provisional_target_mapping: &SchemaPhysicalMapping,
+    ) -> Result<SchemaPhysicalMapping, Error> {
         let source_mapping = self
             .catalogue
             .physical_mappings
             .get(&lens.source)
             .ok_or(Error::InvalidStoredValue("source physical mapping missing"))?
             .clone();
-        let mut target_mapping = self
-            .catalogue
-            .physical_mappings
-            .get(&lens.target)
-            .ok_or(Error::InvalidStoredValue("target physical mapping missing"))?
-            .clone();
+        let mut target_mapping = provisional_target_mapping.clone();
         let source_schema = self
             .catalogue
             .catalogue_schemas
@@ -3536,15 +3719,7 @@ where
             ))?
             .schema
             .clone();
-        let target_schema = self
-            .catalogue
-            .catalogue_schemas
-            .get(&lens.target)
-            .ok_or(Error::InvalidStoredValue(
-                "target physical mapping schema missing",
-            ))?
-            .schema
-            .clone();
+        let target_schema = &target_schema_version.schema;
         for table_lens in &lens.table_lenses {
             let source_table = source_mapping.tables.get(&table_lens.source_table).ok_or(
                 Error::InvalidStoredValue("source physical table mapping missing"),
@@ -3648,6 +3823,83 @@ where
         Ok(target_mapping)
     }
 
+    fn persist_catalogue_schema_lineage(
+        &mut self,
+        staged: &StagedSchemaLineage,
+    ) -> Result<(), Error> {
+        let mut batch = self.database.open_batch();
+        batch.update(
+            "jazz_catalogue",
+            vec![
+                Value::Bytes(b"schema_lineage_staged".to_vec()),
+                Value::Uuid(staged.publication.id.0),
+                Value::Bytes(serde_json::to_vec(staged)?),
+            ],
+        );
+        self.database.commit_batch(batch)?;
+        Ok(())
+    }
+
+    fn persist_pending_schema_lineage(
+        &mut self,
+        pending: &PendingSchemaLineage,
+    ) -> Result<(), Error> {
+        let mut batch = self.database.open_batch();
+        batch.update(
+            "jazz_catalogue",
+            vec![
+                Value::Bytes(b"schema_lineage_pending".to_vec()),
+                Value::Uuid(pending.publication.id.0),
+                Value::Bytes(serde_json::to_vec(pending)?),
+            ],
+        );
+        self.database.commit_batch(batch)?;
+        Ok(())
+    }
+
+    fn write_active_schema_lineage_to_batch(
+        batch: &mut DatabaseBatch,
+        staged: &StagedSchemaLineage,
+    ) -> Result<(), Error> {
+        let schema = &staged.publication.schema;
+        let lens = &staged.publication.lens;
+        batch.update(
+            "jazz_catalogue",
+            vec![
+                Value::Bytes(b"schema".to_vec()),
+                Value::Uuid(schema.id.0),
+                Value::Bytes(serde_json::to_vec(schema)?),
+            ],
+        );
+        batch.update(
+            "jazz_catalogue",
+            vec![
+                Value::Bytes(b"lens".to_vec()),
+                Value::Uuid(lens.id.0),
+                Value::Bytes(serde_json::to_vec(lens)?),
+            ],
+        );
+        Self::write_schema_version_mapping_to_batch(
+            batch,
+            staged.alias,
+            schema.id,
+            &staged.mapping,
+        )?;
+        let active = SchemaLineageActivation {
+            id: staged.publication.id,
+            catalogue_seq: staged.catalogue_seq,
+        };
+        batch.update(
+            "jazz_catalogue",
+            vec![
+                Value::Bytes(b"schema_lineage_active".to_vec()),
+                Value::Uuid(active.id.0),
+                Value::Bytes(serde_json::to_vec(&active)?),
+            ],
+        );
+        Ok(())
+    }
+
     fn persist_catalogue_lens_with_physical_metadata(
         &mut self,
         lens: &MigrationLens,
@@ -3698,6 +3950,24 @@ where
         batch.update(
             "jazz_catalogue_pointer",
             vec![Value::U64(pointer.revision), Value::Uuid(pointer.schema.0)],
+        );
+        self.database.commit_batch(batch)?;
+        Ok(())
+    }
+
+    fn persist_pending_catalogue_pointer(
+        &mut self,
+        pointer: CurrentWriteSchema,
+    ) -> Result<(), Error> {
+        let id = uuid::Uuid::new_v5(&pointer.schema.0, &pointer.revision.to_le_bytes());
+        let mut batch = self.database.open_batch();
+        batch.update(
+            "jazz_catalogue",
+            vec![
+                Value::Bytes(b"write_pointer_pending".to_vec()),
+                Value::Uuid(id),
+                Value::Bytes(serde_json::to_vec(&pointer)?),
+            ],
         );
         self.database.commit_batch(batch)?;
         Ok(())
@@ -5028,10 +5298,35 @@ struct CatalogueOpenState<S> {
     lenses: BTreeMap<MigrationLensId, MigrationLens>,
     schema_version_aliases: BTreeMap<SchemaVersionId, SchemaVersionAlias>,
     physical_mappings: BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    staged_lineages: BTreeMap<u64, StagedSchemaLineage>,
+    pending_lineages: BTreeMap<u64, PendingSchemaLineage>,
+    active_lineages_by_target: BTreeMap<SchemaVersionId, StagedSchemaLineage>,
+    active_catalogue_seq: u64,
+    pending_write_pointers: BTreeMap<u64, CurrentWriteSchema>,
     next_physical_table_id: u64,
     next_physical_column_id: u64,
     current_write_schema: CurrentWriteSchema,
     branch_partitions: BTreeSet<(PhysicalTableId, BranchId)>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct StagedSchemaLineage {
+    catalogue_seq: u64,
+    publication: SchemaLineagePublication,
+    alias: SchemaVersionAlias,
+    mapping: SchemaPhysicalMapping,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+struct PendingSchemaLineage {
+    catalogue_seq: u64,
+    publication: SchemaLineagePublication,
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
+struct SchemaLineageActivation {
+    id: SchemaLineagePublicationId,
+    catalogue_seq: u64,
 }
 
 struct DatabaseSlot<S> {

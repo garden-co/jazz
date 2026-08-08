@@ -46,9 +46,10 @@ use crate::peer::{PeerRole, PeerState};
 use crate::protocol::{
     BindingViewKey, ContentExtent, CoverageKey, CurrentWriteSchema, LargeValueOwnerRef,
     MigrationLens, PeerPayloadInventory, ProgramFactEntry, ReadViewKey, ReadViewSourceSpec,
-    ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef, SchemaVersion, ShapeAst,
-    Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey, SyncMessage,
-    VersionBundle, build_version_carriers_from_singletons, expand_version_carriers,
+    ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef, SchemaLineagePublication,
+    SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
+    SubscriptionKey, SyncMessage, VersionBundle, build_version_carriers_from_singletons,
+    expand_version_carriers,
 };
 use crate::protocol_limits::{
     MAX_WIRE_FRAME_BYTES, validate_content_extents, validate_fetch_row_versions,
@@ -2157,6 +2158,24 @@ where
             .apply_sync_message(SyncMessage::PublishSchema {
                 author: self.identity.author,
                 schema: Box::new(schema),
+            })
+            .map_err(Into::into)
+    }
+
+    /// Atomically publish a non-genesis schema and its lineage-defining lens.
+    pub fn publish_schema_with_lens(
+        &self,
+        catalogue_seq: u64,
+        publication: SchemaLineagePublication,
+    ) -> Result<Vec<SyncMessage>, Error> {
+        self.check_catalogue_admin()?;
+        self.node
+            .node
+            .borrow_mut()
+            .apply_sync_message(SyncMessage::PublishSchemaWithLens {
+                author: self.identity.author,
+                catalogue_seq,
+                publication: Box::new(publication),
             })
             .map_err(Into::into)
     }

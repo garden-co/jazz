@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use groove::records::{OwnedRecord, Value};
 
-use crate::ids::{AuthorId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
+use crate::ids::{
+    AuthorId, MigrationLensId, NodeUuid, RowUuid, SchemaLineagePublicationId, SchemaVersionId,
+};
 use crate::node::content_store::Extent;
 use crate::query::{BindingId, Query, RelationQuery, ShapeId};
 use crate::schema::{JazzSchema, TableSchema};
@@ -78,6 +80,15 @@ pub enum SyncMessage {
         author: AuthorId,
         /// Schema payload.
         schema: Box<SchemaVersion>,
+    },
+    /// Atomically publish a non-genesis schema with its lineage-defining lens.
+    PublishSchemaWithLens {
+        /// Authenticated catalogue admin.
+        author: AuthorId,
+        /// Database-wide authoritative catalogue ordering position.
+        catalogue_seq: u64,
+        /// Complete schema-and-lineage publication bundle.
+        publication: Box<SchemaLineagePublication>,
     },
     /// Publish an immutable migration lens payload.
     PublishLens {
@@ -2234,6 +2245,10 @@ pub struct LargeValueExtentEntry {
 pub const MIGRATION_LENS_NAMESPACE: uuid::Uuid =
     uuid::uuid!("5d13f9cb-8a10-5e0f-9a58-e56630a1dc22");
 
+/// Namespace used for atomic schema-lineage publication UUIDv5 ids.
+pub const SCHEMA_LINEAGE_PUBLICATION_NAMESPACE: uuid::Uuid =
+    uuid::uuid!("a1b3ff15-9358-52e0-baa8-f384b1d5db1c");
+
 /// Namespace used for semantic read-view UUIDv5 ids.
 pub const READ_VIEW_NAMESPACE: uuid::Uuid = uuid::uuid!("1a87cf70-f8f0-5ae7-a574-1f9b5e4517f1");
 
@@ -2244,6 +2259,71 @@ pub struct SchemaVersion {
     pub id: SchemaVersionId,
     /// Full schema payload.
     pub schema: JazzSchema,
+}
+
+/// Atomic catalogue payload that admits one non-genesis schema.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct SchemaLineagePublication {
+    /// Content-addressed identity of this complete bundle.
+    pub id: SchemaLineagePublicationId,
+    /// New immutable schema payload.
+    pub schema: SchemaVersion,
+    /// Lineage-defining lens from one already-admitted schema.
+    pub lens: MigrationLens,
+    /// Target tables that begin fresh physical lineages.
+    pub new_tables: Vec<String>,
+    /// Source tables intentionally absent from the target schema.
+    pub dropped_tables: Vec<String>,
+}
+
+impl SchemaLineagePublication {
+    /// Construct an atomic schema-lineage publication payload.
+    pub fn new(
+        schema: SchemaVersion,
+        lens: MigrationLens,
+        new_tables: impl IntoIterator<Item = impl Into<String>>,
+        dropped_tables: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let mut publication = Self {
+            id: SchemaLineagePublicationId(uuid::Uuid::nil()),
+            schema,
+            lens,
+            new_tables: new_tables.into_iter().map(Into::into).collect(),
+            dropped_tables: dropped_tables.into_iter().map(Into::into).collect(),
+        };
+        publication.id = publication.content_id();
+        publication
+    }
+
+    /// Return the content-addressed id implied by this payload.
+    pub fn content_id(&self) -> SchemaLineagePublicationId {
+        let mut bytes = Vec::new();
+        put_str(&mut bytes, "jazz-schema-lineage-publication-v1");
+        put_bytes(
+            &mut bytes,
+            &serde_json::to_vec(&self.schema).expect("schema publication serializes"),
+        );
+        put_bytes(
+            &mut bytes,
+            &serde_json::to_vec(&self.lens).expect("lineage lens serializes"),
+        );
+        let mut new_tables = self.new_tables.clone();
+        new_tables.sort();
+        put_len(&mut bytes, new_tables.len());
+        for table in new_tables {
+            put_str(&mut bytes, &table);
+        }
+        let mut dropped_tables = self.dropped_tables.clone();
+        dropped_tables.sort();
+        put_len(&mut bytes, dropped_tables.len());
+        for table in dropped_tables {
+            put_str(&mut bytes, &table);
+        }
+        SchemaLineagePublicationId(uuid::Uuid::new_v5(
+            &SCHEMA_LINEAGE_PUBLICATION_NAMESPACE,
+            &bytes,
+        ))
+    }
 }
 
 impl SchemaVersion {

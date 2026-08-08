@@ -65,6 +65,166 @@ fn physical_identity_mapping_and_live_id_recovery_are_durable_catalogue_metadata
 }
 
 #[test]
+fn non_genesis_schema_activates_only_with_its_ordered_lineage_bundle() {
+    // Physical topology and the staged catalogue state are not public API, so
+    // this internal test pins their atomic admission boundary directly.
+    let base = schema();
+    let source_id = base.version_id();
+    let target = SchemaVersion::new(catalogue_evolved_schema());
+    let lens = MigrationLens::new(
+        source_id,
+        target.id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "body".to_owned(),
+                default: Value::String(String::new()),
+            }],
+        }],
+    );
+    let publication = SchemaLineagePublication::new(
+        target.clone(),
+        lens.clone(),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    let (dir, mut core) = open_node_with_schema(node(0x2e), base.clone());
+
+    let standalone = core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(target.clone()),
+    });
+    assert!(matches!(
+        standalone,
+        Err(Error::InvalidCatalogueUpdate(
+            "non-genesis schema requires lineage publication"
+        ))
+    ));
+    assert!(!core.catalogue_schemas().contains_key(&target.id));
+
+    let ack = core
+        .apply_sync_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(publication.clone()),
+        })
+        .unwrap();
+    assert!(matches!(
+        ack.as_slice(),
+        [SyncMessage::CatalogueAck(crate::protocol::CatalogueAck {
+            revision: Some(1),
+            schema: Some(schema),
+            lens: Some(published_lens),
+            applied: true,
+        })] if *schema == target.id && *published_lens == lens.id
+    ));
+    let source = &core.catalogue.physical_mappings[&source_id].tables["todos"];
+    let activated = &core.catalogue.physical_mappings[&target.id].tables["todos"];
+    assert_eq!(activated.table_id, source.table_id);
+    assert_eq!(activated.columns["title"], source.columns["title"]);
+
+    let duplicate = core
+        .apply_sync_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(publication),
+        })
+        .unwrap();
+    assert!(matches!(duplicate.as_slice(), [SyncMessage::CatalogueAck(_)]));
+    drop(core);
+
+    let reopened = reopen_node_at(&dir, node(0x2e), base);
+    assert!(reopened.catalogue_schemas().contains_key(&target.id));
+    assert_eq!(
+        reopened.catalogue.physical_mappings[&target.id].tables["todos"].table_id,
+        reopened.catalogue.physical_mappings[&source_id].tables["todos"].table_id
+    );
+}
+
+#[test]
+fn schema_lineage_gaps_and_inactive_sources_park_durably_then_drain_in_order() {
+    let v1 = schema();
+    let v2 = SchemaVersion::new(catalogue_evolved_schema());
+    let v3 = SchemaVersion::new(JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("body", ColumnType::String),
+            ColumnSchema::new("archived", ColumnType::Bool),
+        ],
+    )]));
+    let lens_12 = MigrationLens::new(
+        v1.version_id(),
+        v2.id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "body".to_owned(),
+                default: Value::String(String::new()),
+            }],
+        }],
+    );
+    let lens_23 = MigrationLens::new(
+        v2.id,
+        v3.id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "archived".to_owned(),
+                default: Value::Bool(false),
+            }],
+        }],
+    );
+    let publication_1 = SchemaLineagePublication::new(
+        v2.clone(),
+        lens_12,
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    let publication_2 = SchemaLineagePublication::new(
+        v3.clone(),
+        lens_23,
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    let (dir, mut core) = open_node_with_schema(node(0x2c), v1.clone());
+
+    let parked = core
+        .apply_sync_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 2,
+            publication: Box::new(publication_2),
+        })
+        .unwrap();
+    assert!(parked.is_empty());
+    assert!(!core.catalogue_schemas().contains_key(&v2.id));
+    assert!(!core.catalogue_schemas().contains_key(&v3.id));
+    drop(core);
+
+    let mut reopened = reopen_node_at(&dir, node(0x2c), v1);
+    assert!(!reopened.catalogue_schemas().contains_key(&v3.id));
+    let drained = reopened
+        .apply_sync_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(publication_1),
+        })
+        .unwrap();
+    assert_eq!(
+        drained
+            .iter()
+            .filter(|message| matches!(message, SyncMessage::CatalogueAck(_)))
+            .count(),
+        2
+    );
+    assert!(reopened.catalogue_schemas().contains_key(&v2.id));
+    assert!(reopened.catalogue_schemas().contains_key(&v3.id));
+}
+
+#[test]
 fn publishing_lens_reconciles_target_table_and_column_identities_durably() {
     // Physical topology is intentionally not public API, so this internal test
     // verifies identity reconciliation and live-mapping recovery directly.
