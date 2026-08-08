@@ -188,6 +188,10 @@ pub(crate) enum PolicyContext {
         /// The source whose policy this subplan proves. Its own read policy is
         /// suspended to avoid recursive policy evaluation.
         protected_source: SourceId,
+        /// Authorization kind being evaluated. Read-policy proofs recursively
+        /// authorize membership sources; write-policy predicates select their
+        /// operation-specific authority directly.
+        role: PolicyDecisionRole,
         /// Missing-policy behavior.
         mode: PolicyEnforcementMode,
         /// Identity whose permissions are being evaluated.
