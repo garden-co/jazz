@@ -782,6 +782,41 @@ fn merge_back_branch_emits_ordinary_target_transaction_and_leaves_branch_open() 
     );
 }
 
+#[test]
+fn merge_back_parents_every_concurrent_target_head() {
+    let (_core_dir, mut core) = open_node_with_schema(node(2), schema());
+    let row_uuid = row(0x41);
+    let branch_id = branch(0x41);
+    core.create_root_branch(branch_id).unwrap();
+
+    let (left, _) = core
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("left")),
+        )
+        .unwrap();
+    let (right, _) = core
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 11).cells(title_cells("right")),
+        )
+        .unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row_uuid, 12).cells(title_cells("branch")),
+    )
+    .unwrap();
+
+    let merge = core.merge_back_branch(branch_id).unwrap();
+    let version = core
+        .query_versions_for_tx(merge)
+        .unwrap()
+        .into_iter()
+        .find(|version| version.row_uuid() == row_uuid)
+        .unwrap();
+    let mut parents = version.parents();
+    parents.sort();
+    assert_eq!(parents, vec![left, right]);
+}
+
 #[derive(Clone, Copy)]
 enum MergeBackOracleAction {
     Update(RowUuid, &'static str),

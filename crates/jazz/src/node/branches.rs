@@ -148,12 +148,7 @@ where
                     };
                     let winner = source_versions[winner_idx].clone();
                     through_frontier.insert(self.version_tx_id(&winner)?);
-                    let parents = self
-                        .query_local_layer_winner(&table.name, row_uuid, layer)?
-                        .map(|version| self.version_tx_id(&version))
-                        .transpose()?
-                        .into_iter()
-                        .collect();
+                    let parents = self.target_layer_heads(&table.name, row_uuid, layer)?;
                     let cells = table_schema
                         .columns
                         .iter()
@@ -723,6 +718,35 @@ where
             current_version_index(&versions, &candidates, layer, &self.node_aliases)
                 .map(|idx| versions[idx].clone()),
         )
+    }
+
+    fn target_layer_heads(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+    ) -> Result<Vec<TxId>, Error> {
+        let versions = self.query_row_versions(table, row_uuid)?;
+        let mut candidates = Vec::new();
+        for (idx, version) in versions.iter().enumerate() {
+            if version.layer() != layer {
+                continue;
+            }
+            let tx_id = self.version_tx_id(version)?;
+            let Some(tx) = self.transaction_record(tx_id) else {
+                continue;
+            };
+            if matches!(tx.fate, Fate::Accepted | Fate::Pending) {
+                candidates.push(idx);
+            }
+        }
+        let mut heads = content_head_indices(&versions, &candidates, &self.node_aliases)
+            .into_iter()
+            .map(|idx| self.version_tx_id(&versions[idx]))
+            .collect::<Result<Vec<_>, _>>()?;
+        heads.sort();
+        heads.dedup();
+        Ok(heads)
     }
 
     fn branch_overlay_layer_versions(

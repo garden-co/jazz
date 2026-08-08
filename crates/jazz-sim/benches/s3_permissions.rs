@@ -1626,7 +1626,7 @@ fn flush_headline_versions(
         predicate_read_set: None,
         permission_subject: Some(AuthorId::SYSTEM),
         user_metadata_json: Some("s3_block_tree_headline_fixture".to_owned()),
-        source_branch: None,
+        branch_merge: None,
         merge_strategy: None,
     };
     let chunk = std::mem::take(versions);

@@ -231,7 +231,7 @@ fn run_commit_unit(config: &Config) {
                     node((rows_per_unit % 200) as u8 + 1),
                 ),
                 kind: jazz::tx::TxKind::Mergeable,
-                source_branch: None,
+                branch_merge: None,
                 n_total_writes: rows_per_unit.try_into().expect("rows per unit fits u32"),
                 made_by: AuthorId::SYSTEM,
                 permission_subject: None,
