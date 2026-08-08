@@ -1614,8 +1614,8 @@ where
         row: RowUuid,
         patch: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        let (cells, parent) = self.merge_existing_cells(table, row, patch)?;
-        self.write_mergeable(
+        let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
+        self.write_mergeable_with_authored_columns(
             self.identity.author,
             None,
             table,
@@ -1623,6 +1623,7 @@ where
             cells,
             parent.into_iter().collect(),
             None,
+            authored_columns,
         )
     }
 
@@ -1634,8 +1635,8 @@ where
         patch: RowCells,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
-        let (cells, parent) = self.merge_existing_cells(table, row, patch)?;
-        self.write_mergeable_at_ms(
+        let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
+        self.write_mergeable_at_ms_with_authored_columns(
             self.identity.author,
             None,
             table,
@@ -1643,6 +1644,7 @@ where
             cells,
             parent.into_iter().collect(),
             None,
+            authored_columns,
             now_ms,
         )
     }
@@ -1657,14 +1659,15 @@ where
         row: RowUuid,
         patch: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        let (cells, parent) = self.merge_existing_cells(table, row, patch)?;
-        self.write_mergeable_as_session_subject(
+        let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
+        self.write_mergeable_as_session_subject_with_authored_columns(
             made_by,
             table,
             row,
             cells,
             parent.into_iter().collect(),
             None,
+            authored_columns,
         )
     }
 
@@ -1676,7 +1679,7 @@ where
         row: RowUuid,
         patch: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        let (cells, parent) =
+        let (cells, parent, authored_columns) =
             self.merge_existing_cells_for_identity(table, row, patch, identity)?;
         let parents = parent.into_iter().collect::<Vec<_>>();
         let dry_run = MergeableCommit::new(table, row, self.next_now_ms())
@@ -1696,7 +1699,16 @@ where
                 format!("policy denied UPDATE on table {table}"),
             ));
         }
-        self.write_mergeable(identity, Some(identity), table, row, cells, parents, None)
+        self.write_mergeable_with_authored_columns(
+            identity,
+            Some(identity),
+            table,
+            row,
+            cells,
+            parents,
+            None,
+            authored_columns,
+        )
     }
 
     /// Update a row for `identity` with an explicit millisecond provenance time.
@@ -1708,7 +1720,7 @@ where
         patch: RowCells,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
-        let (cells, parent) =
+        let (cells, parent, authored_columns) =
             self.merge_existing_cells_for_identity(table, row, patch, identity)?;
         let parents = parent.into_iter().collect::<Vec<_>>();
         let dry_run = MergeableCommit::new(table, row, now_ms)
@@ -1728,7 +1740,7 @@ where
                 format!("policy denied UPDATE on table {table}"),
             ));
         }
-        self.write_mergeable_at_ms(
+        self.write_mergeable_at_ms_with_authored_columns(
             identity,
             Some(identity),
             table,
@@ -1736,6 +1748,7 @@ where
             cells,
             parents,
             None,
+            authored_columns,
             now_ms,
         )
     }
@@ -1798,16 +1811,25 @@ where
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents) = if self
+        let (cells, parents, authored_columns) = if self
             .upsert_target_for_identity(table, row, self.identity.author)?
             .is_some()
         {
-            let (cells, parent) = self.merge_existing_cells(table, row, cells)?;
-            (cells, parent.into_iter().collect())
+            let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, cells)?;
+            (cells, parent.into_iter().collect(), Some(authored_columns))
         } else {
-            (cells, Vec::new())
+            (cells, Vec::new(), None)
         };
-        self.write_mergeable(self.identity.author, None, table, row, cells, parents, None)
+        self.write_mergeable_with_authored_columns(
+            self.identity.author,
+            None,
+            table,
+            row,
+            cells,
+            parents,
+            None,
+            authored_columns.unwrap_or_default(),
+        )
     }
 
     /// Upsert a row with an explicit millisecond provenance time.
@@ -1819,16 +1841,16 @@ where
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents) = if self
+        let (cells, parents, authored_columns) = if self
             .upsert_target_for_identity(table, row, self.identity.author)?
             .is_some()
         {
-            let (cells, parent) = self.merge_existing_cells(table, row, cells)?;
-            (cells, parent.into_iter().collect())
+            let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, cells)?;
+            (cells, parent.into_iter().collect(), Some(authored_columns))
         } else {
-            (cells, Vec::new())
+            (cells, Vec::new(), None)
         };
-        self.write_mergeable_at_ms(
+        self.write_mergeable_at_ms_with_authored_columns(
             self.identity.author,
             None,
             table,
@@ -1836,6 +1858,7 @@ where
             cells,
             parents,
             None,
+            authored_columns.unwrap_or_default(),
             now_ms,
         )
     }
@@ -1849,17 +1872,26 @@ where
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents) = if self
+        let (cells, parents, authored_columns) = if self
             .upsert_target_for_identity(table, row, identity)?
             .is_some()
         {
-            let (cells, parent) =
+            let (cells, parent, authored_columns) =
                 self.merge_existing_cells_for_identity(table, row, cells, identity)?;
-            (cells, parent.into_iter().collect())
+            (cells, parent.into_iter().collect(), Some(authored_columns))
         } else {
-            (cells, Vec::new())
+            (cells, Vec::new(), None)
         };
-        self.write_mergeable(identity, Some(identity), table, row, cells, parents, None)
+        self.write_mergeable_with_authored_columns(
+            identity,
+            Some(identity),
+            table,
+            row,
+            cells,
+            parents,
+            None,
+            authored_columns.unwrap_or_default(),
+        )
     }
 
     /// Upsert a row for `identity` with an explicit millisecond provenance time.
@@ -1872,17 +1904,17 @@ where
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents) = if self
+        let (cells, parents, authored_columns) = if self
             .upsert_target_for_identity(table, row, identity)?
             .is_some()
         {
-            let (cells, parent) =
+            let (cells, parent, authored_columns) =
                 self.merge_existing_cells_for_identity(table, row, cells, identity)?;
-            (cells, parent.into_iter().collect())
+            (cells, parent.into_iter().collect(), Some(authored_columns))
         } else {
-            (cells, Vec::new())
+            (cells, Vec::new(), None)
         };
-        self.write_mergeable_at_ms(
+        self.write_mergeable_at_ms_with_authored_columns(
             identity,
             Some(identity),
             table,
@@ -1890,6 +1922,7 @@ where
             cells,
             parents,
             None,
+            authored_columns.unwrap_or_default(),
             now_ms,
         )
     }
@@ -2642,6 +2675,29 @@ where
         )
     }
 
+    fn write_mergeable_as_session_subject_with_authored_columns(
+        &self,
+        made_by: AuthorId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        parents: Vec<TxId>,
+        deletion: Option<DeletionEvent>,
+        authored_columns: BTreeSet<String>,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.check_attribution_allowed(made_by)?;
+        self.write_mergeable_with_authored_columns(
+            made_by,
+            Some(self.identity.author),
+            table,
+            row,
+            cells,
+            parents,
+            deletion,
+            authored_columns,
+        )
+    }
+
     /// Restore a row with an explicit millisecond provenance time.
     pub fn restore_at_ms(
         &self,
@@ -2742,6 +2798,55 @@ where
         deletion: Option<DeletionEvent>,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
+        self.write_mergeable_at_ms_with_authored_columns(
+            made_by,
+            permission_subject,
+            table,
+            row,
+            cells,
+            parents,
+            deletion,
+            BTreeSet::new(),
+            now_ms,
+        )
+    }
+
+    fn write_mergeable_with_authored_columns(
+        &self,
+        made_by: AuthorId,
+        permission_subject: Option<AuthorId>,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        parents: Vec<TxId>,
+        deletion: Option<DeletionEvent>,
+        authored_columns: BTreeSet<String>,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.write_mergeable_at_ms_with_authored_columns(
+            made_by,
+            permission_subject,
+            table,
+            row,
+            cells,
+            parents,
+            deletion,
+            authored_columns,
+            self.next_now_ms(),
+        )
+    }
+
+    fn write_mergeable_at_ms_with_authored_columns(
+        &self,
+        made_by: AuthorId,
+        permission_subject: Option<AuthorId>,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        parents: Vec<TxId>,
+        deletion: Option<DeletionEvent>,
+        authored_columns: BTreeSet<String>,
+        now_ms: u64,
+    ) -> Result<WriteHandle<S>, Error> {
         let operation = if deletion == Some(DeletionEvent::Deleted) {
             "DELETE"
         } else if parents.is_empty() {
@@ -2758,6 +2863,9 @@ where
             .made_by(made_by)
             .parents(parents)
             .cells(cells);
+        if !authored_columns.is_empty() {
+            commit = commit.authored_columns(authored_columns);
+        }
         if let Some(subject) = permission_subject {
             commit = commit.permission_subject(subject);
         }
@@ -3013,7 +3121,7 @@ where
         table: &str,
         row: RowUuid,
         patch: RowCells,
-    ) -> Result<(RowCells, Option<TxId>), Error> {
+    ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
         self.merge_existing_cells_for_identity(table, row, patch, self.identity.author)
     }
 
@@ -3023,7 +3131,7 @@ where
         row: RowUuid,
         patch: RowCells,
         identity: AuthorId,
-    ) -> Result<(RowCells, Option<TxId>), Error> {
+    ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
         let table_schema = self.table_schema(table)?;
         self.ensure_row_not_deleted(table, row)?;
         if table_schema
@@ -3038,7 +3146,8 @@ where
                 .local_current_row(table, row)?
                 .as_ref()
                 .and_then(|existing| self.node.node.borrow_mut().current_row_tx_id(existing));
-            return Ok((patch, parent));
+            let authored_columns = patch.keys().cloned().collect();
+            return Ok((patch, parent, authored_columns));
         }
         if !self.can_read_for_identity(table, row, identity)? {
             return Err(read_for_write_denied("partial UPDATE", table));
@@ -3056,8 +3165,9 @@ where
             }
         }
         let parent = self.node.node.borrow_mut().current_row_tx_id(&existing);
+        let authored_columns = patch.keys().cloned().collect();
         cells.extend(patch);
-        Ok((cells, parent))
+        Ok((cells, parent, authored_columns))
     }
 
     /// Attach this `Db` to an upstream peer over a binding-supplied transport.

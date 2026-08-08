@@ -46,9 +46,9 @@ use crate::schema::{
 use crate::text_merge::{Run as PlainTextRun, TextOp as PlainTextOp};
 use crate::time::{GlobalSeq, TxTime};
 use crate::tx::{
-    AbsentRead, DeletionEvent, DurabilityTier, Fate, HistoryEntry, PredicateRead,
-    RecordedMergeStrategy, RejectedTransaction, RejectedVersion, RejectionReason, RowRead,
-    Snapshot, Transaction, TransactionRecord, TxId, TxKind,
+    AbsentRead, BranchMergeProvenance, DeletionEvent, DurabilityTier, Fate, HistoryEntry,
+    PredicateRead, RecordedMergeStrategy, RejectedTransaction, RejectedVersion, RejectionReason,
+    RowRead, Snapshot, Transaction, TransactionRecord, TxId, TxKind,
 };
 
 const TEXT_EXTENT_OPS_MAGIC: &[u8] = b"JTXTREF1";
@@ -1087,6 +1087,15 @@ where
         commits: Vec<MergeableCommit>,
         made_at: TxTime,
     ) -> Result<TxId, Error> {
+        self.commit_mergeable_many_at_with_branch_merge(commits, made_at, None)
+    }
+
+    pub(super) fn commit_mergeable_many_at_with_branch_merge(
+        &mut self,
+        commits: Vec<MergeableCommit>,
+        made_at: TxTime,
+        branch_merge: Option<BranchMergeProvenance>,
+    ) -> Result<TxId, Error> {
         let write_schema_version = self.catalogue.current_write_schema.schema;
         let tx_id = TxId::new(made_at, self.node_uuid);
         let made_by = commits[0].made_by;
@@ -1105,7 +1114,8 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json,
-            source_branch: None,
+            target_lineage: crate::tx::BranchLineage::Root,
+            branch_merge,
             merge_strategy: commits[0].merge_strategy.clone(),
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
@@ -1122,6 +1132,7 @@ where
             ),
         );
         let mut stored_versions = Vec::new();
+        let mut pending_parents = BTreeSet::new();
         for commit in commits {
             let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
             let layer = VersionLayer::for_commit(&commit);
@@ -1185,6 +1196,12 @@ where
                     previous_current.as_ref(),
                 )?
             };
+            let authored_columns = Some(
+                commit
+                    .authored_columns
+                    .clone()
+                    .unwrap_or_else(|| cells.keys().cloned().collect()),
+            );
             let stored = VersionRow::from_parts_with_schema_version(
                 &table_schema,
                 VersionRowParts {
@@ -1199,6 +1216,7 @@ where
                     updated_by: commit.made_by,
                     updated_at: TxTime(commit.now_ms),
                     cells,
+                    authored_columns,
                     deletion: commit.deletion,
                 },
                 (write_schema_version != self.catalogue.current_schema_version_id)
@@ -1228,15 +1246,16 @@ where
             );
             self.update_merge_heads_for_content_version(&mut batch, &stored)?;
             self.write_ahead_current_insert(&mut batch, &stored)?;
-            for parent in stored.parents() {
-                if let Some(parent_alias) = self.node_aliases.get(&parent.node).copied() {
-                    batch.insert(
-                        "jazz_pending_edges",
-                        pending_edge_values(tx_node_alias, tx_id, parent_alias, parent),
-                    );
-                }
-            }
+            pending_parents.extend(stored.parents());
             stored_versions.push(stored);
+        }
+        for parent in pending_parents {
+            if let Some(parent_alias) = self.node_aliases.get(&parent.node).copied() {
+                batch.insert(
+                    "jazz_pending_edges",
+                    pending_edge_values(tx_node_alias, tx_id, parent_alias, parent),
+                );
+            }
         }
         self.database.commit_batch(batch)?;
         self.cache_tx_versions(tx_id, stored_versions.clone());
@@ -1291,7 +1310,8 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json: edit.user_metadata_json.clone(),
-            source_branch: None,
+            target_lineage: crate::tx::BranchLineage::Root,
+            branch_merge: None,
             merge_strategy: None,
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
@@ -1339,7 +1359,7 @@ where
                 ));
             }
         };
-        let cells = BTreeMap::from([(column_name, Value::Bytes(cell_payload))]);
+        let cells = BTreeMap::from([(column_name.clone(), Value::Bytes(cell_payload))]);
         let parents = previous_current
             .as_ref()
             .map(|previous| self.version_tx_id(previous))
@@ -1361,6 +1381,7 @@ where
                 updated_by: made_by,
                 updated_at,
                 cells,
+                authored_columns: Some(BTreeSet::from([column_name.clone()])),
                 deletion: None,
             },
             (write_schema_version != self.catalogue.current_schema_version_id)
@@ -4657,6 +4678,8 @@ pub struct MergeableCommit {
     pub now_ms: u64,
     /// User cells for content versions.
     pub cells: BTreeMap<String, Value>,
+    /// Explicitly authored content columns. `None` means every supplied cell.
+    pub authored_columns: Option<BTreeSet<String>>,
     /// Deletion-register event, if any.
     pub deletion: Option<DeletionEvent>,
     /// Parent content versions.
@@ -4677,6 +4700,7 @@ impl MergeableCommit {
             permission_subject: None,
             now_ms,
             cells: BTreeMap::new(),
+            authored_columns: None,
             deletion: None,
             parents: Vec::new(),
             user_metadata_json: None,
@@ -4712,6 +4736,13 @@ impl MergeableCommit {
     /// Set one user cell for a content version.
     pub fn cell(mut self, column: impl Into<String>, value: Value) -> Self {
         self.cells.insert(column.into(), value);
+        self
+    }
+
+    /// Preserve which cells were explicitly authored when `cells` is a
+    /// materialized snapshot assembled for a partial update.
+    pub fn authored_columns(mut self, columns: BTreeSet<String>) -> Self {
+        self.authored_columns = Some(columns);
         self
     }
 
@@ -5340,6 +5371,10 @@ pub enum Error {
     /// Branch-scoped exclusive transactions are not implemented in v1.
     #[error("exclusive transactions on branches are unsupported in v1")]
     UnsupportedBranchExclusive,
+    /// Local branch-merge calculation could not prove or encode the requested
+    /// ordinary target write.
+    #[error("branch merge calculation failed: {0}")]
+    BranchMergeCalculation(&'static str),
     /// The authenticated identity is not authorized for this operation.
     #[error("authorization denied")]
     AuthorizationDenied,

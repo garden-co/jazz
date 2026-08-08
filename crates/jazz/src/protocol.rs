@@ -295,6 +295,10 @@ pub struct VersionRecord {
     table: groove::Intern<String>,
     schema_version: SchemaVersionId,
     record: OwnedRecord,
+    /// `None` denotes a legacy or lens-translated payload whose authored
+    /// presence is unavailable; consumers must conservatively treat every
+    /// present payload cell as authored.
+    authored_columns: Option<BTreeSet<String>>,
 }
 
 impl VersionRecord {
@@ -308,7 +312,20 @@ impl VersionRecord {
             table: groove::Intern::new(table.into()),
             schema_version,
             record,
+            authored_columns: None,
         }
+    }
+
+    pub(crate) fn with_authored_columns(
+        mut self,
+        authored_columns: Option<BTreeSet<String>>,
+    ) -> Self {
+        self.authored_columns = authored_columns;
+        self
+    }
+
+    pub(crate) fn authored_columns(&self) -> Option<&BTreeSet<String>> {
+        self.authored_columns.as_ref()
     }
 
     /// Encode a wire record directly from typed row payload parts.

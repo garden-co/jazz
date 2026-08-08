@@ -195,6 +195,189 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
         } if *tx_id == tx.tx_id
     )));
 }
+
+#[test]
+fn catalogue_arrival_drains_branch_relay_into_branch_partition() {
+    let base = schema();
+    let evolved = catalogue_evolved_schema();
+    let evolved_id = evolved.version_id();
+    let (_writer_dir, mut writer) =
+        open_history_complete_node_with_schema(node(0x38), base.clone());
+    let (relay_dir, mut relay) =
+        open_history_complete_node_with_schema(node(0x39), base.clone());
+    let branch_id = branch(0x66);
+    writer.create_root_branch(branch_id).unwrap();
+    relay.create_root_branch(branch_id).unwrap();
+    let tx_id = writer
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("todos", row(0x56), 1_001).cells(title_cells("relay parked")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = writer.commit_unit_for(tx_id).unwrap() else {
+        panic!("commit unit expected");
+    };
+    let rewritten = versions
+        .into_iter()
+        .map(|version| {
+            VersionRecord::from_cells(
+                &base.tables[0],
+                evolved_id,
+                version.row_uuid(),
+                version.parents(),
+                version.created_by(),
+                version.created_at(),
+                version.updated_by(),
+                version.updated_at(),
+                &version_record_cells(&version, &base.tables[0]),
+                version.deletion(),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+
+    relay.ingest_relay_commit_unit(tx.clone(), rewritten).unwrap();
+    assert!(relay.query_transaction(tx.tx_id).unwrap().is_none());
+    assert!(
+        !relay
+            .branches
+            .branch_partitions
+            .iter()
+            .any(|(_, _, existing)| *existing == branch_id)
+    );
+
+    relay
+        .apply_sync_message(SyncMessage::PublishSchema {
+            author: AuthorId::SYSTEM,
+            schema: Box::new(SchemaVersion::new(evolved)),
+        })
+        .unwrap();
+    let stored = relay.transaction_record(tx.tx_id).unwrap();
+    assert_eq!(
+        stored.target_lineage,
+        crate::tx::BranchLineage::Branch(branch_id)
+    );
+    assert_eq!(stored.fate, Fate::Pending);
+    let shape = Query::from("todos").validate(&relay.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let rows = relay
+        .query_rows_on_branch(branch_id, &shape, &binding)
+        .unwrap()
+        .into_iter()
+        .map(current_row_pair)
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(rows.get(&row(0x56)), Some(&title_cells("relay parked")));
+    assert!(
+        relay
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .all(|current| current.row_uuid() != row(0x56))
+    );
+
+    drop(relay);
+    let mut reopened = reopen_node_at(&relay_dir, node(0x39), base);
+    assert_eq!(
+        reopened.transaction_record(tx.tx_id).unwrap().target_lineage,
+        crate::tx::BranchLineage::Branch(branch_id)
+    );
+    let rows = reopened
+        .query_rows_on_branch(branch_id, &shape, &binding)
+        .unwrap()
+        .into_iter()
+        .map(current_row_pair)
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(rows.get(&row(0x56)), Some(&title_cells("relay parked")));
+}
+
+#[test]
+fn parked_branch_ingress_role_keeps_authority_precedence_in_both_orders() {
+    let base = schema();
+    let evolved = catalogue_evolved_schema();
+    let evolved_id = evolved.version_id();
+    let (_writer_dir, mut writer) =
+        open_history_complete_node_with_schema(node(0x3a), base.clone());
+    let branch_id = branch(0x67);
+    writer.create_root_branch(branch_id).unwrap();
+    let tx_id = writer
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("todos", row(0x57), 1_002).cells(title_cells("one unit")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = writer.commit_unit_for(tx_id).unwrap() else {
+        panic!("commit unit expected");
+    };
+    let rewritten = versions
+        .into_iter()
+        .map(|version| {
+            VersionRecord::from_cells(
+                &base.tables[0],
+                evolved_id,
+                version.row_uuid(),
+                version.parents(),
+                version.created_by(),
+                version.created_at(),
+                version.updated_by(),
+                version.updated_at(),
+                &version_record_cells(&version, &base.tables[0]),
+                version.deletion(),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+
+    for (idx, relay_first) in [false, true].into_iter().enumerate() {
+        let node_id = node(0x3b + idx as u8);
+        let (_dir, mut receiver) =
+            open_history_complete_node_with_schema(node_id, base.clone());
+        receiver.create_root_branch(branch_id).unwrap();
+        let authority = || SyncMessage::CommitUnit {
+            tx: tx.clone(),
+            versions: rewritten.clone(),
+        };
+        if relay_first {
+            receiver
+                .ingest_relay_commit_unit(tx.clone(), rewritten.clone())
+                .unwrap();
+            assert!(receiver.apply_sync_message(authority()).unwrap().is_empty());
+        } else {
+            assert!(receiver.apply_sync_message(authority()).unwrap().is_empty());
+            receiver
+                .ingest_relay_commit_unit(tx.clone(), rewritten.clone())
+                .unwrap();
+        }
+
+        let updates = receiver
+            .apply_sync_message(SyncMessage::PublishSchema {
+                author: AuthorId::SYSTEM,
+                schema: Box::new(SchemaVersion::new(evolved.clone())),
+            })
+            .unwrap();
+        assert!(updates.iter().any(|update| matches!(
+            update,
+            SyncMessage::FateUpdate {
+                tx_id: candidate,
+                fate: Fate::Accepted,
+                ..
+            } if *candidate == tx.tx_id
+        )));
+        let stored = receiver.transaction_record(tx.tx_id).unwrap();
+        assert_eq!(stored.fate, Fate::Accepted);
+        assert_eq!(
+            stored.target_lineage,
+            crate::tx::BranchLineage::Branch(branch_id)
+        );
+        assert_eq!(receiver.query_versions_for_tx(tx.tx_id).unwrap().len(), 1);
+        assert!(
+            receiver
+                .current_rows("todos", DurabilityTier::Global)
+                .unwrap()
+                .into_iter()
+                .all(|current| current.row_uuid() != row(0x57))
+        );
+    }
+}
 #[test]
 fn catalogue_current_write_schema_revision_is_core_ordered() {
     let base = schema();

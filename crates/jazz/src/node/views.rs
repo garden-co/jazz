@@ -1214,7 +1214,8 @@ where
             permission_subject,
             base_snapshot,
             user_metadata_json,
-            source_branch,
+            target_lineage,
+            branch_merge,
             merge_strategy,
             ..
         } = stored_tx.tx.clone();
@@ -1229,7 +1230,8 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json,
-            source_branch,
+            target_lineage,
+            branch_merge,
             merge_strategy,
         };
         Ok(VersionBundle {

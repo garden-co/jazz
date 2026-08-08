@@ -6955,6 +6955,7 @@ fn prefixed_version_witness_fields_for_tagged_rows(
         ProjectField::renamed(format!("{prefix}tx_node_id"), "tx_node_id"),
         ProjectField::renamed(format!("{prefix}schema_version"), "schema_version"),
         ProjectField::renamed(format!("{prefix}parents"), "parents"),
+        ProjectField::renamed(format!("{prefix}authored_columns"), "authored_columns"),
         ProjectField::renamed(format!("{prefix}created_by"), "created_by"),
         ProjectField::renamed(format!("{prefix}created_at"), "created_at"),
         ProjectField::renamed(format!("{prefix}updated_by"), "updated_by"),
@@ -6988,6 +6989,7 @@ fn inline_version_witness_fields_for_tagged_rows(
         ProjectField::renamed(version.tx_node_field, "tx_node_id"),
         ProjectField::renamed(version.schema_version_field, "schema_version"),
         ProjectField::named("parents"),
+        ProjectField::named("authored_columns"),
         ProjectField::named("created_by"),
         ProjectField::named("created_at"),
         ProjectField::named("updated_by"),
@@ -7020,6 +7022,10 @@ fn deletion_witness_fields_for_tagged_rows(
         ProjectField::named("tx_node_id"),
         ProjectField::named("schema_version"),
         ProjectField::named("parents"),
+        ProjectField::null_typed(
+            "authored_columns",
+            ValueType::Nullable(Box::new(ValueType::Bytes)),
+        ),
         ProjectField::named("created_by"),
         ProjectField::named("created_at"),
         ProjectField::named("updated_by"),
@@ -7226,6 +7232,7 @@ fn version_witness_schema(
         updated_by_field: "updated_by".to_owned(),
         updated_at_field: "updated_at".to_owned(),
         parents_field: "parents".to_owned(),
+        authored_columns_field: "authored_columns".to_owned(),
         deletion_field: "_deletion".to_owned(),
         user_fields: source
             .table_schema

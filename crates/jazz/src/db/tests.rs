@@ -5983,6 +5983,7 @@ fn view_update_chunking_keeps_result_adds_with_referenced_versions() {
             0xaa,
         ]);
         let tx = crate::tx::Transaction {
+            target_lineage: crate::tx::BranchLineage::Root,
             tx_id,
             kind: crate::tx::TxKind::Mergeable,
             n_total_writes: 1,
@@ -5993,7 +5994,7 @@ fn view_update_chunking_keeps_result_adds_with_referenced_versions() {
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json: None,
-            source_branch: None,
+            branch_merge: None,
             merge_strategy: None,
         };
         let version = crate::protocol::VersionRecord::from_cells(
