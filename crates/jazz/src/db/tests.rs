@@ -5588,13 +5588,18 @@ impl CoreDb {
             .map_err(Into::into)
     }
 
-    fn publish_lens(&self, lens: MigrationLens) -> Result<Vec<SyncMessage>, Error> {
+    fn publish_schema_with_lens(
+        &self,
+        catalogue_seq: u64,
+        publication: SchemaLineagePublication,
+    ) -> Result<Vec<SyncMessage>, Error> {
         self.server
             .node()
             .borrow_mut()
-            .apply_sync_message(SyncMessage::PublishLens {
+            .apply_sync_message(SyncMessage::PublishSchemaWithLens {
                 author: self.author,
-                lens,
+                catalogue_seq,
+                publication: Box::new(publication),
             })
             .map_err(Into::into)
     }
@@ -5727,12 +5732,6 @@ fn db_catalogue_facade_publishes_schema_lens_and_current_write_schema() {
     let client = open_db(0xc1, owner, &base);
     let schema_version = SchemaVersion::new(evolved.clone());
 
-    let schema_ack = core.publish_schema(schema_version.clone()).unwrap();
-    assert!(matches!(
-        schema_ack.as_slice(),
-        [SyncMessage::CatalogueAck(ack)] if ack.schema == Some(schema_version.id) && ack.applied
-    ));
-
     let lens = MigrationLens::new(
         base.version_id(),
         schema_version.id,
@@ -5745,10 +5744,23 @@ fn db_catalogue_facade_publishes_schema_lens_and_current_write_schema() {
             }],
         }],
     );
-    let lens_ack = core.publish_lens(lens.clone()).unwrap();
+    let lens_ack = core
+        .publish_schema_with_lens(
+            1,
+            SchemaLineagePublication::new(
+                schema_version.clone(),
+                lens.clone(),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            ),
+        )
+        .unwrap();
     assert!(matches!(
         lens_ack.as_slice(),
-        [SyncMessage::CatalogueAck(ack)] if ack.lens == Some(lens.id) && ack.applied
+        [SyncMessage::CatalogueAck(ack)]
+            if ack.schema == Some(schema_version.id)
+                && ack.lens == Some(lens.id)
+                && ack.applied
     ));
 
     let pointer = CurrentWriteSchema {
