@@ -11662,6 +11662,7 @@ fn inline_current_record_with_source_metadata(
             Value::U64(provenance.created_at.0),
             Value::Uuid(provenance.updated_by.0),
             Value::U64(provenance.updated_at.0),
+            Value::Nullable(None),
         ]);
     }
     if descriptor.field_index("coverage").is_some() {
@@ -11820,6 +11821,7 @@ fn inline_branch_current_record(
             Value::U64(provenance.created_at.0),
             Value::Uuid(provenance.updated_by.0),
             Value::U64(provenance.updated_at.0),
+            Value::Nullable(None),
         ]);
         if descriptor.field_index("branch_id").is_some() {
             values.push(Value::Uuid(branch_id.0));
