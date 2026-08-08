@@ -10,16 +10,12 @@ use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::protocol::{CurrentWriteSchema, SchemaVersion};
-use jazz::query::{
-    OrderDirection, Query, any_of, claim, col, contains, eq, gt, gte, in_list, lit, lt, lte, ne,
-    not, param,
-};
+use jazz::query::{OrderDirection, Query, claim, col, eq, lit, param};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
 
 const DOCUMENTS: &str = "documents";
 const MEMBERSHIPS: &str = "memberships";
-const RANKED_DOCUMENTS: &str = "ranked_documents";
 const TEAMS: &str = "teams";
 const PROJECTS: &str = "projects";
 const PROJECT_ACCESS: &str = "project_access";
@@ -187,18 +183,6 @@ fn evolved_schema() -> JazzSchema {
                 .with_default(Value::U64(0)),
         );
     schema
-}
-
-fn ranked_documents_schema(policy: Query) -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        RANKED_DOCUMENTS,
-        [
-            ColumnSchema::new("rank", ColumnType::U64),
-            ColumnSchema::new("state", ColumnType::String),
-        ],
-    )
-    .with_read_policy(policy)
-    .with_write_policy(Policy::public())])
 }
 
 fn open_db() -> BenchDb {
