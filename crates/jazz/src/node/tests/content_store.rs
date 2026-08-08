@@ -714,6 +714,21 @@ fn authored_schema_qualified_handle_hydrates_after_table_and_column_rename() {
         Vec::<String>::new(),
     )
     .unwrap();
+    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: target.id,
+        },
+    })
+    .unwrap();
+    let renamed_tx = core
+        .commit_large_value_edit(
+            LargeValueEditCommit::new("articles", row_uuid, "content", 20)
+                .insert(b"schema-qualified".len(), b"+renamed"),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit(renamed_tx).unwrap();
 
     assert_eq!(
         core.hydrate_large_value_handle(&handle).unwrap(),
@@ -738,7 +753,7 @@ fn authored_schema_qualified_handle_hydrates_after_table_and_column_rename() {
     };
     assert_eq!(
         core.hydrate_large_value_handle(&projected_handle).unwrap(),
-        b"schema-qualified"
+        b"schema-qualified+renamed"
     );
 
     drop(core);
@@ -761,7 +776,7 @@ fn authored_schema_qualified_handle_hydrates_after_table_and_column_rename() {
         reopened
             .hydrate_large_value_handle(&reopened_handle)
             .unwrap(),
-        b"schema-qualified"
+        b"schema-qualified+renamed"
     );
 }
 
@@ -1117,7 +1132,7 @@ fn concurrent_text_document_merge_over_extent_limit_is_extent_backed_and_checkpo
     let merge_tx = core.version_tx_id(&merge).unwrap();
     assert!(core
         .content_store()
-        .checkpoint(large_value_schema().version_id(), "docs", row_uuid, "body", merge_tx)
+        .checkpoint(schema.version_id(), "docs", row_uuid, "body", merge_tx)
         .unwrap()
         .is_some());
 
@@ -1333,7 +1348,7 @@ fn registered_markdown_strategy_merge_over_extent_limit_is_extent_backed() {
     let merge_tx = core.version_tx_id(&merge).unwrap();
     assert!(core
         .content_store()
-        .checkpoint(large_value_schema().version_id(), "docs", row_uuid, "body", merge_tx)
+        .checkpoint(schema.version_id(), "docs", row_uuid, "body", merge_tx)
         .unwrap()
         .is_some());
     assert_eq!(
@@ -1505,7 +1520,7 @@ fn registered_json_strategy_merge_over_extent_limit_is_extent_backed() {
     let merge_tx = core.version_tx_id(&merge).unwrap();
     assert!(core
         .content_store()
-        .checkpoint(large_value_schema().version_id(), "docs", row_uuid, "body", merge_tx)
+        .checkpoint(schema.version_id(), "docs", row_uuid, "body", merge_tx)
         .unwrap()
         .is_some());
     assert_eq!(

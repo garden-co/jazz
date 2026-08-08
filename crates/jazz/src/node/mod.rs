@@ -2026,6 +2026,8 @@ where
             ))?;
         let (authored_table, authored_column) =
             self.authored_large_value_identity(authored_schema, table, column)?;
+        let (table_id, column_id) =
+            self.large_value_lineage_ids(authored_schema, &authored_table, &authored_column)?;
         let cache_key = large_value_cache_key(
             authored_schema,
             &authored_table,
@@ -2042,23 +2044,13 @@ where
         let mut current = winner_tx_id;
         let mut checkpoint = None;
         loop {
-            let version = self
-                .query_versions_for_tx(current)?
-                .into_iter()
-                .find(|version| {
-                    version.table() == table.name
-                        && version.row_uuid() == winner.row_uuid()
-                        && version.layer() == VersionLayer::Content
-                })
-                .ok_or(Error::MissingTransaction(current))?;
+            let (version, version_table, version_column, version_schema) =
+                self.large_value_version_for_tx(current, winner.row_uuid(), table_id, column_id)?;
             if let Some(value) = self.large_value_checkpoint(
-                self.schema_version_for_alias(version.schema_version_alias())
-                    .ok_or(Error::InvalidStoredValue(
-                        "large-value schema alias is unknown",
-                    ))?,
-                table,
+                version_schema,
+                &version_table,
                 version.row_uuid(),
-                column,
+                &version_column,
                 current,
             )? {
                 checkpoint = Some(value);
@@ -2067,7 +2059,7 @@ where
                 break;
             }
             let parents = version.parents();
-            suffix.push(version);
+            suffix.push((version, version_table, version_column));
             match parents.as_slice() {
                 [] => break,
                 [parent] => current = *parent,
@@ -2078,11 +2070,11 @@ where
 
         let mut value = checkpoint.unwrap_or_default();
         let mut replayed_ops = 0usize;
-        for version in &suffix {
-            let Some(Value::Bytes(payload)) = version.cell(table, column)? else {
+        for (version, version_table, version_column) in &suffix {
+            let Some(Value::Bytes(payload)) = version.cell(version_table, version_column)? else {
                 continue;
             };
-            match column_large_value_kind(table, column)? {
+            match column_large_value_kind(version_table, version_column)? {
                 LargeValueKind::Text => {
                     let op = self.decode_text_storage_op(&payload)?;
                     replayed_ops = replayed_ops.checked_add(op.runs().len()).ok_or(
@@ -2270,33 +2262,32 @@ where
     ) -> Result<usize, Error> {
         let mut replayed_ops = 0usize;
         let mut current = self.version_tx_id(winner)?;
+        let schema = self
+            .schema_version_for_alias(winner.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "large-value schema alias is unknown",
+            ))?;
+        let (authored_table, authored_column) =
+            self.authored_large_value_identity(schema, table, column)?;
+        let (table_id, column_id) =
+            self.large_value_lineage_ids(schema, &authored_table, &authored_column)?;
         loop {
-            let version = self
-                .query_versions_for_tx(current)?
-                .into_iter()
-                .find(|version| {
-                    version.table() == table.name
-                        && version.row_uuid() == winner.row_uuid()
-                        && version.layer() == VersionLayer::Content
-                })
-                .ok_or(Error::MissingTransaction(current))?;
+            let (version, version_table, version_column, version_schema) =
+                self.large_value_version_for_tx(current, winner.row_uuid(), table_id, column_id)?;
             if self
                 .large_value_checkpoint(
-                    self.schema_version_for_alias(version.schema_version_alias())
-                        .ok_or(Error::InvalidStoredValue(
-                            "large-value schema alias is unknown",
-                        ))?,
-                    table,
+                    version_schema,
+                    &version_table,
                     version.row_uuid(),
-                    column,
+                    &version_column,
                     current,
                 )?
                 .is_some()
             {
                 return Ok(replayed_ops);
             }
-            if let Some(Value::Bytes(payload)) = version.cell(table, column)? {
-                let op_count = match column_large_value_kind(table, column)? {
+            if let Some(Value::Bytes(payload)) = version.cell(&version_table, &version_column)? {
+                let op_count = match column_large_value_kind(&version_table, &version_column)? {
                     LargeValueKind::Text => self.decode_text_storage_op(&payload)?.runs().len(),
                     LargeValueKind::Blob => text_oplog::decode(&payload)?.len(),
                 };
@@ -2325,31 +2316,30 @@ where
         let mut suffix = Vec::new();
         let mut current = self.version_tx_id(winner)?;
         let mut checkpoint_len = None;
+        let schema = self
+            .schema_version_for_alias(winner.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "large-value schema alias is unknown",
+            ))?;
+        let (authored_table, authored_column) =
+            self.authored_large_value_identity(schema, table, column)?;
+        let (table_id, column_id) =
+            self.large_value_lineage_ids(schema, &authored_table, &authored_column)?;
         loop {
-            let version = self
-                .query_versions_for_tx(current)?
-                .into_iter()
-                .find(|version| {
-                    version.table() == table.name
-                        && version.row_uuid() == winner.row_uuid()
-                        && version.layer() == VersionLayer::Content
-                })
-                .ok_or(Error::MissingTransaction(current))?;
+            let (version, version_table, version_column, version_schema) =
+                self.large_value_version_for_tx(current, winner.row_uuid(), table_id, column_id)?;
             if let Some(value) = self.large_value_checkpoint(
-                self.schema_version_for_alias(version.schema_version_alias())
-                    .ok_or(Error::InvalidStoredValue(
-                        "large-value schema alias is unknown",
-                    ))?,
-                table,
+                version_schema,
+                &version_table,
                 version.row_uuid(),
-                column,
+                &version_column,
                 current,
             )? {
                 checkpoint_len = Some(value.len());
                 break;
             }
             let parents = version.parents();
-            suffix.push(version);
+            suffix.push((version, version_table, version_column));
             match parents.as_slice() {
                 [] => break,
                 [parent] => current = *parent,
@@ -2359,11 +2349,11 @@ where
         suffix.reverse();
 
         let mut value_len = checkpoint_len.unwrap_or_default();
-        for version in &suffix {
-            let Some(Value::Bytes(payload)) = version.cell(table, column)? else {
+        for (version, version_table, version_column) in &suffix {
+            let Some(Value::Bytes(payload)) = version.cell(version_table, version_column)? else {
                 continue;
             };
-            match column_large_value_kind(table, column)? {
+            match column_large_value_kind(version_table, version_column)? {
                 LargeValueKind::Text => {
                     let op = self.decode_text_storage_op(&payload)?;
                     let value = vec![0; value_len];
@@ -2798,6 +2788,70 @@ where
         }
     }
 
+    fn large_value_lineage_ids(
+        &self,
+        schema: SchemaVersionId,
+        table: &str,
+        column: &str,
+    ) -> Result<(PhysicalTableId, PhysicalColumnId), Error> {
+        let table = self
+            .catalogue
+            .physical_mappings
+            .get(&schema)
+            .and_then(|mapping| mapping.tables.get(table))
+            .ok_or(Error::InvalidStoredValue(
+                "large-value table lineage mapping is missing",
+            ))?;
+        let column = table
+            .columns
+            .get(column)
+            .copied()
+            .ok_or(Error::InvalidStoredValue(
+                "large-value column lineage mapping is missing",
+            ))?;
+        Ok((table.table_id, column))
+    }
+
+    fn large_value_version_for_tx(
+        &mut self,
+        tx_id: TxId,
+        row_uuid: RowUuid,
+        table_id: PhysicalTableId,
+        column_id: PhysicalColumnId,
+    ) -> Result<(VersionRow, TableSchema, String, SchemaVersionId), Error> {
+        for version in self.query_versions_for_tx(tx_id)? {
+            if version.row_uuid() != row_uuid || version.layer() != VersionLayer::Content {
+                continue;
+            }
+            let schema = self
+                .schema_version_for_alias(version.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "large-value ancestor schema alias is unknown",
+                ))?;
+            let Some(table_mapping) = self
+                .catalogue
+                .physical_mappings
+                .get(&schema)
+                .and_then(|mapping| mapping.tables.get(version.table()))
+            else {
+                continue;
+            };
+            if table_mapping.table_id != table_id {
+                continue;
+            }
+            let Some(column) = table_mapping
+                .columns
+                .iter()
+                .find_map(|(name, id)| (*id == column_id).then(|| name.clone()))
+            else {
+                continue;
+            };
+            let table = self.table_in_schema(version.table(), schema)?.clone();
+            return Ok((version, table, column, schema));
+        }
+        Err(Error::MissingTransaction(tx_id))
+    }
+
     fn large_value_extent_refs_for_version(
         &mut self,
         table: &TableSchema,
@@ -2807,18 +2861,20 @@ where
     ) -> Result<Vec<content_store::Extent>, Error> {
         let mut suffix = Vec::new();
         let mut current = self.version_tx_id(winner)?;
+        let schema = self
+            .schema_version_for_alias(winner.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "large-value schema alias is unknown",
+            ))?;
+        let (authored_table, authored_column) =
+            self.authored_large_value_identity(schema, table, column)?;
+        let (table_id, column_id) =
+            self.large_value_lineage_ids(schema, &authored_table, &authored_column)?;
         loop {
-            let version = self
-                .query_versions_for_tx(current)?
-                .into_iter()
-                .find(|version| {
-                    version.table() == table.name
-                        && version.row_uuid() == winner.row_uuid()
-                        && version.layer() == VersionLayer::Content
-                })
-                .ok_or(Error::MissingTransaction(current))?;
+            let (version, version_table, version_column, _) =
+                self.large_value_version_for_tx(current, winner.row_uuid(), table_id, column_id)?;
             let parents = version.parents();
-            suffix.push(version);
+            suffix.push((version, version_table, version_column));
             match parents.as_slice() {
                 [] => break,
                 [parent] => current = *parent,
@@ -2828,8 +2884,8 @@ where
         suffix.reverse();
 
         let mut refs = Vec::new();
-        for version in &suffix {
-            let Some(Value::Bytes(payload)) = version.cell(table, column)? else {
+        for (version, version_table, version_column) in &suffix {
+            let Some(Value::Bytes(payload)) = version.cell(version_table, version_column)? else {
                 continue;
             };
             match kind {
