@@ -109,28 +109,78 @@ where
     where
         S: ReopenableStorage,
     {
-        let branch = self
-            .branches
-            .branches
-            .get(&branch_id)
-            .cloned()
-            .ok_or(Error::BranchNotFound(branch_id))?;
-        if branch.state != codec::BranchState::Open {
-            return Err(Error::BranchClosed(branch_id));
+        self.merge_lineage_into_as(
+            BranchLineage::Branch(branch_id),
+            BranchLineage::Root,
+            identity,
+        )
+    }
+
+    /// Calculate an ordinary transaction which transfers the source's novel
+    /// contributions into the target lineage.
+    pub fn merge_lineage_into(
+        &mut self,
+        source: BranchLineage,
+        target: BranchLineage,
+    ) -> Result<TxId, Error>
+    where
+        S: ReopenableStorage,
+    {
+        self.merge_lineage_into_as(source, target, AuthorId::SYSTEM)
+    }
+
+    /// Identity-aware form of [`Self::merge_lineage_into`].
+    pub fn merge_lineage_into_as(
+        &mut self,
+        source: BranchLineage,
+        target: BranchLineage,
+        identity: AuthorId,
+    ) -> Result<TxId, Error>
+    where
+        S: ReopenableStorage,
+    {
+        if source == target {
+            return Err(Error::BranchMergeCalculation(
+                "source and target lineage must differ",
+            ));
         }
-        if identity != AuthorId::SYSTEM && !self.branch_read_policy_allows(&branch, identity)? {
+        let source_branch = match source {
+            BranchLineage::Root => None,
+            BranchLineage::Branch(branch_id) => Some(
+                self.branches
+                    .branches
+                    .get(&branch_id)
+                    .cloned()
+                    .ok_or(Error::BranchNotFound(branch_id))?,
+            ),
+        };
+        if let Some(branch) = &source_branch
+            && branch.state != codec::BranchState::Open
+        {
+            return Err(Error::BranchClosed(branch.branch_id));
+        }
+        if identity != AuthorId::SYSTEM
+            && let Some(branch) = &source_branch
+            && !self.branch_read_policy_allows(branch, identity)?
+        {
             return Err(Error::AuthorizationDenied);
+        }
+        if let BranchLineage::Branch(target_branch) = target {
+            self.ensure_branch_open(target_branch)?;
+            if !self.branch_write_policy_allows(target_branch, identity)? {
+                return Err(Error::AuthorizationDenied);
+            }
         }
 
         let mut versions = Vec::new();
         let mut through_frontier = BTreeSet::new();
         let mut substitution_sources =
             BTreeMap::<ContributionCoordinate, BTreeSet<ContributionDot>>::new();
-        let known_source_dots = self.validated_target_source_dots(branch_id)?;
+        let known_source_dots = self.validated_target_source_dots(source, target)?;
         let write_schema_version = self.catalogue.current_write_schema.schema;
         for table in self.catalogue.schema.tables.clone() {
             let table_schema = self.table_in_schema(&table.name, write_schema_version)?;
-            let overlay_rows = self.branch_overlay_row_ids(&table.name, branch_id)?;
+            let overlay_rows = self.lineage_row_ids(&table.name, source)?;
             if identity != AuthorId::SYSTEM && !overlay_rows.is_empty() {
                 let shape = crate::query::Query::from(table.name.as_str())
                     .validate(&self.catalogue.schema)
@@ -138,23 +188,25 @@ where
                 let binding = shape
                     .bind(BTreeMap::new())
                     .map_err(|_| Error::BranchMergeCalculation("source read binding is invalid"))?;
-                let readable = self
-                    .query_rows_on_branch_for_link(branch_id, &shape, &binding, identity)?
-                    .into_iter()
-                    .map(|row| row.row_uuid())
-                    .collect::<BTreeSet<_>>();
+                let readable = match source {
+                    BranchLineage::Root => {
+                        self.query_rows_for_link(&shape, &binding, DurabilityTier::Local, identity)?
+                    }
+                    BranchLineage::Branch(branch_id) => {
+                        self.query_rows_on_branch_for_link(branch_id, &shape, &binding, identity)?
+                    }
+                }
+                .into_iter()
+                .map(|row| row.row_uuid())
+                .collect::<BTreeSet<_>>();
                 if !overlay_rows.is_subset(&readable) {
                     return Err(Error::AuthorizationDenied);
                 }
             }
             for row_uuid in overlay_rows {
                 for layer in [VersionLayer::Content, VersionLayer::Deletion] {
-                    let source_versions = self.branch_overlay_layer_versions(
-                        &table.name,
-                        row_uuid,
-                        layer,
-                        branch_id,
-                    )?;
+                    let source_versions =
+                        self.lineage_layer_versions(&table.name, row_uuid, layer, source)?;
                     let candidates = (0..source_versions.len()).collect::<Vec<_>>();
                     let Some(winner_idx) = current_version_index(
                         &source_versions,
@@ -166,7 +218,7 @@ where
                     };
                     let winner = source_versions[winner_idx].clone();
                     through_frontier.insert(self.version_tx_id(&winner)?);
-                    let parents = self.target_layer_heads(&table.name, row_uuid, layer)?;
+                    let parents = self.target_layer_heads(&table.name, row_uuid, layer, target)?;
                     let cells = table_schema
                         .columns
                         .iter()
@@ -216,19 +268,22 @@ where
                                         layer: MergeAspect::Content,
                                         component: ContributionComponent::Column(column.clone()),
                                     };
-                                    let source_dot = ContributionDot {
-                                        lineage: BranchLineage::Branch(branch_id),
-                                        tx_id: source_tx_id,
-                                        coordinate: ContributionCoordinate {
-                                            table: table.name.clone(),
-                                            row_uuid,
-                                            layer: MergeAspect::Content,
-                                            component: ContributionComponent::Column(
-                                                column.clone(),
-                                            ),
-                                        },
+                                    let source_coordinate = ContributionCoordinate {
+                                        table: table.name.clone(),
+                                        row_uuid,
+                                        layer: MergeAspect::Content,
+                                        component: ContributionComponent::Column(column.clone()),
                                     };
-                                    if known_source_dots.contains(&source_dot) {
+                                    let source_dots = self.expanded_contribution_dots(
+                                        source,
+                                        source_tx_id,
+                                        source_coordinate,
+                                    )?;
+                                    let novel = source_dots
+                                        .into_iter()
+                                        .filter(|dot| !known_source_dots.contains(dot))
+                                        .collect::<BTreeSet<_>>();
+                                    if novel.is_empty() {
                                         continue;
                                     }
                                     layer_has_novel_contribution = true;
@@ -236,7 +291,7 @@ where
                                     substitution_sources
                                         .entry(target)
                                         .or_default()
-                                        .insert(source_dot);
+                                        .extend(novel);
                                 }
                             }
                             VersionLayer::Deletion => {
@@ -246,19 +301,23 @@ where
                                     layer: MergeAspect::Deletion,
                                     component: ContributionComponent::Register,
                                 };
-                                let source_dot = ContributionDot {
-                                    lineage: BranchLineage::Branch(branch_id),
-                                    tx_id: source_tx_id,
-                                    coordinate: target.clone(),
-                                };
-                                if known_source_dots.contains(&source_dot) {
+                                let source_dots = self.expanded_contribution_dots(
+                                    source,
+                                    source_tx_id,
+                                    target.clone(),
+                                )?;
+                                let novel = source_dots
+                                    .into_iter()
+                                    .filter(|dot| !known_source_dots.contains(dot))
+                                    .collect::<BTreeSet<_>>();
+                                if novel.is_empty() {
                                     continue;
                                 }
                                 layer_has_novel_contribution = true;
                                 substitution_sources
                                     .entry(target)
                                     .or_default()
-                                    .insert(source_dot);
+                                    .extend(novel);
                             }
                         }
                     }
@@ -310,13 +369,13 @@ where
             })
             .collect();
         let branch_merge = BranchMergeProvenance::canonical(
-            BranchLineage::Branch(branch_id),
+            source,
             Vec::new(),
             through_frontier.into_iter().collect(),
             substitutions,
         )
         .map_err(Error::BranchMergeCalculation)?;
-        self.commit_merge_back_squash(branch_merge, versions)
+        self.commit_merge_transaction(target, branch_merge, versions)
     }
 
     /// Branch-scoped exclusives are intentionally not implemented in v1.
@@ -333,86 +392,112 @@ where
     where
         S: ReopenableStorage,
     {
-        commit.validate()?;
-        self.ensure_branch_open(branch_id)?;
-        if !self.branch_write_policy_allows(branch_id, commit.made_by)? {
-            return Err(Error::AuthorizationDenied);
-        }
-        for parent in &commit.parents {
-            self.merge_tx_time(parent.time);
-        }
-        let made_at = self.mint_tx_time(commit.now_ms);
-        self.commit_mergeable_on_branch_at(branch_id, commit, made_at)
+        self.commit_mergeable_many_on_branch(branch_id, vec![commit])
     }
 
-    fn commit_mergeable_on_branch_at(
+    /// Commit multiple ordinary mergeable writes atomically into one branch
+    /// target. The resulting transaction differs from a root commit only in
+    /// its explicit target lineage and the target-relative policy/storage view.
+    pub fn commit_mergeable_many_on_branch(
         &mut self,
         branch_id: BranchId,
-        commit: MergeableCommit,
+        commits: Vec<MergeableCommit>,
+    ) -> Result<TxId, Error>
+    where
+        S: ReopenableStorage,
+    {
+        if commits.is_empty() {
+            return Err(Error::InvalidMergeableCommit(
+                "mergeable transaction requires at least one write",
+            ));
+        }
+        for commit in &commits {
+            commit.validate()?;
+            if commit.effective_permission_subject() != commits[0].effective_permission_subject() {
+                return Err(Error::InvalidMergeableCommit(
+                    "mergeable transaction permission subjects must match",
+                ));
+            }
+        }
+        self.ensure_branch_open(branch_id)?;
+        let permission_subject = commits[0].effective_permission_subject();
+        if !self.branch_write_policy_allows(branch_id, permission_subject)? {
+            return Err(Error::AuthorizationDenied);
+        }
+        for commit in &commits {
+            for parent in &commit.parents {
+                self.merge_tx_time(parent.time);
+            }
+        }
+        let write_schema_version = self.catalogue.current_write_schema.schema;
+        for table in commits
+            .iter()
+            .map(|commit| commit.table.clone())
+            .collect::<BTreeSet<_>>()
+        {
+            self.persist_branch_partition(table, write_schema_version, branch_id)?;
+        }
+        let made_at = self.mint_tx_time(commits[0].now_ms);
+        self.commit_mergeable_many_on_branch_at(branch_id, commits, made_at, None)
+    }
+
+    fn commit_mergeable_many_on_branch_at(
+        &mut self,
+        branch_id: BranchId,
+        commits: Vec<MergeableCommit>,
         made_at: TxTime,
+        branch_merge: Option<BranchMergeProvenance>,
     ) -> Result<TxId, Error>
     where
         S: ReopenableStorage,
     {
         let write_schema_version = self.catalogue.current_write_schema.schema;
-        let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
         let branch = self
             .branches
             .branches
             .get(&branch_id)
             .cloned()
             .ok_or(Error::BranchNotFound(branch_id))?;
-        let version = VersionRecord::from_commit(&commit, &table_schema, write_schema_version)?;
-        if !self.branch_table_write_policy_allows_version_record(
-            &branch,
-            &table_schema,
-            &version,
-            commit.made_by,
-        )? {
-            return Err(Error::AuthorizationDenied);
+        let permission_subject = commits[0].effective_permission_subject();
+        for commit in &commits {
+            let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
+            let version = VersionRecord::from_commit(commit, &table_schema, write_schema_version)?;
+            if !self.branch_table_write_policy_allows_version_record(
+                &branch,
+                &table_schema,
+                &version,
+                permission_subject,
+            )? {
+                return Err(Error::AuthorizationDenied);
+            }
         }
-        self.persist_branch_partition(commit.table.clone(), write_schema_version, branch_id)?;
+        for table in commits
+            .iter()
+            .map(|commit| commit.table.clone())
+            .collect::<BTreeSet<_>>()
+        {
+            self.persist_branch_partition(table, write_schema_version, branch_id)?;
+        }
         let tx_id = TxId::new(made_at, self.node_uuid);
         let tx = Transaction {
             tx_id,
             kind: TxKind::Mergeable,
-            n_total_writes: 1,
-            made_by: commit.made_by,
-            permission_subject: None,
+            n_total_writes: commits.len().try_into().map_err(|_| {
+                Error::InvalidMergeableCommit("transaction write count exceeds u32")
+            })?,
+            made_by: commits[0].made_by,
+            permission_subject: commits[0].permission_subject,
             base_snapshot: None,
             row_read_set: None,
             absent_read_set: None,
             predicate_read_set: None,
-            user_metadata_json: commit.user_metadata_json.clone(),
-            branch_merge: None,
-            merge_strategy: None,
+            user_metadata_json: commits[0].user_metadata_json.clone(),
+            target_lineage: BranchLineage::Branch(branch_id),
+            branch_merge,
+            merge_strategy: commits[0].merge_strategy.clone(),
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
         let schema_version_alias = self.ensure_schema_version_alias(write_schema_version)?;
-        let stored = VersionRow::from_parts_with_schema_version(
-            &table_schema,
-            VersionRowParts {
-                table: commit.table.clone(),
-                row_uuid: commit.row_uuid,
-                tx_node_alias,
-                schema_version_alias,
-                tx_time: made_at,
-                parents: commit.parents,
-                created_by: commit.made_by,
-                created_at: TxTime(commit.now_ms),
-                updated_by: commit.made_by,
-                updated_at: TxTime(commit.now_ms),
-                authored_columns: Some(
-                    commit
-                        .authored_columns
-                        .clone()
-                        .unwrap_or_else(|| commit.cells.keys().cloned().collect()),
-                ),
-                cells: commit.cells,
-                deletion: commit.deletion,
-            },
-            None,
-        )?;
         let mut batch = self.database.open_batch();
         batch.insert(
             "jazz_transactions",
@@ -424,17 +509,47 @@ where
                 DurabilityTier::Local,
             ),
         );
-        batch.insert_raw(
-            branch_version_storage_table_name(
-                &table_schema.name,
-                stored.layer(),
-                write_schema_version,
-                branch_id,
-            ),
-            history_primary_key(&stored),
-            stored.record.raw().to_vec(),
-        );
+        let mut transaction_tables = BTreeSet::new();
+        for commit in commits {
+            let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
+            let stored = VersionRow::from_parts_with_schema_version(
+                &table_schema,
+                VersionRowParts {
+                    table: commit.table.clone(),
+                    row_uuid: commit.row_uuid,
+                    tx_node_alias,
+                    schema_version_alias,
+                    tx_time: made_at,
+                    parents: commit.parents,
+                    created_by: commit.made_by,
+                    created_at: TxTime(commit.now_ms),
+                    updated_by: commit.made_by,
+                    updated_at: TxTime(commit.now_ms),
+                    authored_columns: Some(
+                        commit
+                            .authored_columns
+                            .clone()
+                            .unwrap_or_else(|| commit.cells.keys().cloned().collect()),
+                    ),
+                    cells: commit.cells,
+                    deletion: commit.deletion,
+                },
+                None,
+            )?;
+            transaction_tables.insert(table_schema.name.clone());
+            batch.insert_raw(
+                branch_version_storage_table_name(
+                    &table_schema.name,
+                    stored.layer(),
+                    write_schema_version,
+                    branch_id,
+                ),
+                history_primary_key(&stored),
+                stored.record.raw().to_vec(),
+            );
+        }
         self.database.commit_batch(batch)?;
+        self.cache_tx_version_tables(tx_id, transaction_tables);
         Ok(tx_id)
     }
 
@@ -488,7 +603,7 @@ where
             .map(|branches| branches.contains(&RowUuid(branch.branch_id.0)))
     }
 
-    fn branch_write_policy_allows(
+    pub(super) fn branch_write_policy_allows(
         &mut self,
         branch_id: BranchId,
         identity: AuthorId,
@@ -525,7 +640,7 @@ where
         )
     }
 
-    fn branch_table_write_policy_allows_version_record(
+    pub(super) fn branch_table_write_policy_allows_version_record(
         &mut self,
         branch: &BranchRecord,
         table: &TableSchema,
@@ -763,6 +878,83 @@ where
         Ok(row_ids)
     }
 
+    fn lineage_row_ids(
+        &mut self,
+        table: &str,
+        lineage: BranchLineage,
+    ) -> Result<BTreeSet<RowUuid>, Error> {
+        match lineage {
+            BranchLineage::Root => Ok(self
+                .query_table_versions(table)?
+                .into_iter()
+                .map(|version| version.row_uuid())
+                .collect()),
+            BranchLineage::Branch(branch_id) => self.branch_overlay_row_ids(table, branch_id),
+        }
+    }
+
+    fn lineage_layer_versions(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+        lineage: BranchLineage,
+    ) -> Result<Vec<VersionRow>, Error> {
+        match lineage {
+            BranchLineage::Root => Ok(self
+                .query_row_versions(table, row_uuid)?
+                .into_iter()
+                .filter(|version| version.layer() == layer)
+                .collect()),
+            BranchLineage::Branch(branch_id) => {
+                self.branch_overlay_layer_versions(table, row_uuid, layer, branch_id)
+            }
+        }
+    }
+
+    fn expanded_contribution_dots(
+        &mut self,
+        lineage: BranchLineage,
+        tx_id: TxId,
+        coordinate: ContributionCoordinate,
+    ) -> Result<BTreeSet<ContributionDot>, Error> {
+        let Some(stored) = self.query_transaction(tx_id)? else {
+            return Err(Error::BranchMergeCalculation(
+                "source contribution transaction is unavailable",
+            ));
+        };
+        if stored.tx.target_lineage != lineage {
+            return Err(Error::BranchMergeCalculation(
+                "source contribution is stored in another lineage",
+            ));
+        }
+        if let Some(provenance) = &stored.tx.branch_merge
+            && let Some(substitution) = provenance
+                .substitutions
+                .iter()
+                .find(|substitution| substitution.target == coordinate)
+                .cloned()
+        {
+            let emitted = self.query_versions_for_tx(tx_id)?;
+            if !self.validate_lww_branch_substitution(
+                provenance.source_lineage,
+                provenance,
+                &substitution,
+                &emitted,
+            )? {
+                return Err(Error::BranchMergeCalculation(
+                    "branch merge provenance cannot be validated",
+                ));
+            }
+            return Ok(substitution.sources.into_iter().collect());
+        }
+        Ok(BTreeSet::from([ContributionDot {
+            lineage,
+            tx_id,
+            coordinate,
+        }]))
+    }
+
     fn branch_overlay_layer_winner(
         &mut self,
         table: &str,
@@ -783,8 +975,9 @@ where
         table: &str,
         row_uuid: RowUuid,
         layer: VersionLayer,
+        target: BranchLineage,
     ) -> Result<Vec<TxId>, Error> {
-        let versions = self.query_row_versions(table, row_uuid)?;
+        let versions = self.lineage_layer_versions(table, row_uuid, layer, target)?;
         let mut candidates = Vec::new();
         for (idx, version) in versions.iter().enumerate() {
             if version.layer() != layer {
@@ -809,7 +1002,8 @@ where
 
     fn validated_target_source_dots(
         &mut self,
-        branch_id: BranchId,
+        source: BranchLineage,
+        target: BranchLineage,
     ) -> Result<BTreeSet<ContributionDot>, Error> {
         let records = self
             .database
@@ -832,7 +1026,7 @@ where
         for (bytes, alias, time) in records {
             let provenance: BranchMergeProvenance = serde_json::from_slice(&bytes)
                 .map_err(|_| Error::InvalidStoredValue("invalid branch merge provenance"))?;
-            if provenance.source_lineage != BranchLineage::Branch(branch_id) {
+            if provenance.source_lineage != source {
                 continue;
             }
             let Ok(canonical) = BranchMergeProvenance::canonical(
@@ -855,12 +1049,18 @@ where
                 continue;
             };
             let tx_id = TxId::new(TxTime(time), node_uuid);
+            let Some(target_tx) = self.query_transaction(tx_id)? else {
+                continue;
+            };
+            if target_tx.tx.target_lineage != target {
+                continue;
+            }
             let emitted = self.query_versions_for_tx(tx_id)?;
             let mut validated = BTreeSet::new();
             let mut valid = true;
             for substitution in &provenance.substitutions {
                 if !self.validate_lww_branch_substitution(
-                    branch_id,
+                    source,
                     &provenance,
                     substitution,
                     &emitted,
@@ -874,16 +1074,57 @@ where
                 known.extend(validated);
             }
         }
+        // Native target contributions are represented without provenance. A
+        // previously imported transaction expands through its validated
+        // substitution, preventing A→B→C→A from echoing A's own writes.
+        for table in self.catalogue.schema.tables.clone() {
+            let table_schema =
+                self.table_in_schema(&table.name, self.catalogue.current_write_schema.schema)?;
+            for row_uuid in self.lineage_row_ids(&table.name, target)? {
+                for layer in [VersionLayer::Content, VersionLayer::Deletion] {
+                    for version in
+                        self.lineage_layer_versions(&table.name, row_uuid, layer, target)?
+                    {
+                        let tx_id = self.version_tx_id(&version)?;
+                        let coordinates = match layer {
+                            VersionLayer::Content => version
+                                .authored_columns(&table_schema)?
+                                .unwrap_or_default()
+                                .into_iter()
+                                .map(|column| ContributionCoordinate {
+                                    table: table.name.clone(),
+                                    row_uuid,
+                                    layer: MergeAspect::Content,
+                                    component: ContributionComponent::Column(column),
+                                })
+                                .collect::<Vec<_>>(),
+                            VersionLayer::Deletion => vec![ContributionCoordinate {
+                                table: table.name.clone(),
+                                row_uuid,
+                                layer: MergeAspect::Deletion,
+                                component: ContributionComponent::Register,
+                            }],
+                        };
+                        for coordinate in coordinates {
+                            known.extend(
+                                self.expanded_contribution_dots(target, tx_id, coordinate)?,
+                            );
+                        }
+                    }
+                }
+            }
+        }
         Ok(known)
     }
 
     pub(super) fn validate_lww_branch_substitution(
         &mut self,
-        branch_id: BranchId,
+        source: impl Into<BranchLineage>,
         provenance: &BranchMergeProvenance,
         substitution: &ContributionSubstitution,
         emitted: &[VersionRow],
     ) -> Result<bool, Error> {
+        let source = source.into();
         let target = &substitution.target;
         let layer = match target.layer {
             MergeAspect::Content => VersionLayer::Content,
@@ -897,7 +1138,7 @@ where
             return Ok(false);
         };
         let source_versions =
-            self.branch_overlay_layer_versions(&target.table, target.row_uuid, layer, branch_id)?;
+            self.lineage_layer_versions(&target.table, target.row_uuid, layer, source)?;
         let through = provenance
             .through_frontier
             .iter()
@@ -928,12 +1169,11 @@ where
             if !authored {
                 continue;
             }
-            let coordinate = target.clone();
-            expected.insert(ContributionDot {
-                lineage: BranchLineage::Branch(branch_id),
-                tx_id: source_tx_id,
-                coordinate,
-            });
+            expected.extend(self.expanded_contribution_dots(
+                source,
+                source_tx_id,
+                target.clone(),
+            )?);
             if winning_source
                 .as_ref()
                 .is_none_or(|(winner, _)| source_tx_id > *winner)
@@ -980,14 +1220,24 @@ where
                 VersionLayer::Content => schema_table.history_storage_table().record_schema(),
                 VersionLayer::Deletion => schema_table.register_storage_table().record_schema(),
             };
-            for raw in self
+            let raw_versions = self
                 .database
                 .primary_key_scan_raw(&storage_table, &[Value::Uuid(row_uuid.0)])?
-            {
-                versions.push(VersionRow {
+                .into_iter()
+                .map(|raw| raw.raw().to_vec())
+                .collect::<Vec<_>>();
+            for raw in raw_versions {
+                let version = VersionRow {
                     table: groove::Intern::new(table.to_owned()),
-                    record: OwnedRecord::new(raw.raw().to_vec(), descriptor),
-                });
+                    record: OwnedRecord::new(raw, descriptor),
+                };
+                let tx_id = self.version_tx_id(&version)?;
+                if self
+                    .transaction_record(tx_id)
+                    .is_some_and(|tx| !matches!(tx.fate, Fate::Rejected(_)))
+                {
+                    versions.push(version);
+                }
             }
         }
         Ok(versions)
@@ -1001,16 +1251,42 @@ where
         }
     }
 
-    fn commit_merge_back_squash(
+    fn commit_merge_transaction(
         &mut self,
+        target: BranchLineage,
         branch_merge: BranchMergeProvenance,
         commits: Vec<MergeableCommit>,
     ) -> Result<TxId, Error>
     where
         S: ReopenableStorage,
     {
-        let made_at = self.mint_tx_time(0);
-        self.commit_mergeable_many_at_with_branch_merge(commits, made_at, Some(branch_merge))
+        match target {
+            BranchLineage::Root => {
+                let made_at = self.mint_tx_time(0);
+                self.commit_mergeable_many_at_with_branch_merge(
+                    commits,
+                    made_at,
+                    Some(branch_merge),
+                )
+            }
+            BranchLineage::Branch(branch_id) => {
+                let write_schema_version = self.catalogue.current_write_schema.schema;
+                for table in commits
+                    .iter()
+                    .map(|commit| commit.table.clone())
+                    .collect::<BTreeSet<_>>()
+                {
+                    self.persist_branch_partition(table, write_schema_version, branch_id)?;
+                }
+                let made_at = self.mint_tx_time(0);
+                self.commit_mergeable_many_on_branch_at(
+                    branch_id,
+                    commits,
+                    made_at,
+                    Some(branch_merge),
+                )
+            }
+        }
     }
 
     fn persist_branch_record(&mut self, record: &BranchRecord) -> Result<(), Error> {
@@ -1094,6 +1370,25 @@ where
         );
         self.database.commit_batch(batch)?;
         self.rebuild_database_slot()?;
+        Ok(())
+    }
+
+    pub(super) fn ensure_branch_target_partitions(
+        &mut self,
+        branch_id: BranchId,
+        versions: &[VersionRecord],
+    ) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
+        self.ensure_branch_open(branch_id)?;
+        for (table, schema_version) in versions
+            .iter()
+            .map(|version| (version.table().to_owned(), version.schema_version()))
+            .collect::<BTreeSet<_>>()
+        {
+            self.persist_branch_partition(table, schema_version, branch_id)?;
+        }
         Ok(())
     }
 }

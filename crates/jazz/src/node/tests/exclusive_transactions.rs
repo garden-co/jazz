@@ -266,6 +266,7 @@ fn exclusive_snapshot_global_base_uses_contiguous_global_watermark() {
         reader
             .ingest_known_transaction(
                 Transaction {
+                    target_lineage: crate::tx::BranchLineage::Root,
                     tx_id,
                     kind: TxKind::Mergeable,
                     n_total_writes: 1,
@@ -302,6 +303,7 @@ fn exclusive_snapshot_global_base_uses_contiguous_global_watermark() {
     reader
         .ingest_known_transaction(
             Transaction {
+                target_lineage: crate::tx::BranchLineage::Root,
                 tx_id,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,

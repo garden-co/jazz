@@ -881,6 +881,227 @@ fn merge_back_parents_every_concurrent_target_head() {
 }
 
 #[test]
+fn branch_target_is_canonical_atomic_transaction_state_across_reopen() {
+    let (core_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());
+    let branch_id = branch(0x61);
+    core.create_root_branch(branch_id).unwrap();
+    let tx_id = core
+        .commit_mergeable_many_on_branch(
+            branch_id,
+            vec![
+                MergeableCommit::new("todos", row(0x61), 10)
+                    .cells(title_cells("one")),
+                MergeableCommit::new("todos", row(0x62), 10)
+                    .cells(title_cells("two")),
+            ],
+        )
+        .unwrap();
+
+    let record = core.transaction_record(tx_id).unwrap();
+    assert_eq!(
+        record.target_lineage,
+        crate::tx::BranchLineage::Branch(branch_id)
+    );
+    assert_eq!(record.n_total_writes, 2);
+    let SyncMessage::CommitUnit { tx, versions } = core.commit_unit_for(tx_id).unwrap() else {
+        panic!("commit unit expected");
+    };
+    assert_eq!(tx.target_lineage, crate::tx::BranchLineage::Branch(branch_id));
+    assert_eq!(versions.len(), 2);
+    core.finalize_local_mergeable_commit(tx_id).unwrap();
+    assert_eq!(core.transaction_record(tx_id).unwrap().fate, Fate::Accepted);
+    assert!(
+        core.current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .all(|current| ![row(0x61), row(0x62)].contains(&current.row_uuid()))
+    );
+
+    drop(core);
+    let mut reopened = reopen_node_at(&core_dir, node(2), schema());
+    assert_eq!(
+        reopened.transaction_record(tx_id).unwrap().target_lineage,
+        crate::tx::BranchLineage::Branch(branch_id)
+    );
+    assert_eq!(reopened.query_versions_for_tx(tx_id).unwrap().len(), 2);
+}
+
+#[test]
+fn root_branch_transitive_merge_expands_provenance_without_echo() {
+    let (_core_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());
+    let branch_b = branch(0x62);
+    let branch_c = branch(0x63);
+    core.create_root_branch(branch_b).unwrap();
+    core.create_root_branch(branch_c).unwrap();
+
+    let root_native = core
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0x70), 10).cells(title_cells("root")),
+        )
+        .unwrap();
+    let root_to_b = core
+        .merge_lineage_into(
+            crate::tx::BranchLineage::Root,
+            crate::tx::BranchLineage::Branch(branch_b),
+        )
+        .unwrap();
+    assert_eq!(
+        core.transaction_record(root_to_b).unwrap().target_lineage,
+        crate::tx::BranchLineage::Branch(branch_b)
+    );
+    let b_to_c = core
+        .merge_lineage_into(
+            crate::tx::BranchLineage::Branch(branch_b),
+            crate::tx::BranchLineage::Branch(branch_c),
+        )
+        .unwrap();
+    let b_to_c_provenance = core
+        .transaction_record(b_to_c)
+        .unwrap()
+        .branch_merge
+        .unwrap();
+    assert_eq!(b_to_c_provenance.substitutions.len(), 1);
+    assert_eq!(b_to_c_provenance.substitutions[0].sources[0].tx_id, root_native);
+    assert_eq!(
+        b_to_c_provenance.substitutions[0].sources[0].lineage,
+        crate::tx::BranchLineage::Root
+    );
+
+    core.commit_mergeable_on_branch(
+        branch_c,
+        MergeableCommit::new("todos", row(0x71), 20).cells(title_cells("from-c")),
+    )
+    .unwrap();
+    let c_to_root = core
+        .merge_lineage_into(
+            crate::tx::BranchLineage::Branch(branch_c),
+            crate::tx::BranchLineage::Root,
+        )
+        .unwrap();
+    let versions = core.query_versions_for_tx(c_to_root).unwrap();
+    assert_eq!(versions.len(), 1, "root-originated row must not echo home");
+    assert_eq!(versions[0].row_uuid(), row(0x71));
+    assert!(versions[0].parents().iter().all(|parent| {
+        *parent != root_to_b && *parent != b_to_c
+    }));
+}
+
+#[test]
+fn ordinary_commit_unit_routes_to_branch_target_without_touching_root() {
+    let (_writer_dir, mut writer) = open_history_complete_node_with_schema(node(1), schema());
+    let (_receiver_dir, mut receiver) =
+        open_history_complete_node_with_schema(node(2), schema());
+    let branch_id = branch(0x64);
+    writer.create_root_branch(branch_id).unwrap();
+    receiver.create_root_branch(branch_id).unwrap();
+    let tx_id = writer
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("todos", row(0x81), 10).cells(title_cells("synced")),
+        )
+        .unwrap();
+
+    let unit = writer.commit_unit_for(tx_id).unwrap();
+    let updates = receiver.apply_sync_message(unit.clone()).unwrap();
+    assert!(updates.iter().any(|message| matches!(
+        message,
+        SyncMessage::FateUpdate {
+            tx_id: candidate,
+            fate: Fate::Accepted,
+            ..
+        } if *candidate == tx_id
+    )));
+    assert_eq!(
+        receiver.transaction_record(tx_id).unwrap().target_lineage,
+        crate::tx::BranchLineage::Branch(branch_id)
+    );
+    let shape = Query::from("todos")
+        .validate(&receiver.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let branch_rows = receiver
+        .query_rows_on_branch(branch_id, &shape, &binding)
+        .unwrap()
+        .into_iter()
+        .map(current_row_pair)
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(branch_rows.get(&row(0x81)), Some(&title_cells("synced")));
+    assert!(
+        receiver
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .all(|current| current.row_uuid() != row(0x81))
+    );
+    receiver.apply_sync_message(unit).unwrap();
+    let SyncMessage::CommitUnit {
+        mut tx,
+        versions,
+    } = writer.commit_unit_for(tx_id).unwrap()
+    else {
+        panic!("commit unit expected");
+    };
+    tx.target_lineage = crate::tx::BranchLineage::Root;
+    assert!(matches!(
+        receiver.apply_sync_message(SyncMessage::CommitUnit { tx, versions }),
+        Err(Error::ConflictingCommitUnit(candidate)) if candidate == tx_id
+    ));
+}
+
+#[test]
+fn ordinary_branch_target_ingest_applies_target_authorization() {
+    let schema = branch_rls_schema();
+    let (_writer_dir, mut writer) =
+        open_history_complete_node_with_schema(node(1), schema.clone());
+    let (_receiver_dir, mut receiver) = open_history_complete_node_with_schema(node(2), schema);
+    let branch_id = branch(0x65);
+    let allowed = user(0xa1);
+    let denied = user(0xb2);
+    seed_branch_acl(&mut writer, branch_id, allowed, row(0x90), 1);
+    seed_branch_acl(&mut receiver, branch_id, allowed, row(0x90), 1);
+    writer.create_branch(branch_id).unwrap();
+    receiver.create_branch(branch_id).unwrap();
+    let tx_id = writer
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("todos", row(0x91), 10)
+                .made_by(allowed)
+                .cells(owner_cells(allowed, "candidate")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit {
+        mut tx,
+        versions,
+    } = writer.commit_unit_for(tx_id).unwrap()
+    else {
+        panic!("commit unit expected");
+    };
+    tx.made_by = denied;
+    let updates = receiver
+        .apply_sync_message(SyncMessage::CommitUnit { tx, versions })
+        .unwrap();
+    assert!(updates.iter().any(|message| matches!(
+        message,
+        SyncMessage::FateUpdate {
+            tx_id: candidate,
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            ..
+        } if *candidate == tx_id
+    )));
+    let shape = Query::from("todos")
+        .validate(&receiver.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    assert!(
+        receiver
+            .query_rows_on_branch(branch_id, &shape, &binding)
+            .unwrap()
+            .into_iter()
+            .all(|current| current.row_uuid() != row(0x91))
+    );
+}
+
+#[test]
 fn merge_back_fails_whole_calculation_when_source_row_is_not_readable() {
     let (_core_dir, mut core) =
         open_history_complete_node_with_schema(node(2), owner_policy_schema());
@@ -1242,9 +1463,40 @@ fn assert_merge_back_visible_rows_match(
 fn assert_merge_back_versions_match(seed: u64, mut run: MergeBackOracleRun) {
     let merged = tx_version_summary(&mut run.merged, run.merge_back_tx);
     let direct = txs_version_summary(&mut run.direct, &run.direct_txs);
+    let merged_effects = merged
+        .iter()
+        .map(|(row, layer, deletion, cells, _)| (*row, *layer, *deletion, cells.clone()))
+        .collect::<Vec<_>>();
+    let direct_effects = direct
+        .iter()
+        .map(|(row, layer, deletion, cells, _)| (*row, *layer, *deletion, cells.clone()))
+        .collect::<Vec<_>>();
     assert_eq!(
-        merged, direct,
-        "seed {seed}: merge-back version structure must equal direct net effects"
+        merged_effects, direct_effects,
+        "seed {seed}: merge-back payload must equal direct target-local effects"
+    );
+    let provenance = run
+        .merged
+        .transaction_record(run.merge_back_tx)
+        .unwrap()
+        .branch_merge
+        .unwrap();
+    let source_txs = provenance
+        .through_frontier
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    assert!(
+        merged
+            .iter()
+            .flat_map(|(_, _, _, _, parents)| parents)
+            .all(|parent| !source_txs.contains(parent)),
+        "seed {seed}: source lineage must not appear in target causal parents"
+    );
+    assert_eq!(
+        provenance.substitutions.len(),
+        merged.len(),
+        "seed {seed}: every emitted LWW/register effect needs field provenance"
     );
 }
 

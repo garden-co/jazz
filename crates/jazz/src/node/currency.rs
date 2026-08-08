@@ -6,7 +6,11 @@
 //! node-level read layer over groove tables.
 
 use super::*;
-use crate::schema::{partition_history_table_name, partition_register_table_name};
+use crate::schema::{
+    branch_partition_history_table_name, branch_partition_register_table_name,
+    partition_history_table_name, partition_register_table_name,
+};
+use crate::tx::BranchLineage;
 
 impl<S> NodeState<S>
 where
@@ -197,7 +201,13 @@ where
             .unwrap_or_else(|| self.tx_version_scan_tables());
         let mut versions = Vec::new();
         for table in tables {
-            for (storage_table, descriptor) in self.version_storage_sources(&table)? {
+            let sources = match tx.tx.target_lineage {
+                BranchLineage::Root => self.version_storage_sources(&table)?,
+                BranchLineage::Branch(branch_id) => {
+                    self.branch_version_storage_sources(&table, branch_id)?
+                }
+            };
+            for (storage_table, descriptor) in sources {
                 let raws = self
                     .database
                     .index_scan_raw(
@@ -231,6 +241,29 @@ where
                 .then_with(|| left.layer().cmp(&right.layer()))
         });
         Ok(versions)
+    }
+
+    fn branch_version_storage_sources(
+        &self,
+        table: &str,
+        branch_id: BranchId,
+    ) -> Result<Vec<(String, records::RecordDescriptor)>, Error> {
+        let mut sources = Vec::new();
+        for (logical_table, schema_version, candidate_branch) in &self.branches.branch_partitions {
+            if logical_table != table || *candidate_branch != branch_id {
+                continue;
+            }
+            let table_schema = self.table_in_schema(table, *schema_version)?;
+            sources.push((
+                branch_partition_history_table_name(table, *schema_version, branch_id),
+                table_schema.history_storage_table().record_schema(),
+            ));
+            sources.push((
+                branch_partition_register_table_name(table, *schema_version, branch_id),
+                table_schema.register_storage_table().record_schema(),
+            ));
+        }
+        Ok(sources)
     }
 
     pub(super) fn query_versions_for_tx_rows_by_alias(
@@ -511,6 +544,10 @@ where
             user_metadata_json: record
                 .get_nullable_string(TransactionRowRecord::FIELD_USER_METADATA_IDX)?
                 .map(str::to_owned),
+            target_lineage: serde_json::from_slice(
+                record.get_bytes(TransactionRowRecord::FIELD_TARGET_LINEAGE_IDX)?,
+            )
+            .map_err(|_| Error::InvalidStoredValue("invalid target lineage"))?,
             branch_merge: record
                 .get_nullable_bytes(TransactionRowRecord::FIELD_BRANCH_MERGE_IDX)?
                 .map(|bytes| {

@@ -402,6 +402,7 @@ where
             absent_read_set: Some(open_tx.absent_reads),
             predicate_read_set: Some(open_tx.predicate_reads),
             user_metadata_json: open_tx.user_metadata_json,
+            target_lineage: crate::tx::BranchLineage::Root,
             branch_merge: None,
             merge_strategy: None,
         };

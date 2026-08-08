@@ -145,13 +145,18 @@ where
                 }
                 Ok(Vec::new())
             }
-            SyncMessage::CommitUnit { tx, versions } => self.ingest_commit_unit_with_context(
-                tx,
-                versions,
-                u64::MAX - SKEW_TOLERANCE_MS,
-                ingest_context,
-                encoded_len,
-            ),
+            SyncMessage::CommitUnit { tx, versions } => {
+                if let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage {
+                    self.ensure_branch_target_partitions(branch_id, &versions)?;
+                }
+                self.ingest_commit_unit_with_context(
+                    tx,
+                    versions,
+                    u64::MAX - SKEW_TOLERANCE_MS,
+                    ingest_context,
+                    encoded_len,
+                )
+            }
             SyncMessage::FateUpdate {
                 tx_id,
                 fate,
@@ -619,12 +624,17 @@ where
             .get(&tx_id)
             .copied()
             .unwrap_or(stored.tx.made_by);
-        for version in &records {
-            if !self.version_satisfies_write_policy(version, permission_subject)? {
-                let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
-                self.ingest_rejected_transaction(stored.tx, fate)?;
-                return Ok(());
-            }
+        if !self.commit_unit_satisfies_write_policies(
+            &Transaction {
+                permission_subject: Some(permission_subject),
+                ..stored.tx.clone()
+            },
+            &records,
+            None,
+        )? {
+            let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
+            self.ingest_rejected_transaction(stored.tx, fate)?;
+            return Ok(());
         }
         let global_seq = self.clock.next_global_seq;
         self.clock.next_global_seq = self.clock.next_global_seq.next();
@@ -634,7 +644,9 @@ where
             Some(global_seq),
             Some(DurabilityTier::Global),
         )?;
-        self.create_merge_versions_for(&records)?;
+        if stored.tx.target_lineage == crate::tx::BranchLineage::Root {
+            self.create_merge_versions_for(&records)?;
+        }
         self.checkpoint_large_values_for_tx(tx_id)
     }
 
@@ -1707,6 +1719,7 @@ where
             Vec::new()
         };
 
+        let root_target = stored.tx.target_lineage == crate::tx::BranchLineage::Root;
         let mut batch = self.database.open_batch();
         let mut global_current_updates = Vec::new();
         let cleanup_rejected_versions = matches!(stored.fate, Fate::Rejected(_));
@@ -1716,7 +1729,7 @@ where
             .filter(|version| version.layer() == VersionLayer::Content)
             .cloned()
             .collect::<Vec<_>>();
-        if matches!(stored.fate, Fate::Accepted) && stored.global_seq.is_some() {
+        if root_target && matches!(stored.fate, Fate::Accepted) && stored.global_seq.is_some() {
             global_current_updates =
                 self.global_current_updates_for_versions(tx_id, &tx_versions)?;
         }
@@ -1751,7 +1764,7 @@ where
                 stored.durability,
             ),
         );
-        if !matches!(stored.fate, Fate::Rejected(_)) {
+        if root_target && !matches!(stored.fate, Fate::Rejected(_)) {
             for version in &content_versions {
                 self.update_merge_heads_for_content_version(&mut batch, version)?;
             }
@@ -1772,7 +1785,8 @@ where
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if matches!(stored.fate, Fate::Rejected(_)) || stored.global_seq.is_some() {
+        if root_target && (matches!(stored.fate, Fate::Rejected(_)) || stored.global_seq.is_some())
+        {
             self.cleanup_fated_ahead_current_for_versions(&mut batch, &tx_versions)?;
         }
         for global_seq in advanced_global_seqs
@@ -1782,7 +1796,7 @@ where
         {
             self.prune_ahead_current_for_global_seq(&mut batch, global_seq)?;
         }
-        let rejected_payload = if cleanup_rejected_versions {
+        let rejected_payload = if root_target && cleanup_rejected_versions {
             self.remove_rejected_local_versions(tx_id, &stored, &mut batch)?
         } else {
             None
@@ -1794,14 +1808,16 @@ where
         }
         #[cfg(test)]
         {
-            let rows = content_versions
-                .iter()
-                .map(|version| (version.table().to_owned(), version.row_uuid()))
-                .collect::<BTreeSet<_>>();
-            self.assert_merge_head_rows_match_history_for_test(&rows)?;
-            self.assert_global_current_updates_match_history_for_test(
-                &global_current_update_versions,
-            )?;
+            if root_target {
+                let rows = content_versions
+                    .iter()
+                    .map(|version| (version.table().to_owned(), version.row_uuid()))
+                    .collect::<BTreeSet<_>>();
+                self.assert_merge_head_rows_match_history_for_test(&rows)?;
+                self.assert_global_current_updates_match_history_for_test(
+                    &global_current_update_versions,
+                )?;
+            }
         }
         if let Some(rejected_payload) = rejected_payload {
             let tx_id = rejected_payload.tx_id();
@@ -1999,6 +2015,32 @@ where
             }
             None => tx.permission_subject.unwrap_or(tx.made_by),
         };
+        if let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage {
+            let branch = self
+                .branches
+                .branches
+                .get(&branch_id)
+                .cloned()
+                .ok_or(Error::BranchNotFound(branch_id))?;
+            if branch.state != codec::BranchState::Open {
+                return Ok(false);
+            }
+            if !self.branch_write_policy_allows(branch_id, permission_subject)? {
+                return Ok(false);
+            }
+            for version in versions {
+                let table = self.table_in_schema(version.table(), version.schema_version())?;
+                if !self.branch_table_write_policy_allows_version_record(
+                    &branch,
+                    &table,
+                    version,
+                    permission_subject,
+                )? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
         for version in versions {
             if !self.version_satisfies_write_policy(version, permission_subject)? {
                 return Ok(false);
@@ -4389,6 +4431,8 @@ where
         update_current_indexes: bool,
     ) -> Result<(), Error> {
         self.merge_tx_time(tx.tx_id.time);
+        let update_current_indexes =
+            update_current_indexes && tx.target_lineage == crate::tx::BranchLineage::Root;
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node)?;
         let tx_already_known = self.query_transaction(tx.tx_id)?.is_some();
         let tx_values =
@@ -4537,16 +4581,27 @@ where
                     }
                 }
             }
-            let history_table = self.cached_version_storage_table_name_for_schema(
-                &table_schema.name,
-                stored.layer(),
-                target_schema,
-                self.catalogue.current_schema_version_id,
-            );
+            let history_table = match tx.target_lineage {
+                crate::tx::BranchLineage::Root => self
+                    .cached_version_storage_table_name_for_schema(
+                        &table_schema.name,
+                        stored.layer(),
+                        target_schema,
+                        self.catalogue.current_schema_version_id,
+                    )
+                    .as_ref()
+                    .to_owned(),
+                crate::tx::BranchLineage::Branch(branch_id) => branch_version_storage_table_name(
+                    &table_schema.name,
+                    stored.layer(),
+                    target_schema,
+                    branch_id,
+                ),
+            };
             if tx_already_known {
                 let existing = self.database.primary_key_get_raw_in_batch(
                     batch,
-                    history_table.as_ref(),
+                    &history_table,
                     &[
                         Value::Uuid(stored.row_uuid().0),
                         Value::U64(stored.tx_time().0),
@@ -4559,14 +4614,14 @@ where
                     }
                 } else {
                     batch.insert_raw(
-                        history_table.as_ref(),
+                        &history_table,
                         history_primary_key(&stored),
                         stored.record.raw().to_vec(),
                     );
                 }
             } else {
                 batch.insert_raw_fresh(
-                    history_table.as_ref(),
+                    &history_table,
                     history_primary_key(&stored),
                     stored.record.raw().to_vec(),
                 );

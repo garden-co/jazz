@@ -40,6 +40,8 @@ pub struct Transaction {
     pub predicate_read_set: Option<Vec<PredicateRead>>,
     /// Optional application metadata attached at commit time.
     pub user_metadata_json: Option<String>,
+    /// Operational lineage where this transaction's row versions are stored.
+    pub target_lineage: BranchLineage,
     /// Non-causal provenance for a locally calculated branch merge.
     ///
     /// Receivers persist and forward this metadata but do not use it for
@@ -49,15 +51,23 @@ pub struct Transaction {
     pub merge_strategy: Option<RecordedMergeStrategy>,
 }
 
-/// A logical history lineage used only by the local branch-merge calculator.
+/// Canonical operational history lineage for transaction routing and local
+/// branch-merge contribution calculation.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
 )]
+#[serde(rename_all = "snake_case")]
 pub enum BranchLineage {
     /// The ordinary non-branch database history.
     Root,
     /// A snapshot-base branch overlay.
     Branch(BranchId),
+}
+
+impl From<BranchId> for BranchLineage {
+    fn from(branch_id: BranchId) -> Self {
+        Self::Branch(branch_id)
+    }
 }
 
 /// Non-causal source evidence attached to an ordinary calculated merge write.
@@ -293,6 +303,8 @@ pub struct TransactionRecord {
     pub durability: DurabilityTier,
     /// Optional application metadata attached at commit time.
     pub user_metadata_json: Option<String>,
+    /// Operational lineage where this transaction's row versions are stored.
+    pub target_lineage: BranchLineage,
     /// Non-causal provenance for a locally calculated branch merge.
     pub branch_merge: Option<BranchMergeProvenance>,
 }
@@ -363,6 +375,11 @@ impl HistoryEntry {
     /// Highest observed durability tier.
     pub fn durability(&self) -> DurabilityTier {
         self.transaction.durability
+    }
+
+    /// Operational lineage containing this transaction's row versions.
+    pub fn target_lineage(&self) -> BranchLineage {
+        self.transaction.target_lineage
     }
 
     /// Direct parent transaction ids for this version.

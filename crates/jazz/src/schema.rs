@@ -1390,6 +1390,7 @@ fn transactions_table() -> GrooveTableSchema {
             column("absent_read_set", GrooveColumnType::Bytes.nullable()),
             column("predicate_read_set", GrooveColumnType::Bytes.nullable()),
             column("user_metadata", GrooveColumnType::String.nullable()),
+            column("target_lineage", GrooveColumnType::Bytes),
             column("branch_merge", GrooveColumnType::Bytes.nullable()),
             column("permission_subject", GrooveColumnType::Uuid.nullable()),
             column("merge_strategy", GrooveColumnType::String.nullable()),

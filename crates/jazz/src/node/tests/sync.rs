@@ -619,6 +619,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
+        target_lineage: crate::tx::BranchLineage::Root,
         branch_merge: None,
         merge_strategy: None,
     };
@@ -713,6 +714,7 @@ fn sequential_partial_exclusive_bundles_index_the_complete_transaction() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
+        target_lineage: crate::tx::BranchLineage::Root,
         branch_merge: None,
         merge_strategy: None,
     };
@@ -759,6 +761,7 @@ fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
+        target_lineage: crate::tx::BranchLineage::Root,
         branch_merge: None,
         merge_strategy: None,
     };
@@ -950,6 +953,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
+        target_lineage: crate::tx::BranchLineage::Root,
         branch_merge: None,
         merge_strategy: None,
     };
@@ -1267,6 +1271,7 @@ fn originating_causality_rejection_retains_child_payload() {
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json: None,
+            target_lineage: crate::tx::BranchLineage::Root,
             branch_merge: None,
             merge_strategy: None,
         },
@@ -1555,6 +1560,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
                     absent_read_set: None,
                     predicate_read_set: None,
                     user_metadata_json: None,
+                    target_lineage: crate::tx::BranchLineage::Root,
                     branch_merge: None,
                     merge_strategy: None,
                 },
@@ -1990,6 +1996,7 @@ fn seed_policy_graph_known_global(
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
+                target_lineage: crate::tx::BranchLineage::Root,
                 branch_merge: None,
                 merge_strategy: None,
             },
@@ -3665,6 +3672,7 @@ fn duplicate_commit_units_compare_versions_without_wire_order() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
+        target_lineage: crate::tx::BranchLineage::Root,
         branch_merge: None,
         merge_strategy: None,
     };

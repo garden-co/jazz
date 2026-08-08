@@ -1214,6 +1214,7 @@ where
             permission_subject,
             base_snapshot,
             user_metadata_json,
+            target_lineage,
             branch_merge,
             merge_strategy,
             ..
@@ -1229,6 +1230,7 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json,
+            target_lineage,
             branch_merge,
             merge_strategy,
         };

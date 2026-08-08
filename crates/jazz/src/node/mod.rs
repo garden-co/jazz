@@ -1114,6 +1114,7 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json,
+            target_lineage: crate::tx::BranchLineage::Root,
             branch_merge,
             merge_strategy: commits[0].merge_strategy.clone(),
         };
@@ -1307,6 +1308,7 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json: edit.user_metadata_json.clone(),
+            target_lineage: crate::tx::BranchLineage::Root,
             branch_merge: None,
             merge_strategy: None,
         };

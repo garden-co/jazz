@@ -459,6 +459,7 @@ fn pending_replay_fixture_transaction(tx_id: TxId, made_by: AuthorId) -> Transac
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
+        target_lineage: crate::tx::BranchLineage::Root,
         branch_merge: None,
         merge_strategy: None,
     }
@@ -850,7 +851,8 @@ fn recovery_ignores_foreign_tx_ids_when_restoring_next_own_ingest_seq() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
-            branch_merge: None,
+                target_lineage: crate::tx::BranchLineage::Root,
+                branch_merge: None,
             merge_strategy: None,
             },
             vec![version_record(
