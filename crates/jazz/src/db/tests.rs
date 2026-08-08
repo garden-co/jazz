@@ -6388,6 +6388,134 @@ fn empty_branch_metadata_retries_after_unacked_reopen() {
 }
 
 #[test]
+fn edge_durably_relays_empty_branch_creation_and_discard_after_reopen() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let edge_uuid = NodeUuid::from_bytes([0xe1; 16]);
+    let branch = BranchId::from_bytes([0x4c; 16]);
+    let client = open_db(0xc1, identity, &schema);
+    let authority = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let edge_dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+
+    let edge_storage = RocksDbStorage::open(edge_dir.path(), &refs).unwrap();
+    let edge = Node::new(
+        NodeState::new_history_complete(edge_uuid, schema.clone(), edge_storage).unwrap(),
+    );
+    client.create_branch_with_id(branch).unwrap();
+    let (client_transport, edge_transport) = duplex();
+    let client_link = client.connect_upstream(client_transport);
+    let edge_downstream = edge.accept_subscriber(edge_transport, identity);
+    client.tick().unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(
+        edge.node().borrow().pending_branch_metadata_uploads().len(),
+        1
+    );
+    assert!(authority.node().borrow().branch_record(branch).is_none());
+    drop(client_link);
+    drop(edge_downstream);
+    drop(edge);
+
+    // The edge acknowledged the client hop, but its independent authority hop
+    // remains durable across restart.
+    let edge_storage = RocksDbStorage::open(edge_dir.path(), &refs).unwrap();
+    let edge = Node::new(
+        NodeState::new_history_complete(edge_uuid, schema.clone(), edge_storage).unwrap(),
+    );
+    assert_eq!(
+        edge.node().borrow().pending_branch_metadata_uploads().len(),
+        1
+    );
+    let (edge_transport, authority_transport) = duplex();
+    let edge_upstream = edge.connect_upstream(edge_transport);
+    let authority_downstream = authority.accept_subscriber_with_trust(
+        authority_transport,
+        identity,
+        CommitUnitTrust::TrustedBackend,
+    );
+    edge.tick().unwrap();
+    authority.tick().unwrap();
+    edge.tick().unwrap();
+    assert!(authority.node().borrow().branch_record(branch).is_some());
+    assert!(
+        edge.node()
+            .borrow()
+            .pending_branch_metadata_uploads()
+            .is_empty()
+    );
+    drop(edge_upstream);
+    drop(authority_downstream);
+
+    // A delayed exact retry from the downstream author is acknowledged but
+    // does not reopen an already-acknowledged upstream relay.
+    let open_metadata =
+        BranchMetadata::from(client.node.node.borrow().branch_record(branch).unwrap());
+    let (mut retry_transport, edge_transport) = duplex();
+    let retry_downstream = edge.accept_subscriber(edge_transport, identity);
+    retry_transport
+        .send(SyncMessage::BranchMetadata(open_metadata))
+        .unwrap();
+    retry_downstream.borrow_mut().tick().unwrap();
+    assert!(
+        edge.node()
+            .borrow()
+            .pending_branch_metadata_uploads()
+            .is_empty()
+    );
+    drop(retry_downstream);
+
+    client
+        .node
+        .node
+        .borrow_mut()
+        .discard_branch(branch)
+        .unwrap();
+    let (client_transport, edge_transport) = duplex();
+    let client_link = client.connect_upstream(client_transport);
+    let edge_downstream = edge.accept_subscriber(edge_transport, identity);
+    client.tick().unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(
+        edge.node().borrow().pending_branch_metadata_uploads().len(),
+        1
+    );
+    assert!(BranchMetadata::from(authority.node().borrow().branch_record(branch).unwrap()).open);
+    drop(client_link);
+    drop(edge_downstream);
+    drop(edge);
+
+    let edge_storage = RocksDbStorage::open(edge_dir.path(), &refs).unwrap();
+    let edge = Node::new(
+        NodeState::new_history_complete(edge_uuid, schema.clone(), edge_storage).unwrap(),
+    );
+    assert_eq!(
+        edge.node().borrow().pending_branch_metadata_uploads().len(),
+        1
+    );
+    let (edge_transport, authority_transport) = duplex();
+    let _edge_upstream = edge.connect_upstream(edge_transport);
+    let _authority_downstream = authority.accept_subscriber_with_trust(
+        authority_transport,
+        identity,
+        CommitUnitTrust::TrustedBackend,
+    );
+    edge.tick().unwrap();
+    authority.tick().unwrap();
+    edge.tick().unwrap();
+    assert!(!BranchMetadata::from(authority.node().borrow().branch_record(branch).unwrap()).open);
+    assert!(
+        edge.node()
+            .borrow()
+            .pending_branch_metadata_uploads()
+            .is_empty()
+    );
+}
+
+#[test]
 fn session_branch_data_parks_until_authenticated_metadata_arrives() {
     let schema = schema();
     let identity = AuthorId::from_bytes([0xc1; 16]);

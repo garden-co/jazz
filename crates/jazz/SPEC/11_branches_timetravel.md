@@ -106,7 +106,11 @@ record, and can commit into the branch before connecting to a server. The full
 snapshot (`owner`, global and local bases, and dots) is persisted without
 receiver re-authoring. Branch metadata has an independent durable outbox, so an
 empty branch retries across reconnect and reopen until an exact upstream echo
-acknowledges it; branch-target data is separately parked until metadata lands.
+acknowledges it. Every intermediary durably relays newly admitted session
+metadata (including `Open` to `Discarded`) until its own upstream acknowledges
+that hop; acknowledging the downstream hop does not clear the upstream relay,
+and a delayed exact downstream retry does not reopen an acknowledged relay.
+Branch-target data is separately parked until metadata lands.
 
 Session-authored v1 creation is deliberately narrower than trusted backend
 replay: it must be first-seen `Open`, parentless, and use the canonical settled

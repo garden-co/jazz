@@ -111,7 +111,8 @@ where
         self.branches.branches.get(&branch_id)
     }
 
-    /// Durable locally-authored metadata awaiting upstream acknowledgement.
+    /// Durable locally-authored or session-relayed metadata awaiting an exact
+    /// acknowledgement from this node's upstream.
     pub fn pending_branch_metadata_uploads(&self) -> Vec<crate::protocol::BranchMetadata> {
         self.branches
             .pending_metadata_uploads
@@ -151,6 +152,14 @@ where
         &mut self,
         metadata: crate::protocol::BranchMetadata,
     ) -> Result<(), Error> {
+        self.admit_branch_metadata_with_upstream_relay(metadata, false)
+    }
+
+    fn admit_branch_metadata_with_upstream_relay(
+        &mut self,
+        metadata: crate::protocol::BranchMetadata,
+        relay_upstream: bool,
+    ) -> Result<(), Error> {
         let record = BranchRecord {
             branch_id: metadata.branch_id,
             created_by: metadata.created_by,
@@ -173,13 +182,13 @@ where
                 && existing.state == codec::BranchState::Open
                 && record.state == codec::BranchState::Discarded
             {
-                self.persist_branch_record(&record, false)?;
+                self.persist_branch_record(&record, relay_upstream)?;
                 self.branches.branches.insert(record.branch_id, record);
                 return Ok(());
             }
             return Err(Error::InvalidStoredValue("conflicting branch metadata"));
         }
-        self.persist_branch_record(&record, false)?;
+        self.persist_branch_record(&record, relay_upstream)?;
         self.branches.branches.insert(record.branch_id, record);
         Ok(())
     }
@@ -223,7 +232,11 @@ where
         if base.global_base > self.clock.applied_global_watermark {
             return Ok(false);
         }
-        self.admit_branch_metadata(metadata)?;
+        // New metadata and lifecycle advances received from a client session
+        // become a durable upstream relay. Exact downstream retries preserve
+        // the existing pending/acknowledged state instead of reopening a
+        // completed relay and creating an echo loop.
+        self.admit_branch_metadata_with_upstream_relay(metadata, true)?;
         Ok(true)
     }
 

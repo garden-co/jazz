@@ -6359,9 +6359,6 @@ where
                                         .insert(metadata.branch_id, metadata.clone());
                                     continue;
                                 }
-                                self.transport
-                                    .send(SyncMessage::BranchMetadata(metadata.clone()))
-                                    .map_err(transport_error)?;
                             }
                             if let SyncMessage::CommitUnit { tx, .. } = &other
                                 && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage
@@ -6457,6 +6454,18 @@ where
                             }
                             if let Some(branch) = admitted_metadata {
                                 pending_branch_metadata_repairs.remove(&branch);
+                                let metadata = self
+                                    .node
+                                    .borrow()
+                                    .branch_record(branch)
+                                    .map(Into::into)
+                                    .expect("admitted branch metadata remains present");
+                                // This exact echo acknowledges only the
+                                // downstream hop. Session admission may have
+                                // independently persisted an upstream relay.
+                                self.transport
+                                    .send(SyncMessage::BranchMetadata(metadata))
+                                    .map_err(transport_error)?;
                             }
                             if let Some((tx_id, unit)) = relay_upload {
                                 let mut outbox = outbox.borrow_mut();
