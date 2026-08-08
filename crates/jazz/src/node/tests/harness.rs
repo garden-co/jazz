@@ -7,8 +7,8 @@ use super::*;
 use crate::oracle::{ModelRowVersion, Oracle, OracleTxState, ParallelMaterializationOracle};
 use crate::peer::{PeerMetrics, PeerState};
 use crate::protocol::{
-    CurrentWriteSchema, LensOp, MigrationLens, RegisterShapeOptions, SchemaVersion, TableLens,
-    VersionRecord,
+    CurrentWriteSchema, LensOp, MigrationLens, RegisterShapeOptions, SchemaLineagePublication,
+    SchemaVersion, TableLens, VersionRecord,
 };
 use crate::query::{
     ArraySubquery, Binding, BindingId, Query, RelationColumnRef, RelationExpr,

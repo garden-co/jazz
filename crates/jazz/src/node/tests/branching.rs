@@ -635,14 +635,10 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
     )
     .unwrap();
 
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(renamed.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+        &mut core,
+        renamed.clone(),
+        MigrationLens::new(
             base.version_id(),
             renamed.id,
             vec![TableLens {
@@ -660,7 +656,9 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
                 ],
             }],
         ),
-    })
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,

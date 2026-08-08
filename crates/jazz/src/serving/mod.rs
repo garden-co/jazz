@@ -24,7 +24,7 @@ use crate::groove::records::Value;
 use crate::groove::storage::MemoryStorage;
 #[cfg(feature = "rocksdb")]
 use crate::groove::storage::RocksDbStorage;
-use crate::ids::{AuthorId, RowUuid, SchemaVersionId};
+use crate::ids::{AuthorId, MigrationLensId, RowUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
 use crate::protocol::{
     CatalogueAck, CurrentWriteSchema, MigrationLens, SchemaLineagePublication, SchemaVersion,
@@ -301,6 +301,14 @@ impl ShellDb {
             Self::Memory(db) => db.active_catalogue_seq(),
             #[cfg(feature = "rocksdb")]
             Self::Rocks(db) => db.active_catalogue_seq(),
+        }
+    }
+
+    fn catalogue_lens(&self, lens: MigrationLensId) -> Option<MigrationLens> {
+        match self {
+            Self::Memory(db) => db.catalogue_lens(lens),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db.catalogue_lens(lens),
         }
     }
 
@@ -679,7 +687,10 @@ impl InMemoryServerShell {
         let schema_version = SchemaVersion::new(schema);
         let schema_id = schema_version.id;
         if self.db.catalogue_schema(schema_id).is_some() {
-            return Ok(schema_id);
+            if self.db.catalogue_lens(lens.id).as_ref() == Some(&lens) {
+                return Ok(schema_id);
+            }
+            return Err(ShellError::MissingEvent("atomic schema lineage"));
         }
         let publication =
             SchemaLineagePublication::new(schema_version, lens, new_tables, dropped_tables);

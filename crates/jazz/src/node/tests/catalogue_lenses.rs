@@ -250,6 +250,45 @@ fn pending_lineage_reserves_its_target_and_sequence() {
 }
 
 #[test]
+fn lineage_operations_must_exhaustively_reproduce_target_columns_before_staging() {
+    let base = schema();
+    let target = SchemaVersion::new(catalogue_evolved_schema());
+    let incomplete_lens = MigrationLens::new(
+        base.version_id(),
+        target.id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: Vec::new(),
+        }],
+    );
+    let publication = SchemaLineagePublication::new(
+        target.clone(),
+        incomplete_lens,
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    let (_dir, mut core) = open_node_with_schema(node(0x29), base);
+    let next_table = core.catalogue.next_physical_table_id;
+    let next_column = core.catalogue.next_physical_column_id;
+
+    assert!(matches!(
+        core.apply_sync_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(publication),
+        }),
+        Err(Error::InvalidCatalogueUpdate(
+            "lens operations do not reproduce target columns"
+        ))
+    ));
+    assert!(!core.catalogue_schemas().contains_key(&target.id));
+    assert!(core.catalogue.staged_lineages.is_empty());
+    assert_eq!(core.catalogue.next_physical_table_id, next_table);
+    assert_eq!(core.catalogue.next_physical_column_id, next_column);
+}
+
+#[test]
 fn schema_lineage_gaps_and_inactive_sources_park_durably_then_drain_in_order() {
     let v1 = schema();
     let v2 = SchemaVersion::new(catalogue_evolved_schema());

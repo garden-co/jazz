@@ -2235,6 +2235,16 @@ where
         self.node.node.borrow().active_catalogue_seq()
     }
 
+    /// Return a published migration lens known to this database.
+    pub fn catalogue_lens(&self, lens: crate::ids::MigrationLensId) -> Option<MigrationLens> {
+        self.node
+            .node
+            .borrow()
+            .catalogue_lenses()
+            .get(&lens)
+            .cloned()
+    }
+
     /// Open a mergeable transaction and return its id.
     ///
     /// The caller owns this transaction's lifetime and must commit it with

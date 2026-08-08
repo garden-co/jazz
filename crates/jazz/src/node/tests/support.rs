@@ -164,6 +164,28 @@ fn owner_policy_schema() -> JazzSchema {
 fn user(byte: u8) -> AuthorId {
     AuthorId::from_bytes([byte; 16])
 }
+fn publish_schema_lineage<S>(
+    core: &mut NodeState<S>,
+    schema: SchemaVersion,
+    lens: MigrationLens,
+    new_tables: impl IntoIterator<Item = impl Into<String>>,
+    dropped_tables: impl IntoIterator<Item = impl Into<String>>,
+) -> Result<Vec<SyncMessage>, Error>
+where
+    S: ReopenableStorage,
+{
+    let publication = SchemaLineagePublication::new(
+        schema,
+        lens,
+        new_tables.into_iter().map(Into::into),
+        dropped_tables.into_iter().map(Into::into),
+    );
+    core.apply_sync_message(SyncMessage::PublishSchemaWithLens {
+        author: AuthorId::SYSTEM,
+        catalogue_seq: core.active_catalogue_seq().saturating_add(1),
+        publication: Box::new(publication),
+    })
+}
 fn owner_cells(author: AuthorId, title: impl Into<String>) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.into())),

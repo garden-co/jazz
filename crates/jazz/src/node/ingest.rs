@@ -773,45 +773,119 @@ where
                 .iter()
                 .find(|table| table.name == table_lens.target_table)
                 .ok_or(Error::InvalidCatalogueUpdate("table lens is unknown"))?;
+            let table_has_large_values = source_table
+                .columns
+                .iter()
+                .chain(&target_table.columns)
+                .any(|column| column.large_value.is_some());
+            if table_has_large_values && source_table.name != target_table.name {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "large-value table rename requires schema-qualified handles",
+                ));
+            }
             let mut columns = source_table
                 .columns
                 .iter()
                 .cloned()
                 .map(|column| (column.name.clone(), column))
                 .collect::<BTreeMap<_, _>>();
+            let mut saw_table_rename = source_table.name == target_table.name;
             for op in &table_lens.ops {
                 match op {
-                    LensOp::RenameTable { .. } => {}
-                    LensOp::RenameColumn { from, to } => {
-                        if let Some(mut column) = columns.remove(from) {
-                            column.name = to.clone();
-                            columns.insert(to.clone(), column);
+                    LensOp::RenameTable { from, to } => {
+                        if saw_table_rename
+                            || from != &source_table.name
+                            || to != &target_table.name
+                        {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "table rename does not match lens endpoints",
+                            ));
                         }
+                        saw_table_rename = true;
+                    }
+                    LensOp::RenameColumn { from, to } => {
+                        if from != to
+                            && source_table
+                                .columns
+                                .iter()
+                                .find(|column| column.name == *from)
+                                .is_some_and(|column| column.large_value.is_some())
+                        {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "large-value column rename requires schema-qualified handles",
+                            ));
+                        }
+                        if columns.contains_key(to) {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "column rename collides with existing column",
+                            ));
+                        }
+                        let mut column = columns.remove(from).ok_or(
+                            Error::InvalidCatalogueUpdate("column rename source is unknown"),
+                        )?;
+                        column.name = to.clone();
+                        columns.insert(to.clone(), column);
                     }
                     LensOp::CopyColumn { from, to } => {
-                        if let Some(mut column) = columns.get(from).cloned() {
-                            column.name = to.clone();
-                            columns.insert(to.clone(), column);
+                        if columns.contains_key(to) {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "column copy collides with existing column",
+                            ));
                         }
+                        let mut column =
+                            columns
+                                .get(from)
+                                .cloned()
+                                .ok_or(Error::InvalidCatalogueUpdate(
+                                    "column copy source is unknown",
+                                ))?;
+                        column.name = to.clone();
+                        columns.insert(to.clone(), column);
                     }
                     LensOp::AddColumn { column, .. } => {
-                        if let Some(target_column) = target_table
+                        if columns.contains_key(column) {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "added column already exists",
+                            ));
+                        }
+                        let target_column = target_table
                             .columns
                             .iter()
                             .find(|candidate| candidate.name == *column)
                             .cloned()
-                        {
-                            columns.insert(column.clone(), target_column);
-                        }
+                            .ok_or(Error::InvalidCatalogueUpdate(
+                                "added column is absent from target",
+                            ))?;
+                        columns.insert(column.clone(), target_column);
                     }
                     LensOp::DropColumn { column, .. } => {
-                        columns.remove(column);
+                        if columns.remove(column).is_none() {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "dropped column is absent from source",
+                            ));
+                        }
                     }
                     LensOp::TransformColumn { column, transform } => {
                         validate_transform_column(columns.get(column), transform)?;
                     }
                     LensOp::RejectSourceDelta { .. } => {}
                 }
+            }
+            if !saw_table_rename {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "renamed table requires an explicit RenameTable operation",
+                ));
+            }
+            let target_columns = target_table
+                .columns
+                .iter()
+                .cloned()
+                .map(|column| (column.name.clone(), column))
+                .collect::<BTreeMap<_, _>>();
+            if columns != target_columns {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "lens operations do not reproduce target columns",
+                ));
             }
         }
         Ok(())

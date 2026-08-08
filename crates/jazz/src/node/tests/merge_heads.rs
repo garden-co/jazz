@@ -212,14 +212,10 @@ fn merge_heads_share_physical_identity_across_table_rename_and_restart() {
         )
         .unwrap();
 
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(renamed.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+        &mut core,
+        renamed.clone(),
+        MigrationLens::new(
             base.version_id(),
             renamed.id,
             vec![TableLens {
@@ -237,7 +233,9 @@ fn merge_heads_share_physical_identity_across_table_rename_and_restart() {
                 ],
             }],
         ),
-    })
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
