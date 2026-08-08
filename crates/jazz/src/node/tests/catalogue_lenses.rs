@@ -2309,14 +2309,10 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
             AuthorId::SYSTEM,
         )
         .unwrap();
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+    &mut core,
+    evolved_payload.clone(),
+    MigrationLens::new(
             base.version_id(),
             evolved_payload.id,
             vec![TableLens {
@@ -2334,8 +2330,10 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
                 ],
             }],
         ),
-    })
-    .unwrap();
+    Vec::<String>::new(),
+    Vec::<String>::new(),
+)
+.unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
@@ -2398,16 +2396,10 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
         .with_reference("todo", "todos"),
     ]));
     let (_join_dir, mut join_core) = open_node_with_schema(node(0x4d), join_base.clone());
-    join_core
-        .apply_sync_message(SyncMessage::PublishSchema {
-            author: AuthorId::SYSTEM,
-            schema: Box::new(join_evolved.clone()),
-        })
-        .unwrap();
-    join_core
-        .apply_sync_message(SyncMessage::PublishLens {
-            author: AuthorId::SYSTEM,
-            lens: MigrationLens::new(
+    publish_schema_lineage(
+        &mut join_core,
+        join_evolved.clone(),
+        MigrationLens::new(
                 join_base.version_id(),
                 join_evolved.id,
                 vec![TableLens {
@@ -2424,8 +2416,10 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
                     ops: vec![],
                 }],
             ),
-        })
-        .unwrap();
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
     join_core
         .apply_sync_message(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
@@ -2490,14 +2484,10 @@ fn schema_projected_reads_ignore_settled_result_set_materialization_cache() {
     )]);
     let evolved_payload = SchemaVersion::new(evolved);
     let (_dir, mut core) = open_node_with_schema(node(0x4c), base.clone());
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+    &mut core,
+    evolved_payload.clone(),
+    MigrationLens::new(
             base.version_id(),
             evolved_payload.id,
             vec![TableLens {
@@ -2515,8 +2505,10 @@ fn schema_projected_reads_ignore_settled_result_set_materialization_cache() {
                 ],
             }],
         ),
-    })
-    .unwrap();
+    Vec::<String>::new(),
+    Vec::<String>::new(),
+)
+.unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
@@ -2624,14 +2616,10 @@ fn schema_projected_current_reachable_filters_translate_old_names() {
     ]);
     let evolved_payload = SchemaVersion::new(evolved);
     let (_dir, mut core) = open_node_with_schema(node(0x4f), base.clone());
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+    &mut core,
+    evolved_payload.clone(),
+    MigrationLens::new(
             base.version_id(),
             evolved_payload.id,
             vec![
@@ -2663,8 +2651,10 @@ fn schema_projected_current_reachable_filters_translate_old_names() {
                 },
             ],
         ),
-    })
-    .unwrap();
+    Vec::<String>::new(),
+    Vec::<String>::new(),
+)
+.unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
@@ -2754,14 +2744,10 @@ fn include_deleted_schema_projected_root_filters_translate_old_names() {
         ],
     )]));
     let (_dir, mut core) = open_node_with_schema(node(0x59), base.clone());
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+    &mut core,
+    evolved.clone(),
+    MigrationLens::new(
             base.version_id(),
             evolved.id,
             vec![TableLens {
@@ -2779,8 +2765,10 @@ fn include_deleted_schema_projected_root_filters_translate_old_names() {
                 ],
             }],
         ),
-    })
-    .unwrap();
+    Vec::<String>::new(),
+    Vec::<String>::new(),
+)
+.unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
@@ -2848,14 +2836,10 @@ fn include_deleted_schema_projected_join_filters_translate_old_names() {
         .with_reference("issue", "issues"),
     ]));
     let (_dir, mut core) = open_node_with_schema(node(0x5a), base.clone());
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+    &mut core,
+    evolved.clone(),
+    MigrationLens::new(
             base.version_id(),
             evolved.id,
             vec![
@@ -2877,8 +2861,10 @@ fn include_deleted_schema_projected_join_filters_translate_old_names() {
                 },
             ],
         ),
-    })
-    .unwrap();
+    Vec::<String>::new(),
+    Vec::<String>::new(),
+)
+.unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
@@ -2975,14 +2961,10 @@ fn include_deleted_schema_projected_reachable_filters_translate_old_names() {
         .with_reference("team", "teams"),
     ]));
     let (_dir, mut core) = open_node_with_schema(node(0x5c), base.clone());
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+    &mut core,
+    evolved.clone(),
+    MigrationLens::new(
             base.version_id(),
             evolved.id,
             vec![
@@ -3017,8 +2999,10 @@ fn include_deleted_schema_projected_reachable_filters_translate_old_names() {
                 },
             ],
         ),
-    })
-    .unwrap();
+    Vec::<String>::new(),
+    Vec::<String>::new(),
+)
+.unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
@@ -3114,14 +3098,10 @@ fn historical_schema_projected_reads_use_projected_snapshot_source() {
     )]);
     let evolved_payload = SchemaVersion::new(evolved);
     let (_dir, mut core) = open_node_with_schema(node(0x54), base.clone());
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+    &mut core,
+    evolved_payload.clone(),
+    MigrationLens::new(
             base.version_id(),
             evolved_payload.id,
             vec![TableLens {
@@ -3139,8 +3119,10 @@ fn historical_schema_projected_reads_use_projected_snapshot_source() {
                 ],
             }],
         ),
-    })
-    .unwrap();
+    Vec::<String>::new(),
+    Vec::<String>::new(),
+)
+.unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
@@ -3235,14 +3217,10 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
     )
     .unwrap();
 
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(renamed.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+    &mut core,
+    renamed.clone(),
+    MigrationLens::new(
             base.version_id(),
             renamed.id,
             vec![TableLens {
@@ -3260,8 +3238,10 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
                 ],
             }],
         ),
-    })
-    .unwrap();
+    Vec::<String>::new(),
+    Vec::<String>::new(),
+)
+.unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
@@ -3415,14 +3395,10 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
     ]);
     let evolved_payload = SchemaVersion::new(evolved);
     let (_dir, mut core) = open_node_with_schema(node(0x55), base.clone());
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+    &mut core,
+    evolved_payload.clone(),
+    MigrationLens::new(
             base.version_id(),
             evolved_payload.id,
             vec![
@@ -3457,8 +3433,10 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
                 },
             ],
         ),
-    })
-    .unwrap();
+    Vec::<String>::new(),
+    Vec::<String>::new(),
+)
+.unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
