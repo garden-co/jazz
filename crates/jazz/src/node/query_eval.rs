@@ -3577,11 +3577,6 @@ fn normalize_reachable_seed(
     param_types: &BTreeMap<String, ColumnType>,
 ) -> Result<(RowSetNodeId, Vec<ValueSourceColumn>), Error> {
     if let Some(seed) = &reachable.seed {
-        if !predicate_params(&seed.filters).is_empty() {
-            return Err(normalization_gap(
-                "reachable_via relation seed filters with retained params need binding-param filter lowering",
-            ));
-        }
         let seed_source = reachable_seed_source_id(seed, reachable_id);
         let mut columns = reachable_seed_frontier_columns(schema, &seed_source, seed)?;
         let edge_route_columns = reachable_edge_route_columns(reachable, param_types)?;
@@ -13636,10 +13631,15 @@ mod tests {
             user_column: None,
             user_claim: None,
             team_column: "team".to_owned(),
-            filters: vec![eq(col("kind"), lit("sync"))],
+            filters: vec![gt(col("kind"), param("seed_kind_lower_bound"))],
         });
         let shape = query.validate(&schema).unwrap();
-        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let binding = shape
+            .bind(BTreeMap::from([(
+                "seed_kind_lower_bound".to_owned(),
+                Value::String("s".to_owned()),
+            )]))
+            .unwrap();
 
         let rows = node
             .query_rows(&shape, &binding, DurabilityTier::Global)
