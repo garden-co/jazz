@@ -40,6 +40,9 @@ Invariant digest:
 - `INV-BRANCH-28`: A source frontier MUST be the canonical sorted de-duplicated maximal antichain of eligible transactions in that lineage's own version-parent graph; frozen-base and cross-lineage transaction parents are not source-frontier edges, while merge provenance contributes only to the separate contribution graph.
 - `INV-BRANCH-29`: The local calculator MUST subtract every prior merge provenance visible in its target snapshot, but the system MUST NOT claim globally coordinated exactly-once behavior for independently calculated offline/concurrent merges; unobserved duplicate attempts are ordinary concurrent writes and coordination or reconciliation remains the merger's responsibility.
 - `INV-BRANCH-30`: A local calculator MUST expand a received merge-provenance edge only after deterministically recomputing the declared novel source contribution against the merge transaction's recorded target-parent snapshot and verifying an exact ordinary payload match; unvalidated, malformed, missing-history, or mixed-edit provenance MUST NOT suppress any contribution.
+- `INV-BRANCH-31`: Contribution closure and subtraction MUST be tracked per exact `(table, row, layer, column-or-operation)` dot, never transaction-wide; sharing a multi-row `TxId` MUST NOT make unrelated dots known.
+- `INV-BRANCH-32`: Every supported merge strategy MUST provide local `extract_native(parent contribution closure, stored value/ops)` and `encode_target_relative(novel contribution, target frontier)` semantics; merge calculation MUST fail locally when either capability is absent.
+- `INV-BRANCH-33`: The calculator MUST consume an exact current-schema contribution view containing projected values, authored presence, and strategy operations; when storage/lenses cannot supply that view exactly, or the initiator cannot prove source-read authorization for every included content/deletion contribution, it MUST fail locally before minting the ordinary transaction.
 
 ## Details
 
@@ -199,6 +202,17 @@ admission prerequisite, or global duplicate-prevention mechanism
 contain unrelated new user edits; conflict-resolution edits are separate
 ordinary transactions so their native contribution dots remain unambiguous.
 
+Dots and closure are field-grained, not transaction-grained. A multi-row or
+multi-column transaction can introduce many independent dots; learning or
+importing one `(table, row, layer, column-or-operation)` dot never marks another
+dot with the same `TxId` as represented (`INV-BRANCH-31`). For an ordinary
+native write whose parents already contain imported contributions, a strategy
+extracts only the new residual contribution from its stored representation:
+counter subtracts the resolved parent contribution, a semilattice extracts its
+new join component, and text/blob uses operation identities not present in the
+parent closure. Imported parent state is therefore not re-labelled as a native
+child contribution merely because the child authored the same column.
+
 Provenance is untrusted advisory transaction metadata. Ordinary admission
 persists and forwards it but does not attest to its truth. Before a future local
 calculator follows such an edge, it reconstructs the declared source novel
@@ -259,6 +273,17 @@ target write relative to the captured target parents (`INV-BRANCH-23`):
   to reduce novel contribution dots and encode an ordinary target write. If it
   cannot, merge calculation fails locally before minting a transaction.
 
+More generally, every supported strategy supplies two local calculation
+capabilities: `extract_native(parent contribution closure, stored value/ops)`
+and `encode_target_relative(novel contribution, target frontier)`. Counter's
+first operation extracts a residual delta and its second emits the target value
+plus that delta. Text/blob extracts stable operation ids and re-encodes their
+effect relative to target heads. LWW extracts explicitly authored values.
+Grow-only set is supported only when its strategy exposes the corresponding
+residual join operation; otherwise it remains a named local capability gap.
+Custom strategies fail locally when either operation is absent
+(`INV-BRANCH-32`).
+
 Content and deletion remain independent layers. Novel deletion/restore dots
 reduce to the final deletion-register contribution; content contributions are
 retained even when the resulting deletion state hides the row, so a later
@@ -267,9 +292,22 @@ same target authorization and column strategies as any other commit. There is
 no strategy-specific behavior in authority admission or on receivers.
 
 Both input views and the emitted transaction use one current-schema projection.
-Schema/lens differences are resolved by the ordinary view boundary before this
-calculation; merge provenance adds no authored-presence lens protocol
-(`INV-BRANCH-27`).
+The calculator consumes a current-schema **contribution view** that must include
+exact projected values, authored presence, deletion events, and strategy-native
+operations/dots. This chapter does not define lens translation for those facts:
+if underlying history cannot project them exactly into the current schema, the
+calculator reports a local capability error. A same-schema implementation is
+valid; silently falling back to materialized cells is not. Merge provenance adds
+no authored-presence lens protocol (`INV-BRANCH-27`, `INV-BRANCH-33`).
+
+Source authorization is checked against the initiating identity, not trusted
+storage visibility. Current visible source content must pass the branch gate and
+current branch-view read policy. A deletion contribution additionally needs a
+defined source read/read-for-write proof for the affected historical content.
+Until historical deleted-row policy evaluation is defined, a calculator that
+cannot prove that authorization fails the whole local calculation rather than
+including or silently omitting the deletion (`INV-BRANCH-33`). Target
+authorization remains the ordinary target read-for-write and write-policy path.
 
 Successful merge leaves the source branch `Open`. Incorporating main into B,
 B into main, or one branch into another is always another calculated ordinary
