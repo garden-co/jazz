@@ -2229,14 +2229,10 @@ fn registered_transform_column_identity_is_accepted_and_projected() {
         MergeableCommit::new("todos", old_row, 30).cells(title_cells("stable-title")),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
             base.version_id(),
             evolved_payload.id,
             vec![TableLens {
@@ -2254,7 +2250,9 @@ fn registered_transform_column_identity_is_accepted_and_projected() {
                 ],
             }],
         ),
-    })
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
 
     let shape = Query::from("todos").validate(&evolved).unwrap();
@@ -2284,14 +2282,10 @@ fn transform_column_rejects_unregistered_transform_at_publish() {
     let evolved = catalogue_evolved_schema();
     let evolved_payload = SchemaVersion::new(evolved.clone());
     let (_dir, mut core) = open_node_with_schema(node(0x4c), base.clone());
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
-    .unwrap();
-    let result = core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    let result = publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
             base.version_id(),
             evolved_payload.id,
             vec![TableLens {
@@ -2309,7 +2303,9 @@ fn transform_column_rejects_unregistered_transform_at_publish() {
                 ],
             }],
         ),
-    });
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
     assert!(matches!(
         result,
         Err(Error::InvalidCatalogueUpdate(
@@ -2333,14 +2329,10 @@ fn transform_column_rejects_large_value_content_transform_at_publish() {
     )]);
     let evolved_payload = SchemaVersion::new(evolved.clone());
     let (_dir, mut core) = open_node_with_schema(node(0x4d), base.clone());
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
-    .unwrap();
-    let result = core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    let result = publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
             base.version_id(),
             evolved_payload.id,
             vec![TableLens {
@@ -2358,7 +2350,9 @@ fn transform_column_rejects_large_value_content_transform_at_publish() {
                 ],
             }],
         ),
-    });
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
     assert!(matches!(
         result,
         Err(Error::InvalidCatalogueUpdate(
@@ -2393,10 +2387,24 @@ fn local_writes_store_versions_under_current_write_schema_storage() {
     let base_tx = core
         .commit_mergeable(MergeableCommit::new("todos", row(0x46), 10).cells(title_cells("base")))
         .unwrap();
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
+    publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved_payload.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: v(""),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
@@ -2421,6 +2429,7 @@ fn local_writes_store_versions_under_current_write_schema_storage() {
     let evolved_history_table = physical_history_table_name(
         core.catalogue.physical_mappings[&evolved_payload.id].tables["todos"].table_id,
     );
+    assert_eq!(base_history_table, evolved_history_table);
     let base_history = core
         .database
         .primary_key_scan_raw(&base_history_table, &[])
@@ -2429,8 +2438,8 @@ fn local_writes_store_versions_under_current_write_schema_storage() {
         .database
         .primary_key_scan_raw(&evolved_history_table, &[])
         .unwrap();
-    assert_eq!(base_history.len(), 1);
-    assert_eq!(evolved_history.len(), 1);
+    assert_eq!(base_history.len(), 2);
+    assert_eq!(evolved_history.len(), base_history.len());
     let stored_txs = core
         .query_table_versions("todos")
         .unwrap()
@@ -2450,10 +2459,24 @@ fn exclusive_writes_store_versions_under_current_write_schema_storage() {
     let base_tx = core
         .commit_mergeable(MergeableCommit::new("todos", row(0x4a), 10).cells(title_cells("base")))
         .unwrap();
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
+    publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved_payload.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: v(""),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
@@ -2484,6 +2507,7 @@ fn exclusive_writes_store_versions_under_current_write_schema_storage() {
     let evolved_history_table = physical_history_table_name(
         core.catalogue.physical_mappings[&evolved_payload.id].tables["todos"].table_id,
     );
+    assert_eq!(base_history_table, evolved_history_table);
     let base_history = core
         .database
         .primary_key_scan_raw(&base_history_table, &[])
@@ -2492,8 +2516,8 @@ fn exclusive_writes_store_versions_under_current_write_schema_storage() {
         .database
         .primary_key_scan_raw(&evolved_history_table, &[])
         .unwrap();
-    assert_eq!(base_history.len(), 1);
-    assert_eq!(evolved_history.len(), 1);
+    assert_eq!(base_history.len(), 2);
+    assert_eq!(evolved_history.len(), base_history.len());
     let stored_txs = core
         .query_table_versions("todos")
         .unwrap()
@@ -2509,10 +2533,24 @@ fn physical_schema_variants_survive_pointer_changes_and_reopen() {
     let evolved = catalogue_evolved_schema();
     let evolved_payload = SchemaVersion::new(evolved.clone());
     let (dir, mut core) = open_node_with_schema(node(0x48), base.clone());
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
+    publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved_payload.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: v(""),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
