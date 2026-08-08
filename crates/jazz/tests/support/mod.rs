@@ -25,7 +25,9 @@ const TEST_JWT_SECRET: &str = "test-jwt-secret-for-integration";
 const TEST_JWT_KID: &str = "test-jwks-kid";
 
 #[allow(unused_imports)]
-pub use jazz::tools::test_support::{QueryRows, push_catalogue_in_memory, wait_for_query};
+pub use jazz::tools::test_support::{
+    QueryRows, push_catalogue_in_memory, wait_for_query, wait_for_query_results,
+};
 
 #[allow(unused_imports)]
 pub use permissions::{

@@ -113,6 +113,54 @@ where
     }
 }
 
+/// Re-runs an identity-bearing query until its ResultKey rows satisfy the matcher.
+#[cfg(feature = "test-utils")]
+pub async fn wait_for_query_results<T, F>(
+    client: &JazzClient,
+    query: Query,
+    durability_tier: Option<DurabilityTier>,
+    timeout: Duration,
+    description: impl Into<String>,
+    mut check_results: F,
+) -> T
+where
+    F: FnMut(Vec<crate::tools::QueryResult>) -> Option<T>,
+{
+    let description = description.into();
+    let deadline = tokio::time::Instant::now() + load_tolerant_wait_timeout(timeout);
+    let mut last_error = None;
+    let mut last_results = None;
+    loop {
+        match tokio::time::timeout(
+            DEFAULT_QUERY_TIMEOUT,
+            client.query_results(query.clone(), durability_tier),
+        )
+        .await
+        {
+            Ok(Ok(results)) => {
+                if let Some(value) = check_results(results.clone()) {
+                    return value;
+                }
+                last_results = Some(results);
+                last_error = None;
+            }
+            Ok(Err(error)) => last_error = Some(error.to_string()),
+            Err(_) => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            match last_error {
+                Some(error) => {
+                    panic!("timed out waiting for {description}: last query error: {error}")
+                }
+                None => {
+                    panic!("timed out waiting for {description}: last results: {last_results:?}")
+                }
+            }
+        }
+        tokio::time::sleep(DEFAULT_POLL_INTERVAL).await;
+    }
+}
+
 /// Publishes schemas and lenses directly into an in-process test server's
 /// catalogue store.
 ///

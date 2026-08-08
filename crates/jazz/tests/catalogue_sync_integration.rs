@@ -25,7 +25,8 @@ use serde_json::json;
 use support::{
     PublishedPermissionsHead, TestingClient, deny_all_select_permissions, has_added, has_removed,
     publish_allow_all_permissions, publish_permissions, push_catalogue_in_memory,
-    wait_for_edge_query_ready, wait_for_query, wait_for_subscription_update,
+    wait_for_edge_query_ready, wait_for_query, wait_for_query_results,
+    wait_for_subscription_update,
 };
 use uuid::Uuid;
 
@@ -295,7 +296,10 @@ fn current_join_provenance_permission_schema() -> jazz::tools::Schema {
                 .policies(
                     TablePolicies::new()
                         .with_insert(PolicyExpr::True)
-                        .with_select(PolicyExpr::True),
+                        .with_select(PolicyExpr::eq_session(
+                            "viewer_name",
+                            vec!["user_id".into()],
+                        )),
                 ),
         )
         .table(
@@ -306,10 +310,7 @@ fn current_join_provenance_permission_schema() -> jazz::tools::Schema {
                 .policies(
                     TablePolicies::new()
                         .with_insert(PolicyExpr::True)
-                        .with_select(PolicyExpr::eq_session(
-                            "viewer_name",
-                            vec!["user_id".into()],
-                        )),
+                        .with_select(PolicyExpr::True),
                 ),
         )
         .build()
@@ -323,7 +324,7 @@ fn legacy_join_provenance_to_current_permissions_lens() -> Lens {
             table: "posts".to_string(),
             column: "viewer_name".to_string(),
             column_type: ColumnType::Text,
-            default: Value::Text("bob".to_string()),
+            default: Value::Text(test_user_id("bob")),
         }]),
     )
 }
@@ -2354,18 +2355,22 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
         .join("people")
         .on("posts.author_id", "people.id")
         .build();
-    let rows = wait_for_query(
+    let rows = wait_for_query_results(
         &bob,
         query,
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "bob join sees v1 post author through table rename",
-        |rows| (rows.len() == 1 && rows[0].0 == post_row_id).then_some(rows),
+        |rows| (rows.len() == 1 && rows[0].key == post_row_id).then_some(rows),
     )
     .await;
 
     assert_eq!(
-        rows[0].1,
+        rows[0]
+            .fields
+            .iter()
+            .map(|field| field.value.clone())
+            .collect::<Vec<_>>(),
         vec![
             Value::Uuid(post_id),
             Value::Uuid(author_id),
@@ -2529,7 +2534,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         .await;
     wait_for_edge_query_ready(&admin, "posts", Duration::from_secs(30)).await;
 
-    let (bob_user_id, _, batch_id) = admin
+    let (_, _, batch_id) = admin
         .insert("users", legacy_join_provenance_user_values("bob"))
         .expect("admin creates legacy user");
     admin
@@ -2573,26 +2578,30 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         .on("users.name", "posts.owner_name")
         .build();
 
-    let bob_rows = wait_for_query(
+    let bob_rows = wait_for_query_results(
         &bob,
         query.clone(),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "bob sees joined row after provenance lens applies current permissions",
-        |rows| (rows.len() == 1 && rows[0].0 == bob_user_id).then_some(rows),
+        |rows| (rows.len() == 1).then_some(rows),
     )
     .await;
     assert_eq!(
-        bob_rows[0].1,
+        bob_rows[0]
+            .fields
+            .iter()
+            .map(|field| field.value.clone())
+            .collect::<Vec<_>>(),
         vec![
             Value::Text("bob".to_string()),
             Value::Text("bob".to_string()),
             Value::Text("Bob private post".to_string()),
-            Value::Text("bob".to_string()),
+            Value::Text(test_user_id("bob")),
         ]
     );
 
-    let alice_rows = wait_for_query(
+    let alice_rows = wait_for_query_results(
         &alice,
         query,
         Some(DurabilityTier::EdgeServer),
