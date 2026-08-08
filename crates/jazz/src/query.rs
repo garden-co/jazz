@@ -2600,6 +2600,12 @@ pub(crate) fn binding_id_for_values(values: &BTreeMap<String, Value>) -> Binding
 /// Query validation error.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum QueryError {
+    /// Flat tuple output currently has a deliberately narrow executable envelope.
+    #[error("flat join cannot be combined with {feature}")]
+    UnsupportedFlatJoinCombination {
+        /// Unsupported feature present on the same query.
+        feature: String,
+    },
     /// Structured array results must declare whether they are bounded.
     #[error("array subquery {relation_path} must specify limit(...) or unbounded()")]
     UnboundedArraySubquery {
@@ -2747,6 +2753,27 @@ fn validate_query_canonical_parts(
         validate_join(schema, &root, &query.table, join, &mut params)?;
     }
     if let Some(flat_join) = &query.flat_join {
+        let unsupported = [
+            (flat_join.sources.is_empty(), "zero joined sources"),
+            (!query.joins.is_empty(), "existential joins"),
+            (!query.policy_branches.is_empty(), "policy branches"),
+            (!query.reachable.is_empty(), "reachability"),
+            (!query.inherits.is_empty(), "inherited-policy traversals"),
+            (!query.includes.is_empty(), "includes"),
+            (!query.array_subqueries.is_empty(), "array subqueries"),
+            (query.select.is_some(), "select projections"),
+            (!query.order_by.is_empty(), "ordering"),
+            (query.aggregate.is_some(), "aggregates"),
+            (query.limit.is_some(), "limits"),
+            (query.offset != 0, "offsets"),
+        ]
+        .into_iter()
+        .find_map(|(present, feature)| present.then_some(feature));
+        if let Some(feature) = unsupported {
+            return Err(QueryError::UnsupportedFlatJoinCombination {
+                feature: feature.to_owned(),
+            });
+        }
         validate_flat_join(schema, &query.table, flat_join)?;
     }
     for reachable in &query.reachable {
@@ -4710,6 +4737,69 @@ mod tests {
             .unwrap();
 
         assert_eq!(left.shape_id(), right.shape_id());
+    }
+
+    #[test]
+    fn flat_join_rejects_combinations_outside_its_executable_envelope() {
+        fn flat() -> Query {
+            let mut query = Query::from("issues");
+            query.flat_join = Some(FlatJoin {
+                root_alias: None,
+                sources: vec![FlatJoinSource {
+                    table: "issue_tags".to_owned(),
+                    alias: None,
+                    on: FlatJoinOn {
+                        left: "issues.id".to_owned(),
+                        right: "issue_tags.issue".to_owned(),
+                    },
+                }],
+            });
+            query
+        }
+
+        let mut cases = Vec::new();
+        let mut query = flat();
+        query.flat_join.as_mut().unwrap().sources.clear();
+        cases.push(query);
+        let mut query = flat();
+        query.select = Some(vec!["title".to_owned()]);
+        cases.push(query);
+        let mut query = flat();
+        query.order_by.push(OrderBy {
+            column: "title".to_owned(),
+            direction: OrderDirection::Asc,
+        });
+        cases.push(query);
+        let mut query = flat();
+        query.limit = Some(1);
+        cases.push(query);
+        let mut query = flat();
+        query.offset = 1;
+        cases.push(query);
+        let mut query = flat();
+        query
+            .array_subqueries
+            .push(ArraySubquery::new("tags", "issue_tags", "issue", "id").unbounded());
+        cases.push(query);
+        cases.push(flat().join_via("issue_tags", "issue", []));
+        cases.push(flat().aggregate([Aggregate::count()]));
+        cases.push(flat().include("project"));
+        cases.push(flat().inherits("project"));
+        let mut query = flat();
+        query.policy_branches.push(PolicyBranch {
+            filters: Vec::new(),
+            joins: Vec::new(),
+            reachable: Vec::new(),
+            inherits: Vec::new(),
+        });
+        cases.push(query);
+
+        for query in cases {
+            assert!(matches!(
+                query.validate(&schema()),
+                Err(QueryError::UnsupportedFlatJoinCombination { .. })
+            ));
+        }
     }
 
     #[test]

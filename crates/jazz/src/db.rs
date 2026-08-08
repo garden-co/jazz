@@ -8520,9 +8520,7 @@ fn apply_maintained_update_to_snapshot(
     let mut index = 0;
     while index < snapshot.root_count {
         let occurrence_id = subscription_row_occurrence_id(&snapshot.rows[index]);
-        if update_removed
-            .iter()
-            .any(|removed| *removed == occurrence_id)
+        if update_removed.contains(&occurrence_id)
             && !update_added
                 .iter()
                 .any(|added| subscription_row_occurrence_id(added) == occurrence_id)
@@ -8535,7 +8533,7 @@ fn apply_maintained_update_to_snapshot(
             removed.push(RemovedRow {
                 table: row.table().to_owned(),
                 row_uuid: row.row_uuid(),
-                occurrence_id: single_source_occurrence_id(&row),
+                occurrence_id,
             });
         } else {
             index += 1;

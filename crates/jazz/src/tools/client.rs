@@ -1829,6 +1829,27 @@ fn core_to_public_value(value: CoreValue) -> Result<Value> {
             .map(core_to_public_value)
             .collect::<Result<Vec<_>>>()
             .map(Value::Array),
+        CoreValue::Record(record) => {
+            let identity_index = ["row_uuid", "id"]
+                .into_iter()
+                .find_map(|name| record.descriptor().field_index(name))
+                .filter(|index| {
+                    record.descriptor().fields()[*index].name.as_deref() == Some("row_uuid")
+                });
+            let id = identity_index.and_then(|index| match record.get_idx(index) {
+                Ok(CoreValue::Uuid(id)) => Some(ObjectId::from_uuid(id)),
+                _ => None,
+            });
+            let values = record
+                .to_values()
+                .map_err(|error| JazzError::Query(error.to_string()))?
+                .into_iter()
+                .enumerate()
+                .filter(|(index, _)| Some(*index) != identity_index)
+                .map(|(_, value)| core_to_public_value(value))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Value::Row { id, values })
+        }
         other => Err(JazzError::Query(format!(
             "client does not support core value {other:?}"
         ))),
@@ -2138,6 +2159,71 @@ fn core_rejection_reason_label(reason: &CoreRejectionReason) -> String {
     }
 }
 
+fn core_array_subquery(
+    subquery: &crate::tools::public_api::query::ArraySubquerySpec,
+    schema: &Schema,
+) -> Result<crate::query::ArraySubquery> {
+    fn local_column(column: &str) -> &str {
+        column.rsplit_once('.').map_or(column, |(_, local)| local)
+    }
+    if !subquery.joins.is_empty() {
+        return Err(JazzError::Query(format!(
+            "array relation {} contains joins, which are not supported",
+            subquery.column_name
+        )));
+    }
+    let table = schema.get(&subquery.table).ok_or_else(|| {
+        JazzError::Query(format!("unknown array relation table {}", subquery.table))
+    })?;
+    let mut filters = Vec::new();
+    for condition in &subquery.filters {
+        filters.extend(core_query_condition(condition, table)?);
+    }
+    let order_by = subquery
+        .order_by
+        .iter()
+        .map(|(column, direction)| crate::query::OrderBy {
+            column: column.clone(),
+            direction: match direction {
+                PublicSortDirection::Ascending => crate::query::OrderDirection::Asc,
+                PublicSortDirection::Descending => crate::query::OrderDirection::Desc,
+            },
+        })
+        .collect();
+    let requirement = match subquery.requirement {
+        crate::tools::public_api::query::ArraySubqueryRequirement::Optional => {
+            crate::query::ArraySubqueryRequirement::Optional
+        }
+        crate::tools::public_api::query::ArraySubqueryRequirement::AtLeastOne => {
+            crate::query::ArraySubqueryRequirement::AtLeastOne
+        }
+        crate::tools::public_api::query::ArraySubqueryRequirement::MatchCorrelationCardinality => {
+            crate::query::ArraySubqueryRequirement::MatchCorrelationCardinality
+        }
+    };
+    Ok(crate::query::ArraySubquery {
+        column_name: subquery.column_name.clone(),
+        table: subquery.table.as_str().to_owned(),
+        // The public builder retains table qualification to make correlation
+        // intent explicit. Core array scopes are already typed by their parent
+        // and child tables, so their column references must be scope-local.
+        inner_column: local_column(&subquery.inner_column).to_owned(),
+        outer_column: local_column(&subquery.outer_column).to_owned(),
+        filters,
+        select: subquery.select_columns.clone(),
+        order_by,
+        limit: subquery.limit,
+        unbounded: subquery.unbounded,
+        offset: subquery.offset,
+        requirement,
+        nested_arrays: subquery
+            .nested_arrays
+            .iter()
+            .map(|nested| core_array_subquery(nested, schema))
+            .collect::<Result<Vec<_>>>()?,
+    })
+}
+
 impl JazzClient {
     fn write_identity(&self) -> Option<CoreAuthorId> {
         self.write_context
@@ -2169,7 +2255,6 @@ impl JazzClient {
     }
     fn core_query(&self, query: &Query) -> Result<crate::query::Query> {
         if query.disjuncts.len() != 1
-            || !query.array_subqueries.is_empty()
             || query.recursive.is_some()
             || query.include_deleted
             || query.result_element_index.is_some()
@@ -2217,6 +2302,11 @@ impl JazzClient {
                 core_query = core_query.filter(predicate);
             }
         }
+        core_query.array_subqueries = query
+            .array_subqueries
+            .iter()
+            .map(|subquery| core_array_subquery(subquery, &schema))
+            .collect::<Result<Vec<_>>>()?;
         if let Some(aggregate) = &query.aggregate {
             let outputs = aggregate
                 .outputs
@@ -2374,6 +2464,16 @@ impl JazzClient {
                                 )
                             })
                     })
+                    .chain(query.array_subqueries.iter().map(|subquery| {
+                        row.raw_field(&subquery.column_name)
+                            .ok_or_else(|| {
+                                JazzError::Query(format!(
+                                    "row missing array relation {}",
+                                    subquery.column_name
+                                ))
+                            })
+                            .and_then(core_to_public_value)
+                    }))
                     .collect::<Result<Vec<_>>>()?;
                 Ok((row_id, values))
             })
@@ -2744,6 +2844,12 @@ impl JazzClient {
         durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
         {
+            if !query.joins.is_empty() {
+                return Err(JazzError::Query(
+                    "one-shot flat joins require a composite output-occurrence identity API"
+                        .to_owned(),
+                ));
+            }
             let opts = Self::core_read_opts(durability_tier);
             let rows = self
                 .db
