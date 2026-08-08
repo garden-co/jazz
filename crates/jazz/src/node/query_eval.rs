@@ -7169,7 +7169,9 @@ where
         let query = shape.query();
         let read_schema_version = shape.schema_version();
         let mut tables = BTreeSet::from([query.table.clone()]);
-        tables.extend(query.joins.iter().map(|join| join.table.clone()));
+        for join in &query.joins {
+            collect_join_read_tables(join, &mut tables);
+        }
         for reachable in &query.reachable {
             tables.insert(reachable.access_table.clone());
             tables.insert(reachable.edge_table.clone());
@@ -11501,18 +11503,42 @@ fn predicate_params(predicates: &[Predicate]) -> BTreeSet<String> {
             Predicate::Not(predicate) => {
                 params.extend(predicate_params(std::slice::from_ref(predicate)));
             }
-            Predicate::Eq(Operand::Column(_), Operand::Param(param))
-            | Predicate::Eq(Operand::Param(param), Operand::Column(_))
-            | Predicate::Ne(Operand::Column(_), Operand::Param(param))
-            | Predicate::Ne(Operand::Param(param), Operand::Column(_))
-            | Predicate::Contains(Operand::Column(_), Operand::Param(param))
-            | Predicate::Contains(Operand::Param(param), Operand::Column(_)) => {
-                params.insert(param.clone());
+            Predicate::Eq(left, right)
+            | Predicate::Ne(left, right)
+            | Predicate::Gt(left, right)
+            | Predicate::Gte(left, right)
+            | Predicate::Lt(left, right)
+            | Predicate::Lte(left, right)
+            | Predicate::Contains(left, right) => {
+                collect_operand_param(left, &mut params);
+                collect_operand_param(right, &mut params);
             }
-            _ => {}
+            Predicate::In(operand, choices) => {
+                collect_operand_param(operand, &mut params);
+                for choice in choices {
+                    collect_operand_param(choice, &mut params);
+                }
+            }
+            Predicate::IsNull(operand) => collect_operand_param(operand, &mut params),
         }
     }
     params
+}
+
+fn collect_operand_param(operand: &Operand, params: &mut BTreeSet<String>) {
+    if let Operand::Param(param) = operand {
+        params.insert(param.clone());
+    }
+}
+
+fn collect_join_read_tables(join: &crate::query::JoinVia, tables: &mut BTreeSet<String>) {
+    tables.insert(join.table.clone());
+    if let Some(source_lookup) = &join.source_lookup {
+        tables.insert(source_lookup.table.clone());
+    }
+    for nested_join in &join.nested_joins {
+        collect_join_read_tables(nested_join, tables);
+    }
 }
 
 #[cfg(test)]
@@ -12272,6 +12298,75 @@ mod tests {
     use crate::schema::{JazzSchema, TableSchema};
 
     use super::*;
+
+    #[test]
+    fn predicate_params_collects_every_operand_position_and_operator() {
+        let predicates = [Predicate::All(vec![
+            Predicate::Gt(param("left"), col("value")),
+            Predicate::In(
+                col("kind"),
+                vec![lit("fixed"), param("choice"), param("second_choice")],
+            ),
+            Predicate::IsNull(param("nullable")),
+            Predicate::Not(Box::new(Predicate::Lte(col("limit"), param("upper")))),
+        ])];
+
+        assert_eq!(
+            predicate_params(&predicates),
+            BTreeSet::from([
+                "choice".to_owned(),
+                "left".to_owned(),
+                "nullable".to_owned(),
+                "second_choice".to_owned(),
+                "upper".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn join_read_tables_include_source_lookups_and_nested_joins() {
+        let nested = crate::query::JoinVia {
+            table: "nested_junction".to_owned(),
+            on_column: "target".to_owned(),
+            target: Default::default(),
+            source_column: None,
+            source_lookup: Some(JoinSourceLookup {
+                table: "nested_lookup".to_owned(),
+                row_id_source_column: "lookup_id".to_owned(),
+                value_column: "value".to_owned(),
+            }),
+            correlated_filters: vec![],
+            filters: vec![],
+            nested_joins: vec![],
+        };
+        let root = crate::query::JoinVia {
+            table: "root_junction".to_owned(),
+            on_column: "target".to_owned(),
+            target: Default::default(),
+            source_column: None,
+            source_lookup: Some(JoinSourceLookup {
+                table: "root_lookup".to_owned(),
+                row_id_source_column: "lookup_id".to_owned(),
+                value_column: "value".to_owned(),
+            }),
+            correlated_filters: vec![],
+            filters: vec![],
+            nested_joins: vec![nested],
+        };
+        let mut tables = BTreeSet::new();
+
+        collect_join_read_tables(&root, &mut tables);
+
+        assert_eq!(
+            tables,
+            BTreeSet::from([
+                "nested_junction".to_owned(),
+                "nested_lookup".to_owned(),
+                "root_junction".to_owned(),
+                "root_lookup".to_owned(),
+            ])
+        );
+    }
 
     #[test]
     fn unordered_array_windows_materialize_per_parent_row_id_order() {
