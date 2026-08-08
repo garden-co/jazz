@@ -2245,22 +2245,9 @@ fn users_to_orgs_relation_query() -> RelationQuery {
         rel: RelationExpr::Project {
             input: Box::new(RelationExpr::Join {
                 left: Box::new(RelationExpr::Join {
-                    left: Box::new(RelationExpr::Filter {
-                        input: Box::new(RelationExpr::TableScan {
-                            table: "users".to_owned(),
-                            alias: None,
-                        }),
-                        predicate: RelationPredicate::Cmp {
-                            left: RelationColumnRef {
-                                scope: Some("users".to_owned()),
-                                column: "id".to_owned(),
-                            },
-                            op: RelationCmpOp::Eq,
-                            right: RelationValueRef::Literal(serde_json::json!({
-                                "type": "Uuid",
-                                "value": row(0x21).0.to_string(),
-                            })),
-                        },
+                    left: Box::new(RelationExpr::TableScan {
+                        table: "users".to_owned(),
+                        alias: None,
                     }),
                     right: Box::new(RelationExpr::TableScan {
                         table: "teams".to_owned(),
