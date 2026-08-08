@@ -46,7 +46,7 @@ Invariant digest:
 - `INV-BRANCH-34`: A source contribution is target-known only when it is already present in the exact target-parent contribution closure or an exact field substitution names that dot; sharing a `TxId`, appearing inside `from_frontier`/`through_frontier`, or transferring another field from the same source version MUST NOT suppress an omitted row, layer, column, or operation, and a reducing strategy's substitution MUST name every novel dot reduced into its output, including losing concurrent dots.
 - `INV-BRANCH-35`: Every transaction MUST carry one canonical operational target lineage (`Root` or a stable `BranchId`); all ordinary persistence, recovery, synchronization, authorization, fate, and exact-retransmission paths MUST route its complete commit unit to that lineage without interpreting branch-merge provenance.
 - `INV-BRANCH-36`: Before a receiver may admit a commit unit or view payload targeted at a branch, trusted transport MUST deliver the durable branch record needed to route that lineage. A receiver that observes data first MUST park it, request the bounded missing branch record, and drain it only after exact idempotent metadata admission; a branch record received without a currently requested readable view reveals no branch row payload.
-- `INV-BRANCH-37`: A session branch-create request carries only a fresh branch id; its authenticated serving link derives immutable creator, parentless `Open` state, and an available snapshot base. Retry returns the original durable record even after the serving watermark advances. Trusted metadata admission permits only exact replay or the one-way `Open` to `Discarded` lifecycle transition with immutable routing fields.
+- `INV-BRANCH-37`: Branch creation is local-first: the local database durably authors a random branch id, authenticated creator, and locally known snapshot base before any network round trip, and immediately permits branch-local commits. Sync authenticates the metadata creator against the session link; exact replay is idempotent and discard is the only permitted lifecycle transition.
 
 ## Details
 
@@ -99,14 +99,15 @@ Schema-version/lens
 partitions (ch. 10) are orthogonal to branch identity.
 
 Creating a branch records metadata only. It is O(1)-style and never copies base
-rows into the overlay (`INV-BRANCH-11`). A session requests creation with only
-a fresh `BranchId`; the authenticated serving link supplies immutable
-`created_by` and derives a new `Open`, parentless snapshot base from its own
-available settled cut. A session cannot smuggle a parent, lifecycle, base, or
-creator through response-shaped `BranchMetadata`. Replaying the same request is
-idempotent only when the complete durable record matches; conflicting records
-are rejected without a distinguishable discovery response. Trusted backend
-`BranchMetadata` remains a routing/repair carrier, not the session creation API
+rows into the overlay (`INV-BRANCH-11`). Creation is local-first: the local
+database chooses a random `BranchId`, records its authenticated identity as
+immutable `created_by`, freezes its locally known settled snapshot, persists the
+record, and can commit into the branch before connecting to a server. Sync sends
+that complete record before branch-target data. A session link admits metadata
+only when `created_by` matches its authenticated identity and the declared
+parent/base dependencies are locally available; a self-asserted author without
+that link context grants nothing. Exact replay is idempotent, immutable conflicts
+are rejected, and `Open` to `Discarded` is the only lifecycle transition
 (`INV-BRANCH-37`).
 
 ### 11.3 Branch reads

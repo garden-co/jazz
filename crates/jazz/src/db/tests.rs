@@ -6186,53 +6186,69 @@ fn source_coverage_facts(
 }
 
 #[test]
-fn session_branch_creation_is_attributed_and_idempotent() {
+fn offline_branch_creation_and_commit_sync_metadata_before_data() {
     let schema = schema();
     let identity = AuthorId::from_bytes([0xc1; 16]);
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, identity, &schema);
     let branch = BranchId::from_bytes([0x42; 16]);
-    let (mut client_transport, server_transport) = duplex();
-    let subscriber = server.accept_subscriber(server_transport, identity);
-
-    client_transport
-        .send(SyncMessage::CreateBranch { branch_id: branch })
+    client.create_branch_with_id(branch).unwrap();
+    let write = client
+        .insert_on_branch(branch, "todos", cells("offline branch", false, identity))
         .unwrap();
-    subscriber.borrow_mut().tick().unwrap();
-    assert!(server.node().borrow().branch_record(branch).is_some());
-    let response = client_transport
-        .try_recv()
-        .expect("creation acknowledgement");
-    assert!(matches!(response, SyncMessage::BranchMetadata(ref metadata)
-        if metadata.branch_id == branch && metadata.created_by == identity && metadata.open));
-    let record = server
-        .node()
+    let branch_row = write.row_uuid();
+    assert!(server.node().borrow().branch_record(branch).is_none());
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, identity);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    let record = client
+        .node
+        .node
         .borrow()
         .branch_record(branch)
         .cloned()
         .unwrap();
     assert_eq!(record.created_by, identity);
-
-    // A dropped acknowledgement is safe to retry: the immutable complete
-    // request replays to the identical durable record even after the server's
-    // settled watermark has advanced.
-    server
-        .insert("todos", cells("advance watermark", false, identity))
+    let received = server
+        .node()
+        .borrow()
+        .branch_record(branch)
+        .cloned()
         .unwrap();
-    client_transport
-        .send(SyncMessage::CreateBranch { branch_id: branch })
-        .unwrap();
-    subscriber.borrow_mut().tick().unwrap();
-    assert!(
-        matches!(client_transport.try_recv(), Some(SyncMessage::BranchMetadata(metadata))
-        if metadata.branch_id == branch
-            && metadata.created_by == identity
-            && metadata.base == record.base)
+    assert_eq!(received.branch_id, record.branch_id);
+    assert_eq!(received.created_by, record.created_by);
+    assert_eq!(received.parent, record.parent);
+    assert_eq!(
+        received.base.as_ref().map(|base| base.global_base),
+        record.base.as_ref().map(|base| base.global_base)
     );
-    assert_eq!(server.node().borrow().branch_record(branch), Some(&record));
+    assert_eq!(
+        server
+            .node()
+            .borrow_mut()
+            .transaction_record(write.mergeable_tx_id())
+            .unwrap()
+            .target_lineage,
+        crate::tx::BranchLineage::Branch(branch)
+    );
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let rows = server
+        .node()
+        .borrow_mut()
+        .query_rows_on_branch(branch, &shape, &binding)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), branch_row);
 }
 
 #[test]
-fn session_branch_creation_rejects_forged_metadata() {
+fn session_branch_metadata_rejects_creator_mismatch() {
     let schema = schema();
     let identity = AuthorId::from_bytes([0xc1; 16]);
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
@@ -6249,48 +6265,153 @@ fn session_branch_creation_rejects_forged_metadata() {
             open: false,
         }))
         .unwrap();
-    subscriber.borrow_mut().tick().unwrap();
+    assert!(subscriber.borrow_mut().tick().is_err());
     assert!(server.node().borrow().branch_record(branch).is_none());
-    assert!(client_transport.try_recv().is_none());
 }
 
 #[test]
-fn session_created_branch_metadata_survives_rocks_reopen() {
-    // Internal transport/storage boundary test: branch creation is a wire-only
-    // operation today, so there is no higher-level client facade to exercise.
+fn session_branch_data_parks_until_authenticated_metadata_arrives() {
     let schema = schema();
     let identity = AuthorId::from_bytes([0xc1; 16]);
-    let node_uuid = NodeUuid::from_bytes([0x5e; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let writer = open_core(0xc1, identity, &schema);
+    let branch = BranchId::from_bytes([0x47; 16]);
+    let record = writer
+        .node()
+        .borrow_mut()
+        .create_branch_as(branch, identity)
+        .unwrap();
+    let tx_id = writer
+        .node()
+        .borrow_mut()
+        .commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new("todos", row(0x47), 1)
+                .made_by(identity)
+                .cells(cells("data first", false, identity)),
+        )
+        .unwrap();
+    let unit = writer.node().borrow_mut().commit_unit_for(tx_id).unwrap();
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, identity);
+
+    client_transport.send(unit).unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(
+        server
+            .node()
+            .borrow_mut()
+            .transaction_record(tx_id)
+            .is_none()
+    );
+    assert!(matches!(
+        client_transport.try_recv(),
+        Some(SyncMessage::FetchBranchMetadata { branches }) if branches == vec![branch]
+    ));
+
+    client_transport
+        .send(SyncMessage::BranchMetadata((&record).into()))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert_eq!(
+        server
+            .node()
+            .borrow_mut()
+            .transaction_record(tx_id)
+            .unwrap()
+            .target_lineage,
+        crate::tx::BranchLineage::Branch(branch)
+    );
+}
+
+#[test]
+fn session_branch_metadata_parks_until_snapshot_base_arrives() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let source = open_core(0xc1, identity, &schema);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let base_write = source
+        .insert("todos", cells("base first", false, identity))
+        .unwrap();
+    let base_unit = source
+        .node()
+        .borrow_mut()
+        .commit_unit_for(base_write.mergeable_tx_id())
+        .unwrap();
+    let branch = BranchId::from_bytes([0x48; 16]);
+    let record = source
+        .node()
+        .borrow_mut()
+        .create_branch_as(branch, identity)
+        .unwrap();
+    assert_eq!(record.base.as_ref().unwrap().global_base, GlobalSeq(1));
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, identity);
+
+    client_transport
+        .send(SyncMessage::BranchMetadata((&record).into()))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(server.node().borrow().branch_record(branch).is_none());
+
+    client_transport.send(base_unit).unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(server.node().borrow().branch_record(branch).is_some());
+}
+
+#[test]
+fn locally_created_branch_and_commit_survive_rocks_reopen() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let node_uuid = NodeUuid::from_bytes([0xc1; 16]);
     let branch = BranchId::from_bytes([0x43; 16]);
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
-    let server =
-        Node::new(NodeState::new_history_complete(node_uuid, schema.clone(), storage).unwrap());
-    let (mut client_transport, server_transport) = duplex();
-    let subscriber = server.accept_subscriber(server_transport, identity);
-
-    client_transport
-        .send(SyncMessage::CreateBranch { branch_id: branch })
+    let client = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity: DbIdentity {
+            node: node_uuid,
+            author: identity,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xc1))),
+        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    }))
+    .unwrap();
+    client.create_branch_with_id(branch).unwrap();
+    let write = client
+        .insert_on_branch(branch, "todos", cells("durable offline", false, identity))
         .unwrap();
-    subscriber.borrow_mut().tick().unwrap();
-    let Some(SyncMessage::BranchMetadata(metadata)) = client_transport.try_recv() else {
-        panic!("session branch creation should return durable metadata");
-    };
-    let expected = server
-        .node()
+    let tx_id = write.mergeable_tx_id();
+    let expected = client
+        .node
+        .node
         .borrow()
         .branch_record(branch)
         .cloned()
         .unwrap();
-    assert_eq!(metadata, BranchMetadata::from(&expected));
-
-    drop(subscriber);
-    drop(server);
+    client.close().unwrap();
+    drop(client);
     let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
-    let reopened = NodeState::new_history_complete(node_uuid, schema, storage).unwrap();
-    assert_eq!(reopened.branch_record(branch), Some(&expected));
+    let reopened = block_on(Db::open(DbConfig {
+        schema,
+        storage,
+        identity: DbIdentity {
+            node: node_uuid,
+            author: identity,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xc2))),
+        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    }))
+    .unwrap();
+    assert_eq!(
+        reopened.node.node.borrow().branch_record(branch),
+        Some(&expected)
+    );
+    assert!(reopened.write_state(tx_id).is_ok());
 }
 
 #[test]
@@ -6423,66 +6544,6 @@ fn trusted_backend_discards_branch_metadata_once_and_recovers_it() {
         reopened.node().borrow().branch_record(branch),
         Some(&discarded_record)
     );
-}
-
-#[test]
-fn session_create_metadata_then_branch_commit_routes_over_transport() {
-    // Internal protocol-sequence test: creation and branch commit upload are
-    // wire surfaces while application-facing branch writes are still pending.
-    let schema = schema();
-    let identity = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let writer = open_core(0xc1, identity, &schema);
-    let branch = BranchId::from_bytes([0x45; 16]);
-    let branch_row = row(0x45);
-    let (mut client_transport, server_transport) = duplex();
-    let subscriber = server.accept_subscriber(server_transport, identity);
-
-    client_transport
-        .send(SyncMessage::CreateBranch { branch_id: branch })
-        .unwrap();
-    subscriber.borrow_mut().tick().unwrap();
-    let Some(SyncMessage::BranchMetadata(metadata)) = client_transport.try_recv() else {
-        panic!("session branch creation should return routing metadata");
-    };
-    writer
-        .node()
-        .borrow_mut()
-        .admit_branch_metadata(metadata)
-        .unwrap();
-    let tx_id = writer
-        .node()
-        .borrow_mut()
-        .commit_mergeable_on_branch(
-            branch,
-            MergeableCommit::new("todos", branch_row, 1)
-                .made_by(identity)
-                .cells(cells("branch transport", false, identity)),
-        )
-        .unwrap();
-    let unit = writer.node().borrow_mut().commit_unit_for(tx_id).unwrap();
-    client_transport.send(unit).unwrap();
-    subscriber.borrow_mut().tick().unwrap();
-
-    assert_eq!(
-        server
-            .node()
-            .borrow_mut()
-            .transaction_record(tx_id)
-            .unwrap()
-            .target_lineage,
-        crate::tx::BranchLineage::Branch(branch)
-    );
-    let shape = Query::from("todos").validate(&schema).unwrap();
-    let binding = shape.bind(BTreeMap::new()).unwrap();
-    let rows = server
-        .node()
-        .borrow_mut()
-        .query_rows_on_branch(branch, &shape, &binding)
-        .unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].row_uuid(), branch_row);
-    assert!(server.read(&Query::from("todos")).unwrap().is_empty());
 }
 
 #[test]

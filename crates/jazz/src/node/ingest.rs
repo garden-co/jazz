@@ -541,7 +541,8 @@ where
         let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage else {
             return Ok(());
         };
-        if !commit_unit_write_count_matches(tx, versions.len())
+        if !self.branches.branches.contains_key(&branch_id)
+            || !commit_unit_write_count_matches(tx, versions.len())
             || versions.iter().any(|version| {
                 !self
                     .catalogue

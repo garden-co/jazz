@@ -149,6 +149,36 @@ where
         Ok(())
     }
 
+    /// Admit locally-authored branch metadata from an authenticated session.
+    /// The link identity, not the self-asserted payload alone, authenticates the
+    /// immutable creator. Dependencies must already be locally readable.
+    pub fn admit_session_branch_metadata(
+        &mut self,
+        metadata: crate::protocol::BranchMetadata,
+        identity: AuthorId,
+    ) -> Result<bool, Error> {
+        if metadata.created_by != identity {
+            return Err(Error::InvalidStoredValue(
+                "branch metadata creator does not match authenticated session",
+            ));
+        }
+        let Some(base) = metadata.base.as_ref() else {
+            return Err(Error::InvalidStoredValue(
+                "session branch metadata requires a snapshot base",
+            ));
+        };
+        if base.global_base > self.clock.applied_global_watermark {
+            return Ok(false);
+        }
+        if let Some(parent) = metadata.parent
+            && !self.branches.branches.contains_key(&parent)
+        {
+            return Ok(false);
+        }
+        self.admit_branch_metadata(metadata)?;
+        Ok(true)
+    }
+
     /// Discard an open branch without deleting its overlay history.
     pub fn discard_branch(&mut self, branch_id: BranchId) -> Result<(), Error> {
         let mut record = self

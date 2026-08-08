@@ -468,6 +468,50 @@ where
             .set_initial_sync_flush_cadence(cadence.writes())?)
     }
 
+    /// Create a snapshot-base branch immediately in local durable storage.
+    ///
+    /// Branch creation is local-first: no serving node round trip is required.
+    /// The authenticated database identity is recorded as the immutable creator.
+    pub fn create_branch(&self) -> Result<crate::ids::BranchId, Error> {
+        let branch = crate::ids::BranchId(uuid::Uuid::now_v7());
+        self.create_branch_with_id(branch)?;
+        Ok(branch)
+    }
+
+    /// Create a local snapshot-base branch with a caller-supplied stable id.
+    pub fn create_branch_with_id(&self, branch: crate::ids::BranchId) -> Result<(), Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .create_branch_as(branch, self.identity.author)?;
+        Ok(())
+    }
+
+    /// Insert a row into a locally-created branch and queue it for ordinary sync.
+    pub fn insert_on_branch(
+        &self,
+        branch: crate::ids::BranchId,
+        table: &str,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        let row = self.row_id_source.borrow_mut().next_row_id();
+        let cells = self.apply_insert_defaults(table, cells)?;
+        let tx_id = self.node.node.borrow_mut().commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new(table, row, self.next_now_ms())
+                .made_by(self.identity.author)
+                .cells(cells),
+        )?;
+        let local_tier = self.finalize_local_commit(tx_id)?;
+        self.refresh_subscriptions()?;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier,
+        })
+    }
+
     /// Seed a settled mergeable row for server bootstrap/import flows.
     ///
     /// This bypasses the client pending-upload path and immediately finalizes
@@ -4124,6 +4168,7 @@ where
                 deferred_subscribe_rejections: VecDeque::new(),
                 served_current_rows: BTreeMap::new(),
                 pending_branch_metadata_repairs: BTreeMap::new(),
+                pending_session_branch_metadata: BTreeMap::new(),
                 branch_metadata_repair_cursor: None,
                 serve_dirty: true,
             },
@@ -5087,6 +5132,9 @@ enum ConnectionLink {
         served_current_rows: BTreeMap<SubscriptionKey, String>,
         /// Deduplicated branch-routing repairs for data-first commit relays.
         pending_branch_metadata_repairs: BTreeMap<crate::ids::BranchId, ()>,
+        /// Authenticated session metadata waiting for its parent/base dependency.
+        pending_session_branch_metadata:
+            BTreeMap<crate::ids::BranchId, crate::protocol::BranchMetadata>,
         /// Round-robin cursor so a saturated repair set cannot starve later ids.
         branch_metadata_repair_cursor: Option<crate::ids::BranchId>,
         /// True when this subscriber's maintained views may have queued deltas
@@ -5705,6 +5753,7 @@ where
                 deferred_subscribe_rejections,
                 served_current_rows,
                 pending_branch_metadata_repairs,
+                pending_session_branch_metadata,
                 branch_metadata_repair_cursor,
                 serve_dirty,
             } => {
@@ -5716,6 +5765,36 @@ where
                     self.transport
                         .send(SyncMessage::FetchBranchMetadata { branches: repairs })
                         .map_err(transport_error)?;
+                }
+                if ingest_context.trust == CommitUnitTrust::Session {
+                    let pending_ids = pending_session_branch_metadata
+                        .keys()
+                        .copied()
+                        .collect::<Vec<_>>();
+                    for branch in pending_ids {
+                        let metadata = pending_session_branch_metadata
+                            .get(&branch)
+                            .cloned()
+                            .expect("pending branch metadata id remains present");
+                        if self.node.borrow_mut().admit_session_branch_metadata(
+                            metadata.clone(),
+                            ingest_context.identity,
+                        )? {
+                            pending_session_branch_metadata.remove(&branch);
+                            let responses = self
+                                .node
+                                .borrow_mut()
+                                .apply_sync_message(SyncMessage::BranchMetadata(metadata))?;
+                            for response in responses {
+                                send_with_content_extents(
+                                    &self.node,
+                                    peer,
+                                    self.transport.as_mut(),
+                                    response,
+                                )?;
+                            }
+                        }
+                    }
                 }
                 let mut applied_inbound = false;
                 let mut scheduled_immediate = false;
@@ -5733,34 +5812,10 @@ where
                         received.encoded_len
                     ));
                     match received.message {
-                        SyncMessage::CreateBranch { branch_id }
-                            if ingest_context.trust == CommitUnitTrust::Session =>
-                        {
-                            // The wire session, not message fields, is the sole
-                            // authority for creator attribution.  The node derives
-                            // an Open snapshot-base record at its current settled
-                            // cut, so a session cannot choose a parent, lifecycle,
-                            // or unavailable base.
-                            let created = self
-                                .node
-                                .borrow_mut()
-                                .create_branch_as(branch_id, ingest_context.identity);
-                            match created {
-                                Ok(record) => {
-                                    self.transport
-                                        .send(SyncMessage::BranchMetadata((&record).into()))
-                                        .map_err(transport_error)?;
-                                }
-                                // Do not turn branch existence into a discovery
-                                // oracle.  The session sees no distinguishable
-                                // response for conflicting/unknown/denied ids.
-                                Err(error) => {
-                                    let _ = error;
-                                    drop_peer_request(&self.node)
-                                }
-                            }
-                        }
                         SyncMessage::CreateBranch { .. } => {
+                            // Legacy server-derived creation is intentionally
+                            // unsupported. Branches are authored and persisted
+                            // locally, then their complete metadata is synced.
                             drop_peer_request(&self.node);
                             continue;
                         }
@@ -6268,17 +6323,45 @@ where
                             self.transport.send(response).map_err(transport_error)?;
                         }
                         // Branch routing records select persistent partitions.
-                        // A session client may request repair, but cannot mint a
-                        // first-seen branch record (or alter its lifecycle) by
-                        // sending a response-shaped metadata message. Only an
-                        // authenticated backend relay is trusted to introduce it.
-                        SyncMessage::BranchMetadata(_)
-                            if ingest_context.trust == CommitUnitTrust::Session =>
-                        {
-                            drop_peer_request(&self.node);
-                            continue;
-                        }
+                        // Sessions may introduce their own locally-authored
+                        // record only when its creator matches the authenticated
+                        // link and its declared dependencies are available.
                         other => {
+                            if let SyncMessage::BranchMetadata(metadata) = &other
+                                && ingest_context.trust == CommitUnitTrust::Session
+                            {
+                                let admitted =
+                                    self.node.borrow_mut().admit_session_branch_metadata(
+                                        metadata.clone(),
+                                        ingest_context.identity,
+                                    )?;
+                                if !admitted {
+                                    if let Some(existing) =
+                                        pending_session_branch_metadata.get(&metadata.branch_id)
+                                        && existing != metadata
+                                    {
+                                        return Err(Error::new(
+                                            ErrorCode::Protocol,
+                                            "conflicting pending branch metadata",
+                                        ));
+                                    }
+                                    pending_session_branch_metadata
+                                        .insert(metadata.branch_id, metadata.clone());
+                                    if let Some(parent) = metadata.parent
+                                        && self.node.borrow().branch_record(parent).is_none()
+                                        && pending_branch_metadata_repairs
+                                            .insert(parent, ())
+                                            .is_none()
+                                    {
+                                        self.transport
+                                            .send(SyncMessage::FetchBranchMetadata {
+                                                branches: vec![parent],
+                                            })
+                                            .map_err(transport_error)?;
+                                    }
+                                    continue;
+                                }
+                            }
                             if let SyncMessage::CommitUnit { tx, .. } = &other
                                 && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage
                                 && self.node.borrow().branch_record(branch).is_none()

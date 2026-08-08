@@ -24,11 +24,10 @@ use crate::tx::{DeletionEvent, DurabilityTier, Fate, Snapshot, Transaction, TxId
 /// Messages exchanged between Jazz nodes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum SyncMessage {
-    /// Request creation of a new snapshot-base branch.
+    /// Legacy server-derived branch-creation request.
     ///
-    /// This is an authenticated session request.  It deliberately contains no
-    /// caller-controlled parent, snapshot, lifecycle, or creator fields: the
-    /// receiving authority derives all of those from its node and link.
+    /// Receivers reject this message. Branches are created durably on the local
+    /// node and synchronize through [`SyncMessage::BranchMetadata`].
     CreateBranch {
         /// Fresh branch identity selected by the caller.
         branch_id: BranchId,
