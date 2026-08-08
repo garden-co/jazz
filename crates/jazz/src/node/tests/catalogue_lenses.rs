@@ -1449,11 +1449,6 @@ fn durable_catalogue_values_pointer_and_physical_mappings_survive_restart() {
     let evolved = catalogue_evolved_schema();
     let evolved_payload = SchemaVersion::new(evolved.clone());
     let (dir, mut core) = open_node_with_schema(node(0x39), base.clone());
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
-    .unwrap();
     let lens = MigrationLens::new(
         base.version_id(),
         evolved_payload.id,
@@ -1466,10 +1461,13 @@ fn durable_catalogue_values_pointer_and_physical_mappings_survive_restart() {
             }],
         }],
     );
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: lens.clone(),
-    })
+    publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        lens.clone(),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
@@ -1519,7 +1517,7 @@ fn shape_registration_parks_until_schema_version_catalogue_arrives() {
         TableSchema::new("notes", [ColumnSchema::new("body", ColumnType::String)]),
     ]);
     let shape = Query::from("todos").validate(&evolved).unwrap();
-    let (dir, mut core) = open_node_with_schema(node(0x3c), base);
+    let (dir, mut core) = open_node_with_schema(node(0x3c), base.clone());
 
     core.apply_sync_message(SyncMessage::RegisterShape {
         shape_id: shape.shape_id(),
@@ -1530,10 +1528,22 @@ fn shape_registration_parks_until_schema_version_catalogue_arrives() {
     assert_eq!(core.sync_metrics().parked_catalogue_shapes, 1);
     assert!(!core.query.registered_shapes.contains_key(&shape.shape_id()));
 
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(SchemaVersion::new(evolved)),
-    })
+    let evolved = SchemaVersion::new(evolved);
+    publish_schema_lineage(
+        &mut core,
+        evolved.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![],
+            }],
+        ),
+        ["notes"],
+        Vec::<String>::new(),
+    )
     .unwrap();
     assert_eq!(core.sync_metrics().parked_catalogue_shapes_resolved, 1);
     assert!(core.query.registered_shapes.contains_key(&shape.shape_id()));
@@ -1549,11 +1559,25 @@ fn publishing_schema_registers_new_physical_tables_live() {
     let base = schema();
     let evolved = catalogue_evolved_schema();
     let evolved_payload = SchemaVersion::new(evolved);
-    let (_dir, mut core) = open_node_with_schema(node(0x3b), base);
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
+    let (_dir, mut core) = open_node_with_schema(node(0x3b), base.clone());
+    publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved_payload.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String(String::new()),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
     let table_id =
         core.catalogue.physical_mappings[&evolved_payload.id].tables["todos"].table_id;
@@ -1582,12 +1606,23 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
         TableSchema::new("notes", [ColumnSchema::new("body", ColumnType::String)]),
     ]);
     let evolved_payload = SchemaVersion::new(evolved.clone());
-    let mut core = open_reopen_refusing_node_with_schema(node(0x3e), base);
+    let mut core = open_reopen_refusing_node_with_schema(node(0x3e), base.clone());
 
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
+    publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved_payload.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![],
+            }],
+        ),
+        ["notes"],
+        Vec::<String>::new(),
+    )
     .unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
