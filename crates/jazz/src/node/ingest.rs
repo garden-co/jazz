@@ -21,12 +21,19 @@ use crate::text_merge::{
 use crate::time::TxTimeSortKey;
 use groove::records::ValueType;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct CommitUnitParkMode {
     ingest_context: Option<CommitUnitIngestContext>,
-    relay: bool,
-    edge_authority_mergeable: bool,
-    edge_accepted_mergeable: bool,
+    ingress_role: ParkedIngressRole,
+}
+
+impl Default for CommitUnitParkMode {
+    fn default() -> Self {
+        Self {
+            ingest_context: None,
+            ingress_role: ParkedIngressRole::Authority,
+        }
+    }
 }
 
 struct LargeValueMergeCell {
@@ -822,7 +829,7 @@ where
             &versions,
             now_ms,
             CommitUnitParkMode {
-                edge_accepted_mergeable: true,
+                ingress_role: ParkedIngressRole::EdgeAccepted,
                 ..CommitUnitParkMode::default()
             },
         )? {
@@ -834,7 +841,7 @@ where
             now_ms,
             &mut memo,
             CommitUnitParkMode {
-                edge_accepted_mergeable: true,
+                ingress_role: ParkedIngressRole::EdgeAccepted,
                 ..CommitUnitParkMode::default()
             },
         )? {
@@ -845,7 +852,7 @@ where
             &versions,
             now_ms,
             CommitUnitParkMode {
-                edge_accepted_mergeable: true,
+                ingress_role: ParkedIngressRole::EdgeAccepted,
                 ..CommitUnitParkMode::default()
             },
         )? {
@@ -978,7 +985,7 @@ where
             ));
         }
         let relay_mode = CommitUnitParkMode {
-            relay: true,
+            ingress_role: ParkedIngressRole::Relay,
             ..CommitUnitParkMode::default()
         };
         if self.park_commit_unit_if_missing_schema_versions_with_mode(
@@ -1285,8 +1292,7 @@ where
             now_ms,
             CommitUnitParkMode {
                 ingest_context,
-                edge_authority_mergeable: true,
-                ..CommitUnitParkMode::default()
+                ingress_role: ParkedIngressRole::EdgeAuthority,
             },
         )? {
             return Ok(Vec::new());
@@ -1298,8 +1304,7 @@ where
             &mut memo,
             CommitUnitParkMode {
                 ingest_context,
-                edge_authority_mergeable: true,
-                ..CommitUnitParkMode::default()
+                ingress_role: ParkedIngressRole::EdgeAuthority,
             },
         )? {
             return Ok(Vec::new());
@@ -1310,8 +1315,7 @@ where
             now_ms,
             CommitUnitParkMode {
                 ingest_context,
-                edge_authority_mergeable: true,
-                ..CommitUnitParkMode::default()
+                ingress_role: ParkedIngressRole::EdgeAuthority,
             },
         )? {
             return Ok(Vec::new());
@@ -2167,9 +2171,7 @@ where
             if existing.ingest_context != mode.ingest_context {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
-            existing.relay |= mode.relay;
-            existing.edge_authority_mergeable |= mode.edge_authority_mergeable;
-            existing.edge_accepted_mergeable |= mode.edge_accepted_mergeable;
+            existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
             return Ok(true);
         }
         self.sync_metrics.parked_orphans += 1;
@@ -2180,9 +2182,7 @@ where
                 versions: versions.to_vec(),
                 now_ms,
                 ingest_context: mode.ingest_context,
-                relay: mode.relay,
-                edge_authority_mergeable: mode.edge_authority_mergeable,
-                edge_accepted_mergeable: mode.edge_accepted_mergeable,
+                ingress_role: mode.ingress_role,
             },
         );
         Ok(true)
@@ -2209,9 +2209,7 @@ where
             if existing.ingest_context != mode.ingest_context {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
-            existing.edge_authority_mergeable |= mode.edge_authority_mergeable;
-            existing.relay |= mode.relay;
-            existing.edge_accepted_mergeable |= mode.edge_accepted_mergeable;
+            existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
             return Ok(true);
         }
         self.sync_metrics.parked_orphans += 1;
@@ -2224,9 +2222,7 @@ where
                 versions: versions.to_vec(),
                 now_ms,
                 ingest_context: mode.ingest_context,
-                relay: mode.relay,
-                edge_authority_mergeable: mode.edge_authority_mergeable,
-                edge_accepted_mergeable: mode.edge_accepted_mergeable,
+                ingress_role: mode.ingress_role,
             },
         );
         Ok(true)
@@ -2249,9 +2245,7 @@ where
             if existing.ingest_context != mode.ingest_context {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
-            existing.edge_authority_mergeable |= mode.edge_authority_mergeable;
-            existing.relay |= mode.relay;
-            existing.edge_accepted_mergeable |= mode.edge_accepted_mergeable;
+            existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
             return Ok(true);
         }
         self.sync_metrics.parked_orphans += 1;
@@ -2262,9 +2256,7 @@ where
                 versions: versions.to_vec(),
                 now_ms,
                 ingest_context: mode.ingest_context,
-                relay: mode.relay,
-                edge_authority_mergeable: mode.edge_authority_mergeable,
-                edge_accepted_mergeable: mode.edge_accepted_mergeable,
+                ingress_role: mode.ingress_role,
             },
         );
         Ok(true)
@@ -2334,7 +2326,7 @@ where
                 .parking
                 .parked_commit_units
                 .iter()
-                .filter(|(_, unit)| !unit.relay)
+                .filter(|(_, unit)| unit.ingress_role != ParkedIngressRole::Relay)
                 .map(|(tx_id, unit)| (*tx_id, unit.versions.clone()))
                 .collect::<Vec<_>>();
             let mut ready = Vec::new();
@@ -2363,13 +2355,13 @@ where
                 if self.parking.parked_catalogue_commit_units.remove(&tx_id) {
                     self.sync_metrics.parked_catalogue_orphans_resolved += 1;
                 }
-                if unit.edge_accepted_mergeable {
+                if unit.ingress_role == ParkedIngressRole::EdgeAccepted {
                     updates.extend(self.finalize_edge_accepted_mergeable_commit_unit_once(
                         unit.tx,
                         unit.versions,
                         unit.now_ms,
                     )?);
-                } else if unit.edge_authority_mergeable {
+                } else if unit.ingress_role == ParkedIngressRole::EdgeAuthority {
                     updates.extend(self.ingest_edge_authority_mergeable_commit_unit_once(
                         unit.tx,
                         unit.versions,
@@ -2398,7 +2390,7 @@ where
                 .parking
                 .parked_commit_units
                 .iter()
-                .filter(|(_, unit)| unit.relay)
+                .filter(|(_, unit)| unit.ingress_role == ParkedIngressRole::Relay)
                 .map(|(tx_id, unit)| (*tx_id, unit.versions.clone()))
                 .collect::<Vec<_>>();
             let mut ready = Vec::new();

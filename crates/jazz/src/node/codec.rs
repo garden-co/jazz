@@ -851,15 +851,33 @@ pub(super) fn owned_record_from_storage_values_with_descriptor(
     Ok(OwnedRecord::new(raw, descriptor))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ParkedIngressRole {
+    Relay,
+    EdgeAuthority,
+    Authority,
+    EdgeAccepted,
+}
+
+impl ParkedIngressRole {
+    pub(super) fn strongest(self, other: Self) -> Self {
+        use ParkedIngressRole::{Authority, EdgeAccepted, EdgeAuthority, Relay};
+        match (self, other) {
+            (EdgeAccepted, _) | (_, EdgeAccepted) => EdgeAccepted,
+            (Authority, _) | (_, Authority) => Authority,
+            (EdgeAuthority, _) | (_, EdgeAuthority) => EdgeAuthority,
+            (Relay, Relay) => Relay,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ParkedCommitUnit {
     pub(super) tx: Transaction,
     pub(super) versions: Vec<VersionRecord>,
     pub(super) now_ms: u64,
     pub(super) ingest_context: Option<CommitUnitIngestContext>,
-    pub(super) relay: bool,
-    pub(super) edge_authority_mergeable: bool,
-    pub(super) edge_accepted_mergeable: bool,
+    pub(super) ingress_role: ParkedIngressRole,
 }
 
 pub(super) fn current_version_index(
