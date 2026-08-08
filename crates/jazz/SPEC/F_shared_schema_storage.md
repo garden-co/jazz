@@ -308,35 +308,27 @@ Identity follows these rules:
 - Independently introduced same-named entities receive different physical ids.
   Name and shape equality alone never merges identities.
 
-#### Publishing lenses
+#### Publishing schemas with lineage
 
-A new schema may be published and written to before the lens mapping it to an existing schema is published,
-so data will end up in a new physical table. If that happens, identity resolution is not a metadata-only relabel.
+The database's creation schema is the genesis exception. Every non-genesis
+schema is admitted atomically with one lineage-defining lens whose source is
+already admitted and whose target is the new schema. The publication bundle
+also declares all new target tables and dropped source tables explicitly. The
+related-table lens endpoints plus those declarations must account for both
+schema table sets exactly.
 
-This is mostly a dev-only concern: it's expected that devs experiment with schema shapes before writing migrations, but in prod new schemas will usually be published alongside their migrations. This means data preservation is not an essential requirement.
+Jazz derives the target physical mapping before persistence. Compatible
+unchanged and renamed entities reuse source physical ids. New tables,
+added/copied columns, and incompatible column epochs receive fresh ids. Dropped
+entities are absent from the target mapping but retained in older mappings and
+storage. Schema, lens, alias, and mapping are persisted in one batch, then every
+Groove layout/projection/index case is registered before acknowledgement and
+before parked data drains.
 
-We can handle this scenario in the following way:
-
-- `PublishSchema` allocates a database-local provisional mapping.
-- A mapping becomes authoritative when it is first used as a lens source or is
-  first reconciled as a lens target. Jazz derives this state from the durable
-  lens catalogue; it does not need a separate persisted flag.
-- The first lens targeting a provisional schema reconciles its mapping,
-  preserving identities across renames and unchanged entities. That result is
-  then immutable.
-- A later lens targeting that schema independently derives the mapping implied
-  by its source mapping and lens operations. Jazz accepts the lens only if the
-  result exactly matches the authoritative target mapping; otherwise
-  publication is rejected before either the lens or mapping is persisted.
-- When reconciliation replaces a provisional table identity, Jazz discards all
-  storage scoped to the target/new physical table before installing the
-  reconciled mapping.
-- This discard includes history, derived current state, indexes, branches, and
-  other table-scoped side storage.
-
-This deliberately accepts data loss in the uncommon dev workflow where a schema
-receives writes before its lens is published. In the future we may replace the
-discard with migration from one physical table to another.
+There is intentionally no provisional mapping, pre-lens write window,
+reconciliation discard, or local data-loss policy. Later cross-lenses may add
+translation paths only when they agree with the already-authoritative target
+mapping; delivery order never chooses physical identity.
 
 ### Indexing
 
@@ -404,8 +396,7 @@ remain compatible with databases written by the former per-schema history layout
    - Persist each schema version’s logical-to-physical mapping alongside its
      database-local alias in `jazz_schema_versions`.
    - Recover the next table/column ids from live persisted mappings during the
-     catalogue-open stage. Fully discarded provisional ids may be reused after
-     restart.
+     catalogue-open stage. Published ids are not reused.
    - Include column identity now because reusable storage and indexes cannot
      safely be defined using logical names.
 
@@ -535,8 +526,7 @@ remain compatible with databases written by the former per-schema history layout
    - Merge heads: `jazz_merge_heads` now keys each derived causal-head set by
      `(PhysicalTableId, RowUuid)`. Ancestry checks compare physical lineage, not
      the authored logical table name. Renames and restart retain one head set;
-     unreconciled same-named lineages remain separate; discarding a provisional
-     lineage clears it before its local ID is reused.
+     independently introduced same-named lineages remain separate.
    - Large-value checkpoints remain keyed by logical table and column names.
      Large-value handles embedded in row payloads and extent identifiers also
      carry authored logical names and cross the public API/wire boundary, so

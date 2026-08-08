@@ -111,17 +111,17 @@ acceptance/rejection, auth expiry, and unsupported-feature diagnostics through
 
 The message variants and their payloads are:
 
-| message                                                                    | direction      | payload                                                                                                                              |
-| -------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `CommitUnit`                                                               | up             | `{ tx: Transaction, versions: Vec<VersionRecord> }`                                                                                  |
-| `FateUpdate`                                                               | down           | `{ tx_id, fate, global_seq: Option<GlobalSeq>, durability: Option<DurabilityTier> }`                                                 |
-| `RegisterShape`                                                            | up             | `{ shape_id, ast: ShapeAst, opts: RegisterShapeOptions }`                                                                            |
-| `Subscribe`                                                                | up             | `{ shape_id, subscription: SubscriptionKey, values: Vec<Value> }`                                                                    |
-| `SubscribeRejected`                                                        | down           | `{ subscription: SubscriptionKey, reason: SubscribeRejectReason }`                                                                   |
-| `Unsubscribe`                                                              | up             | `{ subscription: SubscriptionKey }`                                                                                                  |
-| `ViewUpdate`                                                               | down           | `{ subscription, reset_result_set, version_bundles, peer_payload_inventory, result_member_adds/removes, program_fact_adds/removes }` |
-| `FetchContentExtent` / `ContentExtents`                                    | bulk lane      | `{ owner: LargeValueOwnerRef, extent }` / `{ extents: Vec<ContentExtent> }`                                                          |
-| `PublishSchema` / `PublishLens` / `SetCurrentWriteSchema` / `CatalogueAck` | catalogue lane | ch. 10                                                                                                                               |
+| message                                                                            | direction      | payload                                                                                                                              |
+| ---------------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `CommitUnit`                                                                       | up             | `{ tx: Transaction, versions: Vec<VersionRecord> }`                                                                                  |
+| `FateUpdate`                                                                       | down           | `{ tx_id, fate, global_seq: Option<GlobalSeq>, durability: Option<DurabilityTier> }`                                                 |
+| `RegisterShape`                                                                    | up             | `{ shape_id, ast: ShapeAst, opts: RegisterShapeOptions }`                                                                            |
+| `Subscribe`                                                                        | up             | `{ shape_id, subscription: SubscriptionKey, values: Vec<Value> }`                                                                    |
+| `SubscribeRejected`                                                                | down           | `{ subscription: SubscriptionKey, reason: SubscribeRejectReason }`                                                                   |
+| `Unsubscribe`                                                                      | up             | `{ subscription: SubscriptionKey }`                                                                                                  |
+| `ViewUpdate`                                                                       | down           | `{ subscription, reset_result_set, version_bundles, peer_payload_inventory, result_member_adds/removes, program_fact_adds/removes }` |
+| `FetchContentExtent` / `ContentExtents`                                            | bulk lane      | `{ owner: LargeValueOwnerRef, extent }` / `{ extents: Vec<ContentExtent> }`                                                          |
+| `PublishSchemaWithLens` / `PublishLens` / `SetCurrentWriteSchema` / `CatalogueAck` | catalogue lane | ch. 10                                                                                                                               |
 
 A `VersionBundle`, carried in `ViewUpdate.version_bundles`, is `{ tx, versions,
 fate, global_seq, durability }`: a settled **view payload bundle** with the fate
@@ -398,7 +398,7 @@ Large-value content uses a bulk lane rather than being forced through ordinary
 view payloads. A `FetchContentExtent` request is authorized against row context
 and read policy: an extent whose row mismatches the request or is not visible to
 the peer is refused (`INV-SYNC-19`, ch. 12). Catalogue messages
-(`PublishSchema`, `PublishLens`, `SetCurrentWriteSchema`, `CatalogueAck`) share
+(`PublishSchemaWithLens`, `PublishLens`, `SetCurrentWriteSchema`, `CatalogueAck`) share
 this protocol lane; their semantics are chapter 10.
 
 _Further invariants._ `INV-SYNC-21` — wire `TxId` and row-version payloads use
