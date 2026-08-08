@@ -301,7 +301,24 @@ fn prepared_params_from_domain(
                 source: PreparedQueryParamSource::Claim(claim.path.clone()),
             }),
     );
+    // Groove matches terminal route fields to the leading binding values by
+    // position, so routed parameters must form the binding descriptor prefix
+    // in the same route-field order.
+    params.sort_by_key(|param| {
+        let route_field = prepared_param_route_field(param);
+        (
+            !parameters.routing_params.contains(&route_field),
+            route_field,
+        )
+    });
     params
+}
+
+fn prepared_param_route_field(param: &PreparedQueryParam) -> String {
+    match &param.source {
+        PreparedQueryParamSource::User => route_param_field(&param.name),
+        PreparedQueryParamSource::Claim(_) => param.name.clone(),
+    }
 }
 
 fn prepared_route_param_names(parameters: &super::query_engine::ParameterDomain) -> Vec<String> {
@@ -2279,11 +2296,16 @@ where
             }
             let binding_source_shape = plan.binding_source_shape.clone();
             let binding_user_params = plan.binding_user_params.clone();
+            let param_binding_mode = if binding_source_shape.is_some() {
+                ParamBindingMode::RetainAllParams
+            } else {
+                ParamBindingMode::InlineAllReachableSeeds
+            };
             let policy_request = node.table_read_policy_authorization_request(
                 policy_schema,
                 &table.name,
                 *permission_subject,
-                ParamBindingMode::InlineAllReachableSeeds,
+                param_binding_mode,
                 tier,
                 binding_source_shape.clone(),
                 binding_user_params.clone(),
@@ -9257,8 +9279,23 @@ where
     ) -> Result<PreparedQueryPlan, Error> {
         let app_row_fields = app_row_terminal_fields(&program.lowered.output)?;
         let graph = lowered_app_rows_graph(&program)?;
-        let params = prepared_params_from_domain(&program.lowered.parameters);
-        let route_params = prepared_route_param_names(&program.lowered.parameters);
+        let mut params = prepared_params_from_domain(&program.lowered.parameters);
+        let route_eligible_fields =
+            app_row_terminal_route_eligible_fields(&program.lowered.output)?;
+        let route_eligible_fields = route_eligible_fields.into_iter().collect::<BTreeSet<_>>();
+        // A terminal may expose only a subset of the program's routes (for
+        // example, an include policy can consume a claim without routing the
+        // app-row terminal by it). Keep that terminal's routes as the exact
+        // binding-value prefix Groove zips against.
+        params.sort_by_key(|param| {
+            let route_field = prepared_param_route_field(param);
+            (!route_eligible_fields.contains(&route_field), route_field)
+        });
+        let route_params = params
+            .iter()
+            .map(prepared_param_route_field)
+            .filter(|field| route_eligible_fields.contains(field))
+            .collect::<Vec<_>>();
         let param_names = params
             .iter()
             .map(|param| param.name.clone())
@@ -9279,10 +9316,7 @@ where
                 .source_shape
                 .clone()
                 .unwrap_or_else(|| query_binding_source_shape_for_prepared_params(&params));
-            let route_fields = terminal_route_fields(
-                &route_params,
-                &app_row_terminal_route_eligible_fields(&program.lowered.output)?,
-            );
+            let route_fields = route_params;
             let prepared = self.database.prepare(
                 [groove::ivm::RoutedMultisinkTerminal::new(
                     JAZZ_APP_ROWS_SINK,
@@ -9741,27 +9775,53 @@ where
             .iter()
             .find(|candidate| candidate.name == table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.to_owned()))?;
-        let query = authorization_query_from_read_policy(table);
+        let policy = match self.query_program_policy_context(identity) {
+            PolicyContext::Identity {
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            } => PolicyContext::AuthorizationSubplan {
+                protected_source: root_source_id(table_name),
+                role: PolicyDecisionRole::Read,
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            },
+            other => other,
+        };
+        let mut query = authorization_query_from_read_policy(table);
+        let mut policy_binding_values = BTreeMap::new();
+        if matches!(param_binding_mode, ParamBindingMode::RetainAllParams)
+            && let PolicyContext::AuthorizationSubplan { claims, .. } = &policy
+        {
+            bind_scope_claim_operands(&mut query, claims, &mut policy_binding_values);
+        }
         if !query.includes.is_empty() {
             return Err(Error::InvalidStoredValue(
                 "maintained subscription view policy slice does not support include policies",
             ));
         }
         let policy_shape = query.validate(policy_schema)?;
-        let policy_binding = policy_shape.bind(BTreeMap::new())?;
+        let policy_binding = policy_shape.bind(policy_binding_values.clone())?;
         let policy_shape = bind_query_params_with_mode(
             &policy_shape,
             &policy_binding,
             policy_schema,
             param_binding_mode,
         )?;
-        if !policy_shape.params().is_empty() {
+        if policy_shape
+            .params()
+            .keys()
+            .any(|name| !policy_binding_values.contains_key(name))
+        {
             return Err(Error::QueryCapability(
                 "maintained policy source filters with runtime parameters must lower through query-engine binding sources"
                     .to_owned(),
             ));
         }
-        let binding = policy_shape.bind(BTreeMap::new())?;
+        let binding = policy_shape.bind(policy_binding_values)?;
         let mut input_shape = if include_deleted_root {
             self.normalized_include_deleted_row_set_shape(&policy_shape, &binding)?
         } else {
@@ -9773,28 +9833,17 @@ where
             policy_shape.query(),
             &mut claim_params,
         )?;
+        for (name, claim) in &mut claim_params {
+            if let Some(ty) = policy_shape.params().get(name) {
+                claim.ty = ty.clone();
+            }
+        }
         let binding_source_shape = binding_source_shape.clone().or_else(|| {
             authorization_binding_source_shape(&policy_shape, &binding_user_params, &claim_params)
         });
         if let Some(source_shape) = binding_source_shape.clone() {
             retarget_binding_value_sources(&mut input_shape, &source_shape);
         }
-        let policy = match self.query_program_policy_context(identity) {
-            PolicyContext::Identity {
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            } => PolicyContext::AuthorizationSubplan {
-                protected_source: root_source_id(policy_shape.query().table.as_str()),
-                role: PolicyDecisionRole::Read,
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            },
-            other => other,
-        };
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape_and_policy(
                 &policy_shape,
@@ -10230,6 +10279,27 @@ fn bind_scope_claim_operands(
         if let Some(seed) = &mut reachable.seed {
             for predicate in &mut seed.filters {
                 bind_scope_claim_predicate(predicate, claim_values, binding_values);
+            }
+        }
+    }
+    for branch in &mut query.policy_branches {
+        for predicate in &mut branch.filters {
+            bind_scope_claim_predicate(predicate, claim_values, binding_values);
+        }
+        for join in &mut branch.joins {
+            bind_scope_claim_join(join, claim_values, binding_values);
+        }
+        for reachable in &mut branch.reachable {
+            for predicate in &mut reachable.access_filters {
+                bind_scope_claim_predicate(predicate, claim_values, binding_values);
+            }
+            for predicate in &mut reachable.edge_filters {
+                bind_scope_claim_predicate(predicate, claim_values, binding_values);
+            }
+            if let Some(seed) = &mut reachable.seed {
+                for predicate in &mut seed.filters {
+                    bind_scope_claim_predicate(predicate, claim_values, binding_values);
+                }
             }
         }
     }
