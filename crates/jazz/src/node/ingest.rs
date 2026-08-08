@@ -145,6 +145,9 @@ where
             .expand_version_carriers_for_receive()
             .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
         match message {
+            SyncMessage::CreateBranch { .. } => Err(Error::UnsupportedSyncMessage(
+                "branch creation must be admitted by an authenticated session link",
+            )),
             SyncMessage::BranchMetadata(metadata) => {
                 self.admit_branch_metadata(metadata)?;
                 self.drain_parked_commit_units()

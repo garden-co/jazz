@@ -357,6 +357,12 @@ Every `now` invariant trends toward coverage `✓`; an untested `now` is visible
 
 Some ids and ranges were allocated during drafting but are not cited by any Jazz chapter and are not registry rows; they explain gaps in the numbering and are **not** dangling references. Each gets a row if and when a Jazz chapter cites it. The old glossary reservation was stale and is not a live invariant.
 
+## Branch creation admission
+
+| ID            | Requirement                                                                                                                                                                                                                                                                                                                                                         | Evidence                                                                                                                        | Owner                                                                                            | Status |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------ |
+| INV-BRANCH-20 | A session branch-create request MUST carry only the fresh branch id; the serving authenticated link MUST derive immutable creator, parentless `Open` state, and available snapshot base. Raw `BranchMetadata` from a session MUST NOT create or alter a branch. Exact replay of an identical durable record is idempotent; conflicts produce no discovery response. | `db::tests::session_branch_creation_is_attributed_and_idempotent`; `db::tests::session_branch_creation_rejects_forged_metadata` | `jazz/src/db.rs::PeerConnection::tick`; `jazz/src/node/branches.rs::NodeState::create_branch_as` | now    |
+
 ## Open Questions
 
 None.

@@ -20,6 +20,8 @@ use crate::tx::{
 pub struct BranchRecord {
     /// Branch identity.
     pub branch_id: BranchId,
+    /// Authenticated session identity that created the branch.
+    pub created_by: AuthorId,
     /// Parent branch, or `None` for a root branch.
     pub parent: Option<BranchId>,
     /// Frozen parent settled cut. Root branches have no base.
@@ -32,6 +34,7 @@ impl From<&BranchRecord> for crate::protocol::BranchMetadata {
     fn from(record: &BranchRecord) -> Self {
         Self {
             branch_id: record.branch_id,
+            created_by: record.created_by,
             parent: record.parent,
             base: record.base.clone(),
             open: record.state == codec::BranchState::Open,
@@ -48,8 +51,18 @@ where
     /// Creation writes only one metadata row; overlay tables are created lazily
     /// on the first branch write.
     pub fn create_branch(&mut self, branch_id: BranchId) -> Result<BranchRecord, Error> {
+        self.create_branch_as(branch_id, AuthorId(uuid::Uuid::nil()))
+    }
+
+    /// Create a snapshot-base branch attributed to an authenticated session.
+    pub fn create_branch_as(
+        &mut self,
+        branch_id: BranchId,
+        created_by: AuthorId,
+    ) -> Result<BranchRecord, Error> {
         let record = BranchRecord {
             branch_id,
+            created_by,
             parent: None,
             base: Some(
                 Snapshot::exclusive_base(
@@ -62,6 +75,12 @@ where
             ),
             state: codec::BranchState::Open,
         };
+        if let Some(existing) = self.branches.branches.get(&branch_id) {
+            if existing == &record {
+                return Ok(existing.clone());
+            }
+            return Err(Error::InvalidStoredValue("conflicting branch creation"));
+        }
         self.persist_branch_record(&record)?;
         self.branches.branches.insert(branch_id, record.clone());
         Ok(record)
@@ -71,6 +90,7 @@ where
     pub fn create_root_branch(&mut self, branch_id: BranchId) -> Result<BranchRecord, Error> {
         let record = BranchRecord {
             branch_id,
+            created_by: AuthorId(uuid::Uuid::nil()),
             parent: None,
             base: None,
             state: codec::BranchState::Open,
@@ -94,6 +114,7 @@ where
     ) -> Result<(), Error> {
         let record = BranchRecord {
             branch_id: metadata.branch_id,
+            created_by: metadata.created_by,
             parent: metadata.parent,
             base: metadata.base,
             state: if metadata.open {
@@ -1351,6 +1372,7 @@ where
             "jazz_branches",
             vec![
                 Value::Uuid(record.branch_id.0),
+                Value::Uuid(record.created_by.0),
                 Value::Nullable(record.parent.map(|id| Box::new(Value::Uuid(id.0)))),
                 Value::Nullable(
                     record
@@ -1370,6 +1392,7 @@ where
         record: BorrowedRecord<'_>,
     ) -> Result<(), Error> {
         let branch_id = BranchId(record.get_uuid(BranchRowRecord::FIELD_BRANCH_ID_IDX)?);
+        let created_by = AuthorId(record.get_uuid(BranchRowRecord::FIELD_CREATED_BY_IDX)?);
         let parent = record
             .get_nullable_uuid(BranchRowRecord::FIELD_PARENT_IDX)?
             .map(BranchId);
@@ -1391,6 +1414,7 @@ where
             branch_id,
             BranchRecord {
                 branch_id,
+                created_by,
                 parent,
                 base,
                 state,

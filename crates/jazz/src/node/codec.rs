@@ -284,9 +284,10 @@ groove::impl_record_field_enum!(BranchState {
 groove::define_record! {
     pub(super) struct BranchRowRecord {
         0 => branch_id: BranchId,
-        1 => parent: Option<BranchId>,
-        2 => base_global: Option<GlobalSeq>,
-        3 => state: BranchState,
+        1 => created_by: AuthorId,
+        2 => parent: Option<BranchId>,
+        3 => base_global: Option<GlobalSeq>,
+        4 => state: BranchState,
     }
 }
 

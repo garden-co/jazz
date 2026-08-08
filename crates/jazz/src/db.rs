@@ -5733,6 +5733,37 @@ where
                         received.encoded_len
                     ));
                     match received.message {
+                        SyncMessage::CreateBranch { branch_id }
+                            if ingest_context.trust == CommitUnitTrust::Session =>
+                        {
+                            // The wire session, not message fields, is the sole
+                            // authority for creator attribution.  The node derives
+                            // an Open snapshot-base record at its current settled
+                            // cut, so a session cannot choose a parent, lifecycle,
+                            // or unavailable base.
+                            let created = self
+                                .node
+                                .borrow_mut()
+                                .create_branch_as(branch_id, ingest_context.identity);
+                            match created {
+                                Ok(record) => {
+                                    self.transport
+                                        .send(SyncMessage::BranchMetadata((&record).into()))
+                                        .map_err(transport_error)?;
+                                }
+                                // Do not turn branch existence into a discovery
+                                // oracle.  The session sees no distinguishable
+                                // response for conflicting/unknown/denied ids.
+                                Err(error) => {
+                                    let _ = error;
+                                    drop_peer_request(&self.node)
+                                }
+                            }
+                        }
+                        SyncMessage::CreateBranch { .. } => {
+                            drop_peer_request(&self.node);
+                            continue;
+                        }
                         SyncMessage::RegisterShape {
                             shape_id,
                             opts,

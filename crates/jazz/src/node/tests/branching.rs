@@ -627,6 +627,7 @@ fn branch_writes_reject_unknown_and_closed_branches() {
         closed,
         crate::node::branches::BranchRecord {
             branch_id: closed,
+            created_by: AuthorId::SYSTEM,
             parent: None,
             base: None,
             state: codec::BranchState::Merged,

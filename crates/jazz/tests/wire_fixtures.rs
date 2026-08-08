@@ -115,10 +115,18 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             "BranchMetadata",
             SyncMessage::BranchMetadata(BranchMetadata {
                 branch_id: BranchId::from_bytes([0x42; 16]),
+                created_by: AuthorId::from_bytes([0x43; 16]),
                 parent: None,
                 base: None,
                 open: true,
             }),
+        ),
+        (
+            "create_branch",
+            "CreateBranch",
+            SyncMessage::CreateBranch {
+                branch_id: BranchId::from_bytes([0x42; 16]),
+            },
         ),
         (
             "fetch_branch_metadata",

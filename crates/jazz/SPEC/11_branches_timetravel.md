@@ -80,7 +80,7 @@ watermark answers `at(position).read(...)` locally at exactly that position.
 
 The branch model has one branch kind: the **snapshot-base branch**. A branch is
 identified by a branch record (`BranchRecord`) with
-`{ branch_id, parent: Option<BranchId>, base: Option<SnapshotRef>, state }`, where
+`{ branch_id, created_by: AuthorId, parent: Option<BranchId>, base: Option<SnapshotRef>, state }`, where
 `state ∈ {Open, Discarded}`. A root branch has `parent: None` and no
 base/fallback. An ordinary branch has a base snapshot that is **frozen at
 creation**: later parent commits do not appear in the branch except through the
@@ -98,9 +98,14 @@ Schema-version/lens
 partitions (ch. 10) are orthogonal to branch identity.
 
 Creating a branch records metadata only. It is O(1)-style and never copies base
-rows into the overlay (`INV-BRANCH-11`). Branch creation is itself a
-**mergeable write that works offline**: an offline creator branches at _its own_
-settled watermark, honestly "the base as this client saw it".
+rows into the overlay (`INV-BRANCH-11`). A session requests creation with only
+a fresh `BranchId`; the authenticated serving link supplies immutable
+`created_by` and derives a new `Open`, parentless snapshot base from its own
+available settled cut. A session cannot smuggle a parent, lifecycle, base, or
+creator through response-shaped `BranchMetadata`. Replaying the same request is
+idempotent only when the complete durable record matches; conflicting records
+are rejected without a distinguishable discovery response. Trusted backend
+`BranchMetadata` remains a routing/repair carrier, not the session creation API.
 
 ### 11.3 Branch reads
 

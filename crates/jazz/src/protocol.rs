@@ -24,6 +24,15 @@ use crate::tx::{DeletionEvent, DurabilityTier, Fate, Snapshot, Transaction, TxId
 /// Messages exchanged between Jazz nodes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum SyncMessage {
+    /// Request creation of a new snapshot-base branch.
+    ///
+    /// This is an authenticated session request.  It deliberately contains no
+    /// caller-controlled parent, snapshot, lifecycle, or creator fields: the
+    /// receiving authority derives all of those from its node and link.
+    CreateBranch {
+        /// Fresh branch identity selected by the caller.
+        branch_id: BranchId,
+    },
     /// Durable routing metadata required before a branch-target commit unit or
     /// branch-scoped view payload can be admitted. This is intentionally
     /// separate from the ordinary transaction payload: it selects the target
@@ -212,6 +221,8 @@ pub enum SyncMessage {
 pub struct BranchMetadata {
     /// Stable target lineage identifier.
     pub branch_id: BranchId,
+    /// Session identity that created this immutable branch record.
+    pub created_by: AuthorId,
     /// Optional parent lineage for a snapshot-base branch.
     pub parent: Option<BranchId>,
     /// Frozen base used by ordinary branch reads.

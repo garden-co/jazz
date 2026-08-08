@@ -9,9 +9,10 @@ use groove::storage::{OrderedKvStorage, ReopenableStorage, RocksDbStorage};
 use super::*;
 use crate::ids::{AuthorId, BranchId, NodeUuid};
 use crate::protocol::{
-    BindingViewKey, CatalogueAck, KnownStateCompleteness, KnownStateDeclaration, LensOp,
-    ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef,
-    ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, TableLens,
+    BindingViewKey, BranchMetadata, CatalogueAck, KnownStateCompleteness, KnownStateDeclaration,
+    LensOp, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry,
+    RowVersionRef, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
+    TableLens,
 };
 use crate::protocol_limits::{
     MAX_CONTENT_EXTENT_BYTES, MAX_FETCH_ROW_VERSIONS, MAX_KNOWN_STATE_EXACT_REFS,
@@ -6182,6 +6183,68 @@ fn source_coverage_facts(
     (0..count)
         .map(|idx| source_coverage_fact(idx, coverage_len))
         .collect()
+}
+
+#[test]
+fn session_branch_creation_is_attributed_and_idempotent() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let branch = BranchId::from_bytes([0x42; 16]);
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, identity);
+
+    client_transport
+        .send(SyncMessage::CreateBranch { branch_id: branch })
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(server.node().borrow().branch_record(branch).is_some());
+    let response = client_transport
+        .try_recv()
+        .expect("creation acknowledgement");
+    assert!(matches!(response, SyncMessage::BranchMetadata(ref metadata)
+        if metadata.branch_id == branch && metadata.created_by == identity && metadata.open));
+    let record = server
+        .node()
+        .borrow()
+        .branch_record(branch)
+        .cloned()
+        .unwrap();
+    assert_eq!(record.created_by, identity);
+
+    // A dropped acknowledgement is safe to retry: the immutable complete
+    // request replays to the identical durable record.
+    client_transport
+        .send(SyncMessage::CreateBranch { branch_id: branch })
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(
+        matches!(client_transport.try_recv(), Some(SyncMessage::BranchMetadata(metadata))
+        if metadata.branch_id == branch && metadata.created_by == identity)
+    );
+}
+
+#[test]
+fn session_branch_creation_rejects_forged_metadata() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let branch = BranchId::from_bytes([0x42; 16]);
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, identity);
+
+    client_transport
+        .send(SyncMessage::BranchMetadata(BranchMetadata {
+            branch_id: branch,
+            created_by: AuthorId::from_bytes([0xee; 16]),
+            parent: Some(BranchId::from_bytes([0xdd; 16])),
+            base: None,
+            open: false,
+        }))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(server.node().borrow().branch_record(branch).is_none());
+    assert!(client_transport.try_recv().is_none());
 }
 
 #[test]
