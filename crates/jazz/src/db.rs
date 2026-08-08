@@ -5141,16 +5141,17 @@ where
             })
             .collect::<Vec<_>>();
         for (coverage, shape, binding, subscribers) in groups {
-            let is_branch_view = matches!(
-                coverage.opts.read_view.source,
-                ReadViewSourceSpec::Branch { .. }
-            );
             let branch_metadata = match coverage.opts.read_view.source {
-                ReadViewSourceSpec::Branch { branch } => self
-                    .node
-                    .borrow()
-                    .branch_record(crate::ids::BranchId(branch))
-                    .map(crate::protocol::BranchMetadata::from),
+                ReadViewSourceSpec::Branch { branch } => {
+                    let branch = crate::ids::BranchId(branch);
+                    let mut node = self.node.borrow_mut();
+                    node.branch_metadata_visible_to(branch, identity)?
+                        .then(|| {
+                            node.branch_record(branch)
+                                .map(crate::protocol::BranchMetadata::from)
+                        })
+                        .flatten()
+                }
                 _ => None,
             };
             let maintained_subscription = SubscriptionKey {
@@ -5171,10 +5172,7 @@ where
             // Route metadata is an explicit prerequisite for branch-target
             // bundles. Send it before the first view update so a receiver can
             // create the partition instead of parking the payload forever.
-            if is_branch_view {
-                let metadata = branch_metadata.ok_or_else(|| {
-                    Error::new(ErrorCode::Query, "requested branch metadata is unavailable")
-                })?;
+            if let Some(metadata) = branch_metadata {
                 self.transport
                     .send(SyncMessage::BranchMetadata(metadata))
                     .map_err(transport_error)?;
@@ -5468,6 +5466,14 @@ where
                         .and_then(|pending| pending.unit.clone())
                         .map(Ok)
                         .unwrap_or_else(|| self.node.borrow_mut().commit_unit_for(tx_id))?;
+                    if let SyncMessage::CommitUnit { tx, .. } = &unit
+                        && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage
+                        && let Some(metadata) = self.node.borrow().branch_record(branch).cloned()
+                    {
+                        self.transport
+                            .send(SyncMessage::BranchMetadata((&metadata).into()))
+                            .map_err(transport_error)?;
+                    }
                     if let Err(error) =
                         send_with_local_content_extents(&self.node, self.transport.as_mut(), unit)
                     {
@@ -5593,6 +5599,17 @@ where
                             }
                         }
                         message => {
+                            if let SyncMessage::CommitUnit { tx, .. } = &message
+                                && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage
+                                && self.node.borrow().branch_record(branch).is_none()
+                                && pending_branch_metadata_repairs.insert(branch)
+                            {
+                                self.transport
+                                    .send(SyncMessage::FetchBranchMetadata {
+                                        branches: vec![branch],
+                                    })
+                                    .map_err(transport_error)?;
+                            }
                             if !pending_view_updates.is_empty() {
                                 self.node.borrow_mut().apply_view_updates_in_batch(
                                     std::mem::take(&mut pending_view_updates),
@@ -6033,20 +6050,22 @@ where
                                 if let ReadViewSourceSpec::Branch { branch } =
                                     &opts.read_view.source
                                 {
-                                    let metadata = self
-                                        .node
-                                        .borrow()
-                                        .branch_record(crate::ids::BranchId(*branch))
-                                        .cloned()
-                                        .ok_or_else(|| {
-                                            Error::new(
-                                                ErrorCode::Query,
-                                                "requested branch metadata is unavailable",
-                                            )
-                                        })?;
-                                    self.transport
-                                        .send(SyncMessage::BranchMetadata((&metadata).into()))
-                                        .map_err(transport_error)?;
+                                    let metadata =
+                                        self.node.borrow_mut().branch_metadata_visible_to(
+                                            crate::ids::BranchId(*branch),
+                                            peer.link_identity(),
+                                        )?;
+                                    if metadata {
+                                        let metadata = self
+                                            .node
+                                            .borrow()
+                                            .branch_record(crate::ids::BranchId(*branch))
+                                            .cloned()
+                                            .expect("visible branch metadata remains present");
+                                        self.transport
+                                            .send(SyncMessage::BranchMetadata((&metadata).into()))
+                                            .map_err(transport_error)?;
+                                    }
                                 }
                                 send_with_content_extents(
                                     &self.node,
@@ -6128,15 +6147,19 @@ where
                                             if crate::ids::BranchId(view_branch) == branch
                                     )
                                 });
-                                if !admitted {
-                                    drop_peer_request(&self.node);
-                                    continue;
-                                }
-                                let metadata = self.node.borrow().branch_record(branch).cloned();
-                                if let Some(metadata) = metadata {
-                                    self.transport
-                                        .send(SyncMessage::BranchMetadata((&metadata).into()))
-                                        .map_err(transport_error)?;
+                                let visible = admitted
+                                    && self
+                                        .node
+                                        .borrow_mut()
+                                        .branch_metadata_visible_to(branch, peer.link_identity())?;
+                                if visible {
+                                    let metadata =
+                                        self.node.borrow().branch_record(branch).cloned();
+                                    if let Some(metadata) = metadata {
+                                        self.transport
+                                            .send(SyncMessage::BranchMetadata((&metadata).into()))
+                                            .map_err(transport_error)?;
+                                    }
                                 }
                             }
                         }

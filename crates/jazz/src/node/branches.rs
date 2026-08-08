@@ -642,6 +642,21 @@ where
             .map(|branches| branches.contains(&RowUuid(branch.branch_id.0)))
     }
 
+    /// Whether an authenticated link may learn a branch routing record. This
+    /// is deliberately the same first-level branch gate as branch reads, so
+    /// metadata cannot become a branch-existence oracle when an empty result
+    /// is otherwise legitimate.
+    pub(crate) fn branch_metadata_visible_to(
+        &mut self,
+        branch_id: BranchId,
+        identity: AuthorId,
+    ) -> Result<bool, Error> {
+        let Some(branch) = self.branches.branches.get(&branch_id).cloned() else {
+            return Ok(false);
+        };
+        self.branch_read_policy_allows(&branch, identity)
+    }
+
     pub(super) fn branch_write_policy_allows(
         &mut self,
         branch_id: BranchId,

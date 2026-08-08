@@ -2169,27 +2169,24 @@ impl JazzClient {
             // `main` spelling) as the ordinary current view.
             [] => CoreReadViewSpec::default(),
             [branch] if branch == "main" => CoreReadViewSpec::default(),
-            branches => {
-                let branch_ids = branches
-                    .iter()
-                    .map(|branch| {
-                        uuid::Uuid::parse_str(branch).map_err(|_| {
-                            JazzError::Query(format!(
-                                "branch {branch:?} must be `main` or a branch UUID"
-                            ))
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let source = match branch_ids.as_slice() {
-                    [branch] => CoreReadViewSourceSpec::Branch { branch: *branch },
-                    _ => CoreReadViewSourceSpec::MergedBranches {
-                        branches: branch_ids,
-                    },
-                };
+            [branch] => {
+                let branch = uuid::Uuid::parse_str(branch).map_err(|_| {
+                    JazzError::Query(format!("branch {branch:?} must be `main` or a branch UUID"))
+                })?;
                 CoreReadViewSpec {
-                    source,
+                    source: CoreReadViewSourceSpec::Branch { branch },
                     ..CoreReadViewSpec::default()
                 }
+            }
+            branches => {
+                // Public QueryBuilder retains its historical plural syntax,
+                // but v1's core serving contract transports exactly one branch
+                // metadata prerequisite. Do not lower this to an unsupported
+                // MergedBranches read view and fail later/opaqely.
+                return Err(JazzError::Query(format!(
+                    "multi-branch read views are not supported yet (requested {} branches)",
+                    branches.len()
+                )));
             }
         };
         Ok(CoreReadOpts {
@@ -2993,6 +2990,22 @@ mod tests {
                     .column("completed", ColumnType::Boolean),
             )
             .build()
+    }
+
+    #[test]
+    fn multi_branch_facade_query_fails_loudly_until_merged_view_transport_exists() {
+        let query = QueryBuilder::new("todos")
+            .branches(&[
+                "00000000-0000-0000-0000-000000000001",
+                "00000000-0000-0000-0000-000000000002",
+            ])
+            .build();
+        let error = JazzClient::core_read_opts(&query, None)
+            .expect_err("v1 must not lower plural branches to unsupported MergedBranches");
+        assert!(
+            matches!(error, JazzError::Query(message) if message.contains("multi-branch read views are not supported")),
+            "unexpected multi-branch capability error: {error}"
+        );
     }
 
     fn make_offline_context(
