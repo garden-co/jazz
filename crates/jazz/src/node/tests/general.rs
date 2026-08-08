@@ -126,6 +126,9 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
                     )
                 })
                 .collect(),
+            authored_columns: deletion
+                .is_none()
+                .then(|| table.columns.iter().map(|column| column.name.clone()).collect()),
             deletion,
         }
     }

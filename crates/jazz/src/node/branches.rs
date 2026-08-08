@@ -128,6 +128,7 @@ where
                         .iter()
                         .map(|column| winner.cell(&table_schema, &column.name))
                         .collect::<Result<Vec<_>, _>>()?;
+                    let authored_columns = winner.authored_columns(&table_schema)?;
                     versions.push(
                         VersionRecord::encode(
                             &table_schema,
@@ -141,6 +142,7 @@ where
                             &cells,
                             winner.deletion(),
                         )
+                        .map(|record| record.with_authored_columns(authored_columns))
                         .map_err(Error::from)?,
                     );
                 }
@@ -243,6 +245,12 @@ where
                 created_at: TxTime(commit.now_ms),
                 updated_by: commit.made_by,
                 updated_at: TxTime(commit.now_ms),
+                authored_columns: Some(
+                    commit
+                        .authored_columns
+                        .clone()
+                        .unwrap_or_else(|| commit.cells.keys().cloned().collect()),
+                ),
                 cells: commit.cells,
                 deletion: commit.deletion,
             },

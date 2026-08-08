@@ -250,6 +250,8 @@ pub(crate) struct VersionWitnessSchema {
     pub(crate) updated_at_field: String,
     /// Parent transaction set field.
     pub(crate) parents_field: String,
+    /// Nullable serialized set of explicitly authored user columns.
+    pub(crate) authored_columns_field: String,
     /// Nullable deletion event field.
     pub(crate) deletion_field: String,
     /// Terminal field name for each app column.

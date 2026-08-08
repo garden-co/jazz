@@ -1185,6 +1185,12 @@ where
                     previous_current.as_ref(),
                 )?
             };
+            let authored_columns = Some(
+                commit
+                    .authored_columns
+                    .clone()
+                    .unwrap_or_else(|| cells.keys().cloned().collect()),
+            );
             let stored = VersionRow::from_parts_with_schema_version(
                 &table_schema,
                 VersionRowParts {
@@ -1199,6 +1205,7 @@ where
                     updated_by: commit.made_by,
                     updated_at: TxTime(commit.now_ms),
                     cells,
+                    authored_columns,
                     deletion: commit.deletion,
                 },
                 (write_schema_version != self.catalogue.current_schema_version_id)
@@ -1339,7 +1346,7 @@ where
                 ));
             }
         };
-        let cells = BTreeMap::from([(column_name, Value::Bytes(cell_payload))]);
+        let cells = BTreeMap::from([(column_name.clone(), Value::Bytes(cell_payload))]);
         let parents = previous_current
             .as_ref()
             .map(|previous| self.version_tx_id(previous))
@@ -1361,6 +1368,7 @@ where
                 updated_by: made_by,
                 updated_at,
                 cells,
+                authored_columns: Some(BTreeSet::from([column_name.clone()])),
                 deletion: None,
             },
             (write_schema_version != self.catalogue.current_schema_version_id)
@@ -4657,6 +4665,8 @@ pub struct MergeableCommit {
     pub now_ms: u64,
     /// User cells for content versions.
     pub cells: BTreeMap<String, Value>,
+    /// Explicitly authored content columns. `None` means every supplied cell.
+    pub authored_columns: Option<BTreeSet<String>>,
     /// Deletion-register event, if any.
     pub deletion: Option<DeletionEvent>,
     /// Parent content versions.
@@ -4677,6 +4687,7 @@ impl MergeableCommit {
             permission_subject: None,
             now_ms,
             cells: BTreeMap::new(),
+            authored_columns: None,
             deletion: None,
             parents: Vec::new(),
             user_metadata_json: None,
@@ -4712,6 +4723,13 @@ impl MergeableCommit {
     /// Set one user cell for a content version.
     pub fn cell(mut self, column: impl Into<String>, value: Value) -> Self {
         self.cells.insert(column.into(), value);
+        self
+    }
+
+    /// Preserve which cells were explicitly authored when `cells` is a
+    /// materialized snapshot assembled for a partial update.
+    pub fn authored_columns(mut self, columns: BTreeSet<String>) -> Self {
+        self.authored_columns = Some(columns);
         self
     }
 

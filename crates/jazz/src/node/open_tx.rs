@@ -456,8 +456,8 @@ where
             } else {
                 write.parents
             };
-            let cells = match write.cells {
-                PendingCells::Replace(cells) => cells,
+            let (cells, authored_columns) = match write.cells {
+                PendingCells::Replace(cells) => (cells, None),
                 PendingCells::Patch(patch) => {
                     let table_schema = self.table(&write.table)?.clone();
                     let mut cells = BTreeMap::new();
@@ -468,8 +468,9 @@ where
                             }
                         }
                     }
+                    let authored_columns = patch.keys().cloned().collect();
                     cells.extend(patch);
-                    cells
+                    (cells, Some(authored_columns))
                 }
             };
             let mut commit = MergeableCommit::new(
@@ -480,6 +481,9 @@ where
             .made_by(made_by)
             .parents(parents)
             .cells(cells);
+            if let Some(authored_columns) = authored_columns {
+                commit = commit.authored_columns(authored_columns);
+            }
             if let Some(subject) = permission_subject {
                 commit = commit.permission_subject(subject);
             }

@@ -342,6 +342,7 @@ impl VersionRecord {
             &positional,
             commit.deletion,
         )
+        .map(|record| record.with_authored_columns(commit.authored_columns.clone()))
         .map_err(Error::from)
     }
 
@@ -358,6 +359,7 @@ impl VersionRecord {
             .iter()
             .map(|column| stored.cell(table, &column.name))
             .collect::<Result<Vec<_>, _>>()?;
+        let authored_columns = stored.authored_columns(table)?;
         VersionRecord::encode(
             table,
             schema_version,
@@ -370,6 +372,7 @@ impl VersionRecord {
             &cells,
             stored.deletion(),
         )
+        .map(|record| record.with_authored_columns(authored_columns))
         .map_err(Error::from)
     }
 }
@@ -516,6 +519,7 @@ pub(super) struct VersionRowParts {
     pub(super) updated_by: AuthorId,
     pub(super) updated_at: TxTime,
     pub(super) cells: BTreeMap<String, Value>,
+    pub(super) authored_columns: Option<BTreeSet<String>>,
     pub(super) deletion: Option<DeletionEvent>,
 }
 
@@ -753,6 +757,29 @@ impl VersionRow {
                 .position(|candidate| candidate.name == column)
                 .ok_or(Error::InvalidStoredValue("missing user column field"))?;
         nullable_value(self.record.borrowed().get_idx(field)?)
+    }
+
+    /// `None` is the deliberate legacy/lens fallback: every present cell is
+    /// treated as authored by merge code.
+    pub(super) fn authored_columns(
+        &self,
+        table: &TableSchema,
+    ) -> Result<Option<BTreeSet<String>>, Error> {
+        if self.is_register_record() {
+            return Ok(None);
+        }
+        let field = HistoryRowRecord::USER_CELLS + table.columns.len();
+        if field >= self.record.descriptor().fields().len() {
+            return Ok(None);
+        }
+        let value = nullable_value(self.record.borrowed().get_idx(field)?)?;
+        value
+            .map(|value| match value {
+                Value::Bytes(bytes) => serde_json::from_slice(&bytes)
+                    .map_err(|_| Error::InvalidStoredValue("invalid authored columns")),
+                _ => Err(Error::InvalidStoredValue("authored columns must be bytes")),
+            })
+            .transpose()
     }
 
     pub(super) fn peek_cell(
@@ -1283,6 +1310,17 @@ pub(super) fn history_values_from_parts(
             version.cells.get(&column.name).cloned().map(Box::new),
         ));
     }
+    values.push(Value::Nullable(
+        version
+            .authored_columns
+            .as_ref()
+            .map(|columns| {
+                serde_json::to_vec(columns)
+                    .expect("serializing an ordered set of strings cannot fail")
+            })
+            .map(Box::new)
+            .map(|bytes| Box::new(Value::Bytes(*bytes))),
+    ));
     Ok(values)
 }
 
@@ -1316,6 +1354,12 @@ fn history_values_from_wire(
         }
         values.push(Value::Nullable(value.map(Box::new)));
     }
+    values.push(Value::Nullable(
+        version
+            .authored_columns()
+            .map(|columns| serde_json::to_vec(columns).expect("serializing authored columns"))
+            .map(|bytes| Box::new(Value::Bytes(bytes))),
+    ));
     Ok(values)
 }
 
@@ -1424,6 +1468,12 @@ pub(super) fn global_current_values(
             nullable_value(version.record.borrowed().get_idx(field)?)?.map(Box::new),
         ));
     }
+    values.push(Value::Nullable(
+        version
+            .authored_columns(table)?
+            .map(|columns| serde_json::to_vec(&columns).expect("serializing authored columns"))
+            .map(|bytes| Box::new(Value::Bytes(bytes))),
+    ));
     Ok(values)
 }
 

@@ -766,7 +766,6 @@ impl TableSchema {
                 user_column.column_type.clone().nullable(),
             )
         }));
-
         GrooveTableSchema::new(format!("jazz_{}_rejected_versions", self.name), columns)
             .with_primary_key(PrimaryKey::composite([
                 PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
@@ -820,6 +819,12 @@ impl TableSchema {
                 user_column.column_type.clone().nullable(),
             )
         }));
+        // Absent on legacy records. When present, this is a serialized set of
+        // user columns explicitly authored by this version.
+        columns.push(column(
+            "authored_columns",
+            GrooveColumnType::Bytes.nullable(),
+        ));
 
         GrooveTableSchema::new(name, columns)
             .with_primary_key(PrimaryKey::composite([
@@ -912,6 +917,10 @@ impl TableSchema {
                 user_column.column_type.clone().nullable(),
             )
         }));
+        content_columns.push(column(
+            "authored_columns",
+            GrooveColumnType::Bytes.nullable(),
+        ));
         let mut content_table = GrooveTableSchema::new(
             format!("jazz_{}_global_current", self.name),
             content_columns,
@@ -975,6 +984,10 @@ impl TableSchema {
                 user_column.column_type.clone().nullable(),
             )
         }));
+        content_columns.push(column(
+            "authored_columns",
+            GrooveColumnType::Bytes.nullable(),
+        ));
         vec![
             GrooveTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
                 .with_primary_key(PrimaryKey::composite([

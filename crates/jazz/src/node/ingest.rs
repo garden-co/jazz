@@ -1567,6 +1567,8 @@ where
                             updated_by: version.updated_by(),
                             updated_at: version.updated_at(),
                             cells: target_cells,
+                            // Lens translation lacks authored-presence semantics.
+                            authored_columns: None,
                             deletion: version.deletion(),
                         },
                         (target_schema != self.catalogue.current_schema_version_id)
@@ -2784,6 +2786,12 @@ where
                     }
                     let mut best: Option<(crate::time::TxTimeSortKey, Value)> = None;
                     for version in heads {
+                        if version
+                            .authored_columns(table_schema)?
+                            .is_some_and(|columns| !columns.contains(&column.name))
+                        {
+                            continue;
+                        }
                         let Some(value) = version.cell(table_schema, &column.name)? else {
                             continue;
                         };
@@ -4415,47 +4423,66 @@ where
         for version in versions {
             let author_schema = version.schema_version();
             let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
-            let mut target_table = version.table().to_owned();
-            let mut target_cells = source_table_schema
-                .columns
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, column)| {
-                    version
-                        .optional_cell_at(idx)
-                        .map(|value| (column.name.clone(), value))
-                })
-                .collect::<BTreeMap<_, _>>();
-            let (target_schema, translated_table) = self.translate_cells_to_current_write_schema(
-                author_schema,
-                &target_table,
-                &mut target_cells,
-            )?;
-            target_table = translated_table;
-            let table_schema = self.table_in_schema(&target_table, target_schema)?;
-            let schema_version_alias = self.ensure_schema_version_alias(target_schema)?;
+            let (table_schema, target_schema, stored) =
+                if author_schema != self.catalogue.current_write_schema.schema {
+                    let mut target_table = version.table().to_owned();
+                    let mut target_cells = source_table_schema
+                        .columns
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(idx, column)| {
+                            version
+                                .optional_cell_at(idx)
+                                .map(|value| (column.name.clone(), value))
+                        })
+                        .collect::<BTreeMap<_, _>>();
+                    let (target_schema, translated_table) = self
+                        .translate_cells_to_current_write_schema(
+                            author_schema,
+                            &target_table,
+                            &mut target_cells,
+                        )?;
+                    target_table = translated_table;
+                    let table_schema = self.table_in_schema(&target_table, target_schema)?;
+                    let schema_version_alias = self.ensure_schema_version_alias(target_schema)?;
+                    let stored = VersionRow::from_parts_with_schema_version(
+                        &table_schema,
+                        VersionRowParts {
+                            table: target_table,
+                            row_uuid: version.row_uuid(),
+                            tx_node_alias,
+                            schema_version_alias,
+                            tx_time: tx.tx_id.time,
+                            parents: version.parents(),
+                            created_by: version.created_by(),
+                            created_at: version.created_at(),
+                            updated_by: version.updated_by(),
+                            updated_at: version.updated_at(),
+                            cells: target_cells,
+                            // Lens translation lacks authored-presence semantics.
+                            authored_columns: None,
+                            deletion: version.deletion(),
+                        },
+                        (target_schema != self.catalogue.current_schema_version_id)
+                            .then_some(target_schema),
+                    )?;
+                    (table_schema, target_schema, stored)
+                } else {
+                    let schema_version_alias = self.ensure_schema_version_alias(author_schema)?;
+                    let stored = VersionRow::from_wire_with_schema_version(
+                        &source_table_schema,
+                        &version,
+                        tx_node_alias,
+                        schema_version_alias,
+                        tx.tx_id.time,
+                        (author_schema != self.catalogue.current_schema_version_id)
+                            .then_some(author_schema),
+                    )?;
+                    (source_table_schema, author_schema, stored)
+                };
             let layer = VersionLayer::for_record(&version);
             let previous_current =
                 self.query_local_layer_winner(&table_schema.name, version.row_uuid(), layer)?;
-            let stored = VersionRow::from_parts_with_schema_version(
-                &table_schema,
-                VersionRowParts {
-                    table: target_table,
-                    row_uuid: version.row_uuid(),
-                    tx_node_alias,
-                    schema_version_alias,
-                    tx_time: tx.tx_id.time,
-                    parents: version.parents(),
-                    created_by: version.created_by(),
-                    created_at: version.created_at(),
-                    updated_by: version.updated_by(),
-                    updated_at: version.updated_at(),
-                    cells: target_cells,
-                    deletion: version.deletion(),
-                },
-                (target_schema != self.catalogue.current_schema_version_id)
-                    .then_some(target_schema),
-            )?;
             let previous_winner = if let Some(previous) = previous_current.as_ref() {
                 let previous_tx_id = self.version_tx_id(previous)?;
                 let previous_made_at = if previous_tx_id == tx.tx_id {
