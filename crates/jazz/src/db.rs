@@ -2454,7 +2454,7 @@ where
         self.exclusive_all_for_identity(tx_id, prepared, self.identity.author)
     }
 
-    fn exclusive_all_for_identity(
+    pub(crate) fn exclusive_all_for_identity(
         &self,
         tx_id: OpenTxId,
         prepared: &PreparedQuery,
@@ -8648,7 +8648,7 @@ where
     })
 }
 
-fn subscription_row_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
+pub(crate) fn subscription_row_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
     let root = ObjectId::from_uuid(row.row_uuid().0);
     let mut joined = Vec::new();
     for position in 1.. {

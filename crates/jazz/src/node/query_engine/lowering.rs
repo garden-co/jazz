@@ -2868,6 +2868,10 @@ fn lower_linear_plan_steps(
         BTreeMap<String, usize>,
         BTreeSet<String>,
     )> = None;
+    // Earlier inner-join inputs are flattened into the left record before a
+    // subsequent join. Keep their source-qualified field addresses so the
+    // final flat-join projection can still name every contributing source.
+    let mut accumulated_join_fields = BTreeMap::<(SourceId, String), (String, usize)>::new();
     let mut available_route_fields = if matches!(plan.root, LinearRoot::Source { .. }) {
         root_source.routing_fields.clone()
     } else {
@@ -2917,6 +2921,7 @@ fn lower_linear_plan_steps(
                     root_source,
                     right,
                     &lowered_right,
+                    &accumulated_join_fields,
                     request,
                 )?;
                 if matches!(&plan.root, LinearRoot::Source { .. }) {
@@ -3017,9 +3022,50 @@ fn lower_linear_plan_steps(
                 }
                 let next_is_project =
                     matches!(plan.steps.get(step_index + 1), Some(LinearStep::Project(_)));
+                let next_is_join = matches!(
+                    plan.steps.get(step_index + 1),
+                    Some(LinearStep::Join { .. })
+                );
+                if *mode == JoinMode::Inner && next_is_join {
+                    let (_, right_nullable, right_depths, right_fields) = last_join_right
+                        .take()
+                        .expect("inner join records its right input");
+                    let right_source = right.root_source().ok_or_else(|| {
+                        UnsupportedReason::Operator(
+                            "multi-source flat join requires a source-rooted right input"
+                                .to_owned(),
+                        )
+                    })?;
+                    let mut projection = fields
+                        .iter()
+                        .map(|field| ProjectField::renamed(left_field(field), field.clone()))
+                        .collect::<Vec<_>>();
+                    let mut next_fields = fields.clone();
+                    let mut next_nullable = nullable_fields.clone();
+                    let mut next_depths = nullable_field_depths.clone();
+                    for field in right_fields {
+                        let output = format!("__flat_join_source_{step_index}_{field}");
+                        projection.push(ProjectField::renamed(right_field(&field), output.clone()));
+                        let nullable_depth = right_depths.get(&field).copied().unwrap_or(0);
+                        accumulated_join_fields.insert(
+                            (right_source.clone(), field.clone()),
+                            (output.clone(), nullable_depth),
+                        );
+                        next_fields.insert(output.clone());
+                        if right_nullable.contains(&field) {
+                            next_nullable.insert(output.clone());
+                            next_depths.insert(output, nullable_depth.max(1));
+                        }
+                    }
+                    graph = graph.project_fields(projection);
+                    fields = next_fields;
+                    nullable_fields = next_nullable;
+                    nullable_field_depths = next_depths;
+                }
                 if matches!(mode, JoinMode::Inner | JoinMode::Semi)
                     && matches!(&plan.root, LinearRoot::Source { .. })
                     && !next_is_project
+                    && !next_is_join
                 {
                     let introduced_route_fields = route_fields
                         .iter()
@@ -3052,6 +3098,7 @@ fn lower_linear_plan_steps(
                             root_source,
                             &fields,
                             last_join_right.as_ref(),
+                            &accumulated_join_fields,
                             request,
                         )?;
                         for (source, depth) in field.unwrap_before_project {
@@ -3500,13 +3547,25 @@ fn lower_linear_join_key_pair(
     left_source: &ResolvedSource,
     right_plan: &RelationInputPlan,
     right_output: &LoweredRelationInput,
+    accumulated_join_fields: &BTreeMap<(SourceId, String), (String, usize)>,
     request: &QueryProgramRequest,
 ) -> Result<(String, String), UnsupportedReason> {
     lower_bidirectional_key_pair(
         predicate,
         "join_via only lowers equality join predicates",
         "join_via join predicate must compare left root and right relation fields",
-        |value| lower_linear_root_key_ref(value, left_root, left_source, request),
+        |value| {
+            lower_linear_root_key_ref(value, left_root, left_source, request).or_else(|_| {
+                accumulated_join_field(value, accumulated_join_fields)
+                    .map(|(field, _)| field)
+                    .ok_or_else(|| {
+                        UnsupportedReason::Operator(
+                            "join left key must reference the root or an accumulated join source"
+                                .to_owned(),
+                        )
+                    })
+            })
+        },
         |value| lower_relation_key_ref(value, right_plan, right_output, request),
     )
 }
@@ -3517,6 +3576,7 @@ fn lower_linear_join_key_pairs(
     left_source: &ResolvedSource,
     right_plan: &RelationInputPlan,
     right_output: &LoweredRelationInput,
+    accumulated_join_fields: &BTreeMap<(SourceId, String), (String, usize)>,
     request: &QueryProgramRequest,
 ) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
     let pairs = match predicate {
@@ -3529,6 +3589,7 @@ fn lower_linear_join_key_pairs(
                     left_source,
                     right_plan,
                     right_output,
+                    accumulated_join_fields,
                     request,
                 )
             })
@@ -3539,6 +3600,7 @@ fn lower_linear_join_key_pairs(
             left_source,
             right_plan,
             right_output,
+            accumulated_join_fields,
             request,
         )?],
     };
@@ -3741,6 +3803,18 @@ fn lower_linear_root_key_ref(
     }
 }
 
+fn accumulated_join_field(
+    value: &NormalizedValueRef,
+    fields: &BTreeMap<(SourceId, String), (String, usize)>,
+) -> Option<(String, usize)> {
+    let (source, field) = match value {
+        NormalizedValueRef::SourceField { source, field } => (source, user_column_field(field)),
+        NormalizedValueRef::RowId(RowIdRef::Source(source)) => (source, "row_uuid".to_owned()),
+        _ => return None,
+    };
+    fields.get(&(source.clone(), field)).cloned()
+}
+
 fn lower_projection_field(
     column: &RowProjection,
     plan: &LinearCurrentRoot,
@@ -3752,6 +3826,7 @@ fn lower_projection_field(
         BTreeMap<String, usize>,
         BTreeSet<String>,
     )>,
+    accumulated_join_fields: &BTreeMap<(SourceId, String), (String, usize)>,
     request: &QueryProgramRequest,
 ) -> Result<ProjectionFieldPlan, UnsupportedReason> {
     let mut unwrap_before_project = BTreeMap::new();
@@ -3762,6 +3837,7 @@ fn lower_projection_field(
         source,
         fields,
         last_join_right,
+        accumulated_join_fields,
         request,
     )? {
         ProjectionSource::Field {
@@ -3813,6 +3889,7 @@ fn lower_projection_source(
         BTreeMap<String, usize>,
         BTreeSet<String>,
     )>,
+    accumulated_join_fields: &BTreeMap<(SourceId, String), (String, usize)>,
     request: &QueryProgramRequest,
 ) -> Result<ProjectionSource, UnsupportedReason> {
     if let Ok(field) = lower_linear_root_key_ref(value, &plan.root, source, request) {
@@ -3839,6 +3916,15 @@ fn lower_projection_source(
                 None => param.clone(),
             },
             nullable_depth: 0,
+        });
+    }
+    if let Some((field, nullable_depth)) = accumulated_join_field(value, accumulated_join_fields) {
+        return Ok(ProjectionSource::Field {
+            field: match last_join_right {
+                Some(_) => left_field(&field),
+                None => field,
+            },
+            nullable_depth,
         });
     }
     if let Some((right, nullable_fields, nullable_field_depths, _)) = last_join_right {

@@ -2,17 +2,16 @@
 
 mod support;
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use jazz::row_input;
 use jazz::tools::server::JazzServer;
 use jazz::tools::{
-    ColumnType, DurabilityTier, ObjectId, OutputOccurrenceId, QueryBuilder, Schema, SchemaBuilder,
+    ColumnType, DurabilityTier, QueryBuilder, QueryResult, ResultKey, Schema, SchemaBuilder,
     SubscriptionStreamItem, TableSchema, Value,
 };
 use support::TestingClient;
-use uuid::Uuid;
 
 fn todos_schema() -> Schema {
     SchemaBuilder::new()
@@ -72,6 +71,15 @@ async fn next_delta_with_removed(
     panic!("subscription did not emit a removed output occurrence")
 }
 
+fn key_for_joined_title(results: &[QueryResult], title: &str) -> ResultKey {
+    results
+        .iter()
+        .find(|result| result.get("joined.title") == Some(&Value::Text(title.to_owned())))
+        .unwrap_or_else(|| panic!("missing joined result with title {title}: {results:?}"))
+        .key
+        .clone()
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_replacements() {
     tokio::task::LocalSet::new()
@@ -96,23 +104,6 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 .await
                 .expect("todo settles locally");
 
-            let first_join = ObjectId::from_uuid(Uuid::from_bytes([0x11; 16]));
-            let second_join = ObjectId::from_uuid(Uuid::from_bytes([0x22; 16]));
-            let ordered = OutputOccurrenceId::new(root, [first_join, second_join]);
-            let reversed = OutputOccurrenceId::new(root, [second_join, first_join]);
-            assert_ne!(
-                ordered, reversed,
-                "declared join order is part of the identity"
-            );
-            assert_eq!(
-                ordered.contributing_rows().collect::<Vec<_>>(),
-                vec![root, first_join, second_join]
-            );
-            assert_ne!(ordered.canonical_bytes(), reversed.canonical_bytes());
-            let by_occurrence =
-                BTreeMap::from([(ordered.clone(), "ordered"), (reversed, "reversed")]);
-            assert_eq!(by_occurrence.get(&ordered), Some(&"ordered"));
-
             let joined_query = QueryBuilder::new("todos")
                 .alias("root")
                 .filter_eq("done", Value::Boolean(false))
@@ -125,13 +116,49 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 .await
                 .expect("joined maintained output is supported");
             let joined_reset = next_delta(&mut joined_stream).await;
+            let initial_results = client
+                .query_results(joined_query.clone(), Some(DurabilityTier::Local))
+                .await
+                .expect("one-shot joined output is supported");
+            let self_key = key_for_joined_title(&initial_results, "draft");
             assert!(
                 joined_reset
                     .added
                     .iter()
-                    .any(|row| row.id == OutputOccurrenceId::new(root, [root])),
+                    .any(|row| row.id == self_key),
                 "the root is the only initial join contributor"
             );
+            let encoded = serde_json::to_vec(&self_key).expect("serialize result key");
+            let wire: Vec<u8> = serde_json::from_slice(&encoded).expect("inspect opaque key bytes");
+            assert_eq!(wire.first(), Some(&1), "result key wire format is versioned");
+            assert_eq!(
+                serde_json::from_slice::<ResultKey>(&encoded).expect("deserialize result key"),
+                self_key,
+                "result keys retain their complete opaque identity through serialization"
+            );
+            let mut unsupported = wire;
+            unsupported[0] = 2;
+            assert!(
+                serde_json::from_value::<ResultKey>(serde_json::json!(unsupported)).is_err(),
+                "unknown ResultKey wire versions fail closed"
+            );
+            let tx = client.begin_transaction().expect("begin joined read-your-writes tx");
+            tx.insert(
+                "todos",
+                row_input!("title" => "staged", "bucket" => "shared", "done" => true),
+            )
+            .expect("stage joined-side insert");
+            let staged_results = tx
+                .query_results(joined_query.clone(), Some(DurabilityTier::Local))
+                .await
+                .expect("joined query reads its staged write");
+            assert_eq!(
+                key_for_joined_title(&staged_results, "staged")
+                    .row_id(),
+                None,
+                "a joined transaction result cannot collapse to a source row id"
+            );
+            tx.rollback().expect("roll back staged joined-side insert");
 
             let (first, _, batch) = client
                 .insert(
@@ -144,11 +171,18 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 .await
                 .expect("first joined row settles locally");
             let first_added = next_delta_with_added(&mut joined_stream).await;
+            let first_key = key_for_joined_title(
+                &client
+                    .query_results(joined_query.clone(), Some(DurabilityTier::Local))
+                    .await
+                    .expect("query joined results after first fan-out"),
+                "first",
+            );
             assert!(
                 first_added
                     .added
                     .iter()
-                    .any(|row| row.id == OutputOccurrenceId::new(root, [first])),
+                    .any(|row| row.id == first_key),
                 "the first joined row is addressed beneath its root: {first_added:?}"
             );
 
@@ -163,14 +197,76 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 .await
                 .expect("second todo settles");
             let fan_out = next_delta_with_added(&mut joined_stream).await;
+            let current_results = client
+                .query_results(joined_query.clone(), Some(DurabilityTier::Local))
+                .await
+                .expect("query joined results after second fan-out");
+            let second_key = key_for_joined_title(&current_results, "second");
+            assert_ne!(first_key, second_key, "fan-out results have distinct keys");
             assert!(
                 fan_out
                     .added
                     .iter()
-                    .any(|row| row.id == OutputOccurrenceId::new(root, [second])),
+                    .any(|row| row.id == second_key),
                 "a second matching source produces a distinct occurrence under the same root: {fan_out:?}"
             );
-
+            let two_hop_query = QueryBuilder::new("todos")
+                .alias("root")
+                .filter_eq("done", Value::Boolean(false))
+                .join("todos")
+                .alias("first_hop")
+                .on("root.bucket", "first_hop.bucket")
+                .join("todos")
+                .alias("second_hop")
+                .on("first_hop.bucket", "second_hop.bucket")
+                .build();
+            let two_hop_results = client
+                .query_results(two_hop_query.clone(), Some(DurabilityTier::Local))
+                .await
+                .expect("two-hop one-shot join");
+            let ordered = two_hop_results
+                .iter()
+                .find(|result| {
+                    result.get("first_hop.title") == Some(&Value::Text("first".to_owned()))
+                        && result.get("second_hop.title")
+                            == Some(&Value::Text("second".to_owned()))
+                })
+                .expect("ordered two-hop result")
+                .key
+                .clone();
+            let reversed = two_hop_results
+                .iter()
+                .find(|result| {
+                    result.get("first_hop.title") == Some(&Value::Text("second".to_owned()))
+                        && result.get("second_hop.title")
+                            == Some(&Value::Text("first".to_owned()))
+                })
+                .expect("reversed two-hop result")
+                .key
+                .clone();
+            assert_ne!(ordered, reversed, "join position is part of ResultKey");
+            let encoded = serde_json::to_vec(&ordered).expect("serialize three-part key");
+            assert_eq!(
+                serde_json::from_slice::<ResultKey>(&encoded).expect("deserialize three-part key"),
+                ordered
+            );
+            let mut two_hop_stream = client
+                .subscribe(two_hop_query)
+                .await
+                .expect("subscribe to two-hop flat join");
+            let two_hop_reset = next_delta_with_added(&mut two_hop_stream).await;
+            assert_eq!(
+                two_hop_reset
+                    .added
+                    .iter()
+                    .map(|change| change.id.clone())
+                    .collect::<BTreeSet<_>>(),
+                two_hop_results
+                    .iter()
+                    .map(|result| result.key.clone())
+                    .collect(),
+                "one-shot and maintained two-hop keys are identical"
+            );
             let batch = client
                 .update(
                     root,
@@ -182,12 +278,57 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 .await
                 .expect("replacement settles");
             let replacement = next_delta_with_updated(&mut joined_stream).await;
+            let two_hop_root_replacement = next_delta_with_updated(&mut two_hop_stream).await;
             assert!(
                 replacement
                     .updated
                     .iter()
-                    .any(|row| row.id == OutputOccurrenceId::new(root, [second])),
+                    .any(|row| row.id == second_key),
                 "a root-source replacement is addressed by its composite occurrence id"
+            );
+            assert!(
+                two_hop_root_replacement
+                    .updated
+                    .iter()
+                    .any(|change| change.id == ordered),
+                "root replacement retains the three-component result key"
+            );
+
+            let batch = client
+                .update(
+                    second,
+                    vec![("title".to_owned(), Value::Text("second revised".to_owned()))],
+                )
+                .expect("replace joined source content");
+            client
+                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("joined-side replacement settles");
+            let joined_replacement = next_delta_with_updated(&mut joined_stream).await;
+            let two_hop_joined_replacement = next_delta_with_updated(&mut two_hop_stream).await;
+            assert!(
+                joined_replacement
+                    .updated
+                    .iter()
+                    .any(|row| row.id == second_key),
+                "a joined-source replacement retains its result key"
+            );
+            assert!(
+                two_hop_joined_replacement
+                    .updated
+                    .iter()
+                    .any(|change| change.id == ordered),
+                "second-hop replacement retains the three-component result key"
+            );
+            assert_eq!(
+                client
+                    .query_results(joined_query.clone(), Some(DurabilityTier::Local))
+                    .await
+                    .expect("query after joined-side replacement")
+                    .into_iter()
+                    .find(|result| result.key == second_key)
+                    .and_then(|result| result.get("joined.title").cloned()),
+                Some(Value::Text("second revised".to_owned()))
             );
 
             let batch = client.delete(first).expect("remove first joined row");
@@ -196,12 +337,27 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 .await
                 .expect("joined-row removal settles");
             let removal = next_delta_with_removed(&mut joined_stream).await;
+            let two_hop_removal = next_delta_with_removed(&mut two_hop_stream).await;
             assert!(
                 removal
                     .removed
                     .iter()
-                    .any(|row| row.id == OutputOccurrenceId::new(root, [first])),
+                    .any(|row| row.id == first_key),
                 "a joined-source removal is addressed by its composite occurrence id"
+            );
+            assert!(
+                two_hop_removal
+                    .removed
+                    .iter()
+                    .any(|change| change.id == ordered),
+                "first-hop removal retracts the exact three-component key"
+            );
+            assert!(
+                two_hop_removal
+                    .removed
+                    .iter()
+                    .any(|change| change.id == reversed),
+                "second-hop removal retracts the exact three-component key"
             );
 
             drop(joined_stream);
@@ -229,7 +385,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 rehydrated_reset
                     .added
                     .iter()
-                    .any(|row| row.id == OutputOccurrenceId::new(root, [second])),
+                    .any(|row| row.id == second_key),
                 "reset/rehydrate preserves the remaining composite occurrence id: {rehydrated_reset:?}"
             );
 
@@ -253,7 +409,7 @@ async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction_batc
                 .ready_on("todos", Duration::from_secs(30))
                 .connect()
                 .await;
-            let (root, _, batch) = client
+            let (_root, _, batch) = client
                 .insert(
                     "todos",
                     row_input!("title" => "root", "bucket" => "shared", "done" => false),
@@ -292,7 +448,7 @@ async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction_batc
                 .await
                 .expect("add-then-remove batch settles");
 
-            let (durable, _, batch) = client
+            let (_durable, _, batch) = client
                 .insert(
                     "todos",
                     row_input!("title" => "durable", "bucket" => "shared", "done" => true),
@@ -303,18 +459,28 @@ async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction_batc
                 .await
                 .expect("durable joined row settles");
             let delta = next_delta_with_added(&mut stream).await;
+            let results = client
+                .query_results(
+                    QueryBuilder::new("todos")
+                        .alias("root")
+                        .filter_eq("done", Value::Boolean(false))
+                        .join("todos")
+                        .alias("joined")
+                        .on("root.bucket", "joined.bucket")
+                        .build(),
+                    Some(DurabilityTier::Local),
+                )
+                .await
+                .expect("query joined results after netting");
+            let durable_key = key_for_joined_title(&results, "durable");
             assert!(
-                delta
-                    .added
-                    .iter()
-                    .any(|row| row.id == OutputOccurrenceId::new(root, [durable])),
+                delta.added.iter().any(|row| row.id == durable_key),
                 "the final payload is the durable occurrence: {delta:?}"
             );
             assert!(
-                !delta
-                    .added
-                    .iter()
-                    .any(|row| row.id == OutputOccurrenceId::new(root, [transient])),
+                !results.iter().any(|result| {
+                    result.get("joined.title") == Some(&Value::Text("transient".to_owned()))
+                }),
                 "the add-then-remove occurrence was netted out: {delta:?}"
             );
 

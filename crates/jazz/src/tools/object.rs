@@ -100,21 +100,6 @@ impl OutputOccurrenceId {
         }
     }
 
-    /// Root source-row identity.
-    pub fn root(&self) -> ObjectId {
-        self.root
-    }
-
-    /// Joined source-row identities in declared join order.
-    pub fn joined(&self) -> &[ObjectId] {
-        &self.joined
-    }
-
-    /// All contributing source-row identities, root first.
-    pub fn contributing_rows(&self) -> impl Iterator<Item = ObjectId> + '_ {
-        std::iter::once(self.root).chain(self.joined.iter().copied())
-    }
-
     /// Canonical positional bytes for terminal-state keys and consolidation.
     ///
     /// Each component is a fixed-width UUID, so concatenating root followed by
@@ -147,6 +132,89 @@ impl PartialEq<ObjectId> for OutputOccurrenceId {
 
 impl PartialEq<OutputOccurrenceId> for ObjectId {
     fn eq(&self, other: &OutputOccurrenceId) -> bool {
+        other == self
+    }
+}
+
+/// Stable, opaque identity of one query result.
+///
+/// A key may identify either one source row or one particular combination of
+/// rows produced by a join. Callers should treat it as an indivisible address:
+/// its representation is deliberately not part of the public API.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ResultKey(OutputOccurrenceId);
+
+const RESULT_KEY_WIRE_VERSION: u8 = 1;
+
+impl Serialize for ResultKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let identity = self.0.canonical_bytes();
+        let mut encoded = Vec::with_capacity(identity.len() + 1);
+        encoded.push(RESULT_KEY_WIRE_VERSION);
+        encoded.extend_from_slice(&identity);
+        serde_bytes::Bytes::new(&encoded).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ResultKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = serde_bytes::ByteBuf::deserialize(deserializer)?.into_vec();
+        if encoded.first().copied() != Some(RESULT_KEY_WIRE_VERSION) {
+            return Err(serde::de::Error::custom("unsupported ResultKey version"));
+        }
+        let identity = &encoded[1..];
+        if identity.is_empty() || identity.len() % 16 != 0 {
+            return Err(serde::de::Error::custom("malformed ResultKey identity"));
+        }
+        let mut rows = identity.chunks_exact(16).map(|bytes| {
+            let mut uuid = [0_u8; 16];
+            uuid.copy_from_slice(bytes);
+            ObjectId::from_uuid(Uuid::from_bytes(uuid))
+        });
+        let root = rows
+            .next()
+            .ok_or_else(|| serde::de::Error::custom("ResultKey is missing its root"))?;
+        Ok(Self(OutputOccurrenceId::new(root, rows)))
+    }
+}
+
+impl ResultKey {
+    #[cfg(feature = "client")]
+    pub(crate) fn from_occurrence(value: OutputOccurrenceId) -> Self {
+        Self(value)
+    }
+
+    #[cfg(feature = "client")]
+    pub(crate) fn as_occurrence(&self) -> &OutputOccurrenceId {
+        &self.0
+    }
+
+    /// Return the source row id when this result is a plain, single-row result.
+    pub fn row_id(&self) -> Option<ObjectId> {
+        self.0.joined.is_empty().then_some(self.0.root)
+    }
+}
+
+impl From<ObjectId> for ResultKey {
+    fn from(value: ObjectId) -> Self {
+        Self(OutputOccurrenceId::single_source(value))
+    }
+}
+
+impl PartialEq<ObjectId> for ResultKey {
+    fn eq(&self, other: &ObjectId) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<ResultKey> for ObjectId {
+    fn eq(&self, other: &ResultKey) -> bool {
         other == self
     }
 }
