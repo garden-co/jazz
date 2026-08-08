@@ -1588,7 +1588,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
-  it("encodes negative integer query literals as signed i32 bits for core", () => {
+  it("encodes integer query literals with the Groove I32 tag", () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new NativeRuntimeAdapter(
       {
@@ -1640,9 +1640,33 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(readPreparedFirstLiteral(preparedBytes!)).toEqual({
       column: "priority",
       opTag: 8,
-      literalTag: 2,
-      value: 0x7fffffff,
+      literalTag: 14,
+      value: -1,
     });
+  });
+
+  it("preserves signed i32 query literal boundaries and rejects overflow", () => {
+    const query = queryWithPredicates("metrics", [
+      { column: "count", op: "Gte", value: { type: "Integer", value: -0x80000000 } },
+      { column: "count", op: "Eq", value: { type: "Integer", value: 0 } },
+      { column: "count", op: "Lte", value: { type: "Integer", value: 0x7fffffff } },
+    ]);
+
+    expect(readPreparedComparisonLiterals(query)).toEqual([
+      { predicateTag: 7, column: "count", literal: { tag: 14, value: -0x80000000 } },
+      { predicateTag: 3, column: "count", literal: { tag: 14, value: 0 } },
+      { predicateTag: 9, column: "count", literal: { tag: 14, value: 0x7fffffff } },
+    ]);
+    expect(() =>
+      queryWithPredicates("metrics", [
+        { column: "count", op: "Eq", value: { type: "Integer", value: -0x80000001 } },
+      ]),
+    ).toThrow("Integer value must be a signed 32-bit integer");
+    expect(() =>
+      queryWithPredicates("metrics", [
+        { column: "count", op: "Eq", value: { type: "Integer", value: 0x80000000 } },
+      ]),
+    ).toThrow("Integer value must be a signed 32-bit integer");
   });
 
   it("encodes BIGINT query literals as signed i64 values", () => {
@@ -1655,6 +1679,97 @@ describe("NativeRuntimeAdapter server transport", () => {
       { predicateTag: 6, column: "largeCount", literal: { tag: 13, value: 9007199254740993n } },
       { predicateTag: 8, column: "largeCount", literal: { tag: 13, value: -5n } },
     ]);
+    for (const value of [-(1n << 63n) - 1n, 1n << 63n]) {
+      expect(() =>
+        queryWithPredicates("metrics", [
+          { column: "largeCount", op: "Eq", value: { type: "BigInt", value } },
+        ]),
+      ).toThrow("BigInt value must be a signed 64-bit integer");
+    }
+  });
+
+  it("encodes signed Integer policy literals as logical I32 values", () => {
+    const policy = readSchemaSelectPolicyBranches(
+      encodeSchema({
+        metrics: {
+          columns: [{ name: "score", column_type: { type: "Integer" }, nullable: false }],
+          policies: {
+            select: {
+              using: {
+                type: "And",
+                exprs: [
+                  {
+                    type: "Cmp",
+                    column: "score",
+                    op: "Ge",
+                    value: { type: "Literal", value: { type: "Integer", value: -7 } },
+                  },
+                  {
+                    type: "Cmp",
+                    column: "score",
+                    op: "Le",
+                    value: { type: "Literal", value: { type: "Integer", value: 8 } },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      }),
+      "metrics",
+    );
+
+    expect(policy.filters).toEqual([
+      {
+        tag: 7,
+        column: "score",
+        operand: { tag: 3, literalTag: 14, value: -7n },
+      },
+      {
+        tag: 9,
+        column: "score",
+        operand: { tag: 3, literalTag: 14, value: 8n },
+      },
+    ]);
+
+    for (const value of [-2_147_483_649, 2_147_483_648]) {
+      expect(() =>
+        encodeSchema({
+          metrics: {
+            columns: [{ name: "score", column_type: { type: "Integer" }, nullable: false }],
+            policies: {
+              select: {
+                using: {
+                  type: "Cmp",
+                  column: "score",
+                  op: "Eq",
+                  value: { type: "Literal", value: { type: "Integer", value } },
+                },
+              },
+            },
+          },
+        }),
+      ).toThrow("Integer policy literal default must be a signed 32-bit integer");
+    }
+    for (const value of [-(1n << 63n) - 1n, 1n << 63n]) {
+      expect(() =>
+        encodeSchema({
+          metrics: {
+            columns: [{ name: "score", column_type: { type: "BigInt" }, nullable: false }],
+            policies: {
+              select: {
+                using: {
+                  type: "Cmp",
+                  column: "score",
+                  op: "Eq",
+                  value: { type: "Literal", value: { type: "BigInt", value } },
+                },
+              },
+            },
+          },
+        }),
+      ).toThrow("BigInt policy literal must be a signed 64-bit integer");
+    }
   });
 
   it("materializes array subquery relation snapshots for subscriptions", async () => {
@@ -3032,8 +3147,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         column: "count",
         literals: [
-          { tag: 2, value: encodeSignedI32ForTest(5) },
-          { tag: 2, value: encodeSignedI32ForTest(10) },
+          { tag: 14, value: 5 },
+          { tag: 14, value: 10 },
         ],
       },
       {
@@ -4779,13 +4894,11 @@ function readPreparedNumericLiteral(reader: PostcardReader): {
       return { tag, value: reader.f64Le() };
     case 13:
       return { tag, value: reader.i64() };
+    case 14:
+      return { tag, value: Number(reader.i64()) };
     default:
       throw new Error(`expected numeric prepared literal tag, got ${tag}`);
   }
-}
-
-function encodeSignedI32ForTest(value: number): number {
-  return (value ^ 0x80000000) >>> 0;
 }
 
 function readPreparedLimit(query: Uint8Array): number | undefined {
@@ -4944,7 +5057,7 @@ function readPreparedFirstLiteral(query: Uint8Array): {
   const column = reader.string();
   expect(reader.u64()).toBe(3);
   const literalTag = reader.u64();
-  const value = literalTag === 13 ? Number(reader.i64()) : reader.u64();
+  const value = literalTag === 13 || literalTag === 14 ? Number(reader.i64()) : reader.u64();
   return { column, opTag, literalTag, value };
 }
 
@@ -5331,7 +5444,7 @@ function readPolicyPredicateForTest(reader: PostcardReader): TestPolicyPredicate
   if (tag === 2) {
     return { tag, child: readPolicyPredicateForTest(reader) };
   }
-  if (tag === 3) {
+  if ([3, 4, 6, 7, 8, 9].includes(tag)) {
     expect(reader.u64()).toBe(0);
     const column = reader.string();
     return { tag, column, operand: readPolicyOperandForTest(reader) };
@@ -5362,7 +5475,7 @@ function readPolicyOperandForTest(reader: PostcardReader): TestPolicyOperand {
     if (literalTag === 2 || literalTag === 3) {
       return { tag, literalTag, value: reader.u64() };
     }
-    if (literalTag === 13) {
+    if (literalTag === 13 || literalTag === 14) {
       return { tag, literalTag, value: reader.i64() };
     }
     if (literalTag === 4) {

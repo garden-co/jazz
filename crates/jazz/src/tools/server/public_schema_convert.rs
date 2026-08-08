@@ -534,35 +534,14 @@ fn convert_column_default(
     if matches!(value, Value::Null) {
         return Ok(GrooveValue::Nullable(None));
     }
-    let default = encode_default_for_storage(
-        &column.column_type,
-        convert_default_for_column_type(table, column.name.as_str(), &column.column_type, value)?,
-    );
+    // Record cells carry logical signed values. Groove applies its separate
+    // order-preserving transform only when those values become ordered keys.
+    let default =
+        convert_default_for_column_type(table, column.name.as_str(), &column.column_type, value)?;
     if column.nullable {
         Ok(GrooveValue::Nullable(Some(Box::new(default))))
     } else {
         Ok(default)
-    }
-}
-
-/// Schema defaults cross the native codec in the same order-preserving integer
-/// representation as ordinary storage cells. The transform is its own inverse;
-/// the TypeScript runtime reverses it when it decodes the stored cell.
-fn encode_default_for_storage(column_type: &ColumnType, value: GrooveValue) -> GrooveValue {
-    match (column_type, value) {
-        (ColumnType::Integer, GrooveValue::I32(value)) => {
-            GrooveValue::I32(((value as u32) ^ (1 << 31)) as i32)
-        }
-        (ColumnType::BigInt, GrooveValue::I64(value)) => {
-            GrooveValue::I64(((value as u64) ^ (1 << 63)) as i64)
-        }
-        (ColumnType::Array { element }, GrooveValue::Array(values)) => GrooveValue::Array(
-            values
-                .into_iter()
-                .map(|value| encode_default_for_storage(element, value))
-                .collect(),
-        ),
-        (_, value) => value,
     }
 }
 
@@ -2461,17 +2440,14 @@ mod tests {
                 .map(|column| (column.name.as_str(), &column.default))
                 .collect::<Vec<_>>(),
             vec![
-                ("integer", &Some(GrooveValue::I32(2_147_483_641))),
-                ("bigint", &Some(GrooveValue::I64(9_223_372_036_854_775_801))),
-                (
-                    "bigint_literal",
-                    &Some(GrooveValue::I64(9_223_372_036_854_775_801)),
-                ),
+                ("integer", &Some(GrooveValue::I32(-7))),
+                ("bigint", &Some(GrooveValue::I64(-7))),
+                ("bigint_literal", &Some(GrooveValue::I64(-7))),
                 (
                     "integers",
                     &Some(GrooveValue::Array(vec![
-                        GrooveValue::I32(2_147_483_641),
-                        GrooveValue::I32(-2_147_483_640),
+                        GrooveValue::I32(-7),
+                        GrooveValue::I32(8),
                     ])),
                 ),
             ]
