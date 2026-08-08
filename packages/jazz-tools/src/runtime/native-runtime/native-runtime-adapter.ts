@@ -1674,7 +1674,10 @@ export class NativeRuntimeAdapter implements Runtime {
         subscription.packedResetBatches = null;
         subscription.packedResetRows = null;
       }
-      if (chunk.relationDelta && subscription.relationMaterialization.arraySubqueries.length > 0) {
+      if (
+        chunk.relationDelta &&
+        (subscription.query === null || subscription.relationMaterialization.arraySubqueries.length > 0)
+      ) {
         const previousRows = subscription.rows;
         applyRelationSubscriptionDelta(
           subscription,

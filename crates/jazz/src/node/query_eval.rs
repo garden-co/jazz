@@ -5384,17 +5384,15 @@ where
         projection: Option<&[String]>,
     ) -> Result<Option<CurrentRow>, Error> {
         let table = self.table(table_name)?.clone();
-        let content_descriptor = table.history_storage_table().record_schema();
         let Some(tx_node_alias) = self.node_aliases.get(&tx_id.node).copied() else {
             return Err(Error::MissingTransaction(tx_id));
         };
-        let Some(version) = self.query_version_by_alias_with_descriptor(
+        let Some(version) = self.query_version_by_alias(
             table_name,
             row_uuid,
             VersionLayer::Content,
             tx_id.time,
             tx_node_alias,
-            &content_descriptor,
         )?
         else {
             if self.query_transaction(tx_id)?.is_some() {
