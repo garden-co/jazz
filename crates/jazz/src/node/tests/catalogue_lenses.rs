@@ -847,14 +847,10 @@ fn active_history_projection_accepts_a_new_schema_variant_without_rebuild() {
     );
     let runtime = core.groove_runtime_token();
 
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+        &mut core,
+        evolved.clone(),
+        MigrationLens::new(
             base.version_id(),
             evolved.id,
             vec![TableLens {
@@ -866,7 +862,9 @@ fn active_history_projection_accepts_a_new_schema_variant_without_rebuild() {
                 }],
             }],
         ),
-    })
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
@@ -923,16 +921,11 @@ fn table_and_column_rename_reuses_the_existing_physical_identities() {
         [ColumnSchema::new("name", ColumnType::String)],
     )]));
     let (_dir, mut core) = open_node_with_schema(node(0x30), base.clone());
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(renamed.clone()),
-    })
-    .unwrap();
     let source = core.catalogue.physical_mappings[&base.version_id()].tables["todos"].clone();
-
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+        &mut core,
+        renamed.clone(),
+        MigrationLens::new(
             base.version_id(),
             renamed.id,
             vec![TableLens {
@@ -950,7 +943,9 @@ fn table_and_column_rename_reuses_the_existing_physical_identities() {
                 ],
             }],
         ),
-    })
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
 
     let target = &core.catalogue.physical_mappings[&renamed.id].tables["tasks"];
@@ -969,14 +964,10 @@ fn rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen() 
     )]);
     let renamed = SchemaVersion::new(renamed_schema.clone());
     let (dir, mut core) = open_node_with_schema(node(0x34), base.clone());
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(renamed.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+        &mut core,
+        renamed.clone(),
+        MigrationLens::new(
             base.version_id(),
             renamed.id,
             vec![TableLens {
@@ -994,7 +985,9 @@ fn rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen() 
                 ],
             }],
         ),
-    })
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
@@ -1091,14 +1084,10 @@ fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
     )
     .unwrap();
 
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(renamed.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+        &mut core,
+        renamed.clone(),
+        MigrationLens::new(
             base.version_id(),
             renamed.id,
             vec![TableLens {
@@ -1116,7 +1105,9 @@ fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
                 ],
             }],
         ),
-    })
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
@@ -1215,18 +1206,11 @@ fn changed_merge_semantics_start_a_new_physical_column_epoch() {
         .with_column_merge_strategy("value", MergeStrategy::Counter),
     ]));
     let (_dir, mut core) = open_node_with_schema(node(0x2c), base.clone());
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved.clone()),
-    })
-    .unwrap();
     let source = core.catalogue.physical_mappings[&base.version_id()].tables["counts"].clone();
-    let provisional_target =
-        core.catalogue.physical_mappings[&evolved.id].tables["counts"].clone();
-
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+        &mut core,
+        evolved.clone(),
+        MigrationLens::new(
             base.version_id(),
             evolved.id,
             vec![TableLens {
@@ -1235,13 +1219,14 @@ fn changed_merge_semantics_start_a_new_physical_column_epoch() {
                 ops: vec![],
             }],
         ),
-    })
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
 
     let target = &core.catalogue.physical_mappings[&evolved.id].tables["counts"];
     assert_eq!(target.table_id, source.table_id);
     assert_ne!(target.columns["value"], source.columns["value"]);
-    assert_eq!(target.columns["value"], provisional_target.columns["value"]);
 }
 
 #[test]
