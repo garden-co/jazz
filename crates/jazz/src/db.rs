@@ -6507,13 +6507,16 @@ fn send_with_content_extents<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    let catalogue_seq = node.borrow().active_catalogue_seq();
-    if peer.needs_catalogue_snapshot(catalogue_seq) {
-        let snapshot = node.borrow().catalogue_snapshot();
+    let snapshot = node.borrow().catalogue_snapshot();
+    let catalogue_fingerprint = *blake3::hash(
+        &serde_json::to_vec(&snapshot).expect("catalogue snapshot serialization is infallible"),
+    )
+    .as_bytes();
+    if peer.needs_catalogue_snapshot(catalogue_fingerprint) {
         transport
             .send(SyncMessage::CatalogueSnapshot(Box::new(snapshot)))
             .map_err(transport_error)?;
-        peer.mark_catalogue_snapshot_announced(catalogue_seq);
+        peer.mark_catalogue_snapshot_announced(catalogue_fingerprint);
     }
     let mut message = message;
     match &mut message {
