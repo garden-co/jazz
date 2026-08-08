@@ -332,6 +332,59 @@ fn schema_lineage_gaps_and_inactive_sources_park_durably_then_drain_in_order() {
 }
 
 #[test]
+fn staged_lineage_resumes_after_each_activation_crash_boundary() {
+    for (byte, failpoint) in [
+        (0x25, CatalogueActivationFailpoint::AfterStaged),
+        (0x26, CatalogueActivationFailpoint::AfterRegistration),
+    ] {
+        let base = schema();
+        let target = SchemaVersion::new(catalogue_evolved_schema());
+        let lens = MigrationLens::new(
+            base.version_id(),
+            target.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String(String::new()),
+                }],
+            }],
+        );
+        let publication = SchemaLineagePublication::new(
+            target.clone(),
+            lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        );
+        let (dir, mut core) = open_node_with_schema(node(byte), base.clone());
+        core.set_catalogue_activation_failpoint(failpoint);
+
+        assert!(matches!(
+            core.apply_sync_message(SyncMessage::PublishSchemaWithLens {
+                author: AuthorId::SYSTEM,
+                catalogue_seq: 1,
+                publication: Box::new(publication),
+            }),
+            Err(Error::CatalogueActivationFailed)
+        ));
+        assert!(!core.catalogue_schemas().contains_key(&target.id));
+        assert!(matches!(
+            core.apply_sync_message(SyncMessage::PublishSchema {
+                author: AuthorId::SYSTEM,
+                schema: Box::new(target.clone()),
+            }),
+            Err(Error::CatalogueActivationFailed)
+        ));
+        drop(core);
+
+        let reopened = reopen_node_at(&dir, node(byte), base);
+        assert!(reopened.catalogue_schemas().contains_key(&target.id));
+        assert_eq!(reopened.active_catalogue_seq(), 1);
+    }
+}
+
+#[test]
 fn publishing_lens_reconciles_target_table_and_column_identities_durably() {
     // Physical topology is intentionally not public API, so this internal test
     // verifies identity reconciliation and live-mapping recovery directly.

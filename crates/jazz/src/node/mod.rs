@@ -238,6 +238,8 @@ pub struct NodeState<S> {
     /// must reopen and deterministically resume activation before serving more
     /// protocol traffic.
     catalogue_activation_failed: bool,
+    #[cfg(test)]
+    catalogue_activation_failpoint: Option<CatalogueActivationFailpoint>,
     /// Client-only write cadence selected for the first snapshot hydration.
     initial_sync_flush_cadence: Option<usize>,
     /// Whether the first snapshot is currently using the configured cadence.
@@ -693,6 +695,8 @@ where
             session_claim_revisions: BTreeMap::new(),
             permissions_ready: true,
             catalogue_activation_failed: false,
+            #[cfg(test)]
+            catalogue_activation_failpoint: None,
             initial_sync_flush_cadence: None,
             initial_sync_flush_active: false,
             initial_sync_flush_completed: false,
@@ -2733,6 +2737,11 @@ where
     /// Highest contiguously activated authoritative catalogue position.
     pub fn active_catalogue_seq(&self) -> u64 {
         self.catalogue.active_catalogue_seq
+    }
+
+    #[cfg(test)]
+    fn set_catalogue_activation_failpoint(&mut self, failpoint: CatalogueActivationFailpoint) {
+        self.catalogue_activation_failpoint = Some(failpoint);
     }
 
     /// Published migration lenses known to this node.
@@ -5370,6 +5379,13 @@ struct PendingSchemaLineage {
 struct SchemaLineageActivation {
     id: SchemaLineagePublicationId,
     catalogue_seq: u64,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CatalogueActivationFailpoint {
+    AfterStaged,
+    AfterRegistration,
 }
 
 struct DatabaseSlot<S> {

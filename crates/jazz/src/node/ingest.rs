@@ -502,8 +502,26 @@ where
                 staged
             };
 
+            #[cfg(test)]
+            if self.catalogue_activation_failpoint
+                == Some(CatalogueActivationFailpoint::AfterStaged)
+            {
+                self.catalogue_activation_failpoint = None;
+                self.catalogue_activation_failed = true;
+                return Err(Error::CatalogueActivationFailed);
+            }
+
             self.install_staged_schema_lineage_in_memory(&staged);
             if self.synchronize_physical_version_tables().is_err() {
+                self.remove_staged_schema_lineage_from_memory(&staged);
+                self.catalogue_activation_failed = true;
+                return Err(Error::CatalogueActivationFailed);
+            }
+            #[cfg(test)]
+            if self.catalogue_activation_failpoint
+                == Some(CatalogueActivationFailpoint::AfterRegistration)
+            {
+                self.catalogue_activation_failpoint = None;
                 self.remove_staged_schema_lineage_from_memory(&staged);
                 self.catalogue_activation_failed = true;
                 return Err(Error::CatalogueActivationFailed);
