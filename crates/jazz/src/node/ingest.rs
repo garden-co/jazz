@@ -145,6 +145,13 @@ where
             .expand_version_carriers_for_receive()
             .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
         match message {
+            SyncMessage::BranchMetadata(metadata) => {
+                self.admit_branch_metadata(metadata)?;
+                self.drain_parked_commit_units()
+            }
+            SyncMessage::FetchBranchMetadata { .. } => Err(Error::UnsupportedSyncMessage(
+                "branch metadata repair must be served by peer state",
+            )),
             SyncMessage::SessionClaims { identity, claims } => {
                 if let Some(context) = ingest_context
                     && context.trust == CommitUnitTrust::TrustedBackend

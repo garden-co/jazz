@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use groove::records::{OwnedRecord, Value};
 
-use crate::ids::{AuthorId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
+use crate::ids::{AuthorId, BranchId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
 use crate::node::content_store::Extent;
 use crate::query::{BindingId, Query, RelationQuery, ShapeId};
 use crate::schema::{JazzSchema, TableSchema};
@@ -24,6 +24,19 @@ use crate::tx::{DeletionEvent, DurabilityTier, Fate, Snapshot, Transaction, TxId
 /// Messages exchanged between Jazz nodes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum SyncMessage {
+    /// Durable routing metadata required before a branch-target commit unit or
+    /// branch-scoped view payload can be admitted. This is intentionally
+    /// separate from the ordinary transaction payload: it selects the target
+    /// partition, but never changes transaction semantics.
+    BranchMetadata(BranchMetadata),
+    /// Bounded repair request for branch routing metadata observed out of
+    /// order. Trusted peers may retain every branch; serving policy decides
+    /// whether a client is sent a requested record.
+    FetchBranchMetadata {
+        /// Exact branch routing records requested, bounded by the protocol
+        /// repair limit at decode and serving boundaries.
+        branches: Vec<BranchId>,
+    },
     /// Trusted backend assertion of process-local auth claims for a write subject.
     SessionClaims {
         /// Identity these claims describe.
@@ -192,6 +205,19 @@ pub enum SyncMessage {
         /// Version bundles visible to the requesting link identity.
         version_bundles: Vec<VersionBundle>,
     },
+}
+
+/// Wire-stable durable description of one branch routing target.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct BranchMetadata {
+    /// Stable target lineage identifier.
+    pub branch_id: BranchId,
+    /// Optional parent lineage for a snapshot-base branch.
+    pub parent: Option<BranchId>,
+    /// Frozen base used by ordinary branch reads.
+    pub base: Option<Snapshot>,
+    /// `false` denotes the terminal discarded state.
+    pub open: bool,
 }
 
 impl SyncMessage {

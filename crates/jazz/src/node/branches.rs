@@ -28,6 +28,17 @@ pub struct BranchRecord {
     pub state: codec::BranchState,
 }
 
+impl From<&BranchRecord> for crate::protocol::BranchMetadata {
+    fn from(record: &BranchRecord) -> Self {
+        Self {
+            branch_id: record.branch_id,
+            parent: record.parent,
+            base: record.base.clone(),
+            open: record.state == codec::BranchState::Open,
+        }
+    }
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -72,6 +83,34 @@ where
     /// Return recovered branch metadata.
     pub fn branch_record(&self, branch_id: BranchId) -> Option<&BranchRecord> {
         self.branches.branches.get(&branch_id)
+    }
+
+    /// Idempotently admit durable branch routing metadata received before a
+    /// branch-target unit. Conflicting redefinitions are rejected: branch
+    /// identity is immutable once observed.
+    pub fn admit_branch_metadata(
+        &mut self,
+        metadata: crate::protocol::BranchMetadata,
+    ) -> Result<(), Error> {
+        let record = BranchRecord {
+            branch_id: metadata.branch_id,
+            parent: metadata.parent,
+            base: metadata.base,
+            state: if metadata.open {
+                codec::BranchState::Open
+            } else {
+                codec::BranchState::Discarded
+            },
+        };
+        if let Some(existing) = self.branches.branches.get(&record.branch_id) {
+            if existing == &record {
+                return Ok(());
+            }
+            return Err(Error::InvalidStoredValue("conflicting branch metadata"));
+        }
+        self.persist_branch_record(&record)?;
+        self.branches.branches.insert(record.branch_id, record);
+        Ok(())
     }
 
     /// Discard an open branch without deleting its overlay history.

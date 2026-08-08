@@ -5101,6 +5101,18 @@ where
             })
             .collect::<Vec<_>>();
         for (coverage, shape, binding, subscribers) in groups {
+            let is_branch_view = matches!(
+                coverage.opts.read_view.source,
+                ReadViewSourceSpec::Branch { .. }
+            );
+            let branch_metadata = match coverage.opts.read_view.source {
+                ReadViewSourceSpec::Branch { branch } => self
+                    .node
+                    .borrow()
+                    .branch_record(crate::ids::BranchId(branch))
+                    .map(crate::protocol::BranchMetadata::from),
+                _ => None,
+            };
             let maintained_subscription = SubscriptionKey {
                 shape_id: coverage.shape_id,
                 binding_id: coverage.binding_id,
@@ -5116,6 +5128,17 @@ where
                     coverage.opts,
                 )?
             };
+            // Route metadata is an explicit prerequisite for branch-target
+            // bundles. Send it before the first view update so a receiver can
+            // create the partition instead of parking the payload forever.
+            if is_branch_view {
+                let metadata = branch_metadata.ok_or_else(|| {
+                    Error::new(ErrorCode::Query, "requested branch metadata is unavailable")
+                })?;
+                self.transport
+                    .send(SyncMessage::BranchMetadata(metadata))
+                    .map_err(transport_error)?;
+            }
             for subscription in subscribers {
                 send_with_content_extents(
                     &self.node,
