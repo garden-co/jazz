@@ -201,14 +201,21 @@ query bindings.
 #### Prepared claim parameters
 
 When a query program contains policy claims, lowering MUST first walk the
-entire policy graph and declare one ordered, graph-wide parameter set before it
-emits any graph node. The walk includes every binding source at every nesting
-level, including recursive seed/step paths and every union route. Each claim
-reference is declared by its canonical parameter name and type; a repeated
-reference denotes the same declaration. Every binding source in the emitted
-prepared graph MUST use that one shared declaration environment. A claim in a
-prepared graph MUST lower as a parameter reference and MUST NOT lower as a
-policy-context value literal.
+actual emitted prepared graph—including every non-raw authorization subplan—and
+declare one ordered, graph-wide parameter set before it emits any graph node.
+The walk includes every binding source at every nesting level, including
+recursive seed/step paths and every union route within that emitted graph. Each
+claim reference is declared by its canonical parameter name and type; a
+repeated reference denotes the same declaration. Every binding source in the
+emitted prepared graph MUST use that one shared declaration environment. A
+claim in a prepared graph MUST lower as a parameter reference and MUST NOT
+lower as a policy-context value literal.
+
+A policy dependency read is raw evidence under `INV-RLS-21`, so lowering does
+not recursively inspect that dependency table's separate policy declaration
+merely to compare claim types. Likewise, independently inline-evaluated policy
+branches do not share a prepared descriptor. Their claim declarations become
+comparable only if a future lowering actually places them in one descriptor.
 
 The prepared graph descriptor MUST encode that parameter set -- names and
 types, including claim-path identity where names alone do not establish it --
