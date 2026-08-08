@@ -4,6 +4,7 @@ use groove::records::{
 };
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema,
+    TableVariantField,
 };
 use groove::storage::MemoryStorage;
 
@@ -28,6 +29,65 @@ fn union_schema() -> DatabaseSchema {
     .with_variant(2, ["id", "owner", "url"])
     .with_variant(3, ["id", "owner", "body", "edited"])
     .with_variant(4, ["id", "owner", "url", "alt"])])
+}
+
+#[test]
+fn case_local_same_name_may_have_different_types_when_not_shared()
+-> Result<(), Box<dyn std::error::Error>> {
+    let table = TableSchema::new("events", [ColumnSchema::new("id", ColumnType::U64)])
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+        .with_index(IndexSchema::new("events_by_id", ["id"]))
+        .with_variant_payload(
+            1,
+            [
+                TableVariantField::shared("id", ColumnType::U64, "id"),
+                TableVariantField::local("value", ColumnType::String),
+            ],
+        )
+        .with_variant_payload(
+            2,
+            [
+                TableVariantField::shared("event_id", ColumnType::U64, "id"),
+                TableVariantField::local("value", ColumnType::U64),
+            ],
+        );
+    let schema = DatabaseSchema::new([table]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let mut database = Database::new(schema.clone(), storage)?;
+    let v1 = schema
+        .table("events")
+        .unwrap()
+        .record_schema_for_variant(1)
+        .unwrap();
+    let v2 = schema
+        .table("events")
+        .unwrap()
+        .record_schema_for_variant(2)
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "events",
+        VariantRecord::create(1, v1, &[Value::U64(1), Value::String("opened".into())])?,
+    );
+    batch.insert(
+        "events",
+        VariantRecord::create(2, v2, &[Value::U64(2), Value::U64(404)])?,
+    );
+    database.commit_batch(batch)?;
+    let rows = database.primary_key_scan("events", &[])?;
+    assert_eq!(rows[0].get("value")?, Value::String("opened".into()));
+    assert_eq!(rows[1].get("value")?, Value::U64(404));
+
+    let storage = database.into_storage();
+    let reopened = Database::new(schema, storage)?;
+    let indexed = reopened.index_scan("events", "events_by_id", &[])?;
+    assert_eq!(
+        indexed.len(),
+        2,
+        "shared id index spans both local payloads"
+    );
+    assert_eq!(reopened.primary_key_scan("events", &[])?.len(), 2);
+    Ok(())
 }
 
 fn variant_row(tag: u32, values: &[Value]) -> VariantRecord {

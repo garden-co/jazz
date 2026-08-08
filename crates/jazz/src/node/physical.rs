@@ -5,7 +5,7 @@ use crate::ids::{PhysicalColumnId, PhysicalTableId};
 use crate::schema::MERGE_HEADS_TABLE;
 use groove::schema::{
     ColumnSchema as GrooveColumnSchema, IndexSchema as GrooveIndexSchema,
-    TableSchema as GrooveTableSchema,
+    TableSchema as GrooveTableSchema, TableVariantField as GrooveTableVariantField,
 };
 
 /// Lower Jazz's durable schema alias into Groove's deliberately smaller,
@@ -38,6 +38,19 @@ pub(super) struct PhysicalVariantCase {
     pub(super) tag: u32,
     /// Logical fields physically present in this dense case payload.
     pub(super) fields: BTreeSet<String>,
+    /// Case-local payload fields. Unlike `fields`, these names do not imply a
+    /// table-wide identity and may reuse a name with a different type in
+    /// another user case. `shared_column` opts a field into stable physical
+    /// identity for keys/indices.
+    #[serde(default)]
+    pub(super) payload_fields: Vec<PhysicalVariantPayloadField>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(super) struct PhysicalVariantPayloadField {
+    pub(super) name: String,
+    pub(super) value_type: records::ValueType,
+    pub(super) shared_column: Option<PhysicalColumnId>,
 }
 
 #[derive(Clone, Debug)]
@@ -263,6 +276,7 @@ pub(super) fn allocate_physical_variant_cases(
             user_case: None,
             tag,
             fields: fields.clone(),
+            payload_fields: Vec::new(),
         }];
         mappings
             .get_mut(&schema_version)
@@ -297,6 +311,7 @@ pub(super) fn allocate_physical_variant_cases(
             user_case,
             tag: next,
             fields,
+            payload_fields: Vec::new(),
         });
     }
     allocated.sort_by_key(|case| case.tag);
@@ -343,6 +358,75 @@ pub(super) fn validate_physical_variant_cases(
         }
     }
     Ok(())
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn allocate_physical_payload_variant_cases(
+    mappings: &mut BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+    schema_version: SchemaVersionId,
+    logical_table: &str,
+    cases: impl IntoIterator<Item = (String, Vec<PhysicalVariantPayloadField>)>,
+) -> Result<Vec<PhysicalVariantCase>, Error> {
+    let requested = cases.into_iter().collect::<BTreeMap<_, _>>();
+    let mapping = mappings
+        .get(&schema_version)
+        .and_then(|mapping| mapping.tables.get(logical_table))
+        .ok_or(Error::InvalidStoredValue(
+            "variant-case target physical mapping missing",
+        ))?;
+    let logical_by_physical = mapping
+        .columns
+        .iter()
+        .map(|(logical, physical)| (*physical, logical.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let allocation_input = requested
+        .iter()
+        .map(|(user_case, fields)| {
+            let mut local_names = BTreeSet::new();
+            let mut shared = BTreeSet::new();
+            for field in fields {
+                if !local_names.insert(field.name.as_str()) {
+                    return Err(Error::InvalidStoredValue(
+                        "duplicate case-local variant field",
+                    ));
+                }
+                if let Some(column) = field.shared_column {
+                    shared.insert(logical_by_physical.get(&column).cloned().ok_or(
+                        Error::InvalidStoredValue("variant payload shared physical column missing"),
+                    )?);
+                }
+            }
+            Ok((Some(user_case.clone()), shared))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    let mut allocated = allocate_physical_variant_cases(
+        mappings,
+        aliases,
+        schema_version,
+        logical_table,
+        allocation_input,
+    )?;
+    for case in &mut allocated {
+        case.payload_fields = requested
+            .get(
+                case.user_case
+                    .as_deref()
+                    .ok_or(Error::InvalidStoredValue("payload variant lost user case"))?,
+            )
+            .cloned()
+            .ok_or(Error::InvalidStoredValue(
+                "allocated payload variant definition missing",
+            ))?;
+    }
+    mappings
+        .get_mut(&schema_version)
+        .and_then(|mapping| mapping.tables.get_mut(logical_table))
+        .ok_or(Error::InvalidStoredValue(
+            "variant-case target physical mapping missing",
+        ))?
+        .variant_cases = allocated.clone();
+    Ok(allocated)
 }
 
 pub(super) fn physical_history_binding(
@@ -1502,20 +1586,50 @@ pub(super) fn physical_version_storage_tables(
         let mut layouts_by_tag = BTreeMap::new();
         let mut current_layouts_by_tag = BTreeMap::new();
         let mut rejected_layouts_by_tag = BTreeMap::new();
+        let mut history_payloads_by_tag = BTreeMap::new();
+        let mut current_payloads_by_tag = BTreeMap::new();
+        let mut rejected_payloads_by_tag = BTreeMap::new();
         for (schema_version, logical_table, mapping) in &variants {
             let alias = schema_version_aliases.get(&schema_version).copied().ok_or(
                 Error::InvalidStoredValue("physical history schema alias missing"),
             )?;
             let cases = if mapping.variant_cases.is_empty() {
-                vec![(groove_variant_tag(alias)?, None)]
+                vec![(groove_variant_tag(alias)?, None, None)]
             } else {
                 mapping
                     .variant_cases
                     .iter()
-                    .map(|case| (case.tag, Some(&case.fields)))
+                    .map(|case| (case.tag, Some(&case.fields), Some(case)))
                     .collect()
             };
-            for (tag, fields) in cases {
+            for (tag, fields, case) in cases {
+                if let Some(case) = case.filter(|case| !case.payload_fields.is_empty()) {
+                    history_payloads_by_tag.insert(
+                        tag,
+                        physical_payload_variant_fields(
+                            &physical,
+                            HistoryRowRecord::USER_CELLS,
+                            case,
+                        )?,
+                    );
+                    current_payloads_by_tag.insert(
+                        tag,
+                        physical_payload_variant_fields(
+                            &physical_global,
+                            GlobalCurrentRowRecord::USER_CELLS,
+                            case,
+                        )?,
+                    );
+                    rejected_payloads_by_tag.insert(
+                        tag,
+                        physical_payload_variant_fields(
+                            &rejected,
+                            RejectedVersionRowRecord::USER_CELLS,
+                            case,
+                        )?,
+                    );
+                    continue;
+                }
                 let history =
                     physical_history_field_names_for_case(logical_table, mapping, fields)?;
                 if layouts_by_tag.insert(tag, history).is_some() {
@@ -1542,12 +1656,22 @@ pub(super) fn physical_version_storage_tables(
         for (tag, fields) in layouts_by_tag {
             physical = physical.with_variant(tag, fields);
         }
+        for (tag, fields) in history_payloads_by_tag {
+            physical = physical.with_variant_payload(tag, fields);
+        }
         for (tag, fields) in current_layouts_by_tag {
             physical_global = physical_global.with_variant(tag, fields.clone());
             physical_ahead = physical_ahead.with_variant(tag, fields);
         }
+        for (tag, fields) in current_payloads_by_tag {
+            physical_global = physical_global.with_variant_payload(tag, fields.clone());
+            physical_ahead = physical_ahead.with_variant_payload(tag, fields);
+        }
         for (tag, fields) in rejected_layouts_by_tag {
             rejected = rejected.with_variant(tag, fields);
+        }
+        for (tag, fields) in rejected_payloads_by_tag {
+            rejected = rejected.with_variant_payload(tag, fields);
         }
         for (_, branch_id) in branch_partitions
             .iter()
@@ -1640,6 +1764,41 @@ fn physical_history_field_names(
     mapping: &TablePhysicalMapping,
 ) -> Result<Vec<String>, Error> {
     physical_history_field_names_for_case(table, mapping, None)
+}
+
+fn physical_payload_variant_fields(
+    table: &GrooveTableSchema,
+    system_fields: usize,
+    case: &PhysicalVariantCase,
+) -> Result<Vec<GrooveTableVariantField>, Error> {
+    let mut fields = table
+        .record_schema()
+        .fields()
+        .iter()
+        .take(system_fields)
+        .map(|field| {
+            let name = field.name.clone().ok_or(Error::InvalidStoredValue(
+                "physical variant system field unnamed",
+            ))?;
+            Ok(GrooveTableVariantField::shared(
+                name.clone(),
+                field.value_type.clone(),
+                name,
+            ))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    fields.extend(case.payload_fields.iter().map(|field| {
+        if let Some(column) = field.shared_column {
+            GrooveTableVariantField::shared(
+                field.name.clone(),
+                field.value_type.clone(),
+                physical_user_column_field(column),
+            )
+        } else {
+            GrooveTableVariantField::local(field.name.clone(), field.value_type.clone())
+        }
+    }));
+    Ok(fields)
 }
 
 fn physical_history_field_names_for_case(
@@ -1845,6 +2004,41 @@ mod variant_case_tests {
         ]
     }
 
+    fn payload_cases() -> Vec<(String, Vec<PhysicalVariantPayloadField>)> {
+        vec![
+            (
+                "text".to_owned(),
+                vec![
+                    PhysicalVariantPayloadField {
+                        name: "id".to_owned(),
+                        value_type: records::ValueType::U64,
+                        shared_column: Some(PhysicalColumnId(1)),
+                    },
+                    PhysicalVariantPayloadField {
+                        name: "value".to_owned(),
+                        value_type: records::ValueType::String,
+                        shared_column: None,
+                    },
+                ],
+            ),
+            (
+                "metric".to_owned(),
+                vec![
+                    PhysicalVariantPayloadField {
+                        name: "event_id".to_owned(),
+                        value_type: records::ValueType::U64,
+                        shared_column: Some(PhysicalColumnId(1)),
+                    },
+                    PhysicalVariantPayloadField {
+                        name: "value".to_owned(),
+                        value_type: records::ValueType::U64,
+                        shared_column: None,
+                    },
+                ],
+            ),
+        ]
+    }
+
     #[test]
     fn nested_layout_and_user_cases_allocate_durably_without_collisions() {
         let v1 = schema(1);
@@ -1883,6 +2077,83 @@ mod variant_case_tests {
     }
 
     #[test]
+    fn case_local_same_name_different_types_survives_jazz_mapping_reopen() {
+        let v1 = schema(1);
+        let aliases = BTreeMap::from([(v1, SchemaVersionAlias(1))]);
+        let mut mappings = BTreeMap::from([(v1, mapping(7, &[("id", 1)]))]);
+        let allocated = allocate_physical_payload_variant_cases(
+            &mut mappings,
+            &aliases,
+            v1,
+            "entries",
+            payload_cases(),
+        )
+        .unwrap();
+        let text_value = &allocated
+            .iter()
+            .find(|case| case.user_case.as_deref() == Some("text"))
+            .unwrap()
+            .payload_fields[1];
+        let metric_value = &allocated
+            .iter()
+            .find(|case| case.user_case.as_deref() == Some("metric"))
+            .unwrap()
+            .payload_fields[1];
+        assert_eq!(text_value.name, metric_value.name);
+        assert_eq!(text_value.value_type, records::ValueType::String);
+        assert_eq!(metric_value.value_type, records::ValueType::U64);
+        assert_eq!(text_value.shared_column, None);
+        assert_eq!(metric_value.shared_column, None);
+        let text_tag = allocated
+            .iter()
+            .find(|case| case.user_case.as_deref() == Some("text"))
+            .unwrap()
+            .tag;
+        let metric_tag = allocated
+            .iter()
+            .find(|case| case.user_case.as_deref() == Some("metric"))
+            .unwrap()
+            .tag;
+
+        let encoded = serde_json::to_vec(&mappings).unwrap();
+        let reopened: BTreeMap<SchemaVersionId, SchemaPhysicalMapping> =
+            serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(reopened, mappings);
+        validate_physical_variant_cases(&reopened, &aliases).unwrap();
+
+        let jazz = JazzSchema::new([TableSchema::new(
+            "entries",
+            [crate::schema::ColumnSchema::new(
+                "id",
+                records::ValueType::U64,
+            )],
+        )]);
+        let catalogue = BTreeMap::from([(v1, SchemaVersion::new(jazz))]);
+        let lowered =
+            physical_version_storage_tables(&catalogue, &aliases, &reopened, &BTreeSet::new())
+                .unwrap();
+        let history = lowered
+            .iter()
+            .find(|table| table.name == physical_history_table_name(PhysicalTableId(7)))
+            .unwrap();
+        let text = history.record_schema_for_variant(text_tag).unwrap();
+        let metric = history.record_schema_for_variant(metric_tag).unwrap();
+        let ty = |descriptor: &records::RecordDescriptor, name: &str| {
+            descriptor
+                .fields()
+                .iter()
+                .find(|field| field.name.as_deref() == Some(name))
+                .unwrap()
+                .value_type
+                .clone()
+        };
+        assert_eq!(ty(&text, "value"), records::ValueType::String);
+        assert_eq!(ty(&metric, "value"), records::ValueType::U64);
+        assert_eq!(ty(&text, "id"), records::ValueType::U64);
+        assert_eq!(ty(&metric, "event_id"), records::ValueType::U64);
+    }
+
+    #[test]
     fn reopen_validation_rejects_a_cross_layout_tag_collision() {
         let v1 = schema(1);
         let v2 = schema(2);
@@ -1892,12 +2163,14 @@ mod variant_case_tests {
             user_case: Some("text".to_owned()),
             tag: 9,
             fields: BTreeSet::from(["id".to_owned()]),
+            payload_fields: Vec::new(),
         }];
         let mut second = mapping(7, &[("id", 1)]);
         second.tables.get_mut("entries").unwrap().variant_cases = vec![PhysicalVariantCase {
             user_case: Some("image".to_owned()),
             tag: 9,
             fields: BTreeSet::from(["id".to_owned()]),
+            payload_fields: Vec::new(),
         }];
         let mappings = BTreeMap::from([(v1, first), (v2, second)]);
         assert!(matches!(

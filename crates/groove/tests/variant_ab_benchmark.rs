@@ -75,9 +75,9 @@ fn repeated_release_write_ivm_and_cold_scan_receipt() -> Result<(), Box<dyn std:
     let mut commits = Vec::with_capacity(REPS);
     let mut scans = Vec::with_capacity(REPS);
     for _ in 0..REPS {
-        let schema = schema();
-        let storage = MemoryStorage::new(&schema.column_families());
-        let mut database = Database::new(schema, storage)?;
+        let database_schema = schema();
+        let storage = MemoryStorage::new(&database_schema.column_families());
+        let mut database = Database::new(database_schema, storage)?;
         register_projection(&mut database)?;
         let subscription =
             database.subscribe_one_sink(GraphBuilder::variant_project("entries", "receipt"))?;

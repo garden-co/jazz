@@ -100,15 +100,42 @@ fn validate_table_schema_variants(table: &TableSchema) -> Result<(), Error> {
             });
         }
         let mut fields = HashSet::new();
-        for field in &schema_version.fields {
-            if !fields.insert(field.as_str())
-                || !table.columns.iter().any(|column| column.name == *field)
-            {
-                return Err(Error::InvalidTableSchemaVersionField {
-                    table: table.name.clone(),
-                    version: schema_version.tag,
-                    field: field.clone(),
-                });
+        if schema_version.payload_fields.is_empty() {
+            for field in &schema_version.fields {
+                if !fields.insert(field.as_str())
+                    || !table.columns.iter().any(|column| column.name == *field)
+                {
+                    return Err(Error::InvalidTableSchemaVersionField {
+                        table: table.name.clone(),
+                        version: schema_version.tag,
+                        field: field.clone(),
+                    });
+                }
+            }
+        } else {
+            let mut local = HashSet::new();
+            for field in &schema_version.payload_fields {
+                if !local.insert(field.name.as_str()) {
+                    return Err(Error::InvalidTableSchemaVersionField {
+                        table: table.name.clone(),
+                        version: schema_version.tag,
+                        field: field.name.clone(),
+                    });
+                }
+                let Some(shared) = &field.shared_column else {
+                    continue;
+                };
+                let valid = table
+                    .columns
+                    .iter()
+                    .any(|column| column.name == *shared && column.column_type == field.value_type);
+                if !valid || !fields.insert(shared.as_str()) {
+                    return Err(Error::InvalidTableSchemaVersionField {
+                        table: table.name.clone(),
+                        version: schema_version.tag,
+                        field: shared.clone(),
+                    });
+                }
             }
         }
         for column in &primary_key.columns {
@@ -1918,7 +1945,7 @@ where
                 let table_schema = self.table(table)?;
                 let (schema_version, descriptor, record) =
                     resolve_record_input(table_schema, record)?;
-                let key = primary_key_bytes(table_schema, descriptor, &record)?;
+                let key = primary_key_bytes(table_schema, schema_version, descriptor, &record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Insert,
                     table: table.clone(),
@@ -1958,7 +1985,7 @@ where
                 let table_schema = self.table(table)?;
                 let (schema_version, descriptor, record) =
                     resolve_record_input(table_schema, record)?;
-                let key = primary_key_bytes(table_schema, descriptor, &record)?;
+                let key = primary_key_bytes(table_schema, schema_version, descriptor, &record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Update,
                     table: table.clone(),
@@ -3383,6 +3410,7 @@ fn encode_record(
 
 fn primary_key_bytes(
     table: &TableSchema,
+    schema_version: u64,
     record_schema: RecordDescriptor,
     record: &[u8],
 ) -> Result<Vec<u8>, Error> {
@@ -3393,7 +3421,19 @@ fn primary_key_bytes(
 
     let mut bytes = Vec::new();
     for column in &primary_key.columns {
-        let value = record_schema.get(record, &column.column)?;
+        let local_name = if table.variants.is_empty() {
+            column.column.as_str()
+        } else {
+            table
+                .schema_version(schema_version)
+                .and_then(|variant| variant.payload_name_for_shared(&column.column))
+                .ok_or_else(|| Error::SchemaVersionMissingPrimaryKey {
+                    table: table.name.clone(),
+                    version: schema_version,
+                    column: column.column.clone(),
+                })?
+        };
+        let value = record_schema.get(record, local_name)?;
         ensure_primary_key_value_type(table, column, &value)?;
         encode_primary_key_part(&mut bytes, &value)?;
     }

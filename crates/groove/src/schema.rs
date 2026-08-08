@@ -280,6 +280,19 @@ impl TableSchema {
         self
     }
 
+    /// Register a case with a case-local payload descriptor. Fields only
+    /// participate in table-wide keys/indices when they explicitly name a
+    /// shared column identity.
+    pub fn with_variant_payload(
+        mut self,
+        tag: u32,
+        fields: impl IntoIterator<Item = TableVariantField>,
+    ) -> Self {
+        self.variants
+            .push(TableVariant::with_payload(u64::from(tag), fields));
+        self
+    }
+
     pub fn has_schema_variants(&self) -> bool {
         !self.variants.is_empty()
     }
@@ -298,17 +311,25 @@ impl TableSchema {
             return Some(self.record_schema());
         }
         let schema_version = self.schema_version(version)?;
-        let fields = schema_version
-            .fields
-            .iter()
-            .map(|field_name| {
-                let column = self
-                    .columns
-                    .iter()
-                    .find(|column| column.name == *field_name)?;
-                Some((column.name.clone(), column.column_type.clone()))
-            })
-            .collect::<Option<Vec<_>>>()?;
+        let fields = if schema_version.payload_fields.is_empty() {
+            schema_version
+                .fields
+                .iter()
+                .map(|field_name| {
+                    let column = self
+                        .columns
+                        .iter()
+                        .find(|column| column.name == *field_name)?;
+                    Some((column.name.clone(), column.column_type.clone()))
+                })
+                .collect::<Option<Vec<_>>>()?
+        } else {
+            schema_version
+                .payload_fields
+                .iter()
+                .map(|field| (field.name.clone(), field.value_type.clone()))
+                .collect()
+        };
         Some(RecordDescriptor::new(fields))
     }
 
@@ -331,6 +352,8 @@ pub struct TableVariant {
     #[serde(alias = "version")]
     pub tag: u64,
     pub fields: Vec<String>,
+    #[serde(default)]
+    pub payload_fields: Vec<TableVariantField>,
 }
 
 impl TableVariant {
@@ -338,6 +361,59 @@ impl TableVariant {
         Self {
             tag,
             fields: fields.into_iter().map(Into::into).collect(),
+            payload_fields: Vec::new(),
+        }
+    }
+
+    pub fn with_payload(tag: u64, fields: impl IntoIterator<Item = TableVariantField>) -> Self {
+        Self {
+            tag,
+            fields: Vec::new(),
+            payload_fields: fields.into_iter().collect(),
+        }
+    }
+
+    pub fn payload_name_for_shared(&self, shared: &str) -> Option<&str> {
+        if self.payload_fields.is_empty() {
+            return self
+                .fields
+                .iter()
+                .find(|field| field.as_str() == shared)
+                .map(String::as_str);
+        }
+        self.payload_fields
+            .iter()
+            .find(|field| field.shared_column.as_deref() == Some(shared))
+            .map(|field| field.name.as_str())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub struct TableVariantField {
+    pub name: String,
+    pub value_type: ValueType,
+    /// Optional table-wide physical identity used for keys and indices.
+    pub shared_column: Option<String>,
+}
+
+impl TableVariantField {
+    pub fn local(name: impl Into<String>, value_type: ValueType) -> Self {
+        Self {
+            name: name.into(),
+            value_type,
+            shared_column: None,
+        }
+    }
+
+    pub fn shared(
+        name: impl Into<String>,
+        value_type: ValueType,
+        shared_column: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            value_type,
+            shared_column: Some(shared_column.into()),
         }
     }
 }

@@ -543,19 +543,14 @@ impl IvmRuntime {
                 version: schema_version,
             }
         })?;
-        let fields = index
-            .columns
-            .iter()
-            .all(|indexed| version.fields.contains(indexed))
-            .then(|| {
-                schema_index_input_fields(table, index).map(|fields| {
-                    fields
-                        .into_iter()
-                        .map(ProjectField::named)
-                        .collect::<Vec<_>>()
-                })
+        let fields = schema_index_input_fields(table, index)?
+            .into_iter()
+            .map(|shared| {
+                version
+                    .payload_name_for_shared(&shared)
+                    .map(|local| ProjectField::renamed(local, shared))
             })
-            .transpose()?;
+            .collect::<Option<Vec<_>>>();
         self.register_variant_projection_target_case(
             &table.name,
             VariantProjectionTarget::SchemaIndex(index.name.clone()),
