@@ -180,9 +180,9 @@ describe("PersistentBrowserOpfsRuntime", () => {
     );
 
     await vi.waitFor(() => {
-      expect(worker.messages.some((message) => message.method === "createExecutedSubscription")).toBe(
-        true,
-      );
+      expect(
+        worker.messages.some((message) => message.method === "createExecutedSubscription"),
+      ).toBe(true);
     });
     expect(worker.messages.some((message) => message.method === "insert")).toBe(false);
 
@@ -230,9 +230,9 @@ describe("PersistentBrowserOpfsRuntime", () => {
     const insert = worker.messages.find((message) => message.method === "insert")!;
     worker.respond(insert.id, { transactionId: "native-runtime-transaction" });
     await vi.waitFor(() => {
-      expect(worker.messages.some((message) => message.method === "createExecutedSubscription")).toBe(
-        true,
-      );
+      expect(
+        worker.messages.some((message) => message.method === "createExecutedSubscription"),
+      ).toBe(true);
     });
     const create = worker.messages.find(
       (message) => message.method === "createExecutedSubscription",
