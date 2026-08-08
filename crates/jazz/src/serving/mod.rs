@@ -24,7 +24,7 @@ use crate::groove::records::Value;
 use crate::groove::storage::MemoryStorage;
 #[cfg(feature = "rocksdb")]
 use crate::groove::storage::RocksDbStorage;
-use crate::ids::{AuthorId, RowUuid, SchemaVersionId};
+use crate::ids::{AuthorId, BranchId, RowUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
 use crate::protocol::{
     CatalogueAck, CurrentWriteSchema, MigrationLens, SchemaVersion, SyncMessage,
@@ -271,6 +271,38 @@ impl fmt::Debug for ServerSessionState {
 }
 
 impl ShellDb {
+    fn seed_branch_row(
+        &self,
+        branch: BranchId,
+        table: String,
+        row_id: RowUuid,
+        cells: RowCells,
+    ) -> ShellResult<()> {
+        match self {
+            Self::Memory(db) => db
+                .seed_branch_mergeable_for_bootstrap(
+                    branch,
+                    &table,
+                    row_id,
+                    AuthorId::SYSTEM,
+                    cells,
+                )
+                .map(|_| ())
+                .map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db
+                .seed_branch_mergeable_for_bootstrap(
+                    branch,
+                    &table,
+                    row_id,
+                    AuthorId::SYSTEM,
+                    cells,
+                )
+                .map(|_| ())
+                .map_err(Into::into),
+        }
+    }
+
     fn set_edge_cache_budget(&self, budget: Option<EdgeCacheBudget>) {
         match self {
             Self::Memory(db) => db.set_edge_cache_budget(budget),
@@ -955,6 +987,21 @@ impl InMemoryServerShell {
     ) -> ShellResult<()> {
         self.db
             .seed_settled_mergeable_for_bootstrap(table.into(), row_id, AuthorId::SYSTEM, cells)
+    }
+
+    /// Seed a branch-local row for an administrative/bootstrap flow.
+    ///
+    /// Like [`Self::seed_row_with_id`], this installs finalized history rather
+    /// than emulating a client facade write. Reads still traverse the normal
+    /// branch view and query-engine lowering path.
+    pub fn seed_branch_row_with_id(
+        &mut self,
+        branch: BranchId,
+        table: impl Into<String>,
+        row_id: RowUuid,
+        cells: RowCells,
+    ) -> ShellResult<()> {
+        self.db.seed_branch_row(branch, table.into(), row_id, cells)
     }
 
     fn is_draining(&self) -> bool {

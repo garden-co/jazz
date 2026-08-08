@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::mpsc;
 use std::thread;
 
-use crate::db::{CommitUnitTrust, DbIdentity, Transport};
+use crate::db::{CommitUnitTrust, DbIdentity, RowCells, Transport};
 use crate::groove::records::Value;
-use crate::ids::{AuthorId, NodeUuid, SchemaVersionId};
+use crate::ids::{AuthorId, BranchId, NodeUuid, RowUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
 use crate::protocol::MigrationLens;
 use crate::schema::JazzSchema;
@@ -151,6 +151,28 @@ impl ServerShellHandle {
                 .map_err(|error| error.to_string())
         })
         .await
+    }
+
+    #[allow(dead_code)] // exercised only by the integration-test server feature
+    pub(crate) async fn seed_branch_row_for_test(
+        &self,
+        branch: BranchId,
+        table: String,
+        row_id: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), String> {
+        let activity_tx = self.activity_tx.clone();
+        let result = self
+            .run(move |shell| {
+                shell
+                    .seed_branch_row_with_id(branch, table, row_id, cells)
+                    .map_err(|error| error.to_string())
+            })
+            .await;
+        if result.is_ok() {
+            notify_shell_activity(&activity_tx);
+        }
+        result
     }
 
     pub(crate) async fn publish_permissions_schema(

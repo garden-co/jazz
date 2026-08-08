@@ -22,6 +22,9 @@ use crate::groove::storage::MemoryStorage as CoreMemoryStorage;
 use crate::groove::storage::RocksDbStorage as CoreRocksDbStorage;
 use crate::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
 use crate::node::OpenTxId as CoreOpenTxId;
+use crate::protocol::{
+    ReadViewSourceSpec as CoreReadViewSourceSpec, ReadViewSpec as CoreReadViewSpec,
+};
 use crate::tools::public_api::query::{
     Condition as PublicCondition, SortDirection as PublicSortDirection,
 };
@@ -2156,16 +2159,49 @@ impl JazzClient {
         }
         Ok(())
     }
-    fn core_read_opts(durability_tier: Option<DurabilityTier>) -> CoreReadOpts {
-        CoreReadOpts {
+    fn core_read_opts(
+        query: &Query,
+        durability_tier: Option<DurabilityTier>,
+    ) -> Result<CoreReadOpts> {
+        let read_view = match query.branches.as_slice() {
+            // Existing public callers did not have to name the root before the
+            // branch facade existed. Keep that spelling (and the documented
+            // `main` spelling) as the ordinary current view.
+            [] => CoreReadViewSpec::default(),
+            [branch] if branch == "main" => CoreReadViewSpec::default(),
+            branches => {
+                let branch_ids = branches
+                    .iter()
+                    .map(|branch| {
+                        uuid::Uuid::parse_str(branch).map_err(|_| {
+                            JazzError::Query(format!(
+                                "branch {branch:?} must be `main` or a branch UUID"
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let source = match branch_ids.as_slice() {
+                    [branch] => CoreReadViewSourceSpec::Branch { branch: *branch },
+                    _ => CoreReadViewSourceSpec::MergedBranches {
+                        branches: branch_ids,
+                    },
+                };
+                CoreReadViewSpec {
+                    source,
+                    ..CoreReadViewSpec::default()
+                }
+            }
+        };
+        Ok(CoreReadOpts {
             tier: durability_tier
                 .map(core_tier)
                 .unwrap_or(CoreDurabilityTier::Local),
             local_updates: CoreLocalUpdates::Immediate,
             propagation: CorePropagation::Full,
             include_deleted: false,
+            read_view,
             ..CoreReadOpts::default()
-        }
+        })
     }
     fn core_query(&self, query: &Query) -> Result<crate::query::Query> {
         if !query.joins.is_empty() {
@@ -2666,7 +2702,7 @@ impl JazzClient {
             self.db
                 .subscribe(
                     core_query,
-                    Self::core_read_opts(Some(DurabilityTier::EdgeServer)),
+                    Self::core_read_opts(&query, Some(DurabilityTier::EdgeServer))?,
                     query.table.as_str().to_string(),
                     tx,
                 )
@@ -2684,7 +2720,7 @@ impl JazzClient {
         durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
         {
-            let opts = Self::core_read_opts(durability_tier);
+            let opts = Self::core_read_opts(&query, durability_tier)?;
             let rows = self
                 .db
                 .query_rows(

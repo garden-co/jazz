@@ -496,6 +496,37 @@ where
         Ok(tx_id)
     }
 
+    /// Seed a branch-local mergeable row for history-complete server bootstrap
+    /// or import flows.
+    ///
+    /// The resulting row is evaluated through the ordinary branch read-view
+    /// lowering path; this does not provide an application-facing branch write
+    /// facade.
+    pub fn seed_branch_mergeable_for_bootstrap(
+        &self,
+        branch: crate::ids::BranchId,
+        table: &str,
+        row: RowUuid,
+        made_by: AuthorId,
+        cells: RowCells,
+    ) -> Result<TxId, Error> {
+        let cells = self.apply_insert_defaults(table, cells)?;
+        let mut node = self.node.node.borrow_mut();
+        if node.branch_record(branch).is_none() {
+            node.create_branch(branch)?;
+        }
+        let tx_id = node.commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new(table, row, self.next_now_ms())
+                .made_by(made_by)
+                .cells(cells),
+        )?;
+        drop(node);
+        self.refresh_subscriptions()?;
+        self.node.mark_subscriber_connections_dirty();
+        Ok(tx_id)
+    }
+
     #[cfg(feature = "testing")]
     /// Test/bench-only authority finalization for a locally committed mergeable
     /// transaction.
