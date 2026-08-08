@@ -29,6 +29,16 @@ pub(crate) struct ServerShellHandle {
 type ServerShellJob = Box<dyn FnOnce(&mut InMemoryServerShell) + Send + 'static>;
 
 impl ServerShellHandle {
+    #[cfg(test)]
+    pub(crate) async fn runtime_catalogue_contains(
+        &self,
+        schema: SchemaVersionId,
+        lens: crate::ids::MigrationLensId,
+    ) -> Result<(bool, bool), String> {
+        self.run(move |shell| Ok(shell.runtime_catalogue_contains(schema, lens)))
+            .await
+    }
+
     pub(crate) fn start_with_storage(
         schema: JazzSchema,
         storage_config: StorageConfig,

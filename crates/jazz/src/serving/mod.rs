@@ -584,6 +584,18 @@ impl InMemoryServerShell {
         self.runtime_schema_state.current_write_revision
     }
 
+    #[cfg(test)]
+    pub(crate) fn runtime_catalogue_contains(
+        &self,
+        schema: SchemaVersionId,
+        lens: MigrationLensId,
+    ) -> (bool, bool) {
+        (
+            self.db.catalogue_schema(schema).is_some(),
+            self.db.catalogue_lens(lens).is_some(),
+        )
+    }
+
     fn bootstrap_runtime_schema(&mut self, schema: JazzSchema) -> ShellResult<()> {
         let schema_id = schema.version_id();
         let current = self.db.current_write_schema();
