@@ -6329,6 +6329,103 @@ fn trusted_backend_replays_branch_metadata_over_transport() {
 }
 
 #[test]
+fn trusted_backend_discards_branch_metadata_once_and_recovers_it() {
+    // Internal trust/storage boundary test: lifecycle metadata is carried only
+    // by trusted backend links and must be durable before branch data is routed.
+    let schema = schema();
+    let backend_identity = AuthorId::from_bytes([0xb0; 16]);
+    let node_uuid = NodeUuid::from_bytes([0x5e; 16]);
+    let branch = BranchId::from_bytes([0x46; 16]);
+    let source = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let open_record = source
+        .node()
+        .borrow_mut()
+        .create_branch_as(branch, backend_identity)
+        .unwrap();
+    let open_metadata = BranchMetadata::from(&open_record);
+    let mut discarded_metadata = open_metadata.clone();
+    discarded_metadata.open = false;
+    let dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let target =
+        Node::new(NodeState::new_history_complete(node_uuid, schema.clone(), storage).unwrap());
+    let (mut backend_transport, server_transport) = duplex();
+    let subscriber = target.accept_subscriber_with_trust(
+        server_transport,
+        backend_identity,
+        CommitUnitTrust::TrustedBackend,
+    );
+
+    backend_transport
+        .send(SyncMessage::BranchMetadata(open_metadata.clone()))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    backend_transport
+        .send(SyncMessage::BranchMetadata(discarded_metadata.clone()))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    backend_transport
+        .send(SyncMessage::BranchMetadata(discarded_metadata.clone()))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    let discarded_record = target
+        .node()
+        .borrow()
+        .branch_record(branch)
+        .cloned()
+        .unwrap();
+    assert_eq!(discarded_record.created_by, open_record.created_by);
+    assert_eq!(discarded_record.parent, open_record.parent);
+    assert_eq!(discarded_record.base, open_record.base);
+    assert!(!BranchMetadata::from(&discarded_record).open);
+
+    drop(subscriber);
+    drop(target);
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let reopened = Node::new(NodeState::new_history_complete(node_uuid, schema, storage).unwrap());
+    assert_eq!(
+        reopened.node().borrow().branch_record(branch),
+        Some(&discarded_record)
+    );
+
+    let (mut reverse_transport, server_transport) = duplex();
+    let reverse = reopened.accept_subscriber_with_trust(
+        server_transport,
+        backend_identity,
+        CommitUnitTrust::TrustedBackend,
+    );
+    reverse_transport
+        .send(SyncMessage::BranchMetadata(open_metadata))
+        .unwrap();
+    assert!(reverse.borrow_mut().tick().is_err());
+
+    let mut changed_creator = discarded_metadata.clone();
+    changed_creator.created_by = AuthorId::from_bytes([0xee; 16]);
+    let mut changed_parent = discarded_metadata.clone();
+    changed_parent.parent = Some(BranchId::from_bytes([0xdd; 16]));
+    let mut changed_base = discarded_metadata;
+    changed_base.base = None;
+    for mutation in [changed_creator, changed_parent, changed_base] {
+        let (mut mutation_transport, server_transport) = duplex();
+        let mutation_connection = reopened.accept_subscriber_with_trust(
+            server_transport,
+            backend_identity,
+            CommitUnitTrust::TrustedBackend,
+        );
+        mutation_transport
+            .send(SyncMessage::BranchMetadata(mutation))
+            .unwrap();
+        assert!(mutation_connection.borrow_mut().tick().is_err());
+    }
+    assert_eq!(
+        reopened.node().borrow().branch_record(branch),
+        Some(&discarded_record)
+    );
+}
+
+#[test]
 fn session_create_metadata_then_branch_commit_routes_over_transport() {
     // Internal protocol-sequence test: creation and branch commit upload are
     // wire surfaces while application-facing branch writes are still pending.

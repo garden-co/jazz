@@ -131,6 +131,17 @@ where
             if existing == &record {
                 return Ok(());
             }
+            if existing.branch_id == record.branch_id
+                && existing.created_by == record.created_by
+                && existing.parent == record.parent
+                && existing.base == record.base
+                && existing.state == codec::BranchState::Open
+                && record.state == codec::BranchState::Discarded
+            {
+                self.persist_branch_record(&record)?;
+                self.branches.branches.insert(record.branch_id, record);
+                return Ok(());
+            }
             return Err(Error::InvalidStoredValue("conflicting branch metadata"));
         }
         self.persist_branch_record(&record)?;
