@@ -19,6 +19,64 @@ describe("native query codec", () => {
       );
     }
   });
+
+  it("rejects an array subquery whose bound intent was lost", () => {
+    expect(() =>
+      queryWithPredicates("teams", [], {
+        arraySubqueries: [
+          {
+            columnName: "participants",
+            table: "participants",
+            innerColumn: "team_id",
+            outerColumn: "id",
+          },
+        ],
+      }),
+    ).toThrow("array subquery participants must specify limit or explicitly declare unbounded");
+  });
+
+  it("rejects an array subquery declaring finite and unbounded together", () => {
+    expect(() =>
+      queryWithPredicates("teams", [], {
+        arraySubqueries: [
+          {
+            columnName: "participants",
+            table: "participants",
+            innerColumn: "team_id",
+            outerColumn: "id",
+            limit: 2,
+            unbounded: true,
+          },
+        ],
+      }),
+    ).toThrow("array subquery participants cannot specify both limit and unbounded");
+  });
+
+  it.each([
+    ["limit", -1],
+    ["limit", Number.NaN],
+    ["limit", 1.5],
+    ["limit", Number.MAX_SAFE_INTEGER + 1],
+    ["offset", -1],
+    ["offset", Number.NaN],
+    ["offset", 1.5],
+    ["offset", Number.MAX_SAFE_INTEGER + 1],
+  ] as const)("rejects an invalid array subquery %s of %s", (field, value) => {
+    expect(() =>
+      queryWithPredicates("teams", [], {
+        arraySubqueries: [
+          {
+            columnName: "participants",
+            table: "participants",
+            innerColumn: "team_id",
+            outerColumn: "id",
+            limit: field === "limit" ? value : 2,
+            offset: field === "offset" ? value : 0,
+          },
+        ],
+      }),
+    ).toThrow(`array subquery participants ${field} must be a non-negative safe integer`);
+  });
 });
 
 function queryCases(): Array<

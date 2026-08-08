@@ -257,12 +257,8 @@ export function queryWithPredicates(
 ): Uint8Array {
   const queryOptions = typeof options === "number" ? { limit: options } : options;
   const { limit, offset = 0, orderBy = [], select, arraySubqueries = [] } = queryOptions;
-  if (limit != null && (!Number.isSafeInteger(limit) || limit < 0)) {
-    throw new Error("query limit must be a non-negative safe integer");
-  }
-  if (!Number.isSafeInteger(offset) || offset < 0) {
-    throw new Error("query offset must be a non-negative safe integer");
-  }
+  if (limit != null) validateQueryBound("query limit", limit);
+  validateQueryBound("query offset", offset);
   const writer = new PostcardWriter();
   writer.string(table);
   writer.vec((filter, index) => {
@@ -312,6 +308,18 @@ function writeArraySubquery(writer: PostcardWriter, subquery: QueryArraySubquery
     requirement = "Optional",
     nestedArrays = [],
   } = subquery;
+  if (limit == null && !unbounded) {
+    throw new Error(
+      `array subquery ${subquery.columnName} must specify limit or explicitly declare unbounded`,
+    );
+  }
+  if (limit != null && unbounded) {
+    throw new Error(
+      `array subquery ${subquery.columnName} cannot specify both limit and unbounded`,
+    );
+  }
+  if (limit != null) validateQueryBound(`array subquery ${subquery.columnName} limit`, limit);
+  validateQueryBound(`array subquery ${subquery.columnName} offset`, offset);
   writer.string(subquery.columnName);
   writer.string(subquery.table);
   writer.string(subquery.innerColumn);
@@ -344,6 +352,12 @@ function writeArraySubquery(writer: PostcardWriter, subquery: QueryArraySubquery
   writer.vec((nested, index) => {
     writeArraySubquery(nested, nestedArrays[index]!);
   }, nestedArrays.length);
+}
+
+function validateQueryBound(label: string, value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative safe integer`);
+  }
 }
 
 function arraySubqueryRequirementTag(requirement: QueryArraySubqueryRequirement): number {
