@@ -501,9 +501,8 @@ fn handle_admin_publish_schema(
         }
     };
     let local_schema_id = local_schema.version_id();
-    if let Err(error) = state.shell.publish_runtime_schema(local_schema) {
-        return shell_error_response(error);
-    }
+    // A non-genesis schema remains an administrative draft until a migration
+    // publishes it atomically with its lineage-defining lens.
 
     let canonical = match serde_json::to_vec(&publish.schema) {
         Ok(bytes) => bytes,
@@ -634,7 +633,7 @@ fn load_admin_schema_store(
 }
 
 fn reload_admin_schema_catalogue(
-    shell: &mut InMemoryServerShell,
+    _shell: &mut InMemoryServerShell,
     schemas: &HashMap<String, Vec<StoredAdminSchema>>,
 ) -> LoopbackHttpResult<()> {
     for schema in schemas.values().flat_map(|schemas| schemas.iter()) {
@@ -647,7 +646,7 @@ fn reload_admin_schema_catalogue(
                 ),
             )
         })?;
-        shell.publish_runtime_schema(local_schema)?;
+        let _ = local_schema;
     }
     Ok(())
 }

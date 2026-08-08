@@ -13,8 +13,9 @@ use super::{ServerState, core_server_shell::ServerShellHandle, public_schema_con
 /// Publish newly admitted catalogue entries into the active runtime shell.
 ///
 /// The caller persists administrative entries first. This shared bridge then
-/// admits schemas in source order, lenses after both endpoints exist, and the
-/// current permissions head last so it alone selects the write schema.
+/// uses the first schema to bootstrap an absent runtime, admits later schemas
+/// atomically with lineage lenses, and applies the current permissions head
+/// last so it alone selects the write schema.
 pub(crate) async fn publish_runtime_catalogue(
     state: &ServerState,
     schemas: &[Schema],
@@ -33,24 +34,40 @@ pub(crate) async fn publish_runtime_catalogue(
     for schema in schemas {
         let runtime_schema = public_schema_convert::convert_public_schema(schema)
             .map_err(|error| format!("convert catalogue schema for runtime: {error}"))?;
-        let runtime_shell = runtime_shell(state, &mut shell, runtime_schema.clone())?;
-        runtime_shell
-            .publish_catalogue_schema(runtime_schema)
-            .await
-            .map_err(|error| format!("publish catalogue schema to runtime shell: {error}"))?;
+        runtime_shell(state, &mut shell, runtime_schema)?;
     }
 
     for lens in lenses {
         let source_schema = known_schema(state, &supplied_schemas, lens.source_hash)?;
         let target_schema = known_schema(state, &supplied_schemas, lens.target_hash)?;
         let runtime_lens = convert_lens(lens, &source_schema, &target_schema)?;
+        let new_tables = lens
+            .forward
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                LensOp::AddTable { table, .. } => Some(table.as_str().to_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let dropped_tables = lens
+            .forward
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                LensOp::RemoveTable { table, .. } => Some(table.as_str().to_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         let initial_schema = public_schema_convert::convert_public_schema(&source_schema)
             .map_err(|error| format!("convert lens source schema for runtime: {error}"))?;
+        let target_runtime = public_schema_convert::convert_public_schema(&target_schema)
+            .map_err(|error| format!("convert lens target schema: {error}"))?;
         let runtime_shell = runtime_shell(state, &mut shell, initial_schema)?;
         runtime_shell
-            .publish_lens(runtime_lens)
+            .publish_schema_with_lens(target_runtime, runtime_lens, new_tables, dropped_tables)
             .await
-            .map_err(|error| format!("publish migration lens to runtime shell: {error}"))?;
+            .map_err(|error| format!("publish schema lineage to runtime shell: {error}"))?;
     }
 
     let permissions = state

@@ -27,7 +27,8 @@ use crate::groove::storage::RocksDbStorage;
 use crate::ids::{AuthorId, RowUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
 use crate::protocol::{
-    CatalogueAck, CurrentWriteSchema, MigrationLens, SchemaVersion, SyncMessage,
+    CatalogueAck, CurrentWriteSchema, MigrationLens, SchemaLineagePublication, SchemaVersion,
+    SyncMessage,
 };
 use crate::schema::JazzSchema;
 use crate::wire::{TransportError, WireTransport};
@@ -295,6 +296,14 @@ impl ShellDb {
         }
     }
 
+    fn active_catalogue_seq(&self) -> u64 {
+        match self {
+            Self::Memory(db) => db.active_catalogue_seq(),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db.active_catalogue_seq(),
+        }
+    }
+
     fn connect_upstream(&self, transport: Box<dyn Transport>) -> ShellPeerConnection {
         match self {
             Self::Memory(db) => ShellPeerConnection::Memory(db.connect_upstream(transport)),
@@ -316,6 +325,22 @@ impl ShellDb {
             Self::Memory(db) => db.publish_lens(lens).map_err(Into::into),
             #[cfg(feature = "rocksdb")]
             Self::Rocks(db) => db.publish_lens(lens).map_err(Into::into),
+        }
+    }
+
+    fn publish_schema_with_lens(
+        &self,
+        catalogue_seq: u64,
+        publication: SchemaLineagePublication,
+    ) -> ShellResult<Vec<SyncMessage>> {
+        match self {
+            Self::Memory(db) => db
+                .publish_schema_with_lens(catalogue_seq, publication)
+                .map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db
+                .publish_schema_with_lens(catalogue_seq, publication)
+                .map_err(Into::into),
         }
     }
 
@@ -637,6 +662,36 @@ impl InMemoryServerShell {
             .any(|ack| ack.applied && ack.schema == Some(schema_id));
         if !publish_applied
             || self.db.catalogue_schema(schema_id).as_ref() != Some(&expected_schema)
+        {
+            return Err(ShellError::MissingEvent("CatalogueAck"));
+        }
+        Ok(schema_id)
+    }
+
+    /// Atomically admit a non-genesis schema with its lineage-defining lens.
+    pub fn publish_runtime_schema_with_lens(
+        &mut self,
+        schema: JazzSchema,
+        lens: MigrationLens,
+        new_tables: Vec<String>,
+        dropped_tables: Vec<String>,
+    ) -> ShellResult<SchemaVersionId> {
+        let schema_version = SchemaVersion::new(schema);
+        let schema_id = schema_version.id;
+        if self.db.catalogue_schema(schema_id).is_some() {
+            return Ok(schema_id);
+        }
+        let publication =
+            SchemaLineagePublication::new(schema_version, lens, new_tables, dropped_tables);
+        let catalogue_seq = self.db.active_catalogue_seq().saturating_add(1);
+        let acks = catalogue_acks_from_messages(
+            self.db
+                .publish_schema_with_lens(catalogue_seq, publication)?,
+        );
+        if !acks
+            .iter()
+            .any(|ack| ack.applied && ack.schema == Some(schema_id))
+            || self.db.catalogue_schema(schema_id).is_none()
         {
             return Err(ShellError::MissingEvent("CatalogueAck"));
         }

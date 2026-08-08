@@ -2730,6 +2730,11 @@ where
         &self.catalogue.catalogue_schemas
     }
 
+    /// Highest contiguously activated authoritative catalogue position.
+    pub fn active_catalogue_seq(&self) -> u64 {
+        self.catalogue.active_catalogue_seq
+    }
+
     /// Published migration lenses known to this node.
     pub fn catalogue_lenses(&self) -> &BTreeMap<MigrationLensId, MigrationLens> {
         &self.catalogue.catalogue_lenses

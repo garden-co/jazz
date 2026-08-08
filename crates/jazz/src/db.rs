@@ -2230,6 +2230,11 @@ where
             .map(|schema| schema.schema.clone())
     }
 
+    /// Highest contiguously activated authoritative catalogue position.
+    pub fn active_catalogue_seq(&self) -> u64 {
+        self.node.node.borrow().active_catalogue_seq()
+    }
+
     /// Open a mergeable transaction and return its id.
     ///
     /// The caller owns this transaction's lifetime and must commit it with
