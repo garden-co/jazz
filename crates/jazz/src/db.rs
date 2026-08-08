@@ -3132,6 +3132,12 @@ where
         patch: RowCells,
         identity: AuthorId,
     ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
+        if patch.is_empty() {
+            return Err(crate::node::Error::InvalidMergeableCommit(
+                "partial UPDATE requires at least one cell",
+            )
+            .into());
+        }
         let table_schema = self.table_schema(table)?;
         self.ensure_row_not_deleted(table, row)?;
         if table_schema
