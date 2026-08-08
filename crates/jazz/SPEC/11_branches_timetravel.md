@@ -105,7 +105,8 @@ available settled cut. A session cannot smuggle a parent, lifecycle, base, or
 creator through response-shaped `BranchMetadata`. Replaying the same request is
 idempotent only when the complete durable record matches; conflicting records
 are rejected without a distinguishable discovery response. Trusted backend
-`BranchMetadata` remains a routing/repair carrier, not the session creation API.
+`BranchMetadata` remains a routing/repair carrier, not the session creation API
+(`INV-BRANCH-36`).
 
 ### 11.3 Branch reads
 
