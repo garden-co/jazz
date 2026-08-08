@@ -5,10 +5,10 @@ use groove::schema::ColumnType;
 use jazz::ids::{AuthorId, BranchId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
 use jazz::node::content_store::Extent;
 use jazz::protocol::{
-    CatalogueAck, ContentExtent, CurrentWriteSchema, LargeValueOwnerRef, LensOp, MigrationLens,
-    PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, RowVersionRef, SchemaVersion,
-    ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey,
-    SyncMessage, TableLens, VersionBundle, VersionCarrier, VersionRecord,
+    BranchMetadata, CatalogueAck, ContentExtent, CurrentWriteSchema, LargeValueOwnerRef, LensOp,
+    MigrationLens, PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, RowVersionRef,
+    SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
+    SubscriptionKey, SyncMessage, TableLens, VersionBundle, VersionCarrier, VersionRecord,
     build_version_bundle_runs_from_singletons,
 };
 use jazz::query::{
@@ -110,6 +110,23 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
     };
 
     vec![
+        (
+            "branch_metadata_root_open",
+            "BranchMetadata",
+            SyncMessage::BranchMetadata(BranchMetadata {
+                branch_id: BranchId::from_bytes([0x42; 16]),
+                parent: None,
+                base: None,
+                open: true,
+            }),
+        ),
+        (
+            "fetch_branch_metadata",
+            "FetchBranchMetadata",
+            SyncMessage::FetchBranchMetadata {
+                branches: vec![BranchId::from_bytes([0x42; 16])],
+            },
+        ),
         (
             "fate_update_accepted_global",
             "FateUpdate",
