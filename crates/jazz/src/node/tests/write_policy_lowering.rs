@@ -1260,14 +1260,10 @@ fn lowered_write_policy_keeps_v1_policy_pinned_after_table_rename() {
     )]);
     let v2_payload = SchemaVersion::new(v2.clone());
     let (_dir, mut core) = open_node_with_schema(node(0xe2), v1.clone());
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(v2_payload.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+        &mut core,
+        v2_payload.clone(),
+        MigrationLens::new(
             v1.version_id(),
             v2_payload.id,
             vec![TableLens {
@@ -1279,7 +1275,9 @@ fn lowered_write_policy_keeps_v1_policy_pinned_after_table_rename() {
                 }],
             }],
         ),
-    })
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,

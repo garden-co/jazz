@@ -169,14 +169,10 @@ fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_c
         MergeableCommit::new("todos", existing, 10).cells(title_cells("before-index")),
     );
 
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(indexed.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+        &mut core,
+        indexed.clone(),
+        MigrationLens::new(
             base.version_id(),
             indexed.id,
             vec![TableLens {
@@ -185,7 +181,9 @@ fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_c
                 ops: vec![],
             }],
         ),
-    })
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
@@ -232,14 +230,10 @@ fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_c
     assert_eq!(two_variant_reads.global_current_indexes.reads, 1);
     assert_eq!(two_variant_reads.global_current_rows.reads, 1);
 
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(extended.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+        &mut core,
+        extended.clone(),
+        MigrationLens::new(
             indexed.id,
             extended.id,
             vec![TableLens {
@@ -251,7 +245,9 @@ fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_c
                 }],
             }],
         ),
-    })
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
     core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
