@@ -129,7 +129,24 @@ where
         let write_schema_version = self.catalogue.current_write_schema.schema;
         for table in self.catalogue.schema.tables.clone() {
             let table_schema = self.table_in_schema(&table.name, write_schema_version)?;
-            for row_uuid in self.branch_overlay_row_ids(&table.name, branch_id)? {
+            let overlay_rows = self.branch_overlay_row_ids(&table.name, branch_id)?;
+            if identity != AuthorId::SYSTEM && !overlay_rows.is_empty() {
+                let shape = crate::query::Query::from(table.name.as_str())
+                    .validate(&self.catalogue.schema)
+                    .map_err(|_| Error::BranchMergeCalculation("source read shape is invalid"))?;
+                let binding = shape
+                    .bind(BTreeMap::new())
+                    .map_err(|_| Error::BranchMergeCalculation("source read binding is invalid"))?;
+                let readable = self
+                    .query_rows_on_branch_for_link(branch_id, &shape, &binding, identity)?
+                    .into_iter()
+                    .map(|row| row.row_uuid())
+                    .collect::<BTreeSet<_>>();
+                if !overlay_rows.is_subset(&readable) {
+                    return Err(Error::AuthorizationDenied);
+                }
+            }
+            for row_uuid in overlay_rows {
                 for layer in [VersionLayer::Content, VersionLayer::Deletion] {
                     let source_versions = self.branch_overlay_layer_versions(
                         &table.name,
@@ -218,22 +235,35 @@ where
                             }
                         }
                     }
-                    versions.push(
-                        VersionRecord::encode(
-                            &table_schema,
-                            write_schema_version,
-                            row_uuid,
-                            parents,
-                            winner.created_by(),
-                            winner.created_at(),
-                            winner.updated_by(),
-                            winner.updated_at(),
-                            &cells,
-                            winner.deletion(),
-                        )
-                        .map(|record| record.with_authored_columns(Some(authored_columns)))
-                        .map_err(Error::from)?,
-                    );
+                    let authored_cells = table_schema
+                        .columns
+                        .iter()
+                        .zip(cells)
+                        .filter_map(|(column, value)| {
+                            authored_columns
+                                .contains(&column.name)
+                                .then_some(value.map(|value| (column.name.clone(), value)))
+                                .flatten()
+                        })
+                        .collect::<BTreeMap<_, _>>();
+                    let mut commit = MergeableCommit::new(&table.name, row_uuid, 0)
+                        .made_by(identity)
+                        .parents(parents);
+                    match layer {
+                        VersionLayer::Content => {
+                            commit = commit
+                                .cells(authored_cells)
+                                .authored_columns(authored_columns);
+                        }
+                        VersionLayer::Deletion => {
+                            commit = commit.deletion(winner.deletion().ok_or(
+                                Error::BranchMergeCalculation(
+                                    "deletion source version has no register event",
+                                ),
+                            )?);
+                        }
+                    }
+                    versions.push(commit);
                 }
             }
         }
@@ -249,16 +279,14 @@ where
                 sources: sources.into_iter().collect(),
             })
             .collect();
-        self.commit_merge_back_squash(
-            identity,
-            BranchMergeProvenance {
-                source_lineage: BranchLineage::Branch(branch_id),
-                from_frontier: Vec::new(),
-                through_frontier: through_frontier.into_iter().collect(),
-                substitutions,
-            },
-            versions,
+        let branch_merge = BranchMergeProvenance::canonical(
+            BranchLineage::Branch(branch_id),
+            Vec::new(),
+            through_frontier.into_iter().collect(),
+            substitutions,
         )
+        .map_err(Error::BranchMergeCalculation)?;
+        self.commit_merge_back_squash(branch_merge, versions)
     }
 
     /// Branch-scoped exclusives are intentionally not implemented in v1.
@@ -793,33 +821,14 @@ where
 
     fn commit_merge_back_squash(
         &mut self,
-        permission_subject: AuthorId,
         branch_merge: BranchMergeProvenance,
-        versions: Vec<VersionRecord>,
+        commits: Vec<MergeableCommit>,
     ) -> Result<TxId, Error>
     where
         S: ReopenableStorage,
     {
         let made_at = self.mint_tx_time(0);
-        let tx_id = TxId::new(made_at, self.node_uuid);
-        let tx = Transaction {
-            tx_id,
-            kind: TxKind::Mergeable,
-            n_total_writes: versions.len().try_into().map_err(|_| {
-                Error::InvalidMergeableCommit("transaction write count exceeds u32")
-            })?,
-            made_by: AuthorId::SYSTEM,
-            permission_subject: Some(permission_subject),
-            base_snapshot: None,
-            row_read_set: None,
-            absent_read_set: None,
-            predicate_read_set: None,
-            user_metadata_json: None,
-            branch_merge: Some(branch_merge),
-            merge_strategy: None,
-        };
-        self.ingest_edge_authority_mergeable_commit_unit(tx, versions, made_at.physical_ms())?;
-        Ok(tx_id)
+        self.commit_mergeable_many_at_with_branch_merge(commits, made_at, Some(branch_merge))
     }
 
     fn persist_branch_record(&mut self, record: &BranchRecord) -> Result<(), Error> {

@@ -715,7 +715,8 @@ fn merge_back_branch_emits_ordinary_target_transaction_and_leaves_branch_open() 
         )
         .unwrap();
 
-    let squash = core.merge_back_branch(branch_id).unwrap();
+    let merger = user(0x77);
+    let squash = core.merge_back_branch_as(branch_id, merger).unwrap();
     assert_eq!(
         core.branch_record(branch_id).unwrap().state,
         codec::BranchState::Open
@@ -735,6 +736,8 @@ fn merge_back_branch_emits_ordinary_target_transaction_and_leaves_branch_open() 
     );
 
     let tx = core.transaction_record(squash).unwrap();
+    assert_eq!(tx.made_by, merger);
+    assert_eq!(tx.fate, Fate::Pending);
     assert_eq!(
         tx.branch_merge.as_ref().map(|merge| merge.source_lineage),
         Some(crate::tx::BranchLineage::Branch(branch_id))
@@ -753,6 +756,11 @@ fn merge_back_branch_emits_ordinary_target_transaction_and_leaves_branch_open() 
 
     let squash_versions = core.query_versions_for_tx(squash).unwrap();
     assert_eq!(squash_versions.len(), 3);
+    assert!(
+        squash_versions
+            .iter()
+            .all(|version| version.updated_by() == merger)
+    );
     for branch_tip in [branch_update, branch_insert, branch_delete] {
         assert!(
             squash_versions
@@ -761,6 +769,26 @@ fn merge_back_branch_emits_ordinary_target_transaction_and_leaves_branch_open() 
             "ordinary target transaction must not expose a source branch parent"
         );
     }
+    let (_receiver_dir, mut receiver) = open_node_with_schema(node(0x78), schema());
+    let parent_ids = squash_versions
+        .iter()
+        .flat_map(|version| version.parents())
+        .collect::<BTreeSet<_>>();
+    for parent in parent_ids {
+        receiver
+            .apply_sync_message(core.commit_unit_for(parent).unwrap())
+            .unwrap();
+    }
+    receiver
+        .apply_sync_message(core.commit_unit_for(squash).unwrap())
+        .unwrap();
+    let received = receiver
+        .transaction_record(squash)
+        .unwrap()
+        .branch_merge
+        .unwrap();
+    assert_eq!(received, provenance.clone());
+    assert!(!received.substitutions.is_empty());
     core.commit_mergeable_on_branch(
             branch_id,
             MergeableCommit::new("todos", row(4), 23).cells(title_cells("late write")),
@@ -815,6 +843,29 @@ fn merge_back_parents_every_concurrent_target_head() {
     let mut parents = version.parents();
     parents.sort();
     assert_eq!(parents, vec![left, right]);
+}
+
+#[test]
+fn merge_back_fails_whole_calculation_when_source_row_is_not_readable() {
+    let (_core_dir, mut core) =
+        open_history_complete_node_with_schema(node(2), owner_policy_schema());
+    let owner = user(0x71);
+    let outsider = user(0x72);
+    let branch_id = branch(0x42);
+    core.create_root_branch(branch_id).unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row(0x42), 10)
+            .made_by(owner)
+            .cells(owner_cells(owner, "private")),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        core.merge_back_branch_as(branch_id, outsider),
+        Err(Error::AuthorizationDenied)
+    ));
+    assert!(core.merge_back_branch_as(branch_id, owner).is_ok());
 }
 
 #[derive(Clone, Copy)]

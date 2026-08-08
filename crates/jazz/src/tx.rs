@@ -74,6 +74,43 @@ pub struct BranchMergeProvenance {
     pub substitutions: Vec<ContributionSubstitution>,
 }
 
+impl BranchMergeProvenance {
+    /// Construct canonical locally minted provenance. Source-frontier
+    /// maximality is established by the history calculator before this
+    /// structural canonicalization step.
+    pub fn canonical(
+        source_lineage: BranchLineage,
+        mut from_frontier: Vec<TxId>,
+        mut through_frontier: Vec<TxId>,
+        mut substitutions: Vec<ContributionSubstitution>,
+    ) -> Result<Self, &'static str> {
+        from_frontier.sort();
+        from_frontier.dedup();
+        through_frontier.sort();
+        through_frontier.dedup();
+        for substitution in &mut substitutions {
+            substitution.sources.sort();
+            substitution.sources.dedup();
+            if substitution.sources.is_empty() {
+                return Err("branch merge substitution requires a source dot");
+            }
+        }
+        substitutions.sort_by(|left, right| left.target.cmp(&right.target));
+        if substitutions
+            .windows(2)
+            .any(|pair| pair[0].target == pair[1].target)
+        {
+            return Err("branch merge substitution targets must be unique");
+        }
+        Ok(Self {
+            source_lineage,
+            from_frontier,
+            through_frontier,
+            substitutions,
+        })
+    }
+}
+
 /// One derived target field and the exact source contribution dots it encodes.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
 pub struct ContributionSubstitution {
@@ -831,5 +868,67 @@ fn rejection_reason_from_rejected_record(
                 .to_owned(),
         )),
         _ => Err("reason"),
+    }
+}
+
+#[cfg(test)]
+mod branch_merge_provenance_tests {
+    use super::*;
+
+    fn tx(byte: u8) -> TxId {
+        TxId::new(TxTime(byte.into()), NodeUuid::from_bytes([byte; 16]))
+    }
+
+    fn coordinate(column: &str) -> ContributionCoordinate {
+        ContributionCoordinate {
+            table: "todos".to_owned(),
+            row_uuid: RowUuid::from_bytes([1; 16]),
+            layer: MergeAspect::Content,
+            component: ContributionComponent::Column(column.to_owned()),
+        }
+    }
+
+    #[test]
+    fn canonical_branch_merge_provenance_sorts_and_deduplicates() {
+        let target = coordinate("title");
+        let dot = ContributionDot {
+            lineage: BranchLineage::Root,
+            tx_id: tx(1),
+            coordinate: target.clone(),
+        };
+        let provenance = BranchMergeProvenance::canonical(
+            BranchLineage::Root,
+            vec![tx(2), tx(1), tx(2)],
+            vec![tx(2), tx(1)],
+            vec![ContributionSubstitution {
+                target,
+                sources: vec![dot.clone(), dot],
+            }],
+        )
+        .unwrap();
+        assert_eq!(provenance.from_frontier, vec![tx(1), tx(2)]);
+        assert_eq!(provenance.substitutions[0].sources.len(), 1);
+    }
+
+    #[test]
+    fn canonical_branch_merge_provenance_rejects_duplicate_targets() {
+        let target = coordinate("title");
+        let substitution = ContributionSubstitution {
+            target: target.clone(),
+            sources: vec![ContributionDot {
+                lineage: BranchLineage::Root,
+                tx_id: tx(1),
+                coordinate: target,
+            }],
+        };
+        assert!(
+            BranchMergeProvenance::canonical(
+                BranchLineage::Root,
+                Vec::new(),
+                vec![tx(1)],
+                vec![substitution.clone(), substitution],
+            )
+            .is_err()
+        );
     }
 }

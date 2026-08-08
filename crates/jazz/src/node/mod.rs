@@ -46,9 +46,9 @@ use crate::schema::{
 use crate::text_merge::{Run as PlainTextRun, TextOp as PlainTextOp};
 use crate::time::{GlobalSeq, TxTime};
 use crate::tx::{
-    AbsentRead, DeletionEvent, DurabilityTier, Fate, HistoryEntry, PredicateRead,
-    RecordedMergeStrategy, RejectedTransaction, RejectedVersion, RejectionReason, RowRead,
-    Snapshot, Transaction, TransactionRecord, TxId, TxKind,
+    AbsentRead, BranchMergeProvenance, DeletionEvent, DurabilityTier, Fate, HistoryEntry,
+    PredicateRead, RecordedMergeStrategy, RejectedTransaction, RejectedVersion, RejectionReason,
+    RowRead, Snapshot, Transaction, TransactionRecord, TxId, TxKind,
 };
 
 const TEXT_EXTENT_OPS_MAGIC: &[u8] = b"JTXTREF1";
@@ -1087,6 +1087,15 @@ where
         commits: Vec<MergeableCommit>,
         made_at: TxTime,
     ) -> Result<TxId, Error> {
+        self.commit_mergeable_many_at_with_branch_merge(commits, made_at, None)
+    }
+
+    pub(super) fn commit_mergeable_many_at_with_branch_merge(
+        &mut self,
+        commits: Vec<MergeableCommit>,
+        made_at: TxTime,
+        branch_merge: Option<BranchMergeProvenance>,
+    ) -> Result<TxId, Error> {
         let write_schema_version = self.catalogue.current_write_schema.schema;
         let tx_id = TxId::new(made_at, self.node_uuid);
         let made_by = commits[0].made_by;
@@ -1105,7 +1114,7 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json,
-            branch_merge: None,
+            branch_merge,
             merge_strategy: commits[0].merge_strategy.clone(),
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
