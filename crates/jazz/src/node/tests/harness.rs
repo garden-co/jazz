@@ -13,7 +13,7 @@ use crate::protocol::{
 use crate::query::{
     ArraySubquery, Binding, BindingId, Query, RelationColumnRef, RelationExpr,
     RelationJoinCondition, RelationJoinKind, RelationProjectColumn, RelationProjectExpr,
-    RelationQuery, ShapeId, ValidatedQuery, claim, col, contains, eq, lit, ne, not, param,
+    RelationQuery, ShapeId, ValidatedQuery, claim, col, contains, eq, gt, lit, ne, not, param,
 };
 use crate::schema::{MergeStrategy, Policy};
 use crate::tx::{BranchLineage, MergeAspect};

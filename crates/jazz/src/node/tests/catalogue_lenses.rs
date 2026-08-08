@@ -2786,19 +2786,19 @@ fn schema_projected_current_reachable_filters_translate_old_names() {
             "doc",
             "team",
             param("team"),
-            [eq(col("access_kind"), param("access_kind"))],
+            [gt(col("access_kind"), param("access_kind"))],
             "teamEdges",
             "member",
             "parent",
-            [eq(col("edge_kind"), param("edge_kind"))],
+            [gt(col("edge_kind"), param("edge_kind"))],
         )
         .validate(&base)
         .unwrap();
     let binding = shape
         .bind(BTreeMap::from([
             ("team".to_owned(), Value::Uuid(team1.0)),
-            ("access_kind".to_owned(), v("allow")),
-            ("edge_kind".to_owned(), v("active")),
+            ("access_kind".to_owned(), v("a")),
+            ("edge_kind".to_owned(), v("a")),
         ]))
         .unwrap();
     let rows = core
