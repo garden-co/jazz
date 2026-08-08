@@ -1065,6 +1065,124 @@ fn ordinary_commit_unit_routes_to_branch_target_without_touching_root() {
 }
 
 #[test]
+fn invalid_branch_targets_do_not_persist_poison_partitions() {
+    let (_writer_dir, mut writer) = open_history_complete_node_with_schema(node(1), schema());
+    let branch_id = branch(0x65);
+    writer.create_root_branch(branch_id).unwrap();
+    let tx_id = writer
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("todos", row(0x82), 10).cells(title_cells("candidate")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = writer.commit_unit_for(tx_id).unwrap() else {
+        panic!("expected commit unit");
+    };
+    let version = versions[0].clone();
+
+    let (unknown_schema_dir, mut unknown_schema) =
+        open_history_complete_node_with_schema(node(2), schema());
+    unknown_schema.create_root_branch(branch_id).unwrap();
+    let unknown_schema_version = SchemaVersionId(uuid::Uuid::from_bytes([0xee; 16]));
+    let unknown_schema_record = VersionRecord::new(
+        version.table(),
+        unknown_schema_version,
+        version.record().clone(),
+    );
+    unknown_schema
+        .apply_sync_message(SyncMessage::CommitUnit {
+            tx: tx.clone(),
+            versions: vec![unknown_schema_record],
+        })
+        .unwrap();
+    assert!(
+        !unknown_schema
+            .branches
+            .branch_partitions
+            .iter()
+            .any(|(_, _, existing)| *existing == branch_id)
+    );
+    drop(unknown_schema);
+    let reopened = reopen_node_at(&unknown_schema_dir, node(2), schema());
+    assert!(
+        !reopened
+            .branches
+            .branch_partitions
+            .iter()
+            .any(|(_, _, existing)| *existing == branch_id)
+    );
+
+    let (unknown_table_dir, mut unknown_table) =
+        open_history_complete_node_with_schema(node(3), schema());
+    unknown_table.create_root_branch(branch_id).unwrap();
+    let unknown_table_record = VersionRecord::new(
+        "unknown_table",
+        version.schema_version(),
+        version.record().clone(),
+    );
+    assert!(
+        unknown_table
+            .apply_sync_message(SyncMessage::CommitUnit {
+                tx: tx.clone(),
+                versions: vec![unknown_table_record],
+            })
+            .is_err()
+    );
+    assert!(
+        !unknown_table
+            .branches
+            .branch_partitions
+            .iter()
+            .any(|(_, _, existing)| *existing == branch_id)
+    );
+    drop(unknown_table);
+    let reopened = reopen_node_at(&unknown_table_dir, node(3), schema());
+    assert!(
+        !reopened
+            .branches
+            .branch_partitions
+            .iter()
+            .any(|(_, _, existing)| *existing == branch_id)
+    );
+
+    let (oversized_dir, mut oversized) = open_history_complete_node_with_schema(node(4), schema());
+    oversized.create_root_branch(branch_id).unwrap();
+    let oversized_versions =
+        vec![version; crate::protocol_limits::MAX_COMMIT_UNIT_VERSIONS + 1];
+    let mut oversized_tx = tx;
+    oversized_tx.n_total_writes = oversized_versions.len() as u32;
+    let updates = oversized
+        .apply_sync_message(SyncMessage::CommitUnit {
+            tx: oversized_tx,
+            versions: oversized_versions,
+        })
+        .unwrap();
+    assert!(updates.iter().any(|update| matches!(
+        update,
+        SyncMessage::FateUpdate {
+            fate: Fate::Rejected(RejectionReason::MalformedCommit(_)),
+            ..
+        }
+    )));
+    assert!(
+        !oversized
+            .branches
+            .branch_partitions
+            .iter()
+            .any(|(_, _, existing)| *existing == branch_id)
+    );
+    drop(oversized);
+    let reopened = reopen_node_at(&oversized_dir, node(4), schema());
+    assert!(
+        !reopened
+            .branches
+            .branch_partitions
+            .iter()
+            .any(|(_, _, existing)| *existing == branch_id)
+    );
+}
+
+#[test]
 fn ordinary_branch_target_ingest_applies_target_authorization() {
     let schema = branch_rls_schema();
     let (_writer_dir, mut writer) =

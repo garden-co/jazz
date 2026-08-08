@@ -145,18 +145,13 @@ where
                 }
                 Ok(Vec::new())
             }
-            SyncMessage::CommitUnit { tx, versions } => {
-                if let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage {
-                    self.ensure_branch_target_partitions(branch_id, &versions)?;
-                }
-                self.ingest_commit_unit_with_context(
-                    tx,
-                    versions,
-                    u64::MAX - SKEW_TOLERANCE_MS,
-                    ingest_context,
-                    encoded_len,
-                )
-            }
+            SyncMessage::CommitUnit { tx, versions } => self.ingest_commit_unit_with_context(
+                tx,
+                versions,
+                u64::MAX - SKEW_TOLERANCE_MS,
+                ingest_context,
+                encoded_len,
+            ),
             SyncMessage::FateUpdate {
                 tx_id,
                 fate,
@@ -513,6 +508,33 @@ where
         Ok(())
     }
 
+    /// Prepare physical branch storage only after bounded structural checks and
+    /// catalogue dependencies are known to be satisfiable. Missing catalogue
+    /// schemas are left for the ordinary parking path.
+    fn prepare_branch_target_partitions_if_ready(
+        &mut self,
+        tx: &Transaction,
+        versions: &[VersionRecord],
+    ) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
+        let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage else {
+            return Ok(());
+        };
+        if !commit_unit_write_count_matches(tx, versions.len())
+            || versions.iter().any(|version| {
+                !self
+                    .catalogue
+                    .catalogue_schemas
+                    .contains_key(&version.schema_version())
+            })
+        {
+            return Ok(());
+        }
+        self.ensure_branch_target_partitions(branch_id, versions)
+    }
+
     /// Ingest a commit unit as fate authority.
     pub fn ingest_commit_unit(
         &mut self,
@@ -540,9 +562,6 @@ where
     where
         S: ReopenableStorage,
     {
-        if let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage {
-            self.ensure_branch_target_partitions(branch_id, &versions)?;
-        }
         if let Some(reason) = commit_unit_limit_violation(&tx, &versions, encoded_len) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
             self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
@@ -555,6 +574,7 @@ where
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
             return Ok(updates);
         }
+        self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
         let mut updates = self.ingest_commit_unit_once(tx, versions, now_ms, ingest_context)?;
         updates.extend(self.drain_parked_commit_units()?);
         Ok(updates)
@@ -574,8 +594,10 @@ where
     where
         S: ReopenableStorage,
     {
-        if let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage {
-            self.ensure_branch_target_partitions(branch_id, &versions)?;
+        if commit_unit_limit_violation(&tx, &versions, None).is_none()
+            && commit_unit_write_count_matches(&tx, versions.len())
+        {
+            self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
         }
         let mut updates =
             self.ingest_edge_authority_mergeable_commit_unit_once(tx, versions, now_ms, None)?;
@@ -595,8 +617,10 @@ where
     where
         S: ReopenableStorage,
     {
-        if let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage {
-            self.ensure_branch_target_partitions(branch_id, &versions)?;
+        if commit_unit_limit_violation(&tx, &versions, None).is_none()
+            && commit_unit_write_count_matches(&tx, versions.len())
+        {
+            self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
         }
         let ingest_context = Some(CommitUnitIngestContext {
             identity,
@@ -911,9 +935,12 @@ where
     where
         S: ReopenableStorage,
     {
-        if let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage {
-            self.ensure_branch_target_partitions(branch_id, &versions)?;
+        if commit_unit_limit_violation(&tx, &versions, None).is_some()
+            || !commit_unit_write_count_matches(&tx, versions.len())
+        {
+            return Err(Error::UnsupportedCommitUnit("malformed relay commit unit"));
         }
+        self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
         self.ingest_relay_commit_unit_once(tx, versions)?;
         self.drain_parked_relay_commit_units()?;
         Ok(())
@@ -2322,7 +2349,10 @@ where
         Ok(true)
     }
 
-    pub(super) fn drain_parked_commit_units(&mut self) -> Result<Vec<SyncMessage>, Error> {
+    pub(super) fn drain_parked_commit_units(&mut self) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
         let mut updates = Vec::new();
         loop {
             let parked = self
@@ -2347,6 +2377,9 @@ where
                 break;
             }
             for tx_id in ready {
+                if let Some(unit) = self.parking.parked_commit_units.get(&tx_id).cloned() {
+                    self.prepare_branch_target_partitions_if_ready(&unit.tx, &unit.versions)?;
+                }
                 let Some(unit) = self.parking.parked_commit_units.remove(&tx_id) else {
                     continue;
                 };

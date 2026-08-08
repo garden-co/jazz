@@ -1369,7 +1369,23 @@ where
             ],
         );
         self.database.commit_batch(batch)?;
-        self.rebuild_database_slot()?;
+        if let Err(rebuild_error) = self.rebuild_database_slot() {
+            self.branches
+                .branch_partitions
+                .remove(&(table.clone(), schema_version, branch_id));
+            let mut rollback = self.database.open_batch();
+            rollback.delete(
+                "jazz_branch_partitions",
+                PrimaryKeyValue::Composite(vec![
+                    PrimaryKeyValue::Bytes(table.as_bytes().to_vec()),
+                    PrimaryKeyValue::Uuid(schema_version.0),
+                    PrimaryKeyValue::Uuid(branch_id.0),
+                ]),
+            );
+            self.database.commit_batch(rollback)?;
+            self.rebuild_database_slot()?;
+            return Err(rebuild_error);
+        }
         Ok(())
     }
 
@@ -1382,11 +1398,16 @@ where
         S: ReopenableStorage,
     {
         self.ensure_branch_open(branch_id)?;
-        for (table, schema_version) in versions
+        let partitions = versions
             .iter()
             .map(|version| (version.table().to_owned(), version.schema_version()))
-            .collect::<BTreeSet<_>>()
-        {
+            .collect::<BTreeSet<_>>();
+        // Validate the complete set before persisting any metadata. This makes
+        // a malformed mixed-table unit all-or-nothing at the partition layer.
+        for (table, schema_version) in &partitions {
+            self.table_in_schema(table, *schema_version)?;
+        }
+        for (table, schema_version) in partitions {
             self.persist_branch_partition(table, schema_version, branch_id)?;
         }
         Ok(())
