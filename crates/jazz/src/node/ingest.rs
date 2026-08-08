@@ -519,7 +519,10 @@ where
         tx: Transaction,
         versions: Vec<VersionRecord>,
         now_ms: u64,
-    ) -> Result<Vec<SyncMessage>, Error> {
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
         self.ingest_commit_unit_with_context(tx, versions, now_ms, None, None)
     }
 
@@ -533,7 +536,13 @@ where
         now_ms: u64,
         ingest_context: Option<CommitUnitIngestContext>,
         encoded_len: Option<usize>,
-    ) -> Result<Vec<SyncMessage>, Error> {
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        if let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage {
+            self.ensure_branch_target_partitions(branch_id, &versions)?;
+        }
         if let Some(reason) = commit_unit_limit_violation(&tx, &versions, encoded_len) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
             self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
@@ -561,7 +570,13 @@ where
         tx: Transaction,
         versions: Vec<VersionRecord>,
         now_ms: u64,
-    ) -> Result<Vec<SyncMessage>, Error> {
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        if let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage {
+            self.ensure_branch_target_partitions(branch_id, &versions)?;
+        }
         let mut updates =
             self.ingest_edge_authority_mergeable_commit_unit_once(tx, versions, now_ms, None)?;
         updates.extend(self.drain_parked_commit_units()?);
@@ -576,7 +591,13 @@ where
         versions: Vec<VersionRecord>,
         now_ms: u64,
         identity: AuthorId,
-    ) -> Result<Vec<SyncMessage>, Error> {
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        if let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage {
+            self.ensure_branch_target_partitions(branch_id, &versions)?;
+        }
         let ingest_context = Some(CommitUnitIngestContext {
             identity,
             trust: CommitUnitTrust::TrustedBackend,
@@ -692,7 +713,9 @@ where
             Some(global_seq),
             Some(DurabilityTier::Global),
         )?;
-        self.create_merge_versions_for(&versions)?;
+        if tx.target_lineage == crate::tx::BranchLineage::Root {
+            self.create_merge_versions_for(&versions)?;
+        }
         self.checkpoint_large_values_for_tx(tx_id)?;
         Ok(Fate::Accepted)
     }
@@ -853,7 +876,12 @@ where
         self.clock.next_global_seq = self.clock.next_global_seq.next();
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
-        let merge_rows = self.merge_rows_for_versions(&versions)?;
+        let root_target = tx.target_lineage == crate::tx::BranchLineage::Root;
+        let merge_rows = if root_target {
+            self.merge_rows_for_versions(&versions)?
+        } else {
+            Vec::new()
+        };
         self.ingest_known_transaction(
             tx.clone(),
             versions,
@@ -862,7 +890,9 @@ where
             durability,
         )?;
         debug_assert_eq!(self.clock.applied_global_watermark, global_seq);
-        self.create_merge_versions_for_rows(merge_rows)?;
+        if root_target {
+            self.create_merge_versions_for_rows(merge_rows)?;
+        }
         self.checkpoint_large_values_for_tx(tx.tx_id)?;
         Ok(vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
@@ -877,7 +907,13 @@ where
         &mut self,
         tx: Transaction,
         versions: Vec<VersionRecord>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
+        if let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage {
+            self.ensure_branch_target_partitions(branch_id, &versions)?;
+        }
         self.ingest_relay_commit_unit_once(tx, versions)?;
         self.drain_parked_relay_commit_units()?;
         Ok(())
@@ -1116,7 +1152,12 @@ where
         self.clock.next_global_seq = self.clock.next_global_seq.next();
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
-        let merge_rows = self.merge_rows_for_versions(&versions)?;
+        let root_target = tx.target_lineage == crate::tx::BranchLineage::Root;
+        let merge_rows = if root_target {
+            self.merge_rows_for_versions(&versions)?
+        } else {
+            Vec::new()
+        };
         self.ingest_known_transaction(
             tx.clone(),
             versions,
@@ -1125,7 +1166,9 @@ where
             durability,
         )?;
         debug_assert_eq!(self.clock.applied_global_watermark, global_seq);
-        self.create_merge_versions_for_rows(merge_rows)?;
+        if root_target {
+            self.create_merge_versions_for_rows(merge_rows)?;
+        }
         self.checkpoint_large_values_for_tx(tx.tx_id)?;
         Ok(vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
@@ -4631,7 +4674,7 @@ where
                 self.write_ahead_current_insert(batch, &stored)?;
             }
         }
-        if !matches!(fate, Fate::Rejected(_)) {
+        if update_current_indexes && !matches!(fate, Fate::Rejected(_)) {
             for stored in &content_versions {
                 self.update_merge_heads_for_content_version_in_batch(batch, stored)?;
             }

@@ -1033,6 +1033,22 @@ fn ordinary_commit_unit_routes_to_branch_target_without_touching_root() {
             .into_iter()
             .all(|current| current.row_uuid() != row(0x81))
     );
+    let root_tx = receiver
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0x81), 30).cells(title_cells("root-after-branch")),
+        )
+        .unwrap();
+    receiver.finalize_local_mergeable_commit(root_tx).unwrap();
+    receiver
+        .assert_merge_heads_match_history_for_test("todos", row(0x81))
+        .unwrap();
+    assert_eq!(
+        receiver
+            .visible_current_cells("todos", row(0x81))
+            .unwrap()
+            .unwrap(),
+        title_cells("root-after-branch")
+    );
     receiver.apply_sync_message(unit).unwrap();
     let SyncMessage::CommitUnit {
         mut tx,
