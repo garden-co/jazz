@@ -5185,6 +5185,24 @@ fn joined_issue_query() -> Query {
     Query::from("issues").join_via("issue_tags", "issue", [eq(col("tag"), lit("prepared"))])
 }
 
+#[test]
+fn prepared_query_discards_graph_handle_when_runtime_changes() {
+    let schema = issue_schema();
+    let db = open_db(0xb7, AuthorId::SYSTEM, &schema);
+    let prepared = db.prepare_query(&joined_issue_query()).unwrap();
+    let runtime_token = db.node.node.borrow().groove_runtime_token();
+    assert!(
+        prepared
+            .plan_for_tier(DurabilityTier::Local, runtime_token)
+            .is_some()
+    );
+    assert!(
+        prepared
+            .plan_for_tier(DurabilityTier::Local, runtime_token.wrapping_add(1))
+            .is_none()
+    );
+}
+
 fn seed_issue_project(db: &Db<RocksDbStorage>, author: AuthorId) {
     db.seed_settled_mergeable_for_bootstrap(
         "projects",

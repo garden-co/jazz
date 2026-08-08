@@ -615,11 +615,13 @@ where
         } else {
             (None, None)
         };
+        let groove_runtime_token = self.node.node.borrow().groove_runtime_token();
         Ok(PreparedQuery {
             shape,
             binding,
             local_plan,
             global_plan,
+            groove_runtime_token,
         })
     }
 
@@ -629,15 +631,14 @@ where
     /// coverage is tracked separately by query attachments and durability-aware
     /// subscription reads.
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
-        self.node
-            .node
-            .borrow_mut()
-            .query_rows_local_preview(
-                &prepared.shape,
-                &prepared.binding,
-                prepared.plan_for_tier(DurabilityTier::Local),
-            )
-            .map_err(Into::into)
+        let mut node = self.node.node.borrow_mut();
+        let groove_runtime_token = node.groove_runtime_token();
+        node.query_rows_local_preview(
+            &prepared.shape,
+            &prepared.binding,
+            prepared.plan_for_tier(DurabilityTier::Local, groove_runtime_token),
+        )
+        .map_err(Into::into)
     }
 
     /// Synchronously read rows and attribute work inside the node query path.
@@ -649,15 +650,14 @@ where
         &self,
         prepared: &PreparedQuery,
     ) -> Result<(Vec<CurrentRow>, QueryReadProfile), Error> {
-        self.node
-            .node
-            .borrow_mut()
-            .query_rows_local_preview_profiled(
-                &prepared.shape,
-                &prepared.binding,
-                prepared.plan_for_tier(DurabilityTier::Local),
-            )
-            .map_err(Into::into)
+        let mut node = self.node.node.borrow_mut();
+        let groove_runtime_token = node.groove_runtime_token();
+        node.query_rows_local_preview_profiled(
+            &prepared.shape,
+            &prepared.binding,
+            prepared.plan_for_tier(DurabilityTier::Local, groove_runtime_token),
+        )
+        .map_err(Into::into)
     }
 
     /// Synchronously read exactly one local row if present.
@@ -1134,10 +1134,12 @@ where
             )?;
         let local_subscription_id = subscription.subscription_id();
         let local_node = Rc::clone(&self.node.node);
+        let local_runtime_token = local_node.borrow().groove_runtime_token();
         let mut local_cleanup = CleanupGuard::new(Box::new(move || {
-            local_node
-                .borrow_mut()
-                .unsubscribe_groove_subscription(local_subscription_id);
+            let mut node = local_node.borrow_mut();
+            if node.groove_runtime_token() == local_runtime_token {
+                node.unsubscribe_groove_subscription(local_subscription_id);
+            }
         }));
         // Array output is admitted only as a complete terminal-rendered parent.
         // Validate the reset before retaining subscription state or publishing
@@ -2993,16 +2995,15 @@ where
         identity: AuthorId,
     ) -> Result<Option<CurrentRow>, Error> {
         let query = self.prepare_query(&Query::from(table))?;
-        Ok(self
-            .node
-            .node
-            .borrow_mut()
+        let mut node = self.node.node.borrow_mut();
+        let groove_runtime_token = node.groove_runtime_token();
+        Ok(node
             .query_rows_for_link_with_prepared_plan(
                 &query.shape,
                 &query.binding,
                 DurabilityTier::Local,
                 identity,
-                query.plan_for_tier(DurabilityTier::Local),
+                query.plan_for_tier(DurabilityTier::Local, groove_runtime_token),
             )?
             .into_iter()
             .find(|candidate| candidate.row_uuid() == row))
@@ -8245,6 +8246,9 @@ pub struct PreparedQuery {
     binding: Binding,
     local_plan: Option<PreparedQueryPlanHandle>,
     global_plan: Option<PreparedQueryPlanHandle>,
+    /// Plans contain IDs from one live Groove graph registry. A catalogue
+    /// change can replace that registry while this public handle survives.
+    groove_runtime_token: u64,
 }
 
 impl PreparedQuery {
@@ -8258,7 +8262,14 @@ impl PreparedQuery {
         &self.binding
     }
 
-    fn plan_for_tier(&self, tier: DurabilityTier) -> Option<&PreparedQueryPlanHandle> {
+    fn plan_for_tier(
+        &self,
+        tier: DurabilityTier,
+        groove_runtime_token: u64,
+    ) -> Option<&PreparedQueryPlanHandle> {
+        if self.groove_runtime_token != groove_runtime_token {
+            return None;
+        }
         match tier {
             DurabilityTier::Local => self.local_plan.as_ref(),
             DurabilityTier::Global => self.global_plan.as_ref(),
@@ -8268,7 +8279,8 @@ impl PreparedQuery {
 
     #[cfg(test)]
     fn has_plan_for_tier(&self, tier: DurabilityTier) -> bool {
-        self.plan_for_tier(tier).is_some()
+        self.plan_for_tier(tier, self.groove_runtime_token)
+            .is_some()
     }
 }
 
