@@ -1221,6 +1221,7 @@ where
             schema_version_aliases.insert(schema_version, alias);
             physical_mappings.insert(schema_version, mapping);
         }
+        validate_physical_variant_cases(&physical_mappings, &schema_version_aliases)?;
         let mut next_physical_table_id = 1;
         let mut next_physical_column_id = 1;
         for mapping in physical_mappings.values() {
@@ -4205,7 +4206,11 @@ where
                     }
                     tables.insert(
                         table.name.clone(),
-                        TablePhysicalMapping { table_id, columns },
+                        TablePhysicalMapping {
+                            table_id,
+                            columns,
+                            variant_cases: Vec::new(),
+                        },
                     );
                 }
                 SchemaPhysicalMapping { tables }
@@ -4224,6 +4229,41 @@ where
                     .ok_or(Error::InvalidStoredValue("schema version alias exhausted"))?,
             ),
         };
+        let schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&schema_version)
+            .ok_or(Error::InvalidStoredValue(
+                "physical mapping schema payload missing",
+            ))?
+            .schema
+            .clone();
+        let mut candidate_mappings = self.catalogue.physical_mappings.clone();
+        candidate_mappings.insert(schema_version, mapping);
+        let mut candidate_aliases = self.catalogue.schema_version_aliases.clone();
+        candidate_aliases.insert(schema_version, alias);
+        for table in &schema.tables {
+            allocate_physical_variant_cases(
+                &mut candidate_mappings,
+                &candidate_aliases,
+                schema_version,
+                &table.name,
+                [(
+                    None,
+                    table
+                        .columns
+                        .iter()
+                        .map(|column| column.name.clone())
+                        .collect(),
+                )],
+            )?;
+        }
+        let mapping =
+            candidate_mappings
+                .remove(&schema_version)
+                .ok_or(Error::InvalidStoredValue(
+                    "allocated physical mapping disappeared",
+                ))?;
         let mut batch = self.database.open_batch();
         Self::write_schema_version_mapping_to_batch(&mut batch, alias, schema_version, &mapping)?;
         self.database.commit_batch(batch)?;
@@ -4245,6 +4285,14 @@ where
                 .schema_version_aliases
                 .values()
                 .map(|alias| alias.0)
+                .chain(
+                    self.catalogue
+                        .physical_mappings
+                        .values()
+                        .flat_map(|mapping| mapping.tables.values())
+                        .flat_map(|table| table.variant_cases.iter())
+                        .map(|case| u64::from(case.tag)),
+                )
                 .max()
                 .unwrap_or(0)
                 .checked_add(1)
@@ -4425,6 +4473,7 @@ where
                 TablePhysicalMapping {
                     table_id: source_table.table_id,
                     columns,
+                    variant_cases: Vec::new(),
                 },
             );
         }

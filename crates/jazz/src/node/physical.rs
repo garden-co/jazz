@@ -25,6 +25,19 @@ pub(super) struct SchemaPhysicalMapping {
 pub(super) struct TablePhysicalMapping {
     pub(super) table_id: PhysicalTableId,
     pub(super) columns: BTreeMap<String, PhysicalColumnId>,
+    /// Durable flat Groove cases for this Jazz layout. `user_case = None` is
+    /// the ordinary non-union row. For a user top-level union, one entry is
+    /// allocated per realizable `(schema layout, user case)` pair.
+    #[serde(default)]
+    pub(super) variant_cases: Vec<PhysicalVariantCase>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(super) struct PhysicalVariantCase {
+    pub(super) user_case: Option<String>,
+    pub(super) tag: u32,
+    /// Logical fields physically present in this dense case payload.
+    pub(super) fields: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -149,10 +162,187 @@ pub(super) fn allocate_provisional_physical_mapping(
         }
         tables.insert(
             table.name.clone(),
-            TablePhysicalMapping { table_id, columns },
+            TablePhysicalMapping {
+                table_id,
+                columns,
+                variant_cases: Vec::new(),
+            },
         );
     }
     Ok(SchemaPhysicalMapping { tables })
+}
+
+/// Allocate and retain the flat Groove cases for one Jazz table layout.
+///
+/// `cases` is `(portable user-case name, logical fields present)`. Passing one
+/// `None` case represents an ordinary non-union table. Allocation consults all
+/// schema mappings sharing the physical table lineage, so tags never collide
+/// across layout evolution. The caller persists the containing
+/// `SchemaPhysicalMapping` in the same catalogue batch as schema admission.
+pub(super) fn allocate_physical_variant_cases(
+    mappings: &mut BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+    schema_version: SchemaVersionId,
+    logical_table: &str,
+    cases: impl IntoIterator<Item = (Option<String>, BTreeSet<String>)>,
+) -> Result<Vec<PhysicalVariantCase>, Error> {
+    let target = mappings
+        .get(&schema_version)
+        .and_then(|mapping| mapping.tables.get(logical_table))
+        .ok_or(Error::InvalidStoredValue(
+            "variant-case target physical mapping missing",
+        ))?;
+    let table_id = target.table_id;
+    let target_columns = target.columns.keys().cloned().collect::<BTreeSet<_>>();
+    let existing_target = target
+        .variant_cases
+        .iter()
+        .map(|case| (case.user_case.clone(), case.clone()))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut used = BTreeMap::<u32, (SchemaVersionId, Option<String>)>::new();
+    for (candidate_schema, mapping) in mappings.iter() {
+        let Some((_, table)) = mapping
+            .tables
+            .iter()
+            .find(|(_, table)| table.table_id == table_id)
+        else {
+            continue;
+        };
+        if table.variant_cases.is_empty() {
+            // The target mapping is still provisional: its alias has never
+            // been written as a row tag, and is replaced by the cases below.
+            if *candidate_schema == schema_version {
+                continue;
+            }
+            let alias = aliases
+                .get(candidate_schema)
+                .copied()
+                .ok_or(Error::InvalidStoredValue(
+                    "variant-case schema alias missing",
+                ))?;
+            let tag = groove_variant_tag(alias)?;
+            if used.insert(tag, (*candidate_schema, None)).is_some() {
+                return Err(Error::InvalidStoredValue(
+                    "physical table variant tag collision",
+                ));
+            }
+        } else {
+            for case in &table.variant_cases {
+                if used
+                    .insert(case.tag, (*candidate_schema, case.user_case.clone()))
+                    .is_some()
+                {
+                    return Err(Error::InvalidStoredValue(
+                        "physical table variant tag collision",
+                    ));
+                }
+            }
+        }
+    }
+
+    let requested = cases.into_iter().collect::<BTreeMap<_, _>>();
+    if requested.is_empty() {
+        return Err(Error::InvalidStoredValue(
+            "physical table variant registry must not be empty",
+        ));
+    }
+    if existing_target.is_empty()
+        && requested.len() == 1
+        && let Some(fields) = requested.get(&None)
+    {
+        let tag = groove_variant_tag(*aliases.get(&schema_version).ok_or(
+            Error::InvalidStoredValue("variant-case schema alias missing"),
+        )?)?;
+        if used.contains_key(&tag) {
+            return Err(Error::InvalidStoredValue(
+                "physical table variant tag collision",
+            ));
+        }
+        let allocated = vec![PhysicalVariantCase {
+            user_case: None,
+            tag,
+            fields: fields.clone(),
+        }];
+        mappings
+            .get_mut(&schema_version)
+            .and_then(|mapping| mapping.tables.get_mut(logical_table))
+            .ok_or(Error::InvalidStoredValue(
+                "variant-case target physical mapping missing",
+            ))?
+            .variant_cases = allocated.clone();
+        return Ok(allocated);
+    }
+    let mut next = used.keys().next_back().copied().unwrap_or(0);
+    let mut allocated = Vec::with_capacity(requested.len());
+    for (user_case, fields) in requested {
+        if !fields.is_subset(&target_columns) {
+            return Err(Error::InvalidStoredValue(
+                "physical table variant contains an unknown field",
+            ));
+        }
+        if let Some(existing) = existing_target.get(&user_case) {
+            if existing.fields != fields {
+                return Err(Error::InvalidStoredValue(
+                    "physical table variant case definition changed",
+                ));
+            }
+            allocated.push(existing.clone());
+            continue;
+        }
+        next = next.checked_add(1).ok_or(Error::InvalidStoredValue(
+            "physical table variant tag exhausted",
+        ))?;
+        allocated.push(PhysicalVariantCase {
+            user_case,
+            tag: next,
+            fields,
+        });
+    }
+    allocated.sort_by_key(|case| case.tag);
+    mappings
+        .get_mut(&schema_version)
+        .and_then(|mapping| mapping.tables.get_mut(logical_table))
+        .ok_or(Error::InvalidStoredValue(
+            "variant-case target physical mapping missing",
+        ))?
+        .variant_cases = allocated.clone();
+    Ok(allocated)
+}
+
+pub(super) fn validate_physical_variant_cases(
+    mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+) -> Result<(), Error> {
+    let mut by_table =
+        BTreeMap::<PhysicalTableId, BTreeMap<u32, (SchemaVersionId, Option<String>)>>::new();
+    for (schema_version, mapping) in mappings {
+        for table in mapping.tables.values() {
+            let cases = if table.variant_cases.is_empty() {
+                vec![(
+                    groove_variant_tag(*aliases.get(schema_version).ok_or(
+                        Error::InvalidStoredValue("variant-case schema alias missing"),
+                    )?)?,
+                    None,
+                )]
+            } else {
+                table
+                    .variant_cases
+                    .iter()
+                    .map(|case| (case.tag, case.user_case.clone()))
+                    .collect()
+            };
+            let tags = by_table.entry(table.table_id).or_default();
+            for (tag, user_case) in cases {
+                if tags.insert(tag, (*schema_version, user_case)).is_some() {
+                    return Err(Error::InvalidStoredValue(
+                        "physical table variant tag collision",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn physical_history_binding(
@@ -480,27 +670,39 @@ where
                     .ok_or(Error::InvalidStoredValue(
                         "physical projection source schema alias missing",
                     ))?;
-                let Some(fields) = self.physical_history_projection_case(
-                    source_schema,
-                    &source_table_name,
-                    &source_mapping,
-                    target_schema,
-                    &target_table_name,
-                )?
-                else {
-                    self.database.register_variant_ignore_case(
+                let cases = if source_mapping.variant_cases.is_empty() {
+                    vec![(groove_variant_tag(source_alias)?, None)]
+                } else {
+                    source_mapping
+                        .variant_cases
+                        .iter()
+                        .map(|case| (case.tag, Some(&case.fields)))
+                        .collect()
+                };
+                for (tag, present) in cases {
+                    let Some(fields) = self.physical_history_projection_case(
+                        source_schema,
+                        &source_table_name,
+                        &source_mapping,
+                        target_schema,
+                        &target_table_name,
+                        present,
+                    )?
+                    else {
+                        self.database.register_variant_ignore_case(
+                            &storage_table,
+                            &projection_target,
+                            tag,
+                        )?;
+                        continue;
+                    };
+                    self.database.register_variant_case(
                         &storage_table,
                         &projection_target,
-                        groove_variant_tag(source_alias)?,
+                        tag,
+                        fields,
                     )?;
-                    continue;
-                };
-                self.database.register_variant_case(
-                    &storage_table,
-                    &projection_target,
-                    groove_variant_tag(source_alias)?,
-                    fields,
-                )?;
+                }
             }
         }
         Ok(())
@@ -564,27 +766,39 @@ where
                     .ok_or(Error::InvalidStoredValue(
                         "physical current projection source schema alias missing",
                     ))?;
-                let fields = self.physical_current_projection_case(
-                    source_schema,
-                    &source_table_name,
-                    &source_mapping,
-                    target_schema,
-                    &target_table_name,
-                )?;
-                for storage_table in &storage_tables {
-                    if let Some(fields) = fields.clone() {
-                        self.database.register_variant_case(
-                            storage_table,
-                            &projection_target,
-                            groove_variant_tag(source_alias)?,
-                            fields,
-                        )?;
-                    } else {
-                        self.database.register_variant_ignore_case(
-                            storage_table,
-                            &projection_target,
-                            groove_variant_tag(source_alias)?,
-                        )?;
+                let cases = if source_mapping.variant_cases.is_empty() {
+                    vec![(groove_variant_tag(source_alias)?, None)]
+                } else {
+                    source_mapping
+                        .variant_cases
+                        .iter()
+                        .map(|case| (case.tag, Some(&case.fields)))
+                        .collect()
+                };
+                for (tag, present) in cases {
+                    let fields = self.physical_current_projection_case(
+                        source_schema,
+                        &source_table_name,
+                        &source_mapping,
+                        target_schema,
+                        &target_table_name,
+                        present,
+                    )?;
+                    for storage_table in &storage_tables {
+                        if let Some(fields) = fields.clone() {
+                            self.database.register_variant_case(
+                                storage_table,
+                                &projection_target,
+                                tag,
+                                fields,
+                            )?;
+                        } else {
+                            self.database.register_variant_ignore_case(
+                                storage_table,
+                                &projection_target,
+                                tag,
+                            )?;
+                        }
                     }
                 }
             }
@@ -850,6 +1064,7 @@ where
         source_mapping: &TablePhysicalMapping,
         target_schema: SchemaVersionId,
         target_table_name: &str,
+        present: Option<&BTreeSet<String>>,
     ) -> Result<Option<Vec<ProjectField>>, Error> {
         self.physical_content_projection_case(
             source_schema,
@@ -858,6 +1073,7 @@ where
             target_schema,
             target_table_name,
             ContentProjectionShape::History,
+            present,
         )
     }
 
@@ -868,6 +1084,7 @@ where
         source_mapping: &TablePhysicalMapping,
         target_schema: SchemaVersionId,
         target_table_name: &str,
+        present: Option<&BTreeSet<String>>,
     ) -> Result<Option<Vec<ProjectField>>, Error> {
         self.physical_content_projection_case(
             source_schema,
@@ -876,6 +1093,7 @@ where
             target_schema,
             target_table_name,
             ContentProjectionShape::Current,
+            present,
         )
     }
 
@@ -887,6 +1105,7 @@ where
         target_schema: SchemaVersionId,
         target_table_name: &str,
         shape: ContentProjectionShape,
+        present: Option<&BTreeSet<String>>,
     ) -> Result<Option<Vec<ProjectField>>, Error> {
         #[derive(Clone)]
         enum CellProjection {
@@ -899,6 +1118,7 @@ where
         let mut cells = source_table
             .columns
             .iter()
+            .filter(|column| present.is_none_or(|present| present.contains(&column.name)))
             .map(|column| {
                 let column_id = source_mapping.columns.get(&column.name).copied().ok_or(
                     Error::InvalidStoredValue("physical projection column mapping missing"),
@@ -977,18 +1197,29 @@ where
             .collect::<Vec<_>>();
         for column in &target_table.columns {
             let output = user_column_field(&column.name);
-            let Some(projection) = cells.remove(&column.name) else {
-                return Ok(None);
+            let projection = match cells.remove(&column.name) {
+                Some(projection) => projection,
+                None if present.is_some() => CellProjection::Literal(Value::Nullable(None)),
+                None => return Ok(None),
             };
             match projection {
                 CellProjection::Field(source) => {
                     fields.push(ProjectField::renamed(source, output));
                 }
-                CellProjection::Literal(value) => fields.push(ProjectField::literal_typed(
-                    output,
-                    Value::Nullable(Some(Box::new(value))),
-                    records::ValueType::Nullable(Box::new(column.column_type.clone())),
-                )),
+                CellProjection::Literal(Value::Nullable(None)) => {
+                    fields.push(ProjectField::literal_typed(
+                        output,
+                        Value::Nullable(None),
+                        records::ValueType::Nullable(Box::new(column.column_type.clone())),
+                    ));
+                }
+                CellProjection::Literal(value) => {
+                    fields.push(ProjectField::literal_typed(
+                        output,
+                        Value::Nullable(Some(Box::new(value))),
+                        records::ValueType::Nullable(Box::new(column.column_type.clone())),
+                    ));
+                }
             }
         }
         fields.extend(
@@ -1268,42 +1499,55 @@ pub(super) fn physical_version_storage_tables(
         );
         rejected.primary_key = rejected_template.primary_key.clone();
 
-        let mut layouts_by_alias = BTreeMap::new();
-        let mut current_layouts_by_alias = BTreeMap::new();
-        let mut rejected_layouts_by_alias = BTreeMap::new();
+        let mut layouts_by_tag = BTreeMap::new();
+        let mut current_layouts_by_tag = BTreeMap::new();
+        let mut rejected_layouts_by_tag = BTreeMap::new();
         for (schema_version, logical_table, mapping) in &variants {
             let alias = schema_version_aliases.get(&schema_version).copied().ok_or(
                 Error::InvalidStoredValue("physical history schema alias missing"),
             )?;
-            let fields = physical_history_field_names(logical_table, mapping)?;
-            if layouts_by_alias.insert(alias, fields).is_some() {
-                return Err(Error::InvalidStoredValue(
-                    "schema maps multiple logical tables to one physical lineage",
-                ));
-            }
-            let fields = physical_current_field_names(logical_table, mapping)?;
-            if current_layouts_by_alias.insert(alias, fields).is_some() {
-                return Err(Error::InvalidStoredValue(
-                    "schema maps multiple logical tables to one physical lineage",
-                ));
-            }
-            let fields = physical_rejected_version_field_names(logical_table, mapping)?;
-            if rejected_layouts_by_alias.insert(alias, fields).is_some() {
-                return Err(Error::InvalidStoredValue(
-                    "schema maps multiple logical tables to one physical lineage",
-                ));
+            let cases = if mapping.variant_cases.is_empty() {
+                vec![(groove_variant_tag(alias)?, None)]
+            } else {
+                mapping
+                    .variant_cases
+                    .iter()
+                    .map(|case| (case.tag, Some(&case.fields)))
+                    .collect()
+            };
+            for (tag, fields) in cases {
+                let history =
+                    physical_history_field_names_for_case(logical_table, mapping, fields)?;
+                if layouts_by_tag.insert(tag, history).is_some() {
+                    return Err(Error::InvalidStoredValue(
+                        "physical table variant tag collision",
+                    ));
+                }
+                let current =
+                    physical_current_field_names_for_case(logical_table, mapping, fields)?;
+                if current_layouts_by_tag.insert(tag, current).is_some() {
+                    return Err(Error::InvalidStoredValue(
+                        "physical table variant tag collision",
+                    ));
+                }
+                let rejected =
+                    physical_rejected_version_field_names_for_case(logical_table, mapping, fields)?;
+                if rejected_layouts_by_tag.insert(tag, rejected).is_some() {
+                    return Err(Error::InvalidStoredValue(
+                        "physical table variant tag collision",
+                    ));
+                }
             }
         }
-        for (alias, fields) in layouts_by_alias {
-            physical = physical.with_variant(groove_variant_tag(alias)?, fields);
+        for (tag, fields) in layouts_by_tag {
+            physical = physical.with_variant(tag, fields);
         }
-        for (alias, fields) in current_layouts_by_alias {
-            physical_global =
-                physical_global.with_variant(groove_variant_tag(alias)?, fields.clone());
-            physical_ahead = physical_ahead.with_variant(groove_variant_tag(alias)?, fields);
+        for (tag, fields) in current_layouts_by_tag {
+            physical_global = physical_global.with_variant(tag, fields.clone());
+            physical_ahead = physical_ahead.with_variant(tag, fields);
         }
-        for (alias, fields) in rejected_layouts_by_alias {
-            rejected = rejected.with_variant(groove_variant_tag(alias)?, fields);
+        for (tag, fields) in rejected_layouts_by_tag {
+            rejected = rejected.with_variant(tag, fields);
         }
         for (_, branch_id) in branch_partitions
             .iter()
@@ -1395,6 +1639,14 @@ fn physical_history_field_names(
     table: &TableSchema,
     mapping: &TablePhysicalMapping,
 ) -> Result<Vec<String>, Error> {
+    physical_history_field_names_for_case(table, mapping, None)
+}
+
+fn physical_history_field_names_for_case(
+    table: &TableSchema,
+    mapping: &TablePhysicalMapping,
+    present: Option<&BTreeSet<String>>,
+) -> Result<Vec<String>, Error> {
     let logical_descriptor = table.history_storage_table().record_schema();
     let mut fields = logical_descriptor
         .fields()
@@ -1407,6 +1659,9 @@ fn physical_history_field_names(
         })
         .collect::<Result<Vec<_>, _>>()?;
     for column in &table.columns {
+        if present.is_some_and(|present| !present.contains(&column.name)) {
+            continue;
+        }
         let column_id =
             mapping
                 .columns
@@ -1436,6 +1691,14 @@ fn physical_current_field_names(
     table: &TableSchema,
     mapping: &TablePhysicalMapping,
 ) -> Result<Vec<String>, Error> {
+    physical_current_field_names_for_case(table, mapping, None)
+}
+
+fn physical_current_field_names_for_case(
+    table: &TableSchema,
+    mapping: &TablePhysicalMapping,
+    present: Option<&BTreeSet<String>>,
+) -> Result<Vec<String>, Error> {
     let logical_descriptor = table.global_current_storage_tables()[0].record_schema();
     let mut fields = logical_descriptor
         .fields()
@@ -1448,6 +1711,9 @@ fn physical_current_field_names(
         })
         .collect::<Result<Vec<_>, _>>()?;
     for column in &table.columns {
+        if present.is_some_and(|present| !present.contains(&column.name)) {
+            continue;
+        }
         let column_id =
             mapping
                 .columns
@@ -1477,6 +1743,14 @@ fn physical_rejected_version_field_names(
     table: &TableSchema,
     mapping: &TablePhysicalMapping,
 ) -> Result<Vec<String>, Error> {
+    physical_rejected_version_field_names_for_case(table, mapping, None)
+}
+
+fn physical_rejected_version_field_names_for_case(
+    table: &TableSchema,
+    mapping: &TablePhysicalMapping,
+    present: Option<&BTreeSet<String>>,
+) -> Result<Vec<String>, Error> {
     let logical_descriptor = table.rejected_versions_storage_table().record_schema();
     let mut fields = logical_descriptor
         .fields()
@@ -1489,6 +1763,9 @@ fn physical_rejected_version_field_names(
         })
         .collect::<Result<Vec<_>, _>>()?;
     for column in &table.columns {
+        if present.is_some_and(|present| !present.contains(&column.name)) {
+            continue;
+        }
         let column_id =
             mapping
                 .columns
@@ -1528,4 +1805,106 @@ pub(super) fn physical_column_epoch_is_compatible(
         && source_column.text_merge_spec == target_column.text_merge_spec
         && source_table.merge_strategy(source_column_name)
             == target_table.merge_strategy(target_column_name)
+}
+
+#[cfg(test)]
+mod variant_case_tests {
+    use super::*;
+
+    fn schema(byte: u8) -> SchemaVersionId {
+        SchemaVersionId(uuid::Uuid::from_bytes([byte; 16]))
+    }
+
+    fn mapping(table_id: u64, columns: &[(&str, u64)]) -> SchemaPhysicalMapping {
+        SchemaPhysicalMapping {
+            tables: BTreeMap::from([(
+                "entries".to_owned(),
+                TablePhysicalMapping {
+                    table_id: PhysicalTableId(table_id),
+                    columns: columns
+                        .iter()
+                        .map(|(name, id)| (name.to_string(), PhysicalColumnId(*id)))
+                        .collect(),
+                    variant_cases: Vec::new(),
+                },
+            )]),
+        }
+    }
+
+    fn cases(edited: bool) -> Vec<(Option<String>, BTreeSet<String>)> {
+        let mut text = BTreeSet::from(["id".to_owned(), "body".to_owned()]);
+        if edited {
+            text.insert("edited".to_owned());
+        }
+        vec![
+            (Some("text".to_owned()), text),
+            (
+                Some("image".to_owned()),
+                BTreeSet::from(["id".to_owned(), "url".to_owned()]),
+            ),
+        ]
+    }
+
+    #[test]
+    fn nested_layout_and_user_cases_allocate_durably_without_collisions() {
+        let v1 = schema(1);
+        let v2 = schema(2);
+        let aliases = BTreeMap::from([(v1, SchemaVersionAlias(1)), (v2, SchemaVersionAlias(2))]);
+        let mut mappings =
+            BTreeMap::from([(v1, mapping(7, &[("id", 1), ("body", 2), ("url", 3)]))]);
+
+        let first =
+            allocate_physical_variant_cases(&mut mappings, &aliases, v1, "entries", cases(false))
+                .unwrap();
+        mappings.insert(
+            v2,
+            mapping(7, &[("id", 1), ("body", 2), ("url", 3), ("edited", 4)]),
+        );
+        let second =
+            allocate_physical_variant_cases(&mut mappings, &aliases, v2, "entries", cases(true))
+                .unwrap();
+        assert_eq!(
+            first.iter().map(|case| case.tag).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(
+            second.iter().map(|case| case.tag).collect::<Vec<_>>(),
+            [3, 4]
+        );
+        validate_physical_variant_cases(&mappings, &aliases).unwrap();
+
+        // The mapping is the payload durably written in jazz_schema_versions;
+        // a JSON round trip models close/reopen of the catalogue row.
+        let encoded = serde_json::to_vec(&mappings).unwrap();
+        let reopened: BTreeMap<SchemaVersionId, SchemaPhysicalMapping> =
+            serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(reopened, mappings);
+        validate_physical_variant_cases(&reopened, &aliases).unwrap();
+    }
+
+    #[test]
+    fn reopen_validation_rejects_a_cross_layout_tag_collision() {
+        let v1 = schema(1);
+        let v2 = schema(2);
+        let aliases = BTreeMap::from([(v1, SchemaVersionAlias(1)), (v2, SchemaVersionAlias(2))]);
+        let mut first = mapping(7, &[("id", 1)]);
+        first.tables.get_mut("entries").unwrap().variant_cases = vec![PhysicalVariantCase {
+            user_case: Some("text".to_owned()),
+            tag: 9,
+            fields: BTreeSet::from(["id".to_owned()]),
+        }];
+        let mut second = mapping(7, &[("id", 1)]);
+        second.tables.get_mut("entries").unwrap().variant_cases = vec![PhysicalVariantCase {
+            user_case: Some("image".to_owned()),
+            tag: 9,
+            fields: BTreeSet::from(["id".to_owned()]),
+        }];
+        let mappings = BTreeMap::from([(v1, first), (v2, second)]);
+        assert!(matches!(
+            validate_physical_variant_cases(&mappings, &aliases),
+            Err(Error::InvalidStoredValue(
+                "physical table variant tag collision"
+            ))
+        ));
+    }
 }
