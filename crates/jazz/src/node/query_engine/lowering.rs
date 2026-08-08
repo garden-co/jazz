@@ -336,7 +336,9 @@ fn source_authorization_for_source(
             protected_source, ..
         } if protected_source == source => Ok(SourceAuthorizationRequest::System),
         PolicyContext::AuthorizationSubplan {
-            permission_subject, ..
+            permission_subject,
+            role: PolicyDecisionRole::Read,
+            ..
         } if analyzed_plan_sources(plan).contains(source) => {
             Ok(SourceAuthorizationRequest::PolicyProof {
                 permission_subject: *permission_subject,

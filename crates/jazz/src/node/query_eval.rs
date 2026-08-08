@@ -5951,6 +5951,7 @@ where
                     attribution,
                 } => PolicyContext::AuthorizationSubplan {
                     protected_source: root_source_id(policy_shape.query().table.as_str()),
+                    role: PolicyDecisionRole::Read,
                     mode,
                     permission_subject,
                     claims,
@@ -6650,6 +6651,7 @@ where
                 attribution,
             } => PolicyContext::AuthorizationSubplan {
                 protected_source: root_source_id(policy_shape.query().table.as_str()),
+                role: PolicyDecisionRole::Write,
                 mode,
                 permission_subject,
                 claims,
@@ -9778,6 +9780,7 @@ where
                 attribution,
             } => PolicyContext::AuthorizationSubplan {
                 protected_source: root_source_id(policy_shape.query().table.as_str()),
+                role: PolicyDecisionRole::Read,
                 mode,
                 permission_subject,
                 claims,
@@ -9919,6 +9922,7 @@ where
                 attribution,
             } => PolicyContext::AuthorizationSubplan {
                 protected_source: root_source_id(policy_shape.query().table.as_str()),
+                role: PolicyDecisionRole::Read,
                 mode,
                 permission_subject,
                 claims,
@@ -10008,6 +10012,7 @@ where
                 attribution,
             } => PolicyContext::AuthorizationSubplan {
                 protected_source: root_source_id(policy_shape.query().table.as_str()),
+                role: PolicyDecisionRole::Read,
                 mode,
                 permission_subject,
                 claims,
