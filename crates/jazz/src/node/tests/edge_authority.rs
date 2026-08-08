@@ -301,7 +301,7 @@ fn edge_authority_rejects_exclusive_and_catalogue_writes_loudly() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        source_branch: None,
+        branch_merge: None,
         merge_strategy: None,
     };
     assert!(matches!(

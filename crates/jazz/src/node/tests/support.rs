@@ -1124,7 +1124,7 @@ fn ingest_relay_version(
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json: None,
-            source_branch: None,
+            branch_merge: None,
             merge_strategy: None,
         },
         vec![version_record(

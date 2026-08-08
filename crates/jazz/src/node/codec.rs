@@ -211,7 +211,7 @@ groove::define_record! {
         7 => absent_read_set: Option<Value>,
         8 => predicate_read_set: Option<Value>,
         9 => user_metadata: Option<String>,
-        10 => source_branch: Option<BranchId>,
+        10 => branch_merge: Option<Vec<u8>>,
         11 => permission_subject: Option<AuthorId>,
         12 => merge_strategy: Option<String>,
         13 => fate: FateTag,
@@ -496,7 +496,7 @@ impl StoredTransaction {
             global_seq: self.global_seq,
             durability: self.durability,
             user_metadata_json: self.tx.user_metadata_json.clone(),
-            source_branch: self.tx.source_branch,
+            branch_merge: self.tx.branch_merge.clone(),
         }
     }
 }
@@ -824,7 +824,7 @@ impl VersionRow {
                 global_seq: tx.global_seq,
                 durability: tx.durability,
                 user_metadata_json: tx.tx.user_metadata_json.clone(),
-                source_branch: tx.tx.source_branch,
+                branch_merge: tx.tx.branch_merge.clone(),
             },
             is_locally_current,
             is_globally_current,
@@ -1014,7 +1014,11 @@ pub(super) fn transaction_values(
                 .clone()
                 .map(|value| Box::new(Value::String(value))),
         ),
-        Value::Nullable(tx.source_branch.map(|id| Box::new(Value::Uuid(id.0)))),
+        Value::Nullable(tx.branch_merge.as_ref().map(|provenance| {
+            Box::new(Value::Bytes(
+                serde_json::to_vec(provenance).expect("branch merge provenance is serializable"),
+            ))
+        })),
         Value::Nullable(tx.permission_subject.map(|id| Box::new(Value::Uuid(id.0)))),
         Value::Nullable(
             tx.merge_strategy

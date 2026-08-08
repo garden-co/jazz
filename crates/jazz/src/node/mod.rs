@@ -1105,7 +1105,7 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json,
-            source_branch: None,
+            branch_merge: None,
             merge_strategy: commits[0].merge_strategy.clone(),
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
@@ -1298,7 +1298,7 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json: edit.user_metadata_json.clone(),
-            source_branch: None,
+            branch_merge: None,
             merge_strategy: None,
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
@@ -5358,6 +5358,10 @@ pub enum Error {
     /// Branch-scoped exclusive transactions are not implemented in v1.
     #[error("exclusive transactions on branches are unsupported in v1")]
     UnsupportedBranchExclusive,
+    /// Local branch-merge calculation could not prove or encode the requested
+    /// ordinary target write.
+    #[error("branch merge calculation failed: {0}")]
+    BranchMergeCalculation(&'static str),
     /// The authenticated identity is not authorized for this operation.
     #[error("authorization denied")]
     AuthorizationDenied,

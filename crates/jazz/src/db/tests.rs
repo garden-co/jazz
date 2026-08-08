@@ -5993,7 +5993,7 @@ fn view_update_chunking_keeps_result_adds_with_referenced_versions() {
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json: None,
-            source_branch: None,
+            branch_merge: None,
             merge_strategy: None,
         };
         let version = crate::protocol::VersionRecord::from_cells(

@@ -40,10 +40,88 @@ pub struct Transaction {
     pub predicate_read_set: Option<Vec<PredicateRead>>,
     /// Optional application metadata attached at commit time.
     pub user_metadata_json: Option<String>,
-    /// Branch provenance for system-created branch squash transactions.
-    pub source_branch: Option<BranchId>,
+    /// Non-causal provenance for a locally calculated branch merge.
+    ///
+    /// Receivers persist and forward this metadata but do not use it for
+    /// transaction admission, parent prerequisites, fate, or row merging.
+    pub branch_merge: Option<BranchMergeProvenance>,
     /// Strategy runtime that produced this transaction when it is a recorded merge.
     pub merge_strategy: Option<RecordedMergeStrategy>,
+}
+
+/// A logical history lineage used only by the local branch-merge calculator.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub enum BranchLineage {
+    /// The ordinary non-branch database history.
+    Root,
+    /// A snapshot-base branch overlay.
+    Branch(BranchId),
+}
+
+/// Non-causal source evidence attached to an ordinary calculated merge write.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct BranchMergeProvenance {
+    /// Source lineage read by the local calculator.
+    pub source_lineage: BranchLineage,
+    /// Maximal source cut already represented by the calculator's target view.
+    pub from_frontier: Vec<TxId>,
+    /// Maximal source cut incorporated by this calculated transaction.
+    pub through_frontier: Vec<TxId>,
+    /// Field-grained derived-output substitutions validated by future local
+    /// calculators before they use this metadata for contribution subtraction.
+    pub substitutions: Vec<ContributionSubstitution>,
+}
+
+/// One derived target field and the exact source contribution dots it encodes.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct ContributionSubstitution {
+    /// Field or operation emitted by the ordinary target transaction.
+    pub target: ContributionCoordinate,
+    /// Canonically sorted and de-duplicated source dots represented by `target`.
+    pub sources: Vec<ContributionDot>,
+}
+
+/// Stable field-grained coordinate in a transaction lineage.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct ContributionCoordinate {
+    /// Logical table in the calculator's exact schema view.
+    pub table: String,
+    /// Logical row identity.
+    pub row_uuid: RowUuid,
+    /// Independent content or deletion history layer.
+    pub layer: MergeAspect,
+    /// Column, register, or strategy-operation identity within that layer.
+    pub component: ContributionComponent,
+}
+
+/// Field or operation identity within one row history layer.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub enum ContributionComponent {
+    /// An ordinary named content column.
+    Column(String),
+    /// A strategy-defined stable operation identifier.
+    Operation(Vec<u8>),
+    /// The deletion/restore register.
+    Register,
+}
+
+/// Stable native contribution identity used by the local merge calculator.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct ContributionDot {
+    /// Lineage in which the native contribution originated.
+    pub lineage: BranchLineage,
+    /// Transaction that introduced the native contribution.
+    pub tx_id: TxId,
+    /// Exact field or operation introduced by that transaction.
+    pub coordinate: ContributionCoordinate,
 }
 
 /// Runtime strategy tag recorded on system-created merge transactions.
@@ -149,7 +227,9 @@ pub enum DurabilityTier {
 }
 
 /// Stored history layer for a row version.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
 pub enum MergeAspect {
     /// User content cell version.
     Content,
@@ -176,8 +256,8 @@ pub struct TransactionRecord {
     pub durability: DurabilityTier,
     /// Optional application metadata attached at commit time.
     pub user_metadata_json: Option<String>,
-    /// Branch provenance for system-created branch squash transactions.
-    pub source_branch: Option<BranchId>,
+    /// Non-causal provenance for a locally calculated branch merge.
+    pub branch_merge: Option<BranchMergeProvenance>,
 }
 
 /// Stored edit-history entry for a row.

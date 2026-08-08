@@ -677,7 +677,7 @@ fn discard_branch_closes_branch_for_writes_and_merge_back() {
 }
 
 #[test]
-fn merge_back_branch_squashes_net_overlay_into_parent_and_closes_branch() {
+fn merge_back_branch_emits_ordinary_target_transaction_and_leaves_branch_open() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (core_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());
     let mut oracle = Oracle::new();
@@ -718,7 +718,7 @@ fn merge_back_branch_squashes_net_overlay_into_parent_and_closes_branch() {
     let squash = core.merge_back_branch(branch_id).unwrap();
     assert_eq!(
         core.branch_record(branch_id).unwrap().state,
-        codec::BranchState::Merged
+        codec::BranchState::Open
     );
     let parent_rows = core
         .current_rows("todos", DurabilityTier::Local)
@@ -735,7 +735,10 @@ fn merge_back_branch_squashes_net_overlay_into_parent_and_closes_branch() {
     );
 
     let tx = core.transaction_record(squash).unwrap();
-    assert_eq!(tx.source_branch, Some(branch_id));
+    assert_eq!(
+        tx.branch_merge.as_ref().map(|merge| merge.source_lineage),
+        Some(crate::tx::BranchLineage::Branch(branch_id))
+    );
     assert_eq!(tx.user_metadata_json, None);
 
     let squash_versions = core.query_versions_for_tx(squash).unwrap();
@@ -744,26 +747,28 @@ fn merge_back_branch_squashes_net_overlay_into_parent_and_closes_branch() {
         assert!(
             squash_versions
                 .iter()
-                .any(|version| version.parents().contains(&branch_tip)),
-            "merge-back squash must retain the branch frontier as a parent"
+                .all(|version| !version.parents().contains(&branch_tip)),
+            "ordinary target transaction must not expose a source branch parent"
         );
     }
-    assert!(matches!(
-        core.commit_mergeable_on_branch(
+    core.commit_mergeable_on_branch(
             branch_id,
             MergeableCommit::new("todos", row(4), 23).cells(title_cells("late write")),
-        ),
-        Err(Error::BranchClosed(id)) if id == branch_id
-    ));
-    assert!(matches!(
-        core.merge_back_branch(branch_id),
-        Err(Error::BranchClosed(id)) if id == branch_id
-    ));
+        )
+        .unwrap();
     drop(core);
     let mut reopened = reopen_node_at(&core_dir, node(2), schema());
     assert_eq!(
-        reopened.transaction_record(squash).unwrap().source_branch,
-        Some(branch_id)
+        reopened
+            .transaction_record(squash)
+            .unwrap()
+            .branch_merge
+            .map(|merge| merge.source_lineage),
+        Some(crate::tx::BranchLineage::Branch(branch_id))
+    );
+    assert_eq!(
+        reopened.branch_record(branch_id).unwrap().state,
+        codec::BranchState::Open
     );
 }
 

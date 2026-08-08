@@ -402,7 +402,7 @@ where
             absent_read_set: Some(open_tx.absent_reads),
             predicate_read_set: Some(open_tx.predicate_reads),
             user_metadata_json: open_tx.user_metadata_json,
-            source_branch: None,
+            branch_merge: None,
             merge_strategy: None,
         };
         self.ingest_transaction_and_versions(

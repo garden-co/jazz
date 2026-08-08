@@ -10,6 +10,7 @@ use crate::schema::{
     branch_metadata_table_schema, branch_partition_history_table_name,
     branch_partition_register_table_name,
 };
+use crate::tx::{BranchLineage, BranchMergeProvenance};
 
 /// Durable branch metadata recovered from `jazz_branches`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,8 +88,21 @@ where
         Ok(())
     }
 
-    /// Merge an open branch overlay back into its parent as one mergeable squash.
+    /// Calculate and commit an ordinary mergeable write from a branch into root.
     pub fn merge_back_branch(&mut self, branch_id: BranchId) -> Result<TxId, Error>
+    where
+        S: ReopenableStorage,
+    {
+        self.merge_back_branch_as(branch_id, AuthorId::SYSTEM)
+    }
+
+    /// Calculate a branch merge under the initiating identity's source-read and
+    /// ordinary target-write permissions.
+    pub fn merge_back_branch_as(
+        &mut self,
+        branch_id: BranchId,
+        identity: AuthorId,
+    ) -> Result<TxId, Error>
     where
         S: ReopenableStorage,
     {
@@ -101,8 +115,12 @@ where
         if branch.state != codec::BranchState::Open {
             return Err(Error::BranchClosed(branch_id));
         }
+        if identity != AuthorId::SYSTEM && !self.branch_read_policy_allows(&branch, identity)? {
+            return Err(Error::AuthorizationDenied);
+        }
 
         let mut versions = Vec::new();
+        let mut through_frontier = BTreeSet::new();
         let write_schema_version = self.catalogue.current_write_schema.schema;
         for table in self.catalogue.schema.tables.clone() {
             let table_schema = self.table_in_schema(&table.name, write_schema_version)?;
@@ -113,16 +131,13 @@ where
                     else {
                         continue;
                     };
-                    let branch_tip = self.version_tx_id(&winner)?;
-                    let parent_tip = self
+                    through_frontier.insert(self.version_tx_id(&winner)?);
+                    let parents = self
                         .query_local_layer_winner(&table.name, row_uuid, layer)?
                         .map(|version| self.version_tx_id(&version))
-                        .transpose()?;
-                    let mut parents = parent_tip.into_iter().collect::<Vec<_>>();
-                    if !parents.contains(&branch_tip) {
-                        parents.push(branch_tip);
-                    }
-                    parents.sort();
+                        .transpose()?
+                        .into_iter()
+                        .collect();
                     let cells = table_schema
                         .columns
                         .iter()
@@ -148,18 +163,21 @@ where
                 }
             }
         }
-
         if versions.is_empty() {
-            return Err(Error::InvalidMergeableCommit(
-                "merge-back requires at least one branch overlay write",
+            return Err(Error::BranchMergeCalculation(
+                "merge calculation requires at least one branch overlay write",
             ));
         }
-        let tx_id = self.commit_merge_back_squash(branch_id, versions)?;
-        let mut record = branch;
-        record.state = codec::BranchState::Merged;
-        self.persist_branch_record(&record)?;
-        self.branches.branches.insert(branch_id, record);
-        Ok(tx_id)
+        self.commit_merge_back_squash(
+            identity,
+            BranchMergeProvenance {
+                source_lineage: BranchLineage::Branch(branch_id),
+                from_frontier: Vec::new(),
+                through_frontier: through_frontier.into_iter().collect(),
+                substitutions: Vec::new(),
+            },
+            versions,
+        )
     }
 
     /// Branch-scoped exclusives are intentionally not implemented in v1.
@@ -227,7 +245,7 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json: commit.user_metadata_json.clone(),
-            source_branch: None,
+            branch_merge: None,
             merge_strategy: None,
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
@@ -654,7 +672,8 @@ where
 
     fn commit_merge_back_squash(
         &mut self,
-        branch_id: BranchId,
+        permission_subject: AuthorId,
+        branch_merge: BranchMergeProvenance,
         versions: Vec<VersionRecord>,
     ) -> Result<TxId, Error>
     where
@@ -669,13 +688,13 @@ where
                 Error::InvalidMergeableCommit("transaction write count exceeds u32")
             })?,
             made_by: AuthorId::SYSTEM,
-            permission_subject: None,
+            permission_subject: Some(permission_subject),
             base_snapshot: None,
             row_read_set: None,
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json: None,
-            source_branch: Some(branch_id),
+            branch_merge: Some(branch_merge),
             merge_strategy: None,
         };
         self.ingest_edge_authority_mergeable_commit_unit(tx, versions, made_at.physical_ms())?;

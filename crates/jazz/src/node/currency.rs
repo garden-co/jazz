@@ -511,9 +511,13 @@ where
             user_metadata_json: record
                 .get_nullable_string(TransactionRowRecord::FIELD_USER_METADATA_IDX)?
                 .map(str::to_owned),
-            source_branch: record
-                .get_nullable_uuid(TransactionRowRecord::FIELD_SOURCE_BRANCH_IDX)?
-                .map(BranchId),
+            branch_merge: record
+                .get_nullable_bytes(TransactionRowRecord::FIELD_BRANCH_MERGE_IDX)?
+                .map(|bytes| {
+                    serde_json::from_slice(bytes)
+                        .map_err(|_| Error::InvalidStoredValue("invalid branch merge provenance"))
+                })
+                .transpose()?,
             merge_strategy: record
                 .get_nullable_string(TransactionRowRecord::FIELD_MERGE_STRATEGY_IDX)?
                 .and_then(decode_merge_strategy_tag),

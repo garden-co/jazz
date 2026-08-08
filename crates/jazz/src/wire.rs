@@ -1037,7 +1037,7 @@ mod tests {
                         absent_read_set: None,
                         predicate_read_set: None,
                         user_metadata_json: None,
-                        source_branch: None,
+                        branch_merge: None,
                         merge_strategy: None,
                     },
                     versions: vec![
@@ -1316,7 +1316,7 @@ mod tests {
                     absent_read_set: None,
                     predicate_read_set: None,
                     user_metadata_json: None,
-                    source_branch: None,
+                    branch_merge: None,
                     merge_strategy: None,
                 },
                 versions: Vec::new(),
