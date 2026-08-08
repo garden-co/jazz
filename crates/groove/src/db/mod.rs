@@ -3677,7 +3677,12 @@ fn encode_primary_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Error
                 encode_primary_key_part(key, value)?;
             }
         }
-        Value::F64(_) | Value::Array(_) | Value::Nullable(_) | Value::Record(_) => {
+        Value::F64(_)
+        | Value::Array(_)
+        | Value::Nullable(_)
+        | Value::Record(_)
+        // Direct-store keys require a declared total order; unions do not have one.
+        | Value::Union(_) => {
             return Err(Error::InvalidDirectRecordStoreKey(
                 "unsupported direct record store key type".to_owned(),
             ));
@@ -3797,7 +3802,8 @@ fn decode_primary_key_part(
         | records::ValueType::Array(_)
         | records::ValueType::Nullable(_)
         | records::ValueType::Tuple(_)
-        | records::ValueType::Record(_) => Err(Error::InvalidDirectRecordStoreKey(
+        | records::ValueType::Record(_)
+        | records::ValueType::Union(_) => Err(Error::InvalidDirectRecordStoreKey(
             "unsupported direct record store key type".to_owned(),
         )),
     }
@@ -3927,7 +3933,7 @@ fn decode_index_key_part(
                 _ => Err(Error::InvalidPersistedIndex(index_name.to_owned())),
             }
         }
-        ColumnType::Array(_) | ColumnType::Record(_) => {
+        ColumnType::Array(_) | ColumnType::Record(_) | ColumnType::Union(_) => {
             Err(Error::InvalidPersistedIndex(index_name.to_owned()))
         }
     }

@@ -9887,7 +9887,9 @@ pub(crate) fn encode_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Iv
             key.push(9);
             encode_key_part(key, value)?;
         }
-        Value::Array(_) | Value::Record(_) => return Err(IvmRuntimeError::UnsupportedJoinKey),
+        Value::Array(_) | Value::Record(_) | Value::Union(_) => {
+            return Err(IvmRuntimeError::UnsupportedJoinKey);
+        }
     }
     Ok(())
 }
@@ -11342,7 +11344,9 @@ fn encode_runtime_primary_key_part(
             key.push(1);
             encode_runtime_primary_key_part(key, value)?;
         }
-        Value::Array(_) | Value::Record(_) => return Err(IvmRuntimeError::UnsupportedJoinKey),
+        Value::Array(_) | Value::Record(_) | Value::Union(_) => {
+            return Err(IvmRuntimeError::UnsupportedJoinKey);
+        }
     }
     Ok(())
 }

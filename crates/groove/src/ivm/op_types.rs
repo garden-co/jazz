@@ -461,7 +461,8 @@ impl From<Value> for LiteralValue {
             Value::Tuple(values) => Self::Tuple(values.into_iter().map(Into::into).collect()),
             Value::Array(values) => Self::Array(values.into_iter().map(Into::into).collect()),
             Value::Nullable(value) => Self::Nullable(value.map(|value| Box::new((*value).into()))),
-            Value::Record(_) => Self::Record,
+            // Neither records nor tagged payload unions are supported predicate literals.
+            Value::Record(_) | Value::Union(_) => Self::Record,
         }
     }
 }

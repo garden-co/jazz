@@ -27,6 +27,42 @@ pub enum Value {
     I64(i64),
     I32(i32),
     Record(OwnedRecord),
+    Union(UnionValue),
+}
+
+/// One selected case of a [`UnionSchema`].
+///
+/// The tag is the declaration-order index of the case in its union schema.
+/// It is encoded with the payload record as a bounded canonical `u32` varint.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub struct UnionValue {
+    tag: u32,
+    record: OwnedRecord,
+}
+
+impl UnionValue {
+    pub fn new(tag: u32, record: OwnedRecord) -> Self {
+        Self { tag, record }
+    }
+
+    pub fn create(tag: u32, descriptor: RecordDescriptor, values: &[Value]) -> Result<Self, Error> {
+        Ok(Self::new(
+            tag,
+            OwnedRecord::new(descriptor.create(values)?, descriptor),
+        ))
+    }
+
+    pub fn tag(&self) -> u32 {
+        self.tag
+    }
+
+    pub fn record(&self) -> &OwnedRecord {
+        &self.record
+    }
+
+    pub fn into_record(self) -> OwnedRecord {
+        self.record
+    }
 }
 
 impl From<u8> for Value {
@@ -129,6 +165,90 @@ pub struct EnumSchema {
     pub variants: Vec<String>,
 }
 
+/// Named union schema whose declaration-order cases have stable `u32` tags.
+///
+/// A case name and its payload descriptor are part of the persistent schema.
+/// Appending a case preserves existing tags; reordering, removing, or renaming
+/// a case changes the meaning of stored values and is therefore incompatible.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub struct UnionSchema {
+    pub name: String,
+    pub cases: Vec<UnionCase>,
+}
+
+/// One named payload layout in a [`UnionSchema`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub struct UnionCase {
+    pub name: String,
+    pub payload: RecordDescriptor,
+}
+
+impl UnionCase {
+    pub fn new(name: impl Into<String>, payload: RecordDescriptor) -> Self {
+        Self {
+            name: name.into(),
+            payload,
+        }
+    }
+}
+
+impl UnionSchema {
+    pub fn new(
+        name: impl Into<String>,
+        cases: impl IntoIterator<Item = UnionCase>,
+    ) -> Result<Self, Error> {
+        let name = name.into();
+        let cases = cases.into_iter().collect::<Vec<_>>();
+        Self::validate_cases(&name, &cases)?;
+        Ok(Self { name, cases })
+    }
+
+    fn validate_cases(name: &str, cases: &[UnionCase]) -> Result<(), Error> {
+        if !cases.is_empty() && u32::try_from(cases.len() - 1).is_err() {
+            return Err(Error::UnionTooManyCases {
+                name: name.to_owned(),
+                cases: cases.len(),
+            });
+        }
+        for (index, case) in cases.iter().enumerate() {
+            if cases[..index]
+                .iter()
+                .any(|candidate| candidate.name == case.name)
+            {
+                return Err(Error::DuplicateUnionCaseName {
+                    union_name: name.to_owned(),
+                    case: case.name.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), Error> {
+        Self::validate_cases(&self.name, &self.cases)
+    }
+
+    pub fn case(&self, tag: u32) -> Result<&UnionCase, Error> {
+        self.cases
+            .get(tag as usize)
+            .ok_or_else(|| Error::UnknownUnionTag {
+                union_name: self.name.clone(),
+                tag,
+            })
+    }
+
+    pub fn tag(&self, case: &str) -> Result<u32, Error> {
+        self.cases
+            .iter()
+            .position(|candidate| candidate.name == case)
+            .and_then(|index| u32::try_from(index).ok())
+            .ok_or_else(|| Error::UnknownUnionCase {
+                union_name: self.name.clone(),
+                case: case.to_owned(),
+            })
+    }
+}
+
 impl EnumSchema {
     pub fn new(
         name: impl Into<String>,
@@ -188,6 +308,8 @@ pub enum ValueType {
     Nullable(Box<ValueType>),
     /// A variable-width nested record interpreted by this inline descriptor.
     Record(Box<RecordDescriptor>),
+    /// A variable-width tagged payload record selected by a stable union case.
+    Union(Box<UnionSchema>),
 }
 
 impl ValueType {
@@ -206,7 +328,7 @@ impl ValueType {
         match self {
             Self::Tuple(members) => members.iter().any(Self::contains_record),
             Self::Array(inner) | Self::Nullable(inner) => inner.contains_record(),
-            Self::Record(_) => true,
+            Self::Record(_) | Self::Union(_) => true,
             _ => false,
         }
     }
@@ -224,7 +346,7 @@ impl ValueType {
                 .iter()
                 .try_fold(0usize, |total, member| Some(total + member.fixed_size()?)),
             Self::Nullable(value_type) => value_type.fixed_size().map(|size| size + 1),
-            Self::String | Self::Bytes | Self::Array(_) | Self::Record(_) => None,
+            Self::String | Self::Bytes | Self::Array(_) | Self::Record(_) | Self::Union(_) => None,
         }
     }
 
@@ -253,6 +375,10 @@ pub(super) fn encode_value(value: &Value, value_type: &ValueType) -> Result<Vec<
         (Value::Record(record), ValueType::Record(_)) => {
             ensure_value_type(value, value_type)?;
             bytes.extend_from_slice(record.raw());
+        }
+        (Value::Union(union), ValueType::Union(schema)) => {
+            ensure_union_value(union, schema)?;
+            bytes.extend(super::encode_variant_record(union.tag, union.record.raw()));
         }
         _ if value_type.is_fixed_size() => encode_fixed_value(&mut bytes, value, value_type)?,
         _ => {
@@ -293,6 +419,11 @@ pub(super) fn encode_fixed_value(
             encode_nullable(bytes, value.as_deref(), inner_type)?;
         }
         (_, ValueType::Record(_)) => {
+            return Err(Error::TypeMismatch {
+                expected: value_type.clone(),
+            });
+        }
+        (_, ValueType::Union(_)) => {
             return Err(Error::TypeMismatch {
                 expected: value_type.clone(),
             });
@@ -345,6 +476,23 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
             Ok(Value::Record(OwnedRecord::new(
                 bytes.to_vec(),
                 **descriptor,
+            )))
+        }
+        ValueType::Union(schema) => {
+            let (tag, payload) =
+                super::split_variant_record(bytes).map_err(|error| match error {
+                    Error::InvalidSchemaVersionHeader => Error::InvalidUnionHeader,
+                    other => other,
+                })?;
+            let case = schema.case(tag)?;
+            let values = case.payload.bind(payload).to_values()?;
+            let canonical = case.payload.create(&values)?;
+            if canonical != payload {
+                return Err(Error::NonCanonicalRecord);
+            }
+            Ok(Value::Union(UnionValue::new(
+                tag,
+                OwnedRecord::new(payload.to_vec(), case.payload),
             )))
         }
     }
@@ -524,10 +672,25 @@ pub(super) fn ensure_value_type(value: &Value, value_type: &ValueType) -> Result
             }
             Ok(())
         }
+        (Value::Union(union), ValueType::Union(schema)) => ensure_union_value(union, schema),
         _ => Err(Error::TypeMismatch {
             expected: value_type.clone(),
         }),
     }
+}
+
+fn ensure_union_value(value: &UnionValue, schema: &UnionSchema) -> Result<(), Error> {
+    let case = schema.case(value.tag)?;
+    if value.record.descriptor() != &case.payload {
+        return Err(Error::TypeMismatch {
+            expected: ValueType::Union(Box::new(schema.clone())),
+        });
+    }
+    let values = value.record.to_values()?;
+    if case.payload.create(&values)? != value.record.raw() {
+        return Err(Error::NonCanonicalRecord);
+    }
+    Ok(())
 }
 
 pub(super) fn validate_schema_value_type(value_type: &ValueType) -> Result<(), Error> {
@@ -547,6 +710,15 @@ pub(super) fn validate_schema_value_type(value_type: &ValueType) -> Result<(), E
         ValueType::Record(descriptor) => {
             for field in descriptor.fields() {
                 validate_schema_value_type(&field.value_type)?;
+            }
+            Ok(())
+        }
+        ValueType::Union(schema) => {
+            schema.validate()?;
+            for case in &schema.cases {
+                for field in case.payload.fields() {
+                    validate_schema_value_type(&field.value_type)?;
+                }
             }
             Ok(())
         }
@@ -657,7 +829,8 @@ fn decode_tuple_member(bytes: &[u8], value_type: &ValueType) -> Result<Value, Er
         | ValueType::String
         | ValueType::Bytes
         | ValueType::Array(_)
-        | ValueType::Record(_) => Err(Error::InvalidTupleMember {
+        | ValueType::Record(_)
+        | ValueType::Union(_) => Err(Error::InvalidTupleMember {
             member_type: value_type.clone(),
         }),
     }

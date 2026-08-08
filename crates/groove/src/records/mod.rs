@@ -90,7 +90,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 pub use macros::{FieldKind, RecordField, assert_record_field_layout};
-pub use values::{EnumSchema, Value, ValueType};
+pub use values::{EnumSchema, UnionCase, UnionSchema, UnionValue, Value, ValueType};
 
 /// Maximum bytes in the canonical table-local variant-tag prefix.
 ///
@@ -1579,14 +1579,14 @@ pub struct DescriptorField {
 }
 
 /// Owned encoded record tied to the descriptor that decodes it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Record<'a> {
     raw: Vec<u8>,
     descriptor: &'a RecordDescriptor,
 }
 
 /// Owned encoded record tied to an owned descriptor.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct OwnedRecord {
     raw: Vec<u8>,
     descriptor: RecordDescriptor,
@@ -1882,6 +1882,16 @@ pub enum Error {
     InvalidOffset,
     #[error("invalid schema-version header")]
     InvalidSchemaVersionHeader,
+    #[error("invalid union value header")]
+    InvalidUnionHeader,
+    #[error("union {name} has {cases} cases; maximum is u32::MAX + 1")]
+    UnionTooManyCases { name: String, cases: usize },
+    #[error("duplicate case {case} in union {union_name}")]
+    DuplicateUnionCaseName { union_name: String, case: String },
+    #[error("unknown case {case} in union {union_name}")]
+    UnknownUnionCase { union_name: String, case: String },
+    #[error("unknown tag {tag} in union {union_name}")]
+    UnknownUnionTag { union_name: String, tag: u32 },
     #[error("table variant tag {0} exceeds the bounded u32 tag space")]
     VariantTagOutOfRange(u64),
     #[error("nested record bytes are not canonical")]
