@@ -207,11 +207,26 @@ fn pending_lineage_reserves_its_target_and_sequence() {
         core.apply_sync_message(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 2,
-            publication: Box::new(publication),
+            publication: Box::new(publication.clone()),
         })
         .unwrap()
         .is_empty()
     );
+    assert!(matches!(
+        core.apply_sync_message_with_ingest_context(
+            SyncMessage::PublishSchemaWithLens {
+                author: AuthorId::SYSTEM,
+                catalogue_seq: 2,
+                publication: Box::new(publication),
+            },
+            Some(CommitUnitIngestContext {
+                identity: user(0x71),
+                trust: CommitUnitTrust::Session,
+                edge_authority: false,
+            }),
+        ),
+        Err(Error::UnauthorizedCatalogueUpdate)
+    ));
     assert!(matches!(
         core.apply_sync_message(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,

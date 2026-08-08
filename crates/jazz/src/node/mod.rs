@@ -234,6 +234,10 @@ pub struct NodeState<S> {
     /// Whether this authority has installed the permissions head that governs
     /// session-scoped reads and writes.
     permissions_ready: bool,
+    /// A staged catalogue bundle failed after durable admission. The process
+    /// must reopen and deterministically resume activation before serving more
+    /// protocol traffic.
+    catalogue_activation_failed: bool,
     /// Client-only write cadence selected for the first snapshot hydration.
     initial_sync_flush_cadence: Option<usize>,
     /// Whether the first snapshot is currently using the configured cadence.
@@ -688,6 +692,7 @@ where
             session_claims: BTreeMap::new(),
             session_claim_revisions: BTreeMap::new(),
             permissions_ready: true,
+            catalogue_activation_failed: false,
             initial_sync_flush_cadence: None,
             initial_sync_flush_active: false,
             initial_sync_flush_completed: false,
@@ -5915,6 +5920,9 @@ pub enum Error {
     /// Catalogue payload failed validation.
     #[error("invalid catalogue update: {0}")]
     InvalidCatalogueUpdate(&'static str),
+    /// Durable staged catalogue activation failed and requires node reopen.
+    #[error("catalogue activation failed; reopen required")]
+    CatalogueActivationFailed,
     /// Durable catalogue payload could not be encoded or decoded.
     #[error(transparent)]
     CatalogueCodec(#[from] serde_json::Error),

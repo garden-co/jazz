@@ -140,6 +140,9 @@ where
     where
         S: ReopenableStorage,
     {
+        if self.catalogue_activation_failed {
+            return Err(Error::CatalogueActivationFailed);
+        }
         let message = message
             .expand_version_carriers_for_receive()
             .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
@@ -257,16 +260,23 @@ where
                 Ok(Vec::new())
             }
             SyncMessage::PublishSchema { author, schema } => {
-                self.apply_publish_schema(author, *schema)
+                self.apply_publish_schema(author, ingest_context, *schema)
             }
             SyncMessage::PublishSchemaWithLens {
                 author,
                 catalogue_seq,
                 publication,
-            } => self.apply_publish_schema_with_lens(author, catalogue_seq, *publication),
-            SyncMessage::PublishLens { author, lens } => self.apply_publish_lens(author, lens),
+            } => self.apply_publish_schema_with_lens(
+                author,
+                ingest_context,
+                catalogue_seq,
+                *publication,
+            ),
+            SyncMessage::PublishLens { author, lens } => {
+                self.apply_publish_lens(author, ingest_context, lens)
+            }
             SyncMessage::SetCurrentWriteSchema { author, pointer } => {
-                self.apply_set_current_write_schema(author, pointer)
+                self.apply_set_current_write_schema(author, ingest_context, pointer)
             }
             SyncMessage::CatalogueAck(_) => Ok(Vec::new()),
             SyncMessage::FetchContentExtent { .. } => {
@@ -284,12 +294,13 @@ where
     fn apply_publish_schema(
         &mut self,
         author: AuthorId,
+        ingest_context: Option<CommitUnitIngestContext>,
         schema: SchemaVersion,
     ) -> Result<Vec<SyncMessage>, Error>
     where
         S: ReopenableStorage,
     {
-        self.require_catalogue_admin(author)?;
+        self.require_catalogue_admin(author, ingest_context)?;
         if schema.id != schema.schema.version_id() {
             return Err(Error::InvalidCatalogueUpdate(
                 "schema id does not match schema payload",
@@ -337,13 +348,14 @@ where
     fn apply_publish_schema_with_lens(
         &mut self,
         author: AuthorId,
+        ingest_context: Option<CommitUnitIngestContext>,
         catalogue_seq: u64,
         publication: SchemaLineagePublication,
     ) -> Result<Vec<SyncMessage>, Error>
     where
         S: ReopenableStorage,
     {
-        self.require_catalogue_admin(author)?;
+        self.require_catalogue_admin(author, ingest_context)?;
         self.validate_schema_lineage_publication_bounds(&publication)?;
         if publication.id != publication.content_id() {
             return Err(Error::InvalidCatalogueUpdate(
@@ -491,15 +503,17 @@ where
             };
 
             self.install_staged_schema_lineage_in_memory(&staged);
-            if let Err(error) = self.synchronize_physical_version_tables() {
+            if self.synchronize_physical_version_tables().is_err() {
                 self.remove_staged_schema_lineage_from_memory(&staged);
-                return Err(error);
+                self.catalogue_activation_failed = true;
+                return Err(Error::CatalogueActivationFailed);
             }
             let mut batch = self.database.open_batch();
             Self::write_active_schema_lineage_to_batch(&mut batch, &staged)?;
-            if let Err(error) = self.database.commit_batch(batch) {
+            if self.database.commit_batch(batch).is_err() {
                 self.remove_staged_schema_lineage_from_memory(&staged);
-                return Err(error.into());
+                self.catalogue_activation_failed = true;
+                return Err(Error::CatalogueActivationFailed);
             }
             self.catalogue.staged_lineages.remove(&next);
             self.catalogue.pending_lineages.remove(&next);
@@ -566,12 +580,13 @@ where
     fn apply_publish_lens(
         &mut self,
         author: AuthorId,
+        ingest_context: Option<CommitUnitIngestContext>,
         lens: MigrationLens,
     ) -> Result<Vec<SyncMessage>, Error>
     where
         S: ReopenableStorage,
     {
-        self.require_catalogue_admin(author)?;
+        self.require_catalogue_admin(author, ingest_context)?;
         if lens.id != lens.content_id() {
             return Err(Error::InvalidCatalogueUpdate(
                 "lens id does not match lens payload",
@@ -621,12 +636,13 @@ where
     fn apply_set_current_write_schema(
         &mut self,
         author: AuthorId,
+        ingest_context: Option<CommitUnitIngestContext>,
         pointer: CurrentWriteSchema,
     ) -> Result<Vec<SyncMessage>, Error>
     where
         S: ReopenableStorage,
     {
-        self.require_catalogue_admin(author)?;
+        self.require_catalogue_admin(author, ingest_context)?;
         if !self
             .catalogue
             .catalogue_schemas
@@ -691,8 +707,15 @@ where
         Ok(out)
     }
 
-    fn require_catalogue_admin(&self, author: AuthorId) -> Result<(), Error> {
-        if author == AuthorId::SYSTEM {
+    fn require_catalogue_admin(
+        &self,
+        claimed_author: AuthorId,
+        ingest_context: Option<CommitUnitIngestContext>,
+    ) -> Result<(), Error> {
+        let authenticated_author = ingest_context
+            .map(|context| context.identity)
+            .unwrap_or(claimed_author);
+        if authenticated_author == AuthorId::SYSTEM {
             Ok(())
         } else {
             Err(Error::UnauthorizedCatalogueUpdate)
