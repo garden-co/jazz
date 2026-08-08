@@ -949,6 +949,7 @@ where
         let mut active_lineage_ids = BTreeSet::new();
         let mut active_catalogue_seq = 0;
         let mut pending_write_pointers = BTreeMap::new();
+        let mut genesis_schema = None;
         for raw in meta_database.primary_key_scan_raw("jazz_catalogue", &[])? {
             let record = raw.record();
             match record.get_bytes(CatalogueRowRecord::FIELD_KIND_IDX)? {
@@ -1022,6 +1023,15 @@ where
                     )?;
                     pending_write_pointers.insert(pointer.revision, pointer);
                 }
+                b"genesis" => {
+                    let schema =
+                        SchemaVersionId(record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?);
+                    if genesis_schema.replace(schema).is_some() {
+                        return Err(Error::InvalidStoredValue(
+                            "duplicate catalogue genesis marker",
+                        ));
+                    }
+                }
                 _ => return Err(Error::InvalidStoredValue("unknown catalogue kind")),
             }
         }
@@ -1091,6 +1101,19 @@ where
                 }
             }
         }
+        match genesis_schema {
+            Some(genesis) if genesis != current_schema_version_id => {
+                return Err(Error::InvalidStoredValue(
+                    "opened schema does not match durable catalogue genesis",
+                ));
+            }
+            None if !catalogue_schemas.is_empty() => {
+                return Err(Error::InvalidStoredValue(
+                    "catalogue schemas exist without a genesis marker",
+                ));
+            }
+            _ => {}
+        }
         let had_current_schema = catalogue_schemas.contains_key(&current_schema_version_id);
         if !had_current_schema {
             catalogue_schemas.insert(
@@ -1122,6 +1145,16 @@ where
                         .ok_or(Error::InvalidStoredValue("schema version alias exhausted"))?,
                 ));
             let mut batch = meta_database.open_batch();
+            if genesis_schema.is_none() {
+                batch.update(
+                    "jazz_catalogue",
+                    vec![
+                        Value::Bytes(b"genesis".to_vec()),
+                        Value::Uuid(current_schema_version_id.0),
+                        Value::Bytes(Vec::new()),
+                    ],
+                );
+            }
             if !had_current_schema {
                 batch.update(
                     "jazz_catalogue",

@@ -373,7 +373,7 @@ where
             ));
         }
         if let Some(existing) = self.catalogue.active_lineages_by_target.get(&schema.id) {
-            if existing.publication != publication {
+            if existing.publication != publication || existing.catalogue_seq != catalogue_seq {
                 return Err(Error::InvalidCatalogueUpdate(
                     "schema lineage publication conflicts with catalogue",
                 ));
@@ -398,6 +398,21 @@ where
                 ));
             }
         } else {
+            if self
+                .catalogue
+                .pending_lineages
+                .values()
+                .any(|pending| pending.publication.schema.id == schema.id)
+                || self
+                    .catalogue
+                    .staged_lineages
+                    .values()
+                    .any(|staged| staged.publication.schema.id == schema.id)
+            {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "schema lineage target is already reserved",
+                ));
+            }
             let pending = PendingSchemaLineage {
                 catalogue_seq,
                 publication,

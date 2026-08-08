@@ -143,6 +143,98 @@ fn non_genesis_schema_activates_only_with_its_ordered_lineage_bundle() {
 }
 
 #[test]
+fn durable_genesis_rejects_reopen_with_a_different_schema() {
+    let base = schema();
+    let (dir, core) = open_node_with_schema(node(0x2a), base);
+    drop(core);
+
+    let different = catalogue_evolved_schema();
+    let cfs = different.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let reopened = NodeState::new(node(0x2a), different, storage);
+    assert!(matches!(
+        reopened,
+        Err(Error::InvalidStoredValue(
+            "opened schema does not match durable catalogue genesis"
+        ))
+    ));
+}
+
+#[test]
+fn pending_lineage_reserves_its_target_and_sequence() {
+    let base = schema();
+    let target = SchemaVersion::new(catalogue_evolved_schema());
+    let lens = MigrationLens::new(
+        base.version_id(),
+        target.id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "body".to_owned(),
+                default: Value::String(String::new()),
+            }],
+        }],
+    );
+    let publication = SchemaLineagePublication::new(
+        target.clone(),
+        lens,
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    let conflicting_lens = MigrationLens::new(
+        base.version_id(),
+        target.id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "body".to_owned(),
+                default: Value::String("different semantic default".to_owned()),
+            }],
+        }],
+    );
+    let conflict = SchemaLineagePublication::new(
+        target,
+        conflicting_lens,
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    let (_dir, mut core) = open_node_with_schema(node(0x2b), base);
+
+    assert!(
+        core.apply_sync_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 2,
+            publication: Box::new(publication),
+        })
+        .unwrap()
+        .is_empty()
+    );
+    assert!(matches!(
+        core.apply_sync_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 2,
+            publication: Box::new(conflict.clone()),
+        }),
+        Err(Error::InvalidCatalogueUpdate(
+            "schema lineage catalogue sequence conflict"
+        ))
+    ));
+    assert!(matches!(
+        core.apply_sync_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 3,
+            publication: Box::new(conflict),
+        }),
+        Err(Error::InvalidCatalogueUpdate(
+            "schema lineage target is already reserved"
+        ))
+    ));
+}
+
+#[test]
 fn schema_lineage_gaps_and_inactive_sources_park_durably_then_drain_in_order() {
     let v1 = schema();
     let v2 = SchemaVersion::new(catalogue_evolved_schema());
