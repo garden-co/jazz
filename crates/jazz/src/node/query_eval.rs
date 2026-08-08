@@ -58,7 +58,7 @@ use crate::query::{
     QueryError, ShapeId, ValidatedQuery, binding_id_for_values, relation_query_to_query,
 };
 use crate::schema::{ColumnSchema, branch_metadata_table_schema, global_current_index_name};
-use crate::tools::OutputOccurrenceId;
+use crate::tools::{ObjectId, OutputOccurrenceId};
 
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
@@ -2777,7 +2777,8 @@ fn current_query_output_request(
         .then(|| AppRowOutputRequest {
             projection: app_row_payload_projection(
                 query,
-                matches!(output, CurrentQueryProgramOutput::MaintainedView),
+                matches!(output, CurrentQueryProgramOutput::MaintainedView)
+                    || !query.array_subqueries.is_empty(),
             ),
             large_values: Vec::new(),
         }),
@@ -5269,7 +5270,9 @@ where
         // query rank. Membership/windowing is already lowered; only restore the
         // selected roots to their advertised order before sending a reset.
         self.apply_query_order(shape.query(), &mut rows)?;
-        self.apply_projection(shape.query(), &mut rows)?;
+        if shape.query().flat_join.is_none() {
+            self.apply_projection(shape.query(), &mut rows)?;
+        }
         let root_count = rows.len();
         let mut edges = Vec::new();
         for fact in program_facts {
@@ -5318,7 +5321,7 @@ where
                 .current_row_from_aggregate_result_payload(query, member, payload)
                 .map(Some);
         }
-        if member.as_row().is_none()
+        if (query.flat_join.is_some() || member.as_row().is_none())
             && let Some(payload) = result_payloads.get(member)
         {
             let Some(table_name) = member.table_name() else {
@@ -7954,24 +7957,26 @@ where
         // members. Preserve their current values alongside membership while
         // coalescing a multisink batch; otherwise a present NULL or a revised
         // aggregate can be mistaken for an absent payload at materialization.
-        transitions.result_payload_adds = transitions
-            .program_fact_adds
-            .iter()
-            .filter_map(|fact| match fact {
-                ProgramFactEntry::ResultPayload(payload) => {
-                    Some((payload.member.clone(), payload.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-        transitions.result_payload_removes = transitions
-            .program_fact_removes
-            .iter()
-            .filter_map(|fact| match fact {
-                ProgramFactEntry::ResultPayload(payload) => Some(payload.member.clone()),
-                _ => None,
-            })
-            .collect();
+        if local.result_query.aggregate.is_some() {
+            transitions.result_payload_adds = transitions
+                .program_fact_adds
+                .iter()
+                .filter_map(|fact| match fact {
+                    ProgramFactEntry::ResultPayload(payload) => {
+                        Some((payload.member.clone(), payload.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            transitions.result_payload_removes = transitions
+                .program_fact_removes
+                .iter()
+                .filter_map(|fact| match fact {
+                    ProgramFactEntry::ResultPayload(payload) => Some(payload.member.clone()),
+                    _ => None,
+                })
+                .collect();
+        }
         Ok(Some(transitions))
     }
 

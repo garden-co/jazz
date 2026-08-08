@@ -4872,6 +4872,7 @@ fn lowered_terminals(
     if let Some(app_rows) = &request.output.app_rows
         && !has_routed_tree_app_projection
     {
+        let projected_output = projected_multisource_terminal(plan, source);
         let (graph, descriptor, hidden_fields) = match app_rows.projection.clone() {
             PayloadProjection::Tree(tree) if !tree.paths.is_empty() => {
                 if !root_route_fields.is_empty() {
@@ -4893,6 +4894,41 @@ fn lowered_terminals(
                     collected.descriptor,
                     collected.hidden_fields,
                 )
+            }
+            _ if projected_output.is_some() => {
+                let (output_source_id, output_fields, is_flat) = projected_output
+                    .as_ref()
+                    .expect("guarded projected multi-source output");
+                let output_source = resolved_sources.get(output_source_id).ok_or_else(|| {
+                    single_gap_report(UnsupportedReason::Runtime(format!(
+                        "projected output source {output_source_id:?} was not resolved"
+                    )))
+                })?;
+                let (graph, descriptor) = if *is_flat {
+                    let descriptor = RecordDescriptor::new(
+                        output_fields
+                            .iter()
+                            .map(|field| (field.name.clone(), field.ty.clone())),
+                    );
+                    (graph.clone(), descriptor)
+                } else {
+                    let descriptor = output_source.row_shape.descriptor.clone();
+                    let fields = descriptor
+                        .fields()
+                        .iter()
+                        .filter_map(|field| field.name.clone())
+                        .map(ProjectField::named)
+                        .collect::<Vec<_>>();
+                    (graph.clone().project_fields(fields), descriptor)
+                };
+                let mut hidden_fields = hidden_source_fields(&output_source.row_shape);
+                hidden_fields.extend(
+                    output_fields
+                        .iter()
+                        .filter(|field| field.name.starts_with("__flat_join_row_"))
+                        .map(|field| field.name.clone()),
+                );
+                (graph, descriptor, hidden_fields)
             }
             _ => (
                 if root_route_fields.is_empty() {
@@ -6351,6 +6387,34 @@ fn flat_join_payload_fields(plan: &AnalyzedQueryPlan) -> Vec<TypedOutputField> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn projected_multisource_terminal(
+    plan: &AnalyzedQueryPlan,
+    root_source: &ResolvedSource,
+) -> Option<(SourceId, Vec<TypedOutputField>, bool)> {
+    let columns = root_linear_steps(plan).and_then(|steps| match steps.last() {
+        Some(LinearStep::Project(columns)) => Some(columns),
+        _ => None,
+    })?;
+    let output_source = columns.iter().find_map(|column| match &column.value {
+        NormalizedValueRef::RowId(RowIdRef::Source(source))
+            if column.output.name == root_source.row_shape.row_uuid_field =>
+        {
+            Some(source.clone())
+        }
+        _ => None,
+    })?;
+    let is_flat = columns
+        .iter()
+        .any(|column| column.output.name.starts_with("__flat_join_row_"));
+    is_flat.then(|| {
+        (
+            output_source,
+            columns.iter().map(|column| column.output.clone()).collect(),
+            true,
+        )
+    })
 }
 
 fn root_linear_steps(plan: &AnalyzedQueryPlan) -> Option<&[LinearStep]> {
