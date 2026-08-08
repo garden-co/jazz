@@ -667,6 +667,10 @@ pub struct AggregateOutput {
     pub column: Option<String>,
 }
 
+/// Public client aggregate functions.
+///
+/// The public client surface supports COUNT and SUM today. Core Jazz and Groove
+/// also support AVG, MIN, and MAX; widening this enum is tracked separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AggregateFunction {
     Count,
@@ -1089,6 +1093,7 @@ impl QueryBuilder {
         self
     }
 
+    /// Add COUNT(*). Public client aggregates are COUNT and SUM today.
     pub fn count(mut self) -> Self {
         self.query.aggregate.get_or_insert_with(|| AggregateSpec {
             group_by: None,
@@ -1106,6 +1111,7 @@ impl QueryBuilder {
         self
     }
 
+    /// Add SUM(column). Core Jazz/Groove also support AVG/MIN/MAX separately.
     pub fn sum(mut self, column: impl Into<String>) -> Self {
         self.query.aggregate.get_or_insert_with(|| AggregateSpec {
             group_by: None,

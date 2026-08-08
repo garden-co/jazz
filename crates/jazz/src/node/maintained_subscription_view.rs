@@ -17,7 +17,7 @@ use super::query_engine::{
 use crate::ids::{AuthorId, NodeAlias, NodeUuid, RowUuid};
 use crate::protocol::{
     ProgramFactEntry, RealRowMemberEntry, RelationEdgeEntry, ResultMemberEntry,
-    ResultMemberPayloadEntry, ResultRowLayer, RowVersionRefEntry,
+    ResultMemberPayloadEntry, ResultRowLayer, RowVersionRefEntry, SyntheticReplacementToken,
 };
 use crate::schema::TableSchema;
 use crate::time::{GlobalSeq, TxTime};
@@ -543,6 +543,7 @@ impl MaintainedSubscriptionView {
                 transitions.removes.push(member.clone());
                 self.result_weights.remove(&member);
                 if let Some(existing) = self.result_payloads.remove(&member) {
+                    transitions.result_payload_removes.push(member.clone());
                     transitions
                         .program_fact_removes
                         .push(ProgramFactEntry::ResultPayload(existing));
@@ -557,6 +558,7 @@ impl MaintainedSubscriptionView {
             transitions.removes.push(old_member.clone());
             self.result_weights.remove(&old_member);
             if let Some(existing) = self.result_payloads.remove(&old_member).or(old_payload) {
+                transitions.result_payload_removes.push(old_member.clone());
                 transitions
                     .program_fact_removes
                     .push(ProgramFactEntry::ResultPayload(existing));
@@ -568,6 +570,9 @@ impl MaintainedSubscriptionView {
         transitions
             .program_fact_adds
             .push(ProgramFactEntry::ResultPayload(payload.clone()));
+        transitions
+            .result_payload_adds
+            .push((member.clone(), payload.clone()));
         self.result_payloads.insert(member.clone(), payload);
         self.result_weights.insert(member, 1);
         Ok(())
@@ -796,15 +801,15 @@ fn decode_typed_terminal_record(
             let row = postcard::to_allocvec(&row_value).map_err(|_| {
                 super::Error::InvalidStoredValue("aggregate result row encoding failed")
             })?;
-            let revision_value =
-                record.get_idx(field_idx(record, &schema.synthetic.revision_field)?)?;
-            let revision = postcard::to_allocvec(&revision_value).map_err(|_| {
-                super::Error::InvalidStoredValue("aggregate result revision encoding failed")
+            let replacement_value =
+                record.get_idx(field_idx(record, &schema.synthetic.replacement_field)?)?;
+            let replacement = postcard::to_allocvec(&replacement_value).map_err(|_| {
+                super::Error::InvalidStoredValue("aggregate replacement token encoding failed")
             })?;
             let member = ResultMemberEntry::Synthetic {
                 table,
                 row,
-                revision,
+                replacement: SyntheticReplacementToken::from_encoded_record(replacement),
             };
             let payload = ResultMemberPayloadEntry {
                 member: member.clone(),
@@ -1412,8 +1417,8 @@ fn result_member_entry_bytes(member: &ResultMemberEntry) -> usize {
             ResultMemberEntry::Synthetic {
                 table,
                 row,
-                revision,
-            } => table.len() + vec_bytes(row) + vec_bytes(revision),
+                replacement,
+            } => table.len() + vec_bytes(row) + mem::size_of_val(replacement),
             ResultMemberEntry::PathTuple {
                 path,
                 source_table,

@@ -7,7 +7,7 @@ import type {
   Value,
   WasmSchema,
 } from "../../drivers/types.js";
-import { PostcardWriter, type ValueType } from "./native-codec.js";
+import { PostcardWriter, writeValueType, type ValueType } from "./native-codec.js";
 
 const OUTER_ROW_SESSION_PREFIX = "__jazz_outer_row";
 
@@ -84,7 +84,7 @@ export function encodeSchema(schema: WasmSchema): Uint8Array {
     table.vec((column, columnIndex) => {
       const columnSpec = definition.columns[columnIndex]!;
       column.string(columnSpec.name);
-      writeColumnType(column, columnValueType(columnSpec));
+      writeValueType(column, columnValueType(columnSpec));
       writeLargeValueKind(column, columnSpec);
       column.none();
       writeColumnDefault(column, columnSpec);
@@ -111,34 +111,7 @@ export function encodeSchema(schema: WasmSchema): Uint8Array {
 
 export function columnValueType(column: ColumnDescriptor): ValueType {
   const valueType = columnTypeToValueType(column.column_type);
-  return column.nullable ? { tag: 12, inner: valueType } : valueType;
-}
-
-// JazzSchema columns use groove::schema::ColumnType's postcard layout, which
-// differs from groove::records::ValueType at tag 13: it is I64, not Record.
-function writeColumnType(writer: PostcardWriter, columnType: ValueType): void {
-  writer.enumUnit(columnType.tag);
-  if (columnType.tag === 9) {
-    if (!columnType.enumSchema) throw new Error("missing enum schema for Groove ColumnType::Enum");
-    writer.string(columnType.enumSchema.name);
-    writer.vec(
-      (variantWriter, index) => variantWriter.string(columnType.enumSchema!.variants[index]!),
-      columnType.enumSchema.variants.length,
-    );
-    return;
-  }
-  if (columnType.tag === 10) {
-    const members = columnType.members ?? (columnType.inner ? [columnType.inner] : []);
-    writer.vec(
-      (memberWriter, index) => writeColumnType(memberWriter, members[index]!),
-      members.length,
-    );
-    return;
-  }
-  if (columnType.tag === 11 || columnType.tag === 12) {
-    if (!columnType.inner) throw new Error(`missing inner column type for tag ${columnType.tag}`);
-    writeColumnType(writer, columnType.inner);
-  }
+  return column.nullable ? { tag: 14, inner: valueType } : valueType;
 }
 
 function writeLargeValueKind(writer: PostcardWriter, column: ColumnDescriptor) {
@@ -275,27 +248,27 @@ function writeMergeStrategies(writer: PostcardWriter, columns: ColumnDescriptor[
 export function columnTypeToValueType(type: ColumnType): ValueType {
   switch (type.type) {
     case "Boolean":
-      return { tag: 5 };
+      return { tag: 7 };
     case "Integer":
-      return { tag: 14 };
+      return { tag: 4 };
     case "BigInt":
-      return { tag: 13 };
+      return { tag: 5 };
     case "Timestamp":
       return { tag: 3 };
     case "Double":
-      return { tag: 4 };
+      return { tag: 6 };
     case "Text":
     case "Json":
     case "Enum":
-      return { tag: 6 };
-    case "Bytea":
-      return { tag: 7 };
-    case "Uuid":
       return { tag: 8 };
+    case "Bytea":
+      return { tag: 9 };
+    case "Uuid":
+      return { tag: 10 };
     case "Array":
-      return { tag: 11, inner: columnTypeToValueType(type.element) };
+      return { tag: 13, inner: columnTypeToValueType(type.element) };
     case "Row":
-      throw new Error("Core runtime does not encode nested row columns yet");
+      throw new Error("Core runtime schema does not support nested Row columns");
   }
 }
 

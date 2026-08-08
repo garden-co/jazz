@@ -319,6 +319,9 @@ struct QueryServing {
         BTreeMap<ReadPolicyAuthorizationRequestCacheKey, query_engine::QueryProgramRequest>,
     /// Lowered authorization row-id graphs keyed by their full query-engine request.
     policy_authorization_graph_cache: BTreeMap<String, query_eval::PolicyAuthorizationGraph>,
+    /// Policy tables currently being compiled as membership proofs. This is
+    /// transient recursion state, not a cache.
+    policy_proof_stack: Vec<String>,
     /// Logical tables that have history rows for a stored transaction.
     tx_version_tables_cache: BTreeMap<TxId, BTreeSet<String>>,
     /// Recently staged history rows for a stored transaction.
@@ -586,6 +589,7 @@ where
                 query_shape_cache: BTreeMap::new(),
                 read_policy_authorization_request_cache: BTreeMap::new(),
                 policy_authorization_graph_cache: BTreeMap::new(),
+                policy_proof_stack: Vec::new(),
                 tx_version_tables_cache: BTreeMap::new(),
                 tx_versions_cache: BTreeMap::new(),
                 tx_version_tables_cache_order: VecDeque::new(),
@@ -4599,9 +4603,7 @@ impl CurrentRow {
                 .chain(projected_columns.iter().map(|column| {
                     (
                         user_column_field(&column.name),
-                        records::ValueType::Nullable(Box::new(
-                            column.column_type.clone().value_type(),
-                        )),
+                        records::ValueType::Nullable(Box::new(column.column_type.clone())),
                     )
                 }))
                 .chain([
@@ -5526,6 +5528,16 @@ pub enum Error {
     /// Query-engine capability report for a currently unsupported program.
     #[error("query capability unsupported: {0}")]
     QueryCapability(String),
+    /// A membership-policy proof revisited a table already on its compilation
+    /// stack. The named error prevents stack exhaustion while diagnosing a
+    /// policy cycle.
+    #[error("PolicyProofCycle: table '{table}' re-entered at depth {depth}")]
+    PolicyProofCycle {
+        /// Revisited policy table.
+        table: String,
+        /// Compilation-stack depth at attempted re-entry.
+        depth: usize,
+    },
     /// Table was not found in the schema.
     #[error("table not found: {0}")]
     TableNotFound(String),

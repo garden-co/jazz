@@ -36,6 +36,7 @@ Invariant digest:
 - `INV-API-20`: An upstream connection MUST upload each locally-authored transaction at most once.
 - `INV-API-21`: A subscriber `PeerConnection::tick` MUST serve subscriptions under the `AuthorId` passed to `Node::accept_subscriber`, not under the serving node's own identity.
 - `INV-API-22`: Db::tick() MUST service every registered connection exactly once.
+- `INV-API-23`: A client binding tick driver MUST classify `Db::tick()` failures. A recoverable protocol condition MUST NOT terminate the driver; the driver MUST continue through its documented repair or reconnect path with bounded backoff. A fatal failure, or exhausted recovery, MUST stop the driver and be surfaced to the caller as an error rather than appearing as a stalled sync operation.
 - `INV-API-24`: The query builder exposed through Db::table MUST expose the schema-validated query construction capabilities defined in ch. 6.
 - `INV-API-25`: `TextEdit` operations MUST use byte offsets relative to the current local parent value for the column and MUST lower to `LargeValueEditOp::Insert`/`LargeValueEditOp::Delete`.
 - `INV-API-26`: `Db::mergeable_tx()` MUST group multiple facade writes under one mergeable `TxId`, and the produced commit unit MUST set `Transaction.n_total_writes` to the number of grouped versions.
@@ -298,6 +299,16 @@ directions; relay/edge/core peer roles remain below the facade (ch. 9).
 (`RegisterShape` then `Subscribe`, `INV-API-19`), uploads each local commit
 once (`INV-API-20`), drains inbound messages, applies them, and refreshes
 registered subscriptions (ch. 8).
+
+Bindings that schedule `Db::tick()` in a background client driver own the
+driver's lifecycle. They classify a returned error before deciding whether to
+stop: bounded-queue backpressure retries, a missing content extent follows the
+content-repair path, and a closed upstream WebSocket detaches and reconnects.
+Other errors are terminal because no repair is defined for them. Recovery uses
+bounded exponential backoff; when it exhausts, the binding records a terminal
+sync error. Queries, hydration, and durability waits must observe that error
+promptly rather than waiting for ordinary coverage or settlement timeouts
+(`INV-API-23`).
 
 The binding-facing surface includes:
 

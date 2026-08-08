@@ -1541,6 +1541,37 @@ pub enum SubscribeServerFailureCode {
 /// `(table, row_uuid, content_tx_id)`.
 pub type ResultRowEntry = (groove::Intern<String>, RowUuid, TxId);
 
+/// Opaque replacement discriminator for a synthetic result member.
+///
+/// Aggregate result rows have no revision or version. The runtime needs a
+/// token solely to pair a retracted aggregate record with its replacement;
+/// callers cannot inspect or construct the token as a meaningful value.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct SyntheticReplacementToken(Vec<u8>);
+
+impl std::fmt::Debug for SyntheticReplacementToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SyntheticReplacementToken(..)")
+    }
+}
+
+impl SyntheticReplacementToken {
+    pub(crate) fn from_encoded_record(value: Vec<u8>) -> Self {
+        Self(value)
+    }
+}
+
+#[cfg(test)]
+mod synthetic_replacement_token_tests {
+    use super::SyntheticReplacementToken;
+
+    #[test]
+    fn replacement_token_does_not_expose_a_plausible_revision_value() {
+        let token = SyntheticReplacementToken::from_encoded_record(vec![6]);
+        assert_eq!(format!("{token:?}"), "SyntheticReplacementToken(..)");
+    }
+}
+
 /// Protocol-visible result member.
 ///
 /// A member identifies one terminal output of a lowered query program. Ordinary
@@ -1554,12 +1585,12 @@ pub enum ResultMemberEntry {
     Row(RealRowMemberEntry),
     /// Synthetic result row, such as aggregate output.
     Synthetic {
-        /// Logical synthetic table/relation.
+        /// Logical synthetic result kind. This is a label, not identity.
         table: String,
-        /// Stable synthetic row id.
+        /// Stable identity derived from the aggregate group key.
         row: Vec<u8>,
-        /// Synthetic revision/version id.
-        revision: Vec<u8>,
+        /// Opaque runtime-only discriminator for replacement pairing.
+        replacement: SyntheticReplacementToken,
     },
     /// Relation/path tuple membership.
     PathTuple {

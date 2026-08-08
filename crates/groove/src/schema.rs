@@ -1,13 +1,17 @@
 //! SQL DDL-ish schema metadata for record layout and durable indices.
 //!
 //! This module owns database, table, column, primary-key, foreign-key, and index
-//! declarations. It maps declared column types to [`RecordDescriptor`] value
-//! types, but it does not encode rows itself; binary layout lives in
+//! declarations. Columns and record fields share one [`ValueType`], but this
+//! module does not encode rows itself; binary layout lives in
 //! [`crate::records`]. It also does not plan or maintain indices; the database
 //! facade and IVM runtime consume this metadata to create storage keys and
 //! durable graph nodes.
 
-use crate::records::{EnumSchema, RecordDescriptor, ValueType};
+use crate::records::{RecordDescriptor, ValueType};
+
+/// Schema-facing name for the one logical type space used by both columns and
+/// record values. This is an alias, not a conversion boundary.
+pub use crate::records::ValueType as ColumnType;
 
 /// Collection of table and directly exposed record-store schemas known to a database.
 ///
@@ -284,7 +288,7 @@ impl TableSchema {
                     .columns
                     .iter()
                     .find(|column| column.name == *field_name)?;
-                Some((column.name.clone(), column.column_type.value_type()))
+                Some((column.name.clone(), column.column_type.clone()))
             })
             .collect::<Option<Vec<_>>>()?;
         Some(RecordDescriptor::new(fields))
@@ -294,7 +298,7 @@ impl TableSchema {
         RecordDescriptor::new(
             self.columns
                 .iter()
-                .map(|column| (column.name.clone(), column.column_type.value_type())),
+                .map(|column| (column.name.clone(), column.column_type.clone())),
         )
     }
 }
@@ -338,74 +342,6 @@ impl ColumnSchema {
         Self {
             name: name.into(),
             column_type,
-        }
-    }
-}
-
-/// Type metadata for a declared column.
-///
-/// # Examples
-///
-/// ```
-/// use groove::records::ValueType;
-/// use groove::schema::ColumnType;
-///
-/// let tags = ColumnType::String.array_of().nullable();
-///
-/// assert_eq!(
-///     tags.value_type(),
-///     ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::String))))
-/// );
-/// ```
-#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
-pub enum ColumnType {
-    U8,
-    U16,
-    U32,
-    U64,
-    F64,
-    Bool,
-    String,
-    Bytes,
-    Uuid,
-    Enum(EnumSchema),
-    /// Fixed-width composite column. All members must be fixed-width; variable
-    /// tuple members are reserved for a future extension.
-    Tuple(Vec<ColumnType>),
-    Array(Box<ColumnType>),
-    Nullable(Box<ColumnType>),
-    I64,
-    I32,
-}
-
-impl ColumnType {
-    pub fn nullable(self) -> Self {
-        Self::Nullable(Box::new(self))
-    }
-
-    pub fn array_of(self) -> Self {
-        Self::Array(Box::new(self))
-    }
-
-    pub fn value_type(&self) -> ValueType {
-        match self {
-            Self::U8 => ValueType::U8,
-            Self::U16 => ValueType::U16,
-            Self::U32 => ValueType::U32,
-            Self::U64 => ValueType::U64,
-            Self::I32 => ValueType::I32,
-            Self::I64 => ValueType::I64,
-            Self::F64 => ValueType::F64,
-            Self::Bool => ValueType::Bool,
-            Self::String => ValueType::String,
-            Self::Bytes => ValueType::Bytes,
-            Self::Uuid => ValueType::Uuid,
-            Self::Enum(schema) => ValueType::Enum(schema.clone()),
-            Self::Tuple(members) => {
-                ValueType::Tuple(members.iter().map(ColumnType::value_type).collect())
-            }
-            Self::Array(value_type) => ValueType::Array(Box::new(value_type.value_type())),
-            Self::Nullable(value_type) => ValueType::Nullable(Box::new(value_type.value_type())),
         }
     }
 }
@@ -668,11 +604,11 @@ mod tests {
     #[test]
     fn column_types_map_nested_nullables_and_arrays_to_record_value_types() {
         assert_eq!(
-            ColumnType::U16.nullable().array_of().value_type(),
+            ColumnType::U16.nullable().array_of().clone(),
             ValueType::Array(Box::new(ValueType::Nullable(Box::new(ValueType::U16))))
         );
         assert_eq!(
-            ColumnType::String.array_of().nullable().value_type(),
+            ColumnType::String.array_of().nullable().clone(),
             ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::String))))
         );
     }

@@ -1791,7 +1791,7 @@ fn build_current_row_descriptor(table: &TableSchema) -> records::RecordDescripto
             .chain(table.columns.iter().map(|column| {
                 (
                     user_column_field(&column.name),
-                    records::ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
+                    records::ValueType::Nullable(Box::new(column.column_type.clone())),
                 )
             }))
             .chain([
@@ -1815,7 +1815,7 @@ pub(super) fn current_row_from_positional_cells(
             table.columns.iter().map(|column| {
                 (
                     column.name.clone(),
-                    records::ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
+                    records::ValueType::Nullable(Box::new(column.column_type.clone())),
                 )
             }),
         ),
@@ -1888,7 +1888,7 @@ pub(super) fn nullable_value(value: Value) -> Result<Option<Value>, Error> {
 }
 
 pub(super) fn validate_cell_value(column: &ColumnSchema, value: &Value) -> Result<(), Error> {
-    records::RecordDescriptor::new([("cell", column.column_type.clone().value_type())])
+    records::RecordDescriptor::new([("cell", column.column_type.clone())])
         .create(std::slice::from_ref(value))?;
     Ok(())
 }

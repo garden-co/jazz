@@ -976,7 +976,7 @@ where
                 CellProjection::Literal(value) => fields.push(ProjectField::literal_typed(
                     output,
                     Value::Nullable(Some(Box::new(value))),
-                    records::ValueType::Nullable(Box::new(column.column_type.value_type())),
+                    records::ValueType::Nullable(Box::new(column.column_type.clone())),
                 )),
             }
         }

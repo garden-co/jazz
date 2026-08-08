@@ -792,7 +792,7 @@ where
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
     /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]))?;
-    /// let binding_descriptor = RecordDescriptor::new([("year", ColumnType::U64.value_type())]);
+    /// let binding_descriptor = RecordDescriptor::new([("year", ColumnType::U64.clone())]);
     /// let shape = database.prepare_one_sink(
     ///     GraphBuilder::join(
     ///         GraphBuilder::binding_source("year_params", binding_descriptor),
@@ -3063,12 +3063,12 @@ where
 }
 
 fn primary_key_descriptor(primary_key: &PrimaryKey) -> RecordDescriptor {
-    RecordDescriptor::new(primary_key.columns.iter().map(|column| {
-        (
-            column.column.clone(),
-            column.key_type.column_type().value_type(),
-        )
-    }))
+    RecordDescriptor::new(
+        primary_key
+            .columns
+            .iter()
+            .map(|column| (column.column.clone(), column.key_type.column_type().clone())),
+    )
 }
 
 fn consolidate_table_deltas(table_deltas: Vec<TableDelta>) -> Vec<TableDelta> {
@@ -3681,7 +3681,7 @@ fn validate_primary_key_bytes(
         .ok_or_else(|| Error::MissingPrimaryKey(table.name.clone()))?;
     let mut remaining = primary_key;
     for column in &table_primary_key.columns {
-        decode_primary_key_part(&mut remaining, &column.key_type.column_type().value_type())
+        decode_primary_key_part(&mut remaining, &column.key_type.column_type().clone())
             .map_err(|_| Error::InvalidPersistedIndex(index_name.to_owned()))?;
     }
     if !remaining.is_empty() {
@@ -4013,7 +4013,9 @@ fn decode_index_key_part(
                 _ => Err(Error::InvalidPersistedIndex(index_name.to_owned())),
             }
         }
-        ColumnType::Array(_) => Err(Error::InvalidPersistedIndex(index_name.to_owned())),
+        ColumnType::Array(_) | ColumnType::Record(_) => {
+            Err(Error::InvalidPersistedIndex(index_name.to_owned()))
+        }
     }
 }
 

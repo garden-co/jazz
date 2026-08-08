@@ -2271,6 +2271,44 @@ impl IvmRuntime {
     ) -> Result<CompiledNode, IvmRuntimeError> {
         let inferred_output = self.infer_builder_output_cached(graph, output_memo)?;
         match graph {
+            GraphBuilder::Table { .. }
+            | GraphBuilder::InlineRecords { .. }
+            | GraphBuilder::Index { .. }
+            | GraphBuilder::FrontierSource { .. }
+            | GraphBuilder::BindingSource { .. }
+            | GraphBuilder::Recursive { .. }
+            | GraphBuilder::CollectBy { .. } => {
+                self.add_dedup_source_graph(graph, inferred_output, output_memo)
+            }
+            GraphBuilder::ArgMaxBy { .. }
+            | GraphBuilder::ArgMinBy { .. }
+            | GraphBuilder::TopBy { .. } => {
+                self.add_dedup_ordering_graph(graph, inferred_output, output_memo)
+            }
+            GraphBuilder::Aggregate { .. }
+            | GraphBuilder::Filter { .. }
+            | GraphBuilder::Project { .. }
+            | GraphBuilder::UnwrapNullable { .. }
+            | GraphBuilder::Unnest { .. }
+            | GraphBuilder::Union { .. } => {
+                self.add_dedup_unary_graph(graph, inferred_output, output_memo)
+            }
+            GraphBuilder::Join { .. }
+            | GraphBuilder::SemiJoin { .. }
+            | GraphBuilder::AntiJoin { .. } => {
+                self.add_dedup_join_graph(graph, inferred_output, output_memo)
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn add_dedup_source_graph(
+        &mut self,
+        graph: &GraphBuilder,
+        inferred_output: RecordDescriptor,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        match graph {
             GraphBuilder::Table {
                 table,
                 scan,
@@ -2405,6 +2443,21 @@ impl IvmRuntime {
                 self.initialize_node_runtime(node);
                 Ok(CompiledNode { output, node })
             }
+            GraphBuilder::CollectBy { input, collect } => {
+                self.add_collect_by_graph(input, collect, inferred_output, output_memo)
+            }
+            _ => unreachable!("dispatcher routes only source graph builders here"),
+        }
+    }
+
+    #[inline(never)]
+    fn add_dedup_ordering_graph(
+        &mut self,
+        graph: &GraphBuilder,
+        inferred_output: RecordDescriptor,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        match graph {
             GraphBuilder::ArgMaxBy {
                 input,
                 group_cols,
@@ -2626,9 +2679,18 @@ impl IvmRuntime {
                 self.initialize_node_runtime(node);
                 Ok(CompiledNode { output, node })
             }
-            GraphBuilder::CollectBy { input, collect } => {
-                self.add_collect_by_graph(input, collect, inferred_output, output_memo)
-            }
+            _ => unreachable!("dispatcher routes only ordering graph builders here"),
+        }
+    }
+
+    #[inline(never)]
+    fn add_dedup_unary_graph(
+        &mut self,
+        graph: &GraphBuilder,
+        inferred_output: RecordDescriptor,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        match graph {
             GraphBuilder::Aggregate {
                 input,
                 group_cols,
@@ -2788,6 +2850,18 @@ impl IvmRuntime {
                 self.initialize_node_runtime(node);
                 Ok(CompiledNode { output, node })
             }
+            _ => unreachable!("dispatcher routes only unary graph builders here"),
+        }
+    }
+
+    #[inline(never)]
+    fn add_dedup_join_graph(
+        &mut self,
+        graph: &GraphBuilder,
+        inferred_output: RecordDescriptor,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        match graph {
             GraphBuilder::Join {
                 left,
                 right,
@@ -2905,6 +2979,7 @@ impl IvmRuntime {
                 self.initialize_node_runtime(node);
                 Ok(CompiledNode { output, node })
             }
+            _ => unreachable!("dispatcher routes only join graph builders here"),
         }
     }
 
@@ -4014,12 +4089,12 @@ where
 }
 
 fn primary_key_descriptor(primary_key: &PrimaryKey) -> RecordDescriptor {
-    RecordDescriptor::new(primary_key.columns.iter().map(|column| {
-        (
-            column.column.clone(),
-            column.key_type.column_type().value_type(),
-        )
-    }))
+    RecordDescriptor::new(
+        primary_key
+            .columns
+            .iter()
+            .map(|column| (column.column.clone(), column.key_type.column_type().clone())),
+    )
 }
 
 fn validate_public_output_fields(
@@ -6943,6 +7018,15 @@ where
         input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         if input.deltas.is_empty() {
+            if self.context.eval_mode == EvalMode::Hydrate && aggregate.group_key.is_empty() {
+                let record =
+                    aggregate_row_from_records(input.descriptor, output_desc, aggregate, &[])?
+                        .ok_or(IvmRuntimeError::UnsupportedOperator)?;
+                return Ok(RecordDeltas {
+                    descriptor: output_desc,
+                    deltas: vec![RecordDelta { record, weight: 1 }],
+                });
+            }
             return Ok(RecordDeltas::empty(output_desc));
         }
         let [input_node] = self
@@ -8063,7 +8147,7 @@ fn aggregate_output_type(
 ) -> Result<ValueType, IvmRuntimeError> {
     Ok(match aggregate.function {
         AggregateFunction::Count => ValueType::U64,
-        AggregateFunction::Avg => ValueType::F64,
+        AggregateFunction::Avg => ValueType::Nullable(Box::new(ValueType::F64)),
         AggregateFunction::Sum => {
             let value_type = aggregate_expr_value_type(input, aggregate)?;
             match non_nullable_type(&value_type) {
@@ -8073,12 +8157,13 @@ fn aggregate_output_type(
                 | ValueType::U64
                 | ValueType::I32
                 | ValueType::I64
-                | ValueType::F64 => value_type,
+                | ValueType::F64 => nullable_type(&value_type),
                 _ => return Err(IvmRuntimeError::UnsupportedOperator),
             }
         }
         AggregateFunction::Min | AggregateFunction::Max => {
-            aggregate_expr_value_type(input, aggregate)?
+            let value_type = aggregate_expr_value_type(input, aggregate)?;
+            nullable_type(&value_type)
         }
     })
 }
@@ -8114,6 +8199,11 @@ fn non_nullable_type(value_type: &ValueType) -> &ValueType {
         ValueType::Nullable(inner) => inner,
         other => other,
     }
+}
+
+/// Used for converting non-nullable column types to nullable column types when aggregating.
+fn nullable_type(value_type: &ValueType) -> ValueType {
+    ValueType::Nullable(Box::new(non_nullable_type(value_type).clone()))
 }
 
 fn index_record_descriptor() -> RecordDescriptor {
@@ -9158,14 +9248,16 @@ fn aggregate_row_from_records(
             positive.push((record.as_ref(), *weight));
         }
     }
-    if total_weight == 0 {
+    if total_weight == 0 && !aggregate.group_key.is_empty() {
         return Ok(None);
     }
 
-    let first = BorrowedRecord::new(positive[0].0, &input_desc);
     let mut values = Vec::new();
-    for group_expr in &aggregate.group_key {
-        values.push(evaluate_aggregate_expr(&first, group_expr)?);
+    if let Some((first, _)) = positive.first() {
+        let first = BorrowedRecord::new(first, &input_desc);
+        for group_expr in &aggregate.group_key {
+            values.push(evaluate_aggregate_expr(&first, group_expr)?);
+        }
     }
     for aggregate_expr in &aggregate.aggregates {
         values.push(evaluate_aggregate(records, input_desc, aggregate_expr)?);
@@ -9207,10 +9299,14 @@ fn evaluate_aggregate(
             }
             Ok(Value::U64(count))
         }
-        AggregateFunction::Sum => aggregate_sum(records, input_desc, aggregate),
-        AggregateFunction::Avg => aggregate_avg(records, input_desc, aggregate),
+        AggregateFunction::Sum => {
+            aggregate_sum(records, input_desc, aggregate).map(nullable_aggregate_value)
+        }
+        AggregateFunction::Avg => {
+            aggregate_avg(records, input_desc, aggregate).map(nullable_aggregate_value)
+        }
         AggregateFunction::Min | AggregateFunction::Max => {
-            aggregate_extremum(records, input_desc, aggregate)
+            aggregate_extremum(records, input_desc, aggregate).map(nullable_aggregate_value)
         }
     }
 }
@@ -9219,7 +9315,7 @@ fn aggregate_sum(
     records: &[(Bytes, i64)],
     input_desc: RecordDescriptor,
     aggregate: &AggregateExpr,
-) -> Result<Value, IvmRuntimeError> {
+) -> Result<Option<Value>, IvmRuntimeError> {
     let Some(expr) = &aggregate.expression else {
         return Err(IvmRuntimeError::UnsupportedOperator);
     };
@@ -9267,23 +9363,28 @@ fn aggregate_sum(
             _ => return Err(IvmRuntimeError::UnsupportedOperator),
         }
     }
-    match kind.ok_or(IvmRuntimeError::UnsupportedOperator)? {
-        ValueType::U8 => u8::try_from(u64_sum)
+    match kind {
+        None => Ok(None),
+        Some(ValueType::U8) => u8::try_from(u64_sum)
             .map(Value::U8)
-            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
-        ValueType::U16 => u16::try_from(u64_sum)
+            .map(Some)
+            .map_err(|_| IvmRuntimeError::AggregateOverflow),
+        Some(ValueType::U16) => u16::try_from(u64_sum)
             .map(Value::U16)
-            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
-        ValueType::U32 => u32::try_from(u64_sum)
+            .map(Some)
+            .map_err(|_| IvmRuntimeError::AggregateOverflow),
+        Some(ValueType::U32) => u32::try_from(u64_sum)
             .map(Value::U32)
-            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
-        ValueType::U64 => Ok(Value::U64(u64_sum)),
-        ValueType::I32 => i32::try_from(i64_sum)
+            .map(Some)
+            .map_err(|_| IvmRuntimeError::AggregateOverflow),
+        Some(ValueType::U64) => Ok(Some(Value::U64(u64_sum))),
+        Some(ValueType::I32) => i32::try_from(i64_sum)
             .map(Value::I32)
-            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
-        ValueType::I64 => Ok(Value::I64(i64_sum)),
-        ValueType::F64 => Ok(Value::F64(f64_sum)),
-        _ => Err(IvmRuntimeError::UnsupportedOperator),
+            .map(Some)
+            .map_err(|_| IvmRuntimeError::AggregateOverflow),
+        Some(ValueType::F64) => Ok(Some(Value::F64(f64_sum))),
+        Some(ValueType::I64) => Ok(Some(Value::I64(i64_sum))),
+        Some(_) => Err(IvmRuntimeError::UnsupportedOperator),
     }
 }
 
@@ -9291,7 +9392,7 @@ fn aggregate_avg(
     records: &[(Bytes, i64)],
     input_desc: RecordDescriptor,
     aggregate: &AggregateExpr,
-) -> Result<Value, IvmRuntimeError> {
+) -> Result<Option<Value>, IvmRuntimeError> {
     let Some(expr) = &aggregate.expression else {
         return Err(IvmRuntimeError::UnsupportedOperator);
     };
@@ -9310,16 +9411,16 @@ fn aggregate_avg(
         count += *weight;
     }
     if count <= 0 {
-        return Err(IvmRuntimeError::UnsupportedOperator);
+        return Ok(None);
     }
-    Ok(Value::F64(sum / (count as f64)))
+    Ok(Some(Value::F64(sum / (count as f64))))
 }
 
 fn aggregate_extremum(
     records: &[(Bytes, i64)],
     input_desc: RecordDescriptor,
     aggregate: &AggregateExpr,
-) -> Result<Value, IvmRuntimeError> {
+) -> Result<Option<Value>, IvmRuntimeError> {
     let Some(expr) = &aggregate.expression else {
         return Err(IvmRuntimeError::UnsupportedOperator);
     };
@@ -9349,19 +9450,18 @@ fn aggregate_extremum(
             best = Some((value_key, record.clone(), value));
         }
     }
-    best.map(|(_, _, value)| value)
-        .ok_or(IvmRuntimeError::UnsupportedOperator)
+    Ok(best.map(|(_, _, value)| value))
 }
 
 fn add_weighted_u64(current: u64, value: u64, weight: i64) -> Result<u64, IvmRuntimeError> {
-    let weight = u64::try_from(weight).map_err(|_| IvmRuntimeError::UnsupportedOperator)?;
+    let weight = u64::try_from(weight).map_err(|_| IvmRuntimeError::AggregateOverflow)?;
     current
         .checked_add(
             value
                 .checked_mul(weight)
-                .ok_or(IvmRuntimeError::UnsupportedOperator)?,
+                .ok_or(IvmRuntimeError::AggregateOverflow)?,
         )
-        .ok_or(IvmRuntimeError::UnsupportedOperator)
+        .ok_or(IvmRuntimeError::AggregateOverflow)
 }
 
 fn add_weighted_i64(current: i64, value: i64, weight: i64) -> Result<i64, IvmRuntimeError> {
@@ -9369,9 +9469,9 @@ fn add_weighted_i64(current: i64, value: i64, weight: i64) -> Result<i64, IvmRun
         .checked_add(
             value
                 .checked_mul(weight)
-                .ok_or(IvmRuntimeError::UnsupportedOperator)?,
+                .ok_or(IvmRuntimeError::AggregateOverflow)?,
         )
-        .ok_or(IvmRuntimeError::UnsupportedOperator)
+        .ok_or(IvmRuntimeError::AggregateOverflow)
 }
 
 fn numeric_value_as_f64(value: &Value) -> Result<f64, IvmRuntimeError> {
@@ -9385,6 +9485,10 @@ fn numeric_value_as_f64(value: &Value) -> Result<f64, IvmRuntimeError> {
         Value::F64(value) => Ok(*value),
         _ => Err(IvmRuntimeError::UnsupportedOperator),
     }
+}
+
+fn nullable_aggregate_value(value: Option<Value>) -> Value {
+    Value::Nullable(value.map(Box::new))
 }
 
 fn unwrap_nullable_value(value: Value) -> Option<Value> {
@@ -10055,6 +10159,8 @@ fn encode_runtime_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
 
 #[derive(Debug, Error)]
 pub enum IvmRuntimeError {
+    #[error("aggregate result exceeds its declared numeric width")]
+    AggregateOverflow,
     #[error("graph field not found: {0}")]
     GraphFieldNotFound(String),
     #[error("graph field index out of bounds: {0}")]
@@ -10239,8 +10345,8 @@ mod tests {
 
     fn reach_descriptor() -> RecordDescriptor {
         RecordDescriptor::new([
-            ("src", ColumnType::U64.value_type()),
-            ("dst", ColumnType::U64.value_type()),
+            ("src", ColumnType::U64.clone()),
+            ("dst", ColumnType::U64.clone()),
         ])
     }
 

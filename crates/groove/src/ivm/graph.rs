@@ -96,7 +96,7 @@ use super::op_types::*;
 /// .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
 /// let mut database = Database::new(schema, MemoryStorage::new(&["albums"]))?;
 ///
-/// let binding_descriptor = RecordDescriptor::new([("artist_id", ColumnType::U64.value_type())]);
+/// let binding_descriptor = RecordDescriptor::new([("artist_id", ColumnType::U64.clone())]);
 /// let graph = GraphBuilder::join(
 ///     GraphBuilder::binding_source("artist_params", binding_descriptor),
 ///     GraphBuilder::table("albums"),

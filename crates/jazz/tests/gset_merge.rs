@@ -325,6 +325,283 @@ async fn concurrent_writes_never_remove_a_shared_element_impl() {
     server.shutdown().await;
 }
 
+#[tokio::test]
+async fn same_elements_in_different_orders_converge_to_one_canonical_order() {
+    tokio::task::LocalSet::new()
+        .run_until(same_elements_in_different_orders_converge_to_one_canonical_order_impl())
+        .await
+}
+
+async fn same_elements_in_different_orders_converge_to_one_canonical_order_impl() {
+    let _suite_guard = lock_gset_suite().await;
+    let schema = gset_schema();
+    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice-order-independent")
+        .ready_on("docs", READY_TIMEOUT)
+        .connect()
+        .await;
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("bob-order-independent")
+        .ready_on("docs", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let (doc_id, _, _) = alice
+        .insert("docs", doc_values("order", &[]))
+        .expect("alice creates doc");
+    let query = QueryBuilder::new("docs").build();
+    wait_for_query(
+        &bob,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob sees order doc",
+        |rows| (rows.len() == 1).then_some(()),
+    )
+    .await;
+
+    merge_concurrently(
+        &server,
+        doc_id,
+        "tags",
+        &alice,
+        tags_value(&["charlie", "alpha", "bravo"]),
+        &bob,
+        tags_value(&["bravo", "charlie", "alpha"]),
+    )
+    .await;
+    assert_converges(
+        &alice,
+        &bob,
+        &query,
+        doc_id,
+        tags_of,
+        vec![
+            "alpha".to_string(),
+            "bravo".to_string(),
+            "charlie".to_string(),
+        ],
+        "the same elements in opposite orders converge byte-identically",
+    )
+    .await;
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn duplicate_insertions_are_idempotent() {
+    tokio::task::LocalSet::new()
+        .run_until(duplicate_insertions_are_idempotent_impl())
+        .await
+}
+
+async fn duplicate_insertions_are_idempotent_impl() {
+    let _suite_guard = lock_gset_suite().await;
+    let schema = gset_schema();
+    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice-idempotent")
+        .ready_on("docs", READY_TIMEOUT)
+        .connect()
+        .await;
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("bob-idempotent")
+        .ready_on("docs", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let (doc_id, _, _) = alice
+        .insert("docs", doc_values("idempotent", &[]))
+        .expect("alice creates doc");
+    let query = QueryBuilder::new("docs").build();
+    wait_for_query(
+        &bob,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob sees idempotent doc",
+        |rows| (rows.len() == 1).then_some(()),
+    )
+    .await;
+
+    merge_concurrently(
+        &server,
+        doc_id,
+        "tags",
+        &alice,
+        tags_value(&["once", "once"]),
+        &bob,
+        tags_value(&["once", "once"]),
+    )
+    .await;
+    assert_converges(
+        &alice,
+        &bob,
+        &query,
+        doc_id,
+        tags_of,
+        vec!["once".to_string()],
+        "duplicate insertions collapse to one set element",
+    )
+    .await;
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn later_writes_cannot_remove_existing_elements() {
+    tokio::task::LocalSet::new()
+        .run_until(later_writes_cannot_remove_existing_elements_impl())
+        .await
+}
+
+async fn later_writes_cannot_remove_existing_elements_impl() {
+    let _suite_guard = lock_gset_suite().await;
+    let schema = gset_schema();
+    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("alice-no-remove")
+        .ready_on("docs", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let (doc_id, _, _) = alice
+        .insert("docs", doc_values("no-remove", &["keep"]))
+        .expect("alice creates doc");
+    let remove_batch = alice
+        .update(doc_id, vec![("tags".to_string(), tags_value(&[]))])
+        .expect("attempted removal writes a version");
+    alice
+        .wait_for_batch(remove_batch, DurabilityTier::EdgeServer)
+        .await
+        .expect("attempted removal settles");
+
+    let query = QueryBuilder::new("docs").build();
+    wait_for_query(
+        &alice,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "a later empty write cannot remove the existing element",
+        |rows| {
+            rows.iter()
+                .find(|row| row.0 == doc_id)
+                .and_then(tags_of)
+                .filter(|tags| tags == &vec!["keep".to_string()])
+                .map(|_| ())
+        },
+    )
+    .await;
+
+    alice.shutdown().await.expect("shutdown alice");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn empty_and_non_empty_sets_union_in_both_propagation_orders() {
+    tokio::task::LocalSet::new()
+        .run_until(empty_and_non_empty_sets_union_in_both_propagation_orders_impl())
+        .await
+}
+
+async fn empty_and_non_empty_sets_union_in_both_propagation_orders_impl() {
+    let _suite_guard = lock_gset_suite().await;
+    let schema = gset_schema();
+    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice-empty")
+        .ready_on("docs", READY_TIMEOUT)
+        .connect()
+        .await;
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("bob-empty")
+        .ready_on("docs", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let (doc_alice_first, _, _) = alice
+        .insert("docs", doc_values("empty-first", &[]))
+        .expect("alice creates first doc");
+    let (doc_bob_first, _, _) = alice
+        .insert("docs", doc_values("non-empty-first", &[]))
+        .expect("alice creates second doc");
+    let query = QueryBuilder::new("docs").build();
+    wait_for_query(
+        &bob,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob sees both empty-set docs",
+        |rows| (rows.len() == 2).then_some(()),
+    )
+    .await;
+
+    merge_concurrently(
+        &server,
+        doc_alice_first,
+        "tags",
+        &alice,
+        tags_value(&[]),
+        &bob,
+        tags_value(&["present"]),
+    )
+    .await;
+    assert_converges(
+        &alice,
+        &bob,
+        &query,
+        doc_alice_first,
+        tags_of,
+        vec!["present".to_string()],
+        "empty then non-empty union retains the element",
+    )
+    .await;
+
+    merge_concurrently(
+        &server,
+        doc_bob_first,
+        "tags",
+        &bob,
+        tags_value(&["present"]),
+        &alice,
+        tags_value(&[]),
+    )
+    .await;
+    assert_converges(
+        &alice,
+        &bob,
+        &query,
+        doc_bob_first,
+        tags_of,
+        vec!["present".to_string()],
+        "non-empty then empty union retains the element",
+    )
+    .await;
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
 /// `docs` table with a `scores` float-array column merging as a grow-only set.
 fn gset_float_schema() -> Schema {
     let scores = ColumnDescriptor::new(

@@ -335,9 +335,28 @@ replacement witness information for the peer state machine to emit the same net
 Aggregate functions are capability-gated by groove support. Maintained Jazz
 subscriptions should initially accept only deterministic, retractable summaries
 such as count, numeric sum, min, and max, with deterministic witness ties owned
-by groove. User-defined aggregates, approximate aggregates, and
-empty-global-row SQL compatibility stay outside the maintained subscription
-surface until their replay semantics and payload shape are specified.
+by groove. User-defined aggregates and approximate aggregates stay outside the
+maintained subscription surface until their replay semantics and payload shape
+are specified.
+
+Decision, Anselm 2026-08-07: the empty global aggregate row is **inside** the
+maintained surface, and follows SQL. A scalar global aggregate over no input
+rows delivers a present row reporting `0` for `count` and `NULL` for `sum`,
+`avg`, `min` and `max` — the same result a one-shot read produces, as ch. 6
+§6.4.2 requires. This chapter previously excluded it, which could not hold once
+`groove/SPEC/3_queries_operators.md` specified the one-shot behaviour: a
+one-shot read would return a row where a subscription over the same query
+returned nothing.
+
+Its identity is the one already required by ch. 6 §6.4.3 `INV-QUERY-30`: a
+scalar global aggregate lowers to one fixed synthetic identity. That identity
+does not depend on a group key, so the empty case needs no special derivation —
+which is what makes the empty global row expressible at all. The empty row is
+therefore present from attach, and the transition when the first input row
+arrives is a value replacement of an existing member, not an add. Its
+disappearance is likewise a value replacement back to the empty values, never a
+member removal: a scalar global aggregate's member is present for the lifetime
+of the subscription.
 
 Floating-point accumulation IS inside the maintained surface, under a weaker
 agreement guarantee than the exact one above. Incremental maintenance sums in
