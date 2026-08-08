@@ -739,6 +739,16 @@ fn merge_back_branch_emits_ordinary_target_transaction_and_leaves_branch_open() 
         tx.branch_merge.as_ref().map(|merge| merge.source_lineage),
         Some(crate::tx::BranchLineage::Branch(branch_id))
     );
+    let provenance = tx.branch_merge.as_ref().unwrap();
+    assert_eq!(
+        provenance.through_frontier,
+        vec![branch_update, branch_insert, branch_delete]
+    );
+    assert_eq!(provenance.substitutions.len(), 3);
+    assert!(provenance
+        .substitutions
+        .iter()
+        .all(|substitution| substitution.sources.len() == 1));
     assert_eq!(tx.user_metadata_json, None);
 
     let squash_versions = core.query_versions_for_tx(squash).unwrap();

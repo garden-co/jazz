@@ -10,7 +10,10 @@ use crate::schema::{
     branch_metadata_table_schema, branch_partition_history_table_name,
     branch_partition_register_table_name,
 };
-use crate::tx::{BranchLineage, BranchMergeProvenance};
+use crate::tx::{
+    BranchLineage, BranchMergeProvenance, ContributionComponent, ContributionCoordinate,
+    ContributionDot, ContributionSubstitution, MergeAspect,
+};
 
 /// Durable branch metadata recovered from `jazz_branches`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,16 +124,29 @@ where
 
         let mut versions = Vec::new();
         let mut through_frontier = BTreeSet::new();
+        let mut substitution_sources =
+            BTreeMap::<ContributionCoordinate, BTreeSet<ContributionDot>>::new();
         let write_schema_version = self.catalogue.current_write_schema.schema;
         for table in self.catalogue.schema.tables.clone() {
             let table_schema = self.table_in_schema(&table.name, write_schema_version)?;
             for row_uuid in self.branch_overlay_row_ids(&table.name, branch_id)? {
                 for layer in [VersionLayer::Content, VersionLayer::Deletion] {
-                    let Some(winner) =
-                        self.branch_overlay_layer_winner(&table.name, row_uuid, layer, branch_id)?
-                    else {
+                    let source_versions = self.branch_overlay_layer_versions(
+                        &table.name,
+                        row_uuid,
+                        layer,
+                        branch_id,
+                    )?;
+                    let candidates = (0..source_versions.len()).collect::<Vec<_>>();
+                    let Some(winner_idx) = current_version_index(
+                        &source_versions,
+                        &candidates,
+                        layer,
+                        &self.node_aliases,
+                    ) else {
                         continue;
                     };
+                    let winner = source_versions[winner_idx].clone();
                     through_frontier.insert(self.version_tx_id(&winner)?);
                     let parents = self
                         .query_local_layer_winner(&table.name, row_uuid, layer)?
@@ -143,7 +159,70 @@ where
                         .iter()
                         .map(|column| winner.cell(&table_schema, &column.name))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let authored_columns = winner.authored_columns(&table_schema)?;
+                    let mut authored_columns = BTreeSet::new();
+                    for source_version in &source_versions {
+                        let source_tx_id = self.version_tx_id(source_version)?;
+                        through_frontier.insert(source_tx_id);
+                        match layer {
+                            VersionLayer::Content => {
+                                for column in source_version
+                                    .authored_columns(&table_schema)?
+                                    .unwrap_or_else(|| {
+                                        table_schema
+                                            .columns
+                                            .iter()
+                                            .filter(|column| {
+                                                source_version
+                                                    .cell(&table_schema, &column.name)
+                                                    .is_ok_and(|value| value.is_some())
+                                            })
+                                            .map(|column| column.name.clone())
+                                            .collect()
+                                    })
+                                {
+                                    authored_columns.insert(column.clone());
+                                    let target = ContributionCoordinate {
+                                        table: table.name.clone(),
+                                        row_uuid,
+                                        layer: MergeAspect::Content,
+                                        component: ContributionComponent::Column(column.clone()),
+                                    };
+                                    substitution_sources.entry(target).or_default().insert(
+                                        ContributionDot {
+                                            lineage: BranchLineage::Branch(branch_id),
+                                            tx_id: source_tx_id,
+                                            coordinate: ContributionCoordinate {
+                                                table: table.name.clone(),
+                                                row_uuid,
+                                                layer: MergeAspect::Content,
+                                                component: ContributionComponent::Column(column),
+                                            },
+                                        },
+                                    );
+                                }
+                            }
+                            VersionLayer::Deletion => {
+                                let target = ContributionCoordinate {
+                                    table: table.name.clone(),
+                                    row_uuid,
+                                    layer: MergeAspect::Deletion,
+                                    component: ContributionComponent::Register,
+                                };
+                                substitution_sources.entry(target).or_default().insert(
+                                    ContributionDot {
+                                        lineage: BranchLineage::Branch(branch_id),
+                                        tx_id: source_tx_id,
+                                        coordinate: ContributionCoordinate {
+                                            table: table.name.clone(),
+                                            row_uuid,
+                                            layer: MergeAspect::Deletion,
+                                            component: ContributionComponent::Register,
+                                        },
+                                    },
+                                );
+                            }
+                        }
+                    }
                     versions.push(
                         VersionRecord::encode(
                             &table_schema,
@@ -157,7 +236,7 @@ where
                             &cells,
                             winner.deletion(),
                         )
-                        .map(|record| record.with_authored_columns(authored_columns))
+                        .map(|record| record.with_authored_columns(Some(authored_columns)))
                         .map_err(Error::from)?,
                     );
                 }
@@ -168,13 +247,20 @@ where
                 "merge calculation requires at least one branch overlay write",
             ));
         }
+        let substitutions = substitution_sources
+            .into_iter()
+            .map(|(target, sources)| ContributionSubstitution {
+                target,
+                sources: sources.into_iter().collect(),
+            })
+            .collect();
         self.commit_merge_back_squash(
             identity,
             BranchMergeProvenance {
                 source_lineage: BranchLineage::Branch(branch_id),
                 from_frontier: Vec::new(),
                 through_frontier: through_frontier.into_iter().collect(),
-                substitutions: Vec::new(),
+                substitutions,
             },
             versions,
         )
@@ -631,6 +717,21 @@ where
         layer: VersionLayer,
         branch_id: BranchId,
     ) -> Result<Option<VersionRow>, Error> {
+        let versions = self.branch_overlay_layer_versions(table, row_uuid, layer, branch_id)?;
+        let candidates = (0..versions.len()).collect::<Vec<_>>();
+        Ok(
+            current_version_index(&versions, &candidates, layer, &self.node_aliases)
+                .map(|idx| versions[idx].clone()),
+        )
+    }
+
+    fn branch_overlay_layer_versions(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+        branch_id: BranchId,
+    ) -> Result<Vec<VersionRow>, Error> {
         let mut versions = Vec::new();
         for (logical_table, schema_version, candidate_branch) in
             self.branches.branch_partitions.clone()
@@ -655,11 +756,7 @@ where
                 });
             }
         }
-        let candidates = (0..versions.len()).collect::<Vec<_>>();
-        Ok(
-            current_version_index(&versions, &candidates, layer, &self.node_aliases)
-                .map(|idx| versions[idx].clone()),
-        )
+        Ok(versions)
     }
 
     fn ensure_branch_open(&self, branch_id: BranchId) -> Result<(), Error> {
