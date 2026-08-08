@@ -5329,6 +5329,16 @@ where
                         received.encoded_len
                     ));
                     match received.message {
+                        SyncMessage::CatalogueSnapshot(snapshot) => {
+                            if !pending_view_updates.is_empty() {
+                                self.node.borrow_mut().apply_view_updates_in_batch(
+                                    std::mem::take(&mut pending_view_updates),
+                                )?;
+                            }
+                            self.node
+                                .borrow_mut()
+                                .apply_trusted_catalogue_snapshot(*snapshot)?;
+                        }
                         SyncMessage::RowVersionPayloads { version_bundles } => {
                             if !pending_view_updates.is_empty() {
                                 self.node.borrow_mut().apply_view_updates_in_batch(
@@ -6497,6 +6507,14 @@ fn send_with_content_extents<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    let catalogue_seq = node.borrow().active_catalogue_seq();
+    if peer.needs_catalogue_snapshot(catalogue_seq) {
+        let snapshot = node.borrow().catalogue_snapshot();
+        transport
+            .send(SyncMessage::CatalogueSnapshot(Box::new(snapshot)))
+            .map_err(transport_error)?;
+        peer.mark_catalogue_snapshot_announced(catalogue_seq);
+    }
     let mut message = message;
     match &mut message {
         SyncMessage::ViewUpdate {

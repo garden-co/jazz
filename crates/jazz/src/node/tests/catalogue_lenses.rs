@@ -33,6 +33,72 @@ fn schema_version_id_round_trips_through_wire_ingest_and_recovery() {
 }
 
 #[test]
+fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
+    // This is an internal transport-boundary test: public clients never apply
+    // trusted upstream catalogue snapshots directly.
+    let base = schema();
+    let evolved = SchemaVersion::new(catalogue_evolved_schema());
+    let lens = MigrationLens::new(
+        base.version_id(),
+        evolved.id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "body".to_owned(),
+                default: v(""),
+            }],
+        }],
+    );
+    let (_authority_dir, mut authority) = open_node_with_schema(node(0x35), base.clone());
+    publish_schema_lineage(
+        &mut authority,
+        evolved.clone(),
+        lens,
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    authority
+        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: evolved.id,
+            },
+        })
+        .unwrap();
+    let (_, authored) = authority
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0x36), 10).cells(BTreeMap::from([
+                ("title".to_owned(), v("authored")),
+                ("body".to_owned(), v("under-evolved-schema")),
+            ])),
+        )
+        .unwrap();
+
+    let (_receiver_dir, mut receiver) = open_node_with_schema(node(0x37), base);
+    let snapshot = authority.catalogue_snapshot();
+    assert!(matches!(
+        receiver.apply_sync_message(SyncMessage::CatalogueSnapshot(Box::new(snapshot.clone()))),
+        Err(Error::UnsupportedSyncMessage(
+            "catalogue snapshot requires a trusted upstream link"
+        ))
+    ));
+    receiver.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+    assert_eq!(receiver.current_write_schema().schema, evolved.id);
+    receiver.apply_sync_message(authored).unwrap();
+    let versions = receiver.query_all_versions().unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(
+        receiver
+            .schema_version_for_alias(versions[0].schema_version_alias())
+            .unwrap(),
+        evolved.id
+    );
+}
+
+#[test]
 fn physical_identity_mapping_and_live_id_recovery_are_durable_catalogue_metadata() {
     // Physical topology is intentionally not public API, so this internal test
     // verifies the catalogue/recovery and local-allocation invariants directly.

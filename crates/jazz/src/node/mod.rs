@@ -2998,6 +2998,28 @@ where
         self.catalogue.current_write_schema
     }
 
+    pub(crate) fn catalogue_snapshot(&self) -> crate::protocol::CatalogueSnapshot {
+        let mut schemas = self
+            .catalogue
+            .catalogue_schemas
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        schemas.sort_by_key(|schema| schema.id);
+        let mut lineages = self
+            .catalogue
+            .active_lineages_by_target
+            .values()
+            .map(|lineage| (lineage.catalogue_seq, lineage.publication.clone()))
+            .collect::<Vec<_>>();
+        lineages.sort_by_key(|(catalogue_seq, _)| *catalogue_seq);
+        crate::protocol::CatalogueSnapshot {
+            schemas,
+            lineages,
+            current_write_schema: self.catalogue.current_write_schema,
+        }
+    }
+
     /// Return a historical read handle at an exact global settle position.
     pub fn at(&mut self, position: GlobalSeq) -> HistoricalRead<'_, S> {
         HistoricalRead {

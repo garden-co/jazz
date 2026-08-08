@@ -44,6 +44,91 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    pub(crate) fn apply_trusted_catalogue_snapshot(
+        &mut self,
+        snapshot: crate::protocol::CatalogueSnapshot,
+    ) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
+        let mut schemas = BTreeMap::new();
+        for schema in snapshot.schemas {
+            if schema.id != schema.schema.version_id() {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "trusted catalogue snapshot schema id mismatch",
+                ));
+            }
+            if schemas.insert(schema.id, schema).is_some() {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "trusted catalogue snapshot repeats a schema id",
+                ));
+            }
+        }
+
+        let mut lineages = snapshot.lineages;
+        lineages.sort_by_key(|(catalogue_seq, _)| *catalogue_seq);
+        let lineage_targets = lineages
+            .iter()
+            .map(|(_, publication)| publication.schema.id)
+            .collect::<BTreeSet<_>>();
+
+        // A lineage publication carries its target schema and allocates its
+        // alias/mapping atomically. Only install missing roots ahead of the
+        // ordered lineage stream; preinstalling targets would allocate them
+        // twice and disconnect their variant tags from authored rows.
+        for schema in schemas.values() {
+            if lineage_targets.contains(&schema.id)
+                || self.catalogue.catalogue_schemas.contains_key(&schema.id)
+            {
+                continue;
+            }
+            self.persist_catalogue_schema(schema)?;
+            self.catalogue
+                .catalogue_schemas
+                .insert(schema.id, schema.clone());
+            self.ensure_provisional_physical_mapping(schema.id)?;
+            self.ensure_schema_version_alias(schema.id)?;
+        }
+
+        let trusted = Some(CommitUnitIngestContext {
+            identity: AuthorId::SYSTEM,
+            trust: CommitUnitTrust::TrustedBackend,
+            edge_authority: false,
+        });
+        for (catalogue_seq, publication) in lineages {
+            self.apply_publish_schema_with_lens(
+                AuthorId::SYSTEM,
+                trusted,
+                catalogue_seq,
+                publication,
+            )?;
+        }
+
+        // Schema identity deliberately excludes policy and physical-index
+        // declarations. Apply the sender's final payloads after lineage so
+        // agreeing same-id metadata updates use the ordinary trusted path.
+        for schema in schemas.into_values() {
+            self.apply_publish_schema(AuthorId::SYSTEM, trusted, schema)?;
+        }
+
+        if snapshot.current_write_schema.revision == self.catalogue.current_write_schema.revision
+            && snapshot.current_write_schema != self.catalogue.current_write_schema
+        {
+            return Err(Error::InvalidCatalogueUpdate(
+                "trusted catalogue snapshot conflicts at write-schema revision",
+            ));
+        }
+        self.apply_set_current_write_schema(
+            AuthorId::SYSTEM,
+            trusted,
+            snapshot.current_write_schema,
+        )?;
+        self.synchronize_physical_version_tables()?;
+        self.drain_parked_commit_units()?;
+        self.drain_parked_shape_registrations()?;
+        Ok(())
+    }
+
     /// Apply bulk-lane content extent payloads and drain any parked units whose
     /// text-op refs are now locally readable.
     pub fn apply_content_extents(
@@ -262,6 +347,9 @@ where
             )),
             SyncMessage::RowVersionPayloads { .. } => Err(Error::UnsupportedSyncMessage(
                 "row-version repair payload requires outstanding request context",
+            )),
+            SyncMessage::CatalogueSnapshot(_) => Err(Error::UnsupportedSyncMessage(
+                "catalogue snapshot requires a trusted upstream link",
             )),
             SyncMessage::Subscribe(subscribe) => {
                 validate_known_state_declaration(&subscribe.known_state).map_err(|_| {

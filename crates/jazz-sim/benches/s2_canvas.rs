@@ -2577,7 +2577,8 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
         | SyncMessage::SubscribeRejected { .. }
         | SyncMessage::Unsubscribe { .. }
         | SyncMessage::FetchRowVersions { .. }
-        | SyncMessage::RowVersionPayloads { .. } => 0,
+        | SyncMessage::RowVersionPayloads { .. }
+        | SyncMessage::CatalogueSnapshot(_) => 0,
     }
 }
 

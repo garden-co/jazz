@@ -167,7 +167,7 @@ describe("websocket frame carrier", () => {
     expect(reader.u64()).toBe(FEATURE_SYNC_MESSAGE_PAYLOAD);
     expect(reader.option(() => "session")).toBeUndefined();
     const payload = reader.bytes();
-    expect(payload[0]).toBe(11);
+    expect(payload[0]).toBe(12);
   });
 });
 

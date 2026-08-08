@@ -203,6 +203,20 @@ pub enum SyncMessage {
         /// Version bundles visible to the requesting link identity.
         version_bundles: Vec<VersionBundle>,
     },
+    /// Trusted upstream catalogue metadata required to decode immutable
+    /// authored-version payloads before their view update arrives.
+    CatalogueSnapshot(Box<CatalogueSnapshot>),
+}
+
+/// Ordered schema lineage metadata shipped ahead of authored row payloads.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct CatalogueSnapshot {
+    /// Every immutable schema payload known to the sender.
+    pub schemas: Vec<SchemaVersion>,
+    /// Active non-genesis lineage publications in catalogue order.
+    pub lineages: Vec<(u64, SchemaLineagePublication)>,
+    /// Sender's active write-schema pointer.
+    pub current_write_schema: CurrentWriteSchema,
 }
 
 impl SyncMessage {
