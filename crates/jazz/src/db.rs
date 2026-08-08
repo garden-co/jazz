@@ -4122,6 +4122,7 @@ where
                 shape_registrations: BTreeMap::new(),
                 deferred_subscribe_rejections: VecDeque::new(),
                 served_current_rows: BTreeMap::new(),
+                pending_branch_metadata_repairs: BTreeSet::new(),
                 serve_dirty: true,
             },
             last_resume_bytes: None,
@@ -5080,6 +5081,8 @@ enum ConnectionLink {
         deferred_subscribe_rejections: VecDeque<(SubscriptionKey, String)>,
         /// Whole-table current-row views explicitly served through the facade.
         served_current_rows: BTreeMap<SubscriptionKey, String>,
+        /// Deduplicated branch-routing repairs for data-first commit relays.
+        pending_branch_metadata_repairs: BTreeSet<crate::ids::BranchId>,
         /// True when this subscriber's maintained views may have queued deltas
         /// to serve. Idle transport ticks must not poll every view.
         serve_dirty: bool,
@@ -5653,6 +5656,7 @@ where
                 shape_registrations,
                 deferred_subscribe_rejections,
                 served_current_rows,
+                pending_branch_metadata_repairs,
                 serve_dirty,
             } => {
                 let mut applied_inbound = false;
@@ -5660,6 +5664,10 @@ where
                 let mut sent_view_update = false;
                 while let Some(received) = self.transport.try_recv_received() {
                     applied_inbound = true;
+                    let admitted_metadata = match &received.message {
+                        SyncMessage::BranchMetadata(metadata) => Some(metadata.branch_id),
+                        _ => None,
+                    };
                     #[cfg(feature = "sync-autopsy")]
                     sync_autopsy::record(format!(
                         "subscriber recv {} encoded_len={:?}",
@@ -6171,6 +6179,17 @@ where
                             self.transport.send(response).map_err(transport_error)?;
                         }
                         other => {
+                            if let SyncMessage::CommitUnit { tx, .. } = &other
+                                && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage
+                                && self.node.borrow().branch_record(branch).is_none()
+                                && pending_branch_metadata_repairs.insert(branch)
+                            {
+                                self.transport
+                                    .send(SyncMessage::FetchBranchMetadata {
+                                        branches: vec![branch],
+                                    })
+                                    .map_err(transport_error)?;
+                            }
                             if let SyncMessage::ContentExtents { extents } = &other
                                 && let Err(message) = validate_content_extents(extents)
                             {
@@ -6247,6 +6266,9 @@ where
                                     self.transport.as_mut(),
                                     response,
                                 )?;
+                            }
+                            if let Some(branch) = admitted_metadata {
+                                pending_branch_metadata_repairs.remove(&branch);
                             }
                             if let Some((tx_id, unit)) = relay_upload {
                                 let mut outbox = outbox.borrow_mut();
