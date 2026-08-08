@@ -881,6 +881,47 @@ fn merge_back_parents_every_concurrent_target_head() {
 }
 
 #[test]
+fn merge_back_deduplicates_shared_transaction_parent_edges() {
+    let (_core_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());
+    let branch_id = branch(0x42);
+    core.create_root_branch(branch_id).unwrap();
+
+    let shared_parent = core
+        .commit_mergeable_many(vec![
+            MergeableCommit::new("todos", row(0x42), 10).cells(title_cells("root-one")),
+            MergeableCommit::new("todos", row(0x43), 10).cells(title_cells("root-two")),
+        ])
+        .unwrap();
+    core.commit_mergeable_many_on_branch(
+        branch_id,
+        vec![
+            MergeableCommit::new("todos", row(0x42), 20).cells(title_cells("branch-one")),
+            MergeableCommit::new("todos", row(0x43), 20).cells(title_cells("branch-two")),
+        ],
+    )
+    .unwrap();
+
+    let merge = core.merge_back_branch(branch_id).unwrap();
+    let versions = core.query_versions_for_tx(merge).unwrap();
+    assert_eq!(versions.len(), 2);
+    assert!(
+        versions
+            .iter()
+            .all(|version| version.parents() == vec![shared_parent])
+    );
+
+    let pending_edges = core
+        .database
+        .primary_key_scan_raw("jazz_pending_edges", &[])
+        .unwrap();
+    assert_eq!(
+        pending_edges.len(),
+        1,
+        "pending edges represent transaction dependencies, not version edges"
+    );
+}
+
+#[test]
 fn branch_target_is_canonical_atomic_transaction_state_across_reopen() {
     let (core_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());
     let branch_id = branch(0x61);

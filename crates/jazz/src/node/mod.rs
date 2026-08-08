@@ -1132,6 +1132,7 @@ where
             ),
         );
         let mut stored_versions = Vec::new();
+        let mut pending_parents = BTreeSet::new();
         for commit in commits {
             let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
             let layer = VersionLayer::for_commit(&commit);
@@ -1245,15 +1246,16 @@ where
             );
             self.update_merge_heads_for_content_version(&mut batch, &stored)?;
             self.write_ahead_current_insert(&mut batch, &stored)?;
-            for parent in stored.parents() {
-                if let Some(parent_alias) = self.node_aliases.get(&parent.node).copied() {
-                    batch.insert(
-                        "jazz_pending_edges",
-                        pending_edge_values(tx_node_alias, tx_id, parent_alias, parent),
-                    );
-                }
-            }
+            pending_parents.extend(stored.parents());
             stored_versions.push(stored);
+        }
+        for parent in pending_parents {
+            if let Some(parent_alias) = self.node_aliases.get(&parent.node).copied() {
+                batch.insert(
+                    "jazz_pending_edges",
+                    pending_edge_values(tx_node_alias, tx_id, parent_alias, parent),
+                );
+            }
         }
         self.database.commit_batch(batch)?;
         self.cache_tx_versions(tx_id, stored_versions.clone());
