@@ -5183,6 +5183,128 @@ fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<RocksDbStorage
     .unwrap()
 }
 
+#[test]
+fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let structural = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+            ColumnSchema::new("editor", ColumnType::Uuid),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public())]);
+    let v2_table = TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+            ColumnSchema::new("editor", ColumnType::Uuid),
+            ColumnSchema::new("body", ColumnType::String),
+        ],
+    )
+    .with_write_policy(Policy::public());
+    let owner_head = JazzSchema::new([v2_table
+        .clone()
+        .with_read_policy(Policy::owner_only("todos", "owner"))]);
+    let editor_head =
+        JazzSchema::new([v2_table.with_read_policy(Policy::owner_only("todos", "editor"))]);
+    let owner_payload = SchemaVersion::new(owner_head.clone());
+    assert_eq!(owner_payload.id, editor_head.version_id());
+
+    let db = open_db(0xa0, AuthorId::SYSTEM, &structural);
+    db.publish_schema_with_lens(
+        1,
+        SchemaLineagePublication::new(
+            owner_payload.clone(),
+            MigrationLens::new(
+                structural.version_id(),
+                owner_payload.id,
+                vec![TableLens {
+                    source_table: "todos".to_owned(),
+                    target_table: "todos".to_owned(),
+                    ops: vec![LensOp::AddColumn {
+                        column: "body".to_owned(),
+                        default: Value::String(String::new()),
+                    }],
+                }],
+            ),
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        ),
+    )
+    .unwrap();
+    db.set_current_write_schema(CurrentWriteSchema {
+        revision: 1,
+        schema: owner_payload.id,
+    })
+    .unwrap();
+    let first = row(0xa1);
+    db.seed_settled_mergeable_for_bootstrap(
+        "todos",
+        first,
+        AuthorId::SYSTEM,
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("first".to_owned())),
+            ("owner".to_owned(), Value::Uuid(alice.0)),
+            ("editor".to_owned(), Value::Uuid(bob.0)),
+            ("body".to_owned(), Value::String(String::new())),
+        ]),
+    )
+    .unwrap();
+
+    let prepared = db.prepare_query(&Query::from("todos")).unwrap();
+    let mut subscription = block_on(db.subscribe_for_identity(
+        &prepared,
+        ReadOpts {
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        alice,
+    ))
+    .unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(block_on(subscription.next_event()).unwrap())),
+        vec![first]
+    );
+
+    db.publish_schema(SchemaVersion::new(editor_head)).unwrap();
+    db.seed_settled_mergeable_for_bootstrap(
+        "todos",
+        row(0xb2),
+        AuthorId::SYSTEM,
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("second".to_owned())),
+            ("owner".to_owned(), Value::Uuid(bob.0)),
+            ("editor".to_owned(), Value::Uuid(bob.0)),
+            ("body".to_owned(), Value::String(String::new())),
+        ]),
+    )
+    .unwrap();
+
+    let event = subscription
+        .try_next_event()
+        .expect("permissions-head change must refresh the live subscription");
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        updated,
+        removed,
+        ..
+    } = event
+    else {
+        panic!("permissions-head refresh must emit a delta reset");
+    };
+    assert!(reset);
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].row_uuid, first);
+}
+
 fn joined_issue_query() -> Query {
     Query::from("issues").join_via("issue_tags", "issue", [eq(col("tag"), lit("prepared"))])
 }

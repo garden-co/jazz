@@ -329,8 +329,12 @@ where
                 "non-genesis schema requires lineage publication",
             ));
         }
-        let active_schema_changed = schema.id == self.catalogue.current_schema_version_id
-            && self.catalogue.schema != schema.schema;
+        let active_schema_changed = schema.id == self.catalogue.current_write_schema.schema
+            && self
+                .catalogue
+                .catalogue_schemas
+                .get(&schema.id)
+                .is_some_and(|current| current.schema != schema.schema);
         self.catalogue
             .catalogue_schemas
             .insert(schema.id, schema.clone());
