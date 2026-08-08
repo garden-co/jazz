@@ -399,7 +399,6 @@ fn assert_call_order(
 }
 
 #[test]
-#[ignore = "prepared claim routing is unlanded; tracked separately from INV-RLS-21."]
 fn prepared_policy_claims_route_per_identity_and_application_binding() {
     let team_a = row(0x11);
     let team_b = row(0x12);

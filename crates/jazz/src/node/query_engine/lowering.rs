@@ -456,6 +456,7 @@ fn parameter_domain_for_request(
         }
     }
     for (name, claim) in pre_retarget_claims {
+        domain.user_params.remove(&name);
         domain.claim_params.insert(name.clone(), claim);
         domain.routing_params.insert(name.clone());
     }
@@ -2879,6 +2880,7 @@ fn lower_linear_plan_steps(
                         predicate,
                         source,
                         root_source,
+                        &available_route_fields,
                         request,
                     )?;
                 graph = joined;
@@ -4003,6 +4005,7 @@ fn lower_equality_param_filter_joins(
     predicate: &PredicateExpr,
     source_id: &SourceId,
     source: &ResolvedSource,
+    available_route_fields: &BTreeSet<String>,
     request: &QueryProgramRequest,
 ) -> Result<(GraphBuilder, PredicateExpr, BTreeSet<String>), UnsupportedReason> {
     let predicates = match predicate {
@@ -4010,7 +4013,7 @@ fn lower_equality_param_filter_joins(
         _ => std::slice::from_ref(predicate),
     };
     let mut residual = Vec::new();
-    let mut retained_route_fields = BTreeSet::<String>::new();
+    let mut retained_route_fields = available_route_fields.clone();
     for predicate in predicates {
         let Some(join) = equality_param_join(predicate, source_id, source)? else {
             residual.push(predicate.clone());
