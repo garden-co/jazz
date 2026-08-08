@@ -615,12 +615,14 @@ where
         binding: &Binding,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let branch = self
-            .branches
-            .branches
-            .get(&branch_id)
-            .cloned()
-            .ok_or(Error::BranchNotFound(branch_id))?;
+        let Some(branch) = self.branches.branches.get(&branch_id).cloned() else {
+            // Remote/session branch reads deliberately conflate an unknown
+            // lineage with a lineage the caller is not allowed to enumerate.
+            if identity != AuthorId::SYSTEM {
+                return Ok(Vec::new());
+            }
+            return Err(Error::BranchNotFound(branch_id));
+        };
         if !self.branch_read_policy_allows(&branch, identity)? {
             return Ok(Vec::new());
         }

@@ -51,9 +51,9 @@ use crate::protocol::{
     VersionBundle, build_version_carriers_from_singletons, expand_version_carriers,
 };
 use crate::protocol_limits::{
-    MAX_WIRE_FRAME_BYTES, validate_content_extents, validate_fetch_branch_metadata,
-    validate_fetch_row_versions, validate_known_state_declaration, validate_shape_ast_size,
-    validate_sync_message_len, validate_wire_frame_len,
+    MAX_FETCH_BRANCH_METADATA, MAX_WIRE_FRAME_BYTES, validate_content_extents,
+    validate_fetch_branch_metadata, validate_fetch_row_versions, validate_known_state_declaration,
+    validate_shape_ast_size, validate_sync_message_len, validate_wire_frame_len,
 };
 use crate::query::{
     Binding, BindingId, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery,
@@ -3964,7 +3964,7 @@ where
                 pending_view_update_chunks: BTreeMap::new(),
                 branch_views: BTreeMap::new(),
                 pending_branch_view_updates: BTreeMap::new(),
-                pending_branch_metadata_repairs: BTreeSet::new(),
+                pending_branch_metadata_repairs: BTreeMap::new(),
             },
             last_resume_bytes: None,
         }));
@@ -4122,7 +4122,7 @@ where
                 shape_registrations: BTreeMap::new(),
                 deferred_subscribe_rejections: VecDeque::new(),
                 served_current_rows: BTreeMap::new(),
-                pending_branch_metadata_repairs: BTreeSet::new(),
+                pending_branch_metadata_repairs: BTreeMap::new(),
                 serve_dirty: true,
             },
             last_resume_bytes: None,
@@ -5058,7 +5058,7 @@ enum ConnectionLink {
         /// View updates held until their branch routing record arrives.
         pending_branch_view_updates: BTreeMap<crate::ids::BranchId, Vec<SyncMessage>>,
         /// Deduplicated outstanding metadata repairs on this link.
-        pending_branch_metadata_repairs: BTreeSet<crate::ids::BranchId>,
+        pending_branch_metadata_repairs: BTreeMap<crate::ids::BranchId, ()>,
     },
     /// Serving one subscriber: apply their subscribe requests, ship view
     /// updates under their identity.
@@ -5082,7 +5082,7 @@ enum ConnectionLink {
         /// Whole-table current-row views explicitly served through the facade.
         served_current_rows: BTreeMap<SubscriptionKey, String>,
         /// Deduplicated branch-routing repairs for data-first commit relays.
-        pending_branch_metadata_repairs: BTreeSet<crate::ids::BranchId>,
+        pending_branch_metadata_repairs: BTreeMap<crate::ids::BranchId, ()>,
         /// True when this subscriber's maintained views may have queued deltas
         /// to serve. Idle transport ticks must not poll every view.
         serve_dirty: bool,
@@ -5319,6 +5319,19 @@ where
                 pending_branch_view_updates,
                 pending_branch_metadata_repairs,
             } => {
+                // Repair is deliberately retried on each non-blocked tick. The
+                // request set is bounded and deduplicated; a dropped request or
+                // response therefore cannot permanently strand a parked unit.
+                let repairs = pending_branch_metadata_repairs
+                    .keys()
+                    .copied()
+                    .take(MAX_FETCH_BRANCH_METADATA)
+                    .collect::<Vec<_>>();
+                if !repairs.is_empty() {
+                    self.transport
+                        .send(SyncMessage::FetchBranchMetadata { branches: repairs })
+                        .map_err(transport_error)?;
+                }
                 pending.extend(upstream_subscriptions.borrow_mut().drain(..));
                 let claims = self.node.borrow().session_claims_with_revisions();
                 for (identity, claims, revision) in claims {
@@ -5530,7 +5543,10 @@ where
                                     .entry(branch)
                                     .or_default()
                                     .push(message);
-                                if pending_branch_metadata_repairs.insert(branch) {
+                                if let std::collections::btree_map::Entry::Vacant(entry) =
+                                    pending_branch_metadata_repairs.entry(branch)
+                                {
+                                    entry.insert(());
                                     self.transport
                                         .send(SyncMessage::FetchBranchMetadata {
                                             branches: vec![branch],
@@ -5605,13 +5621,17 @@ where
                             if let SyncMessage::CommitUnit { tx, .. } = &message
                                 && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage
                                 && self.node.borrow().branch_record(branch).is_none()
-                                && pending_branch_metadata_repairs.insert(branch)
                             {
-                                self.transport
-                                    .send(SyncMessage::FetchBranchMetadata {
-                                        branches: vec![branch],
-                                    })
-                                    .map_err(transport_error)?;
+                                if let std::collections::btree_map::Entry::Vacant(entry) =
+                                    pending_branch_metadata_repairs.entry(branch)
+                                {
+                                    entry.insert(());
+                                    self.transport
+                                        .send(SyncMessage::FetchBranchMetadata {
+                                            branches: vec![branch],
+                                        })
+                                        .map_err(transport_error)?;
+                                }
                             }
                             if !pending_view_updates.is_empty() {
                                 self.node.borrow_mut().apply_view_updates_in_batch(
@@ -5659,6 +5679,16 @@ where
                 pending_branch_metadata_repairs,
                 serve_dirty,
             } => {
+                let repairs = pending_branch_metadata_repairs
+                    .keys()
+                    .copied()
+                    .take(MAX_FETCH_BRANCH_METADATA)
+                    .collect::<Vec<_>>();
+                if !repairs.is_empty() {
+                    self.transport
+                        .send(SyncMessage::FetchBranchMetadata { branches: repairs })
+                        .map_err(transport_error)?;
+                }
                 let mut applied_inbound = false;
                 let mut scheduled_immediate = false;
                 let mut sent_view_update = false;
@@ -6178,17 +6208,32 @@ where
                             };
                             self.transport.send(response).map_err(transport_error)?;
                         }
+                        // Branch routing records select persistent partitions.
+                        // A session client may request repair, but cannot mint a
+                        // first-seen branch record (or alter its lifecycle) by
+                        // sending a response-shaped metadata message. Only an
+                        // authenticated backend relay is trusted to introduce it.
+                        SyncMessage::BranchMetadata(_)
+                            if ingest_context.trust == CommitUnitTrust::Session =>
+                        {
+                            drop_peer_request(&self.node);
+                            continue;
+                        }
                         other => {
                             if let SyncMessage::CommitUnit { tx, .. } = &other
                                 && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage
                                 && self.node.borrow().branch_record(branch).is_none()
-                                && pending_branch_metadata_repairs.insert(branch)
                             {
-                                self.transport
-                                    .send(SyncMessage::FetchBranchMetadata {
-                                        branches: vec![branch],
-                                    })
-                                    .map_err(transport_error)?;
+                                if let std::collections::btree_map::Entry::Vacant(entry) =
+                                    pending_branch_metadata_repairs.entry(branch)
+                                {
+                                    entry.insert(());
+                                    self.transport
+                                        .send(SyncMessage::FetchBranchMetadata {
+                                            branches: vec![branch],
+                                        })
+                                        .map_err(transport_error)?;
+                                }
                             }
                             if let SyncMessage::ContentExtents { extents } = &other
                                 && let Err(message) = validate_content_extents(extents)
