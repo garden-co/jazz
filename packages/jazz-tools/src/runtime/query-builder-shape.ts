@@ -33,6 +33,7 @@ export interface NormalizedIncludeEntry {
   select: string[];
   orderBy: Array<[string, "asc" | "desc"]>;
   limit?: number;
+  unbounded: boolean;
   offset?: number;
   hops: string[];
   gather?: BuiltGather;
@@ -50,6 +51,7 @@ export interface NormalizedBuiltQuery {
   select: string[];
   orderBy: Array<[string, "asc" | "desc"]>;
   limit?: number;
+  unbounded: boolean;
   offset?: number;
   includeDeleted: boolean;
   hops: string[];
@@ -64,6 +66,7 @@ type BuiltQueryShape = {
   select?: unknown;
   orderBy?: unknown;
   limit?: unknown;
+  unbounded?: unknown;
   offset?: unknown;
   includeDeleted?: unknown;
   hops?: unknown;
@@ -164,6 +167,9 @@ function createEmptyIncludeEntry(): NormalizedIncludeEntry {
     requireIncludes: false,
     select: [],
     orderBy: [],
+    // `true` and nested-object include shorthand explicitly request the whole
+    // relation, so they are public-API sugar for `.unbounded()`.
+    unbounded: true,
     hops: [],
   };
 }
@@ -201,6 +207,7 @@ function normalizeIncludeEntry(raw: unknown): NormalizedIncludeEntry | null {
       select: normalized.select,
       orderBy: normalized.orderBy,
       limit: normalized.limit,
+      unbounded: normalized.unbounded,
       offset: normalized.offset,
       hops: normalized.hops,
       gather: normalized.gather,
@@ -216,6 +223,7 @@ function normalizeIncludeEntry(raw: unknown): NormalizedIncludeEntry | null {
       select: normalizeSelect(raw.select),
       orderBy: normalizeOrderBy(raw.orderBy),
       limit: typeof raw.limit === "number" ? raw.limit : undefined,
+      unbounded: raw.unbounded === true,
       offset: typeof raw.offset === "number" ? raw.offset : undefined,
       hops: Array.isArray(raw.hops)
         ? raw.hops.filter((hop): hop is string => typeof hop === "string")
@@ -263,6 +271,7 @@ export function normalizeBuiltQuery(raw: unknown): NormalizedBuiltQuery {
     select: normalizeSelect(value.select),
     orderBy: normalizeOrderBy(value.orderBy),
     limit: typeof value.limit === "number" ? value.limit : undefined,
+    unbounded: value.unbounded === true,
     offset: typeof value.offset === "number" ? value.offset : undefined,
     includeDeleted: value.includeDeleted === true,
     hops: Array.isArray(value.hops)

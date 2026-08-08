@@ -238,7 +238,7 @@ fn public_value_to_core(value: Value) -> Result<CoreValue, String> {
     match value {
         Value::Boolean(value) => Ok(CoreValue::Bool(value)),
         Value::Text(value) => Ok(CoreValue::String(value)),
-        Value::Integer(value) => Ok(CoreValue::U32((value as u32) ^ 0x8000_0000)),
+        Value::Integer(value) => Ok(CoreValue::I32(value)),
         Value::BigInt(value) => Ok(CoreValue::I64(value)),
         Value::Double(value) => Ok(CoreValue::F64(value)),
         Value::Timestamp(value) => Ok(CoreValue::U64(value)),
@@ -253,5 +253,45 @@ fn public_value_to_core(value: Value) -> Result<CoreValue, String> {
         Value::BatchId(_) | Value::LargeValue(_) | Value::Row { .. } => {
             Err("migration lens default is not supported by the runtime core".to_owned())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_lens_defaults_preserve_logical_signed_scalars_and_nested_arrays() {
+        for value in [i32::MIN, -1, 0, i32::MAX] {
+            assert_eq!(
+                public_value_to_core(Value::Integer(value)),
+                Ok(CoreValue::I32(value))
+            );
+        }
+        for value in [i64::MIN, -1, 0, i64::MAX] {
+            assert_eq!(
+                public_value_to_core(Value::BigInt(value)),
+                Ok(CoreValue::I64(value))
+            );
+        }
+
+        assert_eq!(
+            public_value_to_core(Value::Array(vec![
+                Value::Integer(-7),
+                Value::Array(vec![
+                    Value::Integer(8),
+                    Value::BigInt(i64::MIN),
+                    Value::Null,
+                ]),
+            ])),
+            Ok(CoreValue::Array(vec![
+                CoreValue::I32(-7),
+                CoreValue::Array(vec![
+                    CoreValue::I32(8),
+                    CoreValue::I64(i64::MIN),
+                    CoreValue::Nullable(None),
+                ]),
+            ]))
+        );
     }
 }

@@ -579,7 +579,9 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       await db.delete(app.users, assignee1.id);
 
       const result = await readOne(
-        app.todos.where({ id: { eq: todo.id } }).include({ assignees: app.users.select("id") }),
+        app.todos
+          .where({ id: { eq: todo.id } })
+          .include({ assignees: app.users.select("id").unbounded() }),
       );
       assert(result, "Result is not defined");
       expectTypeOf(result.assignees).branded.toEqualTypeOf<{ id: string }[]>();
@@ -600,7 +602,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       const result = await readOne(
         app.users
           .where({ id: { eq: owner.id } })
-          .include({ todosViaOwner: app.todos.select("id") }),
+          .include({ todosViaOwner: app.todos.select("id").unbounded() }),
       );
       assert(result, "Result is not defined");
       expectTypeOf(result.todosViaOwner).branded.toEqualTypeOf<{ id: string }[]>();
@@ -659,7 +661,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
         const result = await readOne(
           app.todos
             .where({ id: { eq: todo.id } })
-            .include({ assignees: app.users.select("id") })
+            .include({ assignees: app.users.select("id").unbounded() })
             .requireIncludes(),
         );
 
@@ -680,7 +682,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
         const result = await readOne(
           app.users
             .where({ id: { eq: owner.id } })
-            .include({ todosViaOwner: app.todos.select("id") })
+            .include({ todosViaOwner: app.todos.select("id").unbounded() })
             .requireIncludes(),
         );
         assert(result, "Result is not defined");
@@ -698,9 +700,9 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
         db.delete(app.users, deletedUser.id);
 
         const result = await readOne(
-          app.users
-            .where({ id: { eq: alice.id } })
-            .include({ friends: app.users.include({ friends: true }).requireIncludes() }),
+          app.users.where({ id: { eq: alice.id } }).include({
+            friends: app.users.include({ friends: true }).requireIncludes().unbounded(),
+          }),
         );
 
         assert(result, "Result is not defined");
@@ -879,7 +881,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       const result = await readOne(
         app.projects
           .where({ id: { eq: projectId } })
-          .include({ todosViaProject: app.todos.select("title") }),
+          .include({ todosViaProject: app.todos.select("title").unbounded() }),
       );
 
       assert(result, "Result is not defined");
@@ -948,9 +950,12 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
         app.projects
           .where({ id: { eq: projectId } })
           .include({
-            todosViaProject: app.todos.select("title").include({
-              assignees: app.users.select("name", "$createdAt", "$updatedAt"),
-            }),
+            todosViaProject: app.todos
+              .select("title")
+              .include({
+                assignees: app.users.select("name", "$createdAt", "$updatedAt").unbounded(),
+              })
+              .unbounded(),
           })
           .requireIncludes(),
       );
