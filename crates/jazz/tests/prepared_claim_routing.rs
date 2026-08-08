@@ -488,8 +488,7 @@ fn prepared_policy_claims_support_equal_custom_string_values() {
 }
 
 #[test]
-#[ignore = "prepared claim routing is unlanded; tracked separately from INV-RLS-21."]
-fn prepared_binding_includes_claims_from_auxiliary_source_policies() {
+fn policy_dependency_reads_do_not_expose_dependency_rows() {
     let membership_policy = Policy::shape(
         Query::from(MEMBERSHIPS).filter(eq(col("region"), claim("membership_region"))),
     );
@@ -503,7 +502,7 @@ fn prepared_binding_includes_claims_from_auxiliary_source_policies() {
             ("region".to_owned(), Value::String("region-a".to_owned())),
             (
                 "membership_region".to_owned(),
-                Value::String("region-a".to_owned()),
+                Value::String("not-region-a".to_owned()),
             ),
         ]),
     );
@@ -533,10 +532,35 @@ fn prepared_binding_includes_claims_from_auxiliary_source_policies() {
             .collect::<Vec<_>>();
         assert_eq!(rows, vec![expected]);
     }
+    for (identity, other_team) in [(USER_A, team_b), (USER_B, team_a)] {
+        let prepared = db
+            .prepare_query_bound(
+                &query,
+                BTreeMap::from([("team".to_owned(), Value::Uuid(other_team.0))]),
+            )
+            .expect("prepare cross-principal dependency binding");
+        assert!(
+            row_ids_for_identity(&db, &prepared, identity).is_empty(),
+            "raw evidence must not bypass the outer policy's authenticated user and region predicates"
+        );
+    }
+
+    let memberships = db
+        .prepare_query(&Query::from(MEMBERSHIPS))
+        .expect("prepare direct membership read");
+    assert!(
+        row_ids_for_identity(&db, &memberships, USER_A).is_empty(),
+        "raw dependency evidence must not make the dependency row directly visible"
+    );
+    assert_eq!(
+        row_ids_for_identity(&db, &memberships, USER_B),
+        vec![row(0x32)],
+        "ordinary dependency-table reads must still enforce its own policy"
+    );
 }
 
 #[test]
-fn prepared_binding_routes_claims_through_two_hop_seeded_policy_sources() {
+fn dependency_policies_are_not_recursively_composed_into_outer_policy() {
     let db = open_db_with_schema(two_hop_seeded_policy_schema());
     let (project_a, project_b, document_a, document_b) = seed_two_hop_reachability_policy(&db);
     let query = Query::from(DOCUMENTS).filter(eq(col("project"), param("project")));
@@ -557,17 +581,17 @@ fn prepared_binding_routes_claims_through_two_hop_seeded_policy_sources() {
     assert_eq!(
         row_ids_for_identity(&db, &prepared_a, USER_A),
         vec![document_a],
-        "principal A must receive only project A through the seeded policy chain"
+        "the outer document policy requires a matching membership row; the membership table's own policy is not recursively composed"
     );
     assert_eq!(
         row_ids_for_identity(&db, &prepared_a, USER_B),
-        Vec::<RowUuid>::new(),
-        "principal B's seed claim must not select principal A's document"
+        vec![document_a],
+        "the dependency table's nested project policy must not narrow the outer policy"
     );
     assert_eq!(
         row_ids_for_identity(&db, &prepared_b, USER_A),
-        Vec::<RowUuid>::new(),
-        "principal A's seed claim must not select principal B's document"
+        vec![document_b],
+        "raw policy evidence remains available regardless of the dependency table's own read policy"
     );
     assert_eq!(
         row_ids_for_identity(&db, &prepared_b, USER_B),
@@ -598,7 +622,7 @@ fn policy_proof_implicit_and_outer_include_sources_do_not_reenter_policy_compila
 }
 
 #[test]
-fn policy_proof_cycle_reports_table_and_depth() {
+fn mutually_referential_dependency_policies_do_not_recurse() {
     let db = open_db_with_schema(policy_proof_cycle_schema());
     let a = row(0xb1);
     let b = row(0xb2);
@@ -618,15 +642,11 @@ fn policy_proof_cycle_reports_table_and_depth() {
     let prepared = db
         .prepare_query(&Query::from(CYCLE_A))
         .expect("prepare cyclic policy query");
-    let error = block_on(db.all_for_identity(&prepared, opts(), USER_A))
-        .expect_err("cyclic policy proof must fail before stack exhaustion");
-    let message = error.to_string();
-    assert!(
-        message.contains("PolicyProofCycle"),
-        "unexpected error: {message}"
+    assert_eq!(
+        row_ids_for_identity(&db, &prepared, USER_A),
+        vec![a],
+        "each policy reads the other table as raw evidence instead of recursively applying its policy"
     );
-    assert!(message.contains(CYCLE_A), "unexpected error: {message}");
-    assert!(message.contains("depth: 2"), "unexpected error: {message}");
 }
 
 #[test]
