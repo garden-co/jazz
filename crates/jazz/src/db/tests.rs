@@ -6388,6 +6388,85 @@ fn empty_branch_metadata_retries_after_unacked_reopen() {
 }
 
 #[test]
+fn acknowledged_open_accepts_remote_discard_and_recovers_it() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let node_uuid = NodeUuid::from_bytes([0xc2; 16]);
+    let branch = BranchId::from_bytes([0x4d; 16]);
+    let dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let client = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity: DbIdentity {
+            node: node_uuid,
+            author: identity,
+        },
+        id_source: None,
+        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    }))
+    .unwrap();
+    let authority = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    client.create_branch_with_id(branch).unwrap();
+    let (client_transport, authority_transport) = duplex();
+    let upstream = client.connect_upstream(client_transport);
+    let subscriber = authority.accept_subscriber(authority_transport, identity);
+    client.tick().unwrap();
+    authority.tick().unwrap();
+    client.tick().unwrap();
+    assert!(
+        client
+            .node
+            .node
+            .borrow()
+            .pending_branch_metadata_uploads()
+            .is_empty()
+    );
+    drop(upstream);
+    drop(subscriber);
+
+    authority
+        .node()
+        .borrow_mut()
+        .discard_branch(branch)
+        .unwrap();
+    let discarded = BranchMetadata::from(authority.node().borrow().branch_record(branch).unwrap());
+    assert!(!discarded.open);
+    let (client_transport, mut trusted_remote) = duplex();
+    let upstream = client.connect_upstream(client_transport);
+    trusted_remote
+        .send(SyncMessage::BranchMetadata(discarded.clone()))
+        .unwrap();
+    upstream.borrow_mut().tick().unwrap();
+    assert_eq!(
+        BranchMetadata::from(client.node.node.borrow().branch_record(branch).unwrap()),
+        discarded
+    );
+    drop(upstream);
+    client.close().unwrap();
+    drop(client);
+
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let reopened = block_on(Db::open(DbConfig {
+        schema,
+        storage,
+        identity: DbIdentity {
+            node: node_uuid,
+            author: identity,
+        },
+        id_source: None,
+        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    }))
+    .unwrap();
+    assert_eq!(
+        BranchMetadata::from(reopened.node.node.borrow().branch_record(branch).unwrap()),
+        discarded
+    );
+}
+
+#[test]
 fn edge_durably_relays_empty_branch_creation_and_discard_after_reopen() {
     let schema = schema();
     let identity = AuthorId::from_bytes([0xc1; 16]);

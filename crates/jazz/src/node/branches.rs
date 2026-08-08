@@ -127,6 +127,15 @@ where
         &mut self,
         metadata: &crate::protocol::BranchMetadata,
     ) -> Result<(), Error> {
+        if !self
+            .branches
+            .pending_metadata_uploads
+            .contains(&metadata.branch_id)
+        {
+            // An unsolicited lifecycle update is not an acknowledgement. Let
+            // normal inbound admission validate and persist it.
+            return Ok(());
+        }
         let Some(record) = self.branches.branches.get(&metadata.branch_id).cloned() else {
             return Ok(());
         };
@@ -135,13 +144,7 @@ where
                 "branch metadata acknowledgement does not match local record",
             ));
         }
-        if self
-            .branches
-            .pending_metadata_uploads
-            .contains(&metadata.branch_id)
-        {
-            self.persist_branch_record(&record, false)?;
-        }
+        self.persist_branch_record(&record, false)?;
         Ok(())
     }
 
