@@ -28,21 +28,22 @@ Invariant digest:
 - `INV-BRANCH-16`: A branch-scoped subscription MUST include BranchId in its identity.
 - `INV-BRANCH-17`: A branch merge MUST be calculated locally from readable source and target views and emitted as one ordinary atomic mergeable transaction on the target, with no branch-specific fate or authority admission path; successful merge MUST leave the source branch open.
 - `INV-BRANCH-18`: `Discarded` MUST be the only terminal branch state; discard makes a branch read-only while retaining overlay history, and merge MUST NOT close or otherwise mutate source lifecycle state.
-- `INV-BRANCH-19`: Branch-merge provenance MUST define a non-causal contribution edge from the target merge transaction to the named source frontier; a later local calculator MUST expand that edge to the original source contributions rather than treating the merge transaction's derived payload as a new contribution.
-- `INV-BRANCH-20`: A local merge calculator MUST subtract the contribution closure already represented by the target from the source contribution closure through the selected frontier, including recursively imported contributions, so merging in both directions MUST NOT echo target-originated counter deltas, large-value operations, or scalar writes back to their origin.
+- `INV-BRANCH-19`: Branch-merge provenance MUST define field-grained non-causal substitutions from each emitted target `(table,row,layer,column-or-operation)` to the exact source contribution dots it represents; a later local calculator MUST expand only individually validated substitutions rather than treating derived payload as new native contributions.
+- `INV-BRANCH-20`: A local merge calculator MUST subtract the field-grained contribution closure already represented by the target from the source contribution closure, recursively expanding validated substitutions, so merging in both directions MUST NOT echo target-originated counter deltas, large-value operations, or scalar writes back to their origin.
 - `INV-BRANCH-21`: Incorporating another lineage into a branch MUST use the same ordinary merge-transaction calculation as merging a branch into main; branch rebase is not a separate operation.
 - `INV-BRANCH-22`: A merge-back squash's row-version parents MUST be only the target row/layer heads observed at the merge snapshot; source-branch transactions MUST NOT be causal parents of the target transaction.
 - `INV-BRANCH-23`: For each row/layer/column touched by novel source contributions, the local calculator MUST derive the equivalent ordinary target write contribution under that column's normal merge strategy, including cumulative explicit authorship and explicit writes equal to their prior value, while excluding inherited materialized cells.
-- `INV-BRANCH-24`: Branch-merge provenance MUST carry a source lineage plus canonical `from_frontier` and `through_frontier` source pointers as local calculation metadata; those pointers MUST NOT be interpreted as an authoritative cursor, CAS, transaction parent, admission prerequisite, or global duplicate-prevention record.
+- `INV-BRANCH-24`: Branch-merge provenance MAY carry a source lineage plus canonical `from_frontier` and `through_frontier` pointers as audit/calculation hints, but those pointers MUST NOT imply that every source contribution in that interval was transferred and MUST NOT be interpreted as an authoritative cursor, CAS, transaction parent, admission prerequisite, or global duplicate-prevention record.
 - `INV-BRANCH-25`: Once minted, a branch merge transaction MUST use ordinary transaction identity, limits, fate, authorization, storage, synchronization, rejection, and exact-retransmission idempotency; receivers MUST NOT need branch metadata or source history to apply it.
 - `INV-BRANCH-26`: Trusted cores and edges MAY inspect all source-branch history needed to calculate a merge for an authorized initiator, while client-facing branch data remains permission-scoped; target readers MUST be able to ingest the resulting ordinary transaction without receiving any source-branch transaction or payload.
 - `INV-BRANCH-27`: Branch merge calculation MUST read both source and target through one current-schema view and emit one ordinary transaction in that schema; branch provenance MUST NOT introduce cross-schema authored-presence or lens protocol semantics.
 - `INV-BRANCH-28`: A source frontier MUST be the canonical sorted de-duplicated maximal antichain of eligible transactions in that lineage's own version-parent graph; frozen-base and cross-lineage transaction parents are not source-frontier edges, while merge provenance contributes only to the separate contribution graph.
 - `INV-BRANCH-29`: The local calculator MUST subtract every prior merge provenance visible in its target snapshot, but the system MUST NOT claim globally coordinated exactly-once behavior for independently calculated offline/concurrent merges; unobserved duplicate attempts are ordinary concurrent writes and coordination or reconciliation remains the merger's responsibility.
-- `INV-BRANCH-30`: A local calculator MUST expand a received merge-provenance edge only after deterministically recomputing the declared novel source contribution against the merge transaction's recorded target-parent snapshot and verifying an exact ordinary payload match; unvalidated, malformed, missing-history, or mixed-edit provenance MUST NOT suppress any contribution.
+- `INV-BRANCH-30`: A local calculator MUST expand each received merge-provenance substitution only after deterministically recomputing its exact source dots against that emitted field and its recorded target row/layer parents; unvalidated, malformed, missing-history, or mixed-edit mappings MUST NOT suppress any contribution.
 - `INV-BRANCH-31`: Contribution closure and subtraction MUST be tracked per exact `(table, row, layer, column-or-operation)` dot, never transaction-wide; sharing a multi-row `TxId` MUST NOT make unrelated dots known.
 - `INV-BRANCH-32`: Every supported merge strategy MUST provide local `extract_native(parent contribution closure, stored value/ops)` and `encode_target_relative(novel contribution, target frontier)` semantics; merge calculation MUST fail locally when either capability is absent.
 - `INV-BRANCH-33`: The calculator MUST consume an exact current-schema contribution view containing projected values, authored presence, and strategy operations; when storage/lenses cannot supply that view exactly, or the initiator cannot prove source-read authorization for every included content/deletion contribution, it MUST fail locally before minting the ordinary transaction.
+- `INV-BRANCH-34`: A source contribution is target-known only when an exact validated field substitution names that dot; sharing a `TxId`, appearing inside `from_frontier`/`through_frontier`, or transferring another field from the same source version MUST NOT suppress an omitted row, layer, column, or operation.
 
 ## Details
 
@@ -188,19 +189,26 @@ BranchMergeProvenance {
     source_lineage,
     from_frontier,
     through_frontier,
+    substitutions: [
+        target (table, row, layer, column-or-operation)
+            -> exact source contribution dots,
+        ...
+    ],
 }
 ```
 
-The merge transaction's contribution closure is the union of its ordinary
-target parents' contribution closures and the source contribution closure named
-by that provenance edge. The `from_frontier` records the source cut the local
-calculation found already represented by its target snapshot;
-`through_frontier` records the source cut it incorporated. Both are canonical
-source pointers and neither is a transaction parent, durable cursor, CAS,
-admission prerequisite, or global duplicate-prevention mechanism
-(`INV-BRANCH-19`, `INV-BRANCH-24`). A calculated merge transaction cannot also
-contain unrelated new user edits; conflict-resolution edits are separate
-ordinary transactions so their native contribution dots remain unambiguous.
+The merge transaction's contribution closure is its ordinary target parents'
+closures plus the exact source dots named by each validated field substitution.
+The `from_frontier` records a source cut the local calculation found represented
+by its target snapshot, and `through_frontier` records the source cut it
+examined. They are audit/calculation hints only: neither claims that every dot in
+the interval was transferred. An omitted row, layer, column, or operation
+remains novel even when it shares a source `TxId` with a transferred dot
+(`INV-BRANCH-24`, `INV-BRANCH-34`). Neither pointer is a transaction parent,
+durable cursor, CAS, admission prerequisite, or global duplicate-prevention
+mechanism. A calculated merge transaction cannot also contain unrelated new
+user edits; conflict-resolution edits are separate ordinary transactions so
+their native contribution dots remain unambiguous.
 
 Dots and closure are field-grained, not transaction-grained. A multi-row or
 multi-column transaction can introduce many independent dots; learning or
@@ -215,26 +223,26 @@ child contribution merely because the child authored the same column.
 
 Provenance is untrusted advisory transaction metadata. Ordinary admission
 persists and forwards it but does not attest to its truth. Before a future local
-calculator follows such an edge, it reconstructs the declared source novel
-contribution from retained history, reconstructs the target snapshot named by
-the transaction's complete row/layer parents, runs the same deterministic local
-strategy calculation, and requires an exact match of version set, parents,
-authored presence, cells, deletion events, and large-value operations/extents.
-Only a matching edge may replace the derived payload with its original
-contribution dots. Missing history, a forged source cut, malformed frontier,
-extra or missing payload, or a transaction mixing calculated import cells with
-unrelated user edits makes that local merge calculation fail without minting a
-transaction. It must never suppress a contribution merely because metadata
-claims it was imported (`INV-BRANCH-30`). A node may cache successful validation
+calculator follows a substitution, it reconstructs exactly the named source
+dots, reconstructs the target snapshot named by that emitted version's complete
+row/layer parents, runs the same deterministic local strategy calculation, and
+requires an exact match for that field's authored presence, value/deletion or
+large-value operation/extents. Only that matching mapping may replace the
+derived output dot with its named source dots. Missing history, a forged dot or
+cut, malformed mapping, extra or missing payload, or a transaction mixing a
+valid calculated field with an unrelated field that is falsely mapped makes the
+future local calculation fail without minting a transaction. It must never
+suppress one field because another mapping or a transaction-wide pointer was
+valid (`INV-BRANCH-30`, `INV-BRANCH-34`). A node may cache successful validation
 as derived state, but the cache is not wire authority.
 
 To calculate source→target, the merger recursively expands native contribution
-dots through both ordinary lineage-parent edges and prior merge-provenance
-edges. It subtracts the contribution closure already represented by the target
-snapshot from the source closure through `through_frontier`. The remaining set
-is the **novel contribution set**. `from_frontier` is the maximal source cut
-evidenced by visible prior provenance whose closure is already in that target
-set; it is calculation evidence, not mutable shared state.
+dots through ordinary lineage-parent edges and prior validated field
+substitutions. It subtracts exactly the dots already represented by the target
+snapshot from the source dots reachable at the examined source cut. The
+remaining set is the **novel contribution set**. `from_frontier` and
+`through_frontier` summarize cuts examined by the calculator, but only explicit
+field substitutions establish target-known dots.
 
 This recursive expansion is what prevents bidirectional and transitive echo.
 For example, after main→B imports a main counter increment and text operation,
