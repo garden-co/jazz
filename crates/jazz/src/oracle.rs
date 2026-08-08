@@ -775,6 +775,7 @@ fn merged_cells_with_history(
     let column_names = versions
         .iter()
         .flat_map(|version| version.cells.keys().cloned())
+        .chain(merge_strategies.keys().cloned())
         .collect::<BTreeSet<_>>();
     let mut cells = BTreeMap::new();
     for column in column_names {
@@ -819,6 +820,36 @@ fn merged_cells_with_history(
                     .find_map(|version| version.cells.get(&column))
                     .expect("counter oracle expected at least one integer value");
                 cells.insert(column, oracle_counter_value_from_i128(prototype, merged));
+            }
+            MergeStrategy::GSet => {
+                let by_tx = history
+                    .iter()
+                    .map(|version| (version.tx_id, version))
+                    .collect::<BTreeMap<_, _>>();
+                let mut pending = versions
+                    .iter()
+                    .map(|version| version.tx_id)
+                    .collect::<Vec<_>>();
+                let mut visited = BTreeSet::new();
+                let mut elements = BTreeMap::<Vec<u8>, Value>::new();
+                while let Some(tx_id) = pending.pop() {
+                    if !visited.insert(tx_id) {
+                        continue;
+                    }
+                    let Some(version) = by_tx.get(&tx_id) else {
+                        continue;
+                    };
+                    pending.extend(version.parents.iter().copied());
+                    let Some(Value::Array(values)) = version.cells.get(&column) else {
+                        continue;
+                    };
+                    for value in values {
+                        let key = postcard::to_allocvec(value)
+                            .expect("g-set oracle value must serialize deterministically");
+                        elements.entry(key).or_insert_with(|| value.clone());
+                    }
+                }
+                cells.insert(column, Value::Array(elements.into_values().collect()));
             }
         }
     }
