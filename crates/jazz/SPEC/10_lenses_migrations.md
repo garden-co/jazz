@@ -19,7 +19,7 @@ Invariant digest:
 - `INV-LENS-6`: Unknown-schema shape registrations MUST park and MUST register only after the named schema-version catalogue value arrives.
 - `INV-LENS-7`: `CurrentWriteSchema` updates MUST be monotone by `revision`; stale revisions MUST leave `current_write_schema` unchanged.
 - `INV-LENS-8`: Durable catalogue schemas, lenses, current-write pointer, schema-version aliases, and physical mappings MUST survive node restart.
-- `INV-LENS-9`: Publishing a non-genesis schema and its lineage-defining lens MUST atomically persist the schema, lens, alias, complete physical mapping, and explicit new/dropped-table declarations, then register every physical table and schema variant before acknowledging it or draining parked work.
+- `INV-LENS-9`: Publishing a non-genesis schema and its lineage-defining lens MUST durably stage the complete ordered bundle, keep it invisible while every physical table and schema variant is registered, then durably activate it before acknowledging or draining parked work; reopen MUST resume staged activation idempotently.
 - `INV-LENS-10`: New local writes MUST retain `current_write_schema.schema` as their schema discriminator and resolve storage through that schema's durable physical mapping.
 - `INV-LENS-11`: Old-schema commit units with a forward lens path to the current write schema MUST be copied forward into the current schema variant at ingest.
 - `INV-LENS-12`: Natural lens reads MUST select winners from the shared physical lineage before projecting rows into the requested schema.
@@ -66,6 +66,14 @@ mutations travel as admin-gated
 messages with `CatalogueAck` replies; a non-admin author is rejected
 (`INV-LENS-3`). `AuthorId::SYSTEM` is the catalogue admin.
 
+Every schema-lineage publication carries a core-assigned monotone
+`CatalogueSeq`. Catalogue sequence is an administrative ordering domain, not a
+Jazz data transaction and not branch causality. A receiver parks a publication
+whose earlier catalogue sequence or active source schema is missing. For two
+different bundles naming the same target schema, the first bundle in catalogue
+sequence is the sole lineage-defining winner on every replica; later bundles
+may be admitted only as non-remapping cross-lenses. Arrival order is irrelevant.
+
 The schema supplied when a database is created is its **genesis schema**. Its
 local physical mapping is allocated during creation/reopen and it is the only
 schema that has no lineage-defining parent lens. Every other schema enters the
@@ -100,12 +108,17 @@ Publishing a non-genesis schema first derives its complete physical mapping
 from the bundled lineage lens: compatible unchanged/renamed tables and columns
 reuse source physical ids; added tables, added/copied columns, and incompatible
 column epochs receive fresh ids; dropped entities simply have no target logical
-mapping. Schema, lens, local alias, mapping, and explicit new/dropped-table
-declarations are committed in one storage batch. Jazz then registers all
-physical tables, indexes, row-layout variants, and projection cases before
-acknowledging the bundle or draining work parked on that schema
-(`INV-LENS-9`). No row can therefore be written into storage whose identity is
-later reconciled or discarded. The legacy logical `(table, schema-version)` registry
+mapping. Schema, lens, local alias, mapping, declarations, and catalogue
+sequence are first committed durably with state `Staged`. Staged definitions
+are invisible to schema APIs, write-pointer updates, writes, shapes, and commit
+admission. Jazz then idempotently builds or rebuilds all physical tables,
+indexes, row-layout variants, and projection cases. Only after that succeeds
+does a second durable catalogue transaction mark the bundle `Active`. Reopen
+resumes activation of staged bundles deterministically before exposing the
+node. Only `Active` causes acknowledgement or parked-work drainage
+(`INV-LENS-9`). IDs allocated by a staged bundle are never reused, including
+after failed activation; this makes retry/reopen registration safe without
+rollback exposure. The legacy logical `(table, schema-version)` registry
 `jazz_partitions` no longer exists; durable `jazz_schema_versions` mappings are
 the complete reopen input.
 
@@ -237,6 +250,10 @@ change future merge behavior.
   not change physical placement. If a future schema must inherit physical
   identities from multiple independently evolved parents, define an atomic
   multi-parent lineage proof rather than making arrival order authoritative.
+- 🔶 **Catalogue sequence unification.** Schema-lineage activation requires an
+  authoritative monotone catalogue sequence. Decide whether current-write
+  pointer revisions and later catalogue mutations share that exact sequence or
+  remain distinct typed counters with explicit dependencies.
 - 🔶 **`RenameTable` payload.** `RenameTable`'s payload is ignored in favor of
   `TableLens` source/target during evaluation. Decide whether the op should be
   removed or the redundant payload should be validated.

@@ -315,15 +315,21 @@ schema is admitted atomically with one lineage-defining lens whose source is
 already admitted and whose target is the new schema. The publication bundle
 also declares all new target tables and dropped source tables explicitly. The
 related-table lens endpoints plus those declarations must account for both
-schema table sets exactly.
+schema table sets exactly. A core-assigned `CatalogueSeq` orders bundles;
+receivers park gaps and inactive-source dependencies, so competing target
+lineages converge by catalogue order rather than network arrival order.
 
 Jazz derives the target physical mapping before persistence. Compatible
 unchanged and renamed entities reuse source physical ids. New tables,
 added/copied columns, and incompatible column epochs receive fresh ids. Dropped
 entities are absent from the target mapping but retained in older mappings and
-storage. Schema, lens, alias, and mapping are persisted in one batch, then every
-Groove layout/projection/index case is registered before acknowledgement and
-before parked data drains.
+storage. Schema, lens, alias, mapping, declarations, and sequence first persist
+as `Staged`. Staged definitions are not catalogue-visible and cannot be used by
+a current pointer, write, shape, or commit. Jazz registers every Groove
+layout/projection/index case idempotently and then durably marks the bundle
+`Active`; only Active bundles acknowledge and drain parked work. Reopen resumes
+staged activation before serving. Allocated physical ids are never reused, so a
+failed or crashed activation cannot alias later storage.
 
 There is intentionally no provisional mapping, pre-lens write window,
 reconciliation discard, or local data-loss policy. Later cross-lenses may add
