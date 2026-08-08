@@ -235,7 +235,9 @@ rename participate in one causal-head set.
 
 ### Sync
 
-The current proposal does not modify the sync protocol in any way.
+Shared physical ids do not enter row-version sync, but atomic catalogue
+publication does change the sync vocabulary: a non-genesis schema travels with
+its lineage lens, declarations, bundle identity, and catalogue sequence.
 
 A commit's `VersionRecord` already carries:
 
@@ -280,10 +282,9 @@ These are opaque, database-local `u64` ids, analogous to `SchemaVersionAlias`.
 They are durable and stable for the lifetime of a persisted mapping, but do not
 need to match across nodes. During one process lifetime each database allocates
 them monotonically.
-On restart it derives the next ids as one greater than the maximum ids in live
-persisted mappings. An id removed from all mappings may therefore be reused after
-a restart; this is safe because publishing a lens first discards all storage and
-metadata belonging to the replaced provisional identity. Tuple decoding, query
+On restart it derives the next ids as one greater than the maximum ids in active
+or staged persisted mappings. Allocated ids are never reused, including after
+failed staged activation. Tuple decoding, query
 planning, projection, and index lookup resolve application names through the
 relevant schema's identity mapping.
 
@@ -330,6 +331,12 @@ layout/projection/index case idempotently and then durably marks the bundle
 `Active`; only Active bundles acknowledge and drain parked work. Reopen resumes
 staged activation before serving. Allocated physical ids are never reused, so a
 failed or crashed activation cannot alias later storage.
+
+Bundle identity canonically includes sequence, schema, lens, and sorted
+new/dropped declarations. Exact duplicates are idempotent; conflicting reuse of
+an id, sequence, or target has zero mutation. Cross-lenses must resolve every
+related table and identity-preserving column to the existing physical ids;
+otherwise they are rejected and never allocate, remap, or delete storage.
 
 There is intentionally no provisional mapping, pre-lens write window,
 reconciliation discard, or local data-loss policy. Later cross-lenses may add
@@ -465,8 +472,8 @@ remain compatible with databases written by the former per-schema history layout
    schema-version count. Content uses `VariantProject` because its payload
    descriptor varies; deletion rows share one stable system-only descriptor and
    need no variant projection. Mixed content, deletes, and restores survive
-   restart and table renames. Publishing a lens discards both immutable layers
-   of a replaced provisional physical table.
+   restart and table renames. The former provisional-lineage discard behavior
+   is superseded by atomic staged-to-active schema publication.
    - At this stage global/ahead-current and branch-overlay tables remained
      partitioned, giving the immutable-history cutover a contained vertical slice.
    - Current projection chooses content and deletion winners independently
@@ -512,37 +519,33 @@ remain compatible with databases written by the former per-schema history layout
      `jazz_branch_partitions` stores only those two identities. Writes retain
      their authored `SchemaVersionAlias`; reads and merge-back project winners
      into their requested schema, including across table and column renames.
-     The mapping and mixed-version rows survive restart. Discarding a
-     provisional physical lineage clears its branch rows and partition metadata
-     before that local ID can be reused.
+     The mapping and mixed-version rows survive restart. The former provisional
+     lineage cleanup path is removed by the atomic-publication follow-up.
    - Rejected versions: `jazz_rejected_transactions` remains global transaction
      metadata. Each `PhysicalTableId` now owns one schema-versioned rejected
      payload archive; logical-name payload tables are no longer lowered. Rows
      retain their authored `SchemaVersionAlias`, and recovery derives their
      authored logical table and descriptor from the alias plus physical lineage.
-     If lens publication discards a provisional lineage, Jazz discards every
-     retained retry payload touching that lineage as an atomic whole: its global
-     retry header and archived versions in all lineages. The ordinary rejected
-     transaction audit record remains.
+     Atomic schema publication never creates a writable provisional lineage, so
+     lens publication no longer discards retry payloads or physical storage.
    - Global changes: `jazz_global_changes` now keys and indexes rows by
      `PhysicalTableId`, so historical cuts and whole-table conflict detection
      span table renames without duplicating events or scanning schema variants.
-     Discarding a provisional lineage also removes its change rows before that
-     local physical ID can be reused.
+     Physical ids are never reused.
    - Merge heads: `jazz_merge_heads` now keys each derived causal-head set by
      `(PhysicalTableId, RowUuid)`. Ancestry checks compare physical lineage, not
      the authored logical table name. Renames and restart retain one head set;
      independently introduced same-named lineages remain separate.
-   - Large-value checkpoints remain keyed by logical table and column names.
+   - Large-value checkpoints remain keyed by authored-schema-qualified logical
+     table and column identity.
      Large-value handles embedded in row payloads and extent identifiers also
      carry authored logical names and cross the public API/wire boundary, so
      changing this subsystem is a separate protocol/API decision rather than a
      mechanical local-key conversion.
    - `jazz_partitions` has been removed. Reopen, transaction-scan enumeration,
      and query-routing decisions now derive from durable schema-version physical
-     mappings. A separately mapped provisional schema no longer disables
-     base-schema prepared plans, and heterogeneous physical lineages use those
-     plans directly through their live-extensible `VariantProject` source.
+     mappings. Heterogeneous physical lineages use prepared plans directly
+     through their live-extensible `VariantProject` source.
 
 7. Implement unset/data-preservation semantics later.
 

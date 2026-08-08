@@ -74,9 +74,12 @@ different bundles naming the same target schema, the first bundle in catalogue
 sequence is the sole lineage-defining winner on every replica; later bundles
 may be admitted only as non-remapping cross-lenses. Arrival order is irrelevant.
 
-The schema supplied when a database is created is its **genesis schema**. Its
-local physical mapping is allocated during creation/reopen and it is the only
-schema that has no lineage-defining parent lens. Every other schema enters the
+The database lineage records one durable **genesis schema** at creation. Genesis
+is not whichever schema a replica happens to supply at open: a joining replica
+must install the durable genesis plus the ordered active catalogue chain before
+accepting pointers or data. Genesis's local physical mapping is allocated during
+database bootstrap and it is the only schema that has no lineage-defining
+parent lens. Every other schema enters the
 catalogue through one `PublishSchemaWithLens` bundle. The bundled lens MUST
 target the bundled schema and source an already-admitted schema. The bundle
 also carries exhaustive, explicit new-table and dropped-table declarations;
@@ -84,6 +87,13 @@ those declarations and the lens table endpoints MUST partition the source and
 target table sets without duplicates or omissions. A standalone unknown
 `PublishSchema` is invalid, and a later standalone `PublishLens` may add a
 cross-lens but cannot redefine a schema's physical mapping.
+
+The bundle has its own content-addressed identity, distinct from both
+`SchemaVersionId` and `MigrationLensId`. Its canonical digest covers catalogue
+sequence, schema, lens, and the sorted exhaustive new/dropped table
+declarations. An exact duplicate is idempotent. Reusing a bundle id, catalogue
+sequence, or target schema for different canonical content fails before any id
+allocation, registration, or durable mutation.
 
 `CurrentWriteSchema` is the single moving write pointer. Updates are monotone by
 `revision`, and a stale revision is acknowledged with `applied: false` without
@@ -94,6 +104,11 @@ be interpreted yet, so it **parks** as a catalogue orphan. The orphan drains
 only after the complete schema-and-lineage bundle is durable and its Groove
 variants are registered (`INV-LENS-5`, `INV-LENS-6`, ch. 8). There is no
 partially-known or provisionally writeable schema state.
+
+Current-pointer messages and child schema bundles whose dependencies are not
+Active park durably across reopen. They retry after each activation, in
+catalogue order; a transient missing dependency is not a terminal rejection and
+never exposes the pointer early.
 
 ### 10.3 Shared physical storage
 
@@ -122,6 +137,17 @@ rollback exposure. The legacy logical `(table, schema-version)` registry
 `jazz_partitions` no longer exists; durable `jazz_schema_versions` mappings are
 the complete reopen input.
 
+Admission validates the entire bundle before staging: related source/target
+table endpoints are unique and exhaustive with the explicit new/dropped sets;
+the ordered ops reproduce each target descriptor exactly; `RenameTable`
+payloads agree with their enclosing endpoints; no rename/copy/add collision is
+ambiguous; and physical epochs are reused only when representation and merge
+semantics are compatible. Protocol byte, declaration-count, name-length, and
+operation-depth limits are checked before allocation or Groove registration.
+Catalogue admin authority comes from the authenticated transport/session
+context; the serialized `author` field is provenance and cannot let a forged
+client self-declare `SYSTEM` authority.
+
 _Further invariants._ `INV-LENS-8` — durable catalogue schemas, lenses, the
 current-write pointer, aliases, and physical mappings survive node restart and
 are recovered before the full Groove database is constructed.
@@ -138,6 +164,14 @@ variant. When a forward lens path exists, the commit unit is
 (`INV-LENS-11`). If the selected lens path declares `RejectSourceDelta`, the
 old-schema delta is rejected as a normal `Fate::Rejected(reason)`, not as a
 protocol error (`INV-LENS-16`).
+
+New or dropped tables are not silently omitted during cross-version writes. In
+this first shared-storage layer, a commit unit that cannot be represented
+exactly through the declared table endpoints parks or fails atomically with an
+explicit unsupported-projection result; representable writes in the same unit
+do not partially apply. Preserving original-schema variants and symmetric sync
+across new/dropped tables is a required follow-up, not behavior this layer
+claims to implement.
 
 The transaction records its author's schema version as **audit metadata with no
 semantic role**. A current-write-pointer flip is a core-ordered, monotone
@@ -208,6 +242,11 @@ content is rejected at lens publication (`INV-LENS-18`). **The core only ever
 receives resolved lenses**: a draft lens, such as an ambiguous diff where a
 drop+add might be a rename, is a product/tooling concept, and the validation tool
 refuses unresolved drafts upstream.
+
+Large-value checkpoints, payload handles, and extent references remain portable
+logical identities qualified by authored schema. Database-local
+`PhysicalTableId` and `PhysicalColumnId` values never cross those API/wire
+boundaries; local resolution happens only at the storage boundary.
 
 ### 10.9 Subsumed schema-file and schema-subset notes
 
