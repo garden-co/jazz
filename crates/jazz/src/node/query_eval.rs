@@ -320,6 +320,21 @@ fn prepared_route_param_names(parameters: &super::query_engine::ParameterDomain)
         .collect()
 }
 
+fn prepared_route_value_indices(
+    params: &[PreparedQueryParam],
+    route_fields: &[String],
+) -> Vec<usize> {
+    route_fields
+        .iter()
+        .map(|route_field| {
+            params
+                .iter()
+                .position(|param| prepared_param_route_field(param) == *route_field)
+                .expect("terminal route fields come from the prepared parameter domain")
+        })
+        .collect()
+}
+
 fn terminal_route_fields(route_params: &[String], route_eligible_fields: &[String]) -> Vec<String> {
     let route_eligible_fields = route_eligible_fields.iter().collect::<BTreeSet<_>>();
     route_params
@@ -6044,9 +6059,10 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "policy schema version is unknown",
                 ))?;
-            collect_schema_policy_claim_params(
+            self.collect_policy_dependency_claim_params(
                 &policy_schema.schema,
                 &policy,
+                &input_shape,
                 &mut binding_claim_params,
             )?;
         }
@@ -6083,6 +6099,62 @@ where
             input,
             output: current_query_output_request(output, shape.query()),
         })
+    }
+
+    fn collect_policy_dependency_claim_params(
+        &self,
+        schema: &JazzSchema,
+        policy: &PolicyContext,
+        input: &NormalizedRowSetShape,
+        params: &mut BTreeMap<String, ProgramClaimParam>,
+    ) -> Result<(), Error> {
+        let claims = match policy {
+            PolicyContext::Identity { claims, .. }
+            | PolicyContext::AuthorizationSubplan { claims, .. } => claims,
+            PolicyContext::System => return Ok(()),
+        };
+        let mut pending = normalized_source_tables(input);
+        let mut visited = BTreeSet::new();
+        while let Some(table_name) = pending.pop_first() {
+            if !visited.insert(table_name.clone()) {
+                continue;
+            }
+            let table = schema
+                .tables
+                .iter()
+                .find(|table| table.name == table_name)
+                .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
+            let mut query = authorization_query_from_read_policy(table);
+            let mut values = BTreeMap::new();
+            bind_scope_claim_operands(&mut query, claims, &mut values);
+            let shape = query.validate(schema)?;
+            for (name, ty) in shape.params() {
+                let Some(path) = claim_path_from_param_field(name) else {
+                    continue;
+                };
+                let candidate = ProgramClaimParam {
+                    path,
+                    ty: ty.clone(),
+                };
+                if let Some(existing) = params.get(name)
+                    && existing != &candidate
+                {
+                    return Err(Error::QueryCapability(format!(
+                        "policy claim parameter '{name}' has conflicting schema types"
+                    )));
+                }
+                params.insert(name.clone(), candidate);
+            }
+            coerce_binding_values_for_shape(&shape, &mut values);
+            let binding = shape.bind(values)?;
+            let normalized = self.normalized_row_set_shape(&shape, &binding)?;
+            pending.extend(
+                normalized_source_tables(&normalized)
+                    .difference(&visited)
+                    .cloned(),
+            );
+        }
+        Ok(())
     }
 
     fn normalized_row_set_shape(
@@ -9457,13 +9529,15 @@ where
                 .clone()
                 .unwrap_or_else(|| query_binding_source_shape_for_prepared_params(&params));
             let route_fields = route_params;
+            let route_value_indices = prepared_route_value_indices(&params, &route_fields);
             let prepared = self.database.prepare(
                 [groove::ivm::RoutedMultisinkTerminal::new(
                     JAZZ_APP_ROWS_SINK,
                     graph,
                     route_fields,
                     app_row_fields,
-                )],
+                )
+                .with_route_value_indices(route_value_indices)],
                 binding_source_shape,
                 binding_descriptor,
             )?;
@@ -9636,12 +9710,14 @@ where
                     &route_params,
                     &terminal_route_eligible_fields(&terminal.output)?,
                 );
+                let route_value_indices = prepared_route_value_indices(&params, &route_fields);
                 Ok(RoutedMultisinkTerminal::new(
                     terminal.sink,
                     terminal.graph,
                     route_fields,
                     public_fields,
-                ))
+                )
+                .with_route_value_indices(route_value_indices))
             })
             .collect::<Result<Vec<_>, Error>>()?;
         let prepared =
@@ -9944,6 +10020,7 @@ where
             ));
         }
         let policy_shape = query.validate(policy_schema)?;
+        coerce_binding_values_for_shape(&policy_shape, &mut policy_binding_values);
         let policy_binding = policy_shape.bind(policy_binding_values.clone())?;
         let policy_shape = bind_query_params_with_mode(
             &policy_shape,
@@ -10792,6 +10869,23 @@ fn binding_claim_params_for_shape(
     params
 }
 
+fn normalized_source_tables(shape: &NormalizedRowSetShape) -> BTreeSet<String> {
+    shape
+        .nodes
+        .values()
+        .filter_map(|node| match node {
+            RowSetExpr::Source { source, .. } => Some(source.table.clone()),
+            _ => None,
+        })
+        .chain(
+            shape
+                .auxiliary_sources
+                .iter()
+                .map(|source| source.table.clone()),
+        )
+        .collect()
+}
+
 fn collect_reachable_seed_claim_params(
     schema: &JazzSchema,
     query: &JazzQuery,
@@ -10829,42 +10923,6 @@ fn collect_reachable_seed_claim_params(
                 ty: column.column_type.clone(),
             },
         );
-    }
-    Ok(())
-}
-
-fn collect_schema_policy_claim_params(
-    schema: &JazzSchema,
-    policy: &PolicyContext,
-    params: &mut BTreeMap<String, ProgramClaimParam>,
-) -> Result<(), Error> {
-    let claims = match policy {
-        PolicyContext::Identity { claims, .. }
-        | PolicyContext::AuthorizationSubplan { claims, .. } => claims,
-        PolicyContext::System => return Ok(()),
-    };
-    for table in &schema.tables {
-        let mut query = authorization_query_from_read_policy(table);
-        let mut values = BTreeMap::new();
-        bind_scope_claim_operands(&mut query, claims, &mut values);
-        let shape = query.validate(schema)?;
-        for (name, ty) in shape.params() {
-            let Some(path) = claim_path_from_param_field(name) else {
-                continue;
-            };
-            let candidate = ProgramClaimParam {
-                path,
-                ty: ty.clone(),
-            };
-            if let Some(existing) = params.get(name)
-                && existing != &candidate
-            {
-                return Err(Error::QueryCapability(format!(
-                    "policy claim parameter '{name}' has conflicting schema types"
-                )));
-            }
-            params.insert(name.clone(), candidate);
-        }
     }
     Ok(())
 }
@@ -11388,6 +11446,17 @@ fn coerce_prepared_binding_value(value: Value, column_type: &groove::schema::Col
         (Value::String(value), groove::schema::ColumnType::Uuid) => uuid::Uuid::parse_str(&value)
             .map(Value::Uuid)
             .unwrap_or(Value::String(value)),
+        (Value::I64(value), groove::schema::ColumnType::I32) => i32::try_from(value)
+            .map(Value::I32)
+            .unwrap_or(Value::I64(value)),
+        (Value::U32(value), groove::schema::ColumnType::I32) => i32::try_from(value)
+            .map(Value::I32)
+            .unwrap_or(Value::U32(value)),
+        (Value::I32(value), groove::schema::ColumnType::I64) => Value::I64(i64::from(value)),
+        (Value::U32(value), groove::schema::ColumnType::I64) => Value::I64(i64::from(value)),
+        (Value::U64(value), groove::schema::ColumnType::I64) => i64::try_from(value)
+            .map(Value::I64)
+            .unwrap_or(Value::U64(value)),
         (Value::Nullable(Some(value)), column_type) => Value::Nullable(Some(Box::new(
             coerce_prepared_binding_value(*value, column_type),
         ))),
@@ -11414,6 +11483,15 @@ fn coerce_prepared_binding_value(value: Value, column_type: &groove::schema::Col
             Value::Nullable(Some(Box::new(coerce_prepared_binding_value(value, inner))))
         }
         (value, _) => value,
+    }
+}
+
+fn coerce_binding_values_for_shape(shape: &ValidatedQuery, values: &mut BTreeMap<String, Value>) {
+    for (name, value) in values {
+        let Some(ty) = shape.params().get(name) else {
+            continue;
+        };
+        *value = coerce_prepared_binding_value(value.clone(), ty);
     }
 }
 
