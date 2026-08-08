@@ -66,13 +66,16 @@ mutations travel as admin-gated
 messages with `CatalogueAck` replies; a non-admin author is rejected
 (`INV-LENS-3`). `AuthorId::SYSTEM` is the catalogue admin.
 
-Every schema-lineage publication carries a core-assigned monotone
-`CatalogueSeq`. Catalogue sequence is an administrative ordering domain, not a
-Jazz data transaction and not branch causality. A receiver parks a publication
-whose earlier catalogue sequence or active source schema is missing. For two
-different bundles naming the same target schema, the first bundle in catalogue
-sequence is the sole lineage-defining winner on every replica; later bundles
-may be admitted only as non-remapping cross-lenses. Arrival order is irrelevant.
+Exactly one database-wide catalogue sequencer assigns a dense monotone
+`CatalogueSeq`. An arbitrary core or replica never assigns catalogue sequence;
+edges forward authenticated, prevalidated requests to that sequencer. Catalogue
+sequence is an administrative ordering domain, not a Jazz data transaction and
+not branch causality. A receiver parks an envelope whose earlier catalogue
+sequence or active source schema is missing. The same sequence with different
+canonical content is fatal catalogue corruption, not first-arrival wins.
+Validation happens before consuming sequence. If a sequenced operation must be
+abandoned after assignment, the sequencer emits a replicated tombstone for that
+slot so Active/tombstoned catalogue order remains dense.
 
 The database lineage records one durable **genesis schema** at creation. Genesis
 is not whichever schema a replica happens to supply at open: a joining replica
@@ -88,12 +91,22 @@ target table sets without duplicates or omissions. A standalone unknown
 `PublishSchema` is invalid, and a later standalone `PublishLens` may add a
 cross-lens but cannot redefine a schema's physical mapping.
 
-The bundle has its own content-addressed identity, distinct from both
+Opening an existing database with a caller-supplied schema that disagrees with
+its durable genesis is a hard bootstrap error. A joiner with no local lineage
+installs the authority's genesis record, then replays the dense Active/tombstone
+catalogue chain, then applies pointers and data; it never manufactures genesis
+from its preferred client schema.
+
+The pre-sequence request has its own content-addressed identity, distinct from both
 `SchemaVersionId` and `MigrationLensId`. Its canonical digest covers catalogue
-sequence, schema, lens, and the sorted exhaustive new/dropped table
-declarations. An exact duplicate is idempotent. Reusing a bundle id, catalogue
-sequence, or target schema for different canonical content fails before any id
-allocation, registration, or durable mutation.
+schema, lens, and the sorted exhaustive new/dropped table declarations, but not
+the later assigned `CatalogueSeq`. The sequencer wraps that request in a
+committed sequence envelope. An exact envelope replay is idempotent; an exact
+request retry is deduplicated before assigning a second slot. A new
+`PublishSchemaWithLens` request always rejects a target already reserved by an
+earlier request. A separate `PublishLens` operation is the only way to add an
+agreeing cross-lens. Reusing a request id, sequence, or target for different
+canonical content fails before id allocation, registration, or durable mutation.
 
 `CurrentWriteSchema` is the single moving write pointer. Updates are monotone by
 `revision`, and a stale revision is acknowledged with `applied: false` without
@@ -137,6 +150,11 @@ rollback exposure. The legacy logical `(table, schema-version)` registry
 `jazz_partitions` no longer exists; durable `jazz_schema_versions` mappings are
 the complete reopen input.
 
+Once activation begins, any registration or Active-marker failure puts the node
+in a fail-stop catalogue state: it must not continue serving against the
+temporarily installed in-memory schema. Reopen resumes the durable Staged
+bundle idempotently and either reaches Active or fails closed again.
+
 Admission validates the entire bundle before staging: related source/target
 table endpoints are unique and exhaustive with the explicit new/dropped sets;
 the ordered ops reproduce each target descriptor exactly; `RenameTable`
@@ -144,6 +162,11 @@ payloads agree with their enclosing endpoints; no rename/copy/add collision is
 ambiguous; and physical epochs are reused only when representation and merge
 semantics are compatible. Protocol byte, declaration-count, name-length, and
 operation-depth limits are checked before allocation or Groove registration.
+The initial named limits are `MAX_SCHEMA_LINEAGE_PUBLICATION_BYTES = 2 MiB`,
+`MAX_SCHEMA_LINEAGE_DECLARATIONS = 4096`,
+`MAX_SCHEMA_LINEAGE_NAME_BYTES = 1024`, and
+`MAX_SCHEMA_LINEAGE_OPS = 16384`; changing them is a protocol compatibility
+decision, not an unreviewed implementation tweak.
 Catalogue admin authority comes from the authenticated transport/session
 context; the serialized `author` field is provenance and cannot let a forged
 client self-declare `SYSTEM` authority.
@@ -167,9 +190,10 @@ protocol error (`INV-LENS-16`).
 
 New or dropped tables are not silently omitted during cross-version writes. In
 this first shared-storage layer, a commit unit that cannot be represented
-exactly through the declared table endpoints parks or fails atomically with an
-explicit unsupported-projection result; representable writes in the same unit
-do not partially apply. Preserving original-schema variants and symmetric sync
+exactly through the declared table endpoints is terminally rejected atomically
+with an explicit unsupported-projection reason; only transient missing Active
+catalogue dependencies park. Representable writes in the same unit do not
+partially apply. Preserving original-schema variants and symmetric sync
 across new/dropped tables is a required follow-up, not behavior this layer
 claims to implement.
 
@@ -290,9 +314,10 @@ change future merge behavior.
   identities from multiple independently evolved parents, define an atomic
   multi-parent lineage proof rather than making arrival order authoritative.
 - 🔶 **Catalogue sequence unification.** Schema-lineage activation requires an
-  authoritative monotone catalogue sequence. Decide whether current-write
-  pointer revisions and later catalogue mutations share that exact sequence or
-  remain distinct typed counters with explicit dependencies.
+  authoritative database-wide monotone catalogue sequence. Current-write
+  pointers and later ordered catalogue mutations should enter the same sequence;
+  the remaining work is migrating the pointer API from its legacy independent
+  revision field to the common committed envelope.
 - 🔶 **`RenameTable` payload.** `RenameTable`'s payload is ignored in favor of
   `TableLens` source/target during evaluation. Decide whether the op should be
   removed or the redundant payload should be validated.

@@ -316,7 +316,8 @@ schema is admitted atomically with one lineage-defining lens whose source is
 already admitted and whose target is the new schema. The publication bundle
 also declares all new target tables and dropped source tables explicitly. The
 related-table lens endpoints plus those declarations must account for both
-schema table sets exactly. A core-assigned `CatalogueSeq` orders bundles;
+schema table sets exactly. The sole database-wide catalogue sequencer assigns a
+dense `CatalogueSeq` only after validating a content-addressed request;
 receivers park gaps and inactive-source dependencies, so competing target
 lineages converge by catalogue order rather than network arrival order.
 
@@ -332,9 +333,10 @@ layout/projection/index case idempotently and then durably marks the bundle
 staged activation before serving. Allocated physical ids are never reused, so a
 failed or crashed activation cannot alias later storage.
 
-Bundle identity canonically includes sequence, schema, lens, and sorted
-new/dropped declarations. Exact duplicates are idempotent; conflicting reuse of
-an id, sequence, or target has zero mutation. Cross-lenses must resolve every
+Request identity canonically includes schema, lens, and sorted new/dropped
+declarations but excludes the later sequence envelope. Exact envelope replays
+are idempotent; conflicting reuse of an id or sequence is fatal, and a new
+schema request for a reserved target is rejected with zero mutation. Cross-lenses must resolve every
 related table and identity-preserving column to the existing physical ids;
 otherwise they are rejected and never allocate, remap, or delete storage.
 
