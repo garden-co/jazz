@@ -715,7 +715,11 @@ fn merge_back_branch_squashes_net_overlay_into_parent_and_closes_branch() {
         )
         .unwrap();
 
-    let squash = core.merge_back_branch(branch_id).unwrap();
+    let BranchMergeOutcome::Accepted { tx_id: squash } =
+        core.merge_back_branch(branch_id).unwrap()
+    else {
+        panic!("merge-back must be accepted");
+    };
     assert_eq!(
         core.branch_record(branch_id).unwrap().state,
         codec::BranchState::Merged
@@ -765,6 +769,715 @@ fn merge_back_branch_squashes_net_overlay_into_parent_and_closes_branch() {
         reopened.transaction_record(squash).unwrap().source_branch,
         Some(branch_id)
     );
+}
+
+/// A merge-back squash observes its private branch frontier before minting its
+/// public child transaction, so authority admission accepts it and persists its
+/// versions even if the local HLC register is stale.
+///
+/// Actors: `alice` owns the branch and performs the merge-back; the authority
+/// is the same node in this v1 node-layer test.
+///
+/// ```text
+/// alice branch tip (t=100) ──private parent──► squash (must be > t=100)
+///                     │
+///                  stale local HLC (t=0)
+/// ```
+///
+/// This is intentionally a node-layer regression rather than a `Db` test:
+/// the public facade has no branch mutation API or HLC fault injector yet
+/// (SPEC/11 open question, binding-facing branch facade). All branch writes
+/// and merge-back use the public `NodeState` branch API; only the stale-clock
+/// fault is injected directly.
+#[test]
+fn merge_back_observes_private_frontier_before_minting_squash() {
+    let (_dir, mut core) = open_history_complete_node_with_schema(node(0x71), schema());
+    let branch_id = branch(0x71);
+    core.create_branch(branch_id).unwrap();
+    let branch_tip = core
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("todos", row(0x71), 100).cells(title_cells("branch value")),
+        )
+        .unwrap();
+
+    // Simulate a stale HLC register after the private overlay was recovered by
+    // a path that did not observe its frontier. The regression is the public
+    // merge-back behavior, not a claim that normal recovery should do this.
+    core.clock.tx_time = TxTime::default();
+
+    let BranchMergeOutcome::Accepted { tx_id: squash } =
+        core.merge_back_branch(branch_id).unwrap()
+    else {
+        panic!("merge-back must be accepted");
+    };
+    let stored = core.transaction_record(squash).unwrap();
+    assert_eq!(stored.fate, Fate::Accepted);
+    assert!(
+        squash.time > branch_tip.time,
+        "INV-TX-6: squash must be strictly newer than its private parent"
+    );
+    assert_eq!(core.query_versions_for_tx(squash).unwrap().len(), 1);
+    assert_eq!(
+        core.branch_record(branch_id).unwrap().state,
+        codec::BranchState::Merged
+    );
+
+    // Planted positive: remove the `merge_tx_time(parent.time)` loop in
+    // `commit_merge_back_squash`. The mint below then uses t=0 and admission
+    // rejects the squash as a CausalityViolation before storing any versions.
+}
+
+/// A rejected merge-back fate keeps the branch open, so `alice` can repair its
+/// branch inputs and retry instead of losing the overlay to a false `Merged`
+/// lifecycle transition.
+///
+/// Actors: `alice` owns the private branch tip; the authority has already
+/// rejected that tip, so its public squash must cascade-reject.
+///
+/// ```text
+/// rejected private tip ──parent──► squash ──cascade reject──► branch stays Open
+/// ```
+///
+/// This stays at the node layer because no stable public branch facade exists;
+/// `apply_fate_update` is the public authority-fate API used to inject the
+/// otherwise unreachable rejected-private-parent condition.
+#[test]
+fn rejected_merge_back_fate_does_not_close_the_branch() {
+    let (_dir, mut core) = open_history_complete_node_with_schema(node(0x72), schema());
+    let branch_id = branch(0x72);
+    core.create_branch(branch_id).unwrap();
+    let branch_tip = core
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("todos", row(0x72), 100).cells(title_cells("branch value")),
+        )
+        .unwrap();
+    core.apply_fate_update(
+        branch_tip,
+        Fate::Rejected(RejectionReason::CausalityViolation),
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        core.merge_back_branch(branch_id),
+        Ok(BranchMergeOutcome::Rejected {
+            reason: RejectionReason::Cascade { root },
+            ..
+        }) if root == branch_tip
+    ));
+    assert_eq!(
+        core.branch_record(branch_id).unwrap().state,
+        codec::BranchState::Open,
+        "a rejected squash must leave the overlay retryable"
+    );
+    assert!(!core.branches.pending_merge_backs.contains_key(&branch_id));
+
+    // Planted positive: restore the old unconditional `Ok(tx_id)` return from
+    // `commit_merge_back_squash`. This merge call then succeeds and the outer
+    // lifecycle transition incorrectly marks the branch Merged.
+}
+
+/// A merge-back parked for a missing private prerequisite remains one logical
+/// squash across retries and closes the branch only when canonical ingest later
+/// accepts that same squash.
+///
+/// Actors: `alice` owns the branch; the local edge authority temporarily lacks
+/// the branch-tip transaction metadata.
+///
+/// ```text
+/// missing branch tip ──► parked squash ──retry──► same parked squash
+/// restored branch tip ──► drain/accept ──► exactly one public squash + Merged
+/// ```
+///
+/// There is no public fault injector for selectively losing transaction
+/// metadata, so the test removes and restores only that durable prerequisite;
+/// merge-back and retry themselves use the public branch API.
+#[test]
+fn parked_merge_back_retry_does_not_mint_a_second_squash() {
+    let (dir, mut core) = open_history_complete_node_with_schema(node(0x73), schema());
+    let branch_id = branch(0x73);
+    core.create_branch(branch_id).unwrap();
+    let branch_tip = core
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("todos", row(0x73), 100).cells(title_cells("branch value")),
+        )
+        .unwrap();
+    let stored_tip = core.query_transaction(branch_tip).unwrap().unwrap();
+    let mut batch = core.database.open_batch();
+    batch.delete(
+        "jazz_transactions",
+        groove::db::PrimaryKeyValue::Composite(vec![
+            groove::db::PrimaryKeyValue::U64(branch_tip.time.0),
+            groove::db::PrimaryKeyValue::U64(stored_tip.node_alias.0),
+        ]),
+    );
+    core.database.commit_batch(batch).unwrap();
+
+    let pending_tx = match core.merge_back_branch(branch_id).unwrap() {
+        BranchMergeOutcome::Pending { tx_id } => tx_id,
+        outcome => panic!("expected pending merge-back, got {outcome:?}"),
+    };
+    let parked = core
+        .parking
+        .parked_commit_units
+        .values()
+        .filter(|unit| unit.tx.source_branch == Some(branch_id))
+        .map(|unit| unit.tx.tx_id)
+        .collect::<Vec<_>>();
+    assert_eq!(parked.len(), 1);
+    assert_eq!(parked[0], pending_tx);
+    let trusted_before = core
+        .branches
+        .pending_merge_backs
+        .get(&branch_id)
+        .cloned()
+        .unwrap();
+    let forged_tx = trusted_before.tx.clone();
+    let forged_versions = vec![version_record(
+        row(0x7e),
+        Vec::new(),
+        title_cells("forged satisfiable squash"),
+        None,
+    )];
+    assert!(matches!(
+        core.ingest_edge_authority_mergeable_commit_unit(
+            forged_tx.clone(),
+            forged_versions.clone(),
+            pending_tx.time.physical_ms(),
+        ),
+        Err(Error::ConflictingCommitUnit(tx_id)) if tx_id == pending_tx
+    ));
+    assert!(matches!(
+        core.ingest_commit_unit(
+            forged_tx.clone(),
+            forged_versions.clone(),
+            pending_tx.time.physical_ms(),
+        ),
+        Err(Error::ConflictingCommitUnit(tx_id)) if tx_id == pending_tx
+    ));
+    assert!(matches!(
+        core.ingest_relay_commit_unit(forged_tx, forged_versions),
+        Err(Error::ConflictingCommitUnit(tx_id)) if tx_id == pending_tx
+    ));
+    assert_eq!(
+        core.branches.pending_merge_backs.get(&branch_id),
+        Some(&trusted_before),
+        "forged same-TxId input must not rewrite the durable reservation"
+    );
+    assert_eq!(
+        core.branch_record(branch_id).unwrap().state,
+        codec::BranchState::Open
+    );
+    assert_eq!(core.parking.parked_commit_units.len(), 1);
+    assert!(matches!(
+        core.commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("todos", row(0x77), 101).cells(title_cells("late write")),
+        ),
+        Err(Error::BranchClosed(id)) if id == branch_id
+    ));
+    assert!(matches!(
+        core.discard_branch(branch_id),
+        Err(Error::BranchClosed(id)) if id == branch_id
+    ));
+    assert_eq!(
+        core.merge_back_branch(branch_id).unwrap(),
+        BranchMergeOutcome::Pending { tx_id: pending_tx }
+    );
+    assert_eq!(
+        core.parking
+            .parked_commit_units
+            .values()
+            .filter(|unit| unit.tx.source_branch == Some(branch_id))
+            .count(),
+        1,
+        "retry must reuse the one parked merge-back rather than minting another"
+    );
+
+    drop(core);
+    let mut core = reopen_node_at(&dir, node(0x73), schema());
+    assert_eq!(
+        core.branches
+            .pending_merge_backs
+            .get(&branch_id)
+            .map(|reservation| reservation.tx.tx_id),
+        Some(pending_tx),
+        "the trusted squash reservation must survive reopen"
+    );
+    assert!(core.parking.parked_commit_units.is_empty());
+    assert_eq!(
+        core.merge_back_branch(branch_id).unwrap(),
+        BranchMergeOutcome::Pending { tx_id: pending_tx },
+        "reopen must reconstruct and park the exact reserved squash"
+    );
+
+    let mut batch = core.database.open_batch();
+    batch.update(
+        "jazz_transactions",
+        transaction_values(
+            stored_tip.node_alias,
+            &stored_tip.tx,
+            stored_tip.fate,
+            stored_tip.global_seq,
+            stored_tip.durability,
+        ),
+    );
+    core.database.commit_batch(batch).unwrap();
+    let updates = core.drain_parked_commit_units().unwrap();
+    assert!(updates.iter().any(|update| matches!(
+        update,
+        SyncMessage::FateUpdate { tx_id, fate: Fate::Accepted, .. } if *tx_id == parked[0]
+    )));
+    assert_eq!(
+        core.branch_record(branch_id).unwrap().state,
+        codec::BranchState::Merged
+    );
+    assert_eq!(core.query_versions_for_tx(parked[0]).unwrap().len(), 1);
+    assert_eq!(
+        core.parking
+            .parked_commit_units
+            .values()
+            .filter(|unit| unit.tx.source_branch == Some(branch_id))
+            .count(),
+        0
+    );
+
+    // Planted positives: remove the parked-unit guard to observe two squashes;
+    // remove drain-time lifecycle settlement to leave the branch falsely Open.
+}
+
+#[test]
+fn reopen_reconciles_accepted_reserved_merge_before_branch_settlement() {
+    let (dir, mut core) = open_history_complete_node_with_schema(node(0x78), schema());
+    let branch_id = branch(0x78);
+    let (branch_tip, stored_tip, pending_tx) =
+        park_merge_back_with_missing_tip(&mut core, branch_id, row(0x78));
+    restore_transaction(&mut core, &stored_tip);
+
+    let reservation = core
+        .branches
+        .pending_merge_backs
+        .get(&branch_id)
+        .cloned()
+        .unwrap();
+    core.parking.parked_commit_units.remove(&pending_tx);
+    core.parking.trusted_branch_merge_backs.remove(&pending_tx);
+    let updates = core
+        .ingest_edge_authority_mergeable_commit_unit(
+            reservation.tx,
+            reservation.versions,
+            pending_tx.time.physical_ms(),
+        )
+        .unwrap();
+    assert!(updates.iter().any(|update| matches!(
+        update,
+        SyncMessage::FateUpdate { tx_id, fate: Fate::Accepted, .. } if *tx_id == pending_tx
+    )));
+    assert_eq!(
+        core.branch_record(branch_id).unwrap().state,
+        codec::BranchState::Open,
+        "fixture must stop in the accepted-before-lifecycle crash window"
+    );
+    assert!(core.branches.pending_merge_backs.contains_key(&branch_id));
+    assert_eq!(core.transaction_record(branch_tip).unwrap().tx_id, branch_tip);
+
+    drop(core);
+    let reopened = reopen_node_at(&dir, node(0x78), schema());
+    assert_eq!(
+        reopened.branch_record(branch_id).unwrap().state,
+        codec::BranchState::Merged
+    );
+    assert!(!reopened.branches.pending_merge_backs.contains_key(&branch_id));
+
+    // Planted positive: skip durable fate reconciliation during recovery; the
+    // branch incorrectly reopens as Open with an accepted reserved squash.
+}
+
+#[test]
+fn translated_reserved_merge_reopens_against_canonical_admitted_payload() {
+    let (dir, mut core) = open_history_complete_node_with_schema(node(0x7d), schema());
+    let branch_id = branch(0x7d);
+    let (_branch_tip, stored_tip, pending_tx) =
+        park_merge_back_with_missing_tip(&mut core, branch_id, row(0x7d));
+    let original_schema = schema();
+    let evolved = catalogue_evolved_schema();
+    let evolved_payload = SchemaVersion::new(evolved.clone());
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(evolved_payload.clone()),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::PublishLens {
+        author: AuthorId::SYSTEM,
+        lens: MigrationLens::new(
+            original_schema.version_id(),
+            evolved_payload.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String(String::new()),
+                }],
+            }],
+        ),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved_payload.id,
+        },
+    })
+    .unwrap();
+    restore_transaction(&mut core, &stored_tip);
+
+    let reserved_a = core
+        .branches
+        .pending_merge_backs
+        .get(&branch_id)
+        .cloned()
+        .unwrap();
+    assert!(reserved_a
+        .versions
+        .iter()
+        .all(|version| version.schema_version() == original_schema.version_id()));
+    core.parking.parked_commit_units.remove(&pending_tx);
+    core.parking
+        .trusted_branch_merge_backs
+        .insert(pending_tx, reserved_a.clone());
+    let updates = core
+        .ingest_edge_authority_mergeable_commit_unit(
+            reserved_a.tx,
+            reserved_a.versions,
+            pending_tx.time.physical_ms(),
+        )
+        .unwrap();
+    assert!(updates.iter().any(|update| matches!(
+        update,
+        SyncMessage::FateUpdate { tx_id, fate: Fate::Accepted, .. } if *tx_id == pending_tx
+    )));
+    let reserved_b = core
+        .branches
+        .pending_merge_backs
+        .get(&branch_id)
+        .unwrap();
+    assert!(reserved_b
+        .versions
+        .iter()
+        .all(|version| version.schema_version() == evolved_payload.id));
+    assert_eq!(
+        core.branch_record(branch_id).unwrap().state,
+        codec::BranchState::Open,
+        "fixture stops after canonical acceptance but before lifecycle settlement"
+    );
+
+    drop(core);
+    let reopened = reopen_node_at(&dir, node(0x7d), original_schema);
+    assert_eq!(
+        reopened.branch_record(branch_id).unwrap().state,
+        codec::BranchState::Merged
+    );
+    assert!(!reopened.branches.pending_merge_backs.contains_key(&branch_id));
+
+    // Planted positive: skip `rewrite_trusted_merge_reservation`; recovery then
+    // compares the admitted B history to stale reserved A and fails conflict.
+}
+
+#[test]
+fn reopen_reconciles_rejected_reserved_merge_before_reservation_clear() {
+    let (dir, mut core) = open_history_complete_node_with_schema(node(0x79), schema());
+    let branch_id = branch(0x79);
+    let (branch_tip, stored_tip, pending_tx) =
+        park_merge_back_with_missing_tip(&mut core, branch_id, row(0x79));
+    restore_transaction(&mut core, &stored_tip);
+    core.apply_fate_update(
+        branch_tip,
+        Fate::Rejected(RejectionReason::CausalityViolation),
+        None,
+        None,
+    )
+    .unwrap();
+
+    let reservation = core
+        .branches
+        .pending_merge_backs
+        .get(&branch_id)
+        .cloned()
+        .unwrap();
+    core.parking.parked_commit_units.remove(&pending_tx);
+    core.parking.trusted_branch_merge_backs.remove(&pending_tx);
+    let updates = core
+        .ingest_edge_authority_mergeable_commit_unit(
+            reservation.tx,
+            reservation.versions,
+            pending_tx.time.physical_ms(),
+        )
+        .unwrap();
+    assert!(updates.iter().any(|update| matches!(
+        update,
+        SyncMessage::FateUpdate { tx_id, fate: Fate::Rejected(_), .. } if *tx_id == pending_tx
+    )));
+    assert!(core.branches.pending_merge_backs.contains_key(&branch_id));
+
+    drop(core);
+    let mut reopened = reopen_node_at(&dir, node(0x79), schema());
+    assert_eq!(
+        reopened.branch_record(branch_id).unwrap().state,
+        codec::BranchState::Open
+    );
+    assert!(!reopened.branches.pending_merge_backs.contains_key(&branch_id));
+    let BranchMergeOutcome::Rejected { tx_id: retry, .. } =
+        reopened.merge_back_branch(branch_id).unwrap()
+    else {
+        panic!("the reopened branch must permit a new terminal attempt");
+    };
+    assert_ne!(retry, pending_tx);
+    assert!(!reopened.branches.pending_merge_backs.contains_key(&branch_id));
+}
+
+#[test]
+fn reopen_rejects_terminal_commit_unit_mismatching_reserved_payload() {
+    let (dir, mut core) = open_history_complete_node_with_schema(node(0x7a), schema());
+    let branch_id = branch(0x7a);
+    let (_branch_tip, stored_tip, pending_tx) =
+        park_merge_back_with_missing_tip(&mut core, branch_id, row(0x7a));
+    restore_transaction(&mut core, &stored_tip);
+    let reservation = core
+        .branches
+        .pending_merge_backs
+        .get(&branch_id)
+        .cloned()
+        .unwrap();
+    core.parking.parked_commit_units.remove(&pending_tx);
+    core.parking.trusted_branch_merge_backs.remove(&pending_tx);
+    let foreign_tx = reservation.tx.clone();
+    let mut foreign_versions = reservation.versions;
+    let original = &foreign_versions[0];
+    foreign_versions[0] = version_record(
+        original.row_uuid(),
+        original.parents(),
+        title_cells("foreign collision"),
+        original.deletion(),
+    );
+    core.ingest_edge_authority_mergeable_commit_unit(
+        foreign_tx,
+        foreign_versions,
+        pending_tx.time.physical_ms(),
+    )
+    .unwrap();
+    drop(core);
+
+    let schema = schema();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    assert!(matches!(
+        NodeState::new_history_complete(node(0x7a), schema, storage),
+        Err(Error::ConflictingCommitUnit(tx_id)) if tx_id == pending_tx
+    ));
+
+    // The deterministic open error occurs before settlement/clear; the
+    // reservation remains durable for diagnosis rather than closing the branch.
+}
+
+#[test]
+fn merge_reservation_rejects_oversized_commit_unit_before_persisting() {
+    let (_dir, mut core) = open_history_complete_node_with_schema(node(0x7b), schema());
+    let branch_id = branch(0x7b);
+    core.create_branch(branch_id).unwrap();
+    let table = core.catalogue.current_write_schema.schema;
+    let table_schema = core.table_in_schema("todos", table).unwrap();
+    let version = VersionRecord::encode(
+        &table_schema,
+        table,
+        row(0x7b),
+        Vec::new(),
+        AuthorId::SYSTEM,
+        TxTime(1),
+        AuthorId::SYSTEM,
+        TxTime(1),
+        &table_schema.columns.iter().map(|_| None).collect::<Vec<_>>(),
+        None,
+    )
+    .unwrap();
+    let tx_id = TxId::new(TxTime(2), node(0x7b));
+    let reservation = PendingBranchMerge {
+        tx: Transaction {
+            tx_id,
+            kind: TxKind::Mergeable,
+            n_total_writes: (crate::protocol_limits::MAX_COMMIT_UNIT_VERSIONS + 1) as u32,
+            made_by: AuthorId::SYSTEM,
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            source_branch: Some(branch_id),
+            merge_strategy: None,
+        },
+        versions: vec![version; crate::protocol_limits::MAX_COMMIT_UNIT_VERSIONS + 1],
+    };
+    assert!(matches!(
+        core.persist_merge_back_reservation(branch_id, &reservation),
+        Err(Error::UnsupportedCommitUnit(
+            "branch merge-back exceeds commit-unit limits"
+        ))
+    ));
+    assert!(!core.branches.pending_merge_backs.contains_key(&branch_id));
+}
+
+#[test]
+fn reopen_rejects_oversized_reservation_before_postcard_decode() {
+    let (dir, mut core) = open_history_complete_node_with_schema(node(0x7c), schema());
+    let branch_id = branch(0x7c);
+    core.create_branch(branch_id).unwrap();
+    core.database
+        .direct_record_store(BRANCH_MERGE_RESERVATIONS_STORE)
+        .unwrap()
+        .set(
+            &[Value::Uuid(branch_id.0)],
+            &[Value::Bytes(vec![0; MAX_COMMIT_UNIT_BYTES + 1])],
+        )
+        .unwrap();
+    drop(core);
+
+    let schema = schema();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    assert!(matches!(
+        NodeState::new_history_complete(node(0x7c), schema, storage),
+        Err(Error::InvalidStoredValue(
+            "branch merge reservation exceeds encoded-size limit"
+        ))
+    ));
+}
+
+fn park_merge_back_with_missing_tip(
+    core: &mut NodeState<RocksDbStorage>,
+    branch_id: BranchId,
+    row_uuid: RowUuid,
+) -> (TxId, StoredTransaction, TxId) {
+    core.create_branch(branch_id).unwrap();
+    let branch_tip = core
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("todos", row_uuid, 100).cells(title_cells("branch value")),
+        )
+        .unwrap();
+    let stored_tip = core.query_transaction(branch_tip).unwrap().unwrap();
+    let mut batch = core.database.open_batch();
+    batch.delete(
+        "jazz_transactions",
+        groove::db::PrimaryKeyValue::Composite(vec![
+            groove::db::PrimaryKeyValue::U64(branch_tip.time.0),
+            groove::db::PrimaryKeyValue::U64(stored_tip.node_alias.0),
+        ]),
+    );
+    core.database.commit_batch(batch).unwrap();
+    let BranchMergeOutcome::Pending { tx_id } = core.merge_back_branch(branch_id).unwrap() else {
+        panic!("missing tip must park merge-back");
+    };
+    (branch_tip, stored_tip, tx_id)
+}
+
+fn restore_transaction(core: &mut NodeState<RocksDbStorage>, stored: &StoredTransaction) {
+    let mut batch = core.database.open_batch();
+    batch.update(
+        "jazz_transactions",
+        transaction_values(
+            stored.node_alias,
+            &stored.tx,
+            stored.fate.clone(),
+            stored.global_seq,
+            stored.durability,
+        ),
+    );
+    core.database.commit_batch(batch).unwrap();
+}
+
+/// Peer-provided `source_branch` provenance cannot impersonate the locally
+/// reserved merge-back identity or mutate local branch lifecycle.
+///
+/// Actors: `mallory` uploads a child transaction carrying `alice`'s branch id;
+/// `alice` then performs her real local merge-back.
+///
+/// ```text
+/// mallory child(source_branch=alice) ──park/drain/accept──► branch stays Open
+/// alice locally reserved squash ─────────────────────────► branch becomes Merged
+/// ```
+#[test]
+fn foreign_source_branch_cannot_block_or_settle_local_branch() {
+    let (_core_dir, mut core) = open_history_complete_node_with_schema(node(0x74), schema());
+    let (_peer_dir, mut peer) = open_history_complete_node_with_schema(node(0x75), schema());
+    let branch_id = branch(0x74);
+    core.create_branch(branch_id).unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row(0x74), 100).cells(title_cells("local branch")),
+    )
+    .unwrap();
+
+    let parent = peer
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0x75), 10).cells(title_cells("peer parent")),
+        )
+        .unwrap();
+    let child = peer
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0x76), 11)
+                .parents(vec![parent])
+                .cells(title_cells("peer child")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit {
+        tx: mut child_tx,
+        versions: child_versions,
+    } = peer.commit_unit_for(child).unwrap()
+    else {
+        panic!("expected child commit unit");
+    };
+    child_tx.source_branch = Some(branch_id);
+    let child_updates = core
+        .ingest_edge_authority_mergeable_commit_unit(child_tx, child_versions, 11)
+        .unwrap();
+    assert!(child_updates.is_empty());
+    assert_eq!(core.parking.parked_commit_units.len(), 1);
+
+    let SyncMessage::CommitUnit {
+        tx: parent_tx,
+        versions: parent_versions,
+    } = peer.commit_unit_for(parent).unwrap()
+    else {
+        panic!("expected parent commit unit");
+    };
+    let updates = core
+        .ingest_edge_authority_mergeable_commit_unit(parent_tx, parent_versions, 12)
+        .unwrap();
+    assert!(updates.iter().any(|update| matches!(
+        update,
+        SyncMessage::FateUpdate { tx_id, fate: Fate::Accepted, .. } if *tx_id == child
+    )));
+    assert_eq!(
+        core.branch_record(branch_id).unwrap().state,
+        codec::BranchState::Open
+    );
+    assert!(!core.branches.pending_merge_backs.contains_key(&branch_id));
+
+    assert!(matches!(
+        core.merge_back_branch(branch_id).unwrap(),
+        BranchMergeOutcome::Accepted { .. }
+    ));
+
+    // Planted positive: settle by `source_branch` without requiring the exact
+    // durable reservation; the foreign child then closes Alice's branch.
 }
 
 #[derive(Clone, Copy)]
@@ -895,7 +1608,12 @@ fn run_merge_back_oracle_seed(seed: u64, include_restore: bool) -> MergeBackOrac
         }
     }
 
-    let merge_back_tx = merged.merge_back_branch(branch_id).unwrap();
+    let BranchMergeOutcome::Accepted {
+        tx_id: merge_back_tx,
+    } = merged.merge_back_branch(branch_id).unwrap()
+    else {
+        panic!("merge-back must be accepted");
+    };
     let direct_txs = apply_direct_net_effects(&mut direct, seed, include_restore, branch_parents);
     MergeBackOracleRun {
         merged,

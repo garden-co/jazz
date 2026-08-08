@@ -36,12 +36,15 @@ use crate::protocol::{
     SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier, VersionRecord, ViewFactEntry,
     expand_version_carriers,
 };
-use crate::protocol_limits::MAX_CONTENT_EXTENT_BYTES;
+use crate::protocol_limits::{
+    MAX_COMMIT_UNIT_BYTES, MAX_CONTENT_EXTENT_BYTES, commit_unit_limit_violation,
+};
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{
-    CLEAN_CLOSE_MARKERS_STORE, ColumnSchema, JazzSchema, KNOWN_STATE_FACTS_STORE, LargeValueKind,
-    MergeStrategy, SETTLED_PROGRAM_FACTS_STORE, SETTLED_RESULT_MEMBERS_STORE,
-    STORAGE_CONSISTENCY_MARKERS_STORE, TableSchema, registered_column_transform,
+    BRANCH_MERGE_RESERVATIONS_STORE, CLEAN_CLOSE_MARKERS_STORE, ColumnSchema, JazzSchema,
+    KNOWN_STATE_FACTS_STORE, LargeValueKind, MergeStrategy, SETTLED_PROGRAM_FACTS_STORE,
+    SETTLED_RESULT_MEMBERS_STORE, STORAGE_CONSISTENCY_MARKERS_STORE, TableSchema,
+    registered_column_transform,
 };
 use crate::text_merge::{Run as PlainTextRun, TextOp as PlainTextOp};
 use crate::time::{GlobalSeq, TxTime};
@@ -83,7 +86,7 @@ pub(crate) use views::MaintainedViewBundleInputs;
 
 type ResultRowMembershipKey = crate::tools::OutputOccurrenceId;
 
-use branches::BranchRecord;
+pub use branches::{BranchMergeOutcome, BranchRecord};
 use codec::*;
 use content_store::ContentStore;
 use open_tx::*;
@@ -272,6 +275,14 @@ struct Branches {
     branches: BTreeMap<BranchId, BranchRecord>,
     /// Storage partitions materialized for table/schema-version/branch triples.
     branch_partitions: BTreeSet<(String, SchemaVersionId, BranchId)>,
+    /// Locally minted merge-back identity reserved per open branch.
+    pending_merge_backs: BTreeMap<BranchId, PendingBranchMerge>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+struct PendingBranchMerge {
+    tx: Transaction,
+    versions: Vec<VersionRecord>,
 }
 
 /// Local transaction clock and settled-global application progress.
@@ -296,6 +307,8 @@ struct Parking {
     parked_binding_deltas: BTreeMap<ShapeId, Vec<Subscribe>>,
     /// Commit units waiting for parent transactions or schema context.
     parked_commit_units: BTreeMap<TxId, ParkedCommitUnit>,
+    /// Parked units created by the local reserved branch merge-back path.
+    trusted_branch_merge_backs: BTreeMap<TxId, PendingBranchMerge>,
     /// Catalogue commit units waiting to be applied in dependency order.
     parked_catalogue_commit_units: BTreeSet<TxId>,
 }
@@ -590,6 +603,7 @@ where
             branches: Branches {
                 branches: BTreeMap::new(),
                 branch_partitions,
+                pending_merge_backs: BTreeMap::new(),
             },
             clock: Clock {
                 tx_time: TxTime::default(),

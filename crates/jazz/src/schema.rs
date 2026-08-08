@@ -36,6 +36,8 @@ pub const KNOWN_STATE_FACTS_STORE: &str = "jazz_known_state_facts";
 pub const SETTLED_RESULT_MEMBERS_STORE: &str = "jazz_settled_result_members";
 /// Direct groove record store used for persisted settled program facts.
 pub const SETTLED_PROGRAM_FACTS_STORE: &str = "jazz_settled_program_facts";
+/// Direct groove record store for node-local branch merge-back reservations.
+pub const BRANCH_MERGE_RESERVATIONS_STORE: &str = "jazz_branch_merge_reservations";
 /// Direct groove record store used to distinguish clean shutdown from crash
 /// recovery windows for bounded startup repair.
 pub const CLEAN_CLOSE_MARKERS_STORE: &str = "jazz_clean_close_markers";
@@ -383,6 +385,11 @@ impl JazzSchema {
                     ("fact", ValueType::Bytes),
                 ]),
                 RecordDescriptor::new([("present", ValueType::U64)]),
+            ))
+            .with_direct_record_store(DirectRecordStoreSchema::new(
+                BRANCH_MERGE_RESERVATIONS_STORE,
+                RecordDescriptor::new([("branch_id", ValueType::Uuid)]),
+                RecordDescriptor::new([("commit_unit", ValueType::Bytes)]),
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 CLEAN_CLOSE_MARKERS_STORE,

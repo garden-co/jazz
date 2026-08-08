@@ -83,7 +83,6 @@ where
         for raw in branch_records {
             self.recover_branch_record(BorrowedRecord::new(&raw, &branch_descriptor))?;
         }
-
         let alias_to_node = self
             .node_aliases
             .iter()
@@ -219,8 +218,81 @@ where
                 .rejected_transactions
                 .insert(tx_id, RejectedTransaction::new(tx_id, record, versions));
         }
+        self.recover_branch_merge_reservations()?;
         if !cleanly_closed {
             self.cleanup_settled_ahead_current_leftovers(storage_consistent_through)?;
+        }
+        Ok(())
+    }
+
+    fn recover_branch_merge_reservations(&mut self) -> Result<(), Error> {
+        let reservations = self
+            .database
+            .direct_record_store(BRANCH_MERGE_RESERVATIONS_STORE)?
+            .prefix_entries(&[])?
+            .into_iter()
+            .map(|entry| {
+                let branch_id = match entry.key.as_slice() {
+                    [Value::Uuid(id)] => BranchId(*id),
+                    _ => {
+                        return Err(Error::InvalidStoredValue(
+                            "branch merge reservation key must be branch uuid",
+                        ));
+                    }
+                };
+                let encoded = match entry.value.get_idx(0)? {
+                    Value::Bytes(encoded) => encoded,
+                    _ => {
+                        return Err(Error::InvalidStoredValue(
+                            "branch merge reservation must contain commit-unit bytes",
+                        ));
+                    }
+                };
+                if encoded.len() > MAX_COMMIT_UNIT_BYTES {
+                    return Err(Error::InvalidStoredValue(
+                        "branch merge reservation exceeds encoded-size limit",
+                    ));
+                }
+                let reservation =
+                    postcard::from_bytes::<PendingBranchMerge>(&encoded).map_err(|_| {
+                        Error::InvalidStoredValue("branch merge reservation must decode")
+                    })?;
+                if commit_unit_limit_violation(&reservation.tx, &reservation.versions, None)
+                    .is_some()
+                {
+                    return Err(Error::InvalidStoredValue(
+                        "branch merge reservation exceeds commit-unit limits",
+                    ));
+                }
+                Ok((branch_id, reservation))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        for (branch_id, reservation) in reservations {
+            if !self
+                .branches
+                .branches
+                .get(&branch_id)
+                .is_some_and(|branch| branch.state == codec::BranchState::Open)
+            {
+                self.database
+                    .direct_record_store(BRANCH_MERGE_RESERVATIONS_STORE)?
+                    .delete(&[Value::Uuid(branch_id.0)])?;
+                continue;
+            }
+            let tx_id = reservation.tx.tx_id;
+            self.merge_tx_time(tx_id.time);
+            self.branches
+                .pending_merge_backs
+                .insert(branch_id, reservation.clone());
+            let Some(fate) = self.query_transaction(tx_id)?.map(|stored| stored.fate) else {
+                continue;
+            };
+            if matches!(fate, Fate::Accepted | Fate::Rejected(_)) {
+                if !self.durable_reserved_commit_unit_matches(&reservation, &fate)? {
+                    return Err(Error::ConflictingCommitUnit(tx_id));
+                }
+                self.settle_reserved_branch_merge(branch_id, tx_id, &fate)?;
+            }
         }
         Ok(())
     }

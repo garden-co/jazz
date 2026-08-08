@@ -529,6 +529,8 @@ where
         ingest_context: Option<CommitUnitIngestContext>,
         encoded_len: Option<usize>,
     ) -> Result<Vec<SyncMessage>, Error> {
+        let versions = canonical_versions(versions);
+        self.validate_trusted_merge_input(&tx, &versions)?;
         if let Some(reason) = commit_unit_limit_violation(&tx, &versions, encoded_len) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
             self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
@@ -692,6 +694,7 @@ where
         now_ms: u64,
     ) -> Result<Vec<SyncMessage>, Error> {
         let versions = canonical_versions(versions);
+        self.validate_trusted_merge_input(&tx, &versions)?;
         let mut memo = IngestMemo::default();
         if tx.kind != TxKind::Mergeable {
             return Err(Error::UnsupportedCommitUnit(
@@ -880,6 +883,7 @@ where
             return Err(Error::UnsupportedCommitUnit("unsupported commit unit kind"));
         }
         let versions = canonical_versions(versions);
+        self.validate_trusted_merge_input(&tx, &versions)?;
         if let Some(existing) = self.query_transaction(tx.tx_id)? {
             let mut existing_versions = self
                 .query_versions_for_tx(tx.tx_id)?
@@ -938,6 +942,7 @@ where
         ingest_context: Option<CommitUnitIngestContext>,
     ) -> Result<Vec<SyncMessage>, Error> {
         let versions = canonical_versions(versions);
+        self.validate_trusted_merge_input(&tx, &versions)?;
         let mut memo = IngestMemo::default();
         if !commit_unit_write_count_matches(&tx, versions.len()) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(
@@ -1131,6 +1136,7 @@ where
         ingest_context: Option<CommitUnitIngestContext>,
     ) -> Result<Vec<SyncMessage>, Error> {
         let versions = canonical_versions(versions);
+        self.validate_trusted_merge_input(&tx, &versions)?;
         let mut memo = IngestMemo::default();
         if tx.kind != TxKind::Mergeable {
             return Err(Error::UnsupportedCommitUnit(
@@ -1306,6 +1312,7 @@ where
         );
         self.merge_tx_time(tx.tx_id.time);
         let versions = canonical_versions(versions);
+        self.validate_trusted_merge_input(&tx, &versions)?;
         if let Some(existing) = self.query_transaction(tx.tx_id)? {
             let mut existing_versions = self
                 .query_versions_for_tx(tx.tx_id)?
@@ -1359,6 +1366,7 @@ where
         );
         self.merge_tx_time(tx.tx_id.time);
         let versions = canonical_versions(versions);
+        self.validate_trusted_merge_input(&tx, &versions)?;
         if self.query_transaction(tx.tx_id)?.is_some() {
             return self.ingest_known_transaction(tx, versions, fate, global_seq, durability);
         }
@@ -2263,10 +2271,14 @@ where
                 let Some(unit) = self.parking.parked_commit_units.remove(&tx_id) else {
                     continue;
                 };
+                let source_branch = unit.tx.source_branch;
+                let trusted_branch_merge =
+                    self.parking.trusted_branch_merge_backs.contains_key(&tx_id);
                 self.sync_metrics.parked_orphans_resolved += 1;
                 if self.parking.parked_catalogue_commit_units.remove(&tx_id) {
                     self.sync_metrics.parked_catalogue_orphans_resolved += 1;
                 }
+                let first_update = updates.len();
                 if unit.edge_accepted_mergeable {
                     updates.extend(self.finalize_edge_accepted_mergeable_commit_unit_once(
                         unit.tx,
@@ -2287,6 +2299,23 @@ where
                         unit.now_ms,
                         unit.ingest_context,
                     )?);
+                }
+                self.parking.trusted_branch_merge_backs.remove(&tx_id);
+                if trusted_branch_merge
+                    && let Some(branch_id) = source_branch
+                    && let Some(fate) =
+                        updates[first_update..]
+                            .iter()
+                            .find_map(|update| match update {
+                                SyncMessage::FateUpdate {
+                                    tx_id: updated_tx_id,
+                                    fate,
+                                    ..
+                                } if *updated_tx_id == tx_id => Some(fate),
+                                _ => None,
+                            })
+                {
+                    self.settle_reserved_branch_merge(branch_id, tx_id, fate)?;
                 }
             }
         }
@@ -4380,6 +4409,8 @@ where
         durability: DurabilityTier,
         update_current_indexes: bool,
     ) -> Result<(), Error> {
+        let versions = canonical_versions(versions);
+        self.validate_trusted_merge_input(&tx, &versions)?;
         self.merge_tx_time(tx.tx_id.time);
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node)?;
         let tx_already_known = self.query_transaction(tx.tx_id)?.is_some();
@@ -4575,6 +4606,11 @@ where
         } else if matches!(fate, Fate::Pending) {
             self.record_child_edges(tx.tx_id, parent_edges);
         }
+        let canonical_versions = stored_versions
+            .iter()
+            .map(|stored| self.version_record_from_row(stored))
+            .collect::<Result<Vec<_>, Error>>()?;
+        self.rewrite_trusted_merge_reservation(&tx, canonical_versions)?;
         self.cache_tx_versions(tx.tx_id, stored_versions);
         Ok(())
     }

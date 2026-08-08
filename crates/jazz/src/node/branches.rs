@@ -24,6 +24,28 @@ pub struct BranchRecord {
     pub state: codec::BranchState,
 }
 
+/// Authority settlement state of one branch merge-back attempt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BranchMergeOutcome {
+    /// The squash was accepted and the branch is now merged.
+    Accepted {
+        /// Accepted public squash transaction.
+        tx_id: TxId,
+    },
+    /// The squash is durably reserved and awaits missing prerequisites.
+    Pending {
+        /// Reserved squash transaction awaiting admission prerequisites.
+        tx_id: TxId,
+    },
+    /// Authority rejected the squash; the branch remains open for a new attempt.
+    Rejected {
+        /// Rejected public squash transaction.
+        tx_id: TxId,
+        /// Exact authority rejection.
+        reason: RejectionReason,
+    },
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -78,7 +100,9 @@ where
             .get(&branch_id)
             .cloned()
             .ok_or(Error::BranchNotFound(branch_id))?;
-        if record.state != codec::BranchState::Open {
+        if record.state != codec::BranchState::Open
+            || self.branches.pending_merge_backs.contains_key(&branch_id)
+        {
             return Err(Error::BranchClosed(branch_id));
         }
         record.state = codec::BranchState::Discarded;
@@ -88,7 +112,7 @@ where
     }
 
     /// Merge an open branch overlay back into its parent as one mergeable squash.
-    pub fn merge_back_branch(&mut self, branch_id: BranchId) -> Result<TxId, Error>
+    pub fn merge_back_branch(&mut self, branch_id: BranchId) -> Result<BranchMergeOutcome, Error>
     where
         S: ReopenableStorage,
     {
@@ -100,6 +124,10 @@ where
             .ok_or(Error::BranchNotFound(branch_id))?;
         if branch.state != codec::BranchState::Open {
             return Err(Error::BranchClosed(branch_id));
+        }
+
+        if let Some(reservation) = self.branches.pending_merge_backs.get(&branch_id).cloned() {
+            return self.ingest_reserved_merge_back(branch_id, reservation);
         }
 
         let mut versions = Vec::new();
@@ -152,12 +180,7 @@ where
                 "merge-back requires at least one branch overlay write",
             ));
         }
-        let tx_id = self.commit_merge_back_squash(branch_id, versions)?;
-        let mut record = branch;
-        record.state = codec::BranchState::Merged;
-        self.persist_branch_record(&record)?;
-        self.branches.branches.insert(branch_id, record);
-        Ok(tx_id)
+        self.commit_merge_back_squash(branch_id, versions)
     }
 
     /// Branch-scoped exclusives are intentionally not implemented in v1.
@@ -638,7 +661,12 @@ where
 
     fn ensure_branch_open(&self, branch_id: BranchId) -> Result<(), Error> {
         match self.branches.branches.get(&branch_id) {
-            Some(record) if record.state == codec::BranchState::Open => Ok(()),
+            Some(record)
+                if record.state == codec::BranchState::Open
+                    && !self.branches.pending_merge_backs.contains_key(&branch_id) =>
+            {
+                Ok(())
+            }
             Some(_) => Err(Error::BranchClosed(branch_id)),
             None => Err(Error::BranchNotFound(branch_id)),
         }
@@ -648,10 +676,18 @@ where
         &mut self,
         branch_id: BranchId,
         versions: Vec<VersionRecord>,
-    ) -> Result<TxId, Error>
+    ) -> Result<BranchMergeOutcome, Error>
     where
         S: ReopenableStorage,
     {
+        // The overlay tip is private to the branch, so it may not have passed
+        // through the ordinary public ingest path that advances this node's
+        // HLC. The squash nevertheless names every derived frontier member as
+        // a causal parent, so observe the complete frontier before minting a
+        // child transaction (INV-TX-6).
+        for parent in versions.iter().flat_map(|version| version.parents()) {
+            self.merge_tx_time(parent.time);
+        }
         let made_at = self.mint_tx_time(0);
         let tx_id = TxId::new(made_at, self.node_uuid);
         let tx = Transaction {
@@ -670,8 +706,197 @@ where
             source_branch: Some(branch_id),
             merge_strategy: None,
         };
-        self.ingest_edge_authority_mergeable_commit_unit(tx, versions, made_at.physical_ms())?;
-        Ok(tx_id)
+        let reservation = PendingBranchMerge { tx, versions };
+        self.persist_merge_back_reservation(branch_id, &reservation)?;
+        self.ingest_reserved_merge_back(branch_id, reservation)
+    }
+
+    fn ingest_reserved_merge_back(
+        &mut self,
+        branch_id: BranchId,
+        reservation: PendingBranchMerge,
+    ) -> Result<BranchMergeOutcome, Error>
+    where
+        S: ReopenableStorage,
+    {
+        let tx_id = reservation.tx.tx_id;
+        self.merge_tx_time(tx_id.time);
+        let mut trusted = reservation.clone();
+        trusted.versions.sort();
+        self.parking
+            .trusted_branch_merge_backs
+            .insert(tx_id, trusted);
+        let updates = self.ingest_edge_authority_mergeable_commit_unit(
+            reservation.tx,
+            reservation.versions,
+            tx_id.time.physical_ms(),
+        )?;
+        let fate = updates.into_iter().find_map(|update| match update {
+            SyncMessage::FateUpdate {
+                tx_id: updated_tx_id,
+                fate,
+                ..
+            } if updated_tx_id == tx_id => Some(fate),
+            _ => None,
+        });
+        match fate {
+            Some(Fate::Accepted) => {
+                self.settle_reserved_branch_merge(branch_id, tx_id, &Fate::Accepted)?;
+                Ok(BranchMergeOutcome::Accepted { tx_id })
+            }
+            Some(Fate::Rejected(reason)) => {
+                self.settle_reserved_branch_merge(
+                    branch_id,
+                    tx_id,
+                    &Fate::Rejected(reason.clone()),
+                )?;
+                Ok(BranchMergeOutcome::Rejected { tx_id, reason })
+            }
+            Some(Fate::Pending) | None => Ok(BranchMergeOutcome::Pending { tx_id }),
+        }
+    }
+
+    pub(super) fn settle_reserved_branch_merge(
+        &mut self,
+        branch_id: BranchId,
+        tx_id: TxId,
+        fate: &Fate,
+    ) -> Result<(), Error> {
+        if self
+            .branches
+            .pending_merge_backs
+            .get(&branch_id)
+            .map(|reservation| reservation.tx.tx_id)
+            != Some(tx_id)
+        {
+            return Ok(());
+        }
+        if !matches!(fate, Fate::Accepted | Fate::Rejected(_)) {
+            return Ok(());
+        }
+        let Some(mut record) = self.branches.branches.get(&branch_id).cloned() else {
+            return Ok(());
+        };
+        if matches!(fate, Fate::Accepted) && record.state == codec::BranchState::Open {
+            record.state = codec::BranchState::Merged;
+            self.persist_branch_record(&record)?;
+            self.branches.branches.insert(branch_id, record);
+        }
+        self.parking.trusted_branch_merge_backs.remove(&tx_id);
+        self.clear_merge_back_reservation(branch_id)?;
+        Ok(())
+    }
+
+    pub(super) fn durable_reserved_commit_unit_matches(
+        &mut self,
+        reservation: &PendingBranchMerge,
+        fate: &Fate,
+    ) -> Result<bool, Error> {
+        let tx_id = reservation.tx.tx_id;
+        let Some(stored) = self.query_transaction(tx_id)? else {
+            return Ok(false);
+        };
+        if stored.tx != reservation.tx {
+            return Ok(false);
+        }
+        if matches!(fate, Fate::Rejected(_)) {
+            // Rejection contributes no normal versions and may happen before
+            // versions enter history. Rejected-version retry storage is
+            // intentionally lossy, so the exact durable Transaction envelope
+            // is the available proof; unlike Accepted, this path never closes
+            // the branch or makes the reserved row effects visible.
+            return Ok(true);
+        }
+        let mut stored_versions = self
+            .query_versions_for_tx(tx_id)?
+            .into_iter()
+            .map(|stored| self.version_record_from_row(&stored))
+            .collect::<Result<Vec<_>, Error>>()?;
+        let mut reserved_versions = reservation.versions.clone();
+        stored_versions.sort();
+        reserved_versions.sort();
+        Ok(stored_versions == reserved_versions)
+    }
+
+    pub(super) fn rewrite_trusted_merge_reservation(
+        &mut self,
+        tx: &Transaction,
+        versions: Vec<VersionRecord>,
+    ) -> Result<(), Error> {
+        let Some(branch_id) = tx.source_branch else {
+            return Ok(());
+        };
+        if !self
+            .parking
+            .trusted_branch_merge_backs
+            .contains_key(&tx.tx_id)
+            || self
+                .branches
+                .pending_merge_backs
+                .get(&branch_id)
+                .map(|reservation| reservation.tx.tx_id)
+                != Some(tx.tx_id)
+        {
+            return Ok(());
+        }
+        let mut canonical = PendingBranchMerge {
+            tx: tx.clone(),
+            versions,
+        };
+        canonical.versions.sort();
+        self.persist_merge_back_reservation(branch_id, &canonical)?;
+        self.parking
+            .trusted_branch_merge_backs
+            .insert(tx.tx_id, canonical);
+        Ok(())
+    }
+
+    pub(super) fn validate_trusted_merge_input(
+        &self,
+        tx: &Transaction,
+        versions: &[VersionRecord],
+    ) -> Result<(), Error> {
+        let Some(trusted) = self.parking.trusted_branch_merge_backs.get(&tx.tx_id) else {
+            return Ok(());
+        };
+        if trusted.tx != *tx || trusted.versions != versions {
+            return Err(Error::ConflictingCommitUnit(tx.tx_id));
+        }
+        Ok(())
+    }
+
+    pub(super) fn persist_merge_back_reservation(
+        &mut self,
+        branch_id: BranchId,
+        reservation: &PendingBranchMerge,
+    ) -> Result<(), Error> {
+        if commit_unit_limit_violation(&reservation.tx, &reservation.versions, None).is_some() {
+            return Err(Error::UnsupportedCommitUnit(
+                "branch merge-back exceeds commit-unit limits",
+            ));
+        }
+        let encoded = postcard::to_allocvec(reservation)
+            .map_err(|_| Error::InvalidStoredValue("branch merge reservation must encode"))?;
+        if encoded.len() > MAX_COMMIT_UNIT_BYTES {
+            return Err(Error::UnsupportedCommitUnit(
+                "branch merge-back reservation exceeds encoded-size limit",
+            ));
+        }
+        self.database
+            .direct_record_store(BRANCH_MERGE_RESERVATIONS_STORE)?
+            .set(&[Value::Uuid(branch_id.0)], &[Value::Bytes(encoded)])?;
+        self.branches
+            .pending_merge_backs
+            .insert(branch_id, reservation.clone());
+        Ok(())
+    }
+
+    fn clear_merge_back_reservation(&mut self, branch_id: BranchId) -> Result<(), Error> {
+        self.database
+            .direct_record_store(BRANCH_MERGE_RESERVATIONS_STORE)?
+            .delete(&[Value::Uuid(branch_id.0)])?;
+        self.branches.pending_merge_backs.remove(&branch_id);
+        Ok(())
     }
 
     fn persist_branch_record(&mut self, record: &BranchRecord) -> Result<(), Error> {

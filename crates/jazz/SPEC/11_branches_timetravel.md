@@ -181,8 +181,30 @@ merge-back and discard have graduated:
   partition table names.
 - ✅ **Merge-back / discard** (`INV-BRANCH-17`, `INV-BRANCH-18`). Merge-back emits
   one atomic mergeable squash of the branch's net effects into the parent,
-  records typed `Transaction.source_branch` provenance, then flips state to
-  `Merged` with overlay history retained. Content and deletion-register overlay
+  records typed `Transaction.source_branch` provenance, and returns a typed
+  `Accepted`, `Pending`, or `Rejected` outcome. A pending squash has one durable,
+  node-local reservation of its exact `(Transaction, VersionRecord[])` commit
+  unit which is reused across retries and reopen; branch writes and discard are
+  blocked until it settles. Recovery reconciles a durably accepted or rejected
+  reserved transaction before allowing retry. Accepted recovery requires the
+  exact durable transaction and full normal-version payload to equal the frozen
+  reservation before closing the branch. Rejected recovery requires the exact
+  transaction envelope only: rejection contributes no normal versions, may
+  precede history insertion, and leaves the branch open after reservation clear.
+  Only that exact locally reserved
+  transaction—not peer-supplied `source_branch` provenance—may
+  transition the branch to `Merged`, and only after `Accepted`; `Rejected` clears
+  the reservation and leaves the branch open. Overlay history is retained.
+  When authority admission translates the reserved versions through a newer
+  current schema/lens path, it durably rewrites the trusted reservation to that
+  exact canonical admitted payload before transaction/history persistence. The
+  TxId and branch association do not change; foreign `source_branch` provenance
+  cannot trigger this rewrite. While a locally reserved unit is parked or being
+  retried, trust is bound to its exact pre-translation transaction and sorted
+  version payload, not merely its TxId; a same-TxId mismatch conflicts before
+  translation or staging. A successful canonical rewrite deliberately advances
+  that exact trusted binding to the translated payload.
+  Content and deletion-register overlay
   winners are emitted independently, so a restored deletion-register winner can
   be squashed alongside the row's content winner. Discard is a metadata state
   flip to `Discarded`; both paths make the branch read-only. The correctness rule
