@@ -6213,15 +6213,22 @@ fn session_branch_creation_is_attributed_and_idempotent() {
     assert_eq!(record.created_by, identity);
 
     // A dropped acknowledgement is safe to retry: the immutable complete
-    // request replays to the identical durable record.
+    // request replays to the identical durable record even after the server's
+    // settled watermark has advanced.
+    server
+        .insert("todos", cells("advance watermark", false, identity))
+        .unwrap();
     client_transport
         .send(SyncMessage::CreateBranch { branch_id: branch })
         .unwrap();
     subscriber.borrow_mut().tick().unwrap();
     assert!(
         matches!(client_transport.try_recv(), Some(SyncMessage::BranchMetadata(metadata))
-        if metadata.branch_id == branch && metadata.created_by == identity)
+        if metadata.branch_id == branch
+            && metadata.created_by == identity
+            && metadata.base == record.base)
     );
+    assert_eq!(server.node().borrow().branch_record(branch), Some(&record));
 }
 
 #[test]

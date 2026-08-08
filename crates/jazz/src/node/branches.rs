@@ -60,6 +60,16 @@ where
         branch_id: BranchId,
         created_by: AuthorId,
     ) -> Result<BranchRecord, Error> {
+        if let Some(existing) = self.branches.branches.get(&branch_id) {
+            if existing.created_by == created_by
+                && existing.parent.is_none()
+                && existing.base.is_some()
+                && existing.state == codec::BranchState::Open
+            {
+                return Ok(existing.clone());
+            }
+            return Err(Error::InvalidStoredValue("conflicting branch creation"));
+        }
         let record = BranchRecord {
             branch_id,
             created_by,
@@ -75,12 +85,6 @@ where
             ),
             state: codec::BranchState::Open,
         };
-        if let Some(existing) = self.branches.branches.get(&branch_id) {
-            if existing == &record {
-                return Ok(existing.clone());
-            }
-            return Err(Error::InvalidStoredValue("conflicting branch creation"));
-        }
         self.persist_branch_record(&record)?;
         self.branches.branches.insert(branch_id, record.clone());
         Ok(record)
