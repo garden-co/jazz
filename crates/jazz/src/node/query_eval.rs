@@ -8063,20 +8063,37 @@ where
         kind: LargeValueKind,
         cache: &mut LocalMaintainedMaterializationCache,
     ) -> Result<Vec<u8>, Error> {
-        let len =
-            self.large_value_column_len_with_materialization_cache(table, version, column, cache)?;
+        let canonical = self.canonical_maintained_view_witness(version)?;
+        let version = canonical.as_ref().unwrap_or(version);
+        let authored_schema = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "large-value schema alias is unknown",
+            ))?;
+        let (authored_table, authored_column) =
+            self.authored_large_value_identity(authored_schema, table, column)?;
+        let authored_table_schema = self
+            .table_in_schema(&authored_table, authored_schema)?
+            .clone();
+        let len = self.large_value_column_len_with_materialization_cache(
+            &authored_table_schema,
+            version,
+            &authored_column,
+            cache,
+        )?;
         let refs = self.large_value_extent_refs_for_version_with_materialization_cache(
-            table, version, column, kind, cache,
+            &authored_table_schema,
+            version,
+            &authored_column,
+            kind,
+            cache,
         )?;
         let tx_id = self.version_tx_id(version)?;
         encode_large_value_handle(
-            self.schema_version_for_alias(version.schema_version_alias())
-                .ok_or(Error::InvalidStoredValue(
-                    "large-value schema alias is unknown",
-                ))?,
-            table,
+            authored_schema,
+            &authored_table,
             version.row_uuid(),
-            column,
+            &authored_column,
             tx_id,
             kind,
             len,

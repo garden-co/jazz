@@ -108,7 +108,7 @@ pub const SKEW_TOLERANCE_MS: u64 = 30_000;
 pub(crate) const LARGE_VALUE_CHECKPOINT_OP_INTERVAL: usize = 1024;
 const LARGE_VALUE_MATERIALIZATION_CACHE_MAX_ENTRIES: usize = 128;
 const TX_VERSION_TABLE_CACHE_MAX_ENTRIES: usize = 4096;
-type LargeValueCacheKey = (String, RowUuid, String, TxId);
+type LargeValueCacheKey = (SchemaVersionId, String, RowUuid, String, TxId);
 
 static NEXT_GROOVE_RUNTIME_TOKEN: AtomicU64 = AtomicU64::new(1);
 
@@ -2019,7 +2019,20 @@ where
         self.large_value_metrics.materializations =
             self.large_value_metrics.materializations.saturating_add(1);
         let winner_tx_id = self.version_tx_id(winner)?;
-        let cache_key = large_value_cache_key(table, winner.row_uuid(), column, winner_tx_id);
+        let authored_schema = self
+            .schema_version_for_alias(winner.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "large-value schema alias is unknown",
+            ))?;
+        let (authored_table, authored_column) =
+            self.authored_large_value_identity(authored_schema, table, column)?;
+        let cache_key = large_value_cache_key(
+            authored_schema,
+            &authored_table,
+            winner.row_uuid(),
+            &authored_column,
+            winner_tx_id,
+        );
         if let Some(value) = self.large_value_materialization_cache.get(&cache_key) {
             self.large_value_metrics.last_replayed_ops = 0;
             self.large_value_metrics.last_replayed_versions = 0;
@@ -2177,8 +2190,15 @@ where
         column: &str,
         version: TxId,
     ) -> Result<Option<Vec<u8>>, Error> {
-        self.content_store()
-            .checkpoint(schema, &table.name, row_uuid, column, version)
+        let (authored_table, authored_column) =
+            self.authored_large_value_identity(schema, table, column)?;
+        self.content_store().checkpoint(
+            schema,
+            &authored_table,
+            row_uuid,
+            &authored_column,
+            version,
+        )
     }
 
     fn put_large_value_checkpoint(
@@ -2189,14 +2209,18 @@ where
         value: &[u8],
     ) -> Result<(), Error> {
         let tx_id = self.version_tx_id(version)?;
+        let authored_schema = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "large-value schema alias is unknown",
+            ))?;
+        let (authored_table, authored_column) =
+            self.authored_large_value_identity(authored_schema, table, column)?;
         self.content_store().put_checkpoint(
-            self.schema_version_for_alias(version.schema_version_alias())
-                .ok_or(Error::InvalidStoredValue(
-                    "large-value schema alias is unknown",
-                ))?,
-            &table.name,
+            authored_schema,
+            &authored_table,
             version.row_uuid(),
-            column,
+            &authored_column,
             tx_id,
             value,
         )
@@ -2681,22 +2705,97 @@ where
         column: &str,
         kind: LargeValueKind,
     ) -> Result<Vec<u8>, Error> {
-        let len = self.large_value_column_len(table, version, column)?;
-        let refs = self.large_value_extent_refs_for_version(table, version, column, kind)?;
+        let canonical = self.canonical_maintained_view_witness(version)?;
+        let version = canonical.as_ref().unwrap_or(version);
+        let authored_schema = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "large-value schema alias is unknown",
+            ))?;
+        let (authored_table, authored_column) =
+            self.authored_large_value_identity(authored_schema, table, column)?;
+        let authored_table_schema = self
+            .table_in_schema(&authored_table, authored_schema)?
+            .clone();
+        let len = self.large_value_column_len(&authored_table_schema, version, &authored_column)?;
+        let refs = self.large_value_extent_refs_for_version(
+            &authored_table_schema,
+            version,
+            &authored_column,
+            kind,
+        )?;
         let tx_id = self.version_tx_id(version)?;
         encode_large_value_handle(
-            self.schema_version_for_alias(version.schema_version_alias())
-                .ok_or(Error::InvalidStoredValue(
-                    "large-value schema alias is unknown",
-                ))?,
-            table,
+            authored_schema,
+            &authored_table,
             version.row_uuid(),
-            column,
+            &authored_column,
             tx_id,
             kind,
             len,
             refs,
         )
+    }
+
+    /// Resolve projected view names back to the immutable logical names used by
+    /// the schema under which `version` was authored. Physical IDs are only a
+    /// local lookup aid; they never cross the handle/checkpoint boundary.
+    fn authored_large_value_identity(
+        &self,
+        authored_schema: SchemaVersionId,
+        view_table: &TableSchema,
+        view_column: &str,
+    ) -> Result<(String, String), Error> {
+        let authored_mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&authored_schema)
+            .ok_or(Error::InvalidStoredValue(
+                "large-value authored schema mapping is missing",
+            ))?;
+        let mut resolved = BTreeSet::new();
+        for (view_schema, mapping) in &self.catalogue.physical_mappings {
+            let Some(view_mapping) = mapping.tables.get(&view_table.name) else {
+                continue;
+            };
+            let Some(column_id) = view_mapping.columns.get(view_column) else {
+                continue;
+            };
+            let view_descriptor_matches = self
+                .catalogue
+                .catalogue_schemas
+                .get(view_schema)
+                .and_then(|schema| {
+                    schema
+                        .schema
+                        .tables
+                        .iter()
+                        .find(|table| table.name == view_table.name)
+                })
+                == Some(view_table);
+            if !view_descriptor_matches {
+                continue;
+            }
+            for (authored_table, authored_table_mapping) in &authored_mapping.tables {
+                if authored_table_mapping.table_id != view_mapping.table_id {
+                    continue;
+                }
+                for (authored_column, authored_column_id) in &authored_table_mapping.columns {
+                    if authored_column_id == column_id {
+                        resolved.insert((authored_table.clone(), authored_column.clone()));
+                    }
+                }
+            }
+        }
+        match resolved.len() {
+            1 => Ok(resolved.into_iter().next().expect("one identity")),
+            0 => Err(Error::InvalidStoredValue(
+                "large-value view identity has no authored mapping",
+            )),
+            _ => Err(Error::InvalidStoredValue(
+                "large-value view identity has ambiguous authored mappings",
+            )),
+        }
     }
 
     fn large_value_extent_refs_for_version(
@@ -5587,7 +5686,7 @@ fn encode_extent_text_ops(ops: &[TextOp]) -> Vec<u8> {
 
 fn encode_large_value_handle(
     schema: SchemaVersionId,
-    table: &TableSchema,
+    table: &str,
     row_uuid: RowUuid,
     column: &str,
     tx_id: TxId,
@@ -5597,7 +5696,7 @@ fn encode_large_value_handle(
 ) -> Result<Vec<u8>, Error> {
     let mut bytes = Vec::from(LARGE_VALUE_HANDLE_MAGIC);
     bytes.extend_from_slice(schema.0.as_bytes());
-    write_handle_string(&mut bytes, &table.name)?;
+    write_handle_string(&mut bytes, table)?;
     bytes.extend_from_slice(row_uuid.as_bytes());
     write_handle_string(&mut bytes, column)?;
     bytes.extend_from_slice(&tx_id.time.0.to_be_bytes());
@@ -5864,12 +5963,13 @@ fn text_content_len(content: &TextContent) -> Result<usize, Error> {
 }
 
 fn large_value_cache_key(
-    table: &TableSchema,
+    schema: SchemaVersionId,
+    table: &str,
     row_uuid: RowUuid,
     column: &str,
     tx_id: TxId,
 ) -> LargeValueCacheKey {
-    (table.name.clone(), row_uuid, column.to_owned(), tx_id)
+    (schema, table.to_owned(), row_uuid, column.to_owned(), tx_id)
 }
 
 #[cfg(test)]

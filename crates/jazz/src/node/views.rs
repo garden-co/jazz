@@ -1252,7 +1252,7 @@ where
     /// schema. Sync must still ship the immutable payload authored under the
     /// row's stored schema alias, so recover that exact history row only when
     /// the projected witness no longer has its authored logical layout.
-    fn canonical_maintained_view_witness(
+    pub(super) fn canonical_maintained_view_witness(
         &mut self,
         version: &VersionRow,
     ) -> Result<Option<VersionRow>, Error> {

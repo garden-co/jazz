@@ -669,7 +669,7 @@ fn authored_schema_qualified_handle_hydrates_after_table_and_column_rename() {
         [crate::schema::ColumnSchema::blob("content")],
     )]));
     let row_uuid = row(0x64);
-    let (_dir, mut core) = open_node_with_schema(node(0x64), base.clone());
+    let (dir, mut core) = open_node_with_schema(node(0x64), base.clone());
     let tx_id = core
         .commit_mergeable(
             MergeableCommit::new("docs", row_uuid, 10).cells(BTreeMap::from([(
@@ -717,6 +717,50 @@ fn authored_schema_qualified_handle_hydrates_after_table_and_column_rename() {
 
     assert_eq!(
         core.hydrate_large_value_handle(&handle).unwrap(),
+        b"schema-qualified"
+    );
+
+    let target_table = &target.schema.tables[0];
+    assert_eq!(
+        core.authored_large_value_identity(base.version_id(), target_table, "content")
+            .unwrap(),
+        ("docs".to_owned(), "body".to_owned())
+    );
+    let target_shape = Query::from("articles").validate(&target.schema).unwrap();
+    let target_binding = target_shape.bind(BTreeMap::new()).unwrap();
+    let projected_handle = core
+        .query_rows(&target_shape, &target_binding, DurabilityTier::Global)
+        .unwrap()
+        .remove(0)
+        .cell(target_table, "content");
+    let Some(Value::Bytes(projected_handle)) = projected_handle else {
+        panic!("expected target-view large-value handle");
+    };
+    assert_eq!(
+        core.hydrate_large_value_handle(&projected_handle).unwrap(),
+        b"schema-qualified"
+    );
+
+    drop(core);
+    let mut reopened = reopen_node_at(&dir, node(0x64), base.clone());
+    assert_eq!(
+        reopened
+            .authored_large_value_identity(base.version_id(), target_table, "content")
+            .unwrap(),
+        ("docs".to_owned(), "body".to_owned())
+    );
+    let reopened_handle = reopened
+        .query_rows(&target_shape, &target_binding, DurabilityTier::Global)
+        .unwrap()
+        .remove(0)
+        .cell(target_table, "content");
+    let Some(Value::Bytes(reopened_handle)) = reopened_handle else {
+        panic!("expected target-view large-value handle after reopen");
+    };
+    assert_eq!(
+        reopened
+            .hydrate_large_value_handle(&reopened_handle)
+            .unwrap(),
         b"schema-qualified"
     );
 }
@@ -968,7 +1012,13 @@ fn sequential_text_document_crosses_extent_limit_and_replays_from_checkpoint_suf
     assert!(expected.len() > MAX_CONTENT_EXTENT_BYTES);
     assert!(opened
         .content_store()
-        .checkpoint(large_value_schema().version_id(), "docs", row_uuid, "body", second_tx)
+        .checkpoint(
+            text_large_value_schema().version_id(),
+            "docs",
+            row_uuid,
+            "body",
+            second_tx,
+        )
         .unwrap()
         .is_some());
     assert_eq!(
