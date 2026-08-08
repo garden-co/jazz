@@ -3965,6 +3965,7 @@ where
                 branch_views: BTreeMap::new(),
                 pending_branch_view_updates: BTreeMap::new(),
                 pending_branch_metadata_repairs: BTreeMap::new(),
+                branch_metadata_repair_cursor: None,
             },
             last_resume_bytes: None,
         }));
@@ -4123,6 +4124,7 @@ where
                 deferred_subscribe_rejections: VecDeque::new(),
                 served_current_rows: BTreeMap::new(),
                 pending_branch_metadata_repairs: BTreeMap::new(),
+                branch_metadata_repair_cursor: None,
                 serve_dirty: true,
             },
             last_resume_bytes: None,
@@ -5059,6 +5061,8 @@ enum ConnectionLink {
         pending_branch_view_updates: BTreeMap<crate::ids::BranchId, Vec<SyncMessage>>,
         /// Deduplicated outstanding metadata repairs on this link.
         pending_branch_metadata_repairs: BTreeMap<crate::ids::BranchId, ()>,
+        /// Round-robin cursor so a saturated repair set cannot starve later ids.
+        branch_metadata_repair_cursor: Option<crate::ids::BranchId>,
     },
     /// Serving one subscriber: apply their subscribe requests, ship view
     /// updates under their identity.
@@ -5083,6 +5087,8 @@ enum ConnectionLink {
         served_current_rows: BTreeMap<SubscriptionKey, String>,
         /// Deduplicated branch-routing repairs for data-first commit relays.
         pending_branch_metadata_repairs: BTreeMap<crate::ids::BranchId, ()>,
+        /// Round-robin cursor so a saturated repair set cannot starve later ids.
+        branch_metadata_repair_cursor: Option<crate::ids::BranchId>,
         /// True when this subscriber's maintained views may have queued deltas
         /// to serve. Idle transport ticks must not poll every view.
         serve_dirty: bool,
@@ -5092,6 +5098,28 @@ enum ConnectionLink {
 struct PendingRowVersionRepair {
     requests: Vec<crate::protocol::RowVersionRef>,
     update: SyncMessage,
+}
+
+/// Return one fair bounded repair page, advancing the cursor after the page.
+fn next_branch_metadata_repairs(
+    repairs: &BTreeMap<crate::ids::BranchId, ()>,
+    cursor: &mut Option<crate::ids::BranchId>,
+) -> Vec<crate::ids::BranchId> {
+    let mut page = repairs
+        .keys()
+        .copied()
+        .filter(|branch| cursor.is_none_or(|after| *branch > after))
+        .take(MAX_FETCH_BRANCH_METADATA)
+        .collect::<Vec<_>>();
+    if page.is_empty() && !repairs.is_empty() {
+        page = repairs
+            .keys()
+            .copied()
+            .take(MAX_FETCH_BRANCH_METADATA)
+            .collect();
+    }
+    *cursor = page.last().copied();
+    page
 }
 
 /// Per-connection resume state for a served subscriber.
@@ -5318,15 +5346,15 @@ where
                 branch_views,
                 pending_branch_view_updates,
                 pending_branch_metadata_repairs,
+                branch_metadata_repair_cursor,
             } => {
                 // Repair is deliberately retried on each non-blocked tick. The
                 // request set is bounded and deduplicated; a dropped request or
                 // response therefore cannot permanently strand a parked unit.
-                let repairs = pending_branch_metadata_repairs
-                    .keys()
-                    .copied()
-                    .take(MAX_FETCH_BRANCH_METADATA)
-                    .collect::<Vec<_>>();
+                let repairs = next_branch_metadata_repairs(
+                    pending_branch_metadata_repairs,
+                    branch_metadata_repair_cursor,
+                );
                 if !repairs.is_empty() {
                     self.transport
                         .send(SyncMessage::FetchBranchMetadata { branches: repairs })
@@ -5677,13 +5705,13 @@ where
                 deferred_subscribe_rejections,
                 served_current_rows,
                 pending_branch_metadata_repairs,
+                branch_metadata_repair_cursor,
                 serve_dirty,
             } => {
-                let repairs = pending_branch_metadata_repairs
-                    .keys()
-                    .copied()
-                    .take(MAX_FETCH_BRANCH_METADATA)
-                    .collect::<Vec<_>>();
+                let repairs = next_branch_metadata_repairs(
+                    pending_branch_metadata_repairs,
+                    branch_metadata_repair_cursor,
+                );
                 if !repairs.is_empty() {
                     self.transport
                         .send(SyncMessage::FetchBranchMetadata { branches: repairs })
