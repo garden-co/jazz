@@ -15,7 +15,7 @@ Invariant digest:
 - `INV-BRANCH-3`: `Node::at_time(time)` MUST resolve to the latest settled global position whose transaction time is `<= time`, returning `GlobalSeq(0)` when no such settled transaction exists.
 - `INV-BRANCH-4`: A local historical read handle MUST NOT answer from incomplete local history; if `is_history_complete_for(shape, position)` is false it MUST return `Error::HistoricalReadRequiresServer` or route to a history-complete server one-shot.
 - `INV-BRANCH-5`: A history-complete node at a sufficient watermark MUST answer `Node::at(position).read(...)` locally at exactly that position.
-- `INV-BRANCH-6`: A snapshot-base branch MUST freeze its base at creation; later parent/main commits MUST NOT appear in the branch unless represented by branch overlay writes or explicit rebase/merge operations.
+- `INV-BRANCH-6`: A snapshot-base branch MUST freeze its base at creation; later parent/main commits MUST NOT appear in the branch unless represented by branch overlay writes, including ordinary calculated merge transactions.
 - `INV-BRANCH-7`: A branch read MUST resolve rows overlay-first: for any row with a current branch overlay winner, the branch MUST return the overlay winner and MUST NOT also return the base winner for that row.
 - `INV-BRANCH-8`: Branch overlay writes MUST NOT affect parent/main current reads.
 - `INV-BRANCH-9`: Sibling branch overlays MUST be isolated; a read on one branch MUST NOT observe overlay versions written only to a sibling branch.
@@ -26,17 +26,19 @@ Invariant digest:
 - `INV-BRANCH-14`: Writes to non-open or unknown branches MUST fail rather than creating/using an implicit branch.
 - `INV-BRANCH-15`: Branch overlay data MUST NOT ship to a session that cannot read the branch metadata row; branch readability gates overlay visibility before ordinary per-row policy checks inside the branch view, and branch writes MUST pass branch-row write policy before table write policy evaluated inside the branch view.
 - `INV-BRANCH-16`: A branch-scoped subscription MUST include BranchId in its identity.
-- `INV-BRANCH-17`: Merge-back MUST commit one ordinary atomic mergeable transaction to the target containing the source branch's cumulative authored effects since that target's previous import cursor, record the exact source interval as typed provenance, atomically advance that cursor, and leave the source branch open.
-- `INV-BRANCH-18`: Discarding or explicitly closing a branch MUST make it read-only while retaining overlay history for audit; successful merge-back MUST NOT close it.
-- `INV-BRANCH-19`: Rebase MUST move a branch's frozen base by three-way per-column reconcile between the old base, the new base, and the branch overlay, using the same merge engine and strategies as merge-back, including large-value op-merge.
-- `INV-BRANCH-20`: Rebase MUST preserve overlay `TxId`s and original write provenance; it MUST NOT replay overlay writes, remint transaction identities, or treat rebased overlay versions as newly written.
-- `INV-BRANCH-21`: Rebase-then-merge-back MUST converge with merge-directly under the same merge oracle and per-column merge strategies.
+- `INV-BRANCH-17`: A branch merge MUST be calculated locally from readable source and target views and emitted as one ordinary atomic mergeable transaction on the target, with no branch-specific fate or authority admission path; successful merge MUST leave the source branch open.
+- `INV-BRANCH-18`: `Discarded` MUST be the only terminal branch state; discard makes a branch read-only while retaining overlay history, and merge MUST NOT close or otherwise mutate source lifecycle state.
+- `INV-BRANCH-19`: Branch-merge provenance MUST define a non-causal contribution edge from the target merge transaction to the named source frontier; a later local calculator MUST expand that edge to the original source contributions rather than treating the merge transaction's derived payload as a new contribution.
+- `INV-BRANCH-20`: A local merge calculator MUST subtract the contribution closure already represented by the target from the source contribution closure through the selected frontier, including recursively imported contributions, so merging in both directions MUST NOT echo target-originated counter deltas, large-value operations, or scalar writes back to their origin.
+- `INV-BRANCH-21`: Incorporating another lineage into a branch MUST use the same ordinary merge-transaction calculation as merging a branch into main; branch rebase is not a separate operation.
 - `INV-BRANCH-22`: A merge-back squash's row-version parents MUST be only the target row/layer heads observed at the merge snapshot; source-branch transactions MUST NOT be causal parents of the target transaction.
-- `INV-BRANCH-23`: For each row and layer touched in the imported source interval, merge-back MUST import the final source value of every column explicitly authored anywhere in that interval, including explicit writes equal to their prior value, and MUST NOT import inherited materialized cells as authored effects.
-- `INV-BRANCH-24`: A branch import cursor MUST be a frontier of durably committed, branch-authorized source transactions, represented as a canonical sorted de-duplicated set of `TxId`s, and MUST be maintained independently for every `(source branch, target lineage)` pair.
-- `INV-BRANCH-25`: Authority admission MUST compare-and-swap the exact expected `from_frontier` to `through_frontier` atomically with accepting the squash; exact retries MUST be idempotent, while stale, overlapping, regressing, or non-descendant intervals MUST fail without applying writes or moving the cursor.
+- `INV-BRANCH-23`: For each row/layer/column touched by novel source contributions, the local calculator MUST derive the equivalent ordinary target write contribution under that column's normal merge strategy, including cumulative explicit authorship and explicit writes equal to their prior value, while excluding inherited materialized cells.
+- `INV-BRANCH-24`: Branch-merge provenance MUST carry a source lineage plus canonical `from_frontier` and `through_frontier` source pointers as local calculation metadata; those pointers MUST NOT be interpreted as an authoritative cursor, CAS, transaction parent, admission prerequisite, or global duplicate-prevention record.
+- `INV-BRANCH-25`: Once minted, a branch merge transaction MUST use ordinary transaction identity, limits, fate, authorization, storage, synchronization, rejection, and exact-retransmission idempotency; receivers MUST NOT need branch metadata or source history to apply it.
 - `INV-BRANCH-26`: Trusted cores and edges MAY inspect all source-branch history needed to validate and construct an import, while client-facing branch data remains permission-scoped; target readers MUST be able to ingest the accepted squash without receiving any source-branch transaction or payload.
-- `INV-BRANCH-27`: When source and target schemas differ, merge-back MUST translate source values and authored-column presence into the target write schema before target authorization and commit, or reject/pause when that translation is not defined; it MUST NOT silently treat projected/inherited cells as authored.
+- `INV-BRANCH-27`: Branch merge calculation MUST read both source and target through one current-schema view and emit one ordinary transaction in that schema; branch provenance MUST NOT introduce cross-schema authored-presence or lens protocol semantics.
+- `INV-BRANCH-28`: A source frontier MUST be the canonical sorted de-duplicated maximal antichain of eligible transactions in that lineage's own version-parent graph; frozen-base and cross-lineage transaction parents are not source-frontier edges, while merge provenance contributes only to the separate contribution graph.
+- `INV-BRANCH-29`: The local calculator MUST subtract every prior merge provenance visible in its target snapshot, but the system MUST NOT claim globally coordinated exactly-once behavior for independently calculated offline/concurrent merges; unobserved duplicate attempts are ordinary concurrent writes and coordination or reconciliation remains the merger's responsibility.
 
 ## Details
 
@@ -75,7 +77,8 @@ identified by a branch record (`BranchRecord`) with
 `state ∈ {Open, Discarded}`. A root branch has `parent: None` and no
 base/fallback. An ordinary branch has a base snapshot that is **frozen at
 creation**: later parent commits do not appear in the branch except through the
-branch's own overlay writes or an explicit rebase operation (`INV-BRANCH-6`).
+branch's own overlay writes, including an ordinary calculated merge transaction
+that incorporates another lineage (`INV-BRANCH-6`).
 
 The branch base is conceptually a full `SnapshotRef`: an owner, a global
 sequence cut, the owner's local HLC cut, and explicit dots, all pointing at a
@@ -123,9 +126,8 @@ branch preview its own permission-row edits.
 **Implementation status.** The current branch write model rejects exclusive
 branch writes: `open_exclusive_on_branch` returns
 `UnsupportedBranchExclusive`, and `branch_exclusive_returns_v1_error` covers
-that behavior. Branch subscriptions and rebase are not yet implemented. Their
-intended contracts are `INV-BRANCH-16` and `INV-BRANCH-19` through
-`INV-BRANCH-21` respectively. A write to a non-open or unknown branch fails
+that behavior. Branch subscriptions are not yet implemented. Their intended
+contract is `INV-BRANCH-16`. A write to a non-open or unknown branch fails
 rather than creating an implicit branch (`INV-BRANCH-14`).
 
 _Further invariants._ `INV-BRANCH-10` — branch metadata (including the frozen
@@ -135,118 +137,154 @@ creation.
 
 ### 11.5 Merge-back as target-local import
 
-Merge-back is a target write assembled from a source branch, not a causal edge
-from the target history into the private source DAG. A caller that may read the
-source branch asks a trusted edge or core to import the branch into a target
-lineage. Trusted serving tiers may inspect all branch history needed to construct
-and validate the import; this internal authority is distinct from the
-permission-scoped branch view exposed to an untrusted client
-(`INV-BRANCH-15`, `INV-BRANCH-26`).
+Branch merge is a maximally separate **local calculation layer**. The merger
+reads an authorized source-branch view and an authorized target view, calculates
+one target write, and then submits that write through the ordinary transaction
+API. There is no branch-import authority operation. Edges and cores may perform
+the calculation because they are trusted to inspect branch storage; an
+untrusted client sees only rows allowed by the branch gate and row policies. In
+either case the initiating identity must be able to read every source effect
+included in the atomic calculation and must pass the target's ordinary
+read-for-write and operation-specific write policies. The calculator fails the
+whole merge rather than silently omitting an unreadable source effect
+(`INV-BRANCH-15`, `INV-BRANCH-26`). `AuthorId::SYSTEM` does not replace the
+initiator for these policy decisions.
 
-The authority snapshots two independent frontiers:
+The output is a normal `TxKind::Mergeable` transaction in the current schema.
+It has ordinary fate, durability, transaction limits, RLS, storage, sync,
+rejection, and retry behavior. Each emitted content or deletion version names
+the complete current target frontier for that exact row and layer as parents;
+it never names a source transaction. After minting, every receiver can apply the
+transaction without the source branch, its provenance graph, or any witness or
+repair request (`INV-BRANCH-22`, `INV-BRANCH-25`).
 
-1. the source branch's current durably committed, branch-authorized transaction frontier, the
-   `through_frontier`; and
-2. the current content and deletion-register heads of every affected target row,
-   which become the squash versions' ordinary causal parents.
+#### Source and contribution frontiers
 
-The previous cursor for `(source branch, target lineage)` is the
-`from_frontier`. A frontier is a canonical sorted, de-duplicated antichain of
-eligible source `TxId`s, not a single "last transaction": a branch may have
-concurrent tips. The imported interval is the eligible ancestor closure of
-`through_frontier` minus the eligible ancestor closure already covered by
-`from_frontier`. `from_frontier` must be an ancestor cut of
-`through_frontier`; an interval must never skip an unimported accepted source
-ancestor. Cursors are target-specific: importing B into staging does not advance
-B's cursor for main (`INV-BRANCH-24`). The root/main target is identified by the
-database's root lineage; a branch target is identified by its `BranchId`.
+A lineage's **source transaction graph** contains its own eligible durable
+transactions and only version-parent edges whose endpoints are both in that
+lineage. Frozen-base parents and transactions in another lineage are excluded.
+Its frontier is the canonical sorted, de-duplicated maximal antichain of this
+graph. The empty lineage has the empty frontier. This graph answers "where has
+the source advanced?" but is deliberately not the target transaction's causal
+graph (`INV-BRANCH-28`).
 
-For each `(table, row, layer)` touched by the interval, the authority creates at
-most one squash version. For content, it takes the final source-branch value at
-`through_frontier` for every column explicitly authored by any accepted source
-version in the interval. Authorship is cumulative across partial writes: if one
-source version authors `title` and a later version authors only `done`, the
-squash authors both columns with their final branch-view values. An explicit
-write of the value already present still counts. Cells merely materialized from
-the frozen base, an earlier imported interval, or another column's partial-write
-fill do not count (`INV-BRANCH-23`). Concurrent source heads use the ordinary
-per-column merge strategies over the source frontier; the imported result is the
-same resolved value the branch exposes at that frontier.
-
-Content and deletion are independent layers. If the interval authors one or
-more deletion-register events, the squash emits the final deletion-register
-event at `through_frontier`, including a final restore. Content authored in the
-same interval is retained even when the final deletion state hides the row, so a
-later target restore reveals the correct imported content. A delete followed by
-recreate therefore imports both final layer effects rather than collapsing row
-existence into content.
-
-Every squash version names only the target row/layer frontier captured at the
-target snapshot. It never names a source-branch `TxId` as a causal parent
-(`INV-BRANCH-22`). Target writes racing after that snapshot are ordinary
-concurrent writes and reconcile through the normal merge engine. Unrelated
-target rows and columns are unaffected; a disjoint target edit survives because
-the squash carries only authored source columns.
-
-The squash is one ordinary atomic target `Transaction`: the merge initiator is
-its permission subject, and every target write passes the target schema and RLS
-rules exactly as an equivalent direct write would. Source provenance does not
-grant target authority. The transaction additionally carries typed
-`BranchImport` provenance:
+Merge calculation additionally uses a separate **contribution graph**. A native
+user write introduces stable contribution dots:
 
 ```text
-BranchImport {
-    source_branch,
-    target_lineage,
+(origin lineage, origin TxId, table, row, layer, column-or-operation)
+```
+
+Large-value operations retain their existing operation identities. An ordinary
+branch-merge transaction introduces no new native dots for its calculated
+payload. Instead, its typed metadata records a non-causal provenance edge:
+
+```text
+BranchMergeProvenance {
+    source_lineage,
     from_frontier,
     through_frontier,
 }
 ```
 
-The provenance is metadata, not version causality. Open, malformed, or
-branch-authorization-rejected source transactions are outside the frontier and
-contribute no effects. A branch-local transaction does not need global fate to
-be eligible: durable admission into the authorized branch overlay is the
-source-side decision. The authority does not need a client assertion, causal
-witness, or private-parent repair protocol:
-trusted cores/edges already have authority to inspect branch history, and an
-accepted target transaction is self-contained for downstream synchronization
-(`INV-BRANCH-26`).
+The merge transaction's contribution closure is the union of its ordinary
+target parents' contribution closures and the source contribution closure named
+by that provenance edge. The `from_frontier` records the source cut the local
+calculation found already represented by its target snapshot;
+`through_frontier` records the source cut it incorporated. Both are canonical
+source pointers and neither is a transaction parent, durable cursor, CAS,
+admission prerequisite, or global duplicate-prevention mechanism
+(`INV-BRANCH-19`, `INV-BRANCH-24`). A calculated merge transaction cannot also
+contain unrelated new user edits; conflict-resolution edits are separate
+ordinary transactions so their native contribution dots remain unambiguous.
 
-Admission compare-and-swaps the durable cursor from the exact canonical
-`from_frontier` to `through_frontier` in the same storage commit that accepts the
-squash. A stale expected cursor, overlap with an already imported interval,
-regression, non-descendant frontier, malformed antichain, or payload/provenance
-mismatch fails without target writes and without cursor movement. Repeating the
-same transaction identity and exact commit unit returns its known fate;
-repeating a completed import request for the already-current frontier returns
-the original import result rather than minting a second squash. These rules make
-retries safe across devices and reopen (`INV-BRANCH-25`).
+To calculate source→target, the merger recursively expands native contribution
+dots through both ordinary lineage-parent edges and prior merge-provenance
+edges. It subtracts the contribution closure already represented by the target
+snapshot from the source closure through `through_frontier`. The remaining set
+is the **novel contribution set**. `from_frontier` is the maximal source cut
+evidenced by visible prior provenance whose closure is already in that target
+set; it is calculation evidence, not mutable shared state.
 
-Successful merge-back advances only this target-specific cursor and leaves the
-source branch `Open`, allowing more branch writes and a later import of only the
-new interval. Closing and discarding are separate explicit lifecycle operations
-(`INV-BRANCH-17`, `INV-BRANCH-18`). Overlay history remains available for audit
-and future interval construction.
+This recursive expansion is what prevents bidirectional and transitive echo.
+For example, after main→B imports a main counter increment and text operation,
+that merge transaction may be after B's previous source pointer. A later B→main
+calculator expands the B merge transaction through its provenance edge, sees
+that the counter contribution dot and text operation already exist in main's
+target closure, and subtracts them. It does not interpret the materialized
+counter value or target-relative text batch in B as a fresh B-authored effect.
+The same rule works through A→B→C→A chains and for scalar writes
+(`INV-BRANCH-20`).
 
-When source and target schemas differ, source values and authored-column
-presence must be translated to the target write schema before target policy
-evaluation. A translation that cannot preserve authored presence must pause or
-reject rather than guessing; projected defaults and inherited cells are not
-implicitly authored (`INV-BRANCH-27`, ch. 10).
+Full retained history is the correctness source for this graph. Implementations
+may cache closure summaries or checkpoint contribution sets, but a missing
+provenance edge, source transaction, or native operation needed by the
+calculation is a local merge-calculation error, never permission to guess.
+Automatic history GC must not discard the only expansion path. Bounded summary,
+checkpoint, and explicit-GC evidence are open design work below.
 
-### 11.6 Branch subscriptions and rebase
+#### Calculating the ordinary target write
+
+The local calculator reduces the novel contribution set under each column's
+normal merge strategy, then encodes the result exactly as a caller-authored
+target write relative to the captured target parents (`INV-BRANCH-23`):
+
+- LWW-like scalar columns select the resolved value contributed by the novel
+  source edits. Every column explicitly authored anywhere in the novel set is
+  present, including an explicit write equal to its previous value; inherited
+  materialized cells are absent.
+- Grow-only/state-join strategies transfer their novel join contribution.
+- Counter transfers the de-duplicated sum of native source deltas exactly once
+  and emits the ordinary target-relative counter value.
+- Text/blob transfers de-duplicated native operations, applies them to the
+  target frontier, and emits the ordinary target-parent-relative operation batch
+  plus self-contained, target-authorized extents/checkpoint material.
+- A custom strategy must provide the local calculator with a deterministic way
+  to reduce novel contribution dots and encode an ordinary target write. If it
+  cannot, merge calculation fails locally before minting a transaction.
+
+Content and deletion remain independent layers. Novel deletion/restore dots
+reduce to the final deletion-register contribution; content contributions are
+retained even when the resulting deletion state hides the row, so a later
+restore reveals the correct content. The calculated versions then undergo the
+same target authorization and column strategies as any other commit. There is
+no strategy-specific behavior in authority admission or on receivers.
+
+Both input views and the emitted transaction use one current-schema projection.
+Schema/lens differences are resolved by the ordinary view boundary before this
+calculation; merge provenance adds no authored-presence lens protocol
+(`INV-BRANCH-27`).
+
+Successful merge leaves the source branch `Open`. Incorporating main into B,
+B into main, or one branch into another is always another calculated ordinary
+merge transaction. There is no separate rebase operation. `Discarded` is the
+only terminal state and retains history for audit (`INV-BRANCH-17`,
+`INV-BRANCH-18`, `INV-BRANCH-21`).
+
+#### Duplicate calculations and retries
+
+Exact retransmission of the same minted transaction is idempotent by ordinary
+`TxId` commit-unit rules. Before minting, a calculator subtracts all provenance
+visible in its target snapshot, so a sequential repeat with no new source
+contributions is a no-op calculation. There is intentionally no authoritative
+source/target cursor or global branch-merge CAS.
+
+Two offline or concurrent calculators can nevertheless both derive writes from
+snapshots that do not include the other's merge. Those are distinct ordinary
+transactions, not exact retries. Idempotent state-join contributions may absorb
+the duplication, but non-idempotent counter or custom contributions can be
+applied twice. Preventing, detecting, or compensating such a race is the
+merger's coordination/reconciliation responsibility; Jazz does not claim
+globally exactly-once branch import (`INV-BRANCH-29`).
+
+### 11.6 Branch subscriptions
 
 A branch-scoped subscription is identified by its `BranchId` in addition to the
 ordinary subscription identity (`INV-BRANCH-16`).
 
-Rebasing moves a branch's frozen base from its creation cut to a newer parent
-`GlobalSeq` by reconciling the old base, new base, and branch overlay with the
-same three-way per-column merge engine and strategies as merge-back. It adjusts
-the branch view without replaying overlay writes or reminting overlay `TxId`s;
-the original write times and authors remain the provenance of those versions
-(`INV-BRANCH-19`, `INV-BRANCH-20`). Rebase-then-merge-back MUST converge with
-merge-directly under the same merge oracle and strategies (`INV-BRANCH-21`).
+There is no branch rebase operation. To incorporate a newer parent or another
+lineage, calculate and commit an ordinary merge transaction into the branch as
+defined in §11.5 (`INV-BRANCH-21`).
 
 ### 11.7 Subsumed branch and time-travel notes
 
@@ -275,15 +313,12 @@ merge-back and discard have graduated:
   `BranchId`/`SnapshotRef` as opaque stable values and must not leak overlay
   partition table names.
 - ✅ **Merge-back / discard** (`INV-BRANCH-17` through `INV-BRANCH-27`).
-  Merge-back emits one atomic ordinary target squash for the cumulative authored
-  effects in the unimported source interval, records typed `BranchImport`
-  provenance, atomically advances the target-specific source frontier cursor,
-  and leaves the branch open. Discard is a separate metadata state flip to
-  `Discarded` that makes the branch read-only. The correctness rule (the S8
-  oracle): each import must equal the corresponding direct-on-target authored
-  write set for visible rows, deletion-register winners, and target-only version
-  parent frontiers. Open question: squash granularity for very large branches
-  remains one unit vs chunked, gated on the S8 merge-back-cost metric.
+  A local calculator emits one ordinary target transaction for the novel source
+  contribution set, records typed `BranchMergeProvenance`, and leaves the branch
+  open. Discard is a separate metadata state flip to `Discarded` that makes the
+  branch read-only. The correctness rule (the S8 oracle): each merge equals the
+  corresponding direct-on-target strategy contribution for visible rows,
+  deletion-register winners, and target-only version parent frontiers.
 - 🔶 **Branch-exclusive transaction model** (`INV-BRANCH-13`). Before such a
   transaction can be accepted, decide its branch authority, validation, and
   serialization semantics.
@@ -295,7 +330,7 @@ merge-back and discard have graduated:
   keeps growing, so the child needs a stable cut over a branch view (the same
   machinery as composing `at()` inside an overlay; see below);
   (iii) **merge-back** becomes multi-level (child→parent-branch→…→main), each hop a
-  §11.5 squash with `BranchImport` provenance; (iv) **RLS composes per level** — the
+  §11.5 ordinary transaction with `BranchMergeProvenance`; (iv) **RLS composes per level** — the
   branch-metadata-row read/write gate (`INV-BRANCH-15`) chains, so reaching a child
   requires passing every ancestor branch row's policy. Decide a depth bound (or
   prove unbounded is cheap enough) before shipping.
@@ -327,8 +362,23 @@ merge-back and discard have graduated:
   explicit deletion-register current witnesses so a deletion/restore transition
   cannot be missed by a branch-scoped subscriber.
 - 🔶 **Opaque import frontier pointer.** Raw source frontier `TxId`s are
-  acceptable in typed `BranchImport` provenance today. If exposing transaction
-  identities becomes undesirable, define an authority-resolvable opaque pointer
-  or commitment that preserves canonical frontier equality, cursor CAS,
-  idempotency, and auditability without becoming a causal witness or requiring
-  target readers to fetch source history.
+  acceptable in typed `BranchMergeProvenance` today. If exposing transaction
+  identities becomes undesirable, define a provenance-resolvable opaque pointer
+  or commitment that preserves canonical frontier equality, recursive
+  contribution expansion, and auditability without becoming a causal witness or
+  requiring target readers to fetch source history.
+- 🔶 **Contribution-summary scaling and GC.** Correct local calculation now
+  expands retained native contribution and merge-provenance history. Define a
+  bounded, verifiable closure summary/checkpoint and explicit history-GC evidence
+  before allowing removal of the only path to a contribution dot. A cache may
+  accelerate the calculation but cannot become an unverifiable source of truth.
+- 🔶 **Concurrent duplicate merge calculations.** Two offline calculators
+  can independently transfer the same non-idempotent contribution before either
+  observes the other's provenance. The current contract assigns serialization
+  or later reconciliation to the merger. Explore optional local coordination or
+  contribution-aware compensation without adding branch-specific authority
+  admission.
+- 🔶 **Oversized atomic merge.** An emitted merge is one ordinary
+  transaction and therefore inherits ordinary transaction size limits. Decide
+  whether a logical merge may be chunked while retaining an atomic application
+  boundary; do not add a branch-only authority envelope by accident.
