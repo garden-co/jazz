@@ -185,6 +185,39 @@ fn evolved_schema() -> JazzSchema {
     schema
 }
 
+fn public_join_schema() -> JazzSchema {
+    JazzSchema::new([
+        TableSchema::new(TEAMS, [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            DOCUMENTS,
+            [
+                ColumnSchema::new("team", ColumnType::Uuid),
+                ColumnSchema::new("updated_at", ColumnType::U64),
+            ],
+        )
+        .with_reference("team", TEAMS)
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+    ])
+}
+
+fn evolved_public_join_schema() -> JazzSchema {
+    let mut schema = public_join_schema();
+    schema
+        .tables
+        .iter_mut()
+        .find(|table| table.name == DOCUMENTS)
+        .expect("documents table")
+        .columns
+        .push(
+            jazz::schema::ColumnSchema::new("generation", ColumnType::U64)
+                .with_default(Value::U64(0)),
+        );
+    schema
+}
+
 fn open_db() -> BenchDb {
     open_db_with_schema(schema())
 }
@@ -772,6 +805,193 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
     assert_eq!(
         row_ids_for_identity(&db, &prepared_v2_b, USER_B),
         vec![document_b]
+    );
+}
+
+#[cfg(feature = "testing")]
+#[test]
+fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() {
+    let db = open_db_with_schema_as(schema(), AuthorId::SYSTEM);
+    let team_a = row(0x11);
+    let team_b = row(0x12);
+    seed(&db, team_a, team_b, "region-a", "region-b");
+    db.set_identity_claims(
+        USER_A,
+        BTreeMap::from([("region".to_owned(), Value::String("region-a".to_owned()))]),
+    );
+    db.set_identity_claims(
+        USER_B,
+        BTreeMap::from([("region".to_owned(), Value::String("region-b".to_owned()))]),
+    );
+    let query = Query::from(DOCUMENTS).filter(eq(col("team"), param("team")));
+    let prepared = |team: RowUuid| {
+        db.prepare_query_bound(
+            &query,
+            BTreeMap::from([("team".to_owned(), Value::Uuid(team.0))]),
+        )
+        .expect("prepare subscription binding")
+    };
+    let mut stream_a = block_on(db.subscribe_for_identity(&prepared(team_a), opts(), USER_A))
+        .expect("subscribe A");
+    let mut stream_b = block_on(db.subscribe_for_identity(&prepared(team_b), opts(), USER_B))
+        .expect("subscribe B");
+    stream_a.try_next_event().expect("A reset");
+    stream_b.try_next_event().expect("B reset");
+
+    let v2 = SchemaVersion::new(evolved_schema());
+    db.publish_schema(v2.clone()).expect("publish v2 schema");
+    db.publish_lens(MigrationLens::new(
+        schema().version_id(),
+        v2.id,
+        vec![
+            TableLens {
+                source_table: DOCUMENTS.to_owned(),
+                target_table: DOCUMENTS.to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "generation".to_owned(),
+                    default: Value::U64(0),
+                }],
+            },
+            TableLens {
+                source_table: TEAMS.to_owned(),
+                target_table: TEAMS.to_owned(),
+                ops: Vec::new(),
+            },
+            TableLens {
+                source_table: MEMBERSHIPS.to_owned(),
+                target_table: MEMBERSHIPS.to_owned(),
+                ops: Vec::new(),
+            },
+        ],
+    ))
+    .expect("publish v1-to-v2 lens");
+    db.set_current_write_schema(CurrentWriteSchema {
+        revision: 1,
+        schema: v2.id,
+    })
+    .expect("activate v2");
+    db.update(
+        DOCUMENTS,
+        row(0x41),
+        BTreeMap::from([("updated_at".to_owned(), Value::U64(11))]),
+    )
+    .expect("trigger subscription rehydration");
+    stream_a.try_next_event().expect("A rehydration reset");
+    stream_b.try_next_event().expect("B rehydration reset");
+    assert_eq!(db.active_groove_subscriptions_for_test(), 2);
+
+    drop(stream_a);
+    assert_eq!(db.active_groove_subscriptions_for_test(), 1);
+    db.insert_with_id(
+        DOCUMENTS,
+        row(0x43),
+        BTreeMap::from([
+            ("team".to_owned(), Value::Uuid(team_b.0)),
+            ("updated_at".to_owned(), Value::U64(30)),
+        ]),
+    )
+    .expect("write after dropping A");
+    assert!(matches!(
+        stream_b.try_next_event(),
+        Some(SubscriptionEvent::Delta { added, .. }) if added.iter().any(|output| output.row_uuid() == row(0x43))
+    ));
+}
+
+#[test]
+fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
+    let v1 = public_join_schema();
+    let db = open_db_with_schema_as(v1.clone(), AuthorId::SYSTEM);
+    let team = row(0xa1);
+    let document = row(0xa2);
+    db.insert_with_id(
+        TEAMS,
+        team,
+        BTreeMap::from([("name".to_owned(), Value::String("Team A".to_owned()))]),
+    )
+    .expect("seed team");
+    db.insert_with_id(
+        DOCUMENTS,
+        document,
+        BTreeMap::from([
+            ("team".to_owned(), Value::Uuid(team.0)),
+            ("updated_at".to_owned(), Value::U64(1)),
+        ]),
+    )
+    .expect("seed document");
+    let join = Query::from(DOCUMENTS)
+        .join_via_column(TEAMS, "id", "team", [eq(col("name"), param("name"))]);
+    let prepared_v1 = db
+        .prepare_query_bound(
+            &join,
+            BTreeMap::from([("name".to_owned(), Value::String("Team A".to_owned()))]),
+        )
+        .expect("prepare v1 join");
+    assert_eq!(
+        db.read(&prepared_v1)
+            .expect("read v1 prepared join")
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![document]
+    );
+
+    let v2 = SchemaVersion::new(evolved_public_join_schema());
+    db.publish_schema(v2.clone()).expect("publish v2");
+    db.publish_lens(MigrationLens::new(
+        v1.version_id(),
+        v2.id,
+        vec![
+            TableLens {
+                source_table: TEAMS.to_owned(),
+                target_table: TEAMS.to_owned(),
+                ops: Vec::new(),
+            },
+            TableLens {
+                source_table: DOCUMENTS.to_owned(),
+                target_table: DOCUMENTS.to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "generation".to_owned(),
+                    default: Value::U64(0),
+                }],
+            },
+        ],
+    ))
+    .expect("publish lens");
+    db.set_current_write_schema(CurrentWriteSchema {
+        revision: 1,
+        schema: v2.id,
+    })
+    .expect("activate v2");
+
+    // A distinct v2 prepared shape occupies the fresh runtime before the old
+    // handle is read, so correctness cannot rely on an accidentally matching
+    // runtime-local prepared ID.
+    let conflicting_v2 = db
+        .prepare_query_bound(
+            &Query::from(DOCUMENTS).join_via_column(
+                TEAMS,
+                "id",
+                "team",
+                [eq(col("name"), param("other_name"))],
+            ),
+            BTreeMap::from([(
+                "other_name".to_owned(),
+                Value::String("missing".to_owned()),
+            )]),
+        )
+        .expect("prepare conflicting v2 join shape");
+    assert!(
+        db.read(&conflicting_v2)
+            .expect("execute conflicting v2 prepared shape")
+            .is_empty()
+    );
+    assert_eq!(
+        db.read(&prepared_v1)
+            .expect("stale v1 handle recompiles through the active schema")
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![document]
     );
 }
 

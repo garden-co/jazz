@@ -641,6 +641,16 @@ where
         .map_err(Into::into)
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    /// Test-only count of live Groove maintained subscriptions.
+    pub fn active_groove_subscriptions_for_test(&self) -> usize {
+        self.node
+            .node
+            .borrow()
+            .runtime_stats_for_test()
+            .active_subscriptions
+    }
+
     /// Synchronously read rows and attribute work inside the node query path.
     ///
     /// The returned rows are identical to [`Self::read`]. This diagnostic
@@ -1135,10 +1145,17 @@ where
         let local_subscription_id = subscription.subscription_id();
         let local_node = Rc::clone(&self.node.node);
         let local_runtime_token = local_node.borrow().groove_runtime_token();
+        let local_subscription_cleanup = Rc::new(Cell::new(Some((
+            local_runtime_token,
+            local_subscription_id,
+        ))));
+        let local_cleanup_handle = Rc::clone(&local_subscription_cleanup);
         let mut local_cleanup = CleanupGuard::new(Box::new(move || {
             let mut node = local_node.borrow_mut();
-            if node.groove_runtime_token() == local_runtime_token {
-                node.unsubscribe_groove_subscription(local_subscription_id);
+            if let Some((runtime_token, subscription_id)) = local_cleanup_handle.get()
+                && node.groove_runtime_token() == runtime_token
+            {
+                node.unsubscribe_groove_subscription(subscription_id);
             }
         }));
         // Array output is admitted only as a complete terminal-rendered parent.
@@ -1197,6 +1214,7 @@ where
                 maintained_subscription,
             },
             groove_runtime_token: self.node.node.borrow().groove_runtime_token(),
+            local_subscription_cleanup,
             propagates_upstream,
             author,
             read_tier,
@@ -4094,6 +4112,21 @@ where
                 node.borrow_mut().open_local_maintained_view_subscription(
                     &shape, &binding, author, read_tier, &read_view, None,
                 )?;
+            // From this point, cleanup must target the replacement runtime
+            // subscription even if a later fallible refresh step aborts.
+            {
+                let mut state_ref = state.borrow_mut();
+                let subscription_id = maintained.subscription_id();
+                match &mut state_ref.kind {
+                    SubscriptionKind::Prepared {
+                        maintained_subscription,
+                        ..
+                    } => *maintained_subscription = Some(maintained),
+                }
+                state_ref
+                    .local_subscription_cleanup
+                    .set(Some((groove_runtime_token, subscription_id)));
+            }
             let settled_tier = remote_read_tier.unwrap_or(read_tier);
             let settled = subscription_is_settled(
                 &node.borrow(),
@@ -4103,12 +4136,6 @@ where
                 read_view.clone(),
             );
             let mut state_ref = state.borrow_mut();
-            match &mut state_ref.kind {
-                SubscriptionKind::Prepared {
-                    maintained_subscription,
-                    ..
-                } => *maintained_subscription = Some(maintained),
-            }
             let event = subscription_delta_event_with_reset(
                 read_tier,
                 settled,
@@ -8054,6 +8081,9 @@ fn rendered_node_bytes(row: &CurrentRow, relations: &BTreeMap<String, ResultRela
 struct SubscriptionState {
     kind: SubscriptionKind,
     groove_runtime_token: u64,
+    /// The maintained subscription currently owned by this public stream.
+    /// Rehydration replaces the Groove ID, and drop must clean up that new ID.
+    local_subscription_cleanup: Rc<Cell<Option<(u64, groove::ivm::SubscriptionId)>>>,
     propagates_upstream: bool,
     author: AuthorId,
     read_tier: DurabilityTier,
