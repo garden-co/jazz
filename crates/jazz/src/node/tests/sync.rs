@@ -1905,12 +1905,38 @@ fn policy_graph_dropdown_entry_cells(dropdown: RowUuid, idx: usize) -> BTreeMap<
             nullable(Some(Value::Bool(false))),
         ),
         ("c729".to_owned(), Value::Bool(true)),
-        ("c488".to_owned(), nullable(Some(Value::U32(idx as u32)))),
+        ("c488".to_owned(), nullable(Some(Value::I32(idx as i32)))),
         ("c730".to_owned(), Value::Bool(idx.is_multiple_of(3))),
         ("c731".to_owned(), nullable(None)),
         ("c732".to_owned(), nullable(None)),
-        ("c733".to_owned(), nullable(Some(Value::U32(0)))),
+        ("c733".to_owned(), nullable(Some(Value::I32(0)))),
     ])
+}
+
+fn assert_policy_graph_perf_fixture_matches_schema(schema: &JazzSchema) {
+    for (table_name, column_name, expected_type) in [
+        ("t50", "c632", ColumnType::I32),
+        ("t67", "c488", ColumnType::I32.nullable()),
+        ("t67", "c733", ColumnType::I32.nullable()),
+    ] {
+        let table = schema
+            .tables
+            .iter()
+            .find(|candidate| candidate.name == table_name)
+            .unwrap_or_else(|| panic!("policy-graph performance fixture is missing {table_name}"));
+        let column = table
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column_name)
+            .unwrap_or_else(|| {
+                panic!("policy-graph performance fixture is missing {table_name}.{column_name}")
+            });
+        assert_eq!(
+            column.column_type,
+            expected_type,
+            "policy-graph performance fixture writes {table_name}.{column_name} as Value::I32"
+        );
+    }
 }
 
 fn policy_graph_version(
@@ -1936,7 +1962,11 @@ fn policy_graph_version(
         cells,
         None,
     )
-    .unwrap()
+    .unwrap_or_else(|error| {
+        panic!(
+            "policy-graph performance fixture has invalid cells for table={table} row={row_uuid:?}: {error:?}; cells={cells:?}"
+        )
+    })
 }
 
 fn seed_policy_graph_known_global(
@@ -2036,6 +2066,7 @@ where
 fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
     jazz_benchmark_guard::refuse_contaminated_measurement();
     let schema = policy_graph_perf_schema_fixture();
+    assert_policy_graph_perf_fixture_matches_schema(&schema);
     let (_core_dir, mut core) = open_node_with_schema(node(0x22), schema.clone());
 
     let member = policy_graph_author(0x31, 1);
@@ -2068,7 +2099,7 @@ fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
         corp,
         BTreeMap::from([
             ("c457".to_owned(), Value::Uuid(member_team.0)),
-            ("c632".to_owned(), Value::U32(0)),
+            ("c632".to_owned(), Value::I32(0)),
         ]),
     ));
     seed_rows.push((
