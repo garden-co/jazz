@@ -286,8 +286,9 @@ groove::define_record! {
         0 => branch_id: BranchId,
         1 => created_by: AuthorId,
         2 => parent: Option<BranchId>,
-        3 => base_global: Option<GlobalSeq>,
+        3 => base_snapshot: Option<Value>,
         4 => state: BranchState,
+        5 => metadata_pending: bool,
     }
 }
 

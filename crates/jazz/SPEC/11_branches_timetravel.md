@@ -46,7 +46,7 @@ Invariant digest:
 - `INV-BRANCH-34`: A source contribution is target-known only when it is already present in the exact target-parent contribution closure or an exact field substitution names that dot; sharing a `TxId`, appearing inside `from_frontier`/`through_frontier`, or transferring another field from the same source version MUST NOT suppress an omitted row, layer, column, or operation, and a reducing strategy's substitution MUST name every novel dot reduced into its output, including losing concurrent dots.
 - `INV-BRANCH-35`: Every transaction MUST carry one canonical operational target lineage (`Root` or a stable `BranchId`); all ordinary persistence, recovery, synchronization, authorization, fate, and exact-retransmission paths MUST route its complete commit unit to that lineage without interpreting branch-merge provenance.
 - `INV-BRANCH-36`: Before a receiver may admit a commit unit or view payload targeted at a branch, trusted transport MUST deliver the durable branch record needed to route that lineage. A receiver that observes data first MUST park it, request the bounded missing branch record, and drain it only after exact idempotent metadata admission; a branch record received without a currently requested readable view reveals no branch row payload.
-- `INV-BRANCH-37`: Branch creation is local-first: the local database durably authors a random branch id, authenticated creator, and locally known snapshot base before any network round trip, and immediately permits branch-local commits. Sync authenticates the metadata creator against the session link; exact replay is idempotent and discard is the only permitted lifecycle transition.
+- `INV-BRANCH-37`: Branch creation is local-first: the local database durably authors a random branch id, authenticated creator, and complete locally known snapshot base before any network round trip, and immediately permits branch-local commits. Branch metadata has an independent durable sync outbox. Session admission is fail-closed to the supported parentless v1 snapshot shape; exact replay is idempotent and discard is the only permitted lifecycle transition.
 
 ## Details
 
@@ -102,13 +102,21 @@ Creating a branch records metadata only. It is O(1)-style and never copies base
 rows into the overlay (`INV-BRANCH-11`). Creation is local-first: the local
 database chooses a random `BranchId`, records its authenticated identity as
 immutable `created_by`, freezes its locally known settled snapshot, persists the
-record, and can commit into the branch before connecting to a server. Sync sends
-that complete record before branch-target data. A session link admits metadata
-only when `created_by` matches its authenticated identity and the declared
-parent/base dependencies are locally available; a self-asserted author without
-that link context grants nothing. Exact replay is idempotent, immutable conflicts
-are rejected, and `Open` to `Discarded` is the only lifecycle transition
-(`INV-BRANCH-37`).
+record, and can commit into the branch before connecting to a server. The full
+snapshot (`owner`, global and local bases, and dots) is persisted without
+receiver re-authoring. Branch metadata has an independent durable outbox, so an
+empty branch retries across reconnect and reopen until an exact upstream echo
+acknowledges it; branch-target data is separately parked until metadata lands.
+
+Session-authored v1 creation is deliberately narrower than trusted backend
+replay: it must be first-seen `Open`, parentless, and use the canonical settled
+global cut (`owner` is the nil node UUID, `local_base` is zero, and `dots` is
+empty). Its `created_by` must match the authenticated session identity, and its
+global base must already be available or the metadata is parked. This
+parentless-only rule avoids treating knowledge of a parent id as read authority;
+a self-asserted author without session context grants nothing. Exact replay is
+idempotent, immutable conflicts are rejected, and `Open` to `Discarded` is the
+only lifecycle transition (`INV-BRANCH-37`).
 
 ### 11.3 Branch reads
 

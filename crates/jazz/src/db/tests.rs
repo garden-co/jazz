@@ -6270,6 +6270,124 @@ fn session_branch_metadata_rejects_creator_mismatch() {
 }
 
 #[test]
+fn session_branch_metadata_rejects_malformed_initial_shapes() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let source = open_core(0xc1, identity, &schema);
+    let branch = BranchId::from_bytes([0x49; 16]);
+    let record = source
+        .node()
+        .borrow_mut()
+        .create_branch_as(branch, identity)
+        .unwrap();
+    let canonical = BranchMetadata::from(&record);
+    let mut discarded = canonical.clone();
+    discarded.open = false;
+    let mut parented = canonical.clone();
+    parented.parent = Some(BranchId::from_bytes([0xdd; 16]));
+    let mut arbitrary_owner = canonical.clone();
+    arbitrary_owner.base.as_mut().unwrap().owner = NodeUuid::from_bytes([0xee; 16]);
+    let mut local_tail = canonical.clone();
+    local_tail.base.as_mut().unwrap().local_base = TxTime(1);
+    let mut dotted = canonical;
+    dotted
+        .base
+        .as_mut()
+        .unwrap()
+        .dots
+        .push(TxId::new(TxTime(1), NodeUuid(uuid::Uuid::nil())));
+
+    for metadata in [discarded, parented, arbitrary_owner, local_tail, dotted] {
+        let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+        let (mut client_transport, server_transport) = duplex();
+        let subscriber = server.accept_subscriber(server_transport, identity);
+        client_transport
+            .send(SyncMessage::BranchMetadata(metadata))
+            .unwrap();
+        assert!(subscriber.borrow_mut().tick().is_err());
+        assert!(server.node().borrow().branch_record(branch).is_none());
+    }
+}
+
+#[test]
+fn empty_branch_metadata_retries_after_unacked_reopen() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let node_uuid = NodeUuid::from_bytes([0xc1; 16]);
+    let branch = BranchId::from_bytes([0x4a; 16]);
+    let dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let client = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity: DbIdentity {
+            node: node_uuid,
+            author: identity,
+        },
+        id_source: None,
+        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    }))
+    .unwrap();
+    client.create_branch_with_id(branch).unwrap();
+    let first_server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let (client_transport, server_transport) = duplex();
+    let upstream = client.connect_upstream(client_transport);
+    let _subscriber = first_server.accept_subscriber(server_transport, identity);
+    upstream.borrow_mut().tick().unwrap();
+    first_server.tick().unwrap();
+    assert!(first_server.node().borrow().branch_record(branch).is_some());
+    drop(upstream);
+    client.close().unwrap();
+    drop(client);
+
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let reopened = block_on(Db::open(DbConfig {
+        schema,
+        storage,
+        identity: DbIdentity {
+            node: node_uuid,
+            author: identity,
+        },
+        id_source: None,
+        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    }))
+    .unwrap();
+    assert_eq!(
+        reopened
+            .node
+            .node
+            .borrow()
+            .pending_branch_metadata_uploads()
+            .len(),
+        1
+    );
+    let replay_server = open_core(0x6e, AuthorId::SYSTEM, &reopened.schema);
+    let (client_transport, server_transport) = duplex();
+    let upstream = reopened.connect_upstream(client_transport);
+    let _subscriber = replay_server.accept_subscriber(server_transport, identity);
+    upstream.borrow_mut().tick().unwrap();
+    replay_server.tick().unwrap();
+    upstream.borrow_mut().tick().unwrap();
+    assert!(
+        replay_server
+            .node()
+            .borrow()
+            .branch_record(branch)
+            .is_some()
+    );
+    assert!(
+        reopened
+            .node
+            .node
+            .borrow()
+            .pending_branch_metadata_uploads()
+            .is_empty()
+    );
+}
+
+#[test]
 fn session_branch_data_parks_until_authenticated_metadata_arrives() {
     let schema = schema();
     let identity = AuthorId::from_bytes([0xc1; 16]);
@@ -6412,6 +6530,82 @@ fn locally_created_branch_and_commit_survive_rocks_reopen() {
         Some(&expected)
     );
     assert!(reopened.write_state(tx_id).is_ok());
+
+    // Recovery restores both independent durable outboxes: metadata must be
+    // replayed and admitted before the branch-target transaction can land.
+    let server = open_core(0x5e, AuthorId::SYSTEM, &reopened.schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = reopened.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, identity);
+    reopened.tick().unwrap();
+    server.tick().unwrap();
+    reopened.tick().unwrap();
+    server.tick().unwrap();
+    assert_eq!(
+        server.node().borrow().branch_record(branch),
+        Some(&expected)
+    );
+    assert_eq!(
+        server
+            .node()
+            .borrow_mut()
+            .transaction_record(tx_id)
+            .unwrap()
+            .target_lineage,
+        crate::tx::BranchLineage::Branch(branch)
+    );
+}
+
+#[test]
+fn trusted_branch_snapshot_round_trips_without_receiver_reauthoring() {
+    let schema = schema();
+    let backend_identity = AuthorId::from_bytes([0xb0; 16]);
+    let receiver_uuid = NodeUuid::from_bytes([0x5e; 16]);
+    let snapshot_owner = NodeUuid::from_bytes([0xa7; 16]);
+    let branch = BranchId::from_bytes([0x4b; 16]);
+    let snapshot = crate::tx::Snapshot::exclusive_base(
+        snapshot_owner,
+        GlobalSeq(0),
+        TxTime(7),
+        vec![TxId::new(TxTime(8), snapshot_owner)],
+    )
+    .unwrap();
+    let metadata = BranchMetadata {
+        branch_id: branch,
+        created_by: backend_identity,
+        parent: None,
+        base: Some(snapshot.clone()),
+        open: true,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let target =
+        Node::new(NodeState::new_history_complete(receiver_uuid, schema.clone(), storage).unwrap());
+    let (mut backend_transport, server_transport) = duplex();
+    let subscriber = target.accept_subscriber_with_trust(
+        server_transport,
+        backend_identity,
+        CommitUnitTrust::TrustedBackend,
+    );
+    backend_transport
+        .send(SyncMessage::BranchMetadata(metadata.clone()))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert_eq!(
+        target.node().borrow().branch_record(branch).unwrap().base,
+        Some(snapshot.clone())
+    );
+
+    drop(subscriber);
+    drop(target);
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let reopened = NodeState::new_history_complete(receiver_uuid, schema, storage).unwrap();
+    assert_eq!(
+        BranchMetadata::from(reopened.branch_record(branch).unwrap()),
+        metadata
+    );
 }
 
 #[test]

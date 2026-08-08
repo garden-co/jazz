@@ -76,16 +76,16 @@ where
             parent: None,
             base: Some(
                 Snapshot::exclusive_base(
-                    self.node_uuid,
+                    NodeUuid(uuid::Uuid::nil()),
                     self.clock.applied_global_watermark,
-                    self.clock.tx_time,
+                    TxTime::default(),
                     Vec::new(),
                 )
                 .map_err(Error::InvalidStoredValue)?,
             ),
             state: codec::BranchState::Open,
         };
-        self.persist_branch_record(&record)?;
+        self.persist_branch_record(&record, true)?;
         self.branches.branches.insert(branch_id, record.clone());
         Ok(record)
     }
@@ -99,7 +99,9 @@ where
             base: None,
             state: codec::BranchState::Open,
         };
-        self.persist_branch_record(&record)?;
+        // The distinguished root is local storage scaffolding, not session-authored
+        // branch metadata, so it must never enter the sync outbox.
+        self.persist_branch_record(&record, false)?;
         self.branches.branches.insert(branch_id, record.clone());
         Ok(record)
     }
@@ -107,6 +109,39 @@ where
     /// Return recovered branch metadata.
     pub fn branch_record(&self, branch_id: BranchId) -> Option<&BranchRecord> {
         self.branches.branches.get(&branch_id)
+    }
+
+    /// Durable locally-authored metadata awaiting upstream acknowledgement.
+    pub fn pending_branch_metadata_uploads(&self) -> Vec<crate::protocol::BranchMetadata> {
+        self.branches
+            .pending_metadata_uploads
+            .iter()
+            .filter_map(|branch| self.branches.branches.get(branch))
+            .map(Into::into)
+            .collect()
+    }
+
+    /// Clear a durable metadata outbox item after an exact upstream echo.
+    pub fn acknowledge_branch_metadata(
+        &mut self,
+        metadata: &crate::protocol::BranchMetadata,
+    ) -> Result<(), Error> {
+        let Some(record) = self.branches.branches.get(&metadata.branch_id).cloned() else {
+            return Ok(());
+        };
+        if crate::protocol::BranchMetadata::from(&record) != *metadata {
+            return Err(Error::InvalidStoredValue(
+                "branch metadata acknowledgement does not match local record",
+            ));
+        }
+        if self
+            .branches
+            .pending_metadata_uploads
+            .contains(&metadata.branch_id)
+        {
+            self.persist_branch_record(&record, false)?;
+        }
+        Ok(())
     }
 
     /// Idempotently admit durable branch routing metadata received before a
@@ -138,13 +173,13 @@ where
                 && existing.state == codec::BranchState::Open
                 && record.state == codec::BranchState::Discarded
             {
-                self.persist_branch_record(&record)?;
+                self.persist_branch_record(&record, false)?;
                 self.branches.branches.insert(record.branch_id, record);
                 return Ok(());
             }
             return Err(Error::InvalidStoredValue("conflicting branch metadata"));
         }
-        self.persist_branch_record(&record)?;
+        self.persist_branch_record(&record, false)?;
         self.branches.branches.insert(record.branch_id, record);
         Ok(())
     }
@@ -162,17 +197,30 @@ where
                 "branch metadata creator does not match authenticated session",
             ));
         }
+        if metadata.parent.is_some() {
+            return Err(Error::InvalidStoredValue(
+                "v1 session branch metadata must be parentless",
+            ));
+        }
+        if !self.branches.branches.contains_key(&metadata.branch_id) && !metadata.open {
+            return Err(Error::InvalidStoredValue(
+                "first-seen session branch metadata must be open",
+            ));
+        }
         let Some(base) = metadata.base.as_ref() else {
             return Err(Error::InvalidStoredValue(
                 "session branch metadata requires a snapshot base",
             ));
         };
-        if base.global_base > self.clock.applied_global_watermark {
-            return Ok(false);
-        }
-        if let Some(parent) = metadata.parent
-            && !self.branches.branches.contains_key(&parent)
+        if base.owner != NodeUuid(uuid::Uuid::nil())
+            || base.local_base != TxTime::default()
+            || !base.dots.is_empty()
         {
+            return Err(Error::InvalidStoredValue(
+                "unsupported v1 branch snapshot shape",
+            ));
+        }
+        if base.global_base > self.clock.applied_global_watermark {
             return Ok(false);
         }
         self.admit_branch_metadata(metadata)?;
@@ -191,7 +239,7 @@ where
             return Err(Error::BranchClosed(branch_id));
         }
         record.state = codec::BranchState::Discarded;
-        self.persist_branch_record(&record)?;
+        self.persist_branch_record(&record, true)?;
         self.branches.branches.insert(branch_id, record);
         Ok(())
     }
@@ -1411,7 +1459,11 @@ where
         }
     }
 
-    fn persist_branch_record(&mut self, record: &BranchRecord) -> Result<(), Error> {
+    fn persist_branch_record(
+        &mut self,
+        record: &BranchRecord,
+        metadata_pending: bool,
+    ) -> Result<(), Error> {
         let mut batch = self.database.open_batch();
         batch.update(
             "jazz_branches",
@@ -1419,16 +1471,25 @@ where
                 Value::Uuid(record.branch_id.0),
                 Value::Uuid(record.created_by.0),
                 Value::Nullable(record.parent.map(|id| Box::new(Value::Uuid(id.0)))),
-                Value::Nullable(
-                    record
-                        .base
-                        .as_ref()
-                        .map(|base| Box::new(Value::U64(base.global_base.0))),
-                ),
+                Value::Nullable(record.base.as_ref().map(|base| {
+                    Box::new(Value::Bytes(
+                        serde_json::to_vec(base).expect("snapshot is serializable"),
+                    ))
+                })),
                 Value::String(branch_state_string(record.state).to_owned()),
+                Value::Bool(metadata_pending),
             ],
         );
         self.database.commit_batch(batch)?;
+        if metadata_pending {
+            self.branches
+                .pending_metadata_uploads
+                .insert(record.branch_id);
+        } else {
+            self.branches
+                .pending_metadata_uploads
+                .remove(&record.branch_id);
+        }
         Ok(())
     }
 
@@ -1442,19 +1503,15 @@ where
             .get_nullable_uuid(BranchRowRecord::FIELD_PARENT_IDX)?
             .map(BranchId);
         let base = record
-            .get_nullable_u64(BranchRowRecord::FIELD_BASE_GLOBAL_IDX)?
-            .map(|global| {
-                Snapshot::exclusive_base(
-                    self.node_uuid,
-                    GlobalSeq(global),
-                    TxTime::default(),
-                    Vec::new(),
-                )
-                .map_err(Error::InvalidStoredValue)
+            .get_nullable_bytes(BranchRowRecord::FIELD_BASE_SNAPSHOT_IDX)?
+            .map(|bytes| {
+                serde_json::from_slice(bytes)
+                    .map_err(|_| Error::InvalidStoredValue("invalid stored branch snapshot"))
             })
             .transpose()?;
         let state =
             branch_state_from_discriminant(record.get_enum(BranchRowRecord::FIELD_STATE_IDX)?)?;
+        let metadata_pending = record.get_bool(BranchRowRecord::FIELD_METADATA_PENDING_IDX)?;
         self.branches.branches.insert(
             branch_id,
             BranchRecord {
@@ -1465,6 +1522,9 @@ where
                 state,
             },
         );
+        if metadata_pending {
+            self.branches.pending_metadata_uploads.insert(branch_id);
+        }
         Ok(())
     }
 

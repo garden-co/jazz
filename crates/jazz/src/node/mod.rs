@@ -272,6 +272,8 @@ struct Branches {
     branches: BTreeMap<BranchId, BranchRecord>,
     /// Storage partitions materialized for table/schema-version/branch triples.
     branch_partitions: BTreeSet<(String, SchemaVersionId, BranchId)>,
+    /// Locally-authored metadata awaiting an upstream acknowledgement.
+    pending_metadata_uploads: BTreeSet<BranchId>,
 }
 
 /// Local transaction clock and settled-global application progress.
@@ -590,6 +592,7 @@ where
             branches: Branches {
                 branches: BTreeMap::new(),
                 branch_partitions,
+                pending_metadata_uploads: BTreeSet::new(),
             },
             clock: Clock {
                 tx_time: TxTime::default(),

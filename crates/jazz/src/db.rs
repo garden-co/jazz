@@ -5408,6 +5408,11 @@ where
                         .send(SyncMessage::FetchBranchMetadata { branches: repairs })
                         .map_err(transport_error)?;
                 }
+                for metadata in self.node.borrow().pending_branch_metadata_uploads() {
+                    self.transport
+                        .send(SyncMessage::BranchMetadata(metadata))
+                        .map_err(transport_error)?;
+                }
                 pending.extend(upstream_subscriptions.borrow_mut().drain(..));
                 let claims = self.node.borrow().session_claims_with_revisions();
                 for (identity, claims, revision) in claims {
@@ -5681,6 +5686,9 @@ where
                             let branch = metadata.branch_id;
                             self.node
                                 .borrow_mut()
+                                .acknowledge_branch_metadata(&metadata)?;
+                            self.node
+                                .borrow_mut()
                                 .apply_sync_message(SyncMessage::BranchMetadata(metadata))?;
                             pending_branch_metadata_repairs.remove(&branch);
                             if let Some(updates) = pending_branch_view_updates.remove(&branch) {
@@ -5781,10 +5789,9 @@ where
                             ingest_context.identity,
                         )? {
                             pending_session_branch_metadata.remove(&branch);
-                            let responses = self
-                                .node
-                                .borrow_mut()
-                                .apply_sync_message(SyncMessage::BranchMetadata(metadata))?;
+                            let responses = self.node.borrow_mut().apply_sync_message(
+                                SyncMessage::BranchMetadata(metadata.clone()),
+                            )?;
                             for response in responses {
                                 send_with_content_extents(
                                     &self.node,
@@ -5793,6 +5800,9 @@ where
                                     response,
                                 )?;
                             }
+                            self.transport
+                                .send(SyncMessage::BranchMetadata(metadata))
+                                .map_err(transport_error)?;
                         }
                     }
                 }
@@ -6347,20 +6357,11 @@ where
                                     }
                                     pending_session_branch_metadata
                                         .insert(metadata.branch_id, metadata.clone());
-                                    if let Some(parent) = metadata.parent
-                                        && self.node.borrow().branch_record(parent).is_none()
-                                        && pending_branch_metadata_repairs
-                                            .insert(parent, ())
-                                            .is_none()
-                                    {
-                                        self.transport
-                                            .send(SyncMessage::FetchBranchMetadata {
-                                                branches: vec![parent],
-                                            })
-                                            .map_err(transport_error)?;
-                                    }
                                     continue;
                                 }
+                                self.transport
+                                    .send(SyncMessage::BranchMetadata(metadata.clone()))
+                                    .map_err(transport_error)?;
                             }
                             if let SyncMessage::CommitUnit { tx, .. } = &other
                                 && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage

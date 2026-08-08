@@ -1226,11 +1226,12 @@ fn branches_table() -> GrooveTableSchema {
             column("branch_id", GrooveColumnType::Uuid),
             column("created_by", GrooveColumnType::Uuid),
             column("parent", GrooveColumnType::Uuid.nullable()),
-            column("base_global", GrooveColumnType::U64.nullable()),
+            column("base_snapshot", GrooveColumnType::Bytes.nullable()),
             column(
                 "state",
                 storage_enum("jazz_branch_state", &["open", "merged", "discarded"]),
             ),
+            column("metadata_pending", GrooveColumnType::Bool),
         ],
     )
     .with_primary_key(PrimaryKey::composite([PrimaryKeyColumn::uuid("branch_id")]))
