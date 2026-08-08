@@ -756,6 +756,29 @@ fn merge_back_branch_emits_ordinary_target_transaction_and_leaves_branch_open() 
 
     let squash_versions = core.query_versions_for_tx(squash).unwrap();
     assert_eq!(squash_versions.len(), 3);
+    for substitution in &provenance.substitutions {
+        assert!(
+            core.validate_lww_branch_substitution(
+                branch_id,
+                provenance,
+                substitution,
+                &squash_versions,
+            )
+            .unwrap()
+        );
+    }
+    let mut forged = provenance.substitutions[0].clone();
+    forged.sources[0].tx_id = squash;
+    assert!(
+        !core
+            .validate_lww_branch_substitution(
+                branch_id,
+                provenance,
+                &forged,
+                &squash_versions,
+            )
+            .unwrap()
+    );
     assert!(
         squash_versions
             .iter()
@@ -789,11 +812,23 @@ fn merge_back_branch_emits_ordinary_target_transaction_and_leaves_branch_open() 
         .unwrap();
     assert_eq!(received, provenance.clone());
     assert!(!received.substitutions.is_empty());
-    core.commit_mergeable_on_branch(
+    let late_write = core
+        .commit_mergeable_on_branch(
             branch_id,
             MergeableCommit::new("todos", row(4), 23).cells(title_cells("late write")),
         )
         .unwrap();
+    let second_merge = core.merge_back_branch(branch_id).unwrap();
+    let second_versions = core.query_versions_for_tx(second_merge).unwrap();
+    assert_eq!(second_versions.len(), 1);
+    assert_eq!(second_versions[0].row_uuid(), row(4));
+    let second_provenance = core
+        .transaction_record(second_merge)
+        .unwrap()
+        .branch_merge
+        .unwrap();
+    assert_eq!(second_provenance.substitutions.len(), 1);
+    assert_eq!(second_provenance.substitutions[0].sources[0].tx_id, late_write);
     drop(core);
     let mut reopened = reopen_node_at(&core_dir, node(2), schema());
     assert_eq!(
@@ -866,6 +901,27 @@ fn merge_back_fails_whole_calculation_when_source_row_is_not_readable() {
         Err(Error::AuthorizationDenied)
     ));
     assert!(core.merge_back_branch_as(branch_id, owner).is_ok());
+}
+
+#[test]
+fn merge_back_fails_closed_for_strategy_without_contribution_capabilities() {
+    let (_core_dir, mut core) =
+        open_history_complete_node_with_schema(node(2), counter_schema());
+    let branch_id = branch(0x43);
+    core.create_root_branch(branch_id).unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("counters", row(0x43), 10)
+            .cell("count", Value::U64(1))
+            .cell("title", v("branch")),
+    )
+    .unwrap();
+    assert!(matches!(
+        core.merge_back_branch(branch_id),
+        Err(Error::BranchMergeCalculation(
+            "column strategy lacks branch contribution capabilities"
+        ))
+    ));
 }
 
 #[derive(Clone, Copy)]

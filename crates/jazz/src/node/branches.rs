@@ -126,6 +126,7 @@ where
         let mut through_frontier = BTreeSet::new();
         let mut substitution_sources =
             BTreeMap::<ContributionCoordinate, BTreeSet<ContributionDot>>::new();
+        let known_source_dots = self.validated_target_source_dots(branch_id)?;
         let write_schema_version = self.catalogue.current_write_schema.schema;
         for table in self.catalogue.schema.tables.clone() {
             let table_schema = self.table_in_schema(&table.name, write_schema_version)?;
@@ -172,6 +173,7 @@ where
                         .map(|column| winner.cell(&table_schema, &column.name))
                         .collect::<Result<Vec<_>, _>>()?;
                     let mut authored_columns = BTreeSet::new();
+                    let mut layer_has_novel_contribution = false;
                     for source_version in &source_versions {
                         let source_tx_id = self.version_tx_id(source_version)?;
                         through_frontier.insert(source_tx_id);
@@ -192,25 +194,49 @@ where
                                             .collect()
                                     })
                                 {
-                                    authored_columns.insert(column.clone());
+                                    let column_schema = table_schema
+                                        .columns
+                                        .iter()
+                                        .find(|candidate| candidate.name == column)
+                                        .ok_or(Error::BranchMergeCalculation(
+                                            "authored source column is absent from current schema",
+                                        ))?;
+                                    if table_schema.merge_strategy(&column)
+                                        != crate::schema::MergeStrategy::Lww
+                                        || column_schema.large_value.is_some()
+                                        || column_schema.text_merge_spec.is_some()
+                                    {
+                                        return Err(Error::BranchMergeCalculation(
+                                            "column strategy lacks branch contribution capabilities",
+                                        ));
+                                    }
                                     let target = ContributionCoordinate {
                                         table: table.name.clone(),
                                         row_uuid,
                                         layer: MergeAspect::Content,
                                         component: ContributionComponent::Column(column.clone()),
                                     };
-                                    substitution_sources.entry(target).or_default().insert(
-                                        ContributionDot {
-                                            lineage: BranchLineage::Branch(branch_id),
-                                            tx_id: source_tx_id,
-                                            coordinate: ContributionCoordinate {
-                                                table: table.name.clone(),
-                                                row_uuid,
-                                                layer: MergeAspect::Content,
-                                                component: ContributionComponent::Column(column),
-                                            },
+                                    let source_dot = ContributionDot {
+                                        lineage: BranchLineage::Branch(branch_id),
+                                        tx_id: source_tx_id,
+                                        coordinate: ContributionCoordinate {
+                                            table: table.name.clone(),
+                                            row_uuid,
+                                            layer: MergeAspect::Content,
+                                            component: ContributionComponent::Column(
+                                                column.clone(),
+                                            ),
                                         },
-                                    );
+                                    };
+                                    if known_source_dots.contains(&source_dot) {
+                                        continue;
+                                    }
+                                    layer_has_novel_contribution = true;
+                                    authored_columns.insert(column.clone());
+                                    substitution_sources
+                                        .entry(target)
+                                        .or_default()
+                                        .insert(source_dot);
                                 }
                             }
                             VersionLayer::Deletion => {
@@ -220,20 +246,24 @@ where
                                     layer: MergeAspect::Deletion,
                                     component: ContributionComponent::Register,
                                 };
-                                substitution_sources.entry(target).or_default().insert(
-                                    ContributionDot {
-                                        lineage: BranchLineage::Branch(branch_id),
-                                        tx_id: source_tx_id,
-                                        coordinate: ContributionCoordinate {
-                                            table: table.name.clone(),
-                                            row_uuid,
-                                            layer: MergeAspect::Deletion,
-                                            component: ContributionComponent::Register,
-                                        },
-                                    },
-                                );
+                                let source_dot = ContributionDot {
+                                    lineage: BranchLineage::Branch(branch_id),
+                                    tx_id: source_tx_id,
+                                    coordinate: target.clone(),
+                                };
+                                if known_source_dots.contains(&source_dot) {
+                                    continue;
+                                }
+                                layer_has_novel_contribution = true;
+                                substitution_sources
+                                    .entry(target)
+                                    .or_default()
+                                    .insert(source_dot);
                             }
                         }
+                    }
+                    if !layer_has_novel_contribution {
+                        continue;
                     }
                     let authored_cells = table_schema
                         .columns
@@ -775,6 +805,158 @@ where
         heads.sort();
         heads.dedup();
         Ok(heads)
+    }
+
+    fn validated_target_source_dots(
+        &mut self,
+        branch_id: BranchId,
+    ) -> Result<BTreeSet<ContributionDot>, Error> {
+        let records = self
+            .database
+            .primary_key_scan_raw("jazz_transactions", &[])?
+            .into_iter()
+            .filter_map(|raw| {
+                let record = raw.record();
+                let bytes = record
+                    .get_nullable_bytes(TransactionRowRecord::FIELD_BRANCH_MERGE_IDX)
+                    .ok()??
+                    .to_vec();
+                let alias = record
+                    .get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)
+                    .ok()?;
+                let time = record.get_u64(TransactionRowRecord::FIELD_TIME_IDX).ok()?;
+                Some((bytes, alias, time))
+            })
+            .collect::<Vec<_>>();
+        let mut known = BTreeSet::new();
+        for (bytes, alias, time) in records {
+            let provenance: BranchMergeProvenance = serde_json::from_slice(&bytes)
+                .map_err(|_| Error::InvalidStoredValue("invalid branch merge provenance"))?;
+            if provenance.source_lineage != BranchLineage::Branch(branch_id) {
+                continue;
+            }
+            let Ok(canonical) = BranchMergeProvenance::canonical(
+                provenance.source_lineage,
+                provenance.from_frontier.clone(),
+                provenance.through_frontier.clone(),
+                provenance.substitutions.clone(),
+            ) else {
+                continue;
+            };
+            if canonical != provenance {
+                continue;
+            }
+            let alias = NodeAlias(alias);
+            let Some(node_uuid) = self
+                .node_aliases
+                .iter()
+                .find_map(|(node, candidate)| (*candidate == alias).then_some(*node))
+            else {
+                continue;
+            };
+            let tx_id = TxId::new(TxTime(time), node_uuid);
+            let emitted = self.query_versions_for_tx(tx_id)?;
+            let mut validated = BTreeSet::new();
+            let mut valid = true;
+            for substitution in &provenance.substitutions {
+                if !self.validate_lww_branch_substitution(
+                    branch_id,
+                    &provenance,
+                    substitution,
+                    &emitted,
+                )? {
+                    valid = false;
+                    break;
+                }
+                validated.extend(substitution.sources.iter().cloned());
+            }
+            if valid {
+                known.extend(validated);
+            }
+        }
+        Ok(known)
+    }
+
+    pub(super) fn validate_lww_branch_substitution(
+        &mut self,
+        branch_id: BranchId,
+        provenance: &BranchMergeProvenance,
+        substitution: &ContributionSubstitution,
+        emitted: &[VersionRow],
+    ) -> Result<bool, Error> {
+        let target = &substitution.target;
+        let layer = match target.layer {
+            MergeAspect::Content => VersionLayer::Content,
+            MergeAspect::Deletion => VersionLayer::Deletion,
+        };
+        let Some(emitted_version) = emitted.iter().find(|version| {
+            version.table() == target.table
+                && version.row_uuid() == target.row_uuid
+                && version.layer() == layer
+        }) else {
+            return Ok(false);
+        };
+        let source_versions =
+            self.branch_overlay_layer_versions(&target.table, target.row_uuid, layer, branch_id)?;
+        let through = provenance
+            .through_frontier
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let table = self.table(&target.table)?.clone();
+        let mut expected = BTreeSet::new();
+        let mut winning_source: Option<(TxId, VersionRow)> = None;
+        for source_version in source_versions {
+            let source_tx_id = self.version_tx_id(&source_version)?;
+            if !through.contains(&source_tx_id) {
+                continue;
+            }
+            let authored = match &target.component {
+                ContributionComponent::Column(column) => {
+                    source_version.authored_columns(&table)?.map_or_else(
+                        || {
+                            source_version
+                                .cell(&table, column)
+                                .map(|value| value.is_some())
+                        },
+                        |columns| Ok(columns.contains(column)),
+                    )?
+                }
+                ContributionComponent::Register => source_version.deletion().is_some(),
+                ContributionComponent::Operation(_) => return Ok(false),
+            };
+            if !authored {
+                continue;
+            }
+            let coordinate = target.clone();
+            expected.insert(ContributionDot {
+                lineage: BranchLineage::Branch(branch_id),
+                tx_id: source_tx_id,
+                coordinate,
+            });
+            if winning_source
+                .as_ref()
+                .is_none_or(|(winner, _)| source_tx_id > *winner)
+            {
+                winning_source = Some((source_tx_id, source_version));
+            }
+        }
+        if expected != substitution.sources.iter().cloned().collect() {
+            return Ok(false);
+        }
+        let Some((_, winning_source)) = winning_source else {
+            return Ok(false);
+        };
+        match &target.component {
+            ContributionComponent::Column(column) => Ok(emitted_version
+                .authored_columns(&table)?
+                .is_some_and(|columns| columns.contains(column))
+                && emitted_version.cell(&table, column)? == winning_source.cell(&table, column)?),
+            ContributionComponent::Register => {
+                Ok(emitted_version.deletion() == winning_source.deletion())
+            }
+            ContributionComponent::Operation(_) => Ok(false),
+        }
     }
 
     fn branch_overlay_layer_versions(
