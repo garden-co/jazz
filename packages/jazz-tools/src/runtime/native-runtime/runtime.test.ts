@@ -3453,7 +3453,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
     const ordinaryDeltas: NativeRowDelta[] = [];
     const ordinaryHandle = ordinary.createSubscription(JSON.stringify({ table: "todos" }));
-    ordinary.executeSubscription(ordinaryHandle, (delta: NativeRowDelta) => ordinaryDeltas.push(delta));
+    ordinary.executeSubscription(ordinaryHandle, (delta: NativeRowDelta) =>
+      ordinaryDeltas.push(delta),
+    );
     expect(decodeTestDeltas(ordinaryDeltas)[0]).toMatchObject([
       { kind: 0, id: formatUuid(first), row: { values: [{ value: "ordinary" }] } },
     ]);
