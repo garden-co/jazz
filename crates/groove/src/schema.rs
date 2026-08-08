@@ -215,12 +215,14 @@ pub struct TableSchema {
     /// Explicit secondary indices to maintain as durable IVM nodes.
     pub indices: Vec<IndexSchema>,
     pub foreign_keys: Vec<ForeignKey>,
-    /// Row layouts selected by the leading `u64` stored in each versioned row.
+    /// Top-level union cases selected by the leading canonical varint stored in
+    /// each row. A case owns one immutable dense payload descriptor.
     /// An empty registry denotes one homogeneous layout in catalogue order.
     /// Value-based writes use the reserved discriminator `0`; callers may bind
     /// the same layout to another discriminator when it is useful metadata.
     #[serde(default)]
-    pub schema_versions: Vec<TableSchemaVersion>,
+    #[serde(alias = "schema_versions")]
+    pub variants: Vec<TableVariant>,
 }
 
 impl TableSchema {
@@ -231,7 +233,7 @@ impl TableSchema {
             primary_key: None,
             indices: Vec::new(),
             foreign_keys: Vec::new(),
-            schema_versions: Vec::new(),
+            variants: Vec::new(),
         }
     }
 
@@ -259,24 +261,40 @@ impl TableSchema {
         version: u64,
         fields: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
-        self.schema_versions
-            .push(TableSchemaVersion::new(version, fields));
+        self.variants.push(TableVariant::new(version, fields));
+        self
+    }
+
+    /// Register one generic top-level union case.
+    ///
+    /// The case tag is table-local and has no schema-version meaning to
+    /// Groove. Jazz may allocate cases for physical schema layouts; direct
+    /// Groove users may allocate them for domain union variants.
+    pub fn with_variant(
+        mut self,
+        tag: u32,
+        fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.variants
+            .push(TableVariant::new(u64::from(tag), fields));
         self
     }
 
     pub fn has_schema_variants(&self) -> bool {
-        !self.schema_versions.is_empty()
+        !self.variants.is_empty()
     }
 
     pub fn schema_version(&self, version: u64) -> Option<&TableSchemaVersion> {
-        self.schema_versions
-            .iter()
-            .find(|schema_version| schema_version.version == version)
+        self.variants.iter().find(|variant| variant.tag == version)
+    }
+
+    pub fn variant(&self, tag: u32) -> Option<&TableVariant> {
+        self.schema_version(u64::from(tag))
     }
 
     /// Build the descriptor registered for one row schema version.
     pub fn record_schema_for_version(&self, version: u64) -> Option<RecordDescriptor> {
-        if self.schema_versions.is_empty() {
+        if self.variants.is_empty() {
             return Some(self.record_schema());
         }
         let schema_version = self.schema_version(version)?;
@@ -294,6 +312,10 @@ impl TableSchema {
         Some(RecordDescriptor::new(fields))
     }
 
+    pub fn record_schema_for_variant(&self, tag: u32) -> Option<RecordDescriptor> {
+        self.record_schema_for_version(u64::from(tag))
+    }
+
     pub fn record_schema(&self) -> RecordDescriptor {
         RecordDescriptor::new(
             self.columns
@@ -303,21 +325,25 @@ impl TableSchema {
     }
 }
 
-/// One ordered row layout in a schema-variant table's stable field catalogue.
+/// One top-level table union case and its ordered dense payload layout.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
-pub struct TableSchemaVersion {
-    pub version: u64,
+pub struct TableVariant {
+    #[serde(alias = "version")]
+    pub tag: u64,
     pub fields: Vec<String>,
 }
 
-impl TableSchemaVersion {
-    pub fn new(version: u64, fields: impl IntoIterator<Item = impl Into<String>>) -> Self {
+impl TableVariant {
+    pub fn new(tag: u64, fields: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
-            version,
+            tag,
             fields: fields.into_iter().map(Into::into).collect(),
         }
     }
 }
+
+/// Compatibility name for Jazz's schema-layout lowering.
+pub type TableSchemaVersion = TableVariant;
 
 /// Column name and type in declaration order.
 ///

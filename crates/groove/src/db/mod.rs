@@ -83,14 +83,20 @@ fn validate_table_schema_variants(table: &TableSchema) -> Result<(), Error> {
         .as_ref()
         .ok_or_else(|| Error::MissingPrimaryKey(table.name.clone()))?;
     let mut versions = HashSet::new();
-    for schema_version in &table.schema_versions {
-        if schema_version.version == 0 {
+    for schema_version in &table.variants {
+        if schema_version.tag == 0 {
             return Err(Error::ReservedTableSchemaVersion(table.name.clone()));
         }
-        if !versions.insert(schema_version.version) {
+        if schema_version.tag > u64::from(u32::MAX) {
+            return Err(Error::TableVariantTagOutOfRange {
+                table: table.name.clone(),
+                tag: schema_version.tag,
+            });
+        }
+        if !versions.insert(schema_version.tag) {
             return Err(Error::DuplicateTableSchemaVersion {
                 table: table.name.clone(),
-                version: schema_version.version,
+                version: schema_version.tag,
             });
         }
         let mut fields = HashSet::new();
@@ -100,7 +106,7 @@ fn validate_table_schema_variants(table: &TableSchema) -> Result<(), Error> {
             {
                 return Err(Error::InvalidTableSchemaVersionField {
                     table: table.name.clone(),
-                    version: schema_version.version,
+                    version: schema_version.tag,
                     field: field.clone(),
                 });
             }
@@ -109,7 +115,7 @@ fn validate_table_schema_variants(table: &TableSchema) -> Result<(), Error> {
             if !fields.contains(column.column.as_str()) {
                 return Err(Error::SchemaVersionMissingPrimaryKey {
                     table: table.name.clone(),
-                    version: schema_version.version,
+                    version: schema_version.tag,
                     column: column.column.clone(),
                 });
             }
@@ -239,6 +245,15 @@ where
         self.register_table_schema_version_with_columns(table, [], schema_version)
     }
 
+    /// Append one generic top-level table union case.
+    pub fn register_table_variant(
+        &mut self,
+        table: &str,
+        variant: crate::schema::TableVariant,
+    ) -> Result<(), Error> {
+        self.register_table_schema_version(table, variant)
+    }
+
     /// Append stable catalogue fields and one row layout to a live variant table.
     ///
     /// Existing fields and layouts remain immutable. This is the live-schema
@@ -277,7 +292,7 @@ where
                 }
             }
         }
-        updated.schema_versions.push(schema_version.clone());
+        updated.variants.push(schema_version.clone());
         validate_table_schema_variants(&updated)?;
         self.ivm_runtime
             .register_table_schema_version_with_columns(table, added_columns, schema_version)
@@ -363,6 +378,17 @@ where
             .map_err(Error::IvmRuntime)
     }
 
+    /// Append one generic source-case mapping to a fixed-output projection.
+    pub fn register_variant_case(
+        &mut self,
+        table: &str,
+        target: &str,
+        variant_tag: u32,
+        fields: impl IntoIterator<Item = ProjectField>,
+    ) -> Result<(), Error> {
+        self.register_variant_projection_case(table, target, u64::from(variant_tag), fields)
+    }
+
     /// Mark one source version as intentionally absent from a fixed-output
     /// projection.
     ///
@@ -379,6 +405,15 @@ where
         self.ivm_runtime
             .register_variant_projection_ignore_case(table, target, schema_version)
             .map_err(Error::IvmRuntime)
+    }
+
+    pub fn register_variant_ignore_case(
+        &mut self,
+        table: &str,
+        target: &str,
+        variant_tag: u32,
+    ) -> Result<(), Error> {
+        self.register_variant_projection_ignore_case(table, target, u64::from(variant_tag))
     }
 
     /// Apply one registered fixed-output projection to an already decoded
@@ -3987,6 +4022,8 @@ pub enum Error {
     DuplicatePrimaryKey { table: String, key: Vec<u8> },
     #[error("duplicate schema version {version} for table {table}")]
     DuplicateTableSchemaVersion { table: String, version: u64 },
+    #[error("table {table} variant tag {tag} exceeds the bounded u32 tag space")]
+    TableVariantTagOutOfRange { table: String, tag: u64 },
     #[error("duplicate query parameter binding: {0}")]
     DuplicateParameter(String),
     #[error(transparent)]

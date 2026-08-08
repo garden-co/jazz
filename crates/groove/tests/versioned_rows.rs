@@ -603,21 +603,22 @@ fn mixed_schema_versions_survive_replacement_and_reopen() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn version_header_is_fixed_width_and_validated_on_read() -> Result<(), Box<dyn std::error::Error>> {
+fn variant_header_is_canonical_varint_and_validated_on_read()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut database = open_database()?;
+    let record = row(1, &[Value::String("first".into()), Value::U64(1)]);
+    let payload_len = record.raw().len();
     let mut batch = database.open_batch();
-    batch.insert(
-        "items",
-        row(1, &[Value::String("first".into()), Value::U64(1)]),
-    );
+    batch.insert("items", record);
     database.commit_batch(batch)?;
 
     let storage = database.into_storage();
     let entries = storage.prefix("items", b"")?;
     let (key, stored) = entries.first().expect("stored row");
-    assert_eq!(&stored[..8], &1_u64.to_le_bytes());
+    assert_eq!(stored[0], 1);
+    assert_eq!(stored.len(), payload_len + 1);
 
-    storage.set("items", key, &[1, 2, 3])?;
+    storage.set("items", key, &[0x80, 0x00])?;
     let reopened = Database::new(versioned_schema(), storage)?;
     assert!(matches!(
         reopened.primary_key_get("items", &[Value::U64(1)]),

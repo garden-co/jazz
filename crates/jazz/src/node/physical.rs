@@ -8,6 +8,14 @@ use groove::schema::{
     TableSchema as GrooveTableSchema,
 };
 
+/// Lower Jazz's durable schema alias into Groove's deliberately smaller,
+/// table-local union-case space. A future user-declared top-level union will
+/// allocate a distinct tag for each `(schema alias, user case)` pair here.
+fn groove_variant_tag(alias: SchemaVersionAlias) -> Result<u32, Error> {
+    u32::try_from(alias.0)
+        .map_err(|_| Error::InvalidStoredValue("physical table variant tag exhausted"))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(super) struct SchemaPhysicalMapping {
     pub(super) tables: BTreeMap<String, TablePhysicalMapping>,
@@ -480,17 +488,17 @@ where
                     &target_table_name,
                 )?
                 else {
-                    self.database.register_variant_projection_ignore_case(
+                    self.database.register_variant_ignore_case(
                         &storage_table,
                         &projection_target,
-                        source_alias.0,
+                        groove_variant_tag(source_alias)?,
                     )?;
                     continue;
                 };
-                self.database.register_variant_projection_case(
+                self.database.register_variant_case(
                     &storage_table,
                     &projection_target,
-                    source_alias.0,
+                    groove_variant_tag(source_alias)?,
                     fields,
                 )?;
             }
@@ -565,17 +573,17 @@ where
                 )?;
                 for storage_table in &storage_tables {
                     if let Some(fields) = fields.clone() {
-                        self.database.register_variant_projection_case(
+                        self.database.register_variant_case(
                             storage_table,
                             &projection_target,
-                            source_alias.0,
+                            groove_variant_tag(source_alias)?,
                             fields,
                         )?;
                     } else {
-                        self.database.register_variant_projection_ignore_case(
+                        self.database.register_variant_ignore_case(
                             storage_table,
                             &projection_target,
-                            source_alias.0,
+                            groove_variant_tag(source_alias)?,
                         )?;
                     }
                 }
@@ -611,8 +619,8 @@ where
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            for schema_version in desired.schema_versions {
-                if existing.schema_version(schema_version.version).is_some() {
+            for schema_version in desired.variants {
+                if existing.schema_version(schema_version.tag).is_some() {
                     continue;
                 }
                 self.database.register_table_schema_version_with_columns(
@@ -1287,14 +1295,15 @@ pub(super) fn physical_version_storage_tables(
             }
         }
         for (alias, fields) in layouts_by_alias {
-            physical = physical.with_schema_version(alias.0, fields);
+            physical = physical.with_variant(groove_variant_tag(alias)?, fields);
         }
         for (alias, fields) in current_layouts_by_alias {
-            physical_global = physical_global.with_schema_version(alias.0, fields.clone());
-            physical_ahead = physical_ahead.with_schema_version(alias.0, fields);
+            physical_global =
+                physical_global.with_variant(groove_variant_tag(alias)?, fields.clone());
+            physical_ahead = physical_ahead.with_variant(groove_variant_tag(alias)?, fields);
         }
         for (alias, fields) in rejected_layouts_by_alias {
-            rejected = rejected.with_schema_version(alias.0, fields);
+            rejected = rejected.with_variant(groove_variant_tag(alias)?, fields);
         }
         for (_, branch_id) in branch_partitions
             .iter()

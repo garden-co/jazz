@@ -92,7 +92,11 @@ use thiserror::Error;
 pub use macros::{FieldKind, RecordField, assert_record_field_layout};
 pub use values::{EnumSchema, Value, ValueType};
 
-pub const SCHEMA_VERSION_HEADER_LEN: usize = std::mem::size_of::<u64>();
+/// Maximum bytes in the canonical table-local variant-tag prefix.
+///
+/// Tags are deliberately bounded to `u32`: a table with billions of retained
+/// row cases has a registry problem long before it has a tag-space problem.
+pub const MAX_VARIANT_TAG_LEN: usize = 5;
 
 use values::{
     checked_add, decode_value, encode_fixed_value, encode_value, ensure_value_type, usize_to_u32,
@@ -1588,35 +1592,49 @@ pub struct OwnedRecord {
     descriptor: RecordDescriptor,
 }
 
-/// An encoded row bound to the table-local schema version that describes it.
+/// An encoded row bound to the table-local variant case that describes it.
 ///
-/// The version travels with the row through batching and is written as the
-/// stable eight-byte prefix of the stored value.
+/// The tag travels with the row through batching and is written as a canonical
+/// bounded varint prefix. Its meaning belongs to the table registry. Groove
+/// does not distinguish user-declared union cases from storage-layout cases;
+/// a lowering layer may allocate one tag for every `(layout, user_case)` pair.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VersionedRecord {
-    schema_version: u64,
+pub struct VariantRecord {
+    variant_tag: u32,
     record: OwnedRecord,
 }
 
-impl VersionedRecord {
-    pub fn new(schema_version: u64, record: OwnedRecord) -> Self {
-        Self {
-            schema_version,
-            record,
-        }
+impl VariantRecord {
+    /// Compatibility constructor for already-validated schema-version aliases.
+    /// Generic callers should prefer [`Self::try_new`].
+    pub fn new(variant_tag: u64, record: OwnedRecord) -> Self {
+        Self::try_new(variant_tag, record).expect("table variant tag exceeds u32")
     }
 
+    pub fn try_new(variant_tag: u64, record: OwnedRecord) -> Result<Self, Error> {
+        Ok(Self {
+            variant_tag: u32::try_from(variant_tag)
+                .map_err(|_| Error::VariantTagOutOfRange(variant_tag))?,
+            record,
+        })
+    }
+
+    pub fn variant_tag(&self) -> u32 {
+        self.variant_tag
+    }
+
+    /// Compatibility spelling for schema-version lowering clients.
     pub fn schema_version(&self) -> u64 {
-        self.schema_version
+        u64::from(self.variant_tag)
     }
 
     pub fn create(
-        schema_version: u64,
+        variant_tag: u64,
         descriptor: RecordDescriptor,
         values: &[Value],
     ) -> Result<Self, Error> {
         let raw = descriptor.create(values)?;
-        Ok(Self::new(schema_version, OwnedRecord::new(raw, descriptor)))
+        Self::try_new(variant_tag, OwnedRecord::new(raw, descriptor))
     }
 
     pub fn record(&self) -> &OwnedRecord {
@@ -1652,27 +1670,63 @@ impl VersionedRecord {
     }
 
     pub fn into_stored_bytes(self) -> Vec<u8> {
-        encode_versioned_record(self.schema_version, self.record.raw())
+        encode_variant_record(self.variant_tag, self.record.raw())
     }
 }
 
-pub fn encode_versioned_record(schema_version: u64, payload: &[u8]) -> Vec<u8> {
-    let mut stored = Vec::with_capacity(SCHEMA_VERSION_HEADER_LEN + payload.len());
-    stored.extend_from_slice(&schema_version.to_le_bytes());
+/// Backwards-compatible Jazz-facing name. The generic Groove abstraction is
+/// [`VariantRecord`].
+pub type VersionedRecord = VariantRecord;
+
+pub fn encode_variant_record(variant_tag: u32, payload: &[u8]) -> Vec<u8> {
+    let mut stored = Vec::with_capacity(MAX_VARIANT_TAG_LEN + payload.len());
+    put_canonical_u32_varint(&mut stored, variant_tag);
     stored.extend_from_slice(payload);
     stored
 }
 
+pub fn split_variant_record(stored: &[u8]) -> Result<(u32, &[u8]), Error> {
+    let (tag, header_len) = read_canonical_u32_varint(stored)?;
+    Ok((tag, &stored[header_len..]))
+}
+
+/// Compatibility codec used by existing schema-version lowering. New generic
+/// callers should use [`encode_variant_record`].
+pub fn encode_versioned_record(schema_version: u64, payload: &[u8]) -> Vec<u8> {
+    let tag = u32::try_from(schema_version).expect("table variant tag exceeds u32");
+    encode_variant_record(tag, payload)
+}
+
 pub fn split_versioned_record(stored: &[u8]) -> Result<(u64, &[u8]), Error> {
-    let header = stored
-        .get(..SCHEMA_VERSION_HEADER_LEN)
-        .ok_or(Error::InvalidSchemaVersionHeader)?;
-    let schema_version = u64::from_le_bytes(
-        header
-            .try_into()
-            .expect("schema-version header has u64 width"),
-    );
-    Ok((schema_version, &stored[SCHEMA_VERSION_HEADER_LEN..]))
+    let (tag, payload) = split_variant_record(stored)?;
+    Ok((u64::from(tag), payload))
+}
+
+fn put_canonical_u32_varint(out: &mut Vec<u8>, mut value: u32) {
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn read_canonical_u32_varint(input: &[u8]) -> Result<(u32, usize), Error> {
+    let mut value = 0_u32;
+    for index in 0..MAX_VARIANT_TAG_LEN {
+        let byte = *input.get(index).ok_or(Error::InvalidSchemaVersionHeader)?;
+        let payload = u32::from(byte & 0x7f);
+        if index == MAX_VARIANT_TAG_LEN - 1 && payload > 0x0f {
+            return Err(Error::InvalidSchemaVersionHeader);
+        }
+        value |= payload << (index * 7);
+        if byte & 0x80 == 0 {
+            if index > 0 && payload == 0 {
+                return Err(Error::InvalidSchemaVersionHeader);
+            }
+            return Ok((value, index + 1));
+        }
+    }
+    Err(Error::InvalidSchemaVersionHeader)
 }
 
 impl OwnedRecord {
@@ -1828,6 +1882,8 @@ pub enum Error {
     InvalidOffset,
     #[error("invalid schema-version header")]
     InvalidSchemaVersionHeader,
+    #[error("table variant tag {0} exceeds the bounded u32 tag space")]
+    VariantTagOutOfRange(u64),
     #[error("nested record bytes are not canonical")]
     NonCanonicalRecord,
     #[error("tuple members must be fixed-width, got {member_type:?}")]

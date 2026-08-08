@@ -229,13 +229,10 @@ impl IvmRuntime {
             .iter_mut()
             .find(|candidate| candidate.name == table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(table.to_owned()))?;
-        if table_schema
-            .schema_version(schema_version.version)
-            .is_some()
-        {
+        if table_schema.schema_version(schema_version.tag).is_some() {
             return Err(IvmRuntimeError::DuplicateTableSchemaVersion {
                 table: table.to_owned(),
-                version: schema_version.version,
+                version: schema_version.tag,
             });
         }
         for column in columns {
@@ -251,8 +248,8 @@ impl IvmRuntime {
             }
             table_schema.columns.push(column);
         }
-        let version = schema_version.version;
-        table_schema.schema_versions.push(schema_version);
+        let version = schema_version.tag;
+        table_schema.variants.push(schema_version);
         let table_schema = table_schema.clone();
         for index in &table_schema.indices {
             self.register_schema_index_variant_case(&table_schema, index, version)?;
@@ -287,12 +284,8 @@ impl IvmRuntime {
                 target,
                 schema_index_input_descriptor(&table_schema, &index)?,
             )?;
-            for schema_version in &table_schema.schema_versions {
-                self.register_schema_index_variant_case(
-                    &table_schema,
-                    &index,
-                    schema_version.version,
-                )?;
+            for schema_version in &table_schema.variants {
+                self.register_schema_index_variant_case(&table_schema, &index, schema_version.tag)?;
             }
         }
         let persist = self.add_dedup_schema_index(&table_schema, &index)?;
@@ -530,8 +523,8 @@ impl IvmRuntime {
                     target,
                     schema_index_input_descriptor(&table, index)?,
                 )?;
-                for schema_version in &table.schema_versions {
-                    self.register_schema_index_variant_case(&table, index, schema_version.version)?;
+                for schema_version in &table.variants {
+                    self.register_schema_index_variant_case(&table, index, schema_version.tag)?;
                 }
             }
         }
