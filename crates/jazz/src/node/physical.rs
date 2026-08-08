@@ -254,10 +254,25 @@ pub(super) fn allocate_physical_variant_cases(
         }
     }
 
-    let requested = cases.into_iter().collect::<BTreeMap<_, _>>();
+    let mut requested = BTreeMap::new();
+    for (user_case, fields) in cases {
+        if requested.insert(user_case, fields).is_some() {
+            return Err(Error::InvalidStoredValue(
+                "duplicate physical table variant case",
+            ));
+        }
+    }
     if requested.is_empty() {
         return Err(Error::InvalidStoredValue(
             "physical table variant registry must not be empty",
+        ));
+    }
+    if existing_target
+        .keys()
+        .any(|user_case| !requested.contains_key(user_case))
+    {
+        return Err(Error::InvalidStoredValue(
+            "physical table variant case cannot be removed",
         ));
     }
     if existing_target.is_empty()
@@ -368,7 +383,14 @@ pub(super) fn allocate_physical_payload_variant_cases(
     logical_table: &str,
     cases: impl IntoIterator<Item = (String, Vec<PhysicalVariantPayloadField>)>,
 ) -> Result<Vec<PhysicalVariantCase>, Error> {
-    let requested = cases.into_iter().collect::<BTreeMap<_, _>>();
+    let mut requested = BTreeMap::new();
+    for (user_case, payload_fields) in cases {
+        if requested.insert(user_case, payload_fields).is_some() {
+            return Err(Error::InvalidStoredValue(
+                "duplicate physical table variant case",
+            ));
+        }
+    }
     let mapping = mappings
         .get(&schema_version)
         .and_then(|mapping| mapping.tables.get(logical_table))
@@ -2241,6 +2263,66 @@ mod variant_case_tests {
         assert_eq!(ty(&metric, "value"), records::ValueType::U64);
         assert_eq!(ty(&text, "id"), records::ValueType::U64);
         assert_eq!(ty(&metric, "event_id"), records::ValueType::U64);
+    }
+
+    #[test]
+    fn variant_case_registry_rejects_duplicates_and_accidental_omission() {
+        let v1 = schema(1);
+        let aliases = BTreeMap::from([(v1, SchemaVersionAlias(1))]);
+        let mut mappings =
+            BTreeMap::from([(v1, mapping(7, &[("id", 1), ("body", 2), ("url", 3)]))]);
+
+        let duplicate = vec![
+            (
+                Some("text".to_owned()),
+                BTreeSet::from(["id".to_owned(), "body".to_owned()]),
+            ),
+            (
+                Some("text".to_owned()),
+                BTreeSet::from(["id".to_owned(), "body".to_owned()]),
+            ),
+        ];
+        assert!(matches!(
+            allocate_physical_variant_cases(&mut mappings, &aliases, v1, "entries", duplicate,),
+            Err(Error::InvalidStoredValue(
+                "duplicate physical table variant case"
+            ))
+        ));
+        assert!(mappings[&v1].tables["entries"].variant_cases.is_empty());
+
+        allocate_physical_variant_cases(&mut mappings, &aliases, v1, "entries", cases(false))
+            .unwrap();
+        let unchanged = mappings.clone();
+        assert!(matches!(
+            allocate_physical_variant_cases(
+                &mut mappings,
+                &aliases,
+                v1,
+                "entries",
+                [(
+                    Some("text".to_owned()),
+                    BTreeSet::from(["id".to_owned(), "body".to_owned()]),
+                )],
+            ),
+            Err(Error::InvalidStoredValue(
+                "physical table variant case cannot be removed"
+            ))
+        ));
+        assert_eq!(mappings, unchanged);
+
+        let duplicate_payload = vec![payload_cases()[0].clone(), payload_cases()[0].clone()];
+        assert!(matches!(
+            allocate_physical_payload_variant_cases(
+                &mut BTreeMap::from([(v1, mapping(8, &[("id", 1)]))]),
+                &aliases,
+                v1,
+                "entries",
+                duplicate_payload,
+            ),
+            Err(Error::InvalidStoredValue(
+                "duplicate physical table variant case"
+            ))
+        ));
     }
 
     #[test]
