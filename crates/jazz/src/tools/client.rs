@@ -1042,7 +1042,8 @@ impl ClientDb {
         {
             batch_id = OpenBatchId::new();
         }
-        inner.db
+        inner
+            .db
             .begin_exclusive(batch_id)
             .map_err(|error| JazzError::Write(error.to_string()))?;
         inner.transactions.insert(
@@ -2164,9 +2165,7 @@ fn aggregate_public_values(
 }
 
 fn core_batch_id(tx_id: CoreTxId) -> BatchId {
-    let mut bytes = *tx_id.node.0.as_bytes();
-    bytes[..8].copy_from_slice(&tx_id.time.0.to_be_bytes());
-    BatchId(bytes)
+    BatchId::from_committed_tx(tx_id)
 }
 
 fn core_tier(tier: DurabilityTier) -> CoreDurabilityTier {
@@ -3101,7 +3100,11 @@ impl JazzClient {
     }
 
     /// Update a row.
-    pub fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<Option<BatchId>> {
+    pub fn update(
+        &self,
+        object_id: ObjectId,
+        updates: Vec<(String, Value)>,
+    ) -> Result<Option<BatchId>> {
         {
             let table = self
                 .db

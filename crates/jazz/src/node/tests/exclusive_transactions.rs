@@ -22,6 +22,38 @@ fn exclusive_base_snapshot_rejects_foreign_dots_at_creation() {
 }
 
 #[test]
+fn open_batch_identity_is_unique_and_terminal() {
+    let (_temp_dir, mut node) = open_node();
+    let rolled_back = OpenBatchId::new();
+    node.open_exclusive(rolled_back).unwrap();
+    assert!(matches!(
+        node.open_exclusive(rolled_back),
+        Err(Error::DuplicateOpenBatch(id)) if id == rolled_back
+    ));
+    node.abandon_tx(rolled_back).unwrap();
+    assert!(matches!(
+        node.open_exclusive(rolled_back),
+        Err(Error::DuplicateOpenBatch(id)) if id == rolled_back
+    ));
+
+    let committed = OpenBatchId::new();
+    node.open_exclusive(committed).unwrap();
+    node.tx_write(
+        committed,
+        "todos",
+        row(91),
+        title_cells("committed"),
+        None,
+    )
+    .unwrap();
+    node.commit_exclusive(committed, user(1), 10).unwrap();
+    assert!(matches!(
+        node.open_exclusive(committed),
+        Err(Error::DuplicateOpenBatch(id)) if id == committed
+    ));
+}
+
+#[test]
 fn exclusive_tx_snapshot_read_ignores_newer_commits_after_open() {
     let (_temp_dir, mut node) = open_node();
     let row = row(7);
@@ -261,7 +293,7 @@ fn exclusive_tx_open_state_is_invisible_outside_transaction() {
     assert!(node.abandon_tx(tx_id).is_ok());
     assert!(matches!(
         node.tx_read(tx_id, "todos", row).unwrap_err(),
-        Error::MissingOpenTx(missing) if missing == tx_id
+        Error::MissingOpenBatch(missing) if missing == tx_id
     ));
 }
 #[test]

@@ -59,18 +59,18 @@ use jazz::groove::storage::{
     ReopenableStorage as CoreReopenableStorage, RocksDbStorage as CoreRocksDbStorage,
 };
 use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
-use jazz::tools::OpenBatchId as CoreOpenBatchId;
 use jazz::query::{
     Query as CoreQuery, RelationExpr as CoreRelationExpr, RelationQuery as CoreRelationQuery,
 };
 use jazz::schema::JazzSchema;
-use jazz::tools::AppId;
+use jazz::tools::OpenBatchId as CoreOpenBatchId;
 use jazz::tools::identity;
 use jazz::tools::middleware::AuthConfig;
 use jazz::tools::server::{
     JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend,
     TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
 };
+use jazz::tools::{AppId, BatchId};
 use jazz::tx::{DurabilityTier as CoreDurabilityTier, Fate as CoreFate, TxId};
 use jazz::wire::{TransportError, WireTransport as CoreWireTransport};
 
@@ -227,6 +227,7 @@ pub struct QueryAttachment {
 #[napi(js_name = "Write")]
 pub struct Write {
     payload: Vec<u8>,
+    batch_id: BatchId,
     inner: Option<NapiWrite>,
 }
 
@@ -283,6 +284,11 @@ macro_rules! with_napi_mergeable_tx {
 
 #[napi]
 impl Write {
+    #[napi(getter, js_name = "batchId")]
+    pub fn batch_id(&self) -> String {
+        self.batch_id.to_string()
+    }
+
     #[napi(getter)]
     pub fn payload(&self) -> Uint8Array {
         Uint8Array::new(self.payload.clone())
@@ -1464,7 +1470,11 @@ impl NapiDb {
     }
 
     #[napi(js_name = "mergeableTxForIdentity")]
-    pub fn mergeable_tx_for_identity(&self, open_batch_id: String, author: Uint8Array) -> napi::Result<Tx> {
+    pub fn mergeable_tx_for_identity(
+        &self,
+        open_batch_id: String,
+        author: Uint8Array,
+    ) -> napi::Result<Tx> {
         let open_batch_id = open_batch_id
             .parse::<CoreOpenBatchId>()
             .map_err(napi::Error::from_reason)?;
@@ -1606,6 +1616,7 @@ fn core_write_memory(
     Ok(Write {
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        batch_id: BatchId::from_committed_tx(tx_id),
         inner: Some(NapiWrite::Memory { db, tx_id }),
     })
 }
@@ -1622,6 +1633,7 @@ fn core_write_persistent(
     Ok(Write {
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        batch_id: BatchId::from_committed_tx(tx_id),
         inner: Some(NapiWrite::Persistent { db, tx_id }),
     })
 }
@@ -1691,6 +1703,7 @@ fn core_tx_write(tx_id: TxId, inner: Option<NapiWrite>) -> napi::Result<Write> {
     Ok(Write {
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        batch_id: BatchId::from_committed_tx(tx_id),
         inner,
     })
 }

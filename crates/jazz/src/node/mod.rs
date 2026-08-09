@@ -417,6 +417,8 @@ struct RegisteredBinding {
 struct OpenTxState {
     /// Open transaction handles keyed by caller-generated identity.
     open_transactions: BTreeMap<OpenBatchId, OpenTransaction>,
+    /// Identities consumed by commit or rollback; never reusable in this runtime.
+    closed_batches: BTreeSet<OpenBatchId>,
     /// Local-only permission subjects for transactions whose `made_by` keeps provenance.
     local_permission_subjects: BTreeMap<TxId, AuthorId>,
 }
@@ -676,6 +678,7 @@ where
             },
             open_tx: OpenTxState {
                 open_transactions: BTreeMap::new(),
+                closed_batches: BTreeSet::new(),
                 local_permission_subjects: BTreeMap::new(),
             },
             rejections: RejectionTracking::default(),
@@ -6250,7 +6253,7 @@ pub enum Error {
     MaintainedViewMissingBundleWitness(&'static str),
     /// Open transaction handle was not known.
     #[error("missing open transaction: {0:?}")]
-    MissingOpenTx(OpenBatchId),
+    MissingOpenBatch(OpenBatchId),
     /// A caller attempted to reuse an identity that still names live mutable work.
     #[error("duplicate open batch id: {0}")]
     DuplicateOpenBatch(OpenBatchId),

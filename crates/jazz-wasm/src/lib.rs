@@ -17,9 +17,9 @@ use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 use jazz::groove::storage::OpfsStorage;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::tools::OpenBatchId;
 use jazz::query::{Query, RelationExpr, RelationQuery};
 use jazz::schema::JazzSchema;
+use jazz::tools::{BatchId, OpenBatchId};
 use jazz::tx::{DurabilityTier, TxId};
 use jazz::wire::{TransportError, WireTransport};
 use serde::{Deserialize, Serialize};
@@ -244,6 +244,7 @@ pub struct WasmQueryAttachment {
 #[wasm_bindgen]
 pub struct WasmWrite {
     payload: Vec<u8>,
+    batch_id: BatchId,
     inner: Option<WasmWriteInner>,
 }
 
@@ -261,6 +262,11 @@ enum WasmWriteInner {
 
 #[wasm_bindgen]
 impl WasmWrite {
+    #[wasm_bindgen(getter, js_name = batchId)]
+    pub fn batch_id(&self) -> String {
+        self.batch_id.to_string()
+    }
+
     #[wasm_bindgen(getter, js_name = payload)]
     pub fn payload(&self) -> Vec<u8> {
         self.payload.clone()
@@ -471,7 +477,11 @@ impl WasmDbInner {
         with_wasm_db!(self, |db| db.begin_exclusive(id))
     }
 
-    fn begin_mergeable(&self, id: OpenBatchId, author: Option<AuthorId>) -> Result<(), jazz::db::Error> {
+    fn begin_mergeable(
+        &self,
+        id: OpenBatchId,
+        author: Option<AuthorId>,
+    ) -> Result<(), jazz::db::Error> {
         with_wasm_db!(self, |db| match author {
             Some(author) => db.begin_mergeable_for_identity(id, author),
             None => db.begin_mergeable(id),
@@ -1779,8 +1789,12 @@ impl WasmDb {
 
     #[wasm_bindgen(js_name = mergeableTx)]
     pub fn mergeable_tx(&self, open_batch_id: String) -> Result<WasmTx, JsValue> {
-        let open_batch_id = open_batch_id.parse::<OpenBatchId>().map_err(|error| JsValue::from_str(&error))?;
-        self.inner.begin_mergeable(open_batch_id, None).map_err(to_js_error)?;
+        let open_batch_id = open_batch_id
+            .parse::<OpenBatchId>()
+            .map_err(|error| JsValue::from_str(&error))?;
+        self.inner
+            .begin_mergeable(open_batch_id, None)
+            .map_err(to_js_error)?;
         Ok(WasmTx {
             db: self.inner.clone(),
             kind: WasmTxKind::Mergeable,
@@ -1789,10 +1803,18 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = mergeableTxForIdentity)]
-    pub fn mergeable_tx_for_identity(&self, open_batch_id: String, author: Vec<u8>) -> Result<WasmTx, JsValue> {
-        let open_batch_id = open_batch_id.parse::<OpenBatchId>().map_err(|error| JsValue::from_str(&error))?;
+    pub fn mergeable_tx_for_identity(
+        &self,
+        open_batch_id: String,
+        author: Vec<u8>,
+    ) -> Result<WasmTx, JsValue> {
+        let open_batch_id = open_batch_id
+            .parse::<OpenBatchId>()
+            .map_err(|error| JsValue::from_str(&error))?;
         let author = author_id_from_bytes(&author)?;
-        self.inner.begin_mergeable(open_batch_id, Some(author)).map_err(to_js_error)?;
+        self.inner
+            .begin_mergeable(open_batch_id, Some(author))
+            .map_err(to_js_error)?;
         Ok(WasmTx {
             db: self.inner.clone(),
             kind: WasmTxKind::Mergeable,
@@ -1802,8 +1824,12 @@ impl WasmDb {
 
     #[wasm_bindgen(js_name = exclusiveTx)]
     pub fn exclusive_tx(&self, open_batch_id: String) -> Result<WasmTx, JsValue> {
-        let open_batch_id = open_batch_id.parse::<OpenBatchId>().map_err(|error| JsValue::from_str(&error))?;
-        self.inner.begin_exclusive(open_batch_id).map_err(to_js_error)?;
+        let open_batch_id = open_batch_id
+            .parse::<OpenBatchId>()
+            .map_err(|error| JsValue::from_str(&error))?;
+        self.inner
+            .begin_exclusive(open_batch_id)
+            .map_err(to_js_error)?;
         Ok(WasmTx {
             db: self.inner.clone(),
             kind: WasmTxKind::Exclusive,
@@ -2245,6 +2271,7 @@ fn wasm_write_memory(
     };
     Ok(WasmWrite {
         payload: postcard::to_allocvec(&result).map_err(to_js_error)?,
+        batch_id: BatchId::from_committed_tx(tx_id),
         inner: Some(WasmWriteInner::MemoryTx { db, tx_id }),
     })
 }
@@ -2261,6 +2288,7 @@ fn wasm_write_browser(
     };
     Ok(WasmWrite {
         payload: postcard::to_allocvec(&result).map_err(to_js_error)?,
+        batch_id: BatchId::from_committed_tx(tx_id),
         inner: Some(WasmWriteInner::BrowserTx { db, tx_id }),
     })
 }
@@ -2272,6 +2300,7 @@ fn wasm_tx_write(tx_id: TxId, inner: Option<WasmWriteInner>) -> Result<WasmWrite
     };
     Ok(WasmWrite {
         payload: postcard::to_allocvec(&result).map_err(to_js_error)?,
+        batch_id: BatchId::from_committed_tx(tx_id),
         inner,
     })
 }

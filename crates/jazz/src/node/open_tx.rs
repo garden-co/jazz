@@ -23,14 +23,23 @@ where
         made_by: AuthorId,
         permission_subject: Option<AuthorId>,
     ) -> Result<(), Error> {
-        self.open_transaction(id, OpenTransactionKind::Mergeable {
-            made_by,
-            permission_subject,
-        })
+        self.open_transaction(
+            id,
+            OpenTransactionKind::Mergeable {
+                made_by,
+                permission_subject,
+            },
+        )
     }
 
-    fn open_transaction(&mut self, id: OpenBatchId, kind: OpenTransactionKind) -> Result<(), Error> {
-        if self.open_tx.open_transactions.contains_key(&id) {
+    fn open_transaction(
+        &mut self,
+        id: OpenBatchId,
+        kind: OpenTransactionKind,
+    ) -> Result<(), Error> {
+        if self.open_tx.open_transactions.contains_key(&id)
+            || self.open_tx.closed_batches.contains(&id)
+        {
             return Err(Error::DuplicateOpenBatch(id));
         }
         let local_base = self.clock.tx_time;
@@ -343,11 +352,14 @@ where
     /// Commit an exclusive transaction and return its sync commit unit.
     pub fn commit_exclusive(
         &mut self,
-        tx_id: OpenBatchId,
+        open_batch_id: OpenBatchId,
         made_by: AuthorId,
         now_ms: u64,
     ) -> Result<(TxId, SyncMessage), Error> {
-        if !matches!(self.open_tx(tx_id)?.kind, OpenTransactionKind::Exclusive) {
+        if !matches!(
+            self.open_tx(open_batch_id)?.kind,
+            OpenTransactionKind::Exclusive
+        ) {
             return Err(Error::InvalidMergeableCommit(
                 "open transaction is not exclusive",
             ));
@@ -355,8 +367,9 @@ where
         let open_tx = self
             .open_tx
             .open_transactions
-            .remove(&tx_id)
-            .ok_or(Error::MissingOpenTx(tx_id))?;
+            .get(&open_batch_id)
+            .cloned()
+            .ok_or(Error::MissingOpenBatch(open_batch_id))?;
         for parent in open_tx.writes.iter().flat_map(|write| write.parents.iter()) {
             self.merge_tx_time(parent.time);
         }
@@ -411,17 +424,19 @@ where
             None,
             DurabilityTier::Local,
         )?;
+        self.open_tx.open_transactions.remove(&open_batch_id);
+        self.open_tx.closed_batches.insert(open_batch_id);
         Ok((tx_id, SyncMessage::CommitUnit { tx, versions }))
     }
 
     /// Commit a mergeable open transaction through the ordinary mergeable batch path.
     pub(crate) fn commit_mergeable_open(
         &mut self,
-        tx_id: OpenBatchId,
+        open_batch_id: OpenBatchId,
         mut next_now_ms: impl FnMut() -> u64,
     ) -> Result<TxId, Error> {
         if !matches!(
-            self.open_tx(tx_id)?.kind,
+            self.open_tx(open_batch_id)?.kind,
             OpenTransactionKind::Mergeable { .. }
         ) {
             return Err(Error::InvalidMergeableCommit(
@@ -431,8 +446,9 @@ where
         let open_tx = self
             .open_tx
             .open_transactions
-            .remove(&tx_id)
-            .ok_or(Error::MissingOpenTx(tx_id))?;
+            .get(&open_batch_id)
+            .cloned()
+            .ok_or(Error::MissingOpenBatch(open_batch_id))?;
         let OpenTransactionKind::Mergeable {
             made_by,
             permission_subject,
@@ -496,7 +512,10 @@ where
             }
             commits.push(commit);
         }
-        self.commit_mergeable_many(commits)
+        let committed = self.commit_mergeable_many(commits)?;
+        self.open_tx.open_transactions.remove(&open_batch_id);
+        self.open_tx.closed_batches.insert(open_batch_id);
+        Ok(committed)
     }
 
     /// Abandon an open transaction.
@@ -504,7 +523,8 @@ where
         self.open_tx
             .open_transactions
             .remove(&tx_id)
-            .ok_or(Error::MissingOpenTx(tx_id))?;
+            .ok_or(Error::MissingOpenBatch(tx_id))?;
+        self.open_tx.closed_batches.insert(tx_id);
         Ok(())
     }
 
@@ -517,14 +537,17 @@ where
         self.open_tx
             .open_transactions
             .get(&tx_id)
-            .ok_or(Error::MissingOpenTx(tx_id))
+            .ok_or(Error::MissingOpenBatch(tx_id))
     }
 
-    pub(super) fn open_tx_mut(&mut self, tx_id: OpenBatchId) -> Result<&mut OpenTransaction, Error> {
+    pub(super) fn open_tx_mut(
+        &mut self,
+        tx_id: OpenBatchId,
+    ) -> Result<&mut OpenTransaction, Error> {
         self.open_tx
             .open_transactions
             .get_mut(&tx_id)
-            .ok_or(Error::MissingOpenTx(tx_id))
+            .ok_or(Error::MissingOpenBatch(tx_id))
     }
 
     pub(super) fn record_applied_global_seq(&mut self, global_seq: GlobalSeq) -> Vec<GlobalSeq> {
@@ -670,6 +693,7 @@ pub(super) enum OpenTransactionKind {
     },
 }
 
+#[derive(Clone)]
 pub(super) struct OpenTransaction {
     /// Commit semantics and attribution carried by this open transaction.
     pub(super) kind: OpenTransactionKind,
