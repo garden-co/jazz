@@ -44,6 +44,67 @@ fn opening_existing_storage_recovers_mirrors_and_high_water_marks() {
     assert_eq!(next_tx.time, TxTime::from(11));
 }
 
+#[cfg(feature = "testing")]
+#[test]
+fn open_receipt_counts_physical_recovery_scans_exactly() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        for (id, time) in [(1, 10), (2, 11)] {
+            node.commit_mergeable(
+                MergeableCommit::new("todos", row(id), time).cells(title_cells("persisted")),
+            )
+            .unwrap();
+        }
+        node.database.close().unwrap();
+    }
+
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    let (_reopened, receipt) = NodeState::new_with_open_receipt_for_test(
+        node(1),
+        schema,
+        storage,
+        false,
+        LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    )
+    .unwrap();
+
+    // The transaction index is the actual physical access path. This would
+    // become stale if receipt code resumed scanning logical schema tables.
+    assert_eq!(receipt.global_sequence_records_scanned, 2);
+    assert_eq!(receipt.accepted_global_sequences, 0);
+    assert_eq!(receipt.ahead_current_entries, 2);
+}
+
+#[cfg(feature = "testing")]
+#[test]
+fn open_receipt_attributes_catalogue_finalization_when_aliases_are_first_persisted() {
+    // A fresh store plants the finalization work: both aliases are absent and
+    // must be inserted after recovery. This catches an exported receipt phase
+    // that is left at its Default::default() value.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    let (_node, receipt) = NodeState::new_with_open_receipt_for_test(
+        node(1),
+        schema,
+        storage,
+        false,
+        LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    )
+    .unwrap();
+
+    assert!(
+        !receipt.finalize_catalogue.is_zero(),
+        "first-open alias persistence must be attributed to catalogue finalization"
+    );
+}
+
 #[test]
 fn opening_defers_malformed_current_row_to_read() {
     // This is necessarily an internal regression test: planting malformed

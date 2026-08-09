@@ -10,6 +10,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "testing")]
+use std::time::Duration;
+#[cfg(feature = "testing")]
+use web_time::Instant;
 
 use groove::db::{
     CommitMetrics, Database, DatabaseBatch, DirectRecordStoreWrite, Error as GrooveDbError,
@@ -92,6 +96,44 @@ use physical::*;
 use text_oplog::{Content as TextContent, Op as TextOp};
 
 pub use eviction::{EdgeCacheBudget, EdgeCacheBudgetReport, EdgeCacheClass, EvictColdReport};
+
+/// Test/bench-only attribution for durable-state work performed while opening a node.
+#[cfg(feature = "testing")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NodeOpenReceipt {
+    /// Catalogue-record decoding and activation preparation.
+    pub catalogue_open: Duration,
+    /// Groove database construction from recovered physical layouts.
+    pub database_open: Duration,
+    /// Process-local node allocation and initialization.
+    pub state_init: Duration,
+    /// Total durable-state recovery time.
+    pub recover_storage: Duration,
+    /// Alias, branch, clock, and physical-history recovery time.
+    pub recover_catalogue_state: Duration,
+    /// Retained for receipt compatibility; startup no longer makes this sweep.
+    pub validate_current_rows: Duration,
+    /// Accepted global-sequence recovery time.
+    pub recover_global_sequences: Duration,
+    /// Pending-edge and rejected-transaction recovery time.
+    pub recover_pending_and_rejected: Duration,
+    /// Bounded unclean-close cleanup time.
+    pub recover_unclean_close: Duration,
+    /// Persisted maintained-query known-state recovery time.
+    pub recover_known_state: Duration,
+    /// In-memory ahead-current index reconstruction time.
+    pub rebuild_ahead_current: Duration,
+    /// Final catalogue persistence time, when applicable.
+    pub finalize_catalogue: Duration,
+    /// Current rows decoded by the retired full validation sweep.
+    pub validated_current_rows: usize,
+    /// Accepted global-sequence entries recovered.
+    pub accepted_global_sequences: usize,
+    /// Transaction index records inspected for global sequences.
+    pub global_sequence_records_scanned: usize,
+    /// Physical ahead-current records consumed while rebuilding indexes.
+    pub ahead_current_entries: usize,
+}
 
 #[cfg(test)]
 mod tests;
@@ -561,7 +603,55 @@ where
     where
         S: ReopenableStorage,
     {
+        Self::new_with_options_inner(
+            node_uuid,
+            schema,
+            storage,
+            history_complete,
+            large_value_checkpoint_op_interval,
+            #[cfg(feature = "testing")]
+            None,
+        )
+    }
+
+    #[cfg(feature = "testing")]
+    /// Open a node and attribute durable recovery without changing open semantics.
+    pub fn new_with_open_receipt_for_test(
+        node_uuid: NodeUuid,
+        schema: JazzSchema,
+        storage: S,
+        history_complete: bool,
+        large_value_checkpoint_op_interval: usize,
+    ) -> Result<(Self, NodeOpenReceipt), Error>
+    where
+        S: ReopenableStorage,
+    {
+        let mut receipt = NodeOpenReceipt::default();
+        let node = Self::new_with_options_inner(
+            node_uuid,
+            schema,
+            storage,
+            history_complete,
+            large_value_checkpoint_op_interval,
+            Some(&mut receipt),
+        )?;
+        Ok((node, receipt))
+    }
+
+    fn new_with_options_inner(
+        node_uuid: NodeUuid,
+        schema: JazzSchema,
+        storage: S,
+        history_complete: bool,
+        large_value_checkpoint_op_interval: usize,
+        #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
+    ) -> Result<Self, Error>
+    where
+        S: ReopenableStorage,
+    {
         let current_schema_version_id = schema.version_id();
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| Instant::now());
         let CatalogueOpenState {
             storage,
             mut schemas,
@@ -578,6 +668,10 @@ where
             current_write_schema,
             branch_partitions,
         } = Self::open_catalogue_stage(schema.clone(), storage)?;
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.catalogue_open = started.elapsed();
+        }
         let mut registration_schemas = schemas.clone();
         let mut registration_aliases = schema_version_aliases.clone();
         let mut registration_mappings = physical_mappings.clone();
@@ -589,6 +683,8 @@ where
             registration_aliases.insert(staged.publication.schema.id, staged.alias);
             registration_mappings.insert(staged.publication.schema.id, staged.mapping.clone());
         }
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| Instant::now());
         let mut database = Self::open_full_database(
             &schema,
             &registration_schemas,
@@ -597,6 +693,10 @@ where
             &branch_partitions,
             storage,
         )?;
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.database_open = started.elapsed();
+        }
         loop {
             let next = active_catalogue_seq.saturating_add(1);
             let Some(staged) = staged_lineages.get(&next).cloned() else {
@@ -631,6 +731,8 @@ where
             .get(&current_schema_version_id)
             .map(|version| version.schema.clone())
             .unwrap_or_else(|| schema.clone());
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| Instant::now());
         let mut node = Self {
             node_uuid,
             self_node_alias: None,
@@ -717,6 +819,10 @@ where
             initial_sync_flush_active: false,
             initial_sync_flush_completed: false,
         };
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.state_init = started.elapsed();
+        }
         let known_schema_versions = node
             .catalogue
             .catalogue_schemas
@@ -729,13 +835,47 @@ where
         node.synchronize_physical_version_tables()?;
         node.drain_pending_schema_lineages()?;
         node.drain_pending_catalogue_pointers()?;
+        #[cfg(feature = "testing")]
+        if let Some(receipt) = receipt.as_deref_mut() {
+            let started = Instant::now();
+            node.recover_from_storage_with_receipt(receipt)?;
+            receipt.recover_storage = started.elapsed();
+        } else {
+            node.recover_from_storage()?;
+        }
+        #[cfg(not(feature = "testing"))]
         node.recover_from_storage()?;
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| Instant::now());
         node.recover_known_state_facts()?;
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.recover_known_state = started.elapsed();
+        }
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| Instant::now());
+        #[cfg(feature = "testing")]
+        if let Some(receipt) = receipt.as_deref_mut() {
+            node.rebuild_ahead_current_keys_with_receipt(receipt)?;
+        } else {
+            node.rebuild_ahead_current_keys()?;
+        }
+        #[cfg(not(feature = "testing"))]
         node.rebuild_ahead_current_keys()?;
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.rebuild_ahead_current = started.elapsed();
+        }
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| Instant::now());
         let self_node_alias = node.ensure_node_alias(node_uuid)?;
         node.self_node_alias = Some(self_node_alias);
         let schema_alias = node.ensure_schema_version_alias(current_schema_version_id)?;
         node.catalogue.current_schema_version_alias = Some(schema_alias);
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.finalize_catalogue = started.elapsed();
+        }
         Ok(node)
     }
 
@@ -1769,6 +1909,26 @@ where
     }
 
     fn rebuild_ahead_current_keys(&mut self) -> Result<(), Error> {
+        #[cfg(feature = "testing")]
+        {
+            self.rebuild_ahead_current_keys_inner(None)
+        }
+        #[cfg(not(feature = "testing"))]
+        self.rebuild_ahead_current_keys_inner()
+    }
+
+    #[cfg(feature = "testing")]
+    fn rebuild_ahead_current_keys_with_receipt(
+        &mut self,
+        receipt: &mut NodeOpenReceipt,
+    ) -> Result<(), Error> {
+        self.rebuild_ahead_current_keys_inner(Some(receipt))
+    }
+
+    fn rebuild_ahead_current_keys_inner(
+        &mut self,
+        #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
+    ) -> Result<(), Error> {
         self.ahead_current_keys.clear();
         self.ahead_current_rows.clear();
         self.ahead_current_latest.clear();
@@ -1796,6 +1956,10 @@ where
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
             for (alias, row_uuid, tx_time, tx_node_alias) in content_rows {
+                #[cfg(feature = "testing")]
+                if let Some(receipt) = &mut receipt {
+                    receipt.ahead_current_entries += 1;
+                }
                 self.insert_ahead_current_key(
                     self.logical_table_for_physical_alias(table_id, alias)?,
                     VersionLayer::Content,
@@ -1827,6 +1991,10 @@ where
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
             for (alias, row_uuid, tx_time, tx_node_alias) in deletion_rows {
+                #[cfg(feature = "testing")]
+                if let Some(receipt) = &mut receipt {
+                    receipt.ahead_current_entries += 1;
+                }
                 self.insert_ahead_current_key(
                     self.logical_table_for_physical_alias(table_id, alias)?,
                     VersionLayer::Deletion,
