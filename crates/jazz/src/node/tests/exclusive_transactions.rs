@@ -204,7 +204,11 @@ fn tx_read_parent_cache_is_invalidated_by_same_row_write_without_changing_read_s
         node.open_tx(tx_id)
             .unwrap()
             .base_snapshot_rows
-            .contains_key(&("todos".to_owned(), row))
+            .contains_key(&(
+                node.current_write_schema().schema,
+                "todos".to_owned(),
+                row
+            ))
     );
 
     node.tx_write(tx_id, "todos", row, title_cells("updated"), None)
@@ -214,7 +218,11 @@ fn tx_read_parent_cache_is_invalidated_by_same_row_write_without_changing_read_s
             .open_tx(tx_id)
             .unwrap()
             .base_snapshot_rows
-            .contains_key(&("todos".to_owned(), row))
+            .contains_key(&(
+                node.current_write_schema().schema,
+                "todos".to_owned(),
+                row
+            ))
     );
 
     let (_exclusive, unit) = node
