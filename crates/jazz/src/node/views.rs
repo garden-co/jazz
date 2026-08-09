@@ -1284,6 +1284,12 @@ where
                     table.history_storage_table().record_schema()
                 };
                 version.record.descriptor() == &descriptor
+                    && !table.columns.iter().any(|column| {
+                        column.large_value.is_some()
+                            && version.cell(&table, &column.name).is_ok_and(|value| {
+                                matches!(value, Some(Value::Bytes(bytes)) if bytes.starts_with(LARGE_VALUE_HANDLE_MAGIC))
+                            })
+                    })
             });
         if has_authored_layout {
             return Ok(None);
