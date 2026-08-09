@@ -191,10 +191,13 @@ impl JazzSchema {
                 .column_families()
                 .into_iter()
                 .chain(std::iter::once("indices"))
-                .chain((!self.tables.is_empty()).then_some("jazz_physical_history"))
-                .chain((!self.tables.is_empty()).then_some("jazz_physical_register"))
-                .chain((!self.tables.is_empty()).then_some("jazz_physical_global_current"))
-                .chain((!self.tables.is_empty()).then_some("jazz_physical_ahead_current")),
+                // A schema-independent runtime may open before its first typed
+                // application view is registered. Keep the shared physical
+                // row classes available even for the empty bootstrap schema.
+                .chain(std::iter::once("jazz_physical_history"))
+                .chain(std::iter::once("jazz_physical_register"))
+                .chain(std::iter::once("jazz_physical_global_current"))
+                .chain(std::iter::once("jazz_physical_ahead_current")),
         )
     }
 

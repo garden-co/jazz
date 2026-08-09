@@ -192,10 +192,31 @@ where
 {
     schema: JazzSchema,
     schema_version_id: SchemaVersionId,
+    schema_view_is_fixed: bool,
+    schema_views: Rc<RefCell<BTreeMap<SchemaViewId, JazzSchema>>>,
     identity: DbIdentity,
-    node: Node<S>,
-    row_id_source: RefCell<Box<dyn RowIdSource>>,
-    next_now_ms: Cell<u64>,
+    node: Rc<Node<S>>,
+    row_id_source: Rc<RefCell<Box<dyn RowIdSource>>>,
+    next_now_ms: Rc<Cell<u64>>,
+}
+
+/// Process-local, content-addressed identity for an exact typed schema view.
+///
+/// Unlike [`SchemaVersionId`], which identifies structural migration lineage,
+/// this includes defaults and policy metadata used by a typed client facade.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SchemaViewId([u8; 32]);
+
+impl SchemaViewId {
+    /// Stable bytes suitable for binding-level map keys.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    fn for_schema(schema: &JazzSchema) -> Self {
+        let bytes = postcard::to_allocvec(schema).expect("JazzSchema always serializes");
+        Self(blake3::derive_key("jazz typed schema view id v1", &bytes))
+    }
 }
 
 /// Shared list of live subscriptions. Held by both the `Node` and any
@@ -402,6 +423,10 @@ where
     /// ```
     pub async fn open(config: DbConfig<S>) -> Result<Self, Error> {
         let schema_version_id = config.schema.version_id();
+        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
+            SchemaViewId::for_schema(&config.schema),
+            config.schema.clone(),
+        )])));
         let node = NodeState::new_with_large_value_checkpoint_op_interval(
             config.identity.node,
             config.schema.clone(),
@@ -414,14 +439,16 @@ where
         Ok(Self {
             schema: config.schema,
             schema_version_id,
+            schema_view_is_fixed: false,
+            schema_views,
             identity: config.identity,
-            node,
-            row_id_source: RefCell::new(
+            node: Rc::new(node),
+            row_id_source: Rc::new(RefCell::new(
                 config
                     .id_source
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
-            ),
-            next_now_ms: Cell::new(1),
+            )),
+            next_now_ms: Rc::new(Cell::new(1)),
         })
     }
 
@@ -431,6 +458,10 @@ where
     /// in-memory history rather than a partial client replica.
     pub async fn open_history_complete(config: DbConfig<S>) -> Result<Self, Error> {
         let schema_version_id = config.schema.version_id();
+        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
+            SchemaViewId::for_schema(&config.schema),
+            config.schema.clone(),
+        )])));
         let node = NodeState::new_history_complete(
             config.identity.node,
             config.schema.clone(),
@@ -439,20 +470,130 @@ where
         Ok(Self {
             schema: config.schema,
             schema_version_id,
+            schema_view_is_fixed: false,
+            schema_views,
             identity: config.identity,
-            node: Node::new(node),
-            row_id_source: RefCell::new(
+            node: Rc::new(Node::new(node)),
+            row_id_source: Rc::new(RefCell::new(
                 config
                     .id_source
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
-            ),
-            next_now_ms: Cell::new(1),
+            )),
+            next_now_ms: Rc::new(Cell::new(1)),
         })
+    }
+
+    /// Register a typed schema view on this database owner.
+    ///
+    /// Registration is process-local and idempotent by the exact typed schema
+    /// content. It does not publish a catalogue entry or select the current
+    /// write schema. The returned handle shares the owner's node, open batches,
+    /// connections, row-id source, and logical clock while validating typed
+    /// operations against this exact schema view.
+    pub fn register_schema_view(&self, schema: JazzSchema) -> Result<Self, Error> {
+        let schema_version_id = schema.version_id();
+        let schema_view_id = SchemaViewId::for_schema(&schema);
+        self.bootstrap_first_runtime_schema_if_needed(&schema)?;
+        let mut views = self.schema_views.borrow_mut();
+        if let Some(existing) = views.get(&schema_view_id) {
+            if existing != &schema {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    format!("schema view id collision for {schema_view_id:?}"),
+                ));
+            }
+        } else {
+            views.insert(schema_view_id, schema.clone());
+        }
+        drop(views);
+        Ok(Self {
+            schema,
+            schema_version_id,
+            schema_view_is_fixed: true,
+            schema_views: Rc::clone(&self.schema_views),
+            identity: self.identity,
+            node: Rc::clone(&self.node),
+            row_id_source: Rc::clone(&self.row_id_source),
+            next_now_ms: Rc::clone(&self.next_now_ms),
+        })
+    }
+
+    /// Attach an already-registered typed schema view to this owner.
+    pub fn schema_view(&self, schema_view_id: SchemaViewId) -> Result<Self, Error> {
+        let schema = self
+            .schema_views
+            .borrow()
+            .get(&schema_view_id)
+            .cloned()
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Schema,
+                    format!("schema view {schema_view_id:?} is not registered"),
+                )
+            })?;
+        self.register_schema_view(schema)
+    }
+
+    /// Canonical id of this handle's typed schema view.
+    pub fn schema_view_id(&self) -> SchemaViewId {
+        SchemaViewId::for_schema(&self.schema)
+    }
+
+    /// Admit the first application schema into an owner deliberately opened
+    /// with the empty schema. This is the local-first bootstrap equivalent of
+    /// having opened the runtime with that schema originally; later schemas
+    /// still arrive through ordinary catalogue lineage publication.
+    fn bootstrap_first_runtime_schema_if_needed(&self, schema: &JazzSchema) -> Result<(), Error> {
+        let empty_schema = JazzSchema::new([]);
+        let empty_id = empty_schema.version_id();
+        let target_id = schema.version_id();
+        if target_id == empty_id {
+            return Ok(());
+        }
+        let should_bootstrap = {
+            let node = self.node.node.borrow();
+            node.current_write_schema().schema == empty_id
+                && node.catalogue_schemas().len() == 1
+                && node.catalogue_schemas().contains_key(&empty_id)
+                && !node.catalogue_schemas().contains_key(&target_id)
+        };
+        if !should_bootstrap {
+            return Ok(());
+        }
+
+        let new_tables = schema
+            .tables
+            .iter()
+            .map(|table| table.name.clone())
+            .collect::<Vec<_>>();
+        let publication = SchemaLineagePublication::new(
+            SchemaVersion::new(schema.clone()),
+            MigrationLens::new(empty_id, target_id, Vec::new()),
+            new_tables,
+            Vec::<String>::new(),
+        );
+        let mut node = self.node.node.borrow_mut();
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(publication),
+        })?;
+        node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: target_id,
+            },
+        })?;
+        Ok(())
     }
 
     /// Flush node-local maintenance state, write a clean-close marker, and
     /// close the underlying storage.
     pub fn close(&self) -> Result<(), Error> {
+        if self.schema_view_is_fixed {
+            return Ok(());
+        }
         Ok(self.node.node.borrow_mut().close()?)
     }
 
@@ -3052,6 +3193,9 @@ where
     }
 
     fn current_write_schema_for_query(&self) -> Result<(JazzSchema, SchemaVersionId), Error> {
+        if self.schema_view_is_fixed {
+            return Ok((self.schema.clone(), self.schema_version_id));
+        }
         let node = self.node.node.borrow();
         let current = node.current_write_schema();
         if current.schema == self.schema_version_id {
