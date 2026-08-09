@@ -176,6 +176,46 @@ describe("PersistentBrowserOpfsRuntime", () => {
     await runtime.close();
   });
 
+  it("surfaces an unexpected connection failure exactly once through the RPC", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-connect-failure-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app/ws", "{}");
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "connect")).toBe(true);
+    });
+
+    const surfaced: Array<() => void> = [];
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+      callback: () => void,
+    ) => {
+      surfaced.push(callback);
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout);
+
+    worker.reject(
+      worker.messages.find((message) => message.method === "connect")!.id,
+      "arbitrary websocket failure",
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(surfaced).toHaveLength(1);
+    expect(() => surfaced[0]!()).toThrow("arbitrary websocket failure");
+
+    setTimeoutSpy.mockRestore();
+    await runtime.close();
+  });
+
   it("rejects server-tier work parked behind a reconnect when closed", async () => {
     vi.stubGlobal("Worker", FakeWorker);
 

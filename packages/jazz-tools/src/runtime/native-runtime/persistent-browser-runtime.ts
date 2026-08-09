@@ -761,7 +761,7 @@ function connectionGate(resolved = false): ConnectionGate {
   });
   // A gate may have no current consumers (for example, connect/updateAuth). Mark
   // its rejection handled without changing the promise observed by later waiters.
-  void promise.catch(ignoreExpectedShutdown);
+  void promise.catch(() => undefined);
   if (resolved) resolve();
   return { promise, resolve, reject };
 }
