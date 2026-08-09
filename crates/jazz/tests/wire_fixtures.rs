@@ -122,13 +122,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             }),
         ),
         (
-            "create_branch",
-            "CreateBranch",
-            SyncMessage::CreateBranch {
-                branch_id: BranchId::from_bytes([0x42; 16]),
-            },
-        ),
-        (
             "fetch_branch_metadata",
             "FetchBranchMetadata",
             SyncMessage::FetchBranchMetadata {

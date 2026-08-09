@@ -5822,13 +5822,6 @@ where
                         received.encoded_len
                     ));
                     match received.message {
-                        SyncMessage::CreateBranch { .. } => {
-                            // Legacy server-derived creation is intentionally
-                            // unsupported. Branches are authored and persisted
-                            // locally, then their complete metadata is synced.
-                            drop_peer_request(&self.node);
-                            continue;
-                        }
                         SyncMessage::RegisterShape {
                             shape_id,
                             opts,

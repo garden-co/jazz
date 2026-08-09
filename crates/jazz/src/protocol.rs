@@ -24,14 +24,6 @@ use crate::tx::{DeletionEvent, DurabilityTier, Fate, Snapshot, Transaction, TxId
 /// Messages exchanged between Jazz nodes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum SyncMessage {
-    /// Legacy server-derived branch-creation request.
-    ///
-    /// Receivers reject this message. Branches are created durably on the local
-    /// node and synchronize through [`SyncMessage::BranchMetadata`].
-    CreateBranch {
-        /// Fresh branch identity selected by the caller.
-        branch_id: BranchId,
-    },
     /// Durable routing metadata required before a branch-target commit unit or
     /// branch-scoped view payload can be admitted. This is intentionally
     /// separate from the ordinary transaction payload: it selects the target
