@@ -5297,6 +5297,10 @@ struct CollectSlotLayout {
 #[derive(Clone, Debug)]
 struct CollectLayout {
     root_fields: Vec<CollectFlatField>,
+    root_order_cols: Vec<TopByOrder>,
+    root_tie_cols: Vec<String>,
+    root_offset: u64,
+    root_limit: TopByLimit,
     slots: Vec<CollectSlotLayout>,
 }
 
@@ -5323,6 +5327,7 @@ fn lower_collect_by_app_rows(
         request,
         routing_param_fields,
     )?;
+    align_collect_root_window(&mut layout, plan)?;
     align_collect_join_key_types(&mut layout.slots, plan, resolved_sources, request)?;
     let root_context = root_collect_context_graph(visible_root.clone(), &layout)?;
     let mut association_graphs = Vec::new();
@@ -5359,7 +5364,7 @@ fn lower_collect_by_app_rows(
         })?
         .input
         .clone();
-    let graph = GraphBuilder::collect_by_tree(
+    let graph = GraphBuilder::collect_by_tree_ordered(
         input,
         [root_group.clone()],
         layout
@@ -5377,6 +5382,10 @@ fn lower_collect_by_app_rows(
             .slots
             .iter()
             .map(|slot| collect_slot_builder(slot, &root_group)),
+        layout.root_order_cols,
+        layout.root_tie_cols,
+        layout.root_offset,
+        layout.root_limit,
     );
     let mut hidden_fields = hidden_source_fields(&root_source.row_shape);
     hidden_fields.extend(routing_param_fields.iter().cloned());
@@ -5481,6 +5490,98 @@ fn align_collect_join_key_types(
         align_collect_join_key_types(&mut slot.children, plan, resolved_sources, request)?;
     }
     Ok(())
+}
+
+fn align_collect_root_window(
+    layout: &mut CollectLayout,
+    plan: &AnalyzedQueryPlan,
+) -> CapabilityResult<()> {
+    let steps = match plan {
+        AnalyzedQueryPlan::Linear(linear) => linear.steps.iter().collect::<Vec<_>>(),
+        AnalyzedQueryPlan::CorrelatedPath(path) => path
+            .parent
+            .steps
+            .iter()
+            .chain(&path.output_steps)
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    for step in steps {
+        match step {
+            LinearStep::OrderBy(keys) => {
+                layout.root_order_cols = keys
+                    .iter()
+                    .map(|key| {
+                        let field = collect_root_input_for_value(layout, &key.value)?;
+                        Ok(match key.direction {
+                            SortDirection::Asc => TopByOrder::asc(field),
+                            SortDirection::Desc => TopByOrder::desc(field),
+                        })
+                    })
+                    .collect::<CapabilityResult<Vec<_>>>()?;
+            }
+            LinearStep::Slice {
+                limit,
+                offset,
+                tie_breaker,
+                ..
+            } => {
+                layout.root_offset = u64::from(*offset);
+                layout.root_limit = limit
+                    .map(|limit| TopByLimit::Finite(u64::from(limit)))
+                    .unwrap_or(TopByLimit::Unbounded);
+                layout.root_tie_cols = tie_breaker
+                    .iter()
+                    .map(|value| collect_root_input_for_value(layout, value))
+                    .collect::<CapabilityResult<Vec<_>>>()?;
+            }
+            _ => {}
+        }
+    }
+    let row_id = layout
+        .root_fields
+        .iter()
+        .find(|field| field.is_row_id)
+        .expect("collector root retains row id")
+        .input
+        .clone();
+    if layout.root_order_cols.is_empty() {
+        layout.root_order_cols = vec![TopByOrder::asc(&row_id)];
+    }
+    if layout.root_tie_cols.is_empty() {
+        layout.root_tie_cols = vec![row_id];
+    }
+    Ok(())
+}
+
+fn collect_root_input_for_value(
+    layout: &CollectLayout,
+    value: &NormalizedValueRef,
+) -> CapabilityResult<String> {
+    match value {
+        NormalizedValueRef::SourceField { field, .. } => layout
+            .root_fields
+            .iter()
+            .find(|candidate| {
+                candidate.source_field.as_deref() == Some(field)
+                    || candidate
+                        .source_field
+                        .as_deref()
+                        .is_some_and(|source| logical_user_column(source) == field)
+            })
+            .map(|candidate| candidate.input.clone()),
+        NormalizedValueRef::RowId(RowIdRef::Source(_)) => layout
+            .root_fields
+            .iter()
+            .find(|field| field.is_row_id)
+            .map(|field| field.input.clone()),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        single_gap_report(UnsupportedReason::Operator(format!(
+            "collector root window key {value:?} is not present in the root projection"
+        )))
+    })
 }
 
 fn collect_slot_input_for_value(
@@ -5590,7 +5691,14 @@ fn collect_layout(
     }
     let mut next_slot = 0usize;
     let slots = collect_slot_layouts(&projection.paths, resolved_sources, 1, &mut next_slot)?;
-    Ok(CollectLayout { root_fields, slots })
+    Ok(CollectLayout {
+        root_fields,
+        root_order_cols: Vec::new(),
+        root_tie_cols: Vec::new(),
+        root_offset: 0,
+        root_limit: TopByLimit::Unbounded,
+        slots,
+    })
 }
 
 fn collect_logical_output_type(

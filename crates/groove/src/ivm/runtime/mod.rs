@@ -3059,6 +3059,23 @@ impl IvmRuntime {
             }
             validate_collect_by_key_types(&input_output, &group_field_indices)?;
             let slots = collect_by_slots(&input_output, &collect.slots, &group_field_indices, 1)?;
+            let order_field_indices = collect
+                .order_cols
+                .iter()
+                .map(|order| resolve_field_ref(&input_output, &order.field))
+                .collect::<Result<Vec<_>, _>>()?;
+            let tie_field_indices = collect
+                .tie_cols
+                .iter()
+                .map(|field| resolve_field_ref(&input_output, field))
+                .collect::<Result<Vec<_>, _>>()?;
+            if order_field_indices.is_empty() || tie_field_indices.is_empty() {
+                return Err(IvmRuntimeError::InvalidCollectBy(
+                    "tree root order and tie fields must be complete and non-empty".into(),
+                ));
+            }
+            validate_collect_by_key_types(&input_output, &order_field_indices)?;
+            validate_collect_by_key_types(&input_output, &tie_field_indices)?;
             let group_fields = group_field_indices
                 .iter()
                 .map(|field| field_name_at(&input_output, *field))
@@ -3078,12 +3095,37 @@ impl IvmRuntime {
                         tuple_fields: Vec::new(),
                         occurrence_id_fields: Vec::new(),
                         occurrence_id_field_indices: Vec::new(),
-                        order_fields: Vec::new(),
-                        tie_fields: Vec::new(),
-                        sort_field_indices: Vec::new(),
-                        sort_directions: Vec::new(),
-                        offset: 0,
-                        limit: TopByLimit::Unbounded,
+                        order_fields: collect
+                            .order_cols
+                            .iter()
+                            .zip(&order_field_indices)
+                            .map(|(order, field_idx)| {
+                                Ok(TopByOrderField {
+                                    field: field_name_at(&input_output, *field_idx)?,
+                                    direction: order.direction,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, IvmRuntimeError>>()?,
+                        tie_fields: tie_field_indices
+                            .iter()
+                            .map(|field| field_name_at(&input_output, *field))
+                            .collect::<Result<Vec<_>, _>>()?,
+                        sort_field_indices: order_field_indices
+                            .iter()
+                            .chain(&tie_field_indices)
+                            .copied()
+                            .collect(),
+                        sort_directions: collect
+                            .order_cols
+                            .iter()
+                            .map(|order| order.direction)
+                            .chain(std::iter::repeat_n(
+                                TopByDirection::Asc,
+                                tie_field_indices.len(),
+                            ))
+                            .collect(),
+                        offset: collect.offset,
+                        limit: collect.limit,
                     })),
                     [compiled_input.node],
                     output,
@@ -5826,6 +5868,7 @@ enum OperatorState {
 #[derive(Clone, Debug, Default)]
 struct CollectByIncrementalState {
     groups: CollectByGroups,
+    roots: BTreeMap<CollectByOrderKey, i64>,
 }
 
 type CollectByOrderKey = (Vec<TopBySortPart>, Bytes);
@@ -7189,15 +7232,6 @@ where
         if collect_by.mode == CollectByMode::Collect
             && (collect_by.slots.is_empty() || direct_tree_slot.is_some())
             && (collect_by.limit == TopByLimit::Unbounded || direct_tree_slot.is_some())
-            && direct_tree_slot.is_none_or(|slot| {
-                slot.presence_field_index.is_none_or(|field| {
-                    input.deltas.iter().all(|delta| {
-                        BorrowedRecord::new(delta.raw(), &input.descriptor)
-                            .get_bool(field)
-                            .unwrap_or(false)
-                    })
-                })
-            })
         {
             let operator_key = self.operator_key(node)?;
             let mut operator = self
@@ -7209,6 +7243,7 @@ where
             };
             let operations = update_unbounded_collect_by_terminal_state(
                 input.descriptor,
+                output_desc,
                 collect_by,
                 direct_tree_slot,
                 state,
@@ -9920,17 +9955,33 @@ fn evaluate_aggregate_expr(
 type SourceRecord = (Vec<u8>, Bytes);
 type WindowedRecord = (Bytes, i64);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 struct TopBySortPart {
-    key: Vec<u8>,
+    key: Value,
     direction: TopByDirection,
 }
+
+impl PartialEq for TopBySortPart {
+    fn eq(&self, other: &Self) -> bool {
+        self.direction == other.direction
+            && compare_values_sql(&self.key, &other.key, ValueComparison::Exact)
+                == Some(std::cmp::Ordering::Equal)
+    }
+}
+
+impl Eq for TopBySortPart {}
 
 impl Ord for TopBySortPart {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match self.direction {
-            TopByDirection::Asc => self.key.cmp(&other.key),
-            TopByDirection::Desc => other.key.cmp(&self.key),
+            TopByDirection::Asc => {
+                compare_values_sql(&self.key, &other.key, ValueComparison::Exact)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }
+            TopByDirection::Desc => {
+                compare_values_sql(&other.key, &self.key, ValueComparison::Exact)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }
         }
     }
 }
@@ -10131,6 +10182,7 @@ fn collect_by_projected_value(
 
 fn update_unbounded_collect_by_terminal_state(
     input_desc: RecordDescriptor,
+    output_desc: RecordDescriptor,
     collect_by: &CollectByOp,
     direct_tree_slot: Option<&CollectBySlot>,
     state: &mut CollectByIncrementalState,
@@ -10139,6 +10191,7 @@ fn update_unbounded_collect_by_terminal_state(
 ) -> Result<Vec<TerminalOperation>, IvmRuntimeError> {
     if !emit {
         state.groups.clear();
+        state.roots.clear();
     }
     let mut operations = Vec::new();
     for delta in deltas {
@@ -10147,6 +10200,53 @@ fn update_unbounded_collect_by_terminal_state(
         if let Some(presence_field) = direct_tree_slot.and_then(|slot| slot.presence_field_index)
             && !BorrowedRecord::new(delta.raw(), &input_desc).get_bool(presence_field)?
         {
+            let state_key = (
+                collect_by_sort_key(input_desc, delta.raw(), collect_by)?,
+                delta.record.clone(),
+            );
+            let before_weight = state.roots.get(&state_key).copied().unwrap_or_default();
+            let after_weight = before_weight + delta.weight;
+            if after_weight == 0 {
+                state.roots.remove(&state_key);
+            } else {
+                state.roots.insert(state_key.clone(), after_weight);
+            }
+            if !emit || (before_weight > 0) == (after_weight > 0) {
+                continue;
+            }
+            if after_weight > 0 {
+                let index = state
+                    .roots
+                    .range(..state_key)
+                    .filter(|(_, weight)| **weight > 0)
+                    .count();
+                let record = collect_by_tree_parent_from_records(
+                    input_desc,
+                    output_desc,
+                    collect_by,
+                    &[(delta.record.clone(), 1)],
+                )?
+                .ok_or_else(|| {
+                    IvmRuntimeError::InvalidCollectBy(
+                        "root anchor did not render a terminal row".to_owned(),
+                    )
+                })?;
+                operations.push(TerminalOperation {
+                    root_key: group_key.clone(),
+                    path: Vec::new(),
+                    edit: TerminalEdit::Insert {
+                        index,
+                        key: group_key,
+                        value: record.to_vec(),
+                    },
+                });
+            } else {
+                operations.push(TerminalOperation {
+                    root_key: group_key.clone(),
+                    path: Vec::new(),
+                    edit: TerminalEdit::Remove { key: group_key },
+                });
+            }
             continue;
         }
         let (sort_field_indices, sort_directions) = direct_tree_slot.map_or(
@@ -10510,12 +10610,18 @@ fn collect_by_sort_key_for_fields(
     sort_field_indices: &[usize],
     sort_directions: &[TopByDirection],
 ) -> Result<Vec<TopBySortPart>, IvmRuntimeError> {
+    let values = BorrowedRecord::new(record, &descriptor)
+        .to_values()
+        .map_err(IvmRuntimeError::RecordEncoding)?;
     sort_field_indices
         .iter()
         .zip(sort_directions)
         .map(|(field_idx, direction)| {
             Ok(TopBySortPart {
-                key: encoded_record_key_part(descriptor, record, &[*field_idx])?,
+                key: values
+                    .get(*field_idx)
+                    .cloned()
+                    .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(*field_idx))?,
                 direction: *direction,
             })
         })
@@ -10527,17 +10633,12 @@ fn top_by_sort_key(
     record: &[u8],
     top_by: &TopByOp,
 ) -> Result<Vec<TopBySortPart>, IvmRuntimeError> {
-    top_by
-        .sort_field_indices
-        .iter()
-        .zip(&top_by.sort_directions)
-        .map(|(field_idx, direction)| {
-            Ok(TopBySortPart {
-                key: encoded_record_key_part(descriptor, record, &[*field_idx])?,
-                direction: *direction,
-            })
-        })
-        .collect()
+    collect_by_sort_key_for_fields(
+        descriptor,
+        record,
+        &top_by.sort_field_indices,
+        &top_by.sort_directions,
+    )
 }
 
 fn diff_record_windows(

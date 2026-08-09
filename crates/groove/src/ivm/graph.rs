@@ -600,6 +600,31 @@ impl GraphBuilder {
         parent_fields: impl IntoIterator<Item = CollectByField>,
         slots: impl IntoIterator<Item = CollectBySlotBuilder>,
     ) -> Self {
+        Self::collect_by_tree_ordered(
+            input,
+            group_cols,
+            parent_fields,
+            slots,
+            Vec::<TopByOrder>::new(),
+            Vec::<String>::new(),
+            0,
+            TopByLimit::Unbounded,
+        )
+    }
+
+    /// Render a tree terminal whose roots also have an explicit public order
+    /// and window.
+    #[allow(clippy::too_many_arguments)]
+    pub fn collect_by_tree_ordered(
+        input: GraphBuilder,
+        group_cols: impl IntoIterator<Item = impl Into<String>>,
+        parent_fields: impl IntoIterator<Item = CollectByField>,
+        slots: impl IntoIterator<Item = CollectBySlotBuilder>,
+        order_cols: impl IntoIterator<Item = TopByOrder>,
+        tie_cols: impl IntoIterator<Item = impl Into<String>>,
+        offset: u64,
+        limit: TopByLimit,
+    ) -> Self {
         Self::CollectBy {
             input: Box::new(input),
             collect: Box::new(CollectByBuilder {
@@ -611,10 +636,10 @@ impl GraphBuilder {
                 slots: slots.into_iter().collect(),
                 tuple_fields: Vec::new(),
                 occurrence_id_cols: Vec::new(),
-                order_cols: Vec::new(),
-                tie_cols: Vec::new(),
-                offset: 0,
-                limit: TopByLimit::Finite(0),
+                order_cols: order_cols.into_iter().collect(),
+                tie_cols: tie_cols.into_iter().map(FieldRef::name).collect(),
+                offset,
+                limit,
             }),
         }
     }

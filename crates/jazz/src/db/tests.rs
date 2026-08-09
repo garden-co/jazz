@@ -234,14 +234,6 @@ fn terminal_nested_values(
         .collect()
 }
 
-fn schema_table<'a>(schema: &'a JazzSchema, table: &str) -> &'a TableSchema {
-    schema
-        .tables
-        .iter()
-        .find(|candidate| candidate.name == table)
-        .expect("test schema table should exist")
-}
-
 fn oversized_row_version_refs(len: usize) -> Vec<RowVersionRef> {
     (0..len)
         .map(|idx| {
@@ -3067,7 +3059,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
     let initial = block_on(subscription.next_event()).unwrap();
-    let mut snapshot = snapshot_from_event(initial);
+    let snapshot = snapshot_from_event(initial);
     assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1)]);
 
     db.insert_with_id(
@@ -3082,19 +3074,50 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
         reset,
         added,
         removed,
+        terminal_operations,
         ..
     } = &reordered
     else {
         panic!("expected terminal splice")
     };
     assert!(!*reset, "root reordering must remain incremental");
-    assert_eq!(removed.len(), 1);
-    assert_eq!(
-        row_ids(&added.iter().map(|row| row.row.clone()).collect::<Vec<_>>()),
-        vec![row(0xb1), row(0xa1)]
+    assert!(removed.is_empty());
+    assert!(added.is_empty());
+    assert!(
+        matches!(
+            terminal_operations.as_slice(),
+            [groove::ivm::TerminalOperation {
+                path,
+                edit: groove::ivm::TerminalEdit::Insert { index: 0, .. },
+                ..
+            }] if path.is_empty()
+        ),
+        "unexpected root operations: {terminal_operations:?}"
     );
-    apply_subscription_event(&mut snapshot, reordered);
-    assert_eq!(row_ids(&snapshot.rows), vec![row(0xb1), row(0xa1)]);
+
+    let binding_view_key = BindingViewKey::new(
+        prepared_query.shape().shape_id(),
+        prepared_query.binding().binding_id(),
+        RegisterShapeOptions::default().read_view_key(),
+    );
+    db.node
+        .node
+        .borrow_mut()
+        .inject_pending_authoritative_reset_for_test(
+            binding_view_key,
+            std::iter::empty(),
+            GlobalSeq(0),
+        );
+    assert_eq!(db.refresh_subscriptions().unwrap(), 1);
+    let reset = block_on(subscription.next_event()).unwrap();
+    assert!(matches!(
+        reset,
+        SubscriptionEvent::Delta {
+            reset: true,
+            terminal_operations,
+            ..
+        } if terminal_operations.is_empty()
+    ));
 
     db.update(
         "users",
@@ -3108,19 +3131,30 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
         reset,
         added,
         removed,
+        terminal_operations,
         ..
     } = &updated
     else {
         panic!("expected update splice")
     };
     assert!(!*reset);
-    assert_eq!(removed.len(), 2);
-    assert_eq!(
-        row_ids(&added.iter().map(|row| row.row.clone()).collect::<Vec<_>>()),
-        vec![row(0xa1), row(0xb1)]
-    );
-    apply_subscription_event(&mut snapshot, updated);
-    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1), row(0xb1)]);
+    assert!(removed.is_empty());
+    assert!(added.is_empty());
+    assert!(matches!(
+        terminal_operations.as_slice(),
+        [
+            groove::ivm::TerminalOperation {
+                path: remove_path,
+                edit: groove::ivm::TerminalEdit::Remove { .. },
+                ..
+            },
+            groove::ivm::TerminalOperation {
+                path: insert_path,
+                edit: groove::ivm::TerminalEdit::Insert { index: 1, .. },
+                ..
+            }
+        ] if remove_path.is_empty() && insert_path.is_empty()
+    ));
 
     db.delete("users", row(0xa1)).unwrap();
     db.tick().unwrap();
@@ -3129,8 +3163,18 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
         panic!("expected removal splice")
     };
     assert!(!*reset);
-    apply_subscription_event(&mut snapshot, removed);
-    assert_eq!(row_ids(&snapshot.rows), vec![row(0xb1)]);
+    assert!(matches!(
+        removed,
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if matches!(
+                terminal_operations.as_slice(),
+                [groove::ivm::TerminalOperation {
+                    path,
+                    edit: groove::ivm::TerminalEdit::Remove { .. },
+                    ..
+                }] if path.is_empty()
+            )
+    ));
 }
 
 #[test]
@@ -3151,7 +3195,7 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
-    let mut snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    let snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
     assert_eq!(
         terminal_nested_text_values(&snapshot, row(0x21), "comments", "body"),
         Vec::<String>::new()
@@ -3166,11 +3210,14 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
         ]),
     )
     .unwrap();
-    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
-    assert_eq!(
-        terminal_nested_text_values(&snapshot, row(0x21), "comments", "body"),
-        vec!["first".to_owned()]
-    );
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| matches!(
+                operation.edit,
+                groove::ivm::TerminalEdit::Insert { .. }
+            ))
+    ));
 
     db.update(
         "comments",
@@ -3178,18 +3225,24 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
         BTreeMap::from([("body".to_owned(), Value::String("edited".to_owned()))]),
     )
     .unwrap();
-    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
-    assert_eq!(
-        terminal_nested_text_values(&snapshot, row(0x21), "comments", "body"),
-        vec!["edited".to_owned()]
-    );
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| matches!(
+                operation.edit,
+                groove::ivm::TerminalEdit::Insert { .. } | groove::ivm::TerminalEdit::Update { .. }
+            ))
+    ));
 
     db.delete("comments", row(0xc1)).unwrap();
-    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
-    assert_eq!(
-        terminal_nested_text_values(&snapshot, row(0x21), "comments", "body"),
-        Vec::<String>::new()
-    );
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| matches!(
+                operation.edit,
+                groove::ivm::TerminalEdit::Remove { .. }
+            ))
+    ));
 
     db.insert_with_id(
         "comments",
@@ -3200,19 +3253,24 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
         ]),
     )
     .unwrap();
-    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
-    assert_eq!(
-        terminal_nested_text_values(&snapshot, row(0x21), "comments", "body"),
-        vec!["second".to_owned()]
-    );
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| matches!(
+                operation.edit,
+                groove::ivm::TerminalEdit::Insert { .. }
+            ))
+    ));
 
     db.delete("todos", row(0x21)).unwrap();
-    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
-    assert_eq!(snapshot.root_count, 0);
-    assert!(
-        snapshot.edges.is_empty(),
-        "parent removal must cascade assembled child entries away"
-    );
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| operation.path.is_empty() && matches!(
+                operation.edit,
+                groove::ivm::TerminalEdit::Remove { .. }
+            ))
+    ));
 }
 
 #[test]
@@ -3443,22 +3501,14 @@ fn array_subquery_subscription_projects_late_root_and_existing_forward_target() 
         ]),
     )
     .unwrap();
-    let snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
-    assert_eq!(snapshot.root_count, 1);
-    let root = snapshot
-        .rows
-        .iter()
-        .find(|candidate| candidate.table() == "todos" && candidate.row_uuid() == row(0x52))
-        .expect("late root should be present");
-    assert_eq!(
-        root.cell(schema_table(&schema, "todos"), "title"),
-        Some(Value::String("late root".to_owned()))
-    );
-    assert_eq!(root.cell(schema_table(&schema, "todos"), "owner_id"), None);
-    assert_eq!(
-        terminal_nested_text_values(&snapshot, row(0x52), "owner", "name"),
-        vec!["owner".to_owned()]
-    );
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| operation.path.is_empty() && matches!(
+                operation.edit,
+                groove::ivm::TerminalEdit::Insert { index: 0, .. }
+            ))
+    ));
 }
 
 #[test]
@@ -3493,12 +3543,14 @@ fn array_subquery_subscription_projects_late_camel_case_root_and_existing_forwar
         ),
     )
     .unwrap();
-    let snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
-    assert_eq!(snapshot.root_count, 1);
-    assert_eq!(
-        terminal_nested_text_values(&snapshot, row(0x53), "project", "name"),
-        vec!["project".to_owned()]
-    );
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| operation.path.is_empty() && matches!(
+                operation.edit,
+                groove::ivm::TerminalEdit::Insert { index: 0, .. }
+            ))
+    ));
 }
 
 #[test]

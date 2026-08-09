@@ -4443,11 +4443,16 @@ where
                                 "structured subscription lost its Groove terminal",
                             ));
                         };
-                        let snapshot = {
-                            let mut node_ref = node.borrow_mut();
-                            node_ref.drain_local_maintained_view_subscription_state(maintained)?;
-                            node_ref.materialize_local_maintained_relation_snapshot(maintained)?
-                        };
+                        // A structural-patch stream deliberately does not keep
+                        // facade-level replacement rows current. Re-open the
+                        // Groove terminal at an authoritative boundary so the
+                        // reset is a fresh complete value and subsequent FIFO
+                        // patches are relative to exactly that value.
+                        let (replacement, snapshot) =
+                            node.borrow_mut().open_local_maintained_view_subscription(
+                                &shape, &binding, author, read_tier, &read_view, None,
+                            )?;
+                        *maintained = replacement;
                         let settled = subscription_is_settled(
                             &node.borrow(),
                             &shape,
