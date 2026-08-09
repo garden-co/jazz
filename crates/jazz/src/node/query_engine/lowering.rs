@@ -4050,6 +4050,15 @@ fn lower_equality_param_filter_joins(
                 [(join.param.clone(), join.value_type.clone())],
             )?
         };
+        let binding_fields = binding_descriptor
+            .fields()
+            .iter()
+            .map(|field| {
+                field.name.clone().ok_or_else(|| {
+                    UnsupportedReason::Operator("binding fields must be named".to_owned())
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut binding =
             GraphBuilder::binding_source(binding_source_shape.clone(), binding_descriptor);
         let route_field = if is_claim_param {
@@ -4057,6 +4066,32 @@ fn lower_equality_param_filter_joins(
         } else {
             route_param_field(&join.param)
         };
+        let route_is_nullable = domain
+            .claim_params
+            .get(&join.param)
+            .map(|claim| matches!(claim.ty, ColumnType::Nullable(_)))
+            .or_else(|| {
+                domain
+                    .user_params
+                    .get(&join.param)
+                    .map(|ty| matches!(ty, ColumnType::Nullable(_)))
+            })
+            .unwrap_or(false);
+        // Equality unwrapping must not become the route carrier's value
+        // conversion. Keep a second, untouched copy of a nullable binding for
+        // the policy-arm union and for the downstream result-membership
+        // window, then unwrap only the copy used as the equality key.
+        let route_carrier = (join.nullable && route_is_nullable)
+            .then(|| format!("__jazz_route_carrier:{}", join.param));
+        if let Some(route_carrier) = &route_carrier {
+            let mut fields = binding_fields
+                .iter()
+                .cloned()
+                .map(ProjectField::named)
+                .collect::<Vec<_>>();
+            fields.push(ProjectField::renamed(join.param.clone(), route_carrier));
+            binding = binding.project_fields(fields);
+        }
         let mut projection = project_source_fields_from_prefix_rewrapping_nullable(
             source,
             LEFT_JOIN_PREFIX,
@@ -4068,7 +4103,7 @@ fn lower_equality_param_filter_joins(
                 .map(|field| ProjectField::renamed(left_field(&field), field.clone())),
         );
         projection.push(ProjectField::renamed(
-            right_field(&join.param),
+            right_field(route_carrier.as_deref().unwrap_or(&join.param)),
             route_field.clone(),
         ));
         if join.nullable {
