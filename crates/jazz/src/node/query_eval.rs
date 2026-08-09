@@ -2564,9 +2564,10 @@ fn current_query_output_request(
     RowSetOutputRequest {
         app_rows: (matches!(
             output,
-            CurrentQueryProgramOutput::AppRows | CurrentQueryProgramOutput::RelationSnapshot
-        ) || matches!(output, CurrentQueryProgramOutput::MaintainedView)
-            && !query.array_subqueries.is_empty())
+            CurrentQueryProgramOutput::AppRows
+                | CurrentQueryProgramOutput::RelationSnapshot
+                | CurrentQueryProgramOutput::MaintainedView
+        ))
         .then(|| AppRowOutputRequest {
             projection: app_row_payload_projection(
                 query,

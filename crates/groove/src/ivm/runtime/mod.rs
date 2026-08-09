@@ -619,6 +619,7 @@ impl IvmRuntime {
         let CompiledNode {
             output,
             node: output_node,
+            ..
         } = self.add_dedup_graph(&graph)?;
         let records = self.hydration_snapshot(output_node, storage);
         for node in self.gc_ephemeral_nodes(0) {
@@ -778,6 +779,7 @@ impl IvmRuntime {
             context: EvalContext::root(),
             metrics: &mut metrics,
             terminal_deltas: HashMap::default(),
+            root_ordering_windows: HashMap::default(),
         };
 
         for (subscription_id, subscription) in &self.multisink_subscriptions {
@@ -788,9 +790,10 @@ impl IvmRuntime {
                 if !records.deltas.is_empty() && records.descriptor != output.output {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
-                let structured = evaluator.output_is_structured_collect_by(output.node)?;
+                let terminal_owned = output.root_ordering_node.is_some()
+                    || evaluator.output_is_structured_collect_by(output.node)?;
                 let records = records.as_ref().clone();
-                if structured {
+                if terminal_owned {
                     let terminal = if let Some(terminal) =
                         evaluator.take_terminal_deltas_for_output(output.node)?
                     {
@@ -800,10 +803,13 @@ impl IvmRuntime {
                     } else {
                         None
                     };
-                    if let Some(terminal) = terminal
-                        && !terminal.is_empty()
-                    {
-                        terminal_sinks.insert(sink.clone(), terminal);
+                    if let Some(mut terminal) = terminal {
+                        if let Some(root_ordering_node) = output.root_ordering_node {
+                            evaluator.apply_root_ordering(root_ordering_node, &mut terminal)?;
+                        }
+                        if !terminal.is_empty() {
+                            terminal_sinks.insert(sink.clone(), terminal);
+                        }
                     }
                 }
                 if !records.is_empty() {
@@ -1002,6 +1008,7 @@ impl IvmRuntime {
             context: EvalContext::root_snapshot(),
             metrics: &mut metrics,
             terminal_deltas: HashMap::default(),
+            root_ordering_windows: HashMap::default(),
         };
         let records = evaluator
             .update_node(output_node)
@@ -1021,9 +1028,16 @@ impl IvmRuntime {
     {
         let mut sinks = BTreeMap::new();
         for (sink, output) in outputs {
-            let records = self.hydration_snapshot(output.node, storage)?;
+            let ordering = output
+                .root_ordering_node
+                .map(|node| self.hydration_snapshot(node, storage))
+                .transpose()?;
+            let mut records = self.hydration_snapshot(output.node, storage)?;
             if records.descriptor != output.output {
                 return Err(IvmRuntimeError::GraphOutputMismatch);
+            }
+            if let Some(ordering) = &ordering {
+                order_terminal_snapshot(&mut records, ordering)?;
             }
             sinks.insert(sink.clone(), records);
         }
@@ -1069,6 +1083,7 @@ impl IvmRuntime {
             },
             metrics: &mut metrics,
             terminal_deltas: HashMap::default(),
+            root_ordering_windows: HashMap::default(),
         };
         let records = evaluator
             .update_node(output_node)
@@ -1088,9 +1103,16 @@ impl IvmRuntime {
     {
         let mut sinks = BTreeMap::new();
         for (sink, output) in outputs {
-            let records = self.subscription_hydration_snapshot(output.node, storage)?;
+            let ordering = output
+                .root_ordering_node
+                .map(|node| self.subscription_hydration_snapshot(node, storage))
+                .transpose()?;
+            let mut records = self.subscription_hydration_snapshot(output.node, storage)?;
             if records.descriptor != output.output {
                 return Err(IvmRuntimeError::GraphOutputMismatch);
+            }
+            if let Some(ordering) = &ordering {
+                order_terminal_snapshot(&mut records, ordering)?;
             }
             sinks.insert(sink.clone(), records);
         }
@@ -1168,6 +1190,7 @@ impl IvmRuntime {
             context: EvalContext::root(),
             metrics: &mut metrics,
             terminal_deltas: HashMap::default(),
+            root_ordering_windows: HashMap::default(),
         };
 
         for node in durable_nodes {
@@ -2392,7 +2415,11 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: None,
+                })
             }
             GraphBuilder::InlineRecords { output, records } => {
                 if inferred_output != *output {
@@ -2412,6 +2439,7 @@ impl IvmRuntime {
                 Ok(CompiledNode {
                     output: *output,
                     node,
+                    root_ordering_node: None,
                 })
             }
             GraphBuilder::Index { table, index, scan } => {
@@ -2433,7 +2461,11 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: None,
+                })
             }
             GraphBuilder::FrontierSource { binding, output } => {
                 let node = self.graph.dedup_node(
@@ -2450,6 +2482,7 @@ impl IvmRuntime {
                 Ok(CompiledNode {
                     output: inferred_output,
                     node,
+                    root_ordering_node: None,
                 })
             }
             GraphBuilder::BindingSource { shape, output } => {
@@ -2467,6 +2500,7 @@ impl IvmRuntime {
                 Ok(CompiledNode {
                     output: inferred_output,
                     node,
+                    root_ordering_node: None,
                 })
             }
             GraphBuilder::Recursive {
@@ -2503,7 +2537,11 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: None,
+                })
             }
             GraphBuilder::CollectBy { input, collect } => {
                 self.add_collect_by_graph(input, collect, inferred_output, output_memo)
@@ -2592,7 +2630,11 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: compiled_input.root_ordering_node,
+                })
             }
             GraphBuilder::ArgMinBy {
                 input,
@@ -2666,7 +2708,11 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: compiled_input.root_ordering_node,
+                })
             }
             GraphBuilder::TopBy {
                 input,
@@ -2739,7 +2785,11 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: Some(node),
+                })
             }
             _ => unreachable!("dispatcher routes only ordering graph builders here"),
         }
@@ -2787,7 +2837,11 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: compiled_input.root_ordering_node,
+                })
             }
             GraphBuilder::Filter {
                 input,
@@ -2809,7 +2863,11 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: compiled_input.root_ordering_node,
+                })
             }
             GraphBuilder::Project { input, fields } => {
                 let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
@@ -2846,7 +2904,11 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: compiled_input.root_ordering_node,
+                })
             }
             GraphBuilder::UnwrapNullable { input, field } => {
                 let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
@@ -2866,7 +2928,11 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: compiled_input.root_ordering_node,
+                })
             }
             GraphBuilder::Unnest {
                 input,
@@ -2891,12 +2957,23 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: compiled_input.root_ordering_node,
+                })
             }
             GraphBuilder::Union { inputs } => {
                 let mut input_nodes = Vec::with_capacity(inputs.len());
+                let mut public_root_ordering = None;
                 for input in inputs {
                     let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
+                    if input_nodes.is_empty() {
+                        // Structured lowering places the public/root anchor
+                        // first; later arms carry association rows and may
+                        // contain their own nested TopBy nodes.
+                        public_root_ordering = compiled_input.root_ordering_node;
+                    }
                     let input_node = compiled_input.node;
                     let input_output = compiled_input.output;
                     if inferred_output != input_output {
@@ -2910,7 +2987,11 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: public_root_ordering,
+                })
             }
             _ => unreachable!("dispatcher routes only unary graph builders here"),
         }
@@ -2961,7 +3042,16 @@ impl IvmRuntime {
                     .graph
                     .dedup_node(node_descriptor, NodeDurability::Ephemeral);
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    // Jazz lowers the public/root relation on the left and
+                    // nested relation inputs on the right. Prefer the public
+                    // side so a nested TopBy cannot become root ordering.
+                    root_ordering_node: compiled_left
+                        .root_ordering_node
+                        .or(compiled_right.root_ordering_node),
+                })
             }
             GraphBuilder::SemiJoin {
                 left,
@@ -3000,7 +3090,13 @@ impl IvmRuntime {
                     .graph
                     .dedup_node(node_descriptor, NodeDurability::Ephemeral);
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: compiled_left
+                        .root_ordering_node
+                        .or(compiled_right.root_ordering_node),
+                })
             }
             GraphBuilder::AntiJoin {
                 left,
@@ -3039,7 +3135,13 @@ impl IvmRuntime {
                     .graph
                     .dedup_node(node_descriptor, NodeDurability::Ephemeral);
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: compiled_left
+                        .root_ordering_node
+                        .or(compiled_right.root_ordering_node),
+                })
             }
             _ => unreachable!("dispatcher routes only join graph builders here"),
         }
@@ -3152,7 +3254,11 @@ impl IvmRuntime {
                 NodeDurability::Ephemeral,
             );
             self.initialize_node_runtime(node);
-            return Ok(CompiledNode { output, node });
+            return Ok(CompiledNode {
+                output,
+                node,
+                root_ordering_node: compiled_input.root_ordering_node,
+            });
         }
         let child_fields = collect_by_projections(&input_output, &collect.child_fields)?;
         let tuple_fields = collect_by_projections(&input_output, &collect.tuple_fields)?;
@@ -3267,7 +3373,13 @@ impl IvmRuntime {
             NodeDurability::Ephemeral,
         );
         self.initialize_node_runtime(node);
-        Ok(CompiledNode { output, node })
+        Ok(CompiledNode {
+            output,
+            node,
+            // CollectBy changes representation, not the identity/order of
+            // public roots selected upstream.
+            root_ordering_node: compiled_input.root_ordering_node,
+        })
     }
 
     fn add_dedup_schema_index(
@@ -3301,6 +3413,7 @@ impl IvmRuntime {
         let CompiledNode {
             output: index_descriptor,
             node: index_by,
+            ..
         } = self.add_dedup_index_by_from_input(table, index, input, table_descriptor, None)?;
 
         let storage = DurableStorage {
@@ -3450,6 +3563,7 @@ impl IvmRuntime {
         Ok(CompiledNode {
             output: index_descriptor,
             node,
+            root_ordering_node: None,
         })
     }
 }
@@ -4055,6 +4169,34 @@ fn terminal_deltas_from_record_deltas(
     Ok(TerminalDeltas { operations })
 }
 
+fn order_terminal_snapshot(
+    terminal: &mut RecordDeltas,
+    ordering: &RecordDeltas,
+) -> Result<(), IvmRuntimeError> {
+    let mut positions = BTreeMap::new();
+    for (index, delta) in ordering
+        .deltas
+        .iter()
+        .filter(|delta| delta.weight > 0)
+        .enumerate()
+    {
+        let key = encoded_record_key_part(ordering.descriptor, delta.raw(), &[0])?;
+        positions.entry(key).or_insert(index);
+    }
+    let mut keyed = terminal
+        .deltas
+        .drain(..)
+        .map(|delta| {
+            let key = encoded_record_key_part(terminal.descriptor, delta.raw(), &[0])?;
+            let position = positions.get(&key).copied().unwrap_or(usize::MAX);
+            Ok((position, key, delta))
+        })
+        .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+    keyed.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    terminal.deltas = keyed.into_iter().map(|(_, _, delta)| delta).collect();
+    Ok(())
+}
+
 fn diff_terminal_record(
     root_key: &[u8],
     path: Vec<TerminalPathSegment>,
@@ -4069,13 +4211,21 @@ fn diff_terminal_record(
     let mut scalar_changed = false;
     for (index, (before_value, after_value)) in before_values.iter().zip(&after_values).enumerate()
     {
+        let descriptor_field = after
+            .descriptor()
+            .fields()
+            .get(index)
+            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(index))?;
         match (before_value, after_value) {
-            (Value::Array(before_children), Value::Array(after_children)) => {
-                let field = after
-                    .descriptor()
-                    .fields()
-                    .get(index)
-                    .and_then(|field| field.name.clone())
+            (Value::Array(before_children), Value::Array(after_children))
+                if matches!(
+                    &descriptor_field.value_type,
+                    ValueType::Array(inner) if matches!(inner.as_ref(), ValueType::Record(_))
+                ) =>
+            {
+                let field = descriptor_field
+                    .name
+                    .clone()
                     .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
                 let mut child_path = path.clone();
                 child_path.push(TerminalPathSegment::Collection(field));
@@ -4346,6 +4496,12 @@ pub(super) struct BindingDelta {
 struct CompiledNode {
     output: RecordDescriptor,
     node: NodeId,
+    /// The `TopBy` node that defines ordering of public terminal roots.
+    ///
+    /// This is explicit lowering metadata: walking graph ancestors is
+    /// ambiguous once a structured plan contains independently ordered nested
+    /// collections.
+    root_ordering_node: Option<NodeId>,
 }
 
 /// Descriptor plus a batch of weighted encoded record changes.
@@ -6008,6 +6164,12 @@ fn validate_arg_by_primary_key_indices(
 }
 
 /// Single-tick evaluator over a deduplicated graph.
+#[derive(Clone, Debug, Default)]
+struct RootOrderingWindows {
+    before: BTreeMap<Vec<u8>, usize>,
+    after: BTreeMap<Vec<u8>, usize>,
+}
+
 struct TickEvaluator<'a, S> {
     schema: &'a DatabaseSchema,
     graph: &'a IvmGraph,
@@ -6028,6 +6190,10 @@ struct TickEvaluator<'a, S> {
     context: EvalContext,
     metrics: &'a mut TickMetrics,
     terminal_deltas: HashMap<NodeId, TerminalDeltas>,
+    /// Exact pre/post windows captured by TopBy evaluation for terminal
+    /// ordering. Kept per node so nested collection ordering cannot be
+    /// confused with public root ordering.
+    root_ordering_windows: HashMap<NodeId, RootOrderingWindows>,
 }
 
 /// Borrowed runtime pieces used by recursive evaluation to run child graphs.
@@ -6127,6 +6293,7 @@ where
             context: EvalContext::with_binding(self.scope, sub_tick, binding, deltas),
             metrics: self.metrics,
             terminal_deltas: HashMap::default(),
+            root_ordering_windows: HashMap::default(),
         };
         evaluator
             .update_node(node)
@@ -6169,6 +6336,7 @@ where
             ),
             metrics: self.metrics,
             terminal_deltas: HashMap::default(),
+            root_ordering_windows: HashMap::default(),
         };
         evaluator
             .update_node(node)
@@ -6209,6 +6377,7 @@ where
             },
             metrics: self.metrics,
             terminal_deltas: HashMap::default(),
+            root_ordering_windows: HashMap::default(),
         };
         evaluator
             .update_node(node)
@@ -6220,6 +6389,18 @@ impl<S> TickEvaluator<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn apply_root_ordering(
+        &self,
+        ordering_node: NodeId,
+        terminal: &mut TerminalDeltas,
+    ) -> Result<(), IvmRuntimeError> {
+        let Some(windows) = self.root_ordering_windows.get(&ordering_node) else {
+            return Ok(());
+        };
+        apply_root_ordering_operations(&windows.before, &windows.after, terminal);
+        Ok(())
+    }
+
     fn take_terminal_deltas_for_output(
         &mut self,
         node: NodeId,
@@ -7252,6 +7433,9 @@ where
             let after = top_by_window_from_records(output_desc, after_records.clone(), top_by)?;
             let before =
                 top_by_window_before_from_deltas(output_desc, after_records, group_deltas, top_by)?;
+            let windows = self.root_ordering_windows.entry(node).or_default();
+            extend_root_window_positions(output_desc, &before, &mut windows.before)?;
+            extend_root_window_positions(output_desc, &after, &mut windows.after)?;
             output.extend(diff_record_windows(before, after));
         }
         self.arrangement_states.insert(arrangement_key, arrangement);
@@ -7879,6 +8063,79 @@ where
             .first()
             .ok_or(IvmRuntimeError::GraphInputMissing(node))?;
         self.update_node(input)
+    }
+}
+
+fn extend_root_window_positions(
+    descriptor: RecordDescriptor,
+    window: &[WindowedRecord],
+    positions: &mut BTreeMap<Vec<u8>, usize>,
+) -> Result<(), IvmRuntimeError> {
+    let mut index = 0usize;
+    for (record, copies) in window {
+        let key = encoded_record_key_part(descriptor, record, &[0])?;
+        positions.entry(key).or_insert(index);
+        index = index.saturating_add(usize::try_from(*copies).unwrap_or(usize::MAX));
+    }
+    Ok(())
+}
+
+fn apply_root_ordering_operations(
+    before: &BTreeMap<Vec<u8>, usize>,
+    after: &BTreeMap<Vec<u8>, usize>,
+    terminal: &mut TerminalDeltas,
+) {
+    let mut current = before
+        .iter()
+        .map(|(key, index)| (*index, key.clone()))
+        .collect::<Vec<_>>();
+    current.sort_by_key(|(index, _)| *index);
+    let mut current = current.into_iter().map(|(_, key)| key).collect::<Vec<_>>();
+    for operation in &mut terminal.operations {
+        if !operation.path.is_empty() {
+            continue;
+        }
+        match &mut operation.edit {
+            TerminalEdit::Insert { index, key, .. } => {
+                if let Some(actual) = after.get(key) {
+                    *index = *actual;
+                }
+                if let Some(existing) = current.iter().position(|candidate| candidate == key) {
+                    current.remove(existing);
+                }
+                current.insert((*index).min(current.len()), key.clone());
+            }
+            TerminalEdit::Remove { key } => {
+                if let Some(existing) = current.iter().position(|candidate| candidate == key) {
+                    current.remove(existing);
+                }
+            }
+            TerminalEdit::Update { .. } | TerminalEdit::Move { .. } => {}
+        }
+    }
+
+    // Payload/nested edits are applied first. Positional edits follow, so a
+    // consumer never observes a move targeting a root that is not present.
+    let mut desired = after
+        .iter()
+        .map(|(key, index)| (*index, key.clone()))
+        .collect::<Vec<_>>();
+    desired.sort_by_key(|(index, _)| *index);
+    for (after_index, key) in desired {
+        if current.get(after_index) != Some(&key)
+            && let Some(existing) = current.iter().position(|candidate| candidate == &key)
+        {
+            current.remove(existing);
+            current.insert(after_index.min(current.len()), key.clone());
+            terminal.operations.push(TerminalOperation {
+                root_key: key.clone(),
+                path: Vec::new(),
+                edit: TerminalEdit::Move {
+                    key,
+                    index: after_index,
+                },
+            });
+        }
     }
 }
 
@@ -10744,23 +11001,29 @@ fn diff_record_windows(
     after: Vec<WindowedRecord>,
 ) -> Vec<RecordDelta> {
     let mut weights = BTreeMap::<Bytes, i64>::new();
-    for (record, copies) in before {
-        *weights.entry(record).or_default() -= copies;
+    for (record, copies) in &before {
+        *weights.entry(record.clone()).or_default() -= *copies;
     }
-    for (record, copies) in after {
-        *weights.entry(record).or_default() += copies;
+    for (record, copies) in &after {
+        *weights.entry(record.clone()).or_default() += *copies;
     }
-    let mut retractions = Vec::new();
-    let mut insertions = Vec::new();
-    for (record, weight) in weights {
-        match weight.cmp(&0) {
-            std::cmp::Ordering::Less => retractions.push(RecordDelta { record, weight }),
-            std::cmp::Ordering::Greater => insertions.push(RecordDelta { record, weight }),
-            std::cmp::Ordering::Equal => {}
+    let mut deltas = Vec::new();
+    for (record, _) in before {
+        if weights.get(&record).is_some_and(|weight| *weight < 0)
+            && let Some(weight) = weights.remove(&record)
+        {
+            deltas.push(RecordDelta { record, weight });
         }
     }
-    retractions.extend(insertions);
-    retractions
+    for (record, _) in after {
+        if weights.get(&record).is_some_and(|weight| *weight > 0)
+            && let Some(weight) = weights.remove(&record)
+        {
+            deltas.push(RecordDelta { record, weight });
+        }
+    }
+    debug_assert!(weights.values().all(|weight| *weight == 0));
+    deltas
 }
 
 pub(super) fn encoded_record_key_part(
@@ -10998,6 +11261,58 @@ mod tests {
         ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey,
     };
     use crate::storage::{RecordStore, RocksDbStorage};
+
+    #[test]
+    fn root_ordering_rewrites_insert_indices_and_emits_moves_after_payload_edits() {
+        // Internal coverage is intentional: the public browser matrix proves
+        // end-to-end ordering, while this pins the terminal operation protocol
+        // ordering that is not otherwise observable through the public API.
+        let key = |byte| vec![byte];
+        let before = BTreeMap::from([(key(1), 0), (key(2), 1), (key(3), 2)]);
+        let after = BTreeMap::from([(key(3), 0), (key(4), 1), (key(1), 2), (key(2), 3)]);
+        let mut terminal = TerminalDeltas {
+            operations: vec![
+                TerminalOperation {
+                    root_key: key(2),
+                    path: Vec::new(),
+                    edit: TerminalEdit::Update {
+                        key: key(2),
+                        value: vec![22],
+                    },
+                },
+                TerminalOperation {
+                    root_key: key(4),
+                    path: Vec::new(),
+                    edit: TerminalEdit::Insert {
+                        index: 0,
+                        key: key(4),
+                        value: vec![44],
+                    },
+                },
+            ],
+        };
+
+        apply_root_ordering_operations(&before, &after, &mut terminal);
+
+        assert!(matches!(
+            terminal.operations[1].edit,
+            TerminalEdit::Insert { index: 1, .. }
+        ));
+        assert!(matches!(
+            terminal.operations[0].edit,
+            TerminalEdit::Update { .. }
+        ));
+        assert_eq!(
+            terminal.operations[2..]
+                .iter()
+                .map(|operation| match &operation.edit {
+                    TerminalEdit::Move { key, index } => (key.clone(), *index),
+                    edit => panic!("expected root move after payload edits, got {edit:?}"),
+                })
+                .collect::<Vec<_>>(),
+            vec![(key(3), 0), (key(4), 1)]
+        );
+    }
 
     fn albums_schema() -> DatabaseSchema {
         DatabaseSchema::new([TableSchema::new(

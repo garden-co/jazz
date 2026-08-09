@@ -243,12 +243,16 @@ impl MaintainedSubscriptionView {
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     ) -> Result<ResultTransitions, super::Error> {
         let mut transitions = ResultTransitions::default();
-        transitions.terminal_operations.extend(
-            deltas
-                .terminal_sinks
-                .values()
-                .flat_map(|deltas| deltas.operations.iter().cloned()),
-        );
+        for (sink, terminal) in &deltas.terminal_sinks {
+            if matches!(
+                schemas.get(sink)?,
+                MaintainedTerminalKind::StructuredAppRows(_)
+            ) {
+                transitions
+                    .terminal_operations
+                    .extend(terminal.operations.iter().cloned());
+            }
+        }
         for (sink, deltas) in deltas.sinks {
             let delta_transitions =
                 self.apply_typed_deltas(&sink, &deltas, schemas, tables, node_aliases)?;

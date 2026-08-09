@@ -3453,6 +3453,86 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
 }
 
 #[test]
+fn flat_subscription_hydrates_in_declared_root_order() {
+    let schema = relation_schema();
+    let db = open_db(0xd4, AuthorId::from_bytes([0xd4; 16]), &schema);
+    db.insert_with_id(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("zulu".to_owned()))]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "users",
+        row(0xb1),
+        BTreeMap::from([("name".to_owned(), Value::String("alpha".to_owned()))]),
+    )
+    .unwrap();
+
+    let query = Query::from("users").order_by("name", OrderDirection::Desc);
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+
+    assert_eq!(row_ids(&initial.rows), vec![row(0xa1), row(0xb1)]);
+}
+
+#[test]
+fn flat_subscription_inserts_at_declared_root_position() {
+    let schema = relation_schema();
+    let db = open_db(0xd5, AuthorId::from_bytes([0xd5; 16]), &schema);
+    let query = Query::from("users").order_by("name", OrderDirection::Desc);
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let _initial = block_on(subscription.next_event()).unwrap();
+
+    for (id, name) in [(0xa1, "zulu"), (0xb1, "zzzz")] {
+        db.insert_with_id(
+            "users",
+            row(id),
+            BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+        )
+        .unwrap();
+        db.tick().unwrap();
+        let event = block_on(subscription.next_event()).unwrap();
+        if id == 0xb1 {
+            assert!(
+                matches!(
+                    &event,
+                    SubscriptionEvent::Delta { terminal_operations, .. }
+                        if matches!(
+                            terminal_operations.as_slice(),
+                            [groove::ivm::TerminalOperation {
+                                path,
+                                edit: groove::ivm::TerminalEdit::Insert { index: 0, .. },
+                                ..
+                            }] if path.is_empty()
+                        )
+                ),
+                "unexpected flat root event: {event:?}"
+            );
+        }
+    }
+
+    db.update(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("yyyy".to_owned()))]),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let event = block_on(subscription.next_event()).unwrap();
+    assert!(matches!(
+        event,
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| matches!(
+                operation.edit,
+                groove::ivm::TerminalEdit::Update { .. }
+            ))
+    ));
+}
+
+#[test]
 fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
     let schema = relation_schema();
     let db = open_db(0xc2, AuthorId::from_bytes([0xc2; 16]), &schema);
