@@ -338,6 +338,36 @@ describe("PersistentBrowserOpfsRuntime", () => {
     },
   );
 
+  it.each([
+    ["connect", "during close"],
+    ["connect", "after close"],
+    ["updateAuth", "during close"],
+    ["updateAuth", "after close"],
+  ] as const)("does not replace the terminal gate via %s %s", async (operation, timing) => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      `persistent-browser-runtime-${operation}-${timing.replace(" ", "-")}-test`,
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+
+    const close = runtime.close();
+    if (timing === "after close") await close;
+    if (operation === "connect") {
+      runtime.connect("ws://127.0.0.1:4200/apps/app/ws", "{}");
+    } else {
+      runtime.updateAuth("{}");
+    }
+
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null),
+    ).rejects.toThrow("Persistent browser native runtime is closed");
+    await close;
+  });
+
   it("returns a pending write handle and waits on the worker transaction id", async () => {
     vi.stubGlobal("Worker", FakeWorker);
 

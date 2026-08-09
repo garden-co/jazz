@@ -380,6 +380,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   connect(url: string, authJson: string): void {
+    if (this.closing || this.closed) return;
     const gate = this.waitingForReconnect ? this.connectionReady : connectionGate();
     this.connectionReady = gate;
     const connected = this.opened.then(() => {
@@ -412,6 +413,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   updateAuth(authJson: string): void {
+    if (this.closing || this.closed) return;
     // Updating credentials cannot reconnect an explicitly disconnected worker:
     // without a server endpoint the worker treats updateAuth as a no-op. Keep the
     // reconnect gate parked until connect() supplies an endpoint.
