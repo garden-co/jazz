@@ -739,12 +739,13 @@ impl PeerState {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        if result_member_adds.is_empty()
-            && result_member_removes.is_empty()
-            && terminal_operations.is_empty()
-            && program_fact_adds.is_empty()
-            && program_fact_removes.is_empty()
-        {
+        if maintained_view_update_is_empty(
+            &result_member_adds,
+            &result_member_removes,
+            &terminal_operations,
+            &program_fact_adds,
+            &program_fact_removes,
+        ) {
             return Ok(SyncMessage::ViewUpdate {
                 subscription,
                 settled_through: node.applied_global_watermark(),
@@ -2059,6 +2060,20 @@ impl PeerState {
     }
 }
 
+fn maintained_view_update_is_empty(
+    result_member_adds: &[ResultMemberEntry],
+    result_member_removes: &[ResultMemberEntry],
+    terminal_operations: &[groove::ivm::TerminalOperation],
+    program_fact_adds: &[ProgramFactEntry],
+    program_fact_removes: &[ProgramFactEntry],
+) -> bool {
+    result_member_adds.is_empty()
+        && result_member_removes.is_empty()
+        && terminal_operations.is_empty()
+        && program_fact_adds.is_empty()
+        && program_fact_removes.is_empty()
+}
+
 fn member_row_key(member: &ResultMemberEntry) -> Option<RowKey> {
     member.output_occurrence_id()
 }
@@ -2354,7 +2369,8 @@ mod tests {
     use crate::node::MergeableCommit;
     use crate::protocol::{ProgramFactEntry, RealRowMemberEntry, SyncMessage, VersionRecord};
     use crate::query::{
-        Aggregate, OrderDirection, Query, claim, col, eq, gt, is_null, lit, ne, not, param,
+        Aggregate, ArraySubquery, OrderDirection, Query, claim, col, eq, gt, is_null, lit, ne, not,
+        param,
     };
     use crate::schema::{JazzSchema, Policy, TableSchema};
     use crate::time::{GlobalSeq, TxTime};
@@ -3055,6 +3071,83 @@ mod tests {
         peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 
         assert!(maintained_subscription_id(&peer, subscription).is_some());
+    }
+
+    #[test]
+    fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
+        let schema = JazzSchema::new([
+            TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]),
+            TableSchema::new(
+                "todos",
+                [
+                    ColumnSchema::new("title", ColumnType::String),
+                    ColumnSchema::new("owner_id", ColumnType::Uuid),
+                ],
+            ),
+        ]);
+        let (_dir, mut core) = open_node_with_schema(node(0x93), schema.clone());
+        let user = row(0xa1);
+        let user_tx =
+            core.commit_mergeable(MergeableCommit::new("users", user, 1_000).cells(
+                BTreeMap::from([("name".to_owned(), Value::String("owner".to_owned()))]),
+            ))
+            .unwrap();
+        accept_global(&mut core, user_tx, 1);
+        let shape = Query::from("users")
+            .array_subquery(ArraySubquery::new(
+                "todosViaOwner",
+                "todos",
+                "owner_id",
+                "id",
+            ))
+            .validate(&schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let mut peer = PeerState::new();
+        peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+
+        let child_tx = core
+            .commit_mergeable(MergeableCommit::new("todos", row(0xb1), 1_001).cells(
+                BTreeMap::from([
+                    ("title".to_owned(), Value::String("child".to_owned())),
+                    ("owner_id".to_owned(), Value::Uuid(user.0)),
+                ]),
+            ))
+            .unwrap();
+        accept_global(&mut core, child_tx, 2);
+        peer.query_update(&mut core, &shape, &binding).unwrap();
+        let child_update_tx = core
+            .commit_mergeable(MergeableCommit::new("todos", row(0xb1), 1_002).cells(
+                BTreeMap::from([(
+                    "title".to_owned(),
+                    Value::String("updated child".to_owned()),
+                )]),
+            ))
+            .unwrap();
+        accept_global(&mut core, child_update_tx, 3);
+        let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+        let SyncMessage::ViewUpdate {
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+            terminal_operations,
+            ..
+        } = update
+        else {
+            panic!("expected view update")
+        };
+        assert!(result_member_adds.is_empty());
+        assert!(result_member_removes.is_empty());
+        assert!(!terminal_operations.is_empty());
+        assert!(!maintained_view_update_is_empty(
+            &[],
+            &[],
+            &terminal_operations,
+            &[],
+            &[],
+        ));
+        let _ = (program_fact_adds, program_fact_removes);
     }
 
     #[test]
