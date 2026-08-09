@@ -1283,6 +1283,20 @@ impl IvmRuntime {
                     actual: terminal.route_fields.len(),
                 });
             }
+            if terminal.route_value_indices.len() != terminal.route_fields.len() {
+                return Err(IvmRuntimeError::RoutedMultisinkRouteArityMismatch {
+                    sink: terminal.sink.clone(),
+                    expected: terminal.route_fields.len(),
+                    actual: terminal.route_value_indices.len(),
+                });
+            }
+            if let Some(index) = terminal
+                .route_value_indices
+                .iter()
+                .find(|index| **index >= binding_descriptor.fields().len())
+            {
+                return Err(IvmRuntimeError::GraphFieldIndexOutOfBounds(*index));
+            }
             let output = self.infer_builder_output(&terminal.graph)?;
             for field in terminal.route_fields.iter().chain(&terminal.public_fields) {
                 if output.field_index(field).is_none() {
@@ -3748,6 +3762,8 @@ pub struct RoutedMultisinkTerminal {
     pub sink: String,
     pub graph: GraphBuilder,
     pub route_fields: Vec<String>,
+    /// Binding descriptor positions paired with `route_fields`.
+    pub route_value_indices: Vec<usize>,
     pub public_fields: Vec<String>,
 }
 
@@ -3758,12 +3774,24 @@ impl RoutedMultisinkTerminal {
         route_fields: impl IntoIterator<Item = impl Into<String>>,
         public_fields: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
+        let route_fields = route_fields.into_iter().map(Into::into).collect::<Vec<_>>();
+        let route_value_indices = (0..route_fields.len()).collect();
         Self {
             sink: sink.into(),
             graph,
-            route_fields: route_fields.into_iter().map(Into::into).collect(),
+            route_fields,
+            route_value_indices,
             public_fields: public_fields.into_iter().map(Into::into).collect(),
         }
+    }
+
+    /// Select non-prefix binding values for the terminal's route predicates.
+    pub fn with_route_value_indices(
+        mut self,
+        route_value_indices: impl IntoIterator<Item = usize>,
+    ) -> Self {
+        self.route_value_indices = route_value_indices.into_iter().collect();
+        self
     }
 }
 
@@ -4139,17 +4167,36 @@ fn bound_routed_multisink_graph(
     let predicates = terminal
         .route_fields
         .iter()
-        .zip(binding_values)
-        .map(|(field, value)| route_predicate(field, value))
+        .zip(&terminal.route_value_indices)
+        .map(|(field, index)| route_predicate(field, &binding_values[*index]))
         .collect::<Vec<_>>();
-    let graph = match predicates.as_slice() {
-        [] => terminal.graph.clone(),
-        [predicate] => terminal.graph.clone().filter(predicate.clone()),
-        _ => terminal
-            .graph
-            .clone()
-            .filter(PredicateExpr::And(predicates).canonicalize()),
+    let predicate = match predicates.as_slice() {
+        [] => None,
+        [predicate] => Some(predicate.clone()),
+        _ => Some(PredicateExpr::And(predicates).canonicalize()),
     };
+    if let GraphBuilder::CollectBy { input, collect } = &terminal.graph {
+        // CollectBy is terminal-only. Route its flat input before rendering and
+        // remove hidden route columns from the collector's own projection,
+        // rather than appending filter/project consumers after the collector.
+        let mut collect = collect.as_ref().clone();
+        collect
+            .parent_fields
+            .retain(|field| terminal.public_fields.contains(&field.output_name));
+        collect
+            .tuple_fields
+            .retain(|field| terminal.public_fields.contains(&field.output_name));
+        let input = predicate
+            .map(|predicate| input.as_ref().clone().filter(predicate))
+            .unwrap_or_else(|| input.as_ref().clone());
+        return GraphBuilder::CollectBy {
+            input: Box::new(input),
+            collect: Box::new(collect),
+        };
+    }
+    let graph = predicate
+        .map(|predicate| terminal.graph.clone().filter(predicate))
+        .unwrap_or_else(|| terminal.graph.clone());
     graph.project(terminal.public_fields.clone())
 }
 

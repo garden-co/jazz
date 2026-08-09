@@ -7,7 +7,7 @@
 
 mod support;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
 use jazz::row_input;
@@ -25,7 +25,8 @@ use serde_json::json;
 use support::{
     PublishedPermissionsHead, TestingClient, deny_all_select_permissions, has_added, has_removed,
     publish_allow_all_permissions, publish_permissions, push_catalogue_in_memory,
-    wait_for_edge_query_ready, wait_for_query, wait_for_subscription_update,
+    wait_for_edge_query_ready, wait_for_query, wait_for_query_results,
+    wait_for_subscription_update,
 };
 use uuid::Uuid;
 
@@ -323,7 +324,7 @@ fn legacy_join_provenance_to_current_permissions_lens() -> Lens {
             table: "posts".to_string(),
             column: "viewer_name".to_string(),
             column_type: ColumnType::Text,
-            default: Value::Text("bob".to_string()),
+            default: Value::Text(test_user_id("bob")),
         }]),
     )
 }
@@ -2417,18 +2418,22 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
         .join("people")
         .on("posts.author_id", "people.id")
         .build();
-    let rows = wait_for_query(
+    let rows = wait_for_query_results(
         &bob,
         query,
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "bob join sees v1 post author through table rename",
-        |rows| (rows.len() == 1 && rows[0].0 == post_row_id).then_some(rows),
+        |rows| (rows.len() == 1 && rows[0].key == post_row_id).then_some(rows),
     )
     .await;
 
     assert_eq!(
-        rows[0].1,
+        rows[0]
+            .fields
+            .iter()
+            .map(|field| field.value.clone())
+            .collect::<Vec<_>>(),
         vec![
             Value::Uuid(post_id),
             Value::Uuid(author_id),
@@ -2598,7 +2603,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         .await;
     wait_for_edge_query_ready(&admin, "posts", Duration::from_secs(30)).await;
 
-    let (bob_user_id, _, batch_id) = admin
+    let (_, _, batch_id) = admin
         .insert("users", legacy_join_provenance_user_values("bob"))
         .expect("admin creates legacy user");
     admin
@@ -2622,6 +2627,30 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         )
         .await
         .expect("legacy post reaches edge");
+
+    let current_admin = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(current_schema.clone())
+        .with_user_id(test_user_id("join-provenance-current-admin"))
+        .as_admin()
+        .ready_on("users", Duration::from_secs(30))
+        .connect()
+        .await;
+    wait_for_edge_query_ready(&current_admin, "posts", Duration::from_secs(30)).await;
+    let (second_post_id, _, batch_id) = current_admin
+        .insert(
+            "posts",
+            row_input!(
+                "owner_name" => Value::Text("bob".to_owned()),
+                "title" => Value::Text("Bob second private post".to_owned()),
+                "viewer_name" => Value::Text(test_user_id("bob"))
+            ),
+        )
+        .expect("admin creates current-schema post");
+    current_admin
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("current-schema post reaches edge");
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -2648,40 +2677,72 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         .on("users.name", "posts.owner_name")
         .build();
 
-    let bob_rows = wait_for_query(
+    let bob_rows = wait_for_query_results(
         &bob,
         query.clone(),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "bob sees joined row after provenance lens applies current permissions",
-        |rows| (rows.len() == 1 && rows[0].0 == bob_user_id).then_some(rows),
+        |rows| (rows.len() == 2).then_some(rows),
     )
     .await;
+    let bob_keys = bob_rows
+        .iter()
+        .map(|row| row.key.clone())
+        .collect::<BTreeSet<_>>();
     assert_eq!(
-        bob_rows[0].1,
-        vec![
-            Value::Text("bob".to_string()),
-            Value::Text("bob".to_string()),
-            Value::Text("Bob private post".to_string()),
-            Value::Text("bob".to_string()),
-        ]
+        bob_keys.len(),
+        2,
+        "one root joined to two posts must retain two opaque occurrences"
     );
+    let transformed_key = bob_rows
+        .iter()
+        .find(|row| {
+            row.fields
+                .iter()
+                .any(|field| field.value == Value::Text("Bob private post".to_owned()))
+        })
+        .expect("lens-transformed legacy post result")
+        .key
+        .clone();
 
-    let alice_rows = wait_for_query(
+    let batch_id = bob
+        .update(
+            second_post_id,
+            vec![("viewer_name".to_owned(), Value::Text(test_user_id("alice")))],
+        )
+        .expect("move one joined occurrence to Alice's policy scope");
+    bob.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("selective policy update reaches edge");
+
+    let retained_bob_rows = wait_for_query_results(
+        &bob,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        "Bob retains only the lens-transformed joined occurrence",
+        |rows| (rows.len() == 1).then_some(rows),
+    )
+    .await;
+    assert_eq!(retained_bob_rows[0].key, transformed_key);
+
+    let alice_rows = wait_for_query_results(
         &alice,
         query,
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(3),
-        "alice does not see joined row denied by transformed joined provenance",
+        "Alice remains denied the lens-transformed joined occurrence",
         Some,
     )
     .await;
-    assert!(
-        alice_rows.is_empty(),
-        "Alice should not see Bob's joined post after current-permissions filtering"
-    );
+    assert!(alice_rows.iter().all(|row| row.key != transformed_key));
 
     admin.shutdown().await.expect("shutdown admin");
+    current_admin
+        .shutdown()
+        .await
+        .expect("shutdown current admin");
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;

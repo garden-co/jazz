@@ -65,7 +65,7 @@ pub(crate) fn lower_query_program(
         let source_request = SourceRequest {
             source: source.clone(),
             visibility,
-            authorization: source_authorization_for_source(&request, &plan, &source)?,
+            authorization: source_authorization_for_source(&request, &source)?,
             requirements,
         };
         let resolved_source = match source_resolver.resolve_source(&source_request) {
@@ -327,7 +327,6 @@ fn explain_with_request(request: &QueryProgramRequest, mut explain: ExplainPlan)
 
 fn source_authorization_for_source(
     request: &QueryProgramRequest,
-    plan: &AnalyzedQueryPlan,
     source: &SourceId,
 ) -> CapabilityResult<SourceAuthorizationRequest> {
     match &request.policy {
@@ -335,20 +334,6 @@ fn source_authorization_for_source(
         PolicyContext::AuthorizationSubplan {
             protected_source, ..
         } if protected_source == source => Ok(SourceAuthorizationRequest::System),
-        PolicyContext::AuthorizationSubplan {
-            permission_subject, ..
-        } if analyzed_plan_sources(plan).contains(source) => {
-            Ok(SourceAuthorizationRequest::PolicyProof {
-                permission_subject: *permission_subject,
-                plan: PolicyAuthorizationPlan {
-                    protected_source: source.clone(),
-                    role: PolicyDecisionRole::Read,
-                    protected_row_field: "row_uuid".to_owned(),
-                    binding_source_shape: request.input.binding.source_shape.clone(),
-                    binding_user_params: binding_user_param_types(&request.input.binding)?,
-                },
-            })
-        }
         PolicyContext::Identity {
             permission_subject, ..
         } => Ok(SourceAuthorizationRequest::PolicyFiltered {
@@ -372,6 +357,9 @@ fn binding_user_param_types(
 ) -> CapabilityResult<BTreeMap<String, ColumnType>> {
     let mut params = binding.extra_user_params.clone();
     for name in binding.values.keys() {
+        if binding.claim_params.contains_key(name) {
+            continue;
+        }
         let Some(ty) = binding.param_types.get(name) else {
             return Err(single_gap_report(UnsupportedReason::Runtime(format!(
                 "binding parameter '{name}' is missing a validated type"
@@ -441,6 +429,16 @@ fn parameter_domain_for_request(
     request: &QueryProgramRequest,
 ) -> Result<ParameterDomain, UnsupportedReason> {
     let mut domain = parameter_domain(&request.input.shape);
+    for (name, ty) in &request.input.binding.extra_user_params {
+        if let Some(existing) = domain.user_params.get(name)
+            && existing != ty
+        {
+            return Err(UnsupportedReason::Runtime(format!(
+                "binding parameter '{name}' has inconsistent validated types"
+            )));
+        }
+        domain.user_params.insert(name.clone(), ty.clone());
+    }
     if request.input.binding.claim_params.is_empty() {
         return Ok(domain);
     }
@@ -471,8 +469,8 @@ fn parameter_domain_for_request(
         }
     }
     for (name, claim) in pre_retarget_claims {
+        domain.user_params.remove(&name);
         domain.claim_params.insert(name.clone(), claim);
-        domain.routing_params.insert(name.clone());
     }
     Ok(domain)
 }
@@ -2894,6 +2892,7 @@ fn lower_linear_plan_steps(
                         predicate,
                         source,
                         root_source,
+                        &available_route_fields,
                         request,
                     )?;
                 graph = joined;
@@ -3274,7 +3273,7 @@ fn binding_descriptor_params_with_user_params(
 ) -> Result<Vec<(String, ColumnType)>, UnsupportedReason> {
     let domain = parameter_domain_for_request(request)?;
     let mut user_params = request.input.binding.extra_user_params.clone();
-    user_params.extend(domain.user_params);
+    user_params.extend(domain.user_params.clone());
     user_params.extend(additional_user_params);
     Ok(user_params
         .into_iter()
@@ -4018,6 +4017,7 @@ fn lower_equality_param_filter_joins(
     predicate: &PredicateExpr,
     source_id: &SourceId,
     source: &ResolvedSource,
+    available_route_fields: &BTreeSet<String>,
     request: &QueryProgramRequest,
 ) -> Result<(GraphBuilder, PredicateExpr, BTreeSet<String>), UnsupportedReason> {
     let predicates = match predicate {
@@ -4025,7 +4025,7 @@ fn lower_equality_param_filter_joins(
         _ => std::slice::from_ref(predicate),
     };
     let mut residual = Vec::new();
-    let mut retained_route_fields = BTreeSet::<String>::new();
+    let mut retained_route_fields = available_route_fields.clone();
     for predicate in predicates {
         let Some(join) = equality_param_join(predicate, source_id, source)? else {
             residual.push(predicate.clone());
@@ -4045,7 +4045,7 @@ fn lower_equality_param_filter_joins(
                 [(join.param.clone(), join.value_type.clone())],
             )?
         };
-        let binding =
+        let mut binding =
             GraphBuilder::binding_source(binding_source_shape.clone(), binding_descriptor);
         let route_field = if is_claim_param {
             join.param.clone()
@@ -4068,6 +4068,7 @@ fn lower_equality_param_filter_joins(
         ));
         if join.nullable {
             graph = graph.unwrap_nullable(join.field.clone());
+            binding = binding.unwrap_nullable(join.param.clone());
         }
         graph = policy_join_if_needed(graph, binding, [join.field], [join.param], request)
             .project_fields(projection);
@@ -4643,19 +4644,10 @@ fn coerce_literal_for_source_field(
     source: &ResolvedSource,
     field: &str,
 ) -> LiteralValue {
-    if field == source.row_shape.row_uuid_field {
-        return coerce_literal_for_value_type(value, &ValueType::Uuid);
-    }
-    let logical_field = logical_user_column(field);
-    let Some(column) = source
-        .table_schema
-        .columns
-        .iter()
-        .find(|column| column.name == logical_field)
-    else {
+    let Some(value_type) = source_field_type(source, field) else {
         return value;
     };
-    coerce_literal_for_value_type(value, &column.column_type.clone())
+    coerce_literal_for_value_type(value, non_null_value_type(value_type))
 }
 
 fn non_null_value_type(mut value_type: &ValueType) -> &ValueType {
@@ -4928,6 +4920,17 @@ fn lowered_terminals(
         .intersection(available_fields)
         .cloned()
         .collect::<BTreeSet<_>>();
+    // Closure evidence is an authorization boundary only for policy-claim
+    // routes. Ordinary query parameters can be absent from provenance-only
+    // closure graphs; requiring those fields would either reject the program
+    // or suppress raw evidence needed for local evaluation.
+    let claim_route_fields = parameter_domain_for_request(request)
+        .map_err(single_gap_report)?
+        .claim_params
+        .keys()
+        .filter(|field| root_route_fields.contains(*field))
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let mut terminals = Vec::new();
     let closure = lower_closure_membership(
         graph.clone(),
@@ -4952,25 +4955,10 @@ fn lowered_terminals(
     // domain rather than only `root_route_fields` to keep routed maintained
     // array queries on their existing fact-terminal path; the tree collector
     // cannot retain any routed binding fields yet.
-    let has_routed_tree_app_projection = matches!(
-        &request.output.app_rows,
-        Some(AppRowOutputRequest {
-            projection: PayloadProjection::Tree(tree),
-            ..
-        }) if !tree.paths.is_empty() && !routing_param_fields.is_empty()
-    );
-    if let Some(app_rows) = &request.output.app_rows
-        && !has_routed_tree_app_projection
-    {
+    if let Some(app_rows) = &request.output.app_rows {
         let projected_output = projected_multisource_terminal(plan, source);
         let (graph, descriptor, hidden_fields) = match app_rows.projection.clone() {
             PayloadProjection::Tree(tree) if !tree.paths.is_empty() => {
-                if !root_route_fields.is_empty() {
-                    return Err(single_gap_report(UnsupportedReason::Operator(
-                        "tree app projections with routed parameters are not lowered yet"
-                            .to_owned(),
-                    )));
-                }
                 let collected = lower_collect_by_app_rows(
                     closure.visible_root.clone(),
                     &tree,
@@ -4978,6 +4966,7 @@ fn lowered_terminals(
                     source,
                     resolved_sources,
                     request,
+                    &root_route_fields,
                 )?;
                 (
                     collected.graph,
@@ -5100,7 +5089,7 @@ fn lowered_terminals(
                         plan,
                         resolved_source,
                         resolved_sources,
-                        BTreeSet::new(),
+                        claim_route_fields.clone(),
                     )?;
                     let graph = fact_terminal_graph(
                         fact,
@@ -5136,7 +5125,7 @@ fn lowered_terminals(
                         plan,
                         resolved_source,
                         resolved_sources,
-                        BTreeSet::new(),
+                        claim_route_fields.clone(),
                     )?;
                     let contribution_graph = join_contribution_membership_graph(
                         closure.visible_root.clone(),
@@ -5311,8 +5300,34 @@ fn lower_collect_by_app_rows(
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
+    route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<LoweredCollectByAppRows> {
     let mut layout = collect_layout(projection, root_source, resolved_sources)?;
+    let domain = parameter_domain_for_request(request).map_err(single_gap_report)?;
+    for route_field in route_fields {
+        let value_type = domain
+            .claim_params
+            .get(route_field)
+            .map(|claim| claim.ty.clone())
+            .or_else(|| {
+                domain.user_params.iter().find_map(|(name, ty)| {
+                    (route_param_field(name) == *route_field).then(|| ty.clone())
+                })
+            })
+            .ok_or_else(|| {
+                single_gap_report(UnsupportedReason::Runtime(format!(
+                    "collector route field '{route_field}' has no parameter type"
+                )))
+            })?;
+        layout.root_fields.push(CollectFlatField {
+            input: route_field.clone(),
+            output: route_field.clone(),
+            value_type,
+            source_field: Some(route_field.clone()),
+            is_row_id: false,
+            is_presence: false,
+        });
+    }
     align_collect_join_key_types(&mut layout.slots, plan, resolved_sources, request)?;
     let root_context = root_collect_context_graph(visible_root.clone(), &layout)?;
     let mut association_graphs = Vec::new();
@@ -5351,7 +5366,7 @@ fn lower_collect_by_app_rows(
         .clone();
     let graph = GraphBuilder::collect_by_tree(
         input,
-        [root_group.clone()],
+        std::iter::once(root_group.clone()).chain(route_fields.iter().cloned()),
         layout
             .root_fields
             .iter()
@@ -5359,12 +5374,15 @@ fn lower_collect_by_app_rows(
         layout
             .slots
             .iter()
-            .map(|slot| collect_slot_builder(slot, &root_group)),
+            .map(|slot| collect_slot_builder(slot, &root_group, route_fields)),
     );
     Ok(LoweredCollectByAppRows {
         graph,
         descriptor,
-        hidden_fields: hidden_source_fields(&root_source.row_shape),
+        hidden_fields: hidden_source_fields(&root_source.row_shape)
+            .into_iter()
+            .chain(route_fields.iter().cloned())
+            .collect(),
     })
 }
 
@@ -5741,16 +5759,20 @@ fn collect_slot_flat_field_names(slot: &CollectSlotLayout) -> BTreeSet<String> {
         .collect()
 }
 
-fn collect_slot_builder(slot: &CollectSlotLayout, parent_row_id: &str) -> CollectBySlotBuilder {
+fn collect_slot_builder(
+    slot: &CollectSlotLayout,
+    parent_row_id: &str,
+    route_fields: &BTreeSet<String>,
+) -> CollectBySlotBuilder {
     CollectBySlotBuilder::new(
-        [parent_row_id],
+        std::iter::once(parent_row_id.to_owned()).chain(route_fields.iter().cloned()),
         slot.fields
             .iter()
             .map(|field| CollectByField::renamed(&field.input, &field.output)),
         &slot.collection_field,
         slot.children
             .iter()
-            .map(|child| collect_slot_builder(child, &slot.row_id_input)),
+            .map(|child| collect_slot_builder(child, &slot.row_id_input, route_fields)),
         [TopByOrder::asc(&slot.row_id_input)],
         [&slot.row_id_input],
         0,

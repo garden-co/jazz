@@ -155,14 +155,15 @@ in a fail-stop catalogue state: it must not continue serving against the
 temporarily installed in-memory schema. Reopen resumes the durable Staged
 bundle idempotently and either reaches Active or fails closed again.
 
-Admission validates the entire bundle before staging: related source/target
+Admission validates the entire logical bundle before staging: related source/target
 table endpoints are unique and exhaustive with the explicit new/dropped sets;
 the ordered ops reproduce each target descriptor exactly; `RenameTable`
 payloads agree with their enclosing endpoints; no rename/copy/add collision is
 ambiguous; and physical epochs are reused only when representation and merge
-semantics are compatible. Protocol byte, declaration-count, name-length, and
-operation-depth limits are checked before allocation or Groove registration.
-The initial named limits are `MAX_SCHEMA_LINEAGE_PUBLICATION_BYTES = 2 MiB`,
+semantics are compatible. A publication has no schema-layer byte cap: generic
+transport fragmentation carries it atomically across bounded physical frames.
+Structural declaration-count, name-length, and operation-count limits are
+checked before Groove registration. The initial named limits are
 `MAX_SCHEMA_LINEAGE_DECLARATIONS = 4096`,
 `MAX_SCHEMA_LINEAGE_NAME_BYTES = 1024`, and
 `MAX_SCHEMA_LINEAGE_OPS = 16384`; changing them is a protocol compatibility

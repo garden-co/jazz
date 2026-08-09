@@ -305,8 +305,34 @@ fn prepared_params_from_domain(
     params
 }
 
+fn prepared_param_route_field(param: &PreparedQueryParam) -> String {
+    match &param.source {
+        PreparedQueryParamSource::User => route_param_field(&param.name),
+        PreparedQueryParamSource::Claim(_) => param.name.clone(),
+    }
+}
+
 fn prepared_route_param_names(parameters: &super::query_engine::ParameterDomain) -> Vec<String> {
-    parameters.routing_params.iter().cloned().collect()
+    prepared_params_from_domain(parameters)
+        .iter()
+        .map(prepared_param_route_field)
+        .filter(|field| parameters.routing_params.contains(field))
+        .collect()
+}
+
+fn prepared_route_value_indices(
+    params: &[PreparedQueryParam],
+    route_fields: &[String],
+) -> Vec<usize> {
+    route_fields
+        .iter()
+        .map(|route_field| {
+            params
+                .iter()
+                .position(|param| prepared_param_route_field(param) == *route_field)
+                .expect("terminal route fields come from the prepared parameter domain")
+        })
+        .collect()
 }
 
 fn terminal_route_fields(route_params: &[String], route_eligible_fields: &[String]) -> Vec<String> {
@@ -2017,11 +2043,16 @@ where
             }
             let binding_source_shape = plan.binding_source_shape.clone();
             let binding_user_params = plan.binding_user_params.clone();
+            let param_binding_mode = if binding_source_shape.is_some() {
+                ParamBindingMode::RetainAllParams
+            } else {
+                ParamBindingMode::InlineAllReachableSeeds
+            };
             let policy_request = node.table_read_policy_authorization_request(
                 policy_schema,
                 &table.name,
                 *permission_subject,
-                ParamBindingMode::InlineAllReachableSeeds,
+                param_binding_mode,
                 tier,
                 binding_source_shape.clone(),
                 binding_user_params.clone(),
@@ -5951,6 +5982,7 @@ where
                     attribution,
                 } => PolicyContext::AuthorizationSubplan {
                     protected_source: root_source_id(policy_shape.query().table.as_str()),
+                    role: PolicyDecisionRole::Read,
                     mode,
                     permission_subject,
                     claims,
@@ -6013,7 +6045,27 @@ where
         };
         let input_shape = self.normalized_row_set_shape(shape, binding)?;
         let policy = self.query_program_policy_context(identity);
-        let binding_claim_params = binding_claim_params_for_shape(&input_shape);
+        let policy_schema_version = self.read_policy_schema_for_table_name(
+            &shape.query().table,
+            shape.schema_version(),
+            &input_shape,
+        );
+        let mut binding_claim_params = binding_claim_params_for_shape(&input_shape);
+        if use_prepared_binding_source {
+            let policy_schema = self
+                .catalogue
+                .catalogue_schemas
+                .get(&policy_schema_version)
+                .ok_or(Error::InvalidStoredValue(
+                    "policy schema version is unknown",
+                ))?;
+            self.collect_policy_dependency_claim_params(
+                &policy_schema.schema,
+                &policy,
+                &input_shape,
+                &mut binding_claim_params,
+            )?;
+        }
         let source_shape = use_prepared_binding_source
             .then(|| {
                 query_binding_source_shape_for_parts_if_needed(
@@ -6037,11 +6089,7 @@ where
             reads: query_read_set_for_read_view(
                 &input.shape,
                 shape.schema_version(),
-                self.read_policy_schema_for_table_name(
-                    &shape.query().table,
-                    shape.schema_version(),
-                    &input.shape,
-                ),
+                policy_schema_version,
                 tier,
                 read_view,
                 settled_binding_view,
@@ -6051,6 +6099,45 @@ where
             input,
             output: current_query_output_request(output, shape.query()),
         })
+    }
+
+    fn collect_policy_dependency_claim_params(
+        &self,
+        schema: &JazzSchema,
+        policy: &PolicyContext,
+        input: &NormalizedRowSetShape,
+        params: &mut BTreeMap<String, ProgramClaimParam>,
+    ) -> Result<(), Error> {
+        let claims = match policy {
+            PolicyContext::Identity { claims, .. }
+            | PolicyContext::AuthorizationSubplan { claims, .. } => claims,
+            PolicyContext::System => return Ok(()),
+        };
+        for table_name in normalized_source_tables(input) {
+            let table = schema
+                .tables
+                .iter()
+                .find(|table| table.name == table_name)
+                .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
+            let mut query = authorization_query_from_read_policy(table);
+            let mut values = BTreeMap::new();
+            bind_scope_claim_operands(&mut query, claims, &mut values);
+            for (name, claim) in disambiguate_policy_claim_params(&mut query, schema, &mut values)?
+            {
+                // The root policy may rediscover the same claim slot while
+                // walking its source tables. Keep the already-lowered slot in
+                // that case; a typed alias is only needed when the same claim
+                // path is required at a genuinely different schema type.
+                if params
+                    .values()
+                    .any(|existing| existing.path == claim.path && existing.ty == claim.ty)
+                {
+                    continue;
+                }
+                params.insert(name, claim);
+            }
+        }
+        Ok(())
     }
 
     fn normalized_row_set_shape(
@@ -6650,6 +6737,7 @@ where
                 attribution,
             } => PolicyContext::AuthorizationSubplan {
                 protected_source: root_source_id(policy_shape.query().table.as_str()),
+                role: PolicyDecisionRole::Write,
                 mode,
                 permission_subject,
                 claims,
@@ -7152,6 +7240,32 @@ where
 
     fn can_use_prepared_current_query_plan(&self, shape: &ValidatedQuery) -> bool {
         shape.schema_version() == self.catalogue.current_schema_version_id
+            && !self.required_include_membership_is_identity_sensitive(shape)
+    }
+
+    fn required_include_membership_is_identity_sensitive(&self, shape: &ValidatedQuery) -> bool {
+        for include in &shape.query().includes {
+            if !include.require && include.join_mode != crate::query::JoinMode::Inner {
+                continue;
+            }
+            let mut table_name = shape.query().table.clone();
+            for segment in include.path.split('.') {
+                let Ok(table) = self.table_in_schema(&table_name, shape.schema_version()) else {
+                    return true;
+                };
+                let Some(target_name) = table.references.get(segment) else {
+                    return true;
+                };
+                let Ok(target) = self.table_in_schema(target_name, shape.schema_version()) else {
+                    return true;
+                };
+                if target.read_policy.is_some() {
+                    return true;
+                }
+                table_name = target_name.clone();
+            }
+        }
+        false
     }
 
     fn query_uses_heterogeneous_physical_lineage(&self, shape: &ValidatedQuery) -> bool {
@@ -8756,7 +8870,7 @@ where
             let key = (
                 shape.shape_id(),
                 tier,
-                query_binding_value_signature(&binding),
+                policy_plan_cache_signature(&binding, identity),
             );
             if let Some(plan) = self.query.query_shape_cache.get(&key) {
                 plan.clone()
@@ -9342,7 +9456,7 @@ where
         let key = (
             shape.shape_id(),
             tier,
-            query_binding_value_signature(binding),
+            policy_plan_cache_signature(binding, identity),
         );
         if let Some(plan) = self.query.query_shape_cache.get(&key)
             && !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker)
@@ -9413,7 +9527,18 @@ where
         let app_row_fields = app_row_terminal_fields(&program.lowered.output)?;
         let graph = lowered_app_rows_graph(&program)?;
         let params = prepared_params_from_domain(&program.lowered.parameters);
-        let route_params = prepared_route_param_names(&program.lowered.parameters);
+        let route_eligible_fields =
+            app_row_terminal_route_eligible_fields(&program.lowered.output)?;
+        let route_eligible_fields = route_eligible_fields.into_iter().collect::<BTreeSet<_>>();
+        // A terminal may expose only a subset of the program's routes (for
+        // example, an include policy can consume a claim without routing the
+        // app-row terminal by it). Keep that terminal's routes as the exact
+        // binding-value prefix Groove zips against.
+        let route_params = params
+            .iter()
+            .map(prepared_param_route_field)
+            .filter(|field| route_eligible_fields.contains(field))
+            .collect::<Vec<_>>();
         let param_names = params
             .iter()
             .map(|param| param.name.clone())
@@ -9434,17 +9559,16 @@ where
                 .source_shape
                 .clone()
                 .unwrap_or_else(|| query_binding_source_shape_for_prepared_params(&params));
-            let route_fields = terminal_route_fields(
-                &route_params,
-                &app_row_terminal_route_eligible_fields(&program.lowered.output)?,
-            );
+            let route_fields = route_params;
+            let route_value_indices = prepared_route_value_indices(&params, &route_fields);
             let prepared = self.database.prepare(
                 [groove::ivm::RoutedMultisinkTerminal::new(
                     JAZZ_APP_ROWS_SINK,
                     graph,
                     route_fields,
                     app_row_fields,
-                )],
+                )
+                .with_route_value_indices(route_value_indices)],
                 binding_source_shape,
                 binding_descriptor,
             )?;
@@ -9617,12 +9741,14 @@ where
                     &route_params,
                     &terminal_route_eligible_fields(&terminal.output)?,
                 );
+                let route_value_indices = prepared_route_value_indices(&params, &route_fields);
                 Ok(RoutedMultisinkTerminal::new(
                     terminal.sink,
                     terminal.graph,
                     route_fields,
                     public_fields,
-                ))
+                )
+                .with_route_value_indices(route_value_indices))
             })
             .collect::<Result<Vec<_>, Error>>()?;
         let prepared =
@@ -9800,6 +9926,7 @@ where
                 attribution,
             } => PolicyContext::AuthorizationSubplan {
                 protected_source: root_source_id(policy_shape.query().table.as_str()),
+                role: PolicyDecisionRole::Read,
                 mode,
                 permission_subject,
                 claims,
@@ -9895,44 +10022,6 @@ where
             .iter()
             .find(|candidate| candidate.name == table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.to_owned()))?;
-        let query = authorization_query_from_read_policy(table);
-        if !query.includes.is_empty() {
-            return Err(Error::InvalidStoredValue(
-                "maintained subscription view policy slice does not support include policies",
-            ));
-        }
-        let policy_shape = query.validate(policy_schema)?;
-        let policy_binding = policy_shape.bind(BTreeMap::new())?;
-        let policy_shape = bind_query_params_with_mode(
-            &policy_shape,
-            &policy_binding,
-            policy_schema,
-            param_binding_mode,
-        )?;
-        if !policy_shape.params().is_empty() {
-            return Err(Error::QueryCapability(
-                "maintained policy source filters with runtime parameters must lower through query-engine binding sources"
-                    .to_owned(),
-            ));
-        }
-        let binding = policy_shape.bind(BTreeMap::new())?;
-        let mut input_shape = if include_deleted_root {
-            self.normalized_include_deleted_row_set_shape(&policy_shape, &binding)?
-        } else {
-            self.normalized_row_set_shape(&policy_shape, &binding)?
-        };
-        let mut claim_params = binding_claim_params_for_shape(&input_shape);
-        collect_reachable_seed_claim_params(
-            policy_schema,
-            policy_shape.query(),
-            &mut claim_params,
-        )?;
-        let binding_source_shape = binding_source_shape.clone().or_else(|| {
-            authorization_binding_source_shape(&policy_shape, &binding_user_params, &claim_params)
-        });
-        if let Some(source_shape) = binding_source_shape.clone() {
-            retarget_binding_value_sources(&mut input_shape, &source_shape);
-        }
         let policy = match self.query_program_policy_context(identity) {
             PolicyContext::Identity {
                 mode,
@@ -9940,7 +10029,8 @@ where
                 claims,
                 attribution,
             } => PolicyContext::AuthorizationSubplan {
-                protected_source: root_source_id(policy_shape.query().table.as_str()),
+                protected_source: root_source_id(table_name),
+                role: PolicyDecisionRole::Read,
                 mode,
                 permission_subject,
                 claims,
@@ -9948,6 +10038,66 @@ where
             },
             other => other,
         };
+        let mut query = authorization_query_from_read_policy(table);
+        let mut policy_binding_values = BTreeMap::new();
+        if matches!(param_binding_mode, ParamBindingMode::RetainAllParams)
+            && let PolicyContext::AuthorizationSubplan { claims, .. } = &policy
+        {
+            bind_scope_claim_operands(&mut query, claims, &mut policy_binding_values);
+        }
+        if !query.includes.is_empty() {
+            return Err(Error::InvalidStoredValue(
+                "maintained subscription view policy slice does not support include policies",
+            ));
+        }
+        let declared_claim_params = disambiguate_policy_claim_params(
+            &mut query,
+            policy_schema,
+            &mut policy_binding_values,
+        )?;
+        let policy_shape = query.validate(policy_schema)?;
+        coerce_binding_values_for_shape(&policy_shape, &mut policy_binding_values);
+        let policy_binding = policy_shape.bind(policy_binding_values.clone())?;
+        let policy_shape = bind_query_params_with_mode(
+            &policy_shape,
+            &policy_binding,
+            policy_schema,
+            param_binding_mode,
+        )?;
+        if policy_shape
+            .params()
+            .keys()
+            .any(|name| !policy_binding_values.contains_key(name))
+        {
+            return Err(Error::QueryCapability(
+                "maintained policy source filters with runtime parameters must lower through query-engine binding sources"
+                    .to_owned(),
+            ));
+        }
+        let binding = policy_shape.bind(policy_binding_values)?;
+        let mut input_shape = if include_deleted_root {
+            self.normalized_include_deleted_row_set_shape(&policy_shape, &binding)?
+        } else {
+            self.normalized_row_set_shape(&policy_shape, &binding)?
+        };
+        let mut claim_params = binding_claim_params_for_shape(&input_shape);
+        claim_params.extend(declared_claim_params);
+        collect_reachable_seed_claim_params(
+            policy_schema,
+            policy_shape.query(),
+            &mut claim_params,
+        )?;
+        for (name, claim) in &mut claim_params {
+            if let Some(ty) = policy_shape.params().get(name) {
+                claim.ty = ty.clone();
+            }
+        }
+        let binding_source_shape = binding_source_shape.clone().or_else(|| {
+            authorization_binding_source_shape(&policy_shape, &binding_user_params, &claim_params)
+        });
+        if let Some(source_shape) = binding_source_shape.clone() {
+            retarget_binding_value_sources(&mut input_shape, &source_shape);
+        }
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape_and_policy(
                 &policy_shape,
@@ -10030,6 +10180,7 @@ where
                 attribution,
             } => PolicyContext::AuthorizationSubplan {
                 protected_source: root_source_id(policy_shape.query().table.as_str()),
+                role: PolicyDecisionRole::Read,
                 mode,
                 permission_subject,
                 claims,
@@ -10401,6 +10552,27 @@ fn bind_scope_claim_operands(
             }
         }
     }
+    for branch in &mut query.policy_branches {
+        for predicate in &mut branch.filters {
+            bind_scope_claim_predicate(predicate, claim_values, binding_values);
+        }
+        for join in &mut branch.joins {
+            bind_scope_claim_join(join, claim_values, binding_values);
+        }
+        for reachable in &mut branch.reachable {
+            for predicate in &mut reachable.access_filters {
+                bind_scope_claim_predicate(predicate, claim_values, binding_values);
+            }
+            for predicate in &mut reachable.edge_filters {
+                bind_scope_claim_predicate(predicate, claim_values, binding_values);
+            }
+            if let Some(seed) = &mut reachable.seed {
+                for predicate in &mut seed.filters {
+                    bind_scope_claim_predicate(predicate, claim_values, binding_values);
+                }
+            }
+        }
+    }
 }
 
 fn bind_scope_claim_join(
@@ -10466,6 +10638,129 @@ fn bind_scope_claim_operand(
     let param = claim_param_field(&ClaimPath(vec![name.clone()]));
     binding_values.insert(param.clone(), value);
     *operand = Operand::Param(param);
+}
+
+fn disambiguate_policy_claim_params(
+    query: &mut JazzQuery,
+    schema: &JazzSchema,
+    binding_values: &mut BTreeMap<String, Value>,
+) -> Result<BTreeMap<String, ProgramClaimParam>, Error> {
+    let shape = query.validate(schema)?;
+    let mut aliases = BTreeMap::new();
+    let mut claims = BTreeMap::new();
+    for (name, ty) in shape.params() {
+        let Some(path) = claim_path_from_param_field(name) else {
+            continue;
+        };
+        let alias = typed_claim_param_alias(name, ty);
+        aliases.insert(name.clone(), alias.clone());
+        claims.insert(
+            alias,
+            ProgramClaimParam {
+                path,
+                ty: ty.clone(),
+            },
+        );
+    }
+    rename_query_params(query, &aliases);
+    for (name, alias) in aliases {
+        if let Some(value) = binding_values.remove(&name) {
+            binding_values.insert(alias, value);
+        }
+    }
+    Ok(claims)
+}
+
+fn typed_claim_param_alias(name: &str, ty: &ColumnType) -> String {
+    let ty = format!("{ty:?}");
+    format!("__jazz_claim_typed:{}:{ty}:{name}", ty.len())
+}
+
+fn rename_query_params(query: &mut JazzQuery, aliases: &BTreeMap<String, String>) {
+    for predicate in &mut query.filters {
+        rename_predicate_params(predicate, aliases);
+    }
+    for join in &mut query.joins {
+        rename_join_params(join, aliases);
+    }
+    for reachable in &mut query.reachable {
+        rename_reachable_params(reachable, aliases);
+    }
+    for branch in &mut query.policy_branches {
+        for predicate in &mut branch.filters {
+            rename_predicate_params(predicate, aliases);
+        }
+        for join in &mut branch.joins {
+            rename_join_params(join, aliases);
+        }
+        for reachable in &mut branch.reachable {
+            rename_reachable_params(reachable, aliases);
+        }
+    }
+}
+
+fn rename_join_params(join: &mut JoinVia, aliases: &BTreeMap<String, String>) {
+    for predicate in &mut join.filters {
+        rename_predicate_params(predicate, aliases);
+    }
+    for join in &mut join.nested_joins {
+        rename_join_params(join, aliases);
+    }
+}
+
+fn rename_reachable_params(
+    reachable: &mut crate::query::ReachableVia,
+    aliases: &BTreeMap<String, String>,
+) {
+    rename_operand_param(&mut reachable.from, aliases);
+    for predicate in &mut reachable.access_filters {
+        rename_predicate_params(predicate, aliases);
+    }
+    for predicate in &mut reachable.edge_filters {
+        rename_predicate_params(predicate, aliases);
+    }
+    if let Some(seed) = &mut reachable.seed {
+        for predicate in &mut seed.filters {
+            rename_predicate_params(predicate, aliases);
+        }
+    }
+}
+
+fn rename_predicate_params(predicate: &mut Predicate, aliases: &BTreeMap<String, String>) {
+    match predicate {
+        Predicate::All(predicates) | Predicate::Any(predicates) => {
+            for predicate in predicates {
+                rename_predicate_params(predicate, aliases);
+            }
+        }
+        Predicate::Not(predicate) => rename_predicate_params(predicate, aliases),
+        Predicate::Eq(left, right)
+        | Predicate::Ne(left, right)
+        | Predicate::Gt(left, right)
+        | Predicate::Gte(left, right)
+        | Predicate::Lt(left, right)
+        | Predicate::Lte(left, right)
+        | Predicate::Contains(left, right) => {
+            rename_operand_param(left, aliases);
+            rename_operand_param(right, aliases);
+        }
+        Predicate::In(left, values) => {
+            rename_operand_param(left, aliases);
+            for value in values {
+                rename_operand_param(value, aliases);
+            }
+        }
+        Predicate::IsNull(operand) => rename_operand_param(operand, aliases),
+    }
+}
+
+fn rename_operand_param(operand: &mut Operand, aliases: &BTreeMap<String, String>) {
+    let Operand::Param(name) = operand else {
+        return;
+    };
+    if let Some(alias) = aliases.get(name) {
+        *name = alias.clone();
+    }
 }
 
 fn false_predicate() -> Predicate {
@@ -10732,6 +11027,23 @@ fn binding_claim_params_for_shape(
         collect_claim_field_params_from_node(node, &mut params);
     }
     params
+}
+
+fn normalized_source_tables(shape: &NormalizedRowSetShape) -> BTreeSet<String> {
+    shape
+        .nodes
+        .values()
+        .filter_map(|node| match node {
+            RowSetExpr::Source { source, .. } => Some(source.table.clone()),
+            _ => None,
+        })
+        .chain(
+            shape
+                .auxiliary_sources
+                .iter()
+                .map(|source| source.table.clone()),
+        )
+        .collect()
 }
 
 fn collect_reachable_seed_claim_params(
@@ -11122,6 +11434,16 @@ fn query_binding_value_signature(binding: &Binding) -> String {
         .join(",")
 }
 
+fn policy_plan_cache_signature(binding: &Binding, identity: AuthorId) -> String {
+    // Authorization lowering still embeds the permission subject in source
+    // plans. Claim values are routed at bind time, but plans from different
+    // subjects are not interchangeable until that subject is parameterized.
+    format!(
+        "{}|subject={identity:?}",
+        query_binding_value_signature(binding)
+    )
+}
+
 fn exact_known_state_declaration_if_within_limits(
     _shape_id: ShapeId,
     _subscription: SubscriptionKey,
@@ -11284,6 +11606,17 @@ fn coerce_prepared_binding_value(value: Value, column_type: &groove::schema::Col
         (Value::String(value), groove::schema::ColumnType::Uuid) => uuid::Uuid::parse_str(&value)
             .map(Value::Uuid)
             .unwrap_or(Value::String(value)),
+        (Value::I64(value), groove::schema::ColumnType::I32) => i32::try_from(value)
+            .map(Value::I32)
+            .unwrap_or(Value::I64(value)),
+        (Value::U32(value), groove::schema::ColumnType::I32) => i32::try_from(value)
+            .map(Value::I32)
+            .unwrap_or(Value::U32(value)),
+        (Value::I32(value), groove::schema::ColumnType::I64) => Value::I64(i64::from(value)),
+        (Value::U32(value), groove::schema::ColumnType::I64) => Value::I64(i64::from(value)),
+        (Value::U64(value), groove::schema::ColumnType::I64) => i64::try_from(value)
+            .map(Value::I64)
+            .unwrap_or(Value::U64(value)),
         (Value::Nullable(Some(value)), column_type) => Value::Nullable(Some(Box::new(
             coerce_prepared_binding_value(*value, column_type),
         ))),
@@ -11310,6 +11643,15 @@ fn coerce_prepared_binding_value(value: Value, column_type: &groove::schema::Col
             Value::Nullable(Some(Box::new(coerce_prepared_binding_value(value, inner))))
         }
         (value, _) => value,
+    }
+}
+
+fn coerce_binding_values_for_shape(shape: &ValidatedQuery, values: &mut BTreeMap<String, Value>) {
+    for (name, value) in values {
+        let Some(ty) = shape.params().get(name) else {
+            continue;
+        };
+        *value = coerce_prepared_binding_value(value.clone(), ty);
     }
 }
 
@@ -12550,6 +12892,43 @@ mod tests {
         assert_ne!(
             first,
             query_binding_source_shape_for_parts(&params, &different_claims)
+        );
+    }
+
+    #[test]
+    fn one_claim_path_has_distinct_prepared_slots_per_numeric_width() {
+        let field = claim_param_field(&ClaimPath(vec!["access_level".to_owned()]));
+        let i32_alias = typed_claim_param_alias(&field, &ColumnType::I32);
+        let i64_alias = typed_claim_param_alias(&field, &ColumnType::I64);
+
+        assert_ne!(i32_alias, i64_alias);
+        assert_eq!(
+            claim_path_from_param_field(&i32_alias),
+            Some(ClaimPath(vec!["access_level".to_owned()]))
+        );
+        let slots = BTreeMap::from([
+            (
+                i32_alias,
+                ProgramClaimParam {
+                    path: ClaimPath(vec!["access_level".to_owned()]),
+                    ty: ColumnType::I32,
+                },
+            ),
+            (
+                i64_alias,
+                ProgramClaimParam {
+                    path: ClaimPath(vec!["access_level".to_owned()]),
+                    ty: ColumnType::I64,
+                },
+            ),
+        ]);
+        assert_eq!(slots.len(), 2);
+        assert_eq!(
+            slots
+                .values()
+                .map(|slot| slot.path.clone())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([ClaimPath(vec!["access_level".to_owned()])])
         );
     }
 
