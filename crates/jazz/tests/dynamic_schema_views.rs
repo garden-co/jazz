@@ -4,7 +4,7 @@ use jazz::groove::schema::ColumnType;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, col, eq, gt, lit};
-use jazz::schema::{ColumnSchema, JazzSchema, Policy, TableSchema};
+use jazz::schema::{ColumnSchema, JazzSchema, MergeStrategy, Policy, TableSchema};
 use jazz::tools::OpenBatchId;
 
 fn schema(default: &str) -> JazzSchema {
@@ -41,6 +41,25 @@ fn owner_only_schema(default: &str) -> JazzSchema {
     .with_write_policy(Policy::shape(
         jazz::query::Query::from("items").filter(eq(lit(1_i64), lit(2_i64))),
     ))])
+}
+
+fn metadata_schema(reference: Option<&str>, counter: bool, indexed: bool) -> JazzSchema {
+    let mut table = TableSchema::new(
+        "items",
+        [ColumnSchema::new("value", ColumnType::I64).with_default(Value::I64(0))],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public());
+    if let Some(target) = reference {
+        table = table.with_reference("value", target);
+    }
+    if counter {
+        table = table.with_column_merge_strategy("value", MergeStrategy::Counter);
+    }
+    if indexed {
+        table = table.with_indexed_column("value");
+    }
+    JazzSchema::new([table])
 }
 
 fn open_owner(schema: JazzSchema) -> Db<MemoryStorage> {
@@ -122,25 +141,42 @@ fn schema_view_registration_is_idempotent_and_explicit() {
 #[test]
 fn exact_schema_view_policy_cannot_inherit_public_structural_policy() {
     let owner = open_owner(schema("public"));
-    let restricted = owner
-        .register_schema_view(owner_only_schema("not-the-author"))
-        .unwrap();
     assert_eq!(
         schema("public").version_id(),
         owner_only_schema("not-the-author").version_id()
     );
-    assert_ne!(owner.schema_view_id(), restricted.schema_view_id());
-
-    let error = match restricted.insert_with_id(
-        "items",
-        RowUuid::from_bytes([9; 16]),
-        Default::default(),
-    ) {
-        Ok(_) => panic!("restricted exact view unexpectedly inherited public policy"),
+    let error = match owner.register_schema_view(owner_only_schema("not-the-author")) {
+        Ok(_) => panic!("conflicting policy view unexpectedly registered"),
         Err(error) => error,
     };
-    assert_eq!(error.code, jazz::db::ErrorCode::WriteRejected);
-    assert!(error.message.contains("policy denied INSERT"));
+    assert_eq!(error.code, jazz::db::ErrorCode::Schema);
+    assert!(error.message.contains("policy metadata conflicts"));
+}
+
+#[test]
+fn automatic_schema_view_admission_rejects_non_lens_metadata_changes() {
+    for (label, target) in [
+        ("references", metadata_schema(Some("other"), false, false)),
+        ("merge strategies", metadata_schema(None, true, false)),
+    ] {
+        let owner = open_owner(metadata_schema(None, false, false));
+        let error = match owner.register_schema_view(target) {
+            Ok(_) => panic!("{label} change unexpectedly auto-admitted"),
+            Err(error) => error,
+        };
+        assert!(error.message.contains(label));
+        assert!(error.message.contains("explicit lens"));
+    }
+
+    let base = metadata_schema(None, false, false);
+    let owner = open_owner(base.clone());
+    let indexed = metadata_schema(None, false, true);
+    assert_eq!(base.version_id(), indexed.version_id());
+    let error = match owner.register_schema_view(indexed) {
+        Ok(_) => panic!("index change unexpectedly registered without physical admission"),
+        Err(error) => error,
+    };
+    assert!(error.message.contains("index metadata conflicts"));
 }
 
 /// A runtime owner may exist before any typed application schema is known;

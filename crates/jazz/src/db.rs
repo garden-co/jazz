@@ -286,6 +286,33 @@ fn direct_schema_view_lens(
         else {
             continue;
         };
+        if source_table.references != target_table.references {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                format!(
+                    "schema view changes references on {} without an explicit lens",
+                    target_table.name
+                ),
+            ));
+        }
+        if source_table.merge_strategies != target_table.merge_strategies {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                format!(
+                    "schema view changes merge strategies on {} without an explicit lens",
+                    target_table.name
+                ),
+            ));
+        }
+        if source_table.indexed_columns != target_table.indexed_columns {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                format!(
+                    "schema view changes indices on {} without explicit index admission",
+                    target_table.name
+                ),
+            ));
+        }
         let mut ops = Vec::new();
         for target_column in &target_table.columns {
             match source_table
@@ -588,6 +615,25 @@ where
         let schema_version_id = schema.version_id();
         let schema_view_id = SchemaViewId::for_schema(&schema);
         self.admit_local_schema_view_if_needed(&schema)?;
+        {
+            let node = self.node.node.borrow();
+            let admitted = node
+                .catalogue_schemas()
+                .get(&schema_version_id)
+                .ok_or_else(|| Error::new(ErrorCode::Schema, "registered schema is missing"))?;
+            if !schema_policy_metadata_matches(&admitted.schema, &schema) {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    "schema view policy metadata conflicts with its admitted structural schema",
+                ));
+            }
+            if !schema_index_metadata_matches(&admitted.schema, &schema) {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    "schema view index metadata conflicts with its admitted structural schema",
+                ));
+            }
+        }
         let mut views = self.schema_views.borrow_mut();
         if let Some(existing) = views.get(&schema_view_id) {
             if existing != &schema {
@@ -3769,6 +3815,29 @@ where
             })
             .collect()
     }
+}
+
+fn schema_policy_metadata_matches(left: &JazzSchema, right: &JazzSchema) -> bool {
+    left.branch_read_policy == right.branch_read_policy
+        && left.branch_write_policy == right.branch_write_policy
+        && left.tables.len() == right.tables.len()
+        && left.tables.iter().all(|left_table| {
+            right.tables.iter().any(|right_table| {
+                left_table.name == right_table.name
+                    && left_table.read_policy == right_table.read_policy
+                    && left_table.write_policies == right_table.write_policies
+            })
+        })
+}
+
+fn schema_index_metadata_matches(left: &JazzSchema, right: &JazzSchema) -> bool {
+    left.tables.len() == right.tables.len()
+        && left.tables.iter().all(|left_table| {
+            right.tables.iter().any(|right_table| {
+                left_table.name == right_table.name
+                    && left_table.indexed_columns == right_table.indexed_columns
+            })
+        })
 }
 
 #[cfg(feature = "testing")]
