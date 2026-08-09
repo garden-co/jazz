@@ -356,12 +356,7 @@ context that persists across frames on one transport, so cross-message
 repetition (subscription keys, row ids, authors, adjacent timestamps)
 compresses without any wire-format change; and (2) **columnar `ViewUpdate`
 internals** — a reserved append-only message variant whose member/bundle
-payloads are column-encoded (the groove ch. 2 §2.9 window codec applied to a
-message body). A lone single-edit transaction with nothing before or after it
-pays full framing and transaction overhead by design — it is lone precisely
-when there is nothing to amortize against. Windowed _storage_ representation
-(groove ch. 2 §2.9) is never a wire obligation: the wire ships logical
-messages; storage and transport each compress in their own layer.
+payloads use this protocol's independent columnar wire encoding. A lone single-edit transaction with nothing before or after it pays full framing and transaction overhead by design — it is lone precisely when there is nothing to amortize against. Storage remains an independent row-only layer.
 
 Native transports advertise zstd-3 stream compression by default when the
 feature is compiled in. WASM/browser artifacts keep transport compression

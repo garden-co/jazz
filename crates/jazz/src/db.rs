@@ -24,15 +24,8 @@ use groove::records::{OwnedRecord, RecordDescriptor, Value};
 use groove::schema::ColumnType as GrooveColumnType;
 use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use thiserror::Error;
+#[cfg(feature = "cold-settle-attribution")]
 use web_time::Instant;
-
-/// Maximum history-codec windows built during one outer `Db::tick` post-tick
-/// maintenance pass.
-///
-/// The pass runs after connection work and cache eviction, between runtime
-/// ticks. Keeping this small bounds foreground tick work while allowing old
-/// plain history runs to compact incrementally.
-const POST_TICK_HISTORY_WINDOW_BUDGET: usize = 4;
 
 use crate::ids::{AuthorId, NodeUuid, RowUuid, SchemaVersionId};
 pub use crate::node::CommitUnitTrust;
@@ -4207,12 +4200,6 @@ pub struct DbTickStats {
     pub subscription_events: usize,
     /// Number of connection ticks that applied remote sync state locally.
     pub remote_sync_applied: usize,
-    /// Number of history codec windows built by post-tick maintenance.
-    pub consolidated_windows: usize,
-    /// Number of plain history records folded into codec windows.
-    pub consolidated_window_records: usize,
-    /// Foreground time spent in post-tick history window consolidation.
-    pub history_window_consolidation_us: u128,
 }
 
 /// Node-owned participant surface for upstream and subscriber connections.
@@ -4697,17 +4684,6 @@ where
                 .enforce_edge_cache_budget(&pins, budget)?;
         }
         self.prune_settled_outbox_uploads();
-        let consolidation_start = Instant::now();
-        let consolidation = self
-            .node
-            .borrow_mut()
-            .post_tick_consolidate_history_windows(POST_TICK_HISTORY_WINDOW_BUDGET)?;
-        let consolidation_us = consolidation_start.elapsed().as_micros();
-        stats.consolidated_windows += consolidation.windows;
-        stats.consolidated_window_records += consolidation.records;
-        if consolidation.windows > 0 {
-            stats.history_window_consolidation_us += consolidation_us;
-        }
         Ok(stats)
     }
 

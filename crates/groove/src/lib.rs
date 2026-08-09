@@ -20,6 +20,5 @@ pub mod queries;
 pub mod records;
 pub mod schema;
 pub mod storage;
-pub mod window_codec;
 
 pub use internment::Intern;

@@ -468,9 +468,6 @@ struct RunSummary {
     expected_count_all_ms: u128,
     raw_expected_count_all_ms: u128,
     one_shot_validate_ms: u128,
-    consolidated_windows: usize,
-    consolidated_window_records: usize,
-    history_window_consolidation_us: u128,
     ticks: usize,
     subscriptions: usize,
     rows_materialized: usize,
@@ -980,9 +977,6 @@ fn run_connect_and_subscribe(
     let settle_start = Instant::now();
     let mut server_open_bundle_ms = 0_u128;
     let mut client_apply_tick_ms = 0_u128;
-    let mut consolidated_windows = 0_usize;
-    let mut consolidated_window_records = 0_usize;
-    let mut history_window_consolidation_us = 0_u128;
     let mut ticks = 0_usize;
     while !subscriptions
         .iter()
@@ -998,22 +992,12 @@ fn run_connect_and_subscribe(
         let server_start = Instant::now();
         let core_tick = seeded.core.tick_stats().expect("core tick");
         server_open_bundle_ms += server_start.elapsed().as_millis();
-        accumulate_tick_stats(
-            core_tick,
-            &mut consolidated_windows,
-            &mut consolidated_window_records,
-            &mut history_window_consolidation_us,
-        );
+        accumulate_tick_stats(core_tick);
         if let Some(relay) = &active_relay {
             let relay_start = Instant::now();
             let relay_tick = relay.db.tick_stats().expect("relay tick");
             server_open_bundle_ms += relay_start.elapsed().as_millis();
-            accumulate_tick_stats(
-                relay_tick,
-                &mut consolidated_windows,
-                &mut consolidated_window_records,
-                &mut history_window_consolidation_us,
-            );
+            accumulate_tick_stats(relay_tick);
         }
 
         let _queued_to_client = client_counters.right_inbound.borrow().len();
@@ -1021,12 +1005,7 @@ fn run_connect_and_subscribe(
         let client_tick = client.db.tick_stats().expect("client tick");
         drain_subscriptions(start, &mut subscriptions);
         client_apply_tick_ms += client_start.elapsed().as_millis();
-        accumulate_tick_stats(
-            client_tick,
-            &mut consolidated_windows,
-            &mut consolidated_window_records,
-            &mut history_window_consolidation_us,
-        );
+        accumulate_tick_stats(client_tick);
         ticks += 1;
     }
     let settle_loop_ms = settle_start.elapsed().as_millis();
@@ -1109,9 +1088,6 @@ fn run_connect_and_subscribe(
         expected_count_all_ms,
         raw_expected_count_all_ms,
         one_shot_validate_ms,
-        consolidated_windows,
-        consolidated_window_records,
-        history_window_consolidation_us,
         ticks,
         subscriptions: timelines.len(),
         rows_materialized,
@@ -1184,16 +1160,7 @@ fn apply_event(rows: &mut BTreeSet<RowUuid>, event: SubscriptionEvent) -> bool {
     }
 }
 
-fn accumulate_tick_stats(
-    stats: jazz::db::DbTickStats,
-    consolidated_windows: &mut usize,
-    consolidated_window_records: &mut usize,
-    history_window_consolidation_us: &mut u128,
-) {
-    *consolidated_windows += stats.consolidated_windows;
-    *consolidated_window_records += stats.consolidated_window_records;
-    *history_window_consolidation_us += stats.history_window_consolidation_us;
-}
+fn accumulate_tick_stats(_stats: jazz::db::DbTickStats) {}
 
 fn emit_summary(config: &Config, session_id: &str, phase: &str, summary: &RunSummary) {
     emit_phase_receipt(config, session_id, phase, summary);
@@ -1225,24 +1192,11 @@ fn emit_summary(config: &Config, session_id: &str, phase: &str, summary: &RunSum
             "settle_loop_ms": summary.settle_loop_ms,
             "client_apply_tick_ms": summary.client_apply_tick_ms,
             "one_shot_validate_ms": summary.one_shot_validate_ms,
-            "history_window_consolidation_ms": summary.history_window_consolidation_us as f64 / 1000.0,
         }),
     );
     fields.insert(
         "one_shot_validate_ms".to_owned(),
         json!(summary.one_shot_validate_ms),
-    );
-    fields.insert(
-        "consolidated_windows".to_owned(),
-        json!(summary.consolidated_windows),
-    );
-    fields.insert(
-        "consolidated_window_records".to_owned(),
-        json!(summary.consolidated_window_records),
-    );
-    fields.insert(
-        "history_window_consolidation_us".to_owned(),
-        json!(summary.history_window_consolidation_us),
     );
     fields.insert("ticks".to_owned(), json!(summary.ticks));
     fields.insert("subscriptions".to_owned(), json!(summary.subscriptions));
@@ -1344,7 +1298,6 @@ fn emit_phase_receipt(config: &Config, session_id: &str, phase: &str, summary: &
             "settle_loop_ms": summary.settle_loop_ms,
             "client_apply_tick_ms": summary.client_apply_tick_ms,
             "one_shot_validate_ms": summary.one_shot_validate_ms,
-            "history_window_consolidation_ms": summary.history_window_consolidation_us as f64 / 1000.0,
         },
         "rows_materialized": summary.rows_materialized,
         "expected_rows": summary.expected_rows,
