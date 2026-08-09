@@ -6252,7 +6252,7 @@ where
                                             shape,
                                             &binding,
                                             opts.tier,
-                                            ingest_context.identity,
+                                            subscriber_permission_subject(*ingest_context),
                                             &opts.read_view,
                                         );
                                     if let Err(crate::node::Error::QueryCapability(detail)) =
@@ -6426,7 +6426,7 @@ where
                                     &shape,
                                     &binding,
                                     opts.tier,
-                                    ingest_context.identity,
+                                    subscriber_permission_subject(*ingest_context),
                                     &opts.read_view,
                                 );
                             if let Err(crate::node::Error::QueryCapability(detail)) = supported {
@@ -6455,7 +6455,10 @@ where
                             let first_subscriber = coverage_groups
                                 .get(&coverage)
                                 .is_none_or(|group| group.subscribers.is_empty());
-                            let permissions_ready = self.node.borrow().permissions_ready();
+                            let permissions_ready = subscriber_permissions_ready(
+                                self.node.borrow().permissions_ready(),
+                                ingest_context.trust,
+                            );
                             let update = if !permissions_ready {
                                 None
                             } else if first_subscriber {
@@ -6729,7 +6732,10 @@ where
                                 _ => None,
                             };
                             if let Some((tx_id, _)) = &relay_upload
-                                && !self.node.borrow().permissions_ready()
+                                && !subscriber_permissions_ready(
+                                    self.node.borrow().permissions_ready(),
+                                    ingest_context.trust,
+                                )
                             {
                                 let response = SyncMessage::FateUpdate {
                                     tx_id: *tx_id,
@@ -6828,7 +6834,12 @@ where
                     self.observed_subscriber_dirty_epoch.set(next);
                     *serve_dirty = true;
                 }
-                if *serve_dirty && self.node.borrow().permissions_ready() {
+                if *serve_dirty
+                    && subscriber_permissions_ready(
+                        self.node.borrow().permissions_ready(),
+                        ingest_context.trust,
+                    )
+                {
                     // A coverage-group refresh drains every maintained view below.
                     // Tick the shared runtime once before that drain rather than once
                     // per group.
@@ -7804,6 +7815,17 @@ fn coverage_key(
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
         opts,
+    }
+}
+
+fn subscriber_permissions_ready(permissions_ready: bool, trust: CommitUnitTrust) -> bool {
+    trust == CommitUnitTrust::TrustedBackend || permissions_ready
+}
+
+fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> AuthorId {
+    match ingest.trust {
+        CommitUnitTrust::Session => ingest.identity,
+        CommitUnitTrust::TrustedBackend => AuthorId::SYSTEM,
     }
 }
 
