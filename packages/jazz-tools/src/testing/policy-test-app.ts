@@ -16,6 +16,10 @@ type ExpectLike = (value: unknown) => {
   toThrow(expected?: unknown): void;
 };
 type TestDbMethodCallback = (db: Db) => unknown;
+type SeedWrite<T> = {
+  readonly value: T;
+  wait(options: { tier: "local" }): Promise<T>;
+};
 
 /**
  * Db used for testing permissions.
@@ -73,12 +77,13 @@ export class PolicyTestApp {
   ) {}
 
   /**
-   * Seed the database with the given callback.
-   * The callback is executed in an admin database context.
+   * Seed the database with one admin write and wait until it is locally
+   * visible before returning. This prevents the following session-scoped read
+   * from racing the asynchronous native runtime commit.
    */
-  seed<T>(callback: (db: Db) => T): T {
+  async seed<T>(callback: (db: Db) => SeedWrite<T>): Promise<T> {
     const db = this.jazzContext.asBackend();
-    return callback(db);
+    return callback(db).wait({ tier: "local" });
   }
 
   /**

@@ -319,13 +319,12 @@ describe("createPolicyTestApp", () => {
     const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
 
     try {
-      const seeded = policyTestApp.seed((db) => {
-        const { value } = db.insert(testApp.todos, {
+      const seeded = await policyTestApp.seed((db) => {
+        return db.insert(testApp.todos, {
           title: "Ship the direct app API",
           done: false,
           ownerId: "alice",
         });
-        return value;
       });
 
       const alice = policyTestApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
