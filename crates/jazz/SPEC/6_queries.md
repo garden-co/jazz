@@ -447,6 +447,10 @@ lowering rather than substitute traversal order or normalized node identity,
 both of which can churn occurrence keys after unrelated graph edits. Recursive
 bag inputs without a finite stable labeled source-row carrier MUST likewise fail
 lowering rather than collapse copies.
+Two semantically identical `UNION ALL` arms therefore require distinct stable
+labels supplied by their normalized source. A builder without such declared
+identity MUST reject that shape; it MUST NOT invent an ordinal merely to retain
+duplicate derivations.
 
 Public subscription transports MUST carry the opaque versioned `ResultKey`
 sidecar aligned with added, updated, and removed rows. They MUST validate the

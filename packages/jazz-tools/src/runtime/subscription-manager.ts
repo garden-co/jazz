@@ -93,7 +93,7 @@ function applySubscriptionDeltaSequentially<T extends { id: string }>(
         removeById(current, change.id);
         break;
       case RowChangeKind.Updated: {
-        const existing = current.find((item) => item.id === change.id);
+        const existing = current.find((item) => resultIdentity(item) === change.id);
         removeById(current, change.id);
         const next = change.item ?? existing;
         if (next) {
@@ -113,8 +113,8 @@ function applyBulkSubscriptionDelta<T extends { id: string }>(
 ): T[] {
   delta = normalizeRowDelta(delta);
   const changedIds = new Set(delta.map((change) => change.id));
-  const existingById = new Map(current.map((item) => [item.id, item]));
-  const base = current.filter((item) => !changedIds.has(item.id));
+  const existingById = new Map(current.map((item) => [resultIdentity(item), item]));
+  const base = current.filter((item) => !changedIds.has(resultIdentity(item)));
   const placements: Array<{ id: string; index: number; item: T }> = [];
 
   for (const change of delta) {
@@ -196,8 +196,23 @@ function mergeIndexedPlacements<T>(base: T[], placements: Array<{ index: number;
 }
 
 function removeById<T extends { id: string }>(current: T[], id: string): void {
-  const index = current.findIndex((item) => item.id === id);
+  const index = current.findIndex((item) => resultIdentity(item) === id);
   if (index !== -1) current.splice(index, 1);
+}
+
+const RESULT_KEY_PROPERTY = "__jazzResultKey";
+
+function withResultIdentity<T extends { id: string }>(item: T, key: string): T {
+  Object.defineProperty(item, RESULT_KEY_PROPERTY, {
+    value: key,
+    enumerable: false,
+    configurable: true,
+  });
+  return item;
+}
+
+function resultIdentity(item: { id: string }): string {
+  return (item as { __jazzResultKey?: string }).__jazzResultKey ?? item.id;
 }
 
 /**
@@ -440,22 +455,26 @@ export class SubscriptionManager<T extends { id: string }> {
     return this.handleTypedDelta(
       delta.map((change) => {
         switch (change.kind) {
-          case RowChangeKind.Added:
+          case RowChangeKind.Added: {
+            const addedItem = transform(change.row);
             return {
               kind: RowChangeKind.Added,
               id: change.id,
               index: change.index,
-              item: transform(change.row),
+              item: withResultIdentity(addedItem, change.id),
             };
+          }
           case RowChangeKind.Removed:
             return change;
-          case RowChangeKind.Updated:
+          case RowChangeKind.Updated: {
+            const updatedItem = change.row ? transform(change.row) : undefined;
             return {
               kind: RowChangeKind.Updated,
               id: change.id,
               index: change.index,
-              item: change.row ? transform(change.row) : undefined,
+              item: updatedItem ? withResultIdentity(updatedItem, change.id) : undefined,
             };
+          }
         }
       }),
       reset,
@@ -719,7 +738,10 @@ export function decodeNativeDelta(
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     let offset = 0;
     for (let i = 0; i < native.updatedCount; i++) {
-      const id = readUuid(bytes, offset);
+      const sourceId = readUuid(bytes, offset);
+      const id = native.updatedOccurrenceKeys?.[i]
+        ? publicResultKey(native.updatedOccurrenceKeys[i]!)
+        : sourceId;
       offset += 16;
       const index = view.getUint32(offset, true);
       offset += 4;
@@ -734,7 +756,7 @@ export function decodeNativeDelta(
           kind: RowChangeKind.Updated,
           id,
           index,
-          row: decodeNativeRow(id, columns, data),
+          row: decodeNativeRow(sourceId, columns, data),
         });
       } else {
         delta.push({ kind: RowChangeKind.Updated, id, index });
@@ -747,7 +769,10 @@ export function decodeNativeDelta(
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     let offset = 0;
     for (let i = 0; i < native.addedCount; i++) {
-      const id = readUuid(bytes, offset);
+      const sourceId = readUuid(bytes, offset);
+      const id = native.addedOccurrenceKeys?.[i]
+        ? publicResultKey(native.addedOccurrenceKeys[i]!)
+        : sourceId;
       offset += 16;
       const index = view.getUint32(offset, true);
       offset += 4;
@@ -759,7 +784,7 @@ export function decodeNativeDelta(
         kind: RowChangeKind.Added,
         id,
         index,
-        row: decodeNativeRow(id, columns, data),
+        row: decodeNativeRow(sourceId, columns, data),
       });
     }
   }
@@ -769,7 +794,10 @@ export function decodeNativeDelta(
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     let offset = 0;
     for (let i = 0; i < native.removedCount; i++) {
-      const id = readUuid(bytes, offset);
+      const sourceId = readUuid(bytes, offset);
+      const id = native.removedOccurrenceKeys?.[i]
+        ? publicResultKey(native.removedOccurrenceKeys[i]!)
+        : sourceId;
       offset += 16;
       const index = view.getUint32(offset, true);
       offset += 4;
@@ -778,4 +806,9 @@ export function decodeNativeDelta(
   }
 
   return delta;
+}
+
+function publicResultKey(bytes: Uint8Array): string {
+  if (bytes.length === 17 && bytes[0] === 1) return readUuid(bytes, 1);
+  return `result:${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }

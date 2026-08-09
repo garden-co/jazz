@@ -1498,7 +1498,7 @@ fn option_vec_bytes<T>(value: &Option<Vec<T>>) -> usize {
 fn result_member_entry_bytes(member: &ResultMemberEntry) -> usize {
     mem::size_of_val(member)
         + match member {
-            ResultMemberEntry::Row(row) => {
+            ResultMemberEntry::Row(row) | ResultMemberEntry::TypedRow { row, .. } => {
                 intern_string_bytes(&row.table)
                     + option_vec_bytes(&row.branch_or_prefix)
                     + option_vec_bytes(&row.row_digest)

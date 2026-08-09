@@ -1640,6 +1640,14 @@ pub enum ResultMemberEntry {
         /// Stable tuple revision.
         revision: Vec<u8>,
     },
+    /// Real row whose occurrence needs typed derivation discriminators.
+    /// Appended after every legacy variant so their postcard tags stay exact.
+    TypedRow {
+        /// Compatibility row payload and legacy ordered source-row identity.
+        row: RealRowMemberEntry,
+        /// Versioned full output occurrence identity.
+        occurrence_key: ResultKey,
+    },
 }
 
 /// Real table row membership, including both the ordinary current-content
@@ -1656,10 +1664,6 @@ pub struct RealRowMemberEntry {
     /// a flat join. It deliberately does not include content-version fields,
     /// so replacements retain their output address.
     pub occurrence_id: Option<OutputOccurrenceId>,
-    /// Versioned typed occurrence sidecar. Present only when the legacy
-    /// row-vector identity cannot represent derivation discriminators.
-    #[serde(default)]
-    pub occurrence_key: Option<ResultKey>,
     /// Visible content transaction, when this member has a content row.
     #[serde(default)]
     pub content_tx: Option<TxId>,
@@ -1704,7 +1708,6 @@ impl RealRowMemberEntry {
             occurrence_id: Some(OutputOccurrenceId::single_source(ObjectId::from_uuid(
                 row_uuid.0,
             ))),
-            occurrence_key: None,
             content_tx: Some(content_tx),
             layer: ResultRowLayer::Content,
             deletion_tx: None,
@@ -1727,9 +1730,6 @@ impl RealRowMemberEntry {
     /// Attach the stable rendered-output address supplied by the maintained
     /// terminal. Join contributors remain in declared source order.
     pub fn with_occurrence_id(mut self, occurrence_id: OutputOccurrenceId) -> Self {
-        self.occurrence_key = occurrence_id
-            .has_typed_discriminators()
-            .then(|| ResultKey::from_occurrence(occurrence_id.clone()));
         self.occurrence_id = Some(occurrence_id);
         self
     }
@@ -1744,13 +1744,9 @@ impl RealRowMemberEntry {
     /// Stable output occurrence identity. Old persisted members without this
     /// field are normalized to their legacy single-source identity.
     pub fn output_occurrence_id(&self) -> OutputOccurrenceId {
-        self.occurrence_key
-            .as_ref()
-            .map(|key| key.as_occurrence().clone())
-            .or_else(|| self.occurrence_id.clone())
-            .unwrap_or_else(|| {
-                OutputOccurrenceId::single_source(ObjectId::from_uuid(self.row_uuid.0))
-            })
+        self.occurrence_id.clone().unwrap_or_else(|| {
+            OutputOccurrenceId::single_source(ObjectId::from_uuid(self.row_uuid.0))
+        })
     }
 
     /// Return the ordinary current-content projection when available.
@@ -1852,7 +1848,7 @@ impl ResultMemberEntry {
     /// output. Synthetic rows use their synthetic table/relation name.
     pub fn table_name(&self) -> Option<&str> {
         match self {
-            Self::Row(entry) => Some(entry.table.as_str()),
+            Self::Row(entry) | Self::TypedRow { row: entry, .. } => Some(entry.table.as_str()),
             Self::Synthetic { table, .. } => Some(table.as_str()),
             Self::PathTuple { target_table, .. } => Some(target_table.as_str()),
         }
@@ -1861,21 +1857,25 @@ impl ResultMemberEntry {
     /// Return the real-row member payload, when this member is a real row.
     pub fn as_real_row(&self) -> Option<&RealRowMemberEntry> {
         match self {
-            Self::Row(entry) => Some(entry),
+            Self::Row(entry) | Self::TypedRow { row: entry, .. } => Some(entry),
             Self::Synthetic { .. } | Self::PathTuple { .. } => None,
         }
     }
 
     /// Return the stable rendered-output address for a real-row member.
     pub fn output_occurrence_id(&self) -> Option<OutputOccurrenceId> {
-        self.as_real_row()
-            .map(RealRowMemberEntry::output_occurrence_id)
+        match self {
+            Self::TypedRow { occurrence_key, .. } => Some(occurrence_key.as_occurrence().clone()),
+            _ => self
+                .as_real_row()
+                .map(RealRowMemberEntry::output_occurrence_id),
+        }
     }
 
     /// Return the ordinary current-content projection when this member has one.
     pub fn as_row(&self) -> Option<ResultRowEntry> {
         match self {
-            Self::Row(entry) => entry.row_projection(),
+            Self::Row(entry) | Self::TypedRow { row: entry, .. } => entry.row_projection(),
             Self::Synthetic { .. } | Self::PathTuple { .. } => None,
         }
     }
@@ -1883,7 +1883,7 @@ impl ResultMemberEntry {
     /// Consume the ordinary row entry when this member is row-shaped.
     pub fn into_row(self) -> Option<ResultRowEntry> {
         match self {
-            Self::Row(entry) => entry.row_projection(),
+            Self::Row(entry) | Self::TypedRow { row: entry, .. } => entry.row_projection(),
             Self::Synthetic { .. } | Self::PathTuple { .. } => None,
         }
     }
@@ -1897,7 +1897,19 @@ impl From<ResultRowEntry> for ResultMemberEntry {
 
 impl From<RealRowMemberEntry> for ResultMemberEntry {
     fn from(entry: RealRowMemberEntry) -> Self {
-        Self::Row(entry)
+        let occurrence_key = entry
+            .occurrence_id
+            .as_ref()
+            .filter(|occurrence| occurrence.has_typed_discriminators())
+            .cloned()
+            .map(ResultKey::from_occurrence);
+        match occurrence_key {
+            Some(occurrence_key) => Self::TypedRow {
+                row: entry,
+                occurrence_key,
+            },
+            None => Self::Row(entry),
+        }
     }
 }
 
@@ -2746,17 +2758,33 @@ mod tests {
         let occurrence =
             OutputOccurrenceId::with_union_arms(root, [joined], [(0, "direct".to_owned())])
                 .unwrap();
-        let member = ResultMemberEntry::Row(
-            RealRowMemberEntry::current_content((
-                groove::Intern::new("todos".to_owned()),
-                RowUuid(*root.uuid()),
-                TxId::new(TxTime(1), NodeUuid::from_bytes([3; 16])),
-            ))
-            .with_occurrence_id(occurrence.clone()),
-        );
+        let member: ResultMemberEntry = RealRowMemberEntry::current_content((
+            groove::Intern::new("todos".to_owned()),
+            RowUuid(*root.uuid()),
+            TxId::new(TxTime(1), NodeUuid::from_bytes([3; 16])),
+        ))
+        .with_occurrence_id(occurrence.clone())
+        .into();
         let bytes = postcard::to_allocvec(&member).unwrap();
         let decoded: ResultMemberEntry = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.output_occurrence_id(), Some(occurrence));
+    }
+
+    #[test]
+    fn legacy_row_member_postcard_golden_decodes() {
+        const LEGACY: &[u8] = &[
+            0, 1, 116, 16, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 2, 16, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+            3, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let member = ResultMemberEntry::Row(RealRowMemberEntry::current_content((
+            groove::Intern::new("t".to_owned()),
+            RowUuid::from_bytes([1; 16]),
+            TxId::new(TxTime(2), NodeUuid::from_bytes([3; 16])),
+        )));
+        assert_eq!(postcard::to_allocvec(&member).unwrap(), LEGACY);
+        let decoded: ResultMemberEntry = postcard::from_bytes(LEGACY).unwrap();
+        assert_eq!(decoded, member);
     }
 
     #[test]

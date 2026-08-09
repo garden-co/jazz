@@ -81,6 +81,9 @@ export interface NativeRowDelta {
   addedCount: number;
   removedCount: number;
   updatedCount: number;
+  addedOccurrenceKeys?: Uint8Array[];
+  updatedOccurrenceKeys?: Uint8Array[];
+  removedOccurrenceKeys?: Uint8Array[];
   terminalOperations?: NativeTerminalOperation[];
 }
 

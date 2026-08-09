@@ -70,7 +70,9 @@ fn fast_authorization_progress(known_state: &Option<KnownStateDeclaration>) -> O
 
 fn member_settle_position(member: &ResultMemberEntry) -> Option<crate::time::GlobalSeq> {
     match member {
-        ResultMemberEntry::Row(row) => row.settle_position,
+        ResultMemberEntry::Row(row) | ResultMemberEntry::TypedRow { row, .. } => {
+            row.settle_position
+        }
         ResultMemberEntry::Synthetic { .. } | ResultMemberEntry::PathTuple { .. } => None,
     }
 }

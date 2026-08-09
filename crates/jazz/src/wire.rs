@@ -1001,7 +1001,6 @@ mod tests {
                         occurrence_id: Some(crate::tools::OutputOccurrenceId::single_source(
                             crate::tools::ObjectId::from_uuid(row.0),
                         )),
-                        occurrence_key: None,
                         content_tx: Some(tx),
                         layer: Default::default(),
                         deletion_tx: None,

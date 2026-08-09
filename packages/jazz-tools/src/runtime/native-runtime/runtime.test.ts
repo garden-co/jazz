@@ -20,10 +20,15 @@ import {
   decodeNestedRowBytes,
   formatUuid,
   NativeRuntimeAdapter,
+  applySubscriptionDeltaWithWireDelta,
   type Transport,
 } from "./native-runtime-adapter.js";
 import { encodeSchema } from "./schema-codec.js";
-import { decodeNativeDelta } from "../subscription-manager.js";
+import {
+  applySubscriptionDelta,
+  decodeNativeDelta,
+  SubscriptionManager,
+} from "../subscription-manager.js";
 import { definePermissions } from "../../permissions/index.js";
 import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
@@ -3559,6 +3564,47 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.close();
   });
 
+  it("materializes typed-occurrence resets instead of collapsing them in the packed path", () => {
+    const rowId = uuidBytes("00000000-0000-0000-0000-000000000124");
+    const key = (suffix: number) => {
+      const bytes = new Uint8Array(50);
+      bytes[0] = 2;
+      bytes.set(rowId, 1);
+      new DataView(bytes.buffer).setUint32(17, 1);
+      bytes.fill(2, 21, 37);
+      new DataView(bytes.buffer).setUint32(37, 1);
+      new DataView(bytes.buffer).setUint32(41, 0);
+      new DataView(bytes.buffer).setUint32(45, 1);
+      bytes[49] = suffix;
+      return bytes;
+    };
+    const runtime = runtimeWithNativeSubscriptionChunk({
+      type: "delta",
+      reset: true,
+      settled: true,
+      delta: encodeSubscriptionDelta({
+        added: [
+          { table: "todos", rowId, title: "direct" },
+          { table: "todos", rowId, title: "inherited" },
+        ],
+        updated: [],
+        removed: [],
+        addedOccurrenceKeys: [key(1), key(2)],
+      }),
+    });
+    const deltas: NativeRowDelta[] = [];
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, null, null);
+    runtime.executeSubscription(handle, (delta: NativeRowDelta) => deltas.push(delta));
+    const decoded = decodeNativeDelta(deltas[0]!, testSchema.todos.columns);
+    expect(decoded).toHaveLength(2);
+    expect(decoded[0]!.id).not.toBe(decoded[1]!.id);
+    expect(decoded.map((change) => change.id)).toEqual([
+      expect.stringContaining("result:02"),
+      expect.stringContaining("result:02"),
+    ]);
+    runtime.close();
+  });
+
   it("reconciles native relation subscription lifecycles without leaking projection records", () => {
     const first = uuidBytes("00000000-0000-0000-0000-000000000401");
     const second = uuidBytes("00000000-0000-0000-0000-000000000402");
@@ -6186,6 +6232,135 @@ it("rejects malformed or misaligned subscription occurrence sidecars", () => {
   });
   expect(() => readNativeSubscriptionDelta(new PostcardReader(malformed))).toThrow(
     "malformed v2 ResultKey",
+  );
+});
+
+it("keeps same-row union occurrences distinct through apply, removal, and reopen", () => {
+  const rowId = new Uint8Array(16).fill(7);
+  const typedKey = (label: string) => {
+    const labelBytes = new TextEncoder().encode(label);
+    const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length);
+    key[0] = 2;
+    key.fill(7, 1, 17);
+    new DataView(key.buffer).setUint32(17, 1);
+    key.fill(8, 21, 37);
+    new DataView(key.buffer).setUint32(37, 1);
+    new DataView(key.buffer).setUint32(41, 0);
+    new DataView(key.buffer).setUint32(45, labelBytes.length);
+    key.set(labelBytes, 49);
+    return key;
+  };
+  const direct = typedKey("direct");
+  const inherited = typedKey("inherited");
+  const decode = (bytes: Uint8Array) => readNativeSubscriptionDelta(new PostcardReader(bytes));
+  const initial = decode(
+    encodeSubscriptionDelta({
+      added: [
+        { table: "todos", rowId, title: "direct" },
+        { table: "todos", rowId, title: "inherited" },
+      ],
+      updated: [],
+      removed: [],
+      addedOccurrenceKeys: [direct, inherited],
+    }),
+  );
+  const first = applySubscriptionDeltaWithWireDelta([], new Map(), initial, testSchema);
+  const firstDelta = decodeNativeDelta(first.wireDelta, testSchema.todos.columns);
+  expect(first.rows).toHaveLength(2);
+  expect(firstDelta.map((change) => change.id)).toEqual([
+    expect.stringContaining("result:02"),
+    expect.stringContaining("result:02"),
+  ]);
+  expect(firstDelta[0]!.id).not.toBe(firstDelta[1]!.id);
+  const manager = new SubscriptionManager<{ id: string; title: string }>();
+  const transformed = manager.handleDelta(
+    first.wireDelta,
+    (row) => ({
+      id: row.id,
+      title: row.values[0]?.type === "Text" ? row.values[0].value : "",
+    }),
+    testSchema.todos.columns,
+  );
+  expect(transformed.all).toHaveLength(2);
+  expect(transformed.all?.map((item) => item.id)).toEqual([formatUuid(rowId), formatUuid(rowId)]);
+  const publicRows: Array<{ id: string; title: string }> = [];
+  applySubscriptionDelta(publicRows, transformed);
+  expect(publicRows).toHaveLength(2);
+
+  const update = decode(
+    encodeSubscriptionDelta({
+      added: [],
+      updated: [{ table: "todos", rowId, title: "inherited updated" }],
+      removed: [],
+      updatedOccurrenceKeys: [inherited],
+    }),
+  );
+  const afterUpdate = applySubscriptionDeltaWithWireDelta(
+    first.rows,
+    first.rowIndexByKey,
+    update,
+    testSchema,
+  );
+  const updatedDelta = decodeNativeDelta(afterUpdate.wireDelta, testSchema.todos.columns);
+  expect(updatedDelta).toHaveLength(1);
+  expect(updatedDelta[0]!.id).toBe(firstDelta[1]!.id);
+  expect(afterUpdate.rows).toHaveLength(2);
+  const publicUpdate = manager.handleDelta(
+    afterUpdate.wireDelta,
+    (row) => ({
+      id: row.id,
+      title: row.values[0]?.type === "Text" ? row.values[0].value : "",
+    }),
+    testSchema.todos.columns,
+  );
+  expect(publicUpdate.all).toHaveLength(2);
+  applySubscriptionDelta(publicRows, publicUpdate);
+  expect(publicRows).toHaveLength(2);
+
+  const removal = decode(
+    encodeSubscriptionDelta({
+      added: [],
+      updated: [],
+      removed: [{ table: "todos", rowId }],
+      removedOccurrenceKeys: [direct],
+    }),
+  );
+  const second = applySubscriptionDeltaWithWireDelta(
+    afterUpdate.rows,
+    afterUpdate.rowIndexByKey,
+    removal,
+    testSchema,
+  );
+  expect(second.rows).toHaveLength(1);
+  expect(decodeNativeDelta(second.wireDelta, testSchema.todos.columns)[0]!.id).toBe(
+    firstDelta[0]!.id,
+  );
+  const publicRemoval = manager.handleDelta(
+    second.wireDelta,
+    (row) => ({ id: row.id, title: "" }),
+    testSchema.todos.columns,
+  );
+  expect(publicRemoval.all).toHaveLength(1);
+  applySubscriptionDelta(publicRows, publicRemoval);
+  expect(publicRows).toHaveLength(1);
+
+  const reopened = applySubscriptionDeltaWithWireDelta(
+    [],
+    new Map(),
+    decode(
+      encodeSubscriptionDelta({
+        added: [{ table: "todos", rowId, title: "inherited" }],
+        updated: [],
+        removed: [],
+        addedOccurrenceKeys: [inherited],
+      }),
+    ),
+    testSchema,
+    true,
+  );
+  expect(reopened.rows).toHaveLength(1);
+  expect(decodeNativeDelta(reopened.wireDelta, testSchema.todos.columns)[0]!.id).toBe(
+    firstDelta[1]!.id,
   );
 });
 

@@ -29,7 +29,7 @@ import {
   readNativeSubscriptionDelta,
   type NativeRelationSubscriptionSnapshot,
   type NativeRowBatch,
-  type NativeRemovedRow,
+  type NativeSubscriptionDelta,
   type QueryArraySubquery,
   type DescriptorField,
   type QueryLiteral,
@@ -319,11 +319,13 @@ type SubscriptionSourceState = {
   reading: boolean;
 };
 
-type RowState = {
+export type RowState = {
   table: string;
   id: string;
   values: Value[];
   valuesByColumn?: Map<string, Value>;
+  resultKey?: string;
+  resultKeyBytes?: Uint8Array;
 };
 
 type NativeRowFieldPlan = {
@@ -3526,23 +3528,26 @@ function withValuesByColumn(row: RowState, valuesByColumn: Map<string, Value>): 
   return row;
 }
 
-function applySubscriptionDeltaWithWireDelta(
+export function applySubscriptionDeltaWithWireDelta(
   currentRows: RowState[],
   currentIndexByKey: Map<string, number>,
-  delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] },
+  delta: NativeSubscriptionDelta,
   schema: WasmSchema,
   reset = false,
   outputColumns: SubscriptionOutputColumns | null = null,
 ): { rows: RowState[]; rowIndexByKey: Map<string, number>; wireDelta: NativeRowDelta } {
   const rowsByKey = reset
     ? new Map<string, RowState>()
-    : new Map(currentRows.map((row) => [rowKey(row.table, row.id), row]));
-  const removedEntries: Array<{ id: string; index: number }> = [];
+    : new Map(currentRows.map((row) => [rowStateKey(row), row]));
+  const removedEntries: Array<{ id: string; index: number; resultKeyBytes?: Uint8Array }> = [];
 
-  for (const removed of delta.removed) {
+  for (const [removedIndex, removed] of delta.removed.entries()) {
     const id = formatUuid(removed.rowId);
-    const key = rowKey(removed.table, id);
-    removedEntries.push({ id, index: currentIndexByKey.get(key) ?? 0 });
+    const resultKeyBytes = delta.removedOccurrenceKeys[removedIndex];
+    const key = resultKeyBytes
+      ? occurrenceStateKey(resultKeyBytes, removed.table, id)
+      : rowKey(removed.table, id);
+    removedEntries.push({ id, index: currentIndexByKey.get(key) ?? 0, resultKeyBytes });
     rowsByKey.delete(key);
   }
 
@@ -3550,8 +3555,10 @@ function applySubscriptionDeltaWithWireDelta(
   const nestedRowCarrier: NestedRowCarrier = "full-record";
   const addedRows = rowsFromBatches(delta.added, schema, projectedColumns, nestedRowCarrier);
   const updatedRows = rowsFromBatches(delta.updated, schema, projectedColumns, nestedRowCarrier);
+  attachOccurrenceKeys(addedRows, delta.addedOccurrenceKeys);
+  attachOccurrenceKeys(updatedRows, delta.updatedOccurrenceKeys);
   for (const row of addedRows.concat(updatedRows)) {
-    rowsByKey.set(rowKey(row.table, row.id), row);
+    rowsByKey.set(rowStateKey(row), row);
   }
 
   const rows = Array.from(rowsByKey.values());
@@ -3576,9 +3583,35 @@ function applySubscriptionDeltaWithWireDelta(
 function indexRowsByKey(rows: RowState[]): Map<string, number> {
   const index = new Map<string, number>();
   rows.forEach((row, rowIndex) => {
-    index.set(rowKey(row.table, row.id), rowIndex);
+    index.set(rowStateKey(row), rowIndex);
   });
   return index;
+}
+
+function attachOccurrenceKeys(rows: RowState[], keys: Uint8Array[]): void {
+  if (rows.length !== keys.length)
+    throw new Error("subscription occurrence sidecar length mismatch");
+  rows.forEach((row, index) => {
+    const bytes = keys[index]!;
+    row.resultKeyBytes = bytes;
+    row.resultKey = publicResultKey(bytes);
+  });
+}
+
+function occurrenceStateKey(bytes: Uint8Array, table?: string, sourceId?: string): string {
+  if (bytes.length === 17 && bytes[0] === 1 && table && sourceId) return rowKey(table, sourceId);
+  return `result\0${Array.from(bytes, (byte) => byteHex[byte]).join("")}`;
+}
+
+function publicResultKey(bytes: Uint8Array): string {
+  if (bytes.length === 17 && bytes[0] === 1) return formatUuid(bytes.subarray(1));
+  return `result:${Array.from(bytes, (byte) => byteHex[byte]).join("")}`;
+}
+
+function rowStateKey(row: RowState): string {
+  return row.resultKeyBytes
+    ? occurrenceStateKey(row.resultKeyBytes, row.table, row.id)
+    : rowKey(row.table, row.id);
 }
 
 function rowKey(table: string, id: string): string {
@@ -3808,7 +3841,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
   | {
       type: "delta";
       reset?: boolean;
-      delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] };
+      delta: NativeSubscriptionDelta;
       terminalOperations?: NativeTerminalOperation[];
       settled?: boolean;
     }
@@ -3922,16 +3955,16 @@ function nativeDeltaFromRows(
   outputColumns: SubscriptionOutputColumns | null = null,
 ): NativeRowDelta {
   const previousByKey = new Map(
-    previousRows.map((row, index) => [rowKey(row.table, row.id), { row, index }]),
+    previousRows.map((row, index) => [rowStateKey(row), { row, index }]),
   );
   const nextKeys = new Set<string>();
   const added: RowState[] = [];
   const updated: RowState[] = [];
-  const removed: Array<{ id: string; index: number }> = [];
+  const removed: Array<{ id: string; index: number; resultKeyBytes?: Uint8Array }> = [];
   const rowIndexByKey = indexRowsByKey(rows);
 
   rows.forEach((row, index) => {
-    const key = rowKey(row.table, row.id);
+    const key = rowStateKey(row);
     nextKeys.add(key);
     const previous = previousByKey.get(key);
     if (!previous) {
@@ -3944,8 +3977,8 @@ function nativeDeltaFromRows(
   });
 
   previousRows.forEach((row, index) => {
-    if (!nextKeys.has(rowKey(row.table, row.id))) {
-      removed.push({ id: row.id, index });
+    if (!nextKeys.has(rowStateKey(row))) {
+      removed.push({ id: row.id, index, resultKeyBytes: row.resultKeyBytes });
     }
   });
 
@@ -3997,7 +4030,7 @@ function plainResetChunkCanStayPacked(
   subscription: SubscriptionState,
   chunk: {
     reset?: boolean;
-    delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] };
+    delta: NativeSubscriptionDelta;
   },
   schema: WasmSchema,
 ): boolean {
@@ -4008,7 +4041,10 @@ function plainResetChunkCanStayPacked(
     subscription.outputColumns,
     schema,
   );
-  const canStayPacked = reset && noUpdated && noRemoved && identityProjection;
+  const sourceRowKeysOnly = chunk.delta.addedOccurrenceKeys.every(
+    (key) => key.length === 17 && key[0] === 1,
+  );
+  const canStayPacked = reset && noUpdated && noRemoved && identityProjection && sourceRowKeysOnly;
   return canStayPacked;
 }
 
@@ -4098,7 +4134,7 @@ function materializePackedResetRows(subscription: SubscriptionState, schema: Was
 function nativeDeltaFromChanges(
   added: RowState[],
   updated: RowState[],
-  removed: Array<{ id: string; index: number }>,
+  removed: Array<{ id: string; index: number; resultKeyBytes?: Uint8Array }>,
   rowIndexByKey: Map<string, number>,
   schema?: WasmSchema,
   outputColumns: SubscriptionOutputColumns | null = null,
@@ -4111,6 +4147,9 @@ function nativeDeltaFromChanges(
     addedCount: added.length,
     removedCount: removed.length,
     updatedCount: updated.length,
+    addedOccurrenceKeys: added.map((row) => row.resultKeyBytes ?? legacyResultKey(row.id)),
+    updatedOccurrenceKeys: updated.map((row) => row.resultKeyBytes ?? legacyResultKey(row.id)),
+    removedOccurrenceKeys: removed.map((row) => row.resultKeyBytes ?? legacyResultKey(row.id)),
   };
 }
 
@@ -4148,10 +4187,7 @@ function encodeNativeRows(
         `${String(error)} while encoding ${row.table}: ${columns.map((column, index) => `${column.name}:${column.column_type.type}=${frameValues[index]?.type}`).join(", ")}`,
       );
     }
-    chunks.push(
-      requiredUuidBytes(row.id),
-      u32Le(rowIndexByKey.get(rowKey(row.table, row.id)) ?? 0),
-    );
+    chunks.push(requiredUuidBytes(row.id), u32Le(rowIndexByKey.get(rowStateKey(row)) ?? 0));
     if (updated) chunks.push(Uint8Array.of(1));
     chunks.push(u32Le(raw.byteLength), raw);
   }
@@ -4175,6 +4211,10 @@ function valuesForNativeFrame(row: RowState, columns: readonly ColumnDescriptor[
 
 function encodeNativeRemoves(removed: Array<{ id: string; index: number }>): Uint8Array {
   return concatBytes(removed.flatMap((row) => [requiredUuidBytes(row.id), u32Le(row.index)]));
+}
+
+function legacyResultKey(id: string): Uint8Array {
+  return Uint8Array.from([1, ...requiredUuidBytes(id)]);
 }
 
 function requiredUuidBytes(id: string): Uint8Array {
