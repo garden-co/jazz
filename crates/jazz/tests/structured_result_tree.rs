@@ -276,7 +276,7 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
     };
     assert_eq!(child.get_idx(0), Ok(Value::Uuid(initial_child.0)));
 
-    let added_child = db
+    let _added_child = db
         .insert(
             "children",
             BTreeMap::from([
@@ -288,29 +288,30 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
         .expect("insert later child")
         .row_uuid();
     let SubscriptionEvent::Delta {
-        reset: true,
+        reset,
         added,
         updated,
+        removed,
+        terminal_operations,
         ..
     } = block_on(subscription.next_event()).expect("maintained terminal delivery")
     else {
         panic!("expected incremental maintained delta");
     };
+    assert!(!reset);
+    assert!(added.is_empty());
     assert!(updated.is_empty());
-    assert_eq!(added.len(), 1, "one complete terminal parent");
-    assert_eq!(added[0].row_uuid(), matching_parent);
-    let (descriptor, raw) = added[0].encoded_record();
-    let Value::Array(children) = descriptor
-        .bind(raw)
-        .get("children")
-        .expect("decode replacement children")
-    else {
-        panic!("expected terminal child array");
-    };
-    assert_eq!(children.len(), 2);
-    assert!(children.into_iter().any(|value| {
-        matches!(value, Value::Record(child) if child.get_idx(0) == Ok(Value::Uuid(added_child.0)))
-    }));
+    assert!(removed.is_empty());
+    assert!(matches!(
+        terminal_operations.as_slice(),
+        [jazz::groove::ivm::TerminalOperation {
+            path,
+            edit: jazz::groove::ivm::TerminalEdit::Insert { index: 1, .. },
+            ..
+        }] if path == &[jazz::groove::ivm::TerminalPathSegment::Collection(
+            "children".to_owned()
+        )]
+    ));
 }
 
 #[test]
