@@ -205,7 +205,7 @@ describe("JazzClient runtime helpers", () => {
       '{"table":"todos"}',
       {
         localUpdates: "deferred",
-        transactionId,
+        openBatchId: transactionId,
       },
       undefined,
     );

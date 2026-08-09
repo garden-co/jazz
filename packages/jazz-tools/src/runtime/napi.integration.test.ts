@@ -1165,8 +1165,8 @@ describe("NAPI integration", () => {
       >("t187", policyGraphSchema);
       const now = new Date("2026-07-10T00:00:00.000Z");
 
-      await backendDb
-        .transaction((tx) => {
+      await (
+        await backendDb.transaction((tx) => {
           tx.insert(
             teamTable,
             {
@@ -1217,7 +1217,7 @@ describe("NAPI integration", () => {
             { id: randomUUID() },
           );
         })
-        .wait({ tier: "global" });
+      ).wait({ tier: "global" });
 
       await context.shutdown();
       context = null;
