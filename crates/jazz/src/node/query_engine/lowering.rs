@@ -5172,11 +5172,49 @@ fn lowered_terminals(
                 }
             }
         } else if matches!(fact, ProgramFactKey::VersionWitnesses) {
-            let mut evidence_members = closure
+            let mut witness_members = closure
                 .all_visible_members(source.row_shape.source.clone())
                 .into_iter()
                 .collect::<BTreeMap<_, _>>();
-            for contribution in &request.input.shape.authorization_join_contributions {
+            if request
+                .output
+                .facts
+                .contains(&ProgramFactKey::RelationEdges)
+                && let AnalyzedQueryPlan::CorrelatedPath(path) = plan
+            {
+                let joined =
+                    lower_correlated_path_relation_graph(path, source, resolved_sources, request)
+                        .map_err(single_gap_report)?
+                        .graph;
+                for (member_source, member_graph) in correlated_relation_member_graphs(
+                    path,
+                    joined,
+                    source,
+                    resolved_sources,
+                    request,
+                )? {
+                    witness_members
+                        .entry(member_source)
+                        .and_modify(|existing| {
+                            *existing =
+                                GraphBuilder::union([existing.clone(), member_graph.clone()]);
+                        })
+                        .or_insert(member_graph);
+                }
+            }
+            let mut seen_contributions = BTreeSet::new();
+            for contribution in request
+                .input
+                .shape
+                .join_contributions
+                .iter()
+                .chain(&request.input.shape.authorization_join_contributions)
+            {
+                if !seen_contributions
+                    .insert((contribution.id.clone(), contribution.source.clone()))
+                {
+                    continue;
+                }
                 let Some(contribution_source) = resolved_sources.get(&contribution.source) else {
                     continue;
                 };
@@ -5189,7 +5227,7 @@ fn lowered_terminals(
                     resolved_sources,
                     request,
                 )?;
-                evidence_members
+                witness_members
                     .entry(contribution.source.clone())
                     .and_modify(|existing| {
                         *existing =
@@ -5198,9 +5236,10 @@ fn lowered_terminals(
                     .or_insert(contribution_graph);
             }
             for (source_id, resolved_source) in resolved_sources {
-                let Some(member_graph) = evidence_members.get(source_id) else {
+                let Some(member_graph) = witness_members.get(source_id) else {
                     continue;
                 };
+                let version = version_witness_fields(&resolved_source.row_shape)?;
                 let content_output = fact_output_with_terminal(
                     fact,
                     ProgramFactTerminal::VersionWitnessContent,
@@ -5211,11 +5250,14 @@ fn lowered_terminals(
                 )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_fact_sink_name(fact, source_id),
+                    // A writer peer may need the complete atomic transaction,
+                    // not only the row that matched this result. Bound the
+                    // witness set by transactions reached from public members.
                     graph: GraphBuilder::semi_join(
                         content_version_witness_graph(resolved_source, "version_content")?,
                         member_graph.clone(),
-                        ["row_uuid"],
-                        [resolved_source.row_shape.row_uuid_field.clone()],
+                        ["tx_time", "tx_node_id"],
+                        [version.tx_time_field, version.tx_node_field],
                     ),
                     output: OutputTerminalSchema::Fact(content_output),
                 });
@@ -5232,15 +5274,13 @@ fn lowered_terminals(
                 )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_deletion_fact_sink_name(fact, source_id),
-                    graph: GraphBuilder::semi_join(
-                        deletion_witness_graph_for_current_register(
-                            resolved_source,
-                            "version_deletion",
-                        )?,
-                        member_graph.clone(),
-                        ["row_uuid"],
-                        [resolved_source.row_shape.row_uuid_field.clone()],
-                    ),
+                    // The deletion register is already policy-filtered and
+                    // includes authorized tombstones that have no visible row
+                    // with which to form a membership semi-join.
+                    graph: deletion_witness_graph_for_current_register(
+                        resolved_source,
+                        "version_deletion",
+                    )?,
                     output: OutputTerminalSchema::Fact(deletion_output),
                 });
             }
@@ -7000,6 +7040,65 @@ fn correlated_relation_edge_graphs(
         )?);
     }
     Ok(graphs)
+}
+
+fn correlated_relation_member_graphs(
+    path: &CorrelatedPathPlan,
+    graph: GraphBuilder,
+    source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> CapabilityResult<Vec<(SourceId, GraphBuilder)>> {
+    let target = resolved_sources.get(&path.path.child).ok_or_else(|| {
+        Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Runtime(format!(
+                "path child source {:?} was not resolved",
+                path.path.child
+            ))],
+            explain: ExplainPlan::default(),
+        })
+    })?;
+    let mut members = vec![(
+        path.path.child.clone(),
+        graph
+            .clone()
+            .project_fields(project_source_fields_from_prefix(target, RIGHT_JOIN_PREFIX)),
+    )];
+    for sibling in &path.siblings {
+        let sibling_graph =
+            lower_correlated_path_relation_graph(sibling, source, resolved_sources, request)
+                .map_err(single_gap_report)?
+                .graph;
+        members.extend(correlated_relation_member_graphs(
+            sibling,
+            sibling_graph,
+            source,
+            resolved_sources,
+            request,
+        )?);
+    }
+    for nested in &path.nested {
+        let nested_parent = graph
+            .clone()
+            .project_fields(project_source_fields_from_prefix(target, RIGHT_JOIN_PREFIX));
+        let nested_graph = lower_correlated_path_relation_graph_from_parent(
+            nested,
+            nested_parent,
+            target,
+            resolved_sources,
+            request,
+        )
+        .map_err(single_gap_report)?
+        .graph;
+        members.extend(correlated_relation_member_graphs(
+            nested,
+            nested_graph,
+            target,
+            resolved_sources,
+            request,
+        )?);
+    }
+    Ok(members)
 }
 
 fn correlated_relation_edge_fields(
