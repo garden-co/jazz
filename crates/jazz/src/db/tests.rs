@@ -51,9 +51,6 @@ fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: Subscription
             added,
             updated,
             removed,
-            added_related,
-            added_edges,
-            removed_edges,
             ..
         } => {
             if reset {
@@ -101,52 +98,6 @@ fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: Subscription
                 } else {
                     snapshot.rows.insert(snapshot.root_count, row);
                     snapshot.root_count += 1;
-                }
-            }
-
-            for row in added_related {
-                if snapshot
-                    .rows
-                    .iter()
-                    .take(snapshot.root_count)
-                    .any(|root| root.table() == row.table() && root.row_uuid() == row.row_uuid())
-                {
-                    continue;
-                }
-                if let Some(position) =
-                    snapshot
-                        .rows
-                        .iter()
-                        .skip(snapshot.root_count)
-                        .position(|current| {
-                            current.table() == row.table() && current.row_uuid() == row.row_uuid()
-                        })
-                {
-                    snapshot.rows[snapshot.root_count + position] = row;
-                } else {
-                    snapshot.rows.push(row);
-                }
-            }
-
-            snapshot
-                .edges
-                .retain(|edge| !removed_edges.iter().any(|removed| removed == edge));
-            for edge in added_edges {
-                if !snapshot.edges.iter().any(|current| current == &edge) {
-                    snapshot.edges.push(edge);
-                }
-            }
-
-            let mut index = snapshot.root_count;
-            while index < snapshot.rows.len() {
-                let row = &snapshot.rows[index];
-                let still_referenced = snapshot.edges.iter().any(|edge| {
-                    edge.target_table == row.table() && edge.target_row == row.row_uuid()
-                });
-                if still_referenced {
-                    index += 1;
-                } else {
-                    snapshot.rows.remove(index);
                 }
             }
         }
@@ -213,56 +164,72 @@ fn delta_rows(event: SubscriptionEvent) -> (Vec<CurrentRow>, Vec<CurrentRow>, Ve
     }
 }
 
-fn snapshot_edges(event: &SubscriptionEvent) -> BTreeSet<RelationEdge> {
-    let event = event.clone();
-    let mut snapshot = RelationSnapshot::default();
-    apply_subscription_event(&mut snapshot, event);
-    snapshot.edges.iter().cloned().collect()
-}
-
 fn snapshot_from_event(event: SubscriptionEvent) -> RelationSnapshot {
     let mut snapshot = RelationSnapshot::default();
     apply_subscription_event(&mut snapshot, event);
     snapshot
 }
 
-fn schema_table<'a>(schema: &'a JazzSchema, table: &str) -> &'a TableSchema {
-    schema
-        .tables
-        .iter()
-        .find(|candidate| candidate.name == table)
-        .expect("test schema table should exist")
-}
-
-fn related_text_values(
+fn terminal_nested_text_values(
     snapshot: &RelationSnapshot,
-    schema: &JazzSchema,
-    source_table: &str,
-    source_row: RowUuid,
+    root: RowUuid,
     relation: &str,
-    target_table: &str,
     column: &str,
 ) -> Vec<String> {
-    let table = schema_table(schema, target_table);
-    snapshot
-        .edges
+    let row = snapshot
+        .rows
         .iter()
-        .filter(|edge| {
-            edge.source_table == source_table
-                && edge.source_row == source_row
-                && edge.relation == relation
-                && edge.target_table == target_table
+        .take(snapshot.root_count)
+        .find(|row| row.row_uuid() == root)
+        .expect("terminal root row");
+    let (descriptor, raw) = row.encoded_record();
+    let record = groove::records::BorrowedRecord::new(raw, descriptor);
+    let Value::Array(children) = record.get(relation).expect("nested terminal field") else {
+        panic!("nested terminal field must be an array")
+    };
+    children
+        .into_iter()
+        .map(|child| {
+            let Value::Record(child) = child else {
+                panic!("nested terminal array must contain records")
+            };
+            let Value::String(value) = child.get(column).expect("nested text field") else {
+                panic!("nested terminal field must be text")
+            };
+            value
         })
-        .map(|edge| {
-            snapshot
-                .rows
-                .iter()
-                .find(|row| row.table() == target_table && row.row_uuid() == edge.target_row)
-                .unwrap_or_else(|| panic!("missing target row for edge {edge:?}"))
-        })
-        .map(|row| match row.cell(table, column) {
-            Some(Value::String(value)) => value,
-            other => panic!("expected text cell {target_table}.{column}, got {other:?}"),
+        .collect()
+}
+
+fn terminal_nested_values(
+    snapshot: &RelationSnapshot,
+    root: RowUuid,
+    relation: &str,
+    column: &str,
+) -> Vec<Value> {
+    let row = snapshot
+        .rows
+        .iter()
+        .take(snapshot.root_count)
+        .find(|row| row.row_uuid() == root)
+        .expect("terminal root row");
+    let (descriptor, raw) = row.encoded_record();
+    let record = groove::records::BorrowedRecord::new(raw, descriptor);
+    let Value::Array(children) = record.get(relation).expect("nested terminal field") else {
+        panic!("nested terminal field must be an array")
+    };
+    children
+        .into_iter()
+        .map(|child| {
+            let Value::Record(child) = child else {
+                panic!("nested terminal array must contain records")
+            };
+            child.get(column).unwrap_or_else(|error| {
+                panic!(
+                    "nested field {column:?} missing from {:?}: {error}",
+                    child.descriptor()
+                )
+            })
         })
         .collect()
 }
@@ -280,51 +247,6 @@ fn oversized_row_version_refs(len: usize) -> Vec<RowVersionRef> {
             )
         })
         .collect()
-}
-
-fn sorted_related_text_values(
-    snapshot: &RelationSnapshot,
-    schema: &JazzSchema,
-    source_table: &str,
-    source_row: RowUuid,
-    relation: &str,
-    target_table: &str,
-    column: &str,
-) -> Vec<String> {
-    let mut values = related_text_values(
-        snapshot,
-        schema,
-        source_table,
-        source_row,
-        relation,
-        target_table,
-        column,
-    );
-    values.sort();
-    values
-}
-
-fn ordered_limited_related_text_values(
-    snapshot: &RelationSnapshot,
-    schema: &JazzSchema,
-    source_table: &str,
-    source_row: RowUuid,
-    relation: &str,
-    target_table: &str,
-    column: &str,
-    limit: usize,
-) -> Vec<String> {
-    let mut values = sorted_related_text_values(
-        snapshot,
-        schema,
-        source_table,
-        source_row,
-        relation,
-        target_table,
-        column,
-    );
-    values.truncate(limit);
-    values
 }
 
 fn event_settled(event: &SubscriptionEvent) -> bool {
@@ -1285,6 +1207,7 @@ fn view_update_is_not_empty_when_it_only_carries_program_facts() {
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     };
@@ -1299,6 +1222,7 @@ fn view_update_is_not_empty_when_it_only_carries_program_facts() {
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
         program_fact_adds: vec![crate::protocol::ViewFactEntry::PathCorrelationCoverage(
             crate::protocol::PathCorrelationCoverageEntry {
                 path: "owner".to_owned(),
@@ -1869,26 +1793,11 @@ fn branch_read_view_relation_snapshot_uses_query_engine_relation_edges() {
         doctest_support::block_on(db.all_relation_snapshot(&prepared_query, branch_read_opts()))
             .unwrap();
 
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1)]);
+    assert!(snapshot.edges.is_empty());
     assert_eq!(
-        snapshot
-            .rows
-            .iter()
-            .map(|row| (row.table().to_owned(), row.row_uuid()))
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            ("todos".to_owned(), row(0x11)),
-            ("users".to_owned(), row(0xa1)),
-        ])
-    );
-    assert_eq!(
-        snapshot.edges.into_iter().collect::<BTreeSet<_>>(),
-        BTreeSet::from([RelationEdge {
-            source_table: "users".to_owned(),
-            source_row: row(0xa1),
-            relation: "todosViaOwner".to_owned(),
-            target_table: "todos".to_owned(),
-            target_row: row(0x11),
-        }])
+        terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
+        vec!["branch todo".to_owned()]
     );
 }
 
@@ -2568,9 +2477,12 @@ fn relation_snapshot_reverse_array_skips_deleted_children() {
         .limit(1);
     let prepared = db.prepare_query(&query).unwrap();
     let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
-    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1), row(0x22)]);
-    assert_eq!(snapshot.edges.len(), 1);
-    assert_eq!(snapshot.edges[0].target_row, row(0x22));
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1)]);
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
+        vec!["visible todo".to_owned()]
+    );
 }
 
 #[test]
@@ -2738,7 +2650,68 @@ fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() 
         &Query::from("users").join_via_column("todos", "ownerId", "id", []),
     );
     assert_eq!(row_ids(&joined_before_delete), vec![row(0xa1), row(0xa1)]);
+    let occurrence = |joined| {
+        OutputOccurrenceId::new(
+            ObjectId::from_uuid(row(0xa1).0),
+            [ObjectId::from_uuid(row(joined).0)],
+        )
+    };
+    let joined_snapshot = RelationSnapshot {
+        root_count: joined_before_delete.len(),
+        rows: joined_before_delete.clone(),
+        edges: Vec::new(),
+    };
+    assert!(subscription_outputs_with_occurrence_sidecar(&joined_snapshot, &[]).is_err());
+    assert!(
+        subscription_outputs_with_occurrence_sidecar(
+            &joined_snapshot,
+            &[occurrence(0x11), occurrence(0x11)],
+        )
+        .is_err()
+    );
+    assert!(
+        subscription_outputs_with_occurrence_sidecar(
+            &joined_snapshot,
+            &[
+                OutputOccurrenceId::single_source(ObjectId::from_uuid(row(0xbb).0)),
+                occurrence(0x22),
+            ],
+        )
+        .is_err()
+    );
+    let joined_query = Query::from("users").join_via_column("todos", "ownerId", "id", []);
+    let prepared_join = prepared(&db, &joined_query);
+    let mut subscription = block_on(db.subscribe(&prepared_join, ReadOpts::default())).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_event()).unwrap()
+    else {
+        panic!("joined subscription must start with a delta");
+    };
+    assert_eq!(added.len(), 2);
+    let occurrence_ids = added
+        .iter()
+        .map(|output| output.occurrence_id.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(occurrence_ids.len(), 2);
+    assert_eq!(
+        added
+            .iter()
+            .map(|output| output.occurrence_id.clone())
+            .collect::<Vec<_>>(),
+        vec![occurrence(0x11), occurrence(0x22)]
+    );
+    assert!(
+        added
+            .iter()
+            .all(|output| output.occurrence_id.canonical_bytes().len() == 32)
+    );
     db.delete("todos", row(0x11)).unwrap();
+    db.tick().unwrap();
+    let SubscriptionEvent::Delta { removed, .. } = block_on(subscription.next_event()).unwrap()
+    else {
+        panic!("joined occurrence removal must emit a delta");
+    };
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].occurrence_id, occurrence(0x11));
 
     let joined = prepared_read(
         &db,
@@ -2754,9 +2727,12 @@ fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() 
         .limit(1);
     let prepared = db.prepare_query(&query).unwrap();
     let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
-    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1), row(0x22)]);
-    assert_eq!(snapshot.edges.len(), 1);
-    assert_eq!(snapshot.edges[0].target_row, row(0x22));
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1)]);
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(
+        terminal_nested_values(&snapshot, row(0xa1), "todosViaOwner", "row_uuid"),
+        vec![Value::Uuid(row(0x22).0)]
+    );
 }
 
 #[test]
@@ -2807,10 +2783,12 @@ fn relation_snapshot_reverse_array_reads_local_nullable_ref_child() {
     let prepared = db.prepare_query(&query).unwrap();
     let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
 
-    assert_eq!(row_ids(&snapshot.rows), vec![user, todo]);
-    assert_eq!(snapshot.edges.len(), 1);
-    assert_eq!(snapshot.edges[0].source_row, user);
-    assert_eq!(snapshot.edges[0].target_row, todo);
+    assert_eq!(row_ids(&snapshot.rows), vec![user]);
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(
+        terminal_nested_values(&snapshot, user, "todosViaOwner", "row_uuid"),
+        vec![Value::Uuid(todo.0)]
+    );
 }
 
 #[test]
@@ -2838,7 +2816,7 @@ fn relation_snapshot_reverse_array_limit_reads_local_child() {
         )
         .unwrap()
         .row_uuid();
-    let todo = db
+    let _todo = db
         .insert(
             "todos",
             BTreeMap::from([
@@ -2860,10 +2838,12 @@ fn relation_snapshot_reverse_array_limit_reads_local_child() {
     let prepared = db.prepare_query(&query).unwrap();
     let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
 
-    assert_eq!(row_ids(&snapshot.rows), vec![project, todo]);
-    assert_eq!(snapshot.edges.len(), 1);
-    assert_eq!(snapshot.edges[0].source_row, project);
-    assert_eq!(snapshot.edges[0].target_row, todo);
+    assert_eq!(row_ids(&snapshot.rows), vec![project]);
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, project, "todosViaProject", "title"),
+        vec!["visible todo".to_owned()]
+    );
 }
 
 #[test]
@@ -2900,9 +2880,11 @@ fn relation_snapshot_unordered_array_offset_uses_child_row_id_order() {
     let prepared = db.prepare_query(&query).unwrap();
     let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
 
-    assert_eq!(snapshot.edges.len(), 1);
-    assert_eq!(snapshot.edges[0].source_row, parent);
-    assert_eq!(snapshot.edges[0].target_row, row(0xb2));
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(
+        terminal_nested_values(&snapshot, parent, "comments", "row_uuid"),
+        vec![Value::Uuid(row(0xb2).0)]
+    );
 }
 
 #[test]
@@ -2977,17 +2959,58 @@ fn relation_snapshot_reverse_array_projects_provenance_magic_columns() {
         .limit(1);
     let prepared = db.prepare_query(&query).unwrap();
     let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
-    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1), row(0x22)]);
-    assert_eq!(snapshot.edges.len(), 1);
-    assert_eq!(snapshot.edges[0].target_row, row(0x22));
-    let child = snapshot
-        .rows
-        .iter()
-        .find(|candidate| candidate.row_uuid() == row(0x22))
-        .expect("child row is materialized");
-    let (descriptor, _) = child.encoded_record();
-    assert!(descriptor.field_index("$createdAt").is_some());
-    assert!(descriptor.field_index("$updatedAt").is_some());
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1)]);
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(
+        terminal_nested_values(&snapshot, row(0xa1), "todosViaProject", "row_uuid"),
+        vec![Value::Uuid(row(0x22).0)]
+    );
+    assert!(matches!(
+        terminal_nested_values(&snapshot, row(0xa1), "todosViaProject", "$createdAt").as_slice(),
+        [Value::U64(_)]
+    ));
+    assert!(matches!(
+        terminal_nested_values(&snapshot, row(0xa1), "todosViaProject", "$updatedAt").as_slice(),
+        [Value::U64(_)]
+    ));
+}
+
+#[test]
+fn version_bearing_current_source_preserves_provenance_timestamps() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let id = row(0x7a);
+    db.insert_with_id_at_ms(
+        "todos",
+        id,
+        doctest_support::todo_cells("provenance", false),
+        1_234,
+    )
+    .unwrap();
+    {
+        let mut node = db.node.node.borrow_mut();
+        let table = node.table("todos").unwrap().clone();
+        let rows = node
+            .test_content_current_with_version(&table, DurabilityTier::Local)
+            .unwrap();
+        let created_at = rows.descriptor.field_index("created_at").unwrap();
+        let record = rows
+            .iter()
+            .find(|(record, weight)| *weight > 0 && record.get_uuid(0).unwrap() == id.0)
+            .unwrap()
+            .0;
+        assert_eq!(record.get_u64(created_at).unwrap(), 1_234);
+    }
+
+    let query = db
+        .table("todos")
+        .select(["title", "$createdAt", "$updatedAt"])
+        .filter(eq(col("id"), lit(Value::Uuid(id.0))));
+    let prepared = db.prepare_query(&query).unwrap();
+    let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
+    let row = rows.iter().find(|row| row.row_uuid() == id).unwrap();
+    assert_eq!(row.raw_field("$createdAt"), Some(Value::U64(1_234)));
+    assert_eq!(row.raw_field("$updatedAt"), Some(Value::U64(1_234)));
+    assert_eq!(row.raw_field("user_done"), None);
 }
 
 #[test]
@@ -3283,7 +3306,7 @@ fn exclusive_overlay_reserves_stable_provenance_for_insert_and_update() {
 }
 
 #[test]
-fn array_subquery_live_subscription_tracks_child_edges() {
+fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
     let schema = relation_schema();
     let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
     db.insert_with_id(
@@ -3311,11 +3334,16 @@ fn array_subquery_live_subscription_tracks_child_edges() {
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
     let opened = block_on(subscription.next_event()).unwrap();
+    let SubscriptionEvent::Delta { .. } = &opened else {
+        panic!("expected terminal reset")
+    };
+    let snapshot = snapshot_from_event(opened);
     assert_eq!(
-        snapshot_edges(&opened),
-        BTreeSet::new(),
-        "initial parent has no children"
+        terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
+        Vec::<String>::new(),
+        "an empty nested collection is encoded in the surviving root"
     );
+    assert!(snapshot.edges.is_empty());
 
     db.insert_with_id(
         "todos",
@@ -3326,15 +3354,34 @@ fn array_subquery_live_subscription_tracks_child_edges() {
         ]),
     )
     .unwrap();
-    assert_eq!(
-        snapshot_edges(&block_on(subscription.next_event()).unwrap()),
-        BTreeSet::from([RelationEdge {
-            source_table: "users".to_owned(),
-            source_row: row(0xa1),
-            relation: "todosViaOwner".to_owned(),
-            target_table: "todos".to_owned(),
-            target_row: row(0x11),
-        }])
+    db.tick().unwrap();
+    let mut child_added = block_on(subscription.next_event()).unwrap();
+    while let Some(next) = subscription.try_next_event() {
+        child_added = next;
+    }
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        updated,
+        removed,
+        terminal_operations,
+        ..
+    } = &child_added
+    else {
+        panic!("expected root replacement")
+    };
+    assert!(!*reset, "a child insertion must remain incremental");
+    assert!(added.is_empty());
+    assert!(
+        updated.is_empty(),
+        "a descendant patch does not replace its root"
+    );
+    assert!(removed.is_empty());
+    assert!(
+        terminal_operations
+            .iter()
+            .any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Insert { .. })),
+        "child insertion is delivered as a terminal path insert"
     );
 
     db.update(
@@ -3343,11 +3390,12 @@ fn array_subquery_live_subscription_tracks_child_edges() {
         BTreeMap::from([("owner_id".to_owned(), Value::Uuid(row(0xb1).0))]),
     )
     .unwrap();
-    assert_eq!(
-        snapshot_edges(&block_on(subscription.next_event()).unwrap()),
-        BTreeSet::new(),
-        "child leaves the correlated array when its owner changes"
-    );
+    let removed_child = block_on(subscription.next_event()).unwrap();
+    assert!(matches!(
+        removed_child,
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Remove { .. }))
+    ));
 
     db.update(
         "todos",
@@ -3355,17 +3403,328 @@ fn array_subquery_live_subscription_tracks_child_edges() {
         BTreeMap::from([("owner_id".to_owned(), Value::Uuid(row(0xa1).0))]),
     )
     .unwrap();
-    assert_eq!(
-        snapshot_edges(&block_on(subscription.next_event()).unwrap()),
-        BTreeSet::from([RelationEdge {
-            source_table: "users".to_owned(),
-            source_row: row(0xa1),
-            relation: "todosViaOwner".to_owned(),
-            target_table: "todos".to_owned(),
-            target_row: row(0x11),
-        }]),
-        "re-populated group is emitted as full current relation state"
+    let restored_child = block_on(subscription.next_event()).unwrap();
+    assert!(matches!(
+        restored_child,
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Insert { .. }))
+    ));
+}
+
+#[test]
+fn structured_subscription_splices_in_terminal_root_order_after_insert() {
+    let schema = relation_schema();
+    let db = open_db(0xc4, AuthorId::from_bytes([0xc4; 16]), &schema);
+    db.insert_with_id(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("zulu".to_owned()))]),
+    )
+    .unwrap();
+
+    let query = Query::from("users")
+        .order_by("name", OrderDirection::Asc)
+        .array_subquery(ArraySubquery::new(
+            "todosViaOwner",
+            "todos",
+            "owner_id",
+            "id",
+        ));
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let initial = block_on(subscription.next_event()).unwrap();
+    let snapshot = snapshot_from_event(initial);
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1)]);
+
+    db.insert_with_id(
+        "users",
+        row(0xb1),
+        BTreeMap::from([("name".to_owned(), Value::String("alpha".to_owned()))]),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let reordered = block_on(subscription.next_event()).unwrap();
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        removed,
+        terminal_operations,
+        ..
+    } = &reordered
+    else {
+        panic!("expected terminal splice")
+    };
+    assert!(!*reset, "root reordering must remain incremental");
+    assert!(removed.is_empty());
+    assert!(added.is_empty());
+    assert!(
+        matches!(
+            terminal_operations.as_slice(),
+            [groove::ivm::TerminalOperation {
+                path,
+                edit: groove::ivm::TerminalEdit::Insert { index: 0, .. },
+                ..
+            }] if path.is_empty()
+        ),
+        "unexpected root operations: {terminal_operations:?}"
     );
+
+    let binding_view_key = BindingViewKey::new(
+        prepared_query.shape().shape_id(),
+        prepared_query.binding().binding_id(),
+        RegisterShapeOptions::default().read_view_key(),
+    );
+    db.node
+        .node
+        .borrow_mut()
+        .inject_pending_authoritative_reset_for_test(
+            binding_view_key,
+            std::iter::empty(),
+            GlobalSeq(0),
+        );
+    assert_eq!(db.refresh_subscriptions().unwrap(), 1);
+    let reset = block_on(subscription.next_event()).unwrap();
+    assert!(matches!(
+        reset,
+        SubscriptionEvent::Delta {
+            reset: true,
+            terminal_operations,
+            ..
+        } if terminal_operations.is_empty()
+    ));
+
+    db.update(
+        "users",
+        row(0xb1),
+        BTreeMap::from([("name".to_owned(), Value::String("zzzz".to_owned()))]),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let updated = block_on(subscription.next_event()).unwrap();
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        removed,
+        terminal_operations,
+        ..
+    } = &updated
+    else {
+        panic!("expected update splice")
+    };
+    assert!(!*reset);
+    assert!(removed.is_empty());
+    assert!(added.is_empty());
+    assert!(matches!(
+        terminal_operations.as_slice(),
+        [
+            groove::ivm::TerminalOperation {
+                path: remove_path,
+                edit: groove::ivm::TerminalEdit::Remove { .. },
+                ..
+            },
+            groove::ivm::TerminalOperation {
+                path: insert_path,
+                edit: groove::ivm::TerminalEdit::Insert { index: 1, .. },
+                ..
+            }
+        ] if remove_path.is_empty() && insert_path.is_empty()
+    ));
+
+    db.delete("users", row(0xa1)).unwrap();
+    db.tick().unwrap();
+    let removed = block_on(subscription.next_event()).unwrap();
+    let SubscriptionEvent::Delta { reset, .. } = &removed else {
+        panic!("expected removal splice")
+    };
+    assert!(!*reset);
+    assert!(matches!(
+        removed,
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if matches!(
+                terminal_operations.as_slice(),
+                [groove::ivm::TerminalOperation {
+                    path,
+                    edit: groove::ivm::TerminalEdit::Remove { .. },
+                    ..
+                }] if path.is_empty()
+            )
+    ));
+}
+
+#[test]
+fn flat_subscription_hydrates_in_declared_root_order() {
+    let schema = relation_schema();
+    let db = open_db(0xd4, AuthorId::from_bytes([0xd4; 16]), &schema);
+    db.insert_with_id(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("zulu".to_owned()))]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "users",
+        row(0xb1),
+        BTreeMap::from([("name".to_owned(), Value::String("alpha".to_owned()))]),
+    )
+    .unwrap();
+
+    let query = Query::from("users").order_by("name", OrderDirection::Desc);
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+
+    assert_eq!(row_ids(&initial.rows), vec![row(0xa1), row(0xb1)]);
+}
+
+#[test]
+fn flat_subscription_hydrates_in_default_row_id_order() {
+    let schema = relation_schema();
+    let db = open_db(0xd7, AuthorId::from_bytes([0xd7; 16]), &schema);
+    for id in [0xb1, 0xa1] {
+        db.insert_with_id(
+            "users",
+            row(id),
+            BTreeMap::from([("name".to_owned(), Value::String(format!("user-{id}")))]),
+        )
+        .unwrap();
+    }
+
+    let prepared_query = prepared(&db, &Query::from("users"));
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+
+    assert_eq!(row_ids(&initial.rows), vec![row(0xa1), row(0xb1)]);
+}
+
+#[test]
+fn flat_subscription_inserts_at_declared_root_position() {
+    let schema = relation_schema();
+    let db = open_db(0xd5, AuthorId::from_bytes([0xd5; 16]), &schema);
+    let query = Query::from("users").order_by("name", OrderDirection::Desc);
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let _initial = block_on(subscription.next_event()).unwrap();
+
+    for (id, name) in [(0xa1, "zulu"), (0xb1, "zzzz")] {
+        db.insert_with_id(
+            "users",
+            row(id),
+            BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+        )
+        .unwrap();
+        db.tick().unwrap();
+        let event = block_on(subscription.next_event()).unwrap();
+        if id == 0xb1 {
+            assert!(
+                matches!(
+                    &event,
+                    SubscriptionEvent::Delta { terminal_operations, .. }
+                        if matches!(
+                            terminal_operations.as_slice(),
+                            [groove::ivm::TerminalOperation {
+                                path,
+                                edit: groove::ivm::TerminalEdit::Insert { index: 0, .. },
+                                ..
+                            }] if path.is_empty()
+                        )
+                ),
+                "unexpected flat root event: {event:?}"
+            );
+        }
+    }
+
+    db.update(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("yyyy".to_owned()))]),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let event = block_on(subscription.next_event()).unwrap();
+    assert!(matches!(
+        event,
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| matches!(
+                operation.edit,
+                groove::ivm::TerminalEdit::Update { .. }
+            ))
+    ));
+}
+
+#[test]
+fn flat_subscription_updates_with_nullable_sort_payload() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "users",
+        [
+            ColumnSchema::new("name", ColumnType::String),
+            ColumnSchema::new("rank", ColumnType::Nullable(Box::new(ColumnType::I32))),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public())]);
+    let db = open_db(0xd6, AuthorId::from_bytes([0xd6; 16]), &schema);
+    db.insert_with_id(
+        "users",
+        row(0xa1),
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("before".to_owned())),
+            (
+                "rank".to_owned(),
+                Value::Nullable(Some(Box::new(Value::I32(1)))),
+            ),
+        ]),
+    )
+    .unwrap();
+    let query = Query::from("users").order_by("rank", OrderDirection::Asc);
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let _initial = block_on(subscription.next_event()).unwrap();
+
+    db.update(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("after".to_owned()))]),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let event = block_on(subscription.next_event()).unwrap();
+    assert!(matches!(
+        event,
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Update { .. }))
+    ));
+}
+
+#[test]
+fn flat_subscription_shifts_offset_window_when_leading_row_is_deleted() {
+    let schema = relation_schema();
+    let db = open_db(0xd8, AuthorId::from_bytes([0xd8; 16]), &schema);
+    for (id, name) in [(0xa1, "a"), (0xb1, "b"), (0xc1, "c"), (0xd1, "d")] {
+        db.insert_with_id(
+            "users",
+            row(id),
+            BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+        )
+        .unwrap();
+    }
+    let query = Query::from("users")
+        .order_by("name", OrderDirection::Asc)
+        .offset(1)
+        .limit(2);
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert_eq!(row_ids(&initial.rows), vec![row(0xb1), row(0xc1)]);
+
+    db.delete("users", row(0xa1)).unwrap();
+    db.tick().unwrap();
+    let event = block_on(subscription.next_event()).unwrap();
+    assert!(matches!(
+        event,
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Remove { .. }))
+                && terminal_operations.iter().any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Insert { index: 1, .. }))
+    ));
 }
 
 #[test]
@@ -3386,17 +3745,9 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
-    let opened = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    let snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
     assert_eq!(
-        sorted_related_text_values(
-            &opened,
-            &schema,
-            "todos",
-            row(0x21),
-            "comments",
-            "comments",
-            "body"
-        ),
+        terminal_nested_text_values(&snapshot, row(0x21), "comments", "body"),
         Vec::<String>::new()
     );
 
@@ -3409,19 +3760,14 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
         ]),
     )
     .unwrap();
-    let after_insert = snapshot_from_event(block_on(subscription.next_event()).unwrap());
-    assert_eq!(
-        sorted_related_text_values(
-            &after_insert,
-            &schema,
-            "todos",
-            row(0x21),
-            "comments",
-            "comments",
-            "body"
-        ),
-        vec!["first".to_owned()]
-    );
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| matches!(
+                operation.edit,
+                groove::ivm::TerminalEdit::Insert { .. }
+            ))
+    ));
 
     db.update(
         "comments",
@@ -3429,34 +3775,24 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
         BTreeMap::from([("body".to_owned(), Value::String("edited".to_owned()))]),
     )
     .unwrap();
-    let after_update = snapshot_from_event(block_on(subscription.next_event()).unwrap());
-    assert_eq!(
-        sorted_related_text_values(
-            &after_update,
-            &schema,
-            "todos",
-            row(0x21),
-            "comments",
-            "comments",
-            "body"
-        ),
-        vec!["edited".to_owned()]
-    );
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| matches!(
+                operation.edit,
+                groove::ivm::TerminalEdit::Insert { .. } | groove::ivm::TerminalEdit::Update { .. }
+            ))
+    ));
 
     db.delete("comments", row(0xc1)).unwrap();
-    let after_child_delete = snapshot_from_event(block_on(subscription.next_event()).unwrap());
-    assert_eq!(
-        sorted_related_text_values(
-            &after_child_delete,
-            &schema,
-            "todos",
-            row(0x21),
-            "comments",
-            "comments",
-            "body"
-        ),
-        Vec::<String>::new()
-    );
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| matches!(
+                operation.edit,
+                groove::ivm::TerminalEdit::Remove { .. }
+            ))
+    ));
 
     db.insert_with_id(
         "comments",
@@ -3467,27 +3803,24 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
         ]),
     )
     .unwrap();
-    let after_repopulate = snapshot_from_event(block_on(subscription.next_event()).unwrap());
-    assert_eq!(
-        sorted_related_text_values(
-            &after_repopulate,
-            &schema,
-            "todos",
-            row(0x21),
-            "comments",
-            "comments",
-            "body"
-        ),
-        vec!["second".to_owned()]
-    );
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| matches!(
+                operation.edit,
+                groove::ivm::TerminalEdit::Insert { .. }
+            ))
+    ));
 
     db.delete("todos", row(0x21)).unwrap();
-    let after_parent_delete = snapshot_from_event(block_on(subscription.next_event()).unwrap());
-    assert_eq!(after_parent_delete.root_count, 0);
-    assert!(
-        after_parent_delete.edges.is_empty(),
-        "parent removal must cascade assembled child entries away"
-    );
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| operation.path.is_empty() && matches!(
+                operation.edit,
+                groove::ivm::TerminalEdit::Remove { .. }
+            ))
+    ));
 }
 
 #[test]
@@ -3503,23 +3836,18 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
         ]),
     )
     .unwrap();
-    let query = Query::from("todos")
-        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id"));
+    let query = Query::from("todos").array_subquery(
+        ArraySubquery::new("comments", "comments", "todo_id", "id")
+            .order_by("body", OrderDirection::Asc)
+            .offset(1)
+            .limit(1),
+    );
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
-    let mut snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    let snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
     assert_eq!(
-        ordered_limited_related_text_values(
-            &snapshot,
-            &schema,
-            "todos",
-            row(0x31),
-            "comments",
-            "comments",
-            "body",
-            1
-        ),
+        terminal_nested_text_values(&snapshot, row(0x31), "comments", "body"),
         Vec::<String>::new()
     );
 
@@ -3533,19 +3861,13 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     db.tick().unwrap();
-    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
+    assert!(
+        subscription.try_next_event().is_none(),
+        "a child outside the actual collector window must not publish a root update"
+    );
     assert_eq!(
-        ordered_limited_related_text_values(
-            &snapshot,
-            &schema,
-            "todos",
-            row(0x31),
-            "comments",
-            "comments",
-            "body",
-            1
-        ),
-        vec!["b".to_owned()]
+        terminal_nested_text_values(&snapshot, row(0x31), "comments", "body"),
+        Vec::<String>::new()
     );
 
     db.insert_with_id(
@@ -3558,22 +3880,24 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     db.tick().unwrap();
-    if let Some(outside_boundary_event) = subscription.try_next_event() {
-        apply_subscription_event(&mut snapshot, outside_boundary_event);
-        assert_eq!(
-            ordered_limited_related_text_values(
-                &snapshot,
-                &schema,
-                "todos",
-                row(0x31),
-                "comments",
-                "comments",
-                "body",
-                1
-            ),
-            vec!["b".to_owned()]
-        );
-    }
+    let expect_inserted_child = |event: SubscriptionEvent, expected: RowUuid| match event {
+        SubscriptionEvent::Delta {
+            terminal_operations,
+            ..
+        } => assert!(terminal_operations.iter().any(|operation| {
+            matches!(
+                &operation.edit,
+                groove::ivm::TerminalEdit::Insert { key, .. }
+                    if key.as_slice()
+                        == [10]
+                            .into_iter()
+                            .chain(expected.0.as_bytes().iter().copied())
+                            .collect::<Vec<_>>()
+            )
+        })),
+        other => panic!("expected terminal patch event, got {other:?}"),
+    };
+    expect_inserted_child(block_on(subscription.next_event()).unwrap(), row(0xd2));
 
     db.insert_with_id(
         "comments",
@@ -3585,20 +3909,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     db.tick().unwrap();
-    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
-    assert_eq!(
-        ordered_limited_related_text_values(
-            &snapshot,
-            &schema,
-            "todos",
-            row(0x31),
-            "comments",
-            "comments",
-            "body",
-            1
-        ),
-        vec!["a".to_owned()]
-    );
+    expect_inserted_child(block_on(subscription.next_event()).unwrap(), row(0xd1));
 
     db.update(
         "comments",
@@ -3607,20 +3918,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     db.tick().unwrap();
-    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
-    assert_eq!(
-        ordered_limited_related_text_values(
-            &snapshot,
-            &schema,
-            "todos",
-            row(0x31),
-            "comments",
-            "comments",
-            "body",
-            1
-        ),
-        vec!["b".to_owned()]
-    );
+    expect_inserted_child(block_on(subscription.next_event()).unwrap(), row(0xd2));
 }
 
 #[test]
@@ -3662,15 +3960,7 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
     ))
     .unwrap();
     assert_eq!(
-        sorted_related_text_values(
-            &admin,
-            &schema,
-            "todos",
-            row(0x41),
-            "comments",
-            "comments",
-            "body"
-        ),
+        terminal_nested_text_values(&admin, row(0x41), "comments", "body"),
         vec!["member-visible".to_owned(), "other-visible".to_owned()]
     );
 
@@ -3681,15 +3971,7 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
     ))
     .unwrap();
     assert_eq!(
-        sorted_related_text_values(
-            &member_snapshot,
-            &schema,
-            "todos",
-            row(0x41),
-            "comments",
-            "comments",
-            "body"
-        ),
+        terminal_nested_text_values(&member_snapshot, row(0x41), "comments", "body"),
         vec!["member-visible".to_owned()]
     );
 
@@ -3697,15 +3979,7 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
         block_on(db.all_relation_snapshot_for_identity(&prepared_query, ReadOpts::default(), spy))
             .unwrap();
     assert_eq!(
-        sorted_related_text_values(
-            &spy_snapshot,
-            &schema,
-            "todos",
-            row(0x41),
-            "comments",
-            "comments",
-            "body"
-        ),
+        terminal_nested_text_values(&spy_snapshot, row(0x41), "comments", "body"),
         Vec::<String>::new()
     );
 }
@@ -3745,24 +4019,8 @@ fn array_subquery_one_shot_and_maintained_subscription_are_equivalent() {
     let maintained = snapshot_from_event(block_on(subscription.next_event()).unwrap());
 
     assert_eq!(
-        sorted_related_text_values(
-            &maintained,
-            &schema,
-            "todos",
-            row(0x51),
-            "comments",
-            "comments",
-            "body"
-        ),
-        sorted_related_text_values(
-            &one_shot,
-            &schema,
-            "todos",
-            row(0x51),
-            "comments",
-            "comments",
-            "body"
-        )
+        terminal_nested_text_values(&maintained, row(0x51), "comments", "body"),
+        terminal_nested_text_values(&one_shot, row(0x51), "comments", "body")
     );
 }
 
@@ -3793,30 +4051,14 @@ fn array_subquery_subscription_projects_late_root_and_existing_forward_target() 
         ]),
     )
     .unwrap();
-    let snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
-    assert_eq!(snapshot.root_count, 1);
-    let root = snapshot
-        .rows
-        .iter()
-        .find(|candidate| candidate.table() == "todos" && candidate.row_uuid() == row(0x52))
-        .expect("late root should be present");
-    assert_eq!(
-        root.cell(schema_table(&schema, "todos"), "title"),
-        Some(Value::String("late root".to_owned()))
-    );
-    assert_eq!(root.cell(schema_table(&schema, "todos"), "owner_id"), None);
-    assert_eq!(
-        sorted_related_text_values(
-            &snapshot,
-            &schema,
-            "todos",
-            row(0x52),
-            "owner",
-            "users",
-            "name"
-        ),
-        vec!["owner".to_owned()]
-    );
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| operation.path.is_empty() && matches!(
+                operation.edit,
+                groove::ivm::TerminalEdit::Insert { index: 0, .. }
+            ))
+    ));
 }
 
 #[test]
@@ -3851,20 +4093,14 @@ fn array_subquery_subscription_projects_late_camel_case_root_and_existing_forwar
         ),
     )
     .unwrap();
-    let snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
-    assert_eq!(snapshot.root_count, 1);
-    assert_eq!(
-        sorted_related_text_values(
-            &snapshot,
-            &schema,
-            "issues",
-            row(0x53),
-            "project",
-            "projects",
-            "name"
-        ),
-        vec!["project".to_owned()]
-    );
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| operation.path.is_empty() && matches!(
+                operation.edit,
+                groove::ivm::TerminalEdit::Insert { index: 0, .. }
+            ))
+    ));
 }
 
 #[test]
@@ -3912,15 +4148,8 @@ fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
         client.tick().unwrap();
         if let Some(event) = subscription.try_next_event() {
             let snapshot = snapshot_from_event(event);
-            if sorted_related_text_values(
-                &snapshot,
-                &schema,
-                "users",
-                row(0xa6),
-                "todosViaOwner",
-                "todos",
-                "title",
-            ) == vec!["remote child".to_owned()]
+            if terminal_nested_text_values(&snapshot, row(0xa6), "todosViaOwner", "title")
+                == vec!["remote child".to_owned()]
             {
                 delivered = Some(snapshot);
                 break;
@@ -3929,7 +4158,50 @@ fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
     }
     assert!(
         delivered.is_some(),
-        "remote maintained array subscription must hydrate the child row referenced by relation-edge facts"
+        "remote maintained array subscription must deliver the Groove terminal parent"
+    );
+
+    server
+        .insert_with_id(
+            "todos",
+            row(0x67),
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("second child".to_owned())),
+                ("owner_id".to_owned(), Value::Uuid(row(0xa6).0)),
+            ]),
+        )
+        .unwrap();
+    let mut delivered_patch = None;
+    for _ in 0..20 {
+        client.tick().unwrap();
+        server.server.tick().unwrap();
+        client.tick().unwrap();
+        if let Some(event @ SubscriptionEvent::Delta { .. }) = subscription.try_next_event() {
+            if matches!(
+                &event,
+                SubscriptionEvent::Delta {
+                    reset: false,
+                    terminal_operations,
+                    added,
+                    updated,
+                    removed,
+                    ..
+                } if added.is_empty()
+                    && updated.is_empty()
+                    && removed.is_empty()
+                    && terminal_operations.iter().any(|operation| {
+                        !operation.path.is_empty()
+                            && matches!(operation.edit, groove::ivm::TerminalEdit::Insert { .. })
+                    })
+            ) {
+                delivered_patch = Some(event);
+                break;
+            }
+        }
+    }
+    assert!(
+        delivered_patch.is_some(),
+        "framed peer delivery must preserve a generic terminal patch without row replacement"
     );
 }
 
@@ -12876,6 +13148,11 @@ fn db_query_builder_expresses_s1_shaped_filters_and_include_modes() {
             .require_includes(),
     );
     assert_eq!(row_ids(&prepared_read(&db, &require_query)), vec![row(1)]);
+    assert_eq!(
+        row_ids(&prepared_all(&db, &require_query, ReadOpts::default())),
+        vec![row(1)],
+        "required scalar includes must retain public Root membership gating"
+    );
 
     let paged = db
         .table("issues")

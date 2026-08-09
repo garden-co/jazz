@@ -19,28 +19,13 @@ export type NativeSubscriptionDelta = {
   added: NativeRowBatch[];
   updated: NativeRowBatch[];
   removed: NativeRemovedRow[];
-};
-export type NativeRelationSubscriptionEdge = {
-  sourceTable: string;
-  sourceRowId: Uint8Array;
-  relation: string;
-  targetTable: string;
-  targetRowId: Uint8Array;
+  addedOccurrenceKeys: Uint8Array[];
+  updatedOccurrenceKeys: Uint8Array[];
+  removedOccurrenceKeys: Uint8Array[];
 };
 export type NativeRelationSubscriptionSnapshot = {
-  cursor: number;
   rootCount: number;
   rows: NativeRowBatch[];
-  edges: NativeRelationSubscriptionEdge[];
-};
-export type NativeRelationSubscriptionDelta = {
-  baseCursor?: number;
-  cursor: number;
-  added: NativeRowBatch[];
-  updated: NativeRowBatch[];
-  removed: NativeRemovedRow[];
-  addedEdges: NativeRelationSubscriptionEdge[];
-  removedEdges: NativeRelationSubscriptionEdge[];
 };
 
 type PostcardReaderLike = {
@@ -75,54 +60,87 @@ export function readNativeRowBatch(reader: PostcardReaderLike): NativeRowBatch {
 }
 
 export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeSubscriptionDelta {
-  return {
+  const delta = {
     added: reader.readVec(readNativeRowBatch),
     updated: reader.readVec(readNativeRowBatch),
     removed: reader.readVec(readNativeRemovedRow),
+    addedOccurrenceKeys: reader.readVec((keyReader) => readResultKey(keyReader)),
+    updatedOccurrenceKeys: reader.readVec((keyReader) => readResultKey(keyReader)),
+    removedOccurrenceKeys: reader.readVec((keyReader) => readResultKey(keyReader)),
   };
+  const rowCount = (batches: NativeRowBatch[]) =>
+    batches.reduce((count, batch) => count + batch.rows.length, 0);
+  if (
+    delta.addedOccurrenceKeys.length !== rowCount(delta.added) ||
+    delta.updatedOccurrenceKeys.length !== rowCount(delta.updated) ||
+    delta.removedOccurrenceKeys.length !== delta.removed.length
+  ) {
+    throw new Error("subscription occurrence sidecar length mismatch");
+  }
+  return delta;
+}
+
+function readResultKey(reader: PostcardReaderLike): Uint8Array {
+  const key = reader.bytes();
+  if (key[0] === 1) {
+    if (key.length <= 1 || (key.length - 1) % 16 !== 0) throw new Error("malformed v1 ResultKey");
+    return key;
+  }
+  if (key[0] !== 2 || !validTypedResultKey(key.subarray(1))) {
+    throw new Error("malformed v2 ResultKey");
+  }
+  return key;
+}
+
+function validTypedResultKey(bytes: Uint8Array): boolean {
+  const readU32 = (offset: number) =>
+    ((bytes[offset]! << 24) |
+      (bytes[offset + 1]! << 16) |
+      (bytes[offset + 2]! << 8) |
+      bytes[offset + 3]!) >>>
+    0;
+  if (bytes.length < 24) return false;
+  let cursor = 16;
+  const joined = readU32(cursor);
+  cursor += 4;
+  if (joined > 256 || cursor + joined * 16 + 4 > bytes.length) return false;
+  cursor += joined * 16;
+  const discriminators = readU32(cursor);
+  cursor += 4;
+  if (discriminators > joined) return false;
+  const positions = new Set<number>();
+  for (let index = 0; index < discriminators; index++) {
+    if (cursor + 8 > bytes.length) return false;
+    const position = readU32(cursor);
+    const length = readU32(cursor + 4);
+    cursor += 8;
+    if (
+      position >= joined ||
+      positions.has(position) ||
+      length === 0 ||
+      length > 4096 ||
+      cursor + length > bytes.length
+    ) {
+      return false;
+    }
+    positions.add(position);
+    cursor += length;
+  }
+  return cursor === bytes.length;
 }
 
 export function readNativeRelationSubscriptionSnapshot(
   reader: PostcardReaderLike,
 ): NativeRelationSubscriptionSnapshot {
-  return {
-    cursor: reader.u64(),
-    rootCount: reader.u64(),
-    rows: reader.readVec(readNativeRowBatch),
-    edges: reader.readVec(readNativeRelationSubscriptionEdge),
-  };
-}
-
-export function readNativeRelationSubscriptionDelta(
-  reader: PostcardReaderLike,
-): NativeRelationSubscriptionDelta {
-  return {
-    baseCursor: reader.option((value) => value.u64()),
-    cursor: reader.u64(),
-    added: reader.readVec(readNativeRowBatch),
-    updated: reader.readVec(readNativeRowBatch),
-    removed: reader.readVec(readNativeRemovedRow),
-    addedEdges: reader.readVec(readNativeRelationSubscriptionEdge),
-    removedEdges: reader.readVec(readNativeRelationSubscriptionEdge),
-  };
+  const rootCount = reader.u64();
+  const rows = reader.readVec(readNativeRowBatch);
+  return { rootCount, rows };
 }
 
 export function readNativeRemovedRow(reader: PostcardReaderLike): NativeRemovedRow {
   return {
     table: reader.string(),
     rowId: reader.bytes(),
-  };
-}
-
-export function readNativeRelationSubscriptionEdge(
-  reader: PostcardReaderLike,
-): NativeRelationSubscriptionEdge {
-  return {
-    sourceTable: reader.string(),
-    sourceRowId: reader.bytes(),
-    relation: reader.string(),
-    targetTable: reader.string(),
-    targetRowId: reader.bytes(),
   };
 }
 
@@ -309,6 +327,37 @@ export function decodeNativeRow(
   return row;
 }
 
+const terminalRowKeyColumn: ColumnDescriptor = {
+  name: "__jazz_terminal_row_key",
+  column_type: { type: "Uuid" },
+  nullable: false,
+};
+
+/** Decode a Groove terminal record, whose first physical field is its row key. */
+export function decodeNativeTerminalRow(
+  id: string,
+  columns: readonly ColumnDescriptor[],
+  raw: Uint8Array,
+): WasmRow {
+  const terminalColumns = [terminalRowKeyColumn, ...columns];
+  const decoded = decodeNativeRowValues(terminalColumns, raw);
+  const embeddedKey = decoded[0];
+  if (embeddedKey?.type !== "Uuid" || embeddedKey.value !== id) {
+    throw new Error(
+      `terminal record key ${embeddedKey?.type === "Uuid" ? embeddedKey.value : "<non-uuid>"} does not match addressed key ${id}`,
+    );
+  }
+  const values = decoded.slice(1);
+  const valuesByColumn = new Map(columns.map((column, index) => [column.name, values[index]!]));
+  const row = { id, values };
+  Object.defineProperty(row, "valuesByColumn", {
+    value: valuesByColumn,
+    enumerable: false,
+    configurable: true,
+  });
+  return row;
+}
+
 export function encodeNativeRowValues(
   columns: readonly ColumnDescriptor[],
   values: readonly Value[],
@@ -478,16 +527,29 @@ function descriptorFromColumns(columns: readonly ColumnDescriptor[]): Descriptor
 }
 
 function encodeValueForColumn(column: ColumnDescriptor, value: Value | undefined): Uint8Array {
-  if (!value || value.type === "Null") {
+  const logicalType = storageColumnTypeToValueType(column.column_type);
+  const nullableType: ValueType = column.nullable ? { tag: 14, inner: logicalType } : logicalType;
+
+  if (!value) {
+    if (column.sparse) return encodeNullValue({ tag: 14, inner: nullableType });
     if (!column.nullable) {
       throw new Error(`missing non-nullable value for ${column.name}`);
     }
-    return encodeNullValue(storageColumnValueType(column));
+    return encodeNullValue(nullableType);
   }
-  const encoded = encodeNonNullValue(column.column_type, value);
-  if (!column.nullable) return encoded;
-  const valueType = storageColumnValueType(column);
-  const inner = valueType.inner ?? storageColumnTypeToValueType(column.column_type);
+  if (value.type === "Null") {
+    if (!column.nullable) {
+      throw new Error(`missing non-nullable value for ${column.name}`);
+    }
+    const encodedNull = encodeNullValue(nullableType);
+    return column.sparse ? encodePresentValue(encodedNull, nullableType) : encodedNull;
+  }
+  let encoded = encodeNonNullValue(column.column_type, value);
+  if (column.nullable) encoded = encodePresentValue(encoded, logicalType);
+  return column.sparse ? encodePresentValue(encoded, nullableType) : encoded;
+}
+
+function encodePresentValue(encoded: Uint8Array, inner: ValueType): Uint8Array {
   if (fixedSize(inner) == null) {
     return concatBytes([Uint8Array.of(1), encoded]);
   }
@@ -606,8 +668,34 @@ function parseUuid(value: string): Uint8Array {
 }
 
 export function storageColumnValueType(column: ColumnDescriptor): ValueType {
-  const valueType = storageColumnTypeToValueType(column.column_type);
-  return column.nullable ? { tag: 14, inner: valueType } : valueType;
+  let valueType = storageColumnTypeToValueType(column.column_type);
+  if (column.nullable) valueType = { tag: 14, inner: valueType };
+  return column.sparse ? { tag: 14, inner: valueType } : valueType;
+}
+
+/** Strip physical sparse-carrier metadata for public packed row transport. */
+export function logicalStorageColumns(
+  columns: readonly ColumnDescriptor[],
+): readonly ColumnDescriptor[] {
+  return columns.map((column) => ({
+    ...column,
+    sparse: undefined,
+    column_type:
+      column.column_type.type === "Row"
+        ? {
+            ...column.column_type,
+            columns: [...logicalStorageColumns(column.column_type.columns)],
+          }
+        : column.column_type.type === "Array" && column.column_type.element.type === "Row"
+          ? {
+              ...column.column_type,
+              element: {
+                ...column.column_type.element,
+                columns: [...logicalStorageColumns(column.column_type.element.columns)],
+              },
+            }
+          : column.column_type,
+  }));
 }
 
 export function storageColumnTypeToValueType(type: ColumnType): ValueType {
@@ -668,7 +756,7 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
 function decodeRowValue(
   columns: readonly ColumnDescriptor[],
   bytes: Uint8Array,
-): { id?: string; values: Value[] } {
+): { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } {
   if (bytes.byteLength < 5) throw new Error("invalid nested row value");
   const hasId = bytes[0] === 1;
   let offset = 1;
@@ -682,7 +770,16 @@ function decodeRowValue(
   offset += 4;
   const raw = bytes.subarray(offset, offset + len);
   if (raw.byteLength !== len) throw new Error("invalid nested row value length");
-  return { id, values: decodeNativeRowValues(columns, raw) };
+  const row: { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } = {
+    id,
+    values: decodeNativeRowValues(columns, raw),
+  };
+  Object.defineProperty(row, "valuesByColumn", {
+    value: decodeNativeRowValuesByColumn(columns, raw),
+    enumerable: false,
+    configurable: true,
+  });
+  return row;
 }
 
 function decodePlainValue(type: ColumnType, bytes: Uint8Array, columnName?: string): unknown {

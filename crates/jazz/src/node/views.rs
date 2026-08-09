@@ -114,7 +114,7 @@ fn content_row_members_for_bundle(
         .filter(|member| member.as_row().is_some())
         .map(|member| {
             member.as_row().ok_or(Error::InvalidStoredValue(match member {
-                ResultMemberEntry::Row(_) => context,
+                ResultMemberEntry::Row(_) | ResultMemberEntry::TypedRow { .. } => context,
                 ResultMemberEntry::Synthetic { .. } => {
                     "synthetic result members require typed payload facts before row bundle shipping"
                 }
@@ -628,6 +628,7 @@ where
             },
             result_member_adds: result_member_adds.into_iter().collect(),
             result_member_removes: result_member_removes.into_iter().collect(),
+            terminal_operations: Vec::new(),
             program_fact_adds,
             program_fact_removes,
         })
@@ -753,9 +754,24 @@ where
             authorization_progress,
             result_member_adds,
             result_member_removes,
+            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         } = update;
+        let synthetic_result_changed = result_member_adds
+            .iter()
+            .chain(&result_member_removes)
+            .any(|member| matches!(member, ResultMemberEntry::Synthetic { .. }))
+            || program_fact_adds
+                .iter()
+                .chain(&program_fact_removes)
+                .any(|fact| {
+                    matches!(
+                        fact,
+                        ProgramFactEntry::ResultPayload(payload)
+                            if matches!(payload.member, ResultMemberEntry::Synthetic { .. })
+                    )
+                });
         let version_bundle_refs =
             version_bundle_refs_for_carriers(&version_bundles, &version_carriers)?;
         let binding_view_key = match self.binding_view_key_for_subscription(subscription) {
@@ -781,8 +797,18 @@ where
         }
         if reset_result_set {
             self.query
+                .pending_terminal_operations_by_binding_view
+                .remove(&binding_view_key);
+            self.query
                 .initial_hydration_binding_views
                 .insert(binding_view_key);
+        }
+        if !terminal_operations.is_empty() {
+            self.query
+                .pending_terminal_operations_by_binding_view
+                .entry(binding_view_key)
+                .or_default()
+                .extend(terminal_operations);
         }
         if defer_settlement {
             self.query
@@ -938,6 +964,16 @@ where
             }
             program_facts.extend(program_fact_adds);
             fact_rewrite = None;
+        }
+        if synthetic_result_changed
+            && self
+                .query
+                .initial_hydration_binding_views
+                .contains(&binding_view_key)
+        {
+            self.query
+                .pending_authoritative_reset_binding_views
+                .insert(binding_view_key);
         }
         if !defer_settlement {
             self.query
@@ -1272,6 +1308,12 @@ where
                     table.history_storage_table().record_schema()
                 };
                 version.record.descriptor() == &descriptor
+                    && !table.columns.iter().any(|column| {
+                        column.large_value.is_some()
+                            && version.cell(&table, &column.name).is_ok_and(|value| {
+                                matches!(value, Some(Value::Bytes(bytes)) if bytes.starts_with(LARGE_VALUE_HANDLE_MAGIC))
+                            })
+                    })
             });
         if has_authored_layout {
             return Ok(None);

@@ -846,10 +846,22 @@ impl RecordDescriptor {
                         match nullable_present_payload(source_record, span, inner)? {
                             Some(payload) => RawProjectedBytes::Source(payload),
                             None => {
-                                output.truncate(start);
-                                scratch.variable_fields.clear();
-                                scratch.generated.clear();
-                                return Ok(None);
+                                if matches!(target_field.value_type, ValueType::Nullable(_)) {
+                                    let encoded = encode_value(
+                                        &Value::Nullable(None),
+                                        &target_field.value_type,
+                                    )?;
+                                    let generated_start = scratch.generated.len();
+                                    scratch.generated.extend_from_slice(&encoded);
+                                    RawProjectedBytes::Generated(
+                                        generated_start..scratch.generated.len(),
+                                    )
+                                } else {
+                                    output.truncate(start);
+                                    scratch.variable_fields.clear();
+                                    scratch.generated.clear();
+                                    return Ok(None);
+                                }
                             }
                         }
                     }

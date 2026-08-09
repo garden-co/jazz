@@ -60,6 +60,18 @@ export type WireRowChange = WireRowDeltaAdded | WireRowDeltaRemoved | WireRowDel
 
 export type RowDelta = WireRowChange[];
 
+export type NativeTerminalPathSegment = { Collection: string } | { Key: number[] };
+export type NativeTerminalEdit =
+  | { Insert: { index: number; key: number[]; value: number[] } }
+  | { Update: { key: number[]; value: number[] } }
+  | { Remove: { key: number[] } }
+  | { Move: { key: number[]; index: number } };
+export interface NativeTerminalOperation {
+  root_key: number[];
+  path: NativeTerminalPathSegment[];
+  edit: NativeTerminalEdit;
+}
+
 export interface NativeRowDelta {
   __jazzNativeRowDelta: true;
   reset?: boolean;
@@ -69,6 +81,10 @@ export interface NativeRowDelta {
   addedCount: number;
   removedCount: number;
   updatedCount: number;
+  addedOccurrenceKeys?: Uint8Array[];
+  updatedOccurrenceKeys?: Uint8Array[];
+  removedOccurrenceKeys?: Uint8Array[];
+  terminalOperations?: NativeTerminalOperation[];
 }
 
 export type SubscriptionWireDelta = RowDelta | NativeRowDelta;
@@ -93,6 +109,8 @@ export interface ColumnDescriptor {
   name: string;
   column_type: ColumnType;
   nullable: boolean;
+  /** Physical current-row carriers may omit this wildcard field. */
+  sparse?: boolean;
   default?: Value;
   references?: string;
   merge_strategy?: ColumnMergeStrategy;

@@ -4,10 +4,10 @@ import { performance } from "node:perf_hooks";
 import type { ColumnDescriptor, NativeRowDelta, WasmSchema } from "../../drivers/types.js";
 import {
   createRecord,
-  type NativeRelationSubscriptionEdge,
   PostcardReader,
   PostcardWriter,
   queryWithPredicates,
+  readNativeSubscriptionDelta,
   writeDescriptor,
 } from "./native-codec.js";
 import {
@@ -16,12 +16,23 @@ import {
   encodeWebSocketFrameBatch,
   isWireHello,
 } from "./websocket.js";
-import { formatUuid, NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.js";
+import {
+  decodeNestedRowBytes,
+  formatUuid,
+  NativeRuntimeAdapter,
+  applySubscriptionDeltaWithWireDelta,
+  type Transport,
+} from "./native-runtime-adapter.js";
 import { encodeSchema } from "./schema-codec.js";
-import { decodeNativeDelta } from "../subscription-manager.js";
+import {
+  applySubscriptionDelta,
+  decodeNativeDelta,
+  SubscriptionManager,
+} from "../subscription-manager.js";
 import { definePermissions } from "../../permissions/index.js";
 import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
+import { storageColumnValueType } from "./native-row-codec.js";
 import { createOpenBatchId, type BatchId, type OpenBatchId, type WriteReceipt } from "../client.js";
 
 function beginTestBatch(runtime: NativeRuntimeAdapter, userId?: string): OpenBatchId {
@@ -49,6 +60,38 @@ describe("formatUuid", () => {
     ]);
 
     expect(formatUuid(bytes.subarray(2, 18))).toBe("00010203-0405-0607-0809-0a0b0c0d0e0f");
+  });
+});
+
+describe("nested row physical carriers", () => {
+  const id = "00000000-0000-0000-0000-000000000002";
+  const columns: ColumnDescriptor[] = [
+    { name: "title", column_type: { type: "Text" }, nullable: false },
+  ];
+  const descriptor = [
+    { name: "row_uuid", valueType: { tag: 10 } as const },
+    { name: "title", valueType: { tag: 8 } as const },
+  ];
+
+  it("decodes a full snapshot record without stripping its row_uuid field", () => {
+    const bytes = createRecord(descriptor, [uuidBytes(id), new TextEncoder().encode("snapshot")]);
+
+    const row = decodeNestedRowBytes(columns, bytes, descriptor, "full-record");
+
+    expect(row.id).toBe(id);
+    expect(row.values).toEqual([{ type: "Text", value: "snapshot" }]);
+  });
+
+  it("decodes an explicitly keyed terminal payload with the same descriptor", () => {
+    const bytes = concatBytes([
+      uuidBytes(id),
+      createRecord(descriptor.slice(1), [new TextEncoder().encode("terminal")]),
+    ]);
+
+    const row = decodeNestedRowBytes(columns, bytes, descriptor, "keyed-terminal");
+
+    expect(row.id).toBe(id);
+    expect(row.values).toEqual([{ type: "Text", value: "terminal" }]);
   });
 });
 
@@ -629,6 +672,50 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(firstDelta.row.values[0]).toEqual({ type: "Text", value: "settled row" });
   });
 
+  it("preserves terminal operations while settle-gating global subscriptions", () => {
+    const key = [10, ...uuidBytes("00000000-0000-0000-0000-000000000123")];
+    const terminalOperations = [{ root_key: key, path: [], edit: { Move: { key, index: 0 } } }];
+    const events = [
+      {
+        type: "delta",
+        reset: false,
+        settled: false,
+        delta: encodeSubscriptionDelta({ added: [], updated: [], removed: [] }),
+        terminalOperations,
+      },
+      {
+        type: "delta",
+        reset: false,
+        settled: true,
+        delta: encodeSubscriptionDelta({ added: [], updated: [], removed: [] }),
+      },
+    ];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => ({}),
+            subscribe: () => ({ readAll: () => events.splice(0), close: () => true }),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "global");
+    const updates = vi.fn();
+    runtime.executeSubscription(handle, updates);
+
+    expect(updates).toHaveBeenCalledTimes(1);
+    expect(updates.mock.calls[0]![0].terminalOperations).toEqual(terminalOperations);
+  });
+
   it("uses the caller-supplied table for update and delete", () => {
     const calls: unknown[] = [];
     const write = {
@@ -773,16 +860,13 @@ describe("NativeRuntimeAdapter server transport", () => {
               return [
                 {
                   type: "snapshot",
-                  rows: encodeRelationSnapshot(
-                    [
-                      {
-                        table: "todos",
-                        rowId,
-                        title: "visible after scheduled tick",
-                      },
-                    ],
-                    [],
-                  ),
+                  rows: encodeRelationSnapshot([
+                    {
+                      table: "todos",
+                      rowId,
+                      title: "visible after scheduled tick",
+                    },
+                  ]),
                 },
               ];
             },
@@ -1442,21 +1526,18 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     controller!.enqueue({
       type: "snapshot",
-      rows: encodeRelationSnapshot(
-        [
-          {
-            table: "todos",
-            rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-            title: "keep",
-          },
-          {
-            table: "todos",
-            rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
-            title: "drop",
-          },
-        ],
-        [],
-      ),
+      rows: encodeRelationSnapshot([
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+          title: "keep",
+        },
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+          title: "drop",
+        },
+      ]),
     });
     await Promise.resolve();
 
@@ -1939,30 +2020,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
     controller!.enqueue({
       type: "snapshot",
-      rows: encodeRelationSnapshot(
-        [
-          {
-            table: "users",
-            rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-            title: "Ada",
-          },
-          {
-            table: "todos",
-            rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
-            title: "Ship relation reads",
-          },
-        ],
-        [
-          {
-            sourceTable: "users",
-            sourceRowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-            relation: "todosViaOwner",
-            targetTable: "todos",
-            targetRowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
-          },
-        ],
-        1,
-      ),
+      rows: encodeTerminalRelationSnapshot(relationSchema),
     });
     await Promise.resolve();
 
@@ -2027,30 +2085,7 @@ describe("NativeRuntimeAdapter server transport", () => {
             },
             allRelationSnapshot: () => {
               calls.push("allRelationSnapshot");
-              return encodeRelationSnapshot(
-                [
-                  {
-                    table: "users",
-                    rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-                    title: "Ada",
-                  },
-                  {
-                    table: "todos",
-                    rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
-                    title: "Ship relation reads",
-                  },
-                ],
-                [
-                  {
-                    sourceTable: "users",
-                    sourceRowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-                    relation: "todosViaOwner",
-                    targetTable: "todos",
-                    targetRowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
-                  },
-                ],
-                1,
-              );
+              return encodeTerminalRelationSnapshot(relationSchema);
             },
             all: () => {
               calls.push("all");
@@ -2172,16 +2207,13 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     controller!.enqueue({
       type: "snapshot",
-      rows: encodeRelationSnapshot(
-        [
-          {
-            table: "todos",
-            rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-            title: "native",
-          },
-        ],
-        [],
-      ),
+      rows: encodeRelationSnapshot([
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+          title: "native",
+        },
+      ]),
     });
     await Promise.resolve();
 
@@ -2840,21 +2872,18 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     controller!.enqueue({
       type: "snapshot",
-      rows: encodeRelationSnapshot(
-        [
-          {
-            table: "todos",
-            rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-            title: "first",
-          },
-          {
-            table: "todos",
-            rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
-            title: "second",
-          },
-        ],
-        [],
-      ),
+      rows: encodeRelationSnapshot([
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+          title: "first",
+        },
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+          title: "second",
+        },
+      ]),
     });
     await Promise.resolve();
 
@@ -2887,7 +2916,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     controller!.enqueue({
       type: "snapshot",
-      rows: encodeRelationSnapshot([], []),
+      rows: encodeRelationSnapshot([]),
     });
     await Promise.resolve();
 
@@ -3080,6 +3109,62 @@ describe("NativeRuntimeAdapter server transport", () => {
       type: "Timestamp",
       value: updatedAtMs * 1_000,
     });
+  });
+
+  it("decodes a present nullable empty fixed-width array using its storage element type", async () => {
+    const schema = {
+      todos: {
+        columns: [
+          {
+            name: "assigneesIds",
+            column_type: { type: "Array", element: { type: "Uuid" } },
+            nullable: true,
+          },
+        ],
+      },
+    } satisfies WasmSchema;
+    const descriptor = [
+      {
+        name: "assigneesIds",
+        valueType: { tag: 14, inner: { tag: 13, inner: { tag: 10 } } },
+      },
+    ];
+    const writer = new PostcardWriter();
+    writer.vec((batch) => {
+      batch.string("todos");
+      writeDescriptor(batch, descriptor);
+      batch.vec((row) => {
+        row.bytes(uuidBytes("00000000-0000-0000-0000-000000000001"));
+        row.bool(false);
+        row.bytes(createRecord(descriptor, [presentBytes(new Uint8Array())]));
+      }, 1);
+    }, 1);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => writer.finish(),
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      schema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000001",
+        values: [{ type: "Array", value: [] }],
+      },
+    ]);
   });
 
   it("encodes public id in conditions into prepared native queries", async () => {
@@ -3409,21 +3494,18 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     controller!.enqueue({
       type: "snapshot",
-      rows: encodeRelationSnapshot(
-        [
-          {
-            table: "todos",
-            rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-            title: "requested",
-          },
-          {
-            table: "todos",
-            rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
-            title: "extra from native",
-          },
-        ],
-        [],
-      ),
+      rows: encodeRelationSnapshot([
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+          title: "requested",
+        },
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+          title: "extra from native",
+        },
+      ]),
     });
     await Promise.resolve();
 
@@ -3454,15 +3536,6 @@ describe("NativeRuntimeAdapter server transport", () => {
         updated: [],
         removed: [],
       }),
-      relation_delta: encodeRelationSubscriptionDelta({
-        baseCursor: 0,
-        cursor: 1,
-        added: [],
-        updated: [],
-        removed: [],
-        addedEdges: [],
-        removedEdges: [],
-      }),
     };
     const runtime = runtimeWithNativeSubscriptionChunk(chunk);
     const deltas: NativeRowDelta[] = [];
@@ -3491,6 +3564,47 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.close();
   });
 
+  it("materializes typed-occurrence resets instead of collapsing them in the packed path", () => {
+    const rowId = uuidBytes("00000000-0000-0000-0000-000000000124");
+    const key = (suffix: number) => {
+      const bytes = new Uint8Array(50);
+      bytes[0] = 2;
+      bytes.set(rowId, 1);
+      new DataView(bytes.buffer).setUint32(17, 1);
+      bytes.fill(2, 21, 37);
+      new DataView(bytes.buffer).setUint32(37, 1);
+      new DataView(bytes.buffer).setUint32(41, 0);
+      new DataView(bytes.buffer).setUint32(45, 1);
+      bytes[49] = suffix;
+      return bytes;
+    };
+    const runtime = runtimeWithNativeSubscriptionChunk({
+      type: "delta",
+      reset: true,
+      settled: true,
+      delta: encodeSubscriptionDelta({
+        added: [
+          { table: "todos", rowId, title: "direct" },
+          { table: "todos", rowId, title: "inherited" },
+        ],
+        updated: [],
+        removed: [],
+        addedOccurrenceKeys: [key(1), key(2)],
+      }),
+    });
+    const deltas: NativeRowDelta[] = [];
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, null, null);
+    runtime.executeSubscription(handle, (delta: NativeRowDelta) => deltas.push(delta));
+    const decoded = decodeNativeDelta(deltas[0]!, testSchema.todos.columns);
+    expect(decoded).toHaveLength(2);
+    expect(decoded[0]!.id).not.toBe(decoded[1]!.id);
+    expect(decoded.map((change) => change.id)).toEqual([
+      expect.stringContaining("result:02"),
+      expect.stringContaining("result:02"),
+    ]);
+    runtime.close();
+  });
+
   it("reconciles native relation subscription lifecycles without leaking projection records", () => {
     const first = uuidBytes("00000000-0000-0000-0000-000000000401");
     const second = uuidBytes("00000000-0000-0000-0000-000000000402");
@@ -3498,22 +3612,16 @@ describe("NativeRuntimeAdapter server transport", () => {
       relationSubscriptionChunk({
         reset: true,
         rootAdded: [{ table: "todos", rowId: first, title: "first" }],
-        relationAdded: [{ table: "todos", rowId: first, title: "first" }],
       }),
       relationSubscriptionChunk({
-        // Relation snapshots carry the authoritative rendered row. The root
-        // delta can be stale/partial while that snapshot advances.
-        rootUpdated: [{ table: "todos", rowId: first, title: "stale root" }],
-        relationUpdated: [{ table: "todos", rowId: first, title: "first updated" }],
+        rootUpdated: [{ table: "todos", rowId: first, title: "first updated" }],
       }),
       relationSubscriptionChunk({
         rootRemoved: [{ table: "todos", rowId: first }],
-        relationRemoved: [{ table: "todos", rowId: first }],
       }),
       relationSubscriptionChunk({
         reset: true,
         rootAdded: [{ table: "todos", rowId: second, title: "second" }],
-        relationAdded: [{ table: "todos", rowId: second, title: "second" }],
       }),
     ];
     const runtime = runtimeWithNativeRelationSubscriptionChunks(chunks);
@@ -3584,15 +3692,6 @@ describe("NativeRuntimeAdapter server transport", () => {
         rowId: uuidBytes("00000000-0000-0000-0000-000000000321"),
         title: "plain public title",
         note: "nullable public note",
-      }),
-      relation_delta: encodeRelationSubscriptionDelta({
-        baseCursor: 0,
-        cursor: 1,
-        added: [],
-        updated: [],
-        removed: [],
-        addedEdges: [],
-        removedEdges: [],
       }),
     };
     const runtime = runtimeWithNativeSubscriptionChunk(chunk, schema);
@@ -4964,17 +5063,11 @@ function relationSubscriptionChunk({
   rootAdded = [],
   rootUpdated = [],
   rootRemoved = [],
-  relationAdded = [],
-  relationUpdated = [],
-  relationRemoved = [],
 }: {
   reset?: boolean;
   rootAdded?: EncodedTestRow[];
   rootUpdated?: EncodedTestRow[];
   rootRemoved?: Array<{ table: string; rowId: Uint8Array }>;
-  relationAdded?: EncodedTestRow[];
-  relationUpdated?: EncodedTestRow[];
-  relationRemoved?: Array<{ table: string; rowId: Uint8Array }>;
 }): unknown {
   return {
     type: "delta",
@@ -4984,15 +5077,6 @@ function relationSubscriptionChunk({
       added: rootAdded,
       updated: rootUpdated,
       removed: rootRemoved,
-    }),
-    relation_delta: encodeRelationSubscriptionDelta({
-      baseCursor: 0,
-      cursor: 1,
-      added: relationAdded,
-      updated: relationUpdated,
-      removed: relationRemoved,
-      addedEdges: [],
-      removedEdges: [],
     }),
   };
 }
@@ -5981,29 +6065,52 @@ function encodeRows(rows: EncodedTestRow[]): Uint8Array {
   return writer.finish();
 }
 
-function encodeRelationSnapshot(
-  rows: EncodedTestRow[],
-  edges: Array<{
-    sourceTable: string;
-    sourceRowId: Uint8Array;
-    relation: string;
-    targetTable: string;
-    targetRowId: Uint8Array;
-  }>,
-  rootCount = rows.length,
-): Uint8Array {
+function encodeRelationSnapshot(rows: EncodedTestRow[], rootCount = rows.length): Uint8Array {
   const writer = new PostcardWriter();
-  writer.u64(0);
   writer.u64(rootCount);
   writeRowBatches(writer, rows);
-  writer.vec((edge, index) => {
-    const source = edges[index]!;
-    edge.string(source.sourceTable);
-    edge.bytes(source.sourceRowId);
-    edge.string(source.relation);
-    edge.string(source.targetTable);
-    edge.bytes(source.targetRowId);
-  }, edges.length);
+  return writer.finish();
+}
+
+function encodeTerminalRelationSnapshot(schema: WasmSchema): Uint8Array {
+  const childColumns = schema.todos!.columns;
+  const rootColumns: ColumnDescriptor[] = [
+    schema.users!.columns[0]!,
+    {
+      name: "todosViaOwner",
+      column_type: { type: "Array", element: { type: "Row", columns: childColumns } },
+      nullable: false,
+    },
+  ];
+  const childDescriptor = [
+    { name: "row_uuid", valueType: { tag: 10 } },
+    { name: "title", valueType: storageColumnValueType(childColumns[0]!) },
+  ];
+  const descriptor = [
+    { name: "title", valueType: storageColumnValueType(rootColumns[0]!) },
+    {
+      name: "todosViaOwner",
+      valueType: { tag: 13, inner: { tag: 15, record: childDescriptor } },
+    },
+  ];
+  const childRecord = concatBytes([
+    uuidBytes("00000000-0000-0000-0000-000000000002"),
+    createRecord(childDescriptor.slice(1), [new TextEncoder().encode("Ship relation reads")]),
+  ]);
+  const nestedRowsHeader = new Uint8Array(4);
+  new DataView(nestedRowsHeader.buffer).setUint32(0, 1, true);
+  const nestedRows = concatBytes([nestedRowsHeader, childRecord]);
+  const writer = new PostcardWriter();
+  writer.u64(1);
+  writer.vec((batch) => {
+    batch.string("users");
+    writeDescriptor(batch, descriptor);
+    batch.vec((row) => {
+      row.bytes(uuidBytes("00000000-0000-0000-0000-000000000001"));
+      row.bool(false);
+      row.bytes(createRecord(descriptor, [new TextEncoder().encode("Ada"), nestedRows]));
+    }, 1);
+  }, 1);
   return writer.finish();
 }
 
@@ -6053,6 +6160,9 @@ function encodeSubscriptionDelta(delta: {
   added: EncodedTestRow[];
   updated: EncodedTestRow[];
   removed: Array<{ table: string; rowId: Uint8Array }>;
+  addedOccurrenceKeys?: Uint8Array[];
+  updatedOccurrenceKeys?: Uint8Array[];
+  removedOccurrenceKeys?: Uint8Array[];
 }): Uint8Array {
   const writer = new PostcardWriter();
   writeRowBatches(writer, delta.added);
@@ -6062,42 +6172,197 @@ function encodeSubscriptionDelta(delta: {
     removed.string(source.table);
     removed.bytes(source.rowId);
   }, delta.removed.length);
+  const rowKey = (rowId: Uint8Array) => Uint8Array.from([1, ...rowId]);
+  for (const keys of [
+    delta.addedOccurrenceKeys ?? delta.added.map((row) => rowKey(row.rowId)),
+    delta.updatedOccurrenceKeys ?? delta.updated.map((row) => rowKey(row.rowId)),
+    delta.removedOccurrenceKeys ?? delta.removed.map((row) => rowKey(row.rowId)),
+  ]) {
+    writer.vec((key, index) => key.bytes(keys[index]!), keys.length);
+  }
   return writer.finish();
 }
 
-function encodeRelationSubscriptionDelta(delta: {
-  baseCursor?: number;
-  cursor: number;
-  added: EncodedTestRow[];
-  updated: EncodedTestRow[];
-  removed: Array<{ table: string; rowId: Uint8Array }>;
-  addedEdges: NativeRelationSubscriptionEdge[];
-  removedEdges: NativeRelationSubscriptionEdge[];
-}): Uint8Array {
-  const writer = new PostcardWriter();
-  if (delta.baseCursor === undefined) {
-    writer.none();
-  } else {
-    writer.some((value) => value.u64(delta.baseCursor!));
-  }
-  writer.u64(delta.cursor);
-  writeRowBatches(writer, delta.added);
-  writeRowBatches(writer, delta.updated);
-  writer.vec((removed, index) => {
-    const source = delta.removed[index]!;
-    removed.string(source.table);
-    removed.bytes(source.rowId);
-  }, delta.removed.length);
-  writer.vec(
-    (edge, index) => writeRelationEdge(edge, delta.addedEdges[index]!),
-    delta.addedEdges.length,
+it("preserves typed occurrence keys in the native subscription wire sidecar", () => {
+  const typedKey = (label: string) => {
+    const labelBytes = new TextEncoder().encode(label);
+    const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length);
+    key[0] = 2;
+    key.fill(1, 1, 17);
+    new DataView(key.buffer).setUint32(17, 1);
+    key.fill(2, 21, 37);
+    new DataView(key.buffer).setUint32(37, 1);
+    new DataView(key.buffer).setUint32(41, 0);
+    new DataView(key.buffer).setUint32(45, labelBytes.length);
+    key.set(labelBytes, 49);
+    return key;
+  };
+  const direct = typedKey("direct");
+  const inherited = typedKey("inherited");
+  const encoded = encodeSubscriptionDelta({
+    added: [],
+    updated: [],
+    removed: [
+      { table: "todos", rowId: new Uint8Array(16).fill(1) },
+      { table: "todos", rowId: new Uint8Array(16).fill(1) },
+    ],
+    removedOccurrenceKeys: [direct, inherited],
+  });
+  const decoded = readNativeSubscriptionDelta(new PostcardReader(encoded));
+  expect(decoded.removedOccurrenceKeys).toEqual([direct, inherited]);
+  expect(decoded.removedOccurrenceKeys[0]).not.toEqual(decoded.removedOccurrenceKeys[1]);
+});
+
+it("rejects malformed or misaligned subscription occurrence sidecars", () => {
+  const missing = encodeSubscriptionDelta({
+    added: [],
+    updated: [],
+    removed: [{ table: "todos", rowId: new Uint8Array(16) }],
+    removedOccurrenceKeys: [],
+  });
+  expect(() => readNativeSubscriptionDelta(new PostcardReader(missing))).toThrow(
+    "sidecar length mismatch",
   );
-  writer.vec(
-    (edge, index) => writeRelationEdge(edge, delta.removedEdges[index]!),
-    delta.removedEdges.length,
+
+  const malformed = encodeSubscriptionDelta({
+    added: [],
+    updated: [],
+    removed: [{ table: "todos", rowId: new Uint8Array(16) }],
+    removedOccurrenceKeys: [Uint8Array.from([2, 0])],
+  });
+  expect(() => readNativeSubscriptionDelta(new PostcardReader(malformed))).toThrow(
+    "malformed v2 ResultKey",
   );
-  return writer.finish();
-}
+});
+
+it("keeps same-row union occurrences distinct through apply, removal, and reopen", () => {
+  const rowId = new Uint8Array(16).fill(7);
+  const typedKey = (label: string) => {
+    const labelBytes = new TextEncoder().encode(label);
+    const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length);
+    key[0] = 2;
+    key.fill(7, 1, 17);
+    new DataView(key.buffer).setUint32(17, 1);
+    key.fill(8, 21, 37);
+    new DataView(key.buffer).setUint32(37, 1);
+    new DataView(key.buffer).setUint32(41, 0);
+    new DataView(key.buffer).setUint32(45, labelBytes.length);
+    key.set(labelBytes, 49);
+    return key;
+  };
+  const direct = typedKey("direct");
+  const inherited = typedKey("inherited");
+  const decode = (bytes: Uint8Array) => readNativeSubscriptionDelta(new PostcardReader(bytes));
+  const initial = decode(
+    encodeSubscriptionDelta({
+      added: [
+        { table: "todos", rowId, title: "direct" },
+        { table: "todos", rowId, title: "inherited" },
+      ],
+      updated: [],
+      removed: [],
+      addedOccurrenceKeys: [direct, inherited],
+    }),
+  );
+  const first = applySubscriptionDeltaWithWireDelta([], new Map(), initial, testSchema);
+  const firstDelta = decodeNativeDelta(first.wireDelta, testSchema.todos.columns);
+  expect(first.rows).toHaveLength(2);
+  expect(firstDelta.map((change) => change.id)).toEqual([
+    expect.stringContaining("result:02"),
+    expect.stringContaining("result:02"),
+  ]);
+  expect(firstDelta[0]!.id).not.toBe(firstDelta[1]!.id);
+  const manager = new SubscriptionManager<{ id: string; title: string }>();
+  const transformed = manager.handleDelta(
+    first.wireDelta,
+    (row) => ({
+      id: row.id,
+      title: row.values[0]?.type === "Text" ? row.values[0].value : "",
+    }),
+    testSchema.todos.columns,
+  );
+  expect(transformed.all).toHaveLength(2);
+  expect(transformed.all?.map((item) => item.id)).toEqual([formatUuid(rowId), formatUuid(rowId)]);
+  const publicRows: Array<{ id: string; title: string }> = [];
+  applySubscriptionDelta(publicRows, transformed);
+  expect(publicRows).toHaveLength(2);
+
+  const update = decode(
+    encodeSubscriptionDelta({
+      added: [],
+      updated: [{ table: "todos", rowId, title: "inherited updated" }],
+      removed: [],
+      updatedOccurrenceKeys: [inherited],
+    }),
+  );
+  const afterUpdate = applySubscriptionDeltaWithWireDelta(
+    first.rows,
+    first.rowIndexByKey,
+    update,
+    testSchema,
+  );
+  const updatedDelta = decodeNativeDelta(afterUpdate.wireDelta, testSchema.todos.columns);
+  expect(updatedDelta).toHaveLength(1);
+  expect(updatedDelta[0]!.id).toBe(firstDelta[1]!.id);
+  expect(afterUpdate.rows).toHaveLength(2);
+  const publicUpdate = manager.handleDelta(
+    afterUpdate.wireDelta,
+    (row) => ({
+      id: row.id,
+      title: row.values[0]?.type === "Text" ? row.values[0].value : "",
+    }),
+    testSchema.todos.columns,
+  );
+  expect(publicUpdate.all).toHaveLength(2);
+  applySubscriptionDelta(publicRows, publicUpdate);
+  expect(publicRows).toHaveLength(2);
+
+  const removal = decode(
+    encodeSubscriptionDelta({
+      added: [],
+      updated: [],
+      removed: [{ table: "todos", rowId }],
+      removedOccurrenceKeys: [direct],
+    }),
+  );
+  const second = applySubscriptionDeltaWithWireDelta(
+    afterUpdate.rows,
+    afterUpdate.rowIndexByKey,
+    removal,
+    testSchema,
+  );
+  expect(second.rows).toHaveLength(1);
+  expect(decodeNativeDelta(second.wireDelta, testSchema.todos.columns)[0]!.id).toBe(
+    firstDelta[0]!.id,
+  );
+  const publicRemoval = manager.handleDelta(
+    second.wireDelta,
+    (row) => ({ id: row.id, title: "" }),
+    testSchema.todos.columns,
+  );
+  expect(publicRemoval.all).toHaveLength(1);
+  applySubscriptionDelta(publicRows, publicRemoval);
+  expect(publicRows).toHaveLength(1);
+
+  const reopened = applySubscriptionDeltaWithWireDelta(
+    [],
+    new Map(),
+    decode(
+      encodeSubscriptionDelta({
+        added: [{ table: "todos", rowId, title: "inherited" }],
+        updated: [],
+        removed: [],
+        addedOccurrenceKeys: [inherited],
+      }),
+    ),
+    testSchema,
+    true,
+  );
+  expect(reopened.rows).toHaveLength(1);
+  expect(decodeNativeDelta(reopened.wireDelta, testSchema.todos.columns)[0]!.id).toBe(
+    firstDelta[1]!.id,
+  );
+});
 
 function encodeUserWrappedSubscriptionDelta(row: {
   table: string;
@@ -6130,6 +6395,9 @@ function encodeUserWrappedSubscriptionDelta(row: {
   }, 1);
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
+  delta.vec((key) => key.bytes(Uint8Array.from([1, ...row.rowId])), 1);
+  delta.vec(() => undefined, 0);
+  delta.vec(() => undefined, 0);
   return delta.finish();
 }
 
@@ -6138,14 +6406,6 @@ function presentBytes(bytes: Uint8Array): Uint8Array {
   output[0] = 1;
   output.set(bytes, 1);
   return output;
-}
-
-function writeRelationEdge(writer: PostcardWriter, edge: NativeRelationSubscriptionEdge): void {
-  writer.string(edge.sourceTable);
-  writer.bytes(edge.sourceRowId);
-  writer.string(edge.relation);
-  writer.string(edge.targetTable);
-  writer.bytes(edge.targetRowId);
 }
 
 function encodeBinaryLargeValueRows(): Uint8Array {

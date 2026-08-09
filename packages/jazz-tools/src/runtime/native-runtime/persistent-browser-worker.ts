@@ -291,6 +291,7 @@ function subscriptionFrameFromDelta(delta: unknown): PersistentBrowserSubscripti
     addedCount: delta.addedCount,
     removedCount: delta.removedCount,
     updatedCount: delta.updatedCount,
+    terminalOperations: delta.terminalOperations,
   };
 }
 

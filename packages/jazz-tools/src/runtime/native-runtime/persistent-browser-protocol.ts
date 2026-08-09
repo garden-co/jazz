@@ -155,6 +155,7 @@ export type PersistentBrowserSubscriptionFrame = {
   addedCount: number;
   removedCount: number;
   updatedCount: number;
+  terminalOperations?: NativeRowDelta["terminalOperations"];
 };
 
 export type PersistentBrowserSubscriptionMessage = {

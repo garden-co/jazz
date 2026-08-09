@@ -3,6 +3,7 @@ import type {
   ColumnType,
   InsertValues,
   NativeRowDelta,
+  NativeTerminalOperation,
   TablePolicies,
   Value,
   WasmSchema,
@@ -24,15 +25,11 @@ import {
   openConfig,
   queryWithPredicates,
   readNativeRowBatch,
-  readNativeRelationSubscriptionDelta,
   readNativeRelationSubscriptionSnapshot,
   readNativeSubscriptionDelta,
-  type NativeSubscriptionDelta,
   type NativeRelationSubscriptionSnapshot,
-  type NativeRelationSubscriptionDelta,
-  type NativeRelationSubscriptionEdge,
   type NativeRowBatch,
-  type NativeRemovedRow,
+  type NativeSubscriptionDelta,
   type QueryArraySubquery,
   type DescriptorField,
   type QueryLiteral,
@@ -47,11 +44,13 @@ import {
   createNativeRowValueEncoder,
   createRecord,
   createRecordValueDecoder,
+  decodeNativeRowValues,
+  logicalStorageColumns,
   storageColumnTypeToValueType,
   storageColumnValueType,
   writeDescriptor,
 } from "./native-row-codec.js";
-import { HIDDEN_INCLUDE_COLUMN_PREFIX, hiddenIncludeColumnName } from "../select-projection.js";
+import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "../select-projection.js";
 import {
   isPermissionIntrospectionColumn,
   isProvenanceMagicColumn,
@@ -299,18 +298,14 @@ type SubscriptionState = {
   packedResetRows: NativeRowDelta | null;
   visibleRows: RowState[];
   visiblePackedResetRows: NativeRowDelta | null;
-  relationRows: RowState[];
-  relationRootCount: number;
-  relationEdges: NativeRelationSubscriptionEdge[];
-  relationMaterialization: RelationMaterializationSpec;
   outputColumns: SubscriptionOutputColumns | null;
-  snapshotRefresh: boolean;
   session: RuntimeSession | null;
   opts: unknown;
   opened: boolean;
   visibleOpened: boolean;
   deferredVisiblePublication: boolean;
   deferredVisibleReset: boolean;
+  deferredTerminalOperations: NativeTerminalOperation[];
   callback?: Function;
   cancelled: boolean;
 };
@@ -320,29 +315,25 @@ type SubscriptionOutputColumns = {
   rootColumns: readonly ColumnDescriptor[];
 };
 
-type RelationMaterializationSpec = {
-  rootTable: string | null;
-  arraySubqueries: QueryArraySubquery[];
-  clientLimit: number | null;
-  clientOffset: number;
-};
-
 type SubscriptionSourceState = {
   source: ReadableStreamDefaultReader<unknown> | Subscription;
   reading: boolean;
 };
 
-type RowState = {
+export type RowState = {
   table: string;
   id: string;
   values: Value[];
   valuesByColumn?: Map<string, Value>;
+  resultKey?: string;
+  resultKeyBytes?: Uint8Array;
 };
 
 type NativeRowFieldPlan = {
   name: string;
   index: number;
   type?: ColumnType;
+  storageType: ValueType;
   includeInValues: boolean;
 };
 
@@ -769,7 +760,6 @@ export class NativeRuntimeAdapter implements Runtime {
         this.throwServerTransportErrorForTier(tier);
         write.wait(tier);
         this.pumpSubscriptions();
-        this.refreshOpenedPlainSubscriptions();
         return;
       } catch (error) {
         const rejected = rejectedWaitError(batchId, error);
@@ -782,7 +772,6 @@ export class NativeRuntimeAdapter implements Runtime {
           this.throwServerTransportErrorForTier(tier);
           write.wait(tier);
           this.pumpSubscriptions();
-          this.refreshOpenedPlainSubscriptions();
           return;
         } catch (secondError) {
           const secondRejected = rejectedWaitError(batchId, secondError);
@@ -851,7 +840,7 @@ export class NativeRuntimeAdapter implements Runtime {
           return rowsFromRelationSnapshot(
             readRelationSnapshot(payload),
             this.schema,
-            relationMaterializationSpec(coreQueryJson, this.schema),
+            subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
           );
         }
         if (!this.db.allRelationSnapshot) {
@@ -861,7 +850,7 @@ export class NativeRuntimeAdapter implements Runtime {
         return rowsFromRelationSnapshot(
           readRelationSnapshot(payload),
           this.schema,
-          relationMaterializationSpec(coreQueryJson, this.schema),
+          subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
         );
       }
       const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
@@ -930,7 +919,6 @@ export class NativeRuntimeAdapter implements Runtime {
         `Core subscribe failed for ${queryJson}: ${errorMessage(error)}${nativeStack ? `\n${nativeStack}` : ""}`,
       );
     }
-    const snapshotRefresh = !usesNativeRelationApi && typeof this.db.all === "function";
     this.subscriptions.set(handle, {
       sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
       queryJson,
@@ -942,22 +930,16 @@ export class NativeRuntimeAdapter implements Runtime {
       packedResetRows: null,
       visibleRows: [],
       visiblePackedResetRows: null,
-      relationRows: [],
-      relationRootCount: 0,
-      relationEdges: [],
-      relationMaterialization: usesNativeRelationApi
-        ? emptyRelationMaterializationSpec()
-        : relationMaterializationSpec(queryJson, this.schema),
       outputColumns: usesNativeRelationApi
         ? null
         : subscriptionOutputColumns(queryJson, this.schema),
-      snapshotRefresh,
       session,
       opts,
       opened: false,
       visibleOpened: false,
       deferredVisiblePublication: false,
       deferredVisibleReset: false,
+      deferredTerminalOperations: [],
       cancelled: false,
     });
     return handle;
@@ -1019,7 +1001,6 @@ export class NativeRuntimeAdapter implements Runtime {
       this.flushQueuedServerFrames(carrier);
       this.pumpServerTransport();
       this.pumpSubscriptions();
-      this.refreshOpenedPlainSubscriptions();
       return carrier;
     });
     this.serverCarrierPromise.catch((error) => {
@@ -1091,7 +1072,6 @@ export class NativeRuntimeAdapter implements Runtime {
         try {
           write.wait("local");
           this.pumpSubscriptions();
-          this.refreshOpenedPlainSubscriptions();
           return;
         } catch (error) {
           if (!isPendingWaitError(error)) return;
@@ -1127,7 +1107,6 @@ export class NativeRuntimeAdapter implements Runtime {
         // the write handle. Keep subscription pumping paired with the server
         // pump here so write acks are not the only path that drains changes.
         this.pumpSubscriptions();
-        this.refreshOpenedPlainSubscriptions();
         this.scheduleServerPump();
       }
     };
@@ -1257,38 +1236,6 @@ export class NativeRuntimeAdapter implements Runtime {
     return undefined;
   }
 
-  private refreshOpenedPlainSubscriptions(): void {
-    for (const subscription of this.subscriptions.values()) {
-      if (subscription.cancelled || !subscription.opened || !subscription.callback) continue;
-
-      const previousRows = subscription.rows;
-      const nextRows =
-        subscription.query === null
-          ? this.refreshNativeRelationSubscriptionRows(subscription)
-          : subscription.relationMaterialization.arraySubqueries.length > 0
-            ? this.refreshRelationSubscriptionRows(subscription)
-            : this.refreshPlainSubscriptionRows(subscription);
-      const delta = nativeDeltaFromRows(
-        nextRows,
-        previousRows,
-        this.schema,
-        subscription.outputColumns,
-      );
-      if (!nativeDeltaHasChanges(delta)) continue;
-      subscription.rows = nextRows;
-      subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
-      subscription.callback(delta);
-    }
-  }
-
-  private refreshPlainSubscriptionRows(subscription: SubscriptionState): RowState[] {
-    if (!subscription.query) return [];
-    const rowsBytes = subscription.identity
-      ? this.db.allForIdentity(subscription.query, subscription.identity, subscription.opts)
-      : this.db.all(subscription.query, subscription.opts);
-    return rowsFromBatches(readRowBatches(rowsBytes), this.schema);
-  }
-
   private warnedOnce = new Set<string>();
   private warnOnce(key: string, message: string): void {
     if (this.warnedOnce.has(key)) return;
@@ -1325,50 +1272,6 @@ export class NativeRuntimeAdapter implements Runtime {
         if (attachment !== undefined) this.db.detachQuery?.(attachment);
       }
     }
-  }
-
-  private refreshNativeRelationSubscriptionRows(subscription: SubscriptionState): RowState[] {
-    if (
-      !this.db.allRelationQuery ||
-      (subscription.identity && !this.db.allRelationQueryForIdentity)
-    ) {
-      return [];
-    }
-    const rowsBytes = subscription.identity
-      ? this.db.allRelationQueryForIdentity!(
-          subscription.queryJson,
-          subscription.identity,
-          subscription.opts,
-        )
-      : this.db.allRelationQuery(subscription.queryJson, subscription.opts);
-    return rowsFromBatches(readRowBatches(rowsBytes), this.schema);
-  }
-
-  private refreshRelationSubscriptionRows(subscription: SubscriptionState): RowState[] {
-    if (!subscription.query) return [];
-    if (
-      !this.db.allRelationSnapshot ||
-      (subscription.identity && !this.db.allRelationSnapshotForIdentity)
-    ) {
-      return this.refreshPlainSubscriptionRows(subscription);
-    }
-    const payload = subscription.identity
-      ? this.db.allRelationSnapshotForIdentity!(
-          subscription.query,
-          subscription.identity,
-          subscription.opts,
-        )
-      : this.db.allRelationSnapshot(subscription.query, subscription.opts);
-    const snapshot = readRelationSnapshot(payload);
-    subscription.relationRows = rowsFromBatches(snapshot.rows, this.schema);
-    subscription.relationRootCount = snapshot.rootCount;
-    subscription.relationEdges = snapshot.edges;
-    return materializeRelationRows(
-      subscription.relationRows,
-      subscription.relationEdges,
-      subscription.relationRootCount,
-      subscription.relationMaterialization,
-    );
   }
 
   private prepareQuery(queryJson: string): PreparedQuery {
@@ -1670,14 +1573,11 @@ export class NativeRuntimeAdapter implements Runtime {
     if (chunk.type === "snapshot") {
       const previousRows = subscription.rows;
       const wasOpened = subscription.opened;
-      subscription.relationRows = rowsFromBatches(chunk.snapshot.rows, this.schema);
-      subscription.relationRootCount = chunk.snapshot.rootCount;
-      subscription.relationEdges = chunk.snapshot.edges;
-      subscription.rows = materializeRelationRows(
-        subscription.relationRows,
-        subscription.relationEdges,
-        subscription.relationRootCount,
-        subscription.relationMaterialization,
+      subscription.rows = rowsFromRelationSnapshot(
+        chunk.snapshot,
+        this.schema,
+        subscription.outputColumns?.rootColumns,
+        "full-record",
       );
       subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
       subscription.opened = true;
@@ -1694,32 +1594,6 @@ export class NativeRuntimeAdapter implements Runtime {
         chunk.settled,
         !wasOpened,
       );
-    } else if (
-      chunk.relationSnapshot &&
-      subscription.relationMaterialization.arraySubqueries.length > 0
-    ) {
-      const previousRows = subscription.rows;
-      subscription.relationRows = rowsFromBatches(chunk.relationSnapshot.rows, this.schema);
-      subscription.relationRootCount = chunk.relationSnapshot.rootCount;
-      subscription.relationEdges = chunk.relationSnapshot.edges;
-      subscription.rows = materializeRelationRows(
-        subscription.relationRows,
-        subscription.relationEdges,
-        subscription.relationRootCount,
-        subscription.relationMaterialization,
-      );
-      subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
-      this.publishSubscriptionRows(
-        subscription,
-        nativeDeltaFromRows(
-          subscription.rows,
-          previousRows,
-          this.schema,
-          subscription.outputColumns,
-        ),
-        chunk.settled,
-        false,
-      );
     } else {
       if (chunk.reset) {
         subscription.rows = [];
@@ -1727,37 +1601,7 @@ export class NativeRuntimeAdapter implements Runtime {
         subscription.packedResetBatches = null;
         subscription.packedResetRows = null;
       }
-      if (
-        chunk.relationDelta &&
-        (subscription.query === null ||
-          subscription.relationMaterialization.arraySubqueries.length > 0)
-      ) {
-        const previousRows = subscription.rows;
-        applyRelationSubscriptionDelta(
-          subscription,
-          chunk.delta,
-          chunk.relationDelta,
-          this.schema,
-          chunk.reset === true,
-        );
-        subscription.rows = materializeRelationRows(
-          subscription.relationRows,
-          subscription.relationEdges,
-          subscription.relationRootCount,
-          subscription.relationMaterialization,
-        );
-        subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
-        subscription.opened = true;
-        const wireDelta = chunk.reset
-          ? nativeResetDeltaFromRows(subscription.rows, this.schema, subscription.outputColumns)
-          : nativeDeltaFromRows(
-              subscription.rows,
-              previousRows,
-              this.schema,
-              subscription.outputColumns,
-            );
-        this.publishSubscriptionRows(subscription, wireDelta, chunk.settled, chunk.reset === true);
-      } else if (plainResetChunkCanStayPacked(subscription, chunk, this.schema)) {
+      if (plainResetChunkCanStayPacked(subscription, chunk, this.schema)) {
         const packedResetRows = nativeResetDeltaFromBatches(
           chunk.delta.added,
           subscription.outputColumns,
@@ -1768,44 +1612,6 @@ export class NativeRuntimeAdapter implements Runtime {
         subscription.packedResetRows = packedResetRows;
         subscription.opened = true;
         this.publishSubscriptionRows(subscription, packedResetRows, chunk.settled, true);
-      } else if (subscription.snapshotRefresh) {
-        materializePackedResetRows(subscription, this.schema);
-        const previousRows = subscription.rows;
-        // Guarded so the argument never evaluates without a server transport:
-        // memory-backed chunks carry a different updated-payload shape and the
-        // callers swallow rejections, which silently killed delivery. The
-        // refresh is an optimization: any failure (including payload-shape
-        // decode errors on individual subscriptions) must degrade to a plain
-        // snapshot refresh, never kill delivery for that subscription.
-        // Scope: post-open update convergence only. During initial ingest
-        // (reset chunks / not-yet-opened subscriptions) the refresh would fire
-        // per-row edge queries across the whole snapshot — a multi-second cold
-        // open tax with no correctness benefit.
-        if (this.serverTransport && subscription.opened && !chunk.reset) {
-          try {
-            await this.refreshRowsFromEdge(
-              subscription.session,
-              rowsFromBatches(chunk.delta.updated, this.schema),
-            );
-          } catch (error) {
-            this.warnOnce(
-              "edge-refresh-decode",
-              `edge refresh skipped for a subscription chunk: ${String(error)}`,
-            );
-          }
-        }
-        subscription.rows = this.refreshPlainSubscriptionRows(subscription);
-        subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
-        subscription.opened = true;
-        const wireDelta = chunk.reset
-          ? nativeResetDeltaFromRows(subscription.rows, this.schema, subscription.outputColumns)
-          : nativeDeltaFromRows(
-              subscription.rows,
-              previousRows,
-              this.schema,
-              subscription.outputColumns,
-            );
-        this.publishSubscriptionRows(subscription, wireDelta, chunk.settled, chunk.reset === true);
       } else {
         materializePackedResetRows(subscription, this.schema);
         const applied = applySubscriptionDeltaWithWireDelta(
@@ -1814,10 +1620,12 @@ export class NativeRuntimeAdapter implements Runtime {
           chunk.delta,
           this.schema,
           chunk.reset === true,
+          subscription.outputColumns,
         );
         subscription.rows = applied.rows;
         subscription.rowIndexByKey = applied.rowIndexByKey;
         subscription.opened = true;
+        applied.wireDelta.terminalOperations = chunk.terminalOperations;
         this.publishSubscriptionRows(
           subscription,
           applied.wireDelta,
@@ -1837,6 +1645,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.subscriptionCallbacksAreSettledGated(subscription) && settled === false) {
       subscription.deferredVisiblePublication = true;
       subscription.deferredVisibleReset ||= reset;
+      subscription.deferredTerminalOperations.push(...(wireDelta.terminalOperations ?? []));
       return;
     }
 
@@ -1865,6 +1674,12 @@ export class NativeRuntimeAdapter implements Runtime {
       }
     }
 
+    const terminalOperations = [
+      ...subscription.deferredTerminalOperations,
+      ...(wireDelta.terminalOperations ?? []),
+    ];
+    if (terminalOperations.length > 0) visibleDelta.terminalOperations = terminalOperations;
+
     subscription.callback?.(visibleDelta);
     if (visibleDelta === subscription.packedResetRows) {
       subscription.visibleRows = [];
@@ -1876,6 +1691,7 @@ export class NativeRuntimeAdapter implements Runtime {
     subscription.visibleOpened = true;
     subscription.deferredVisiblePublication = false;
     subscription.deferredVisibleReset = false;
+    subscription.deferredTerminalOperations = [];
   }
 
   private subscriptionCallbacksAreSettledGated(subscription: SubscriptionState): boolean {
@@ -2400,36 +2216,6 @@ function unqualifiedColumn(column: string): string {
   return column.split(".").at(-1) ?? column;
 }
 
-function emptyRelationMaterializationSpec(): RelationMaterializationSpec {
-  return {
-    rootTable: null,
-    arraySubqueries: [],
-    clientLimit: null,
-    clientOffset: 0,
-  };
-}
-
-function relationMaterializationSpec(
-  queryJson: string,
-  schema: WasmSchema,
-): RelationMaterializationSpec {
-  const parsed = JSON.parse(queryJson) as {
-    table?: unknown;
-    array_subqueries?: unknown;
-    __jazz_client_limit?: unknown;
-    __jazz_client_offset?: unknown;
-  };
-  if (typeof parsed.table !== "string") {
-    return emptyRelationMaterializationSpec();
-  }
-  return {
-    rootTable: parsed.table,
-    arraySubqueries: readQueryArraySubqueries(parsed.array_subqueries, parsed.table, schema) ?? [],
-    clientLimit: parsed.__jazz_client_limit == null ? null : readLimit(parsed.__jazz_client_limit),
-    clientOffset: parsed.__jazz_client_offset == null ? 0 : readOffset(parsed.__jazz_client_offset),
-  };
-}
-
 function subscriptionOutputColumns(
   queryJson: string,
   schema: WasmSchema,
@@ -2460,12 +2246,21 @@ function outputColumnsForTable(
   schema: WasmSchema,
   select: string[] | undefined,
   arraySubqueries: readonly QueryArraySubquery[],
+  rootTerminal = true,
 ): ColumnDescriptor[] {
   const tableSchema = schema[table];
   if (!tableSchema) throw new Error(`missing schema for subscription table ${table}`);
+  const wildcard = select === undefined;
   const selected = select ?? tableSchema.columns.map((column) => column.name);
   const columns = selected
-    .map((columnName) => tableSchema.columns.find((column) => column.name === columnName))
+    .map((columnName) => {
+      const declared = tableSchema.columns.find((column) => column.name === columnName);
+      if (declared) return wildcard && rootTerminal ? { ...declared, sparse: true } : declared;
+      const magicType = magicColumnType(columnName);
+      return magicType
+        ? ({ name: columnName, column_type: magicType, nullable: false } satisfies ColumnDescriptor)
+        : undefined;
+    })
     .filter((column): column is ColumnDescriptor => column !== undefined);
 
   for (const subquery of arraySubqueries) {
@@ -2474,6 +2269,7 @@ function outputColumnsForTable(
       schema,
       subquery.select,
       subquery.nestedArrays ?? [],
+      false,
     );
     columns.push({
       name: subquery.columnName,
@@ -3590,17 +3386,22 @@ function readRelationSnapshot(payload: Uint8Array): NativeRelationSubscriptionSn
   return readNativeRelationSubscriptionSnapshot(new PostcardReader(payload));
 }
 
-function rowsFromBatches(batches: NativeRowBatch[], schema: WasmSchema): RowState[] {
+function rowsFromBatches(
+  batches: NativeRowBatch[],
+  schema: WasmSchema,
+  projectedColumns?: readonly ColumnDescriptor[],
+  nestedRowCarrier: NestedRowCarrier = "full-record",
+): RowState[] {
   const rows: RowState[] = [];
   for (const batch of batches) {
-    const fieldPlans = nativeRowFieldPlans(batch, schema);
+    const fieldPlans = nativeRowFieldPlans(batch, schema, projectedColumns);
     const decodeRecord = createRecordValueDecoder(batch.descriptor);
     for (const row of batch.rows) {
       const values: Value[] = [];
       const valuesByColumn = new Map<string, Value>();
 
       for (const field of fieldPlans) {
-        const value = decodePlannedField(field, decodeRecord, row.raw);
+        const value = decodePlannedField(field, decodeRecord, row.raw, nestedRowCarrier);
         valuesByColumn.set(field.name, value);
         if (field.includeInValues) {
           values.push(value);
@@ -3622,17 +3423,21 @@ function rowsFromBatches(batches: NativeRowBatch[], schema: WasmSchema): RowStat
   return rows;
 }
 
-function nativeRowFieldPlans(batch: NativeRowBatch, schema: WasmSchema): NativeRowFieldPlan[] {
+function nativeRowFieldPlans(
+  batch: NativeRowBatch,
+  schema: WasmSchema,
+  projectedColumns?: readonly ColumnDescriptor[],
+): NativeRowFieldPlan[] {
   let cache = nativeRowFieldPlanCache.get(schema);
   if (!cache) {
     cache = new Map();
     nativeRowFieldPlanCache.set(schema, cache);
   }
   const cacheKey = nativeRowFieldPlanCacheKey(batch);
-  const cached = cache.get(cacheKey);
+  const cached = projectedColumns ? undefined : cache.get(cacheKey);
   if (cached) return cached;
 
-  const columns = schema[batch.table]?.columns ?? [];
+  const columns = projectedColumns ?? schema[batch.table]?.columns ?? [];
   const columnsByName = new Map(columns.map((column) => [column.name, column]));
   const plans: NativeRowFieldPlan[] = [];
 
@@ -3649,11 +3454,12 @@ function nativeRowFieldPlans(batch: NativeRowBatch, schema: WasmSchema): NativeR
       name,
       index,
       type,
+      storageType: batch.descriptor[index]!.valueType,
       includeInValues: !isHiddenIncludeColumn(name) && !isProvenanceMagicColumn(name),
     });
   }
 
-  cache.set(cacheKey, plans);
+  if (!projectedColumns) cache.set(cacheKey, plans);
   return plans;
 }
 
@@ -3672,10 +3478,14 @@ function valueTypeCacheKey(type: ValueType): string {
 function rowsFromRelationSnapshot(
   snapshot: NativeRelationSubscriptionSnapshot,
   schema: WasmSchema,
-  materialization: RelationMaterializationSpec,
+  projectedColumns?: readonly ColumnDescriptor[],
+  nestedRowCarrier: NestedRowCarrier = "full-record",
 ): RowState[] {
-  const rows = stripRelationSnapshotMetadata(rowsFromBatches(snapshot.rows, schema), schema);
-  return materializeRelationRows(rows, snapshot.edges, snapshot.rootCount, materialization);
+  const rows = stripRelationSnapshotMetadata(
+    rowsFromBatches(snapshot.rows, schema, projectedColumns, nestedRowCarrier),
+    schema,
+  );
+  return rows.slice(0, snapshot.rootCount);
 }
 
 const RELATION_SNAPSHOT_METADATA_FIELDS = new Set([
@@ -3713,172 +3523,6 @@ function stripRelationSnapshotMetadata(rows: RowState[], schema: WasmSchema): Ro
   });
 }
 
-function materializeRelationRows(
-  rows: RowState[],
-  edges: NativeRelationSubscriptionEdge[],
-  rootCount: number,
-  materialization: RelationMaterializationSpec,
-): RowState[] {
-  const rowsByKey = new Map(rows.map((row) => [rowKey(row.table, row.id), row]));
-  const childRowsBySourceAndRelation = new Map<string, RowState[]>();
-  for (const edge of edges) {
-    const targetKey = rowKey(edge.targetTable, formatUuid(edge.targetRowId));
-    const child = rowsByKey.get(targetKey);
-    if (!child) continue;
-    const key = relationKey(edge.sourceTable, formatUuid(edge.sourceRowId), edge.relation);
-    const children = childRowsBySourceAndRelation.get(key) ?? [];
-    children.push(child);
-    childRowsBySourceAndRelation.set(key, children);
-  }
-  const materialized = new Map<string, RowState>();
-  const rootCandidates =
-    materialization.rootTable === null
-      ? rows.slice(0, rootCount)
-      : rows.filter((row) => row.table === materialization.rootTable).slice(0, rootCount);
-  let roots = rootCandidates
-    .map((row) =>
-      materializeRelationRow(
-        row,
-        materialization.arraySubqueries,
-        childRowsBySourceAndRelation,
-        materialized,
-      ),
-    )
-    .filter((result) => result.satisfiesRequirements)
-    .map((result) => result.row);
-  if (materialization.clientOffset > 0 || materialization.clientLimit !== null) {
-    const offset = materialization.clientOffset;
-    const limit = materialization.clientLimit ?? roots.length;
-    roots = roots.slice(offset, offset + limit);
-  }
-  return roots;
-}
-
-function materializeRelationRow(
-  row: RowState,
-  subqueries: readonly QueryArraySubquery[],
-  childRowsBySourceAndRelation: Map<string, RowState[]>,
-  materialized: Map<string, RowState>,
-): { row: RowState; satisfiesRequirements: boolean } {
-  const rowKeyValue = rowKey(row.table, row.id);
-  const cached = materialized.get(rowKeyValue);
-  if (cached) return { row: cached, satisfiesRequirements: true };
-  materialized.set(rowKeyValue, row);
-  const valuesByColumn = new Map(row.valuesByColumn ?? []);
-  const relationValues: Value[] = [];
-  const relationPayloadValues = new Set<Value>();
-  let satisfiesRequirements = true;
-  for (const subquery of subqueries) {
-    const key = relationKey(row.table, row.id, subquery.columnName);
-    const children = childRowsBySourceAndRelation.get(key) ?? [];
-    const childResults = children.map((child) =>
-      materializeRelationRow(
-        child,
-        subquery.nestedArrays ?? [],
-        childRowsBySourceAndRelation,
-        materialized,
-      ),
-    );
-    const materializedChildren = childResults
-      .filter((child) => child.satisfiesRequirements)
-      .map((child) => child.row);
-    if (!arraySubqueryRequirementSatisfied(row, subquery, materializedChildren.length)) {
-      satisfiesRequirements = false;
-    }
-    const value: Value = {
-      type: "Array",
-      value: materializedChildren.map((child) => ({
-        type: "Row",
-        value: rowValueWithValuesByColumn(child),
-      })),
-    } as Value;
-    const publicRelation = publicIncludeRelationName(subquery.columnName);
-    const hiddenRelation = hiddenIncludeColumnName(publicRelation);
-    for (const name of [subquery.columnName, publicRelation, hiddenRelation]) {
-      const payload = valuesByColumn.get(name);
-      if (payload) relationPayloadValues.add(payload);
-    }
-    valuesByColumn.set(subquery.columnName, value);
-    if (publicRelation !== subquery.columnName) {
-      valuesByColumn.set(publicRelation, value);
-    }
-    valuesByColumn.set(hiddenRelation, value);
-    relationValues.push(value);
-  }
-  const baseValues =
-    relationPayloadValues.size === 0
-      ? row.values
-      : row.values.filter((value) => !relationPayloadValues.has(value));
-  const next = withValuesByColumn(
-    {
-      ...row,
-      values: baseValues.concat(relationValues),
-    },
-    valuesByColumn,
-  );
-  materialized.set(rowKeyValue, next);
-  return { row: next, satisfiesRequirements };
-}
-
-function arraySubqueryRequirementSatisfied(
-  row: RowState,
-  subquery: QueryArraySubquery,
-  childCount: number,
-): boolean {
-  switch (subquery.requirement ?? "Optional") {
-    case "Optional":
-      return true;
-    case "AtLeastOne":
-      return childCount > 0;
-    case "MatchCorrelationCardinality":
-      return childCount === correlationCardinality(row, subquery.outerColumn);
-  }
-}
-
-function correlationCardinality(row: RowState, column: string): number {
-  const valuesByColumn = row.valuesByColumn ?? new Map<string, Value>();
-  const value = valuesByColumn.get(stripParentQualifier(column, row.table));
-  if (!value) return 0;
-  if (value.type === "Array") return value.value.length;
-  if (value.type === "Null") return 0;
-  return 1;
-}
-
-function publicIncludeRelationName(relation: string): string {
-  return relation.startsWith(HIDDEN_INCLUDE_COLUMN_PREFIX)
-    ? relation.slice(HIDDEN_INCLUDE_COLUMN_PREFIX.length)
-    : relation;
-}
-
-function rowValueWithValuesByColumn(row: RowState): {
-  id: string;
-  values: Value[];
-  valuesByColumn?: Map<string, Value>;
-} {
-  const value: {
-    id: string;
-    values: Value[];
-    valuesByColumn?: Map<string, Value>;
-    table?: string;
-  } = {
-    id: row.id,
-    values: row.values,
-  };
-  Object.defineProperty(value, "table", {
-    value: row.table,
-    enumerable: false,
-    configurable: true,
-  });
-  if (row.valuesByColumn) {
-    Object.defineProperty(value, "valuesByColumn", {
-      value: row.valuesByColumn,
-      enumerable: false,
-      configurable: true,
-    });
-  }
-  return value;
-}
-
 function withValuesByColumn(row: RowState, valuesByColumn: Map<string, Value>): RowState {
   Object.defineProperty(row, "valuesByColumn", {
     value: valuesByColumn,
@@ -3888,29 +3532,37 @@ function withValuesByColumn(row: RowState, valuesByColumn: Map<string, Value>): 
   return row;
 }
 
-function applySubscriptionDeltaWithWireDelta(
+export function applySubscriptionDeltaWithWireDelta(
   currentRows: RowState[],
   currentIndexByKey: Map<string, number>,
-  delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] },
+  delta: NativeSubscriptionDelta,
   schema: WasmSchema,
   reset = false,
+  outputColumns: SubscriptionOutputColumns | null = null,
 ): { rows: RowState[]; rowIndexByKey: Map<string, number>; wireDelta: NativeRowDelta } {
   const rowsByKey = reset
     ? new Map<string, RowState>()
-    : new Map(currentRows.map((row) => [rowKey(row.table, row.id), row]));
-  const removedEntries: Array<{ id: string; index: number }> = [];
+    : new Map(currentRows.map((row) => [rowStateKey(row), row]));
+  const removedEntries: Array<{ id: string; index: number; resultKeyBytes?: Uint8Array }> = [];
 
-  for (const removed of delta.removed) {
+  for (const [removedIndex, removed] of delta.removed.entries()) {
     const id = formatUuid(removed.rowId);
-    const key = rowKey(removed.table, id);
-    removedEntries.push({ id, index: currentIndexByKey.get(key) ?? 0 });
+    const resultKeyBytes = delta.removedOccurrenceKeys[removedIndex];
+    const key = resultKeyBytes
+      ? occurrenceStateKey(resultKeyBytes, removed.table, id)
+      : rowKey(removed.table, id);
+    removedEntries.push({ id, index: currentIndexByKey.get(key) ?? 0, resultKeyBytes });
     rowsByKey.delete(key);
   }
 
-  const addedRows = rowsFromBatches(delta.added, schema);
-  const updatedRows = rowsFromBatches(delta.updated, schema);
+  const projectedColumns = outputColumns?.rootColumns;
+  const nestedRowCarrier: NestedRowCarrier = "full-record";
+  const addedRows = rowsFromBatches(delta.added, schema, projectedColumns, nestedRowCarrier);
+  const updatedRows = rowsFromBatches(delta.updated, schema, projectedColumns, nestedRowCarrier);
+  attachOccurrenceKeys(addedRows, delta.addedOccurrenceKeys);
+  attachOccurrenceKeys(updatedRows, delta.updatedOccurrenceKeys);
   for (const row of addedRows.concat(updatedRows)) {
-    rowsByKey.set(rowKey(row.table, row.id), row);
+    rowsByKey.set(rowStateKey(row), row);
   }
 
   const rows = Array.from(rowsByKey.values());
@@ -3919,150 +3571,82 @@ function applySubscriptionDeltaWithWireDelta(
     rows,
     rowIndexByKey,
     wireDelta: {
-      ...nativeDeltaFromChanges(addedRows, updatedRows, removedEntries, rowIndexByKey, schema),
+      ...nativeDeltaFromChanges(
+        addedRows,
+        updatedRows,
+        removedEntries,
+        rowIndexByKey,
+        schema,
+        outputColumns,
+      ),
       ...(reset ? { reset: true } : {}),
     },
   };
 }
 
-function applyRelationSubscriptionDelta(
-  subscription: SubscriptionState,
-  rootDelta: NativeSubscriptionDelta,
-  relationDelta: NativeRelationSubscriptionDelta,
-  schema: WasmSchema,
-  reset: boolean,
-): void {
-  if (reset) {
-    subscription.relationRows = [];
-    subscription.relationEdges = [];
-    subscription.relationRootCount = 0;
-  }
-
-  const rootRemoved = new Set(
-    rootDelta.removed.map((row) => rowKey(row.table, formatUuid(row.rowId))),
-  );
-  if (rootRemoved.size > 0) {
-    let index = 0;
-    while (index < subscription.relationRootCount) {
-      const row = subscription.relationRows[index];
-      if (row && rootRemoved.has(rowKey(row.table, row.id))) {
-        subscription.relationRows.splice(index, 1);
-        subscription.relationRootCount -= 1;
-      } else {
-        index += 1;
-      }
-    }
-  }
-
-  const relatedRemoved = new Set(
-    relationDelta.removed.map((row) => rowKey(row.table, formatUuid(row.rowId))),
-  );
-  if (relatedRemoved.size > 0) {
-    subscription.relationRows = subscription.relationRows.filter((row, index) => {
-      if (index < subscription.relationRootCount) return true;
-      return !relatedRemoved.has(rowKey(row.table, row.id));
-    });
-  }
-
-  const rootUpdates = rowsFromBatches(rootDelta.updated, schema);
-  for (const row of rootUpdates) {
-    const position = subscription.relationRows
-      .slice(0, subscription.relationRootCount)
-      .findIndex((current) => rowKey(current.table, current.id) === rowKey(row.table, row.id));
-    if (position >= 0) {
-      subscription.relationRows[position] = row;
-    }
-  }
-
-  const rootAdds = rowsFromBatches(rootDelta.added, schema);
-  for (const row of rootAdds) {
-    const existing = subscription.relationRows
-      .slice(0, subscription.relationRootCount)
-      .findIndex((current) => rowKey(current.table, current.id) === rowKey(row.table, row.id));
-    if (existing >= 0) {
-      subscription.relationRows[existing] = row;
-    } else {
-      subscription.relationRows.splice(subscription.relationRootCount, 0, row);
-      subscription.relationRootCount += 1;
-    }
-  }
-
-  const relationRows = rowsFromBatches(relationDelta.added, schema).concat(
-    rowsFromBatches(relationDelta.updated, schema),
-  );
-  for (const row of relationRows) {
-    const key = rowKey(row.table, row.id);
-    const rootPosition = subscription.relationRows
-      .slice(0, subscription.relationRootCount)
-      .findIndex((current) => rowKey(current.table, current.id) === key);
-    if (rootPosition >= 0) {
-      subscription.relationRows[rootPosition] = row;
-      continue;
-    }
-    const relatedPosition = subscription.relationRows
-      .slice(subscription.relationRootCount)
-      .findIndex((current) => rowKey(current.table, current.id) === key);
-    if (relatedPosition >= 0) {
-      subscription.relationRows[subscription.relationRootCount + relatedPosition] = row;
-    } else {
-      subscription.relationRows.push(row);
-    }
-  }
-
-  const removedEdges = new Set(relationDelta.removedEdges.map(relationEdgeKey));
-  subscription.relationEdges = subscription.relationEdges.filter(
-    (edge) => !removedEdges.has(relationEdgeKey(edge)),
-  );
-  for (const edge of relationDelta.addedEdges) {
-    const key = relationEdgeKey(edge);
-    if (!subscription.relationEdges.some((current) => relationEdgeKey(current) === key)) {
-      subscription.relationEdges.push(edge);
-    }
-  }
-
-  const referenced = new Set(
-    subscription.relationEdges.map((edge) =>
-      rowKey(edge.targetTable, formatUuid(edge.targetRowId)),
-    ),
-  );
-  subscription.relationRows = subscription.relationRows.filter((row, index) => {
-    if (index < subscription.relationRootCount) return true;
-    return referenced.has(rowKey(row.table, row.id));
-  });
-}
-
 function indexRowsByKey(rows: RowState[]): Map<string, number> {
   const index = new Map<string, number>();
   rows.forEach((row, rowIndex) => {
-    index.set(rowKey(row.table, row.id), rowIndex);
+    index.set(rowStateKey(row), rowIndex);
   });
   return index;
+}
+
+function attachOccurrenceKeys(rows: RowState[], keys: Uint8Array[]): void {
+  if (rows.length !== keys.length)
+    throw new Error("subscription occurrence sidecar length mismatch");
+  rows.forEach((row, index) => {
+    const bytes = keys[index]!;
+    row.resultKeyBytes = bytes;
+    row.resultKey = publicResultKey(bytes);
+  });
+}
+
+function occurrenceStateKey(bytes: Uint8Array, table?: string, sourceId?: string): string {
+  if (bytes.length === 17 && bytes[0] === 1 && table && sourceId) return rowKey(table, sourceId);
+  return `result\0${Array.from(bytes, (byte) => byteHex[byte]).join("")}`;
+}
+
+function publicResultKey(bytes: Uint8Array): string {
+  if (bytes.length === 17 && bytes[0] === 1) return formatUuid(bytes.subarray(1));
+  return `result:${Array.from(bytes, (byte) => byteHex[byte]).join("")}`;
+}
+
+function rowStateKey(row: RowState): string {
+  return row.resultKeyBytes
+    ? occurrenceStateKey(row.resultKeyBytes, row.table, row.id)
+    : rowKey(row.table, row.id);
 }
 
 function rowKey(table: string, id: string): string {
   return `${table}\0${id}`;
 }
 
-function relationKey(table: string, id: string, relation: string): string {
-  return `${table}\0${id}\0${relation}`;
-}
-
-function relationEdgeKey(edge: NativeRelationSubscriptionEdge): string {
-  return `${edge.sourceTable}\0${formatUuid(edge.sourceRowId)}\0${edge.relation}\0${edge.targetTable}\0${formatUuid(edge.targetRowId)}`;
-}
-
 function decodePlannedField(
   field: NativeRowFieldPlan,
   decodeRecord: (raw: Uint8Array, logicalIndex: number) => Uint8Array | null,
   raw: Uint8Array,
+  nestedRowCarrier: NestedRowCarrier,
 ): Value {
   const bytes = decodeRecord(raw, field.index);
   if (bytes == null) return { type: "Null" };
   if (!field.type) return { type: "Bytea", value: bytes };
-  return decodeBytes(field.type, bytes, field.name);
+  try {
+    return decodeBytes(field.type, bytes, field.name, field.storageType, nestedRowCarrier);
+  } catch (error) {
+    throw new Error(
+      `${String(error)} while decoding ${field.name} as ${field.type.type} from storage tag ${field.storageType.tag} (${bytes.byteLength} bytes)`,
+    );
+  }
 }
 
-function decodeBytes(type: ColumnType, bytes: Uint8Array, fieldName?: string): Value {
+function decodeBytes(
+  type: ColumnType,
+  bytes: Uint8Array,
+  fieldName?: string,
+  storageType?: ValueType,
+  nestedRowCarrier: NestedRowCarrier = "full-record",
+): Value {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   switch (type.type) {
     case "Boolean":
@@ -4089,14 +3673,123 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array, fieldName?: string): V
     case "Bytea":
       return { type: "Bytea", value: bytes.slice() };
     case "Array":
-      return { type: "Array", value: decodeArrayBytes(type.element, bytes) };
+      return {
+        type: "Array",
+        value: decodeArrayBytes(
+          type.element,
+          bytes,
+          arrayElementStorageType(storageType),
+          nestedRowCarrier,
+        ),
+      };
     case "Row":
-      return { type: "Bytea", value: bytes.slice() };
+      return {
+        type: "Row",
+        value: decodeNestedRowBytes(
+          type.columns,
+          bytes,
+          recordStorageDescriptor(storageType),
+          nestedRowCarrier,
+        ),
+      };
   }
 }
 
-function decodeArrayBytes(elementType: ColumnType, bytes: Uint8Array): Value[] {
-  const elementWidth = fixedValueSize(storageColumnTypeToValueType(elementType));
+function nonNullableStorageType(storageType?: ValueType): ValueType | undefined {
+  let current = storageType;
+  while (current?.tag === 14) current = current.inner;
+  return current;
+}
+
+function arrayElementStorageType(storageType?: ValueType): ValueType | undefined {
+  const array = nonNullableStorageType(storageType);
+  return array?.tag === 13 ? array.inner : undefined;
+}
+
+function recordStorageDescriptor(storageType?: ValueType): DescriptorField[] | undefined {
+  const record = nonNullableStorageType(storageType);
+  return record?.tag === 15 ? record.record : undefined;
+}
+
+export type NestedRowCarrier = "full-record" | "keyed-terminal";
+
+export function decodeNestedRowBytes(
+  columns: readonly ColumnDescriptor[],
+  bytes: Uint8Array,
+  descriptor?: DescriptorField[],
+  carrier: NestedRowCarrier = "full-record",
+): { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } {
+  if (descriptor) {
+    const keyed = carrier === "keyed-terminal";
+    if (keyed && descriptor[0]?.name !== "row_uuid") {
+      throw new Error("keyed terminal nested row descriptor must start with row_uuid");
+    }
+    if (keyed && bytes.byteLength < 16) throw new Error("terminal nested row is missing its key");
+    const payloadDescriptor = keyed ? descriptor.slice(1) : descriptor;
+    const payload = keyed ? bytes.subarray(16) : bytes;
+    const decodeRecord = createRecordValueDecoder(payloadDescriptor);
+    const columnsByName = new Map(columns.map((column) => [column.name, column]));
+    const valuesByColumn = new Map<string, Value>();
+    let id = keyed ? formatUuid(bytes.subarray(0, 16)) : undefined;
+    for (let index = 0; index < payloadDescriptor.length; index += 1) {
+      const name = payloadDescriptor[index]?.name;
+      if (!name) continue;
+      const valueBytes = decodeRecord(payload, index);
+      if (!keyed && name === "row_uuid" && valueBytes) {
+        id = formatUuid(valueBytes);
+        continue;
+      }
+      const column = columnsByName.get(name);
+      if (!column) continue;
+      valuesByColumn.set(
+        name,
+        valueBytes == null
+          ? { type: "Null" }
+          : decodeBytes(column.column_type, valueBytes, name, payloadDescriptor[index]?.valueType),
+      );
+    }
+    const row: { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } = {
+      id,
+      values: columns.map(
+        (column) =>
+          valuesByColumn.get(column.name) ??
+          (column.column_type.type === "Array"
+            ? ({ type: "Array", value: [] } satisfies Value)
+            : ({ type: "Null" } satisfies Value)),
+      ),
+    };
+    Object.defineProperty(row, "valuesByColumn", {
+      value: valuesByColumn,
+      enumerable: false,
+      configurable: true,
+    });
+    return row;
+  }
+  if (bytes.byteLength < 5) throw new Error("invalid nested row value");
+  const hasId = bytes[0] === 1;
+  let offset = 1;
+  let id: string | undefined;
+  if (hasId) {
+    if (bytes.byteLength < 21) throw new Error("invalid nested row id");
+    id = formatUuid(bytes.subarray(offset, offset + 16));
+    offset += 16;
+  }
+  const length = readU32Le(bytes, offset);
+  offset += 4;
+  const raw = bytes.subarray(offset, offset + length);
+  if (raw.byteLength !== length) throw new Error("invalid nested row value length");
+  return { id, values: decodeNativeRowValues(columns, raw) };
+}
+
+function decodeArrayBytes(
+  elementType: ColumnType,
+  bytes: Uint8Array,
+  storageElementType?: ValueType,
+  nestedRowCarrier: NestedRowCarrier = "full-record",
+): Value[] {
+  const elementWidth = fixedValueSize(
+    storageElementType ?? storageColumnTypeToValueType(elementType),
+  );
   if (elementWidth != null) {
     if (elementWidth === 0) return [];
     if (bytes.length % elementWidth !== 0) {
@@ -4104,7 +3797,15 @@ function decodeArrayBytes(elementType: ColumnType, bytes: Uint8Array): Value[] {
     }
     const values: Value[] = [];
     for (let offset = 0; offset < bytes.length; offset += elementWidth) {
-      values.push(decodeBytes(elementType, bytes.subarray(offset, offset + elementWidth)));
+      values.push(
+        decodeBytes(
+          elementType,
+          bytes.subarray(offset, offset + elementWidth),
+          undefined,
+          storageElementType,
+          nestedRowCarrier,
+        ),
+      );
     }
     return values;
   }
@@ -4126,7 +3827,15 @@ function decodeArrayBytes(elementType: ColumnType, bytes: Uint8Array): Value[] {
     if (start > end || end > bytes.length) {
       throw new Error("invalid variable-width array element offset");
     }
-    values.push(decodeBytes(elementType, bytes.subarray(start, end)));
+    values.push(
+      decodeBytes(
+        elementType,
+        bytes.subarray(start, end),
+        undefined,
+        storageElementType,
+        nestedRowCarrier,
+      ),
+    );
   }
   return values;
 }
@@ -4136,9 +3845,8 @@ function normalizeSubscriptionChunk(chunk: unknown):
   | {
       type: "delta";
       reset?: boolean;
-      delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] };
-      relationDelta?: NativeRelationSubscriptionDelta;
-      relationSnapshot?: NativeRelationSubscriptionSnapshot;
+      delta: NativeSubscriptionDelta;
+      terminalOperations?: NativeTerminalOperation[];
       settled?: boolean;
     }
   | {
@@ -4154,11 +3862,10 @@ function normalizeSubscriptionChunk(chunk: unknown):
     type?: unknown;
     rows?: unknown;
     delta?: unknown;
-    relation_delta?: unknown;
-    relation_snapshot?: unknown;
     reason?: unknown;
     reset?: unknown;
     settled?: unknown;
+    terminalOperations?: unknown;
   };
   if (record.type === "closed" || record.type === "Closed") {
     return { type: "closed" };
@@ -4177,18 +3884,9 @@ function normalizeSubscriptionChunk(chunk: unknown):
       delta: readNativeSubscriptionDelta(
         new PostcardReader(assertBytes(record.delta, "subscription delta")),
       ),
-      relationDelta:
-        record.relation_delta === undefined
-          ? undefined
-          : readNativeRelationSubscriptionDelta(
-              new PostcardReader(assertBytes(record.relation_delta, "relation subscription delta")),
-            ),
-      relationSnapshot:
-        record.relation_snapshot === undefined
-          ? undefined
-          : readRelationSnapshot(
-              assertBytes(record.relation_snapshot, "relation subscription snapshot"),
-            ),
+      terminalOperations: Array.isArray(record.terminalOperations)
+        ? (record.terminalOperations as NativeTerminalOperation[])
+        : undefined,
       settled: typeof record.settled === "boolean" ? record.settled : undefined,
     };
   }
@@ -4261,16 +3959,16 @@ function nativeDeltaFromRows(
   outputColumns: SubscriptionOutputColumns | null = null,
 ): NativeRowDelta {
   const previousByKey = new Map(
-    previousRows.map((row, index) => [rowKey(row.table, row.id), { row, index }]),
+    previousRows.map((row, index) => [rowStateKey(row), { row, index }]),
   );
   const nextKeys = new Set<string>();
   const added: RowState[] = [];
   const updated: RowState[] = [];
-  const removed: Array<{ id: string; index: number }> = [];
+  const removed: Array<{ id: string; index: number; resultKeyBytes?: Uint8Array }> = [];
   const rowIndexByKey = indexRowsByKey(rows);
 
   rows.forEach((row, index) => {
-    const key = rowKey(row.table, row.id);
+    const key = rowStateKey(row);
     nextKeys.add(key);
     const previous = previousByKey.get(key);
     if (!previous) {
@@ -4283,8 +3981,8 @@ function nativeDeltaFromRows(
   });
 
   previousRows.forEach((row, index) => {
-    if (!nextKeys.has(rowKey(row.table, row.id))) {
-      removed.push({ id: row.id, index });
+    if (!nextKeys.has(rowStateKey(row))) {
+      removed.push({ id: row.id, index, resultKeyBytes: row.resultKeyBytes });
     }
   });
 
@@ -4310,7 +4008,9 @@ function nativeResetDeltaFromBatches(
   const chunks: Uint8Array[] = [];
   for (const batch of batches) {
     const frameColumns =
-      outputColumns && batch.table === outputColumns.rootTable ? outputColumns.rootColumns : null;
+      outputColumns && batch.table === outputColumns.rootTable
+        ? logicalStorageColumns(outputColumns.rootColumns)
+        : null;
     const encodeFrameRow = frameColumns
       ? createRawNativeFrameRowEncoder(batch.descriptor, frameColumns)
       : (raw: Uint8Array) => raw;
@@ -4336,30 +4036,21 @@ function plainResetChunkCanStayPacked(
   subscription: SubscriptionState,
   chunk: {
     reset?: boolean;
-    delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] };
-    relationDelta?: NativeRelationSubscriptionDelta;
-    relationSnapshot?: NativeRelationSubscriptionSnapshot;
+    delta: NativeSubscriptionDelta;
   },
   schema: WasmSchema,
 ): boolean {
   const reset = chunk.reset === true;
   const noUpdated = chunk.delta.updated.length === 0;
   const noRemoved = chunk.delta.removed.length === 0;
-  const noArraySubqueries = subscription.relationMaterialization.arraySubqueries.length === 0;
-  const noRelevantRelationDelta = !chunk.relationDelta || noArraySubqueries;
-  const noRelationSnapshot = !chunk.relationSnapshot;
   const identityProjection = subscriptionOutputColumnsAreIdentityProjection(
     subscription.outputColumns,
     schema,
   );
-  const canStayPacked =
-    reset &&
-    noUpdated &&
-    noRemoved &&
-    noRelevantRelationDelta &&
-    noRelationSnapshot &&
-    noArraySubqueries &&
-    identityProjection;
+  const sourceRowKeysOnly = chunk.delta.addedOccurrenceKeys.every(
+    (key) => key.length === 17 && key[0] === 1,
+  );
+  const canStayPacked = reset && noUpdated && noRemoved && identityProjection && sourceRowKeysOnly;
   return canStayPacked;
 }
 
@@ -4435,7 +4126,12 @@ function nativeDescriptorMatchesColumns(
 
 function materializePackedResetRows(subscription: SubscriptionState, schema: WasmSchema): void {
   if (!subscription.packedResetBatches) return;
-  subscription.rows = rowsFromBatches(subscription.packedResetBatches, schema);
+  subscription.rows = rowsFromBatches(
+    subscription.packedResetBatches,
+    schema,
+    subscription.outputColumns?.rootColumns,
+    "full-record",
+  );
   subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
   subscription.packedResetBatches = null;
   subscription.packedResetRows = null;
@@ -4444,7 +4140,7 @@ function materializePackedResetRows(subscription: SubscriptionState, schema: Was
 function nativeDeltaFromChanges(
   added: RowState[],
   updated: RowState[],
-  removed: Array<{ id: string; index: number }>,
+  removed: Array<{ id: string; index: number; resultKeyBytes?: Uint8Array }>,
   rowIndexByKey: Map<string, number>,
   schema?: WasmSchema,
   outputColumns: SubscriptionOutputColumns | null = null,
@@ -4457,11 +4153,10 @@ function nativeDeltaFromChanges(
     addedCount: added.length,
     removedCount: removed.length,
     updatedCount: updated.length,
+    addedOccurrenceKeys: added.map((row) => row.resultKeyBytes ?? legacyResultKey(row.id)),
+    updatedOccurrenceKeys: updated.map((row) => row.resultKeyBytes ?? legacyResultKey(row.id)),
+    removedOccurrenceKeys: removed.map((row) => row.resultKeyBytes ?? legacyResultKey(row.id)),
   };
-}
-
-function nativeDeltaHasChanges(delta: NativeRowDelta): boolean {
-  return delta.addedCount > 0 || delta.updatedCount > 0 || delta.removedCount > 0;
 }
 
 function encodeNativeRows(
@@ -4477,10 +4172,11 @@ function encodeNativeRows(
     (values: readonly Value[]) => Uint8Array
   >();
   for (const row of rows) {
-    const columns =
+    const physicalColumns =
       outputColumns && row.table === outputColumns.rootTable
         ? outputColumns.rootColumns
         : schema?.[row.table]?.columns;
+    const columns = physicalColumns ? logicalStorageColumns(physicalColumns) : undefined;
     if (!columns) {
       throw new Error(`missing schema for subscription row table ${row.table}`);
     }
@@ -4489,11 +4185,16 @@ function encodeNativeRows(
       encodeRow = createNativeRowValueEncoder(columns);
       encodersByColumns.set(columns, encodeRow);
     }
-    const raw = encodeRow(valuesForNativeFrame(row, columns));
-    chunks.push(
-      requiredUuidBytes(row.id),
-      u32Le(rowIndexByKey.get(rowKey(row.table, row.id)) ?? 0),
-    );
+    const frameValues = valuesForNativeFrame(row, columns);
+    let raw: Uint8Array;
+    try {
+      raw = encodeRow(frameValues);
+    } catch (error) {
+      throw new Error(
+        `${String(error)} while encoding ${row.table}: ${columns.map((column, index) => `${column.name}:${column.column_type.type}=${frameValues[index]?.type}`).join(", ")}`,
+      );
+    }
+    chunks.push(requiredUuidBytes(row.id), u32Le(rowIndexByKey.get(rowStateKey(row)) ?? 0));
     if (updated) chunks.push(Uint8Array.of(1));
     chunks.push(u32Le(raw.byteLength), raw);
   }
@@ -4517,6 +4218,10 @@ function valuesForNativeFrame(row: RowState, columns: readonly ColumnDescriptor[
 
 function encodeNativeRemoves(removed: Array<{ id: string; index: number }>): Uint8Array {
   return concatBytes(removed.flatMap((row) => [requiredUuidBytes(row.id), u32Le(row.index)]));
+}
+
+function legacyResultKey(id: string): Uint8Array {
+  return Uint8Array.from([1, ...requiredUuidBytes(id)]);
 }
 
 function requiredUuidBytes(id: string): Uint8Array {

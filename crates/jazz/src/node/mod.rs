@@ -385,6 +385,10 @@ struct QueryServing {
     /// Binding views whose settled state was replaced by an authoritative
     /// server-provided reset since the last facade refresh.
     pending_authoritative_reset_binding_views: BTreeSet<BindingViewKey>,
+    /// FIFO terminal edits received from the serving peer and not yet
+    /// published by the local subscription facade.
+    pending_terminal_operations_by_binding_view:
+        BTreeMap<BindingViewKey, Vec<groove::ivm::TerminalOperation>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -684,6 +688,7 @@ where
                 initial_hydration_binding_views: BTreeSet::new(),
                 deferred_publication_binding_views: BTreeSet::new(),
                 pending_authoritative_reset_binding_views: BTreeSet::new(),
+                pending_terminal_operations_by_binding_view: BTreeMap::new(),
             },
             open_tx: OpenTxState {
                 open_transactions: BTreeMap::new(),
@@ -2343,21 +2348,46 @@ where
         winner: &VersionRow,
         column: &str,
     ) -> Result<usize, Error> {
+        if let Some(Value::Bytes(bytes)) = winner.cell(table, column)?
+            && bytes.starts_with(LARGE_VALUE_HANDLE_MAGIC)
+        {
+            return usize::try_from(decode_large_value_handle(&bytes)?.len)
+                .map_err(|_| Error::InvalidStoredValue("large-value handle length exceeds usize"));
+        }
         let mut suffix = Vec::new();
-        let mut current = self.version_tx_id(winner)?;
+        let winner_tx = self.version_tx_id(winner)?;
+        let mut current = winner_tx;
         let mut checkpoint_len = None;
         let schema = self
             .schema_version_for_alias(winner.schema_version_alias())
             .ok_or(Error::InvalidStoredValue(
                 "large-value schema alias is unknown",
             ))?;
-        let (authored_table, authored_column) =
-            self.authored_large_value_identity(schema, table, column)?;
+        let (authored_table, authored_column) = if self
+            .catalogue
+            .physical_mappings
+            .get(&schema)
+            .and_then(|mapping| mapping.tables.get(winner.table()))
+            .is_some_and(|mapping| mapping.columns.contains_key(column))
+        {
+            (winner.table().to_owned(), column.to_owned())
+        } else {
+            self.authored_large_value_identity(schema, table, column)?
+        };
         let (table_id, column_id) =
             self.large_value_lineage_ids(schema, &authored_table, &authored_column)?;
+        let authored_table_schema = self.table_in_schema(&authored_table, schema)?.clone();
         loop {
-            let (version, version_table, version_column, version_schema) =
-                self.large_value_version_for_tx(current, winner.row_uuid(), table_id, column_id)?;
+            let (version, version_table, version_column, version_schema) = if current == winner_tx {
+                (
+                    winner.clone(),
+                    authored_table_schema.clone(),
+                    authored_column.clone(),
+                    schema,
+                )
+            } else {
+                self.large_value_version_for_tx(current, winner.row_uuid(), table_id, column_id)?
+            };
             if let Some(value) = self.large_value_checkpoint(
                 version_schema,
                 &version_table,
@@ -2746,8 +2776,15 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "large-value schema alias is unknown",
             ))?;
-        let (authored_table, authored_column) =
-            self.authored_large_value_identity(authored_schema, table, column)?;
+        let (authored_table, authored_column) = if version.table() == table.name
+            && self
+                .table_in_schema(version.table(), authored_schema)
+                .is_ok_and(|authored| authored == *table)
+        {
+            (version.table().to_owned(), column.to_owned())
+        } else {
+            self.authored_large_value_identity(authored_schema, table, column)?
+        };
         let authored_table_schema = self
             .table_in_schema(&authored_table, authored_schema)?
             .clone();
@@ -2903,20 +2940,44 @@ where
         column: &str,
         kind: LargeValueKind,
     ) -> Result<Vec<content_store::Extent>, Error> {
+        if let Some(Value::Bytes(bytes)) = winner.cell(table, column)?
+            && bytes.starts_with(LARGE_VALUE_HANDLE_MAGIC)
+        {
+            return Ok(decode_large_value_handle(&bytes)?.refs);
+        }
         let mut suffix = Vec::new();
-        let mut current = self.version_tx_id(winner)?;
+        let winner_tx = self.version_tx_id(winner)?;
+        let mut current = winner_tx;
         let schema = self
             .schema_version_for_alias(winner.schema_version_alias())
             .ok_or(Error::InvalidStoredValue(
                 "large-value schema alias is unknown",
             ))?;
-        let (authored_table, authored_column) =
-            self.authored_large_value_identity(schema, table, column)?;
+        let (authored_table, authored_column) = if self
+            .catalogue
+            .physical_mappings
+            .get(&schema)
+            .and_then(|mapping| mapping.tables.get(winner.table()))
+            .is_some_and(|mapping| mapping.columns.contains_key(column))
+        {
+            (winner.table().to_owned(), column.to_owned())
+        } else {
+            self.authored_large_value_identity(schema, table, column)?
+        };
         let (table_id, column_id) =
             self.large_value_lineage_ids(schema, &authored_table, &authored_column)?;
+        let authored_table_schema = self.table_in_schema(&authored_table, schema)?.clone();
         loop {
-            let (version, version_table, version_column, _) =
-                self.large_value_version_for_tx(current, winner.row_uuid(), table_id, column_id)?;
+            let (version, version_table, version_column, _) = if current == winner_tx {
+                (
+                    winner.clone(),
+                    authored_table_schema.clone(),
+                    authored_column.clone(),
+                    schema,
+                )
+            } else {
+                self.large_value_version_for_tx(current, winner.row_uuid(), table_id, column_id)?
+            };
             let parents = version.parents();
             suffix.push((version, version_table, version_column));
             match parents.as_slice() {
@@ -2952,7 +3013,17 @@ where
 
     /// Materialize the bytes referenced by a large-value handle returned in a row cell.
     pub fn hydrate_large_value_handle(&mut self, handle: &[u8]) -> Result<Vec<u8>, Error> {
+        let encoded_handle = handle;
         let handle = decode_large_value_handle(handle)?;
+        if handle
+            .refs
+            .iter()
+            .any(|extent| extent.row != handle.row_uuid)
+        {
+            return Err(Error::InvalidStoredValue(
+                "large-value handle extent row mismatch",
+            ));
+        }
         let table = self
             .catalogue
             .catalogue_schemas
@@ -2980,6 +3051,13 @@ where
         if column_large_value_kind(&table, &handle.column)? != handle.kind {
             return Err(Error::InvalidStoredValue(
                 "large-value handle kind mismatch",
+            ));
+        }
+        let canonical =
+            self.large_value_handle_for_version(&table, &version, &handle.column, handle.kind)?;
+        if canonical != encoded_handle {
+            return Err(Error::InvalidStoredValue(
+                "large-value handle does not match canonical version content",
             ));
         }
         self.materialize_large_value_column(&table, &version, &handle.column)
@@ -5192,13 +5270,16 @@ impl CurrentRow {
 
     /// Cell value by application-schema column position.
     pub fn cell_at(&self, column_position: usize) -> Option<Value> {
-        nullable_value(
-            self.record
-                .borrowed()
-                .get_idx(CurrentRowRecord::USER_CELLS + column_position)
-                .expect("valid current user cell"),
-        )
-        .expect("valid nullable current user cell")
+        match self
+            .record
+            .borrowed()
+            .get_idx(CurrentRowRecord::USER_CELLS + column_position)
+            .expect("valid current user cell")
+        {
+            Value::Nullable(None) => None,
+            Value::Nullable(Some(value)) => Some(*value),
+            value => Some(value),
+        }
     }
 
     /// Cell value by application column name using the table schema to resolve position.
@@ -5212,7 +5293,11 @@ impl CurrentRow {
             field.name.as_deref() == Some(user_name.as_str())
                 || field.name.as_deref() == Some(column)
         })?;
-        nullable_value(self.record.borrowed().get_idx(idx).ok()?).ok()?
+        match self.record.borrowed().get_idx(idx).ok()? {
+            Value::Nullable(None) => None,
+            Value::Nullable(Some(value)) => Some(*value),
+            value => Some(value),
+        }
     }
 
     /// Encoded groove record backing this projected current row.
@@ -5274,9 +5359,19 @@ impl CurrentRow {
         );
         let mut values = vec![Value::Uuid(self.row_uuid().0)];
         for column in projected_columns {
-            values.push(Value::Nullable(
-                self.cell(table, &column.name).map(Box::new),
-            ));
+            let cell = self.cell(table, &column.name);
+            let projected = if matches!(column.column_type, records::ValueType::Nullable(_)) {
+                match cell {
+                    Some(value @ Value::Nullable(_)) => Value::Nullable(Some(Box::new(value))),
+                    Some(value) => {
+                        Value::Nullable(Some(Box::new(Value::Nullable(Some(Box::new(value))))))
+                    }
+                    None => Value::Nullable(None),
+                }
+            } else {
+                Value::Nullable(cell.map(Box::new))
+            };
+            values.push(projected);
         }
         if let Some(provenance) = self.provenance()? {
             values.push(Value::Uuid(provenance.created_by.0));
@@ -5332,15 +5427,20 @@ impl CurrentRow {
             .enumerate()
             .skip(CurrentRowRecord::USER_CELLS)
             .filter_map(|(idx, field)| {
-                if !matches!(field.value_type, records::ValueType::Nullable(_)) {
-                    return None;
-                }
                 let name = field.name.as_ref()?.as_str();
-                if name == "authored_columns" {
+                let name = if name.starts_with("user_") {
+                    self::query_engine::logical_user_column(name).to_owned()
+                } else if matches!(field.value_type, records::ValueType::Nullable(_))
+                    && !matches!(name, "authored_columns" | "settle_position")
+                {
+                    name.to_owned()
+                } else {
                     return None;
-                }
-                let name = self::query_engine::logical_user_column(name).to_owned();
-                let value = nullable_value(self.record.borrowed().get_idx(idx).ok()?).ok()??;
+                };
+                let value = match self.record.borrowed().get_idx(idx).ok()? {
+                    Value::Nullable(value) => value.map(|value| *value)?,
+                    value => value,
+                };
                 Some((name, value))
             })
             .collect()
@@ -5678,6 +5778,7 @@ pub(crate) struct ViewUpdateParts {
     pub(crate) authorization_progress: Option<u64>,
     pub(crate) result_member_adds: Vec<ResultMemberEntry>,
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
+    pub(crate) terminal_operations: Vec<groove::ivm::TerminalOperation>,
     pub(crate) program_fact_adds: Vec<ViewFactEntry>,
     pub(crate) program_fact_removes: Vec<ViewFactEntry>,
 }
@@ -5919,6 +6020,8 @@ struct DecodedLargeValueHandle {
     column: String,
     tx_id: TxId,
     kind: LargeValueKind,
+    len: u64,
+    refs: Vec<content_store::Extent>,
 }
 
 fn decode_large_value_handle(bytes: &[u8]) -> Result<DecodedLargeValueHandle, Error> {
@@ -5938,16 +6041,19 @@ fn decode_large_value_handle(bytes: &[u8]) -> Result<DecodedLargeValueHandle, Er
         2 => LargeValueKind::Blob,
         _ => return Err(Error::InvalidStoredValue("invalid large-value handle kind")),
     };
-    let _len = cursor.read_u64()?;
-    let refs = cursor.read_u64()?;
-    for _ in 0..refs {
-        let _schema = SchemaVersionId(uuid::Uuid::from_bytes(cursor.read_array()?));
-        let _table = cursor.read_string()?;
-        let _writer = AuthorId(uuid::Uuid::from_bytes(cursor.read_array()?));
-        let _row = RowUuid(uuid::Uuid::from_bytes(cursor.read_array()?));
-        let _column = cursor.read_string()?;
-        let _offset = cursor.read_u64()?;
-        let _len = cursor.read_u64()?;
+    let len = cursor.read_u64()?;
+    let ref_count = cursor.read_u64()?;
+    let mut refs = Vec::new();
+    for _ in 0..ref_count {
+        refs.push(content_store::Extent {
+            schema: SchemaVersionId(uuid::Uuid::from_bytes(cursor.read_array()?)),
+            table: cursor.read_string()?,
+            writer: AuthorId(uuid::Uuid::from_bytes(cursor.read_array()?)),
+            row: RowUuid(uuid::Uuid::from_bytes(cursor.read_array()?)),
+            column: cursor.read_string()?,
+            offset: cursor.read_u64()?,
+            len: cursor.read_u64()?,
+        });
     }
     if !cursor.is_empty() {
         return Err(Error::InvalidStoredValue(
@@ -5961,6 +6067,8 @@ fn decode_large_value_handle(bytes: &[u8]) -> Result<DecodedLargeValueHandle, Er
         column,
         tx_id: TxId::new(tx_time, tx_node),
         kind,
+        len,
+        refs,
     })
 }
 

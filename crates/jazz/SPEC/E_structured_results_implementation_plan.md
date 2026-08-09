@@ -185,7 +185,7 @@ validation/over-size tests and the query validator/terminal size-check anchors.
 Landing: full canonical set and smoke (public query/engine work); build the full
 workspace because this introduces public Jazz result types.
 
-### PR 4 — Atomic structured delivery on v5
+### PR 4 — Atomic structured delivery on v6
 
 **Depends on:** PR 3 and #1250. This is the first PR allowed to make structured
 results remotely observable.
@@ -194,10 +194,10 @@ results remotely observable.
 fragmentation. Replace the prior `RelationSnapshot`/`RelationEdge` delivery
 family with the one `ResultTree` vocabulary. Update postcard enums,
 `SyncMessage::ViewUpdate`, transport fragmentation, server/peer/receiver reduction,
-WASM, N-API, native runtime, and cross-language fixtures within v4. A reset
-carries an ordered recursive snapshot. An incremental item is an extensible
-tagged whole-parent replacement keyed by #1250's occurrence id; v4 must not
-interpret it as a child delta.
+WASM, N-API, native runtime, and cross-language fixtures within v6. A reset
+authoritatively replaces cached terminal state. Incremental items are typed,
+stable-keyed root/path `Insert`, `Update`, `Remove`, and `Move` edits emitted by
+the Groove terminal.
 
 Transport reassembly admits the complete structured message atomically. Add
 `MAX_STRUCTURED_RESULT_DEPTH` and `MAX_STRUCTURED_RESULT_WIDTH` validation at
@@ -302,10 +302,10 @@ declaring the feature stable.
 3. Groove terminal semantics (PR 2) precede Jazz lowering (PR 3). Otherwise
    Jazz would either re-create a facade materializer or put a collection inside
    a graph—both violate §6.4.
-4. #1259 cuts wire v4 for `OutputOccurrenceId` before this stack. PR 4 extends
-   that same v4 after the canonical result model and terminal lowering (PR 3);
-   it must not cut v5. Terminal delivery may not retain v3 `RelationSnapshot`
-   in parallel after its structured delivery migration.
+4. #1259 introduced `OutputOccurrenceId` before this stack. PR 4 cuts wire v6
+   for terminal operations after the canonical result model and terminal
+   lowering (PR 3). Terminal delivery may not retain the earlier
+   `RelationSnapshot` representation in parallel after migration.
 5. The `ResultTree` reducer helper can land before the feature as non-enforcing
    test infrastructure. `INV-TEST-5` cannot flip until PR 4 provides real
    structured snapshots, whole-parent replacements, and chunk assembly for the

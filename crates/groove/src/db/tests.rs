@@ -14,7 +14,8 @@ use std::time::Instant;
 
 use crate::ivm::{
     AggregateExpr, AggregateFunction, CollectByField, CollectBySlotBuilder, IvmRuntimeError,
-    LiteralValue, PlanExpr, PredicateExpr, ProjectField, StaticScanSpec, TopByLimit, TopByOrder,
+    LiteralValue, PlanExpr, PredicateExpr, ProjectField, StaticScanSpec, TerminalEdit,
+    TerminalPathSegment, TopByLimit, TopByOrder,
 };
 use crate::queries::{
     BinaryOp, ColumnRef, Cte, Expr, JoinConstraint, JoinKind, Query, Select, SelectItem, TableRef,
@@ -5111,15 +5112,11 @@ fn collect_by_expand_rejects_duplicate_occurrence_source_ids() {
 }
 
 #[test]
-fn collect_by_rejects_every_consumer_including_another_collector() {
+fn collect_by_rejects_join_and_nested_collector_consumers() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
     let mut database = Database::new(history_schema(), storage).unwrap();
     let collector = history_collect_by(2);
-    let consumers = [
-        collector
-            .clone()
-            .filter(PredicateExpr::eq("row", Value::U64(1))),
-        collector.clone().project(["row"]),
+    let relational_consumers = [
         GraphBuilder::join(
             collector.clone(),
             GraphBuilder::table("history"),
@@ -5138,7 +5135,7 @@ fn collect_by_rejects_every_consumer_including_another_collector() {
             TopByLimit::Finite(1),
         ),
     ];
-    for graph in consumers {
+    for graph in relational_consumers {
         assert!(matches!(
             database.subscribe_one_sink(graph),
             Err(Error::IvmRuntime(IvmRuntimeError::CollectByMustBeTerminal))
@@ -5176,6 +5173,86 @@ fn collect_by_suppresses_unchanged_rendered_group_and_replaces_once_at_boundary(
     assert_eq!(
         replacement[1],
         (collect_parent(1, &[(5, "front"), (10, "first")]), 1)
+    );
+}
+
+#[test]
+fn collect_by_multisink_emits_descendant_terminal_operations() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe([("rows", history_collect_by(2))])
+        .unwrap();
+    let initial = subscription.recv().unwrap();
+    assert!(initial.terminal_sinks.is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    batch.insert("history", history_values(1, 20, 20, "second"));
+    database.commit_batch(batch).unwrap();
+    let initial_rows = subscription.recv().unwrap();
+    assert!(matches!(
+        initial_rows.terminal_sinks["rows"].operations.as_slice(),
+        [crate::ivm::TerminalOperation {
+            path,
+            edit: TerminalEdit::Insert { .. },
+            ..
+        }] if path.is_empty()
+    ));
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 5, 5, "front"));
+    database.commit_batch(batch).unwrap();
+    let update = subscription.recv().unwrap();
+    let operations = &update.terminal_sinks["rows"].operations;
+    assert!(operations.iter().all(|operation| {
+        matches!(operation.path.as_slice(), [TerminalPathSegment::Collection(field)] if field == "children")
+    }));
+    assert!(
+        operations
+            .iter()
+            .any(|operation| matches!(operation.edit, TerminalEdit::Insert { index: 0, .. }))
+    );
+    assert!(
+        operations
+            .iter()
+            .any(|operation| matches!(operation.edit, TerminalEdit::Remove { .. }))
+    );
+    assert!(
+        operations
+            .iter()
+            .all(|operation| !matches!(operation.edit, TerminalEdit::Update { .. }))
+    );
+}
+
+#[test]
+fn one_shot_query_does_not_discard_live_collect_by_arrangement() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database.subscribe_one_sink(history_collect_by(2)).unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(collect_parent(1, &[(10, "first")]), 1)]
+    );
+
+    // One-shot queries collect their ephemeral graph immediately. That GC
+    // boundary must retain arrangements owned by an unrelated live terminal.
+    let snapshot = database.query_graph(GraphBuilder::table("rows")).unwrap();
+    assert!(snapshot.is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 20, 20, "second"));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (collect_parent(1, &[(10, "first")]), -1),
+            (collect_parent(1, &[(10, "first"), (20, "second")]), 1),
+        ]
     );
 }
 

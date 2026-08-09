@@ -20,7 +20,7 @@ use std::task::{Context, Poll, Waker};
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_channel::oneshot;
 use futures_core::Stream;
-use groove::records::Value;
+use groove::records::{OwnedRecord, RecordDescriptor, Value};
 use groove::schema::ColumnType as GrooveColumnType;
 use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use thiserror::Error;
@@ -70,7 +70,7 @@ pub use crate::result_tree::{ResultNode, ResultRelation, ResultTree, ResultTreeR
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
 use crate::tools::OpenBatchId;
-use crate::tools::{ObjectId, OutputOccurrenceId};
+use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
 use crate::wire::{
     FEATURE_MESSAGE_FRAGMENTATION, TransportError, WIRE_PROTOCOL_VERSION, WireEnvelope, WireError,
@@ -1525,6 +1525,7 @@ where
                 &opts.read_view,
                 Some(_local_plan),
             )?;
+        let root_occurrence_ids = subscription.root_occurrence_ids().to_vec();
         let local_subscription_id = subscription.subscription_id();
         let local_node = Rc::clone(&self.node.node);
         let local_runtime_token = local_node.borrow().groove_runtime_token();
@@ -1541,14 +1542,8 @@ where
                 node.unsubscribe_groove_subscription(subscription_id);
             }
         }));
-        // Array output is admitted only as a complete terminal-rendered parent.
-        // Validate the reset before retaining subscription state or publishing
-        // its reset event, so an over-budget parent cannot become a partial
-        // replacement through the maintained path.
-        if !prepared.shape.query().array_subqueries.is_empty() {
-            materialize_result_tree(prepared.shape.query(), snapshot.clone())?;
-        }
         let maintained_subscription = Some(subscription);
+        let terminal_rows = !local_shape.query().array_subqueries.is_empty();
         let mut state_shape = local_shape;
         let mut state_binding = local_binding;
         let mut remote_read_tier = None;
@@ -1588,9 +1583,18 @@ where
             opts.read_view.clone(),
         );
         let (sender, receiver) = unbounded();
+        let initial_outputs =
+            subscription_outputs_with_occurrence_sidecar(&snapshot, &root_occurrence_ids)?;
         let state_snapshot = relation_snapshot_with_delta_slack(&snapshot);
-        let snapshot_index = RelationSnapshotIndex::from_snapshot(&state_snapshot);
+        let mut snapshot_index = RelationSnapshotIndex::from_snapshot(&state_snapshot);
+        snapshot_index.roots = root_occurrence_ids
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, occurrence)| (occurrence, index))
+            .collect();
         let state = Rc::new(RefCell::new(SubscriptionState {
+            terminal_rows,
             kind: SubscriptionKind::Prepared {
                 shape: state_shape,
                 binding: state_binding,
@@ -1612,7 +1616,15 @@ where
         state
             .borrow()
             .sender
-            .unbounded_send(subscription_reset_event(read_tier, settled, snapshot))
+            .unbounded_send(SubscriptionEvent::Delta {
+                reset: true,
+                added: initial_outputs,
+                updated: Vec::new(),
+                removed: Vec::new(),
+                terminal_operations: Vec::new(),
+                settled,
+                tier: read_tier,
+            })
             .map_err(|_| Error::new(ErrorCode::Protocol, "subscription receiver closed"))?;
         self.node
             .subscriptions
@@ -3711,7 +3723,10 @@ where
                 continue;
             }
             if let Some(value) = existing.cell(table_schema, &column.name) {
-                cells.insert(column.name.clone(), value);
+                cells.insert(
+                    column.name.clone(),
+                    default_cell_for_column_type(&column.column_type, &value),
+                );
             }
         }
         let parent = self.node.node.borrow_mut().current_row_tx_id(&existing);
@@ -4065,10 +4080,8 @@ impl DbMaintainedSubscriptionFootprint {
 #[cfg(feature = "testing")]
 #[derive(serde::Serialize)]
 struct SizeRelationSnapshot<'a> {
-    cursor: u64,
     root_count: u64,
     rows: Vec<SizeRowBatch<'a>>,
-    edges: Vec<SizeRelationEdge>,
 }
 
 #[cfg(feature = "testing")]
@@ -4103,24 +4116,12 @@ struct SizeRemovedRow {
 }
 
 #[cfg(feature = "testing")]
-#[derive(serde::Serialize)]
-struct SizeRelationEdge {
-    source_table: String,
-    source_row_id: RowUuid,
-    relation: String,
-    target_table: String,
-    target_row_id: RowUuid,
-}
-
-#[cfg(feature = "testing")]
 fn encode_relation_snapshot_for_size(
     snapshot: &RelationSnapshot,
 ) -> Result<Vec<u8>, postcard::Error> {
     postcard::to_allocvec(&SizeRelationSnapshot {
-        cursor: 0,
         root_count: snapshot.root_count as u64,
         rows: size_row_batches(&snapshot.rows),
-        edges: snapshot.edges.iter().map(size_relation_edge).collect(),
     })
 }
 
@@ -4162,17 +4163,6 @@ fn size_row<'a>(row: &CurrentRow, raw: &'a [u8]) -> SizeRow<'a> {
         row_id: row.row_uuid(),
         deleted: row.is_deleted(),
         raw,
-    }
-}
-
-#[cfg(feature = "testing")]
-fn size_relation_edge(edge: &RelationEdge) -> SizeRelationEdge {
-    SizeRelationEdge {
-        source_table: edge.source_table.clone(),
-        source_row_id: edge.source_row,
-        relation: edge.relation.clone(),
-        target_table: edge.target_table.clone(),
-        target_row_id: edge.target_row,
     }
 }
 
@@ -4752,12 +4742,21 @@ where
     let pending_authoritative_resets = node
         .borrow_mut()
         .take_pending_authoritative_reset_binding_views();
+    let mut consumed_authoritative_resets = BTreeSet::new();
     node.borrow_mut().flush_query_runtime()?;
     for weak in subscriptions.borrow().iter() {
         let Some(state) = weak.upgrade() else {
             continue;
         };
-        let (read_tier, remote_read_tier, read_view, previous_source, previous_settled, author) = {
+        let (
+            read_tier,
+            remote_read_tier,
+            read_view,
+            previous_source,
+            previous_settled,
+            author,
+            terminal_rows,
+        ) = {
             let state = state.borrow();
             (
                 state.read_tier,
@@ -4766,6 +4765,7 @@ where
                 state.snapshot_source,
                 state.settled,
                 state.author,
+                state.terminal_rows,
             )
         };
         let groove_runtime_token = node.borrow().groove_runtime_token();
@@ -4778,10 +4778,19 @@ where
                     }
                 }
             };
-            let (maintained, snapshot) =
+            let (maintained, mut snapshot) =
                 node.borrow_mut().open_local_maintained_view_subscription(
                     &shape, &binding, author, read_tier, &read_view, None,
                 )?;
+            let delivered_binding_view = BindingViewKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: RegisterShapeOptions {
+                    tier: read_tier,
+                    read_view: read_view.clone(),
+                }
+                .read_view_key(),
+            };
             // From this point, cleanup must target the replacement runtime
             // subscription even if a later fallible refresh step aborts.
             {
@@ -4798,6 +4807,69 @@ where
                     .set(Some((groove_runtime_token, subscription_id)));
             }
             let settled_tier = remote_read_tier.unwrap_or(read_tier);
+            let settled_binding_view = BindingViewKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: RegisterShapeOptions {
+                    tier: settled_tier,
+                    read_view: read_view.clone(),
+                }
+                .read_view_key(),
+            };
+            let pending_binding_view = pending_authoritative_resets
+                .contains(&delivered_binding_view)
+                .then_some(delivered_binding_view)
+                .or_else(|| {
+                    pending_authoritative_resets
+                        .contains(&settled_binding_view)
+                        .then_some(settled_binding_view)
+                });
+            if let Some(binding_view) = pending_binding_view {
+                let authoritative = node
+                    .borrow_mut()
+                    .authoritative_reset_snapshot_for_binding_view(&shape, binding_view)?;
+                if let Some(authoritative) = authoritative {
+                    let mut state_ref = state.borrow_mut();
+                    let SubscriptionKind::Prepared {
+                        maintained_subscription,
+                        ..
+                    } = &mut state_ref.kind;
+                    let maintained = maintained_subscription
+                        .as_mut()
+                        .expect("replacement maintained subscription installed");
+                    node.borrow_mut()
+                        .reset_local_maintained_view_subscription_from_binding_view(
+                            maintained,
+                            binding_view,
+                        );
+                    snapshot = authoritative;
+                    consumed_authoritative_resets.insert(binding_view);
+                }
+            }
+            let root_occurrence_ids = if shape.query().aggregate.is_some() {
+                snapshot
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        crate::tools::OutputOccurrenceId::single_source(
+                            crate::tools::ObjectId::from_uuid(row.row_uuid().0),
+                        )
+                    })
+                    .collect()
+            } else {
+                let state_ref = state.borrow();
+                let SubscriptionKind::Prepared {
+                    maintained_subscription,
+                    ..
+                } = &state_ref.kind;
+                maintained_subscription
+                    .as_ref()
+                    .expect("replacement maintained subscription installed")
+                    .root_occurrence_ids()
+                    .to_vec()
+            };
+            let reset_outputs =
+                subscription_outputs_with_occurrence_sidecar(&snapshot, &root_occurrence_ids)?;
             let settled = subscription_is_settled(
                 &node.borrow(),
                 &shape,
@@ -4806,16 +4878,28 @@ where
                 read_view.clone(),
             );
             let mut state_ref = state.borrow_mut();
-            let event = subscription_delta_event_with_reset(
-                read_tier,
-                settled,
+            let removed = reset_removed_roots(
                 &state_ref.snapshot,
-                &snapshot,
-                true,
+                &state_ref.snapshot_index,
+                &root_occurrence_ids,
             );
+            let event = SubscriptionEvent::Delta {
+                reset: true,
+                added: reset_outputs,
+                updated: Vec::new(),
+                removed,
+                terminal_operations: Vec::new(),
+                settled,
+                tier: read_tier,
+            };
             state_ref.groove_runtime_token = groove_runtime_token;
             state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
             state_ref.snapshot_index = RelationSnapshotIndex::from_snapshot(&state_ref.snapshot);
+            state_ref.snapshot_index.roots = root_occurrence_ids
+                .into_iter()
+                .enumerate()
+                .map(|(index, occurrence)| (occurrence, index))
+                .collect();
             state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
             state_ref.settled = settled;
             if state_ref.sender.unbounded_send(event).is_ok() {
@@ -4874,6 +4958,9 @@ where
                         };
                     let authoritative_reset_pending =
                         pending_authoritative_resets.contains(&authoritative_reset_binding_view);
+                    if authoritative_reset_pending {
+                        consumed_authoritative_resets.insert(authoritative_reset_binding_view);
+                    }
                     if node
                         .borrow()
                         .publication_deferred_for_binding_view(settled_binding_view)
@@ -4890,9 +4977,43 @@ where
                         retained.push(Rc::downgrade(&state));
                         continue;
                     }
+                    let peer_terminal_operations = node
+                        .borrow_mut()
+                        .take_pending_terminal_operations(delivered_binding_view);
                     let snapshot_tier = remote_settled_tier.unwrap_or(read_tier);
                     let authoritative_reset = authoritative_reset_pending;
-                    if authoritative_reset {
+                    if authoritative_reset && terminal_rows {
+                        let Some(maintained) = maintained_subscription.as_mut() else {
+                            return Err(Error::new(
+                                ErrorCode::Protocol,
+                                "structured subscription lost its Groove terminal",
+                            ));
+                        };
+                        // A structural-patch stream deliberately does not keep
+                        // facade-level replacement rows current. Re-open the
+                        // Groove terminal at an authoritative boundary so the
+                        // reset is a fresh complete value and subsequent FIFO
+                        // patches are relative to exactly that value.
+                        let (replacement, snapshot) =
+                            node.borrow_mut().open_local_maintained_view_subscription(
+                                &shape, &binding, author, read_tier, &read_view, None,
+                            )?;
+                        *maintained = replacement;
+                        let settled = subscription_is_settled(
+                            &node.borrow(),
+                            &shape,
+                            &binding,
+                            settled_tier,
+                            read_view,
+                        );
+                        (
+                            snapshot,
+                            SubscriptionSnapshotSource::LocalMaintained,
+                            settled,
+                            snapshot_tier,
+                            true,
+                        )
+                    } else if authoritative_reset {
                         let authoritative_snapshot = {
                             let mut node_ref = node.borrow_mut();
                             match node_ref.authoritative_reset_snapshot_for_binding_view(
@@ -4984,6 +5105,7 @@ where
                                 update,
                                 snapshot_tier,
                                 previous_settled,
+                                terminal_rows,
                             );
                         }
                         let settled = subscription_is_settled(
@@ -5001,6 +5123,39 @@ where
                             force_reset_event,
                         )
                     } else {
+                        if terminal_rows && !peer_terminal_operations.is_empty() {
+                            if let Some(maintained) = maintained_subscription.as_mut() {
+                                // The serving terminal is authoritative for
+                                // structural publication. Advance the local
+                                // Groove mirror for future resets without
+                                // publishing its redundant reconstruction.
+                                node.borrow_mut()
+                                    .drain_local_maintained_view_subscription_state(maintained)?;
+                            }
+                            let settled = subscription_is_settled(
+                                &node.borrow(),
+                                &shape,
+                                &binding,
+                                settled_tier,
+                                read_view.clone(),
+                            );
+                            let state_ref = &mut *state_ref;
+                            let event = SubscriptionEvent::Delta {
+                                reset: false,
+                                added: Vec::new(),
+                                updated: Vec::new(),
+                                removed: Vec::new(),
+                                terminal_operations: peer_terminal_operations,
+                                settled,
+                                tier: snapshot_tier,
+                            };
+                            state_ref.settled = settled;
+                            retained.push(Rc::downgrade(&state));
+                            if state_ref.sender.unbounded_send(event).is_ok() {
+                                changed += 1;
+                            }
+                            continue;
+                        }
                         let maintained_update = if let Some(maintained) =
                             maintained_subscription.as_mut()
                         {
@@ -5021,37 +5176,106 @@ where
                             None
                         };
                         if let Some(update) = maintained_update {
-                            let state_ref = &mut *state_ref;
-                            let mut event = apply_maintained_update_to_snapshot(
-                                &mut state_ref.snapshot,
-                                &mut state_ref.snapshot_index,
-                                update,
-                                snapshot_tier,
-                                previous_settled,
-                            );
-                            state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
-                            let settled = subscription_is_settled(
-                                &node.borrow(),
-                                &shape,
-                                &binding,
-                                settled_tier,
-                                read_view,
-                            );
-                            state_ref.settled = settled;
-                            retained.push(Rc::downgrade(&state));
-                            if let SubscriptionEvent::Delta {
-                                settled: event_settled,
-                                ..
-                            } = &mut event
-                            {
-                                *event_settled = settled;
+                            if terminal_rows {
+                                if !update.terminal_operations.is_empty() {
+                                    let settled = subscription_is_settled(
+                                        &node.borrow(),
+                                        &shape,
+                                        &binding,
+                                        settled_tier,
+                                        read_view,
+                                    );
+                                    let state_ref = &mut *state_ref;
+                                    let event = SubscriptionEvent::Delta {
+                                        reset: false,
+                                        added: Vec::new(),
+                                        updated: Vec::new(),
+                                        removed: Vec::new(),
+                                        terminal_operations: update.terminal_operations,
+                                        settled,
+                                        tier: snapshot_tier,
+                                    };
+                                    state_ref.settled = settled;
+                                    retained.push(Rc::downgrade(&state));
+                                    if state_ref.sender.unbounded_send(event).is_ok() {
+                                        changed += 1;
+                                    }
+                                    continue;
+                                }
+                                let Some(maintained) = maintained_subscription.as_ref() else {
+                                    return Err(Error::new(
+                                        ErrorCode::Protocol,
+                                        "structured subscription lost its Groove terminal",
+                                    ));
+                                };
+                                let snapshot = node
+                                    .borrow_mut()
+                                    .materialize_local_maintained_relation_snapshot(maintained)?;
+                                let settled = subscription_is_settled(
+                                    &node.borrow(),
+                                    &shape,
+                                    &binding,
+                                    settled_tier,
+                                    read_view,
+                                );
+                                let state_ref = &mut *state_ref;
+                                let event = subscription_terminal_delta_event(
+                                    snapshot_tier,
+                                    settled,
+                                    &state_ref.snapshot,
+                                    &snapshot,
+                                );
+                                state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
+                                state_ref.snapshot_index =
+                                    RelationSnapshotIndex::from_snapshot(&state_ref.snapshot);
+                                state_ref.snapshot_source =
+                                    SubscriptionSnapshotSource::LocalMaintained;
+                                state_ref.settled = settled;
+                                retained.push(Rc::downgrade(&state));
+                                if state_ref.sender.unbounded_send(event).is_ok() {
+                                    changed += 1;
+                                }
+                                continue;
+                            } else {
+                                let state_ref = &mut *state_ref;
+                                let mut event = apply_maintained_update_to_snapshot(
+                                    &mut state_ref.snapshot,
+                                    &mut state_ref.snapshot_index,
+                                    update,
+                                    snapshot_tier,
+                                    previous_settled,
+                                    terminal_rows,
+                                );
+                                state_ref.snapshot_source =
+                                    SubscriptionSnapshotSource::LocalMaintained;
+                                let settled = subscription_is_settled(
+                                    &node.borrow(),
+                                    &shape,
+                                    &binding,
+                                    settled_tier,
+                                    read_view,
+                                );
+                                state_ref.settled = settled;
+                                retained.push(Rc::downgrade(&state));
+                                if let SubscriptionEvent::Delta {
+                                    settled: event_settled,
+                                    ..
+                                } = &mut event
+                                {
+                                    *event_settled = settled;
+                                }
+                                if state_ref.sender.unbounded_send(event).is_ok() {
+                                    changed += 1;
+                                }
+                                continue;
                             }
-                            if state_ref.sender.unbounded_send(event).is_ok() {
-                                changed += 1;
-                            }
-                            continue;
                         }
-                        let (snapshot, snapshot_source) = if remote_settled_tier.is_some() {
+                        let (snapshot, snapshot_source) = if terminal_rows {
+                            (
+                                state_ref.snapshot.clone(),
+                                SubscriptionSnapshotSource::LocalMaintained,
+                            )
+                        } else if remote_settled_tier.is_some() {
                             let previous = state_ref.snapshot.clone();
                             if previous.root_count == 0
                                 && previous.edges.is_empty()
@@ -5170,9 +5394,16 @@ where
                     &previous,
                     &snapshot,
                     true,
+                    terminal_rows,
                 )
             } else {
-                subscription_delta_event(snapshot_tier, settled, &previous, &snapshot)
+                subscription_delta_event(
+                    snapshot_tier,
+                    settled,
+                    &previous,
+                    &snapshot,
+                    terminal_rows,
+                )
             };
             state.snapshot = relation_snapshot_with_delta_slack(&snapshot);
             state.snapshot_index = RelationSnapshotIndex::from_snapshot(&state.snapshot);
@@ -5183,6 +5414,10 @@ where
             }
         }
         retained.push(Rc::downgrade(&state));
+    }
+    for pending in pending_authoritative_resets.difference(&consumed_authoritative_resets) {
+        node.borrow_mut()
+            .defer_authoritative_reset_for_binding_view(*pending);
     }
     *subscriptions.borrow_mut() = retained;
     Ok(changed)
@@ -7409,6 +7644,7 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
+            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         } => ViewUpdateParts {
@@ -7422,6 +7658,7 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             authorization_progress: peer_payload_inventory.authorization_progress,
             result_member_adds,
             result_member_removes,
+            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         },
@@ -7535,8 +7772,9 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             result_member_removes,
             program_fact_adds,
             program_fact_removes,
+            terminal_operations,
         } => format!(
-            "ViewUpdate {} settled={} reset={} bundles={} inventory={} adds={} removes={} fact_adds={} fact_removes={}",
+            "ViewUpdate {} settled={} reset={} bundles={} inventory={} adds={} removes={} fact_adds={} fact_removes={} terminal_ops={}",
             summarize_subscription_key(*subscription),
             settled_through.0,
             reset_result_set,
@@ -7548,7 +7786,8 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             result_member_adds.len(),
             result_member_removes.len(),
             program_fact_adds.len(),
-            program_fact_removes.len()
+            program_fact_removes.len(),
+            terminal_operations.len()
         ),
         SyncMessage::CommitUnit { tx, .. } => format!("CommitUnit tx={:?}", tx.tx_id),
         SyncMessage::FateUpdate { tx_id, fate, .. } => {
@@ -8851,71 +9090,101 @@ fn write_rejected(reason: RejectionReason) -> Error {
     Error::new(ErrorCode::WriteRejected, format!("{reason:?}"))
 }
 
-/// Render the flat maintained/query fact boundary once, at the Jazz public
-/// result boundary. In particular, consumers must not rebuild relation trees
-/// from `RelationSnapshot` rows and edges themselves.
+/// Decode Groove's recursively assembled terminal value into Jazz's typed
+/// structured-result view. This separates relation fields from scalar row
+/// fields, but does not join or assemble relation facts.
 fn materialize_result_tree(query: &Query, snapshot: RelationSnapshot) -> Result<ResultTree, Error> {
-    type RowKey = (String, RowUuid);
-    let roots = snapshot
-        .rows
-        .iter()
-        .take(snapshot.root_count)
-        .map(|row| (row.table().to_owned(), row.row_uuid()))
-        .collect::<Vec<_>>();
-    let rows = snapshot
-        .rows
-        .into_iter()
-        .map(|row| ((row.table().to_owned(), row.row_uuid()), row))
-        .collect::<BTreeMap<RowKey, CurrentRow>>();
-    let mut edges = BTreeMap::<RowKey, Vec<RelationEdge>>::new();
-    for edge in snapshot.edges {
-        edges
-            .entry((edge.source_table.clone(), edge.source_row))
-            .or_default()
-            .push(edge);
-    }
-
-    fn node(
-        row_key: &(String, RowUuid),
-        row: &CurrentRow,
+    fn node_from_record(
+        table: &str,
+        record: OwnedRecord,
         arrays: &[crate::query::ArraySubquery],
-        rows: &BTreeMap<RowKey, CurrentRow>,
-        edges: &BTreeMap<RowKey, Vec<RelationEdge>>,
-        root: bool,
     ) -> Result<ResultNode, Error> {
+        let descriptor = *record.descriptor();
+        let values = record.to_values().map_err(|error| {
+            Error::new(
+                ErrorCode::Protocol,
+                format!("invalid Groove terminal record: {error}"),
+            )
+        })?;
+        let array_by_name = arrays
+            .iter()
+            .map(|array| (array.column_name.as_str(), array))
+            .collect::<BTreeMap<_, _>>();
+        let mut scalar_fields = Vec::new();
+        let mut scalar_values = Vec::new();
         let mut relations = BTreeMap::new();
-        for array in arrays {
-            let children = edges
-                .get(row_key)
+        for (field, value) in descriptor.fields().iter().zip(values) {
+            let Some(name) = field.name.as_deref() else {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    "Groove terminal emitted an unnamed field",
+                ));
+            };
+            let Some(array) = array_by_name.get(name) else {
+                scalar_fields.push((name.to_owned(), field.value_type.clone()));
+                scalar_values.push(value);
+                continue;
+            };
+            let Value::Array(children) = value else {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    format!("Groove terminal relation {name} was not an array"),
+                ));
+            };
+            let children = children
                 .into_iter()
-                .flatten()
-                .filter(|edge| edge.relation == array.column_name)
-                .filter_map(|edge| {
-                    let key = (edge.target_table.clone(), edge.target_row);
-                    rows.get(&key).map(|child| (key, child))
+                .map(|value| {
+                    let Value::Record(record) = value else {
+                        return Err(Error::new(
+                            ErrorCode::Protocol,
+                            format!("Groove terminal relation {name} contained a non-record"),
+                        ));
+                    };
+                    node_from_record(&array.table, record, &array.nested_arrays)
                 })
-                .map(|(key, child)| node(&key, child, &array.nested_arrays, rows, edges, false))
                 .collect::<Result<Vec<_>, _>>()?;
-            relations.insert(array.column_name.clone(), ResultRelation::Array(children));
+            relations.insert(name.to_owned(), ResultRelation::Array(children));
         }
+        let scalar_descriptor = RecordDescriptor::new(scalar_fields);
+        let raw = scalar_descriptor.create(&scalar_values).map_err(|error| {
+            Error::new(
+                ErrorCode::Protocol,
+                format!("invalid scalar projection from Groove terminal: {error}"),
+            )
+        })?;
+        let row = CurrentRow::new(table, OwnedRecord::new(raw, scalar_descriptor));
         let occurrence = OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0));
-        let _ = root;
         Ok(ResultNode {
             occurrence,
-            row: row.clone(),
+            row,
             relations,
         })
     }
 
-    let roots = roots
+    if !snapshot.edges.is_empty() {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "structured result unexpectedly contained relation-fact edges",
+        ));
+    }
+    let roots = snapshot
+        .rows
         .into_iter()
-        .filter_map(|key| rows.get(&key).map(|row| (key, row)))
-        .map(|(key, row)| node(&key, row, &query.array_subqueries, &rows, &edges, true))
+        .take(snapshot.root_count)
+        .map(|row| {
+            let (descriptor, raw) = row.encoded_record();
+            node_from_record(
+                row.table(),
+                OwnedRecord::new(raw.to_vec(), *descriptor),
+                &query.array_subqueries,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ResultTree { roots })
 }
 
 struct SubscriptionState {
+    terminal_rows: bool,
     kind: SubscriptionKind,
     groove_runtime_token: u64,
     /// The maintained subscription currently owned by this public stream.
@@ -8984,6 +9253,17 @@ pub struct RemovedRow {
     pub occurrence_id: OutputOccurrenceId,
 }
 
+impl RemovedRow {
+    #[doc(hidden)]
+    pub fn from_result_key(table: String, row_uuid: RowUuid, key: ResultKey) -> Self {
+        Self {
+            table,
+            row_uuid,
+            occurrence_id: key.as_occurrence().clone(),
+        }
+    }
+}
+
 /// One row addressed by its maintained output occurrence identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubscriptionOutputRow {
@@ -9001,9 +9281,6 @@ impl std::ops::Deref for SubscriptionOutputRow {
     }
 }
 
-/// Materialized relation edge removed from a subscription result.
-pub type RemovedRelationEdge = RelationEdge;
-
 /// Delta event emitted by a database subscription stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubscriptionEvent {
@@ -9019,17 +9296,8 @@ pub enum SubscriptionEvent {
         updated: Vec<SubscriptionOutputRow>,
         /// Rows no longer visible to the subscription.
         removed: Vec<RemovedRow>,
-        /// Related rows newly referenced by relation edges.
-        ///
-        /// Relation subscriptions reduce `added`, `updated`, `removed`,
-        /// `added_related`, `added_edges`, and `removed_edges` into their local
-        /// view. The producer does not attach a full current snapshot to
-        /// incremental deltas.
-        added_related: Vec<CurrentRow>,
-        /// Relation edges newly visible to the subscription.
-        added_edges: Vec<RelationEdge>,
-        /// Relation edges no longer visible to the subscription.
-        removed_edges: Vec<RemovedRelationEdge>,
+        /// Typed structural edits to already hydrated terminal rows.
+        terminal_operations: Vec<groove::ivm::TerminalOperation>,
         /// Whether the result is complete at the requested read tier.
         settled: bool,
         /// Read tier used to materialize the rows.
@@ -9160,27 +9428,60 @@ fn subscription_delta_event(
     settled: bool,
     previous: &RelationSnapshot,
     current: &RelationSnapshot,
+    _terminal_rows: bool,
 ) -> SubscriptionEvent {
-    subscription_delta_event_with_reset(tier, settled, previous, current, false)
+    subscription_delta_event_with_reset(tier, settled, previous, current, false, _terminal_rows)
 }
 
-fn subscription_reset_event(
+/// Publishes an ordered terminal as a root-addressed suffix splice.
+///
+/// A row delta has stable occurrence identities but no positional field. When
+/// terminal ordering changes, retracting and re-adding the first changed suffix
+/// is therefore the smallest representation that lets every consumer recover
+/// the authoritative Groove order. Content-only changes retain their position
+/// and remain ordinary `updated` roots, independent of total result size.
+fn subscription_terminal_delta_event(
     tier: DurabilityTier,
     settled: bool,
-    current: RelationSnapshot,
+    previous: &RelationSnapshot,
+    current: &RelationSnapshot,
 ) -> SubscriptionEvent {
+    let previous_roots = &previous.rows[..previous.root_count];
+    let current_roots = &current.rows[..current.root_count];
+    let common_prefix = previous_roots
+        .iter()
+        .zip(current_roots)
+        .take_while(|(previous, current)| {
+            subscription_row_occurrence_id(previous) == subscription_row_occurrence_id(current)
+        })
+        .count();
+
+    let updated = previous_roots[..common_prefix]
+        .iter()
+        .zip(&current_roots[..common_prefix])
+        .filter(|(previous, current)| previous != current)
+        .map(|(_, current)| subscription_output_row(current.clone()))
+        .collect();
+    let removed = previous_roots[common_prefix..]
+        .iter()
+        .map(|row| RemovedRow {
+            table: row.table().to_owned(),
+            row_uuid: row.row_uuid(),
+            occurrence_id: subscription_row_occurrence_id(row),
+        })
+        .collect();
+    let added = current_roots[common_prefix..]
+        .iter()
+        .cloned()
+        .map(subscription_output_row)
+        .collect();
+
     SubscriptionEvent::Delta {
-        reset: true,
-        added: current
-            .rows
-            .into_iter()
-            .map(subscription_output_row)
-            .collect(),
-        updated: Vec::new(),
-        removed: Vec::new(),
-        added_related: Vec::new(),
-        added_edges: current.edges,
-        removed_edges: Vec::new(),
+        reset: false,
+        added,
+        updated,
+        removed,
+        terminal_operations: Vec::new(),
         settled,
         tier,
     }
@@ -9192,6 +9493,7 @@ fn subscription_delta_event_with_reset(
     previous: &RelationSnapshot,
     current: &RelationSnapshot,
     reset: bool,
+    _terminal_rows: bool,
 ) -> SubscriptionEvent {
     let mut previous_by_id = BTreeMap::new();
     for row in &previous.rows {
@@ -9206,17 +9508,6 @@ fn subscription_delta_event_with_reset(
     let mut added = Vec::new();
     let mut updated = Vec::new();
     let mut removed = Vec::new();
-    let previous_edges = previous.edges.iter().cloned().collect::<BTreeSet<_>>();
-    let current_edges = current.edges.iter().cloned().collect::<BTreeSet<_>>();
-    let added_edges = current_edges
-        .difference(&previous_edges)
-        .cloned()
-        .collect::<Vec<_>>();
-    let removed_edges = previous_edges
-        .difference(&current_edges)
-        .cloned()
-        .collect::<Vec<_>>();
-
     for (key, row) in &current_by_id {
         match previous_by_id.get(key) {
             None => added.push(subscription_output_row((*row).clone())),
@@ -9243,9 +9534,7 @@ fn subscription_delta_event_with_reset(
         added,
         updated,
         removed,
-        added_related: Vec::new(),
-        added_edges,
-        removed_edges,
+        terminal_operations: Vec::new(),
         settled,
         tier,
     }
@@ -9257,12 +9546,14 @@ fn apply_maintained_update_to_snapshot(
     update: LocalMaintainedViewSubscriptionUpdate,
     tier: DurabilityTier,
     settled: bool,
+    _terminal_rows: bool,
 ) -> SubscriptionEvent {
     let LocalMaintainedViewSubscriptionUpdate {
         added: update_added,
         removed: update_removed,
         added_edges: update_added_edges,
         removed_edges: update_removed_edges,
+        terminal_operations,
     } = update;
 
     if snapshot.rows.is_empty()
@@ -9274,19 +9565,23 @@ fn apply_maintained_update_to_snapshot(
         if update_added_edges.is_empty() {
             snapshot.root_count = update_added.len();
             snapshot.rows.reserve(update_added.len());
-            snapshot.rows.extend(update_added.iter().cloned());
-            *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
+            snapshot
+                .rows
+                .extend(update_added.iter().map(|(_, row)| row.clone()));
+            snapshot_index.roots = update_added
+                .iter()
+                .enumerate()
+                .map(|(index, (occurrence, _))| (occurrence.clone(), index))
+                .collect();
             return SubscriptionEvent::Delta {
                 reset: false,
                 added: update_added
                     .into_iter()
-                    .map(subscription_output_row)
+                    .map(|(occurrence_id, row)| SubscriptionOutputRow { occurrence_id, row })
                     .collect(),
                 updated: Vec::new(),
                 removed: Vec::new(),
-                added_related: Vec::new(),
-                added_edges: Vec::new(),
-                removed_edges: Vec::new(),
+                terminal_operations: terminal_operations.clone(),
                 settled,
                 tier,
             };
@@ -9295,9 +9590,9 @@ fn apply_maintained_update_to_snapshot(
         let mut event_added = Vec::with_capacity(update_added.len());
         let mut added_related = Vec::new();
         let mut seen_rows = BTreeSet::new();
-        for row in &update_added {
+        for (occurrence_id, row) in &update_added {
             seen_rows.insert((row.table().to_owned(), row.row_uuid()));
-            event_added.push(row.clone());
+            event_added.push((occurrence_id.clone(), row.clone()));
         }
 
         let mut seen_edges = BTreeSet::new();
@@ -9317,25 +9612,26 @@ fn apply_maintained_update_to_snapshot(
         snapshot
             .rows
             .reserve(event_added.len() + added_related.len());
-        snapshot.rows.extend(event_added.iter().cloned());
+        snapshot
+            .rows
+            .extend(event_added.iter().map(|(_, row)| row.clone()));
         snapshot.rows.extend(added_related.iter().cloned());
         *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
+        snapshot_index.roots = event_added
+            .iter()
+            .enumerate()
+            .map(|(index, (occurrence, _))| (occurrence.clone(), index))
+            .collect();
 
         return SubscriptionEvent::Delta {
             reset: false,
             added: event_added
-                .iter()
-                .cloned()
-                .map(subscription_output_row)
+                .into_iter()
+                .map(|(occurrence_id, row)| SubscriptionOutputRow { occurrence_id, row })
                 .collect(),
             updated: Vec::new(),
             removed: Vec::new(),
-            added_related,
-            added_edges: update_added_edges
-                .iter()
-                .map(|(edge, _)| edge.clone())
-                .collect(),
-            removed_edges: Vec::new(),
+            terminal_operations: terminal_operations.clone(),
             settled,
             tier,
         };
@@ -9346,12 +9642,14 @@ fn apply_maintained_update_to_snapshot(
     let mut removed = Vec::new();
     let mut added_related = Vec::new();
 
-    for row in &update_added {
-        let key = subscription_row_occurrence_id(row);
+    for (key, row) in &update_added {
         if let Some(position) = snapshot_index.roots.get(&key).copied() {
             if snapshot.rows[position] != *row {
                 snapshot.rows[position] = row.clone();
-                updated.push(subscription_output_row(row.clone()));
+                updated.push(SubscriptionOutputRow {
+                    occurrence_id: key.clone(),
+                    row: row.clone(),
+                });
             }
         } else {
             snapshot.rows.insert(snapshot.root_count, row.clone());
@@ -9360,25 +9658,38 @@ fn apply_maintained_update_to_snapshot(
             }
             snapshot_index
                 .roots
-                .insert(subscription_row_occurrence_id(row), snapshot.root_count);
+                .insert(key.clone(), snapshot.root_count);
             snapshot.root_count += 1;
-            added.push(subscription_output_row(row.clone()));
+            added.push(SubscriptionOutputRow {
+                occurrence_id: key.clone(),
+                row: row.clone(),
+            });
         }
     }
 
     let mut index = 0;
     while index < snapshot.root_count {
-        let occurrence_id = subscription_row_occurrence_id(&snapshot.rows[index]);
+        let occurrence_id = snapshot_index
+            .roots
+            .iter()
+            .find_map(|(occurrence, position)| (*position == index).then(|| occurrence.clone()))
+            .expect("every maintained root row has an occurrence index");
         if update_removed.contains(&occurrence_id)
             && !update_added
                 .iter()
-                .any(|added| subscription_row_occurrence_id(added) == occurrence_id)
+                .any(|(added, _)| *added == occurrence_id)
         {
             let row = snapshot.rows.remove(index);
             snapshot.root_count -= 1;
-            snapshot_index
-                .roots
-                .remove(&subscription_row_occurrence_id(&row));
+            snapshot_index.roots.remove(&occurrence_id);
+            for position in snapshot_index.roots.values_mut() {
+                if *position > index {
+                    *position -= 1;
+                }
+            }
+            for position in snapshot_index.related.values_mut() {
+                *position -= 1;
+            }
             removed.push(RemovedRow {
                 table: row.table().to_owned(),
                 row_uuid: row.row_uuid(),
@@ -9387,9 +9698,6 @@ fn apply_maintained_update_to_snapshot(
         } else {
             index += 1;
         }
-    }
-    if !update_removed.is_empty() {
-        *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
     }
 
     if !update_removed_edges.is_empty() {
@@ -9451,12 +9759,7 @@ fn apply_maintained_update_to_snapshot(
         added,
         updated,
         removed,
-        added_related,
-        added_edges: update_added_edges
-            .iter()
-            .map(|(edge, _)| edge.clone())
-            .collect(),
-        removed_edges: update_removed_edges,
+        terminal_operations,
         settled,
         tier,
     }
@@ -9508,6 +9811,65 @@ pub(crate) fn subscription_row_occurrence_id(row: &CurrentRow) -> OutputOccurren
         joined.push(ObjectId::from_uuid(row_id));
     }
     OutputOccurrenceId::new(root, joined)
+}
+
+fn subscription_outputs_with_occurrence_sidecar(
+    snapshot: &RelationSnapshot,
+    occurrence_ids: &[OutputOccurrenceId],
+) -> Result<Vec<SubscriptionOutputRow>, Error> {
+    if occurrence_ids.len() != snapshot.root_count {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "maintained root occurrence sidecar length does not match root rows",
+        ));
+    }
+    let mut unique = BTreeSet::new();
+    snapshot
+        .rows
+        .iter()
+        .take(snapshot.root_count)
+        .zip(occurrence_ids)
+        .map(|(row, occurrence_id)| {
+            let bytes = occurrence_id.canonical_bytes();
+            if bytes.get(..16) != Some(row.row_uuid().0.as_bytes()) {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    "maintained root occurrence sidecar root does not match row",
+                ));
+            }
+            if !unique.insert(occurrence_id.clone()) {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    "maintained root occurrence sidecar contains duplicate identity",
+                ));
+            }
+            Ok(SubscriptionOutputRow {
+                occurrence_id: occurrence_id.clone(),
+                row: row.clone(),
+            })
+        })
+        .collect()
+}
+
+fn reset_removed_roots(
+    previous: &RelationSnapshot,
+    previous_index: &RelationSnapshotIndex,
+    current_occurrences: &[OutputOccurrenceId],
+) -> Vec<RemovedRow> {
+    let current = current_occurrences.iter().collect::<BTreeSet<_>>();
+    previous_index
+        .roots
+        .iter()
+        .filter(|(occurrence, _)| !current.contains(occurrence))
+        .map(|(occurrence_id, position)| {
+            let row = &previous.rows[*position];
+            RemovedRow {
+                table: row.table().to_owned(),
+                row_uuid: row.row_uuid(),
+                occurrence_id: occurrence_id.clone(),
+            }
+        })
+        .collect()
 }
 
 fn subscription_output_row(row: CurrentRow) -> SubscriptionOutputRow {

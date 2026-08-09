@@ -186,10 +186,8 @@ struct WasmRow<'a> {
 
 #[derive(Clone, Debug, Serialize)]
 struct WasmRelationSnapshot<'a> {
-    cursor: u64,
     root_count: u64,
     rows: Vec<WasmRowBatch<'a>>,
-    edges: Vec<WasmRelationEdge>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -197,26 +195,9 @@ struct WasmSubscriptionDelta<'a> {
     added: Vec<WasmRowBatch<'a>>,
     updated: Vec<WasmRowBatch<'a>>,
     removed: Vec<WasmRemovedRow>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct WasmRelationSubscriptionDelta<'a> {
-    base_cursor: Option<u64>,
-    cursor: u64,
-    added: Vec<WasmRowBatch<'a>>,
-    updated: Vec<WasmRowBatch<'a>>,
-    removed: Vec<WasmRemovedRow>,
-    added_edges: Vec<WasmRelationEdge>,
-    removed_edges: Vec<WasmRelationEdge>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct WasmRelationEdge {
-    source_table: String,
-    source_row_id: RowUuid,
-    relation: String,
-    target_table: String,
-    target_row_id: RowUuid,
+    added_occurrence_keys: Vec<jazz::tools::ResultKey>,
+    updated_occurrence_keys: Vec<jazz::tools::ResultKey>,
+    removed_occurrence_keys: Vec<jazz::tools::ResultKey>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2581,21 +2562,24 @@ fn encode_relation_snapshot(
     snapshot: &jazz::node::RelationSnapshot,
 ) -> Result<Vec<u8>, postcard::Error> {
     postcard::to_allocvec(&WasmRelationSnapshot {
-        cursor: 0,
         root_count: snapshot.root_count as u64,
         rows: row_batches(&snapshot.rows),
-        edges: snapshot.edges.iter().map(wasm_relation_edge).collect(),
     })
 }
 
 fn encode_subscription_delta<'a>(
-    added: &'a [jazz::node::CurrentRow],
-    updated: &'a [jazz::node::CurrentRow],
+    added: &'a [jazz::db::SubscriptionOutputRow],
+    updated: &'a [jazz::db::SubscriptionOutputRow],
     removed: &[jazz::db::RemovedRow],
 ) -> Result<Vec<u8>, postcard::Error> {
+    let added_rows = added.iter().map(|row| row.row.clone()).collect::<Vec<_>>();
+    let updated_rows = updated
+        .iter()
+        .map(|row| row.row.clone())
+        .collect::<Vec<_>>();
     postcard::to_allocvec(&WasmSubscriptionDelta {
-        added: row_batches(added),
-        updated: row_batches(updated),
+        added: row_batches(&added_rows),
+        updated: row_batches(&updated_rows),
         removed: removed
             .iter()
             .map(|row| WasmRemovedRow {
@@ -2603,34 +2587,18 @@ fn encode_subscription_delta<'a>(
                 row_id: row.row_uuid,
             })
             .collect(),
-    })
-}
-
-fn encode_relation_subscription_delta<'a>(
-    added: &'a [jazz::node::CurrentRow],
-    updated: &'a [jazz::node::CurrentRow],
-    removed: &[jazz::db::RemovedRow],
-    added_related: &'a [jazz::node::CurrentRow],
-    added_edges: &[jazz::node::RelationEdge],
-    removed_edges: &[jazz::db::RemovedRelationEdge],
-) -> Result<Vec<u8>, postcard::Error> {
-    let mut relation_added = Vec::with_capacity(added.len() + added_related.len());
-    relation_added.extend_from_slice(added);
-    relation_added.extend_from_slice(added_related);
-    postcard::to_allocvec(&WasmRelationSubscriptionDelta {
-        base_cursor: None,
-        cursor: 0,
-        added: row_batches(&relation_added),
-        updated: row_batches(updated),
-        removed: removed
+        added_occurrence_keys: added
             .iter()
-            .map(|row| WasmRemovedRow {
-                table: row.table.clone(),
-                row_id: row.row_uuid,
-            })
+            .map(|row| jazz::tools::ResultKey::from_occurrence(row.occurrence_id.clone()))
             .collect(),
-        added_edges: added_edges.iter().map(wasm_relation_edge).collect(),
-        removed_edges: removed_edges.iter().map(wasm_relation_edge).collect(),
+        updated_occurrence_keys: updated
+            .iter()
+            .map(|row| jazz::tools::ResultKey::from_occurrence(row.occurrence_id.clone()))
+            .collect(),
+        removed_occurrence_keys: removed
+            .iter()
+            .map(|row| jazz::tools::ResultKey::from_occurrence(row.occurrence_id.clone()))
+            .collect(),
     })
 }
 
@@ -2652,16 +2620,6 @@ fn row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<WasmRowBatch<'_>> {
     batches
 }
 
-fn wasm_relation_edge(edge: &jazz::node::RelationEdge) -> WasmRelationEdge {
-    WasmRelationEdge {
-        source_table: edge.source_table.clone(),
-        source_row_id: edge.source_row,
-        relation: edge.relation.clone(),
-        target_table: edge.target_table.clone(),
-        target_row_id: edge.target_row,
-    }
-}
-
 fn wasm_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> WasmRow<'a> {
     WasmRow {
         row_id: row.row_uuid(),
@@ -2678,34 +2636,18 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             added,
             updated,
             removed,
-            added_related,
-            added_edges,
-            removed_edges,
+            terminal_operations,
             settled,
             tier,
+            ..
         } => {
-            // The current native wire remains source-row addressed. Occurrence
-            // identity is maintained in the Rust subscription boundary until a
-            // later wire-format revision carries it explicitly.
-            let added = added
-                .into_iter()
-                .map(|output| output.row)
-                .collect::<Vec<_>>();
-            let updated = updated
-                .into_iter()
-                .map(|output| output.row)
-                .collect::<Vec<_>>();
+            let (added, updated, removed) = if terminal_operations.is_empty() {
+                (added, updated, removed)
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
             let delta =
                 encode_subscription_delta(&added, &updated, &removed).map_err(to_js_error)?;
-            let relation_delta = encode_relation_subscription_delta(
-                &added,
-                &updated,
-                &removed,
-                &added_related,
-                &added_edges,
-                &removed_edges,
-            )
-            .map_err(to_js_error)?;
             set_prop(&object, "type", JsValue::from_str("delta"))?;
             set_prop(
                 &object,
@@ -2714,8 +2656,8 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             )?;
             set_prop(
                 &object,
-                "relation_delta",
-                js_sys::Uint8Array::from(relation_delta.as_slice()).into(),
+                "terminalOperations",
+                serde_wasm_bindgen::to_value(&terminal_operations).map_err(to_js_error)?,
             )?;
             set_prop(&object, "reset", JsValue::from_bool(reset))?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;
@@ -2852,6 +2794,48 @@ mod dynamic_schema_view_tests {
     use jazz::groove::schema::ColumnType;
     use jazz::schema::{ColumnSchema, Policy, TableSchema};
 
+    #[test]
+    fn wasm_delta_preserves_typed_union_occurrence_keys() {
+        #[derive(serde::Deserialize)]
+        struct DecodedRemoved {
+            #[allow(dead_code)]
+            table: String,
+            #[allow(dead_code)]
+            row_id: RowUuid,
+        }
+        #[derive(serde::Deserialize)]
+        struct DecodedDelta {
+            added: Vec<serde::de::IgnoredAny>,
+            updated: Vec<serde::de::IgnoredAny>,
+            removed: Vec<DecodedRemoved>,
+            added_occurrence_keys: Vec<jazz::tools::ResultKey>,
+            updated_occurrence_keys: Vec<jazz::tools::ResultKey>,
+            removed_occurrence_keys: Vec<jazz::tools::ResultKey>,
+        }
+        let root = jazz::tools::ObjectId::from_uuid(uuid::Uuid::from_bytes([1; 16]));
+        let joined = jazz::tools::ObjectId::from_uuid(uuid::Uuid::from_bytes([2; 16]));
+        let occurrence = |label: &str| {
+            jazz::tools::ResultKey::from_union_occurrence(root, [joined], [(0, label.to_owned())])
+                .unwrap()
+        };
+        let removed = ["direct", "inherited"].map(|label| {
+            jazz::db::RemovedRow::from_result_key(
+                "todos".to_owned(),
+                RowUuid::from_bytes([1; 16]),
+                occurrence(label),
+            )
+        });
+        let bytes = encode_subscription_delta(&[], &[], &removed).unwrap();
+        let decoded: DecodedDelta = postcard::from_bytes(&bytes).unwrap();
+        assert!(decoded.added.is_empty() && decoded.updated.is_empty());
+        assert_eq!(decoded.removed.len(), 2);
+        assert!(decoded.added_occurrence_keys.is_empty());
+        assert!(decoded.updated_occurrence_keys.is_empty());
+        assert_ne!(
+            decoded.removed_occurrence_keys[0],
+            decoded.removed_occurrence_keys[1]
+        );
+    }
     /// A short-lived WASM schema attachment must not abandon its owner's open
     /// batch when the JavaScript wrapper is collected.
     #[test]
@@ -2893,7 +2877,7 @@ mod dynamic_schema_view_tests {
             .unwrap();
         let prepared = view.prepare_query(&view.table("items")).unwrap();
         let rows = WasmDbInner::Memory(Rc::clone(&view))
-            .mergeable_all(batch, &prepared)
+            .mergeable_all(batch, &prepared, ReadOpts::default())
             .unwrap();
         assert_eq!(rows.len(), 1, "the attached view reads staged rows");
         owner.commit_mergeable_handle(batch).unwrap();

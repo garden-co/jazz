@@ -150,6 +150,43 @@ describe("native row codec", () => {
       );
     }
   });
+
+  it("decodes sparse terminal carriers without leaking their presence tag", () => {
+    const columns = [
+      {
+        name: "title",
+        column_type: { type: "Text" as const },
+        nullable: false,
+        sparse: true,
+      },
+    ];
+
+    // Outer nullable 1 means the wildcard current-row carrier contains the
+    // field. The public value is still the unwrapped text.
+    const encoded = encodeNativeRowValues(columns, [{ type: "Text", value: "hello" }]);
+    expect(decodeNativeRowValues(columns, encoded)).toEqual([{ type: "Text", value: "hello" }]);
+  });
+
+  it("keeps sparse absence distinct from an explicit application null", () => {
+    const columns = [
+      {
+        name: "ownerId",
+        column_type: { type: "Uuid" as const },
+        nullable: true,
+        sparse: true,
+      },
+    ];
+
+    // The first tag is sparse presence; the second is the application's
+    // nullable value. Explicit null must consume both layers.
+    const explicitNull = encodeNativeRowValues(columns, [{ type: "Null" }]);
+    const sparseAbsence = encodeNativeRowValues(columns, []);
+    expect(explicitNull).not.toEqual(sparseAbsence);
+    expect(explicitNull[0]).toBe(1);
+    expect(sparseAbsence[0]).toBe(0);
+    expect(decodeNativeRowValues(columns, explicitNull)).toEqual([{ type: "Null" }]);
+    expect(decodeNativeRowValues(columns, sparseAbsence)).toEqual([{ type: "Null" }]);
+  });
 });
 
 function nativeRowCodecFixture(): NativeRowCodecFixture {

@@ -18,7 +18,7 @@ use jazz::groove::records::Value;
 use jazz::groove::schema::ColumnType;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{NodeUuid, RowUuid};
-use jazz::query::Query;
+use jazz::query::{ArraySubquery, Query};
 use jazz::schema::JazzSchema;
 use jazz::schema::{ColumnSchema, TableSchema};
 use jazz::serving::auth_admission::author_id_from_subject;
@@ -63,6 +63,19 @@ fn todos_schema() -> JazzSchema {
             ColumnSchema::new("done", ColumnType::Bool),
         ],
     )])
+}
+
+fn structured_schema() -> JazzSchema {
+    JazzSchema::new([
+        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]),
+        TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("owner_id", ColumnType::Uuid),
+            ],
+        ),
+    ])
 }
 
 fn identity_for_subject(node: u8, subject: &str) -> DbIdentity {
@@ -291,6 +304,45 @@ struct RunningServer {
 }
 
 impl RunningServer {
+    fn start_schema(schema: &JazzSchema) -> Self {
+        let mut child = jazz_server_command()
+            .args([
+                "serve-loopback-websocket-schema",
+                &schema_hex(schema),
+                "--in-memory",
+                "--admin-secret",
+                "test-admin-secret",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn schema websocket server");
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take().expect("child stdout");
+        let mut reader = BufReader::new(stdout);
+        let mut lines = Vec::new();
+        let ws_url = loop {
+            let mut line = String::new();
+            assert_ne!(
+                reader.read_line(&mut line).expect("read server stdout"),
+                0,
+                "server exited before reporting ws_url"
+            );
+            let line = line.trim_end().to_owned();
+            let ws_url = line.strip_prefix("ws_url=").map(str::to_owned);
+            lines.push(line);
+            if let Some(ws_url) = ws_url {
+                break ws_url;
+            }
+        };
+        Self {
+            child,
+            stdin,
+            ws_url,
+            lines,
+        }
+    }
+
     fn start(app_id: &str, data_dir: &Path) -> Self {
         let mut child = jazz_server_command()
             .args([
@@ -673,6 +725,192 @@ fn server_command_loads_published_schema_and_persists_ws_data_across_restart() {
         .expect("schema catalogue survives beside data dir");
     assert!(store.contains(app_id));
     let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+#[test]
+fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
+    let schema = structured_schema();
+    let server = RunningServer::start_schema(&schema);
+    let subject = "structured-reconnect-user";
+    let mut writer = open_connected_client(
+        schema.clone(),
+        &server.ws_url,
+        subject,
+        identity_for_subject(0xd1, subject),
+    );
+    writer
+        .db
+        .insert_with_id(
+            "users",
+            RowUuid::from_bytes([0xa1; 16]),
+            BTreeMap::from([("name".to_owned(), Value::String("owner".to_owned()))]),
+        )
+        .unwrap();
+    writer
+        .db
+        .insert_with_id(
+            "todos",
+            RowUuid::from_bytes([0xb1; 16]),
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("first".to_owned())),
+                (
+                    "owner_id".to_owned(),
+                    Value::Uuid(RowUuid::from_bytes([0xa1; 16]).0),
+                ),
+            ]),
+        )
+        .unwrap();
+    assert!(pump_websocket(&mut writer.socket, &writer.db, &writer.wire));
+
+    let mut reader = open_connected_client(
+        schema.clone(),
+        &server.ws_url,
+        subject,
+        identity_for_subject(0xd2, subject),
+    );
+    let query = Query::from("users").array_subquery(ArraySubquery::new(
+        "todosViaOwner",
+        "todos",
+        "owner_id",
+        "id",
+    ));
+    let prepared = reader.db.prepare_query(&query).unwrap();
+    let mut subscription = block_on(reader.db.subscribe(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    assert!(pump_websocket(&mut reader.socket, &reader.db, &reader.wire));
+    let reset = block_on(subscription.next()).expect("structured reset event");
+    assert!(matches!(
+        reset,
+        SubscriptionEvent::Delta {
+            reset: true,
+            terminal_operations,
+            ..
+        } if terminal_operations.is_empty()
+    ));
+    while subscription.next().now_or_never().flatten().is_some() {}
+
+    // Break the actual socket while retaining this Db, its terminal cache,
+    // and the same SubscriptionStream.
+    drop(reader.socket);
+
+    writer
+        .db
+        .insert_with_id(
+            "todos",
+            RowUuid::from_bytes([0xb2; 16]),
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("second".to_owned())),
+                (
+                    "owner_id".to_owned(),
+                    Value::Uuid(RowUuid::from_bytes([0xa1; 16]).0),
+                ),
+            ]),
+        )
+        .unwrap();
+    assert!(pump_websocket(&mut writer.socket, &writer.db, &writer.wire));
+
+    let reconnected_wire = QueuedWireTransport::default();
+    reader
+        .db
+        .connect_upstream(Box::new(WireTransportAdapter::current(
+            reconnected_wire.clone(),
+        )));
+    reader.wire = reconnected_wire;
+    reader.socket = connect_server_ws(&server.ws_url, subject);
+    assert!(pump_websocket(&mut reader.socket, &reader.db, &reader.wire));
+    let reconnect_reset = block_on(subscription.next()).expect("authoritative reconnect reset");
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        terminal_operations,
+        ..
+    } = reconnect_reset
+    else {
+        panic!("expected reconnect reset delta")
+    };
+    assert!(reset);
+    assert!(
+        added.is_empty(),
+        "reset state arrives through version carriers"
+    );
+    assert!(terminal_operations.is_empty());
+    while subscription.next().now_or_never().flatten().is_some() {}
+
+    writer
+        .db
+        .insert_with_id(
+            "todos",
+            RowUuid::from_bytes([0xb3; 16]),
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("third".to_owned())),
+                (
+                    "owner_id".to_owned(),
+                    Value::Uuid(RowUuid::from_bytes([0xa1; 16]).0),
+                ),
+            ]),
+        )
+        .unwrap();
+    assert!(pump_websocket(&mut writer.socket, &writer.db, &writer.wire));
+    assert!(pump_websocket(&mut reader.socket, &reader.db, &reader.wire));
+    let mut patch = None;
+    while let Some(event) = subscription.next().now_or_never().flatten() {
+        if matches!(
+            &event,
+            SubscriptionEvent::Delta {
+                reset: false,
+                terminal_operations,
+                ..
+            } if !terminal_operations.is_empty()
+        ) {
+            patch = Some(event);
+            break;
+        }
+    }
+    let patch = patch.expect("structured patch event");
+    assert!(
+        matches!(
+            &patch,
+            SubscriptionEvent::Delta {
+                reset: false,
+                added,
+                updated,
+                removed,
+                terminal_operations,
+                ..
+            } if added.is_empty()
+                && updated.is_empty()
+                && removed.is_empty()
+                && !terminal_operations.is_empty()
+        ),
+        "unexpected post-reconnect structured event: {patch:?}"
+    );
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = patch
+    else {
+        unreachable!()
+    };
+    assert!(matches!(
+        terminal_operations.as_slice(),
+        [jazz::groove::ivm::TerminalOperation {
+            path,
+            edit: jazz::groove::ivm::TerminalEdit::Insert { index: 2, .. },
+            ..
+        }] if path == &[jazz::groove::ivm::TerminalPathSegment::Collection(
+            "todosViaOwner".to_owned()
+        )]
+    ));
+
+    drop(reader.socket);
+    drop(writer.socket);
+    server.shutdown();
 }
 
 #[test]

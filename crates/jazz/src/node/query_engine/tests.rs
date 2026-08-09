@@ -88,6 +88,49 @@ fn collect_binding_source_fingerprint(graph: &GraphBuilder, sources: &mut BTreeS
     }
 }
 
+/// Structural lowering tests still inspect the relational carrier below the
+/// public boundary. The boundary itself is now deliberately a Groove Root
+/// collector, so these tests assert that invariant and then search its
+/// descendants for the operator they are specifically intended to exercise.
+fn assert_public_root_terminal(graph: &GraphBuilder) {
+    assert!(matches!(
+        graph,
+        GraphBuilder::CollectBy { collect, .. }
+            if collect.mode == groove::ivm::CollectByMode::Root
+    ));
+}
+
+fn graph_any(graph: &GraphBuilder, predicate: &impl Fn(&GraphBuilder) -> bool) -> bool {
+    if predicate(graph) {
+        return true;
+    }
+    match graph {
+        GraphBuilder::Recursive { seed, step, .. } => {
+            graph_any(seed, predicate) || graph_any(step, predicate)
+        }
+        GraphBuilder::Filter { input, .. }
+        | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::Unnest { input, .. }
+        | GraphBuilder::Project { input, .. }
+        | GraphBuilder::ArgMaxBy { input, .. }
+        | GraphBuilder::ArgMinBy { input, .. }
+        | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::CollectBy { input, .. }
+        | GraphBuilder::Aggregate { input, .. } => graph_any(input, predicate),
+        GraphBuilder::Union { inputs } => inputs.iter().any(|input| graph_any(input, predicate)),
+        GraphBuilder::Join { left, right, .. }
+        | GraphBuilder::SemiJoin { left, right, .. }
+        | GraphBuilder::AntiJoin { left, right, .. } => {
+            graph_any(left, predicate) || graph_any(right, predicate)
+        }
+        GraphBuilder::Table { .. }
+        | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::BindingSource { .. }
+        | GraphBuilder::Index { .. }
+        | GraphBuilder::FrontierSource { .. } => false,
+    }
+}
+
 fn requested_projection() -> SchemaProjection<RequestedSourceStage> {
     SchemaProjection {
         schema_family: SchemaFamilySelection::Current,
@@ -475,6 +518,7 @@ fn program_frontier() -> CoverageFrontier {
 fn row_set_output(facts: BTreeSet<ProgramFactKey>) -> RowSetOutputRequest {
     RowSetOutputRequest {
         app_rows: Some(AppRowOutputRequest {
+            public_terminal: true,
             projection: PayloadProjection::ShapeDefault,
             large_values: Vec::new(),
         }),
@@ -502,6 +546,7 @@ fn production_output_request(
         },
         ProductionOutputProfile::RelationSnapshot => RowSetOutputRequest {
             app_rows: Some(AppRowOutputRequest {
+                public_terminal: true,
                 projection: PayloadProjection::ShapeDefault,
                 large_values: Vec::new(),
             }),
@@ -593,7 +638,7 @@ impl SourceResolver for FakeSourceResolver {
         Ok(ResolvedSource {
             table_schema: TableSchema::new(
                 request.source.table.clone(),
-                Vec::<ColumnSchema>::new(),
+                [ColumnSchema::new("title", ColumnType::String)],
             ),
             graph: GraphBuilder::table(format!("resolved_{}", request.source.table)),
             row_shape: SourceRowShape {
@@ -651,6 +696,8 @@ impl SourceResolver for InlineCollectorResolver {
                 ValueType::Nullable(Box::new(ValueType::String)),
             ),
             ("user_todo", ValueType::Nullable(Box::new(ValueType::Uuid))),
+            ("$createdAt", ValueType::U64),
+            ("$updatedAt", ValueType::U64),
         ]);
         let parent = row(0xd1).0;
         let rows = match request.source.table.as_str() {
@@ -660,6 +707,8 @@ impl SourceResolver for InlineCollectorResolver {
                         Value::Uuid(parent),
                         Value::Nullable(Some(Box::new(Value::String("parent".to_owned())))),
                         Value::Nullable(None),
+                        Value::U64(10),
+                        Value::U64(11),
                     ])
                     .expect("inline parent"),
             ],
@@ -678,6 +727,8 @@ impl SourceResolver for InlineCollectorResolver {
                             Value::Uuid(row(id).0),
                             Value::Nullable(Some(Box::new(Value::String(title.to_owned())))),
                             Value::Nullable(Some(Box::new(Value::Uuid(parent)))),
+                            Value::U64(20),
+                            Value::U64(21),
                         ])
                         .expect("inline child")
                 })
@@ -688,6 +739,8 @@ impl SourceResolver for InlineCollectorResolver {
                         Value::Uuid(row(0xd4).0),
                         Value::Nullable(Some(Box::new(Value::String("label".to_owned())))),
                         Value::Nullable(Some(Box::new(Value::Uuid(parent)))),
+                        Value::U64(30),
+                        Value::U64(31),
                     ])
                     .expect("inline sibling child"),
             ],
@@ -697,6 +750,8 @@ impl SourceResolver for InlineCollectorResolver {
                         Value::Uuid(row(0xd5).0),
                         Value::Nullable(Some(Box::new(Value::String("note".to_owned())))),
                         Value::Nullable(Some(Box::new(Value::Uuid(row(0xd2).0)))),
+                        Value::U64(40),
+                        Value::U64(41),
                     ])
                     .expect("inline grandchild"),
             ],
@@ -876,10 +931,17 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
                 .metadata
                 .contains(&SourceMetadataRequirement::Coverage)
         );
-        assert!(matches!(
-            program.lowered.terminals.first().expect("lowered terminal").graph.clone(),
-            GraphBuilder::Table { ref table, .. } if table == "resolved_todos"
-        ));
+        let app_rows = &program
+            .lowered
+            .terminals
+            .first()
+            .expect("lowered terminal")
+            .graph;
+        assert_public_root_terminal(app_rows);
+        assert!(graph_any(app_rows, &|graph| matches!(
+            graph,
+            GraphBuilder::Table { table, .. } if table == "resolved_todos"
+        )));
         assert_eq!(program.lowered.parameters, ParameterDomain::default());
         assert_eq!(
             program
@@ -900,9 +962,7 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
                     hidden_fields,
                     ..
                 }) if descriptor.field_index("user_title").is_some()
-                    && hidden_fields.contains("tx_time")
-                    && hidden_fields.contains("tx_node_id")
-                    && hidden_fields.contains("coverage")
+                    && hidden_fields.is_empty()
             )
         }));
         assert!(terminals.iter().any(|terminal| {
@@ -1087,6 +1147,7 @@ fn current_source_select_projection_and_default_ordered_slice_lower() {
         },
         output: RowSetOutputRequest {
             app_rows: Some(AppRowOutputRequest {
+                public_terminal: true,
                 projection: PayloadProjection::Tree(AppProjectionTree {
                     fields: FieldProjection::Fields(BTreeSet::from(["title".to_owned()])),
                     paths: Vec::new(),
@@ -1106,13 +1167,20 @@ fn current_source_select_projection_and_default_ordered_slice_lower() {
         resolver.requests[0].requirements.app_fields,
         FieldRequirement::Fields(BTreeSet::from(["title".to_owned()]))
     );
-    assert!(matches!(
-        program.lowered.terminals.first().expect("lowered terminal").graph.clone(),
+    let app_rows = &program
+        .lowered
+        .terminals
+        .first()
+        .expect("lowered terminal")
+        .graph;
+    assert_public_root_terminal(app_rows);
+    assert!(graph_any(app_rows, &|graph| matches!(
+        graph,
         GraphBuilder::TopBy {
-            ref input,
-            ref group_cols,
-            ref order_cols,
-            ref tie_cols,
+            input,
+            group_cols,
+            order_cols,
+            tie_cols,
             offset: 2,
             limit: groove::ivm::TopByLimit::Finite(3),
         } if matches!(input.as_ref(), GraphBuilder::Table { table, .. } if table == "resolved_todos")
@@ -1123,7 +1191,7 @@ fn current_source_select_projection_and_default_ordered_slice_lower() {
             }] if field == "row_uuid")
             && matches!(tie_cols.as_slice(), [groove::ivm::FieldRef::Name(field)]
                 if field == "row_uuid")
-    ));
+    )));
 }
 
 #[test]
@@ -1228,9 +1296,29 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
             && request.requirements.app_fields
                 == FieldRequirement::Fields(BTreeSet::from(["tag".to_owned(), "todo".to_owned()]))
     }));
+    let app_rows = &program
+        .lowered
+        .terminals
+        .first()
+        .expect("lowered terminal")
+        .graph;
+    assert_public_root_terminal(app_rows);
     assert!(matches!(
-        program.lowered.terminals.first().expect("lowered terminal").graph.clone(),
-        GraphBuilder::Project { ref input, ref fields }
+        app_rows,
+        GraphBuilder::CollectBy { collect, .. }
+            if collect.group_cols.iter().any(|field| matches!(
+                field,
+                groove::ivm::FieldRef::Name(name)
+                    if name == "__collect_root___root_join_row_0"
+            )) && collect.tie_cols.iter().any(|field| matches!(
+                field,
+                groove::ivm::FieldRef::Name(name)
+                    if name == "__collect_root___root_join_row_0"
+            ))
+    ));
+    assert!(graph_any(app_rows, &|graph| matches!(
+        graph,
+        GraphBuilder::Project { input, fields }
             if fields.iter().any(|field| field.output_name == "row_uuid")
                 && matches!(
                     input.as_ref(),
@@ -1262,7 +1350,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                         && matches!(left_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
                         && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "user_todo")
                 )
-    ));
+    )));
 }
 
 #[test]
@@ -1410,21 +1498,166 @@ fn current_join_via_can_use_union_relation_input() {
                 values: BTreeMap::new(),
             },
         },
-        output: row_set_output(BTreeSet::new()),
+        output: row_set_output(BTreeSet::from([ProgramFactKey::ResultMembership])),
     };
 
     let program = lower_query_program(request, &mut FakeSourceResolver::default())
         .expect("union relation input should lower");
-    assert!(matches!(
-        program.lowered.terminals.first().expect("lowered terminal").graph.clone(),
-        GraphBuilder::Project { input, .. }
-            if matches!(
-                input.as_ref(),
-                GraphBuilder::Join { right, right_on, .. }
-                    if matches!(right.as_ref(), GraphBuilder::Union { inputs } if inputs.len() == 2)
-                        && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "todo")
-            )
-    ));
+    let app_rows = &program
+        .lowered
+        .terminals
+        .first()
+        .expect("lowered terminal")
+        .graph;
+    assert_public_root_terminal(app_rows);
+    assert!(graph_any(app_rows, &|graph| matches!(
+        graph,
+        GraphBuilder::Project { input, fields }
+            if fields.iter().any(|field| field.output_name == "__root_join_arm_0")
+                && fields.iter().any(|field| field.output_name == "__root_join_row_0")
+                && matches!(
+                    input.as_ref(),
+                    GraphBuilder::Join { right, right_on, .. }
+                        if matches!(right.as_ref(), GraphBuilder::Union { inputs } if inputs.len() == 2)
+                            && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "todo")
+                )
+    )));
+    let membership = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "maintained.result_current")
+        .expect("result-membership terminal");
+    let ProgramOutputSchemas::RowSet(outputs) = &program.lowered.output;
+    let schema = outputs
+        .iter()
+        .find_map(|output| match output {
+            OutputTerminalSchema::Fact(ProgramFactOutput {
+                schema: ProgramFactSchema::ResultMembership(schema),
+                ..
+            }) => Some(schema),
+            _ => None,
+        })
+        .expect("result-membership schema");
+    assert_eq!(
+        schema.occurrence_id_fields,
+        ["row_uuid", "__root_join_row_0"]
+    );
+    assert_eq!(
+        schema
+            .occurrence_union_arm_fields
+            .get(&0)
+            .map(String::as_str),
+        Some("__root_join_arm_0")
+    );
+    assert!(graph_any(&membership.graph, &|graph| matches!(
+        graph,
+        GraphBuilder::Project { fields, .. }
+            if fields.iter().any(|field| field.output_name == "__root_join_arm_0")
+                && fields.iter().any(|field| field.output_name == "__root_join_row_0")
+    )));
+}
+
+#[test]
+fn union_occurrence_labels_survive_reorder_and_unrelated_arm_insertion() {
+    fn analyzed_labels(inputs: Vec<(&str, &str)>) -> Vec<String> {
+        let nodes = inputs
+            .iter()
+            .map(|(node, label)| {
+                (
+                    RowSetNodeId((*node).to_owned()),
+                    RowSetExpr::Source {
+                        source: source(label, SourceRole::Policy((*label).to_owned())),
+                        visibility: RowVisibility::Visible,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let union_inputs = inputs
+            .iter()
+            .map(|(node, label)| UnionInput {
+                node: RowSetNodeId((*node).to_owned()),
+                label: (*label).to_owned(),
+            })
+            .collect::<Vec<_>>();
+        analyzed_union_labels(&union_inputs, &nodes).expect("unique semantic labels lower")
+    }
+
+    let original = analyzed_labels(vec![("node-a", "direct"), ("node-b", "inherited")]);
+    let reordered_with_insert = analyzed_labels(vec![
+        ("replacement-node-b", "inherited"),
+        ("new-node", "delegated"),
+        ("replacement-node-a", "direct"),
+    ]);
+
+    assert_eq!(original, ["direct", "inherited"]);
+    assert!(reordered_with_insert.contains(&"direct".to_owned()));
+    assert!(reordered_with_insert.contains(&"inherited".to_owned()));
+    assert_eq!(
+        original.into_iter().collect::<BTreeSet<_>>(),
+        reordered_with_insert
+            .into_iter()
+            .filter(|label| label != "delegated")
+            .collect()
+    );
+}
+
+#[test]
+fn union_occurrence_rejects_duplicate_semantic_labels() {
+    let first = RowSetNodeId("first".to_owned());
+    let second = RowSetNodeId("second".to_owned());
+    let nodes = BTreeMap::from([
+        (
+            first.clone(),
+            RowSetExpr::Source {
+                source: source("first", SourceRole::Policy("first".to_owned())),
+                visibility: RowVisibility::Visible,
+            },
+        ),
+        (
+            second.clone(),
+            RowSetExpr::Source {
+                source: source("second", SourceRole::Policy("second".to_owned())),
+                visibility: RowVisibility::Visible,
+            },
+        ),
+    ]);
+    let error = analyzed_union_labels(
+        &[
+            UnionInput {
+                node: first,
+                label: "same".to_owned(),
+            },
+            UnionInput {
+                node: second,
+                label: "same".to_owned(),
+            },
+        ],
+        &nodes,
+    )
+    .expect_err("duplicate semantic arm identity must fail closed");
+    assert!(format!("{error:?}").contains("duplicated"));
+}
+
+#[test]
+fn union_occurrence_rejects_nul_delimited_label_collision() {
+    let node = RowSetNodeId("source".to_owned());
+    let nodes = BTreeMap::from([(
+        node.clone(),
+        RowSetExpr::Source {
+            source: source("source", SourceRole::Policy("source".to_owned())),
+            visibility: RowVisibility::Visible,
+        },
+    )]);
+    let error = analyzed_union_labels(
+        &[UnionInput {
+            node,
+            label: "outer\0inner".to_owned(),
+        }],
+        &nodes,
+    )
+    .expect_err("nested path delimiter must not occur inside a semantic label");
+    assert!(format!("{error:?}").contains("NUL-free"));
 }
 
 #[test]
@@ -1541,9 +1774,16 @@ fn current_join_via_lowers_source_column_row_id_target_and_correlations() {
     let program = lower_query_program(request, &mut resolver)
         .expect("source-column row-id join_via with correlations should lower");
 
-    assert!(program.lowered.terminals.iter().any(|terminal| matches!(
-        terminal.graph,
-        GraphBuilder::Project { ref input, .. }
+    let app_rows = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "app_rows")
+        .expect("app rows terminal");
+    assert_public_root_terminal(&app_rows.graph);
+    assert!(graph_any(&app_rows.graph, &|graph| matches!(
+        graph,
+        GraphBuilder::Project { input, .. }
             if matches!(
                 input.as_ref(),
                 GraphBuilder::Join { left, right, left_on, right_on, .. }
@@ -1693,9 +1933,16 @@ fn join_contribution_membership_can_use_projected_bridge_fields() {
     let program = lower_query_program(request, &mut resolver)
         .expect("join contribution membership should accept projected bridge fields");
 
-    assert!(program.lowered.terminals.iter().any(|terminal| matches!(
-        terminal.graph,
-        GraphBuilder::Project { ref input, ref fields }
+    let app_rows = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "app_rows")
+        .expect("app rows terminal");
+    assert_public_root_terminal(&app_rows.graph);
+    assert!(graph_any(&app_rows.graph, &|graph| matches!(
+        graph,
+        GraphBuilder::Project { input, fields }
             if fields.iter().any(|field| field.output_name == "row_uuid")
                 && matches!(
                     input.as_ref(),
@@ -1996,10 +2243,17 @@ fn correlated_path_optional_app_rows_materialize_parent_rows() {
     let program =
         lower_query_program(request, &mut resolver).expect("optional path app rows should lower");
 
-    assert!(matches!(
-        program.lowered.terminals.first().expect("lowered terminal").graph.clone(),
-        GraphBuilder::Table { ref table, .. } if table == "resolved_todos"
-    ));
+    let app_rows = &program
+        .lowered
+        .terminals
+        .first()
+        .expect("lowered terminal")
+        .graph;
+    assert_public_root_terminal(app_rows);
+    assert!(graph_any(app_rows, &|graph| matches!(
+        graph,
+        GraphBuilder::Table { table, .. } if table == "resolved_todos"
+    )));
     let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
     assert!(
         terminals
@@ -2048,7 +2302,7 @@ fn collector_tree_projects_authorized_child_rows_and_keeps_empty_optional_slots(
     };
     assert_eq!(
         tag.to_values().expect("child values")[1],
-        Value::Nullable(Some(Box::new(Value::String("allowed".to_owned()))))
+        Value::String("allowed".to_owned())
     );
 
     let empty_request = collector_request(policy_context());
@@ -2067,6 +2321,52 @@ fn collector_tree_projects_authorized_child_rows_and_keeps_empty_optional_slots(
         panic!("collector must render the named tags slot");
     };
     assert!(tags.is_empty(), "childless parent must render tags: []");
+}
+
+#[test]
+fn collector_layout_retains_public_magic_timestamp_fields_on_child_rows() {
+    let mut request = collector_request(system_policy_context());
+    let PayloadProjection::Tree(projection) = &mut request
+        .output
+        .app_rows
+        .as_mut()
+        .expect("app rows")
+        .projection
+    else {
+        panic!("collector request must use a tree projection");
+    };
+    projection.paths[0].fields = FieldProjection::Fields(BTreeSet::from([
+        "$createdAt".to_owned(),
+        "$updatedAt".to_owned(),
+        "title".to_owned(),
+    ]));
+    let program = lower_query_program(request, &mut InlineCollectorResolver::new(None))
+        .expect("magic timestamp child projection should lower");
+    let ProgramOutputSchemas::RowSet(outputs) = &program.lowered.output;
+    let descriptor = outputs
+        .iter()
+        .find_map(|output| match output {
+            OutputTerminalSchema::AppRows(schema) => Some(&schema.descriptor),
+            OutputTerminalSchema::Fact(_) => None,
+        })
+        .expect("app rows descriptor");
+    let tags = descriptor
+        .fields()
+        .iter()
+        .find(|field| field.name.as_deref() == Some("tags"))
+        .expect("tags output field");
+    let ValueType::Array(row) = &tags.value_type else {
+        panic!("tags must be an array");
+    };
+    let ValueType::Record(row) = row.as_ref() else {
+        panic!("tags must contain records");
+    };
+    assert!(row.field_index("title").is_some());
+    assert!(row.field_index("user_title").is_none());
+    assert!(row.field_index("$createdAt").is_some());
+    assert!(row.field_index("$updatedAt").is_some());
+    assert!(row.field_index("$createdBy").is_none());
+    assert!(row.field_index("$updatedBy").is_none());
 }
 
 #[test]
@@ -2128,7 +2428,7 @@ fn collector_tree_keeps_sibling_slots_distinct_and_nests_grandchildren_by_path()
         },
     );
     request.input.shape.nodes.insert(
-        nested_path,
+        nested_path.clone(),
         RowSetExpr::CorrelatedPathProjection {
             input: RowSetNodeId("child".to_owned()),
             child_input: nested_node,
@@ -2165,6 +2465,18 @@ fn collector_tree_keeps_sibling_slots_distinct_and_nests_grandchildren_by_path()
         ],
     });
 
+    let mut required_request = request.clone();
+    let RowSetExpr::CorrelatedPathProjection { requirement, .. } = required_request
+        .input
+        .shape
+        .nodes
+        .get_mut(&nested_path)
+        .expect("nested path")
+    else {
+        panic!("nested node must be a correlated path");
+    };
+    *requirement = CorrelationRequirement::MatchCorrelationCardinality;
+
     let program = lower_query_program(request, &mut InlineCollectorResolver::new(None))
         .expect("nested collector lowers");
     let graph = program
@@ -2191,6 +2503,27 @@ fn collector_tree_keeps_sibling_slots_distinct_and_nests_grandchildren_by_path()
         panic!("expected nested notes slot");
     };
     assert_eq!(notes.len(), 1);
+
+    let required_program =
+        lower_query_program(required_request, &mut InlineCollectorResolver::new(None))
+            .expect("nested required collector lowers");
+    let required_graph = required_program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "app_rows")
+        .expect("required app collector")
+        .graph
+        .clone();
+    let required_rows = run_collector_graph(required_graph);
+    let Value::Array(required_tags) = &required_rows[0].0[3] else {
+        panic!("expected required tags slot");
+    };
+    assert_eq!(
+        required_tags.len(),
+        1,
+        "a child whose required nested relation is missing must be filtered"
+    );
 }
 
 #[test]
@@ -2290,12 +2623,19 @@ fn correlated_path_required_app_rows_with_root_facts_filter_and_dedup_parent_row
     let program =
         lower_query_program(request, &mut resolver).expect("required path app rows should lower");
 
-    assert!(matches!(
-        program.lowered.terminals.first().expect("lowered terminal").graph.clone(),
+    let app_rows = &program
+        .lowered
+        .terminals
+        .first()
+        .expect("lowered terminal")
+        .graph;
+    assert_public_root_terminal(app_rows);
+    assert!(graph_any(app_rows, &|graph| matches!(
+        graph,
         GraphBuilder::ArgMinBy {
-            ref input,
-            ref group_cols,
-            ref order_cols,
+            input,
+            group_cols,
+            order_cols,
         } if matches!(group_cols.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
             && matches!(order_cols.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
             && matches!(
@@ -2309,7 +2649,7 @@ fn correlated_path_required_app_rows_with_root_facts_filter_and_dedup_parent_row
                                     && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "user_todo")
                         )
             )
-    ));
+    )));
     let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
     assert!(
         terminals
@@ -2340,10 +2680,12 @@ fn correlated_path_cardinality_scalar_correlation_lowers_like_at_least_one() {
     let mut resolver = FakeSourceResolver::default();
     let program = lower_query_program(request, &mut resolver).expect("cardinality lowers");
 
-    assert!(matches!(
-        program.lowered.terminals[0].graph,
+    let app_rows = &program.lowered.terminals[0].graph;
+    assert_public_root_terminal(app_rows);
+    assert!(graph_any(app_rows, &|graph| matches!(
+        graph,
         GraphBuilder::ArgMinBy { .. }
-    ));
+    )));
 }
 
 #[test]
@@ -2369,10 +2711,11 @@ fn correlated_path_app_rows_and_relation_facts_lower_to_sibling_sinks() {
         .iter()
         .find(|terminal| terminal.sink == "app_rows")
         .expect("app row terminal");
-    assert!(matches!(
-        app_rows.graph,
-        GraphBuilder::Table { ref table, .. } if table == "resolved_todos"
-    ));
+    assert_public_root_terminal(&app_rows.graph);
+    assert!(graph_any(&app_rows.graph, &|graph| matches!(
+        graph,
+        GraphBuilder::Table { table, .. } if table == "resolved_todos"
+    )));
     let relation_edges = program
         .lowered
         .terminals

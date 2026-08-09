@@ -478,6 +478,7 @@ where
                 peer_payload_inventory,
                 result_member_adds,
                 result_member_removes,
+                terminal_operations,
                 program_fact_adds,
                 program_fact_removes,
             } => {
@@ -492,6 +493,7 @@ where
                     authorization_progress: peer_payload_inventory.authorization_progress,
                     result_member_adds,
                     result_member_removes,
+                    terminal_operations,
                     program_fact_adds,
                     program_fact_removes,
                 })?;
@@ -4922,7 +4924,9 @@ where
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
-        let table = self.table_in_schema(version.table(), schema_version)?;
+        let table = self
+            .table_in_schema(version.table(), schema_version)?
+            .clone();
         let storage_tables = table.global_current_storage_tables();
         let (current_table, current_schema, expected_values) = match version.layer() {
             VersionLayer::Content => (
@@ -4933,7 +4937,7 @@ where
                     PhysicalCurrentClass::Global,
                 )?),
                 &storage_tables[0],
-                global_current_values(&table, version, Some(global_seq))?,
+                self.public_current_values(&table, version, Some(global_seq))?,
             ),
             VersionLayer::Deletion => (
                 groove::Intern::new(self.physical_current_table_for_schema(
@@ -5027,7 +5031,7 @@ where
     }
 
     pub(super) fn write_global_current_update(
-        &self,
+        &mut self,
         batch: &mut DatabaseBatch,
         version: &VersionRow,
         global_seq: GlobalSeq,
@@ -5047,8 +5051,7 @@ where
                 )?;
                 let logical = owned_record_from_storage_values(
                     &table.global_current_storage_tables()[0],
-                    global_current_values(&table, version, Some(global_seq))
-                        .expect("valid global current values"),
+                    self.public_current_values(&table, version, Some(global_seq))?,
                 )
                 .expect("valid global current row");
                 batch.update_raw(
@@ -5110,8 +5113,7 @@ where
                 )?;
                 let logical = owned_record_from_storage_values(
                     &table.ahead_current_storage_tables()[0],
-                    global_current_values(&table, version, None)
-                        .expect("valid ahead current values"),
+                    self.public_current_values(&table, version, None)?,
                 )
                 .expect("valid ahead current row");
                 batch.insert_raw(
@@ -5150,6 +5152,28 @@ where
             version.tx_node_alias(),
         );
         Ok(())
+    }
+
+    /// Build the physical current-source carrier consumed by Groove terminals.
+    /// History retains the authored operation payload, while current sources
+    /// expose self-contained handles so public Root assembly never needs a
+    /// higher-level row reconstruction pass.
+    fn public_current_values(
+        &mut self,
+        table: &TableSchema,
+        version: &VersionRow,
+        global_seq: Option<GlobalSeq>,
+    ) -> Result<Vec<Value>, Error> {
+        let mut values = global_current_values(table, version, global_seq)?;
+        for (index, column) in table.columns.iter().enumerate() {
+            let Some(kind) = column.large_value else {
+                continue;
+            };
+            let handle = self.large_value_handle_for_version(table, version, &column.name, kind)?;
+            values[GlobalCurrentRowRecord::USER_CELLS + index] =
+                Value::Nullable(Some(Box::new(Value::Bytes(handle))));
+        }
+        Ok(values)
     }
 
     pub(super) fn write_ahead_current_delete(

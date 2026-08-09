@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 
-use groove::ivm::{MultisinkDeltas, RecordDeltas};
+use groove::ivm::{MultisinkDeltas, RecordDeltas, TerminalOperation};
 use groove::records::{BorrowedRecord, OwnedRecord, RecordDescriptor, RecordProjector, Value};
 
 use super::codec::{
@@ -125,6 +125,9 @@ pub(crate) struct ResultTransitions {
     /// Root occurrences whose retained collector record changed in this tick.
     /// The future structured carrier can render exactly these parents.
     pub(crate) structured_app_row_changes: BTreeSet<RowUuid>,
+    /// Generic Groove terminal patches. These bypass relation/result assembly
+    /// and are forwarded unchanged to the subscription boundary.
+    pub(crate) terminal_operations: Vec<TerminalOperation>,
     pub(crate) allow_storage_witness_fallback: bool,
     pub(crate) observed_delta_batches: usize,
     pub(crate) observed_result_delta_batches: usize,
@@ -168,6 +171,9 @@ enum MaintainedTerminalKind {
     ReplacementDeletion(VersionWitnessSchema),
     RelationEdge(RelationEdgeSchema),
     StructuredAppRows(AppRowSchema),
+    /// Public aggregate rows are a one-shot output sibling. Maintained state
+    /// is driven by the typed AggregateResult fact terminal instead.
+    IgnoredAggregateAppRows,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -210,6 +216,9 @@ impl MaintainedSubscriptionView {
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     ) -> Result<ResultTransitions, super::Error> {
         let kind = schemas.get(sink)?;
+        if matches!(kind, MaintainedTerminalKind::IgnoredAggregateAppRows) {
+            return Ok(ResultTransitions::default());
+        }
         let observed_result_delta_batch = !deltas.is_empty() && kind.is_result_terminal();
         let mut decode_plan_cache = VersionDecodePlanCache::new();
         let decoded = deltas
@@ -240,6 +249,16 @@ impl MaintainedSubscriptionView {
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     ) -> Result<ResultTransitions, super::Error> {
         let mut transitions = ResultTransitions::default();
+        for (sink, terminal) in &deltas.terminal_sinks {
+            if matches!(
+                schemas.get(sink)?,
+                MaintainedTerminalKind::StructuredAppRows(_)
+            ) {
+                transitions
+                    .terminal_operations
+                    .extend(terminal.operations.iter().cloned());
+            }
+        }
         for (sink, deltas) in deltas.sinks {
             let delta_transitions =
                 self.apply_typed_deltas(&sink, &deltas, schemas, tables, node_aliases)?;
@@ -456,6 +475,13 @@ impl MaintainedSubscriptionView {
             .next()
     }
 
+    pub(crate) fn structured_app_rows(&self) -> Vec<(RowUuid, OwnedRecord)> {
+        self.structured_app_rows
+            .keys()
+            .filter_map(|root| self.structured_app_row(*root).map(|record| (*root, record)))
+            .collect()
+    }
+
     fn apply_structured_app_row_delta(&mut self, root: RowUuid, record: OwnedRecord, weight: i64) {
         self.structured_app_row_descriptor = Some(*record.descriptor());
         let records = self.structured_app_rows.entry(root).or_default();
@@ -633,6 +659,11 @@ impl MaintainedTerminalSchemas {
                         terminal.sink.clone(),
                         MaintainedTerminalKind::StructuredAppRows(rows.clone()),
                     );
+                } else {
+                    sinks.insert(
+                        terminal.sink.clone(),
+                        MaintainedTerminalKind::IgnoredAggregateAppRows,
+                    );
                 }
                 continue;
             };
@@ -727,6 +758,9 @@ fn decode_typed_terminal_record(
     decode_plan_cache: &mut VersionDecodePlanCache,
 ) -> Result<DecodedMaintainedEvent, super::Error> {
     match kind {
+        MaintainedTerminalKind::IgnoredAggregateAppRows => {
+            unreachable!("ignored aggregate app-row terminals are filtered before record decoding")
+        }
         MaintainedTerminalKind::ResultCurrent(schema) => {
             let table_name = match record.get_idx(field_idx(record, &schema.table_field)?)? {
                 Value::String(value) => value,
@@ -753,7 +787,26 @@ fn decode_typed_terminal_record(
                     "maintained result membership occurrence must include its root row",
                 ));
             };
-            let occurrence_id = OutputOccurrenceId::new(*root, joined.iter().copied());
+            let union_arms = schema
+                .occurrence_union_arm_fields
+                .iter()
+                .map(|(position, field)| {
+                    let label = match record.get_idx(field_idx(record, field)?)? {
+                        Value::String(label) if !label.is_empty() => label.clone(),
+                        _ => {
+                            return Err(super::Error::InvalidStoredValue(
+                                "maintained result union arm must be a non-empty string",
+                            ));
+                        }
+                    };
+                    Ok((*position, label))
+                })
+                .collect::<Result<Vec<_>, super::Error>>()?;
+            let occurrence_id =
+                OutputOccurrenceId::with_union_arms(*root, joined.iter().copied(), union_arms)
+                    .ok_or(super::Error::InvalidStoredValue(
+                        "maintained result union occurrence carrier is malformed",
+                    ))?;
             let (tx_time_field, tx_node_field) = match &schema.version {
                 super::query_engine::ResultMembershipVersionSchema::Content(content) => {
                     (&content.tx_time_field, &content.tx_node_field)
@@ -1445,7 +1498,7 @@ fn option_vec_bytes<T>(value: &Option<Vec<T>>) -> usize {
 fn result_member_entry_bytes(member: &ResultMemberEntry) -> usize {
     mem::size_of_val(member)
         + match member {
-            ResultMemberEntry::Row(row) => {
+            ResultMemberEntry::Row(row) | ResultMemberEntry::TypedRow { row, .. } => {
                 intern_string_bytes(&row.table)
                     + option_vec_bytes(&row.branch_or_prefix)
                     + option_vec_bytes(&row.row_digest)
@@ -1598,6 +1651,7 @@ fn replacement_winner(
 mod tests {
     use std::collections::BTreeMap;
 
+    use groove::ivm::RecordDelta;
     use groove::records::Value;
     use groove::schema::ColumnType;
 
@@ -1709,6 +1763,112 @@ mod tests {
         assert!(second.adds.is_empty());
         assert_eq!(second.removes, vec![member]);
         assert!(maintained.result_weights.is_empty());
+    }
+
+    #[test]
+    fn typed_union_terminal_removes_one_arm_and_rehydrates_the_other() {
+        let descriptor = RecordDescriptor::new([
+            ("table", groove::records::ValueType::String),
+            ("row_uuid", groove::records::ValueType::Uuid),
+            ("joined_uuid", groove::records::ValueType::Uuid),
+            ("union_arm", groove::records::ValueType::String),
+            ("tx_time", groove::records::ValueType::U64),
+            ("tx_node", groove::records::ValueType::U64),
+        ]);
+        let schema = ResultMembershipSchema {
+            table_field: "table".to_owned(),
+            row_field: "row_uuid".to_owned(),
+            occurrence_id_fields: vec!["row_uuid".to_owned(), "joined_uuid".to_owned()],
+            occurrence_union_arm_fields: BTreeMap::from([(0, "union_arm".to_owned())]),
+            payload_fields: Vec::new(),
+            branch_or_prefix_field: None,
+            version: ResultMembershipVersionSchema::Content(
+                super::super::query_engine::ContentVersionFields {
+                    tx_time_field: "tx_time".to_owned(),
+                    tx_node_field: "tx_node".to_owned(),
+                },
+            ),
+            settle_position_field: None,
+            routing_param_fields: BTreeSet::new(),
+        };
+        let schemas = MaintainedTerminalSchemas {
+            sinks: BTreeMap::from([(
+                "maintained.result_current".to_owned(),
+                MaintainedTerminalKind::ResultCurrent(schema),
+            )]),
+        };
+        let tables = BTreeMap::from([("todos".to_owned(), table())]);
+        let encoded = |label: &str, weight| RecordDeltas {
+            descriptor: descriptor.clone(),
+            deltas: vec![RecordDelta {
+                record: descriptor
+                    .create(&[
+                        Value::String("todos".to_owned()),
+                        Value::Uuid(row(1).0),
+                        Value::Uuid(row(2).0),
+                        Value::String(label.to_owned()),
+                        Value::U64(10),
+                        Value::U64(10),
+                    ])
+                    .unwrap()
+                    .into(),
+                weight,
+            }],
+        };
+        let mut maintained = MaintainedSubscriptionView::default();
+        let direct = maintained
+            .apply_typed_deltas(
+                "maintained.result_current",
+                &encoded("direct", 1),
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap()
+            .adds
+            .pop()
+            .unwrap();
+        let inherited = maintained
+            .apply_typed_deltas(
+                "maintained.result_current",
+                &encoded("inherited", 1),
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap()
+            .adds
+            .pop()
+            .unwrap();
+        assert_ne!(
+            direct.output_occurrence_id(),
+            inherited.output_occurrence_id()
+        );
+
+        let removed = maintained
+            .apply_typed_deltas(
+                "maintained.result_current",
+                &encoded("direct", -1),
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap();
+        assert_eq!(removed.removes, [direct]);
+        assert_eq!(maintained.result_weights.get(&inherited), Some(&1));
+
+        let mut reopened = MaintainedSubscriptionView::default();
+        let rehydrated = reopened
+            .apply_typed_deltas(
+                "maintained.result_current",
+                &encoded("inherited", 1),
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap();
+        assert_eq!(rehydrated.adds, std::slice::from_ref(&inherited));
+        assert_eq!(reopened.result_weights.get(&inherited), Some(&1));
     }
 
     #[test]

@@ -34,7 +34,7 @@ Invariant digest:
 - `INV-SYNC-26`: A receiver detecting a referenced version without its body MUST be able to request exactly those `(table, row_uuid, tx_time, tx_node_id)` payloads, and the server MUST serve them subject to ordinary read policy. The repair vocabulary and server/client repair helpers are implemented and activated for declared known-state subscriptions.
 - `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams; any local eviction touching stored row-version bodies invalidates persisted fast declarations before another declaration can be made.
 - `INV-SYNC-29`: A fast known-state declaration carrying authorization progress may suppress a reset for a pre-cursor membership difference only when its server-stamped authorization-progress token matches the serving peer's current token for that reader and canonical binding view. `crates/jazz/src/peer.rs::tests::fast_authorization_progress_bounds_membership_resets` enforces both bounds.
-- `INV-SYNC-28`: Structured-output wire v4 MUST carry recursive snapshots and whole-parent replacements in both complete and chunked view updates, reject recursive payloads exceeding named depth/width limits before semantic apply, and provide no v3 compatibility path.
+- `INV-SYNC-28`: Structured-output wire v6 MUST carry authoritative terminal resets and typed root/path edits in atomic logical view updates, fragment only at the transport boundary, and provide no partial semantic-update path.
 - `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as `Fate::Pending` with `DurabilityTier::Local` and emit exactly one `SyncMessage::CommitUnit`.
 - `INV-TX-3`: A commit unit whose Transaction.ntotalwrites does not equal the delivered version count MUST be rejected by the fate authority as RejectionReason::MalformedCommit(...)...
 - `INV-TX-4`: Duplicate commit units with identical payloads MUST be idempotent and return the already-known fate; duplicate units with conflicting payloads MUST fail as Error::Conf...
@@ -231,15 +231,15 @@ and `cold_reset_bulk_ingest_matches_incremental_ingest`
 The remaining reset-specific bypass and the move to an `OrderedKvStorage`
 transaction are implementation work, not protocol invariants.
 
-**Target structured-output delivery (v5).** A structured reset carries an
-ordered recursive snapshot. An incremental update carries whole-parent
-replacements addressed by stable output occurrence; its extensible envelope
-reserves distinct tags for future narrower delta shapes without changing the v5
-meaning. `SyncMessage::ViewUpdate` carries the structured-output vocabulary as
-one logical message; generic transport fragmentation publishes no partial
-logical replacement. Row/version payload references and dedup remain separate
-from the rendered tree so v5 does not duplicate row bodies already available
-through typed members and bundles.
+**Structured-output delivery (v6).** An authoritative reset replaces the
+receiver's complete cached terminal state before any following FIFO edit.
+Incremental updates carry typed, stable-keyed root/path `Insert`, `Update`,
+`Remove`, and `Move` operations emitted by the Groove terminal; they do not
+carry relation edges, row batches for facade-side assembly, or whole-result
+replacements. `SyncMessage::ViewUpdate` carries the terminal operations as one
+logical message, and generic transport fragmentation publishes no partial
+semantic update. Row/version payload references and dedup remain separate from
+the terminal edit stream.
 
 _Further invariants._ `INV-SYNC-17` — a result add carries enough
 deletion-register witness to reconstruct the row's visible presence/absence.
