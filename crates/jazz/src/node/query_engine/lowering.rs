@@ -5276,9 +5276,11 @@ struct CollectFlatField {
     input: String,
     output: String,
     value_type: ValueType,
+    output_value_type: ValueType,
     source_field: Option<String>,
     is_row_id: bool,
     is_presence: bool,
+    is_output: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -5355,7 +5357,14 @@ fn lower_collect_by_app_rows(
         layout
             .root_fields
             .iter()
-            .map(|field| CollectByField::renamed(&field.input, &field.output)),
+            .filter(|field| field.is_output)
+            .map(|field| {
+                if field.is_row_id || field.value_type == field.output_value_type {
+                    CollectByField::renamed(&field.input, &field.output)
+                } else {
+                    CollectByField::renamed_unwrap_nullable(&field.input, &field.output)
+                }
+            }),
         layout
             .slots
             .iter()
@@ -5431,6 +5440,22 @@ fn collect_layout(
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
 ) -> CapabilityResult<CollectLayout> {
+    let mut selected_root = BTreeSet::from([root_source.row_shape.row_uuid_field.clone()]);
+    match &projection.fields {
+        FieldProjection::All => selected_root.extend(
+            root_source
+                .table_schema
+                .columns
+                .iter()
+                .map(|column| user_column_field(&column.name)),
+        ),
+        FieldProjection::Fields(fields) => selected_root.extend(
+            fields
+                .iter()
+                .filter(|field| field.as_str() != "id")
+                .map(|field| user_column_field(field)),
+        ),
+    }
     let root_fields = root_source
         .row_shape
         .descriptor
@@ -5441,15 +5466,39 @@ fn collect_layout(
                 input: format!("__collect_root_{name}"),
                 output: name.clone(),
                 value_type: field.value_type.clone(),
+                output_value_type: collect_logical_output_type(
+                    root_source,
+                    name,
+                    &field.value_type,
+                ),
                 source_field: Some(name.clone()),
                 is_row_id: name == &root_source.row_shape.row_uuid_field,
                 is_presence: false,
+                is_output: selected_root.contains(name),
             })
         })
         .collect::<Vec<_>>();
     let mut next_slot = 0usize;
     let slots = collect_slot_layouts(&projection.paths, resolved_sources, 1, &mut next_slot)?;
     Ok(CollectLayout { root_fields, slots })
+}
+
+fn collect_logical_output_type(
+    source: &ResolvedSource,
+    source_field: &str,
+    fallback: &ValueType,
+) -> ValueType {
+    if source_field == source.row_shape.row_uuid_field {
+        return fallback.clone();
+    }
+    let logical = logical_user_column(source_field);
+    source
+        .table_schema
+        .columns
+        .iter()
+        .find(|column| column.name == logical)
+        .map(|column| column.column_type.clone())
+        .unwrap_or_else(|| fallback.clone())
 }
 
 fn collect_slot_layouts(
@@ -5506,6 +5555,23 @@ fn collect_slot_layouts(
                             "association projection field {source_field:?} must be nullable to retain parent anchors"
                         ))));
                     }
+                    let output_value_type = if is_row_id {
+                        value_type.clone()
+                    } else {
+                        let logical = logical_user_column(&source_field);
+                        source
+                            .table_schema
+                            .columns
+                            .iter()
+                            .find(|column| column.name == logical)
+                            .map(|column| column.column_type.clone())
+                            .ok_or_else(|| {
+                                single_gap_report(UnsupportedReason::Runtime(format!(
+                                    "collector field {source_field:?} is absent from logical table {:?}",
+                                    source.table_schema.name
+                                )))
+                            })?
+                    };
                     Ok(CollectFlatField {
                         input: format!("{prefix}_{source_field}"),
                         output: if is_row_id {
@@ -5514,9 +5580,11 @@ fn collect_slot_layouts(
                             logical_user_column(&source_field).to_owned()
                         },
                         value_type,
+                        output_value_type,
                         source_field: Some(source_field),
                         is_row_id,
                         is_presence: false,
+                        is_output: true,
                     })
                 })
                 .collect::<CapabilityResult<Vec<_>>>()?;
@@ -5744,9 +5812,13 @@ fn collect_slot_flat_field_names(slot: &CollectSlotLayout) -> BTreeSet<String> {
 fn collect_slot_builder(slot: &CollectSlotLayout, parent_row_id: &str) -> CollectBySlotBuilder {
     CollectBySlotBuilder::new(
         [parent_row_id],
-        slot.fields
-            .iter()
-            .map(|field| CollectByField::renamed(&field.input, &field.output)),
+        slot.fields.iter().map(|field| {
+            if field.is_row_id || field.value_type == field.output_value_type {
+                CollectByField::renamed(&field.input, &field.output)
+            } else {
+                CollectByField::renamed_unwrap_nullable(&field.input, &field.output)
+            }
+        }),
         &slot.collection_field,
         slot.children
             .iter()
@@ -5763,7 +5835,8 @@ fn collect_output_descriptor(layout: &CollectLayout) -> CapabilityResult<RecordD
     let mut fields = layout
         .root_fields
         .iter()
-        .map(|field| (field.output.clone(), field.value_type.clone()))
+        .filter(|field| field.is_output)
+        .map(|field| (field.output.clone(), field.output_value_type.clone()))
         .collect::<Vec<_>>();
     fields.extend(
         layout
@@ -5788,7 +5861,7 @@ fn collect_slot_output_descriptor(slot: &CollectSlotLayout) -> CapabilityResult<
     let mut fields = slot
         .fields
         .iter()
-        .map(|field| (field.output.clone(), field.value_type.clone()))
+        .map(|field| (field.output.clone(), field.output_value_type.clone()))
         .collect::<Vec<_>>();
     fields.extend(
         slot.children

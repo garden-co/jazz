@@ -293,6 +293,7 @@ pub struct CollectByProjection {
     pub field: String,
     pub field_idx: usize,
     pub output_name: String,
+    pub unwrap_nullable: bool,
 }
 
 /// One named, ordered child array rendered by a [`CollectByOp`].

@@ -5190,7 +5190,11 @@ impl CurrentRow {
             field.name.as_deref() == Some(user_name.as_str())
                 || field.name.as_deref() == Some(column)
         })?;
-        nullable_value(self.record.borrowed().get_idx(idx).ok()?).ok()?
+        match self.record.borrowed().get_idx(idx).ok()? {
+            Value::Nullable(None) => None,
+            Value::Nullable(Some(value)) => Some(*value),
+            value => Some(value),
+        }
     }
 
     /// Encoded groove record backing this projected current row.

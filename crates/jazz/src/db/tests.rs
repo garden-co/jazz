@@ -3415,15 +3415,7 @@ fn array_subquery_one_shot_and_maintained_subscription_are_equivalent() {
     let maintained = snapshot_from_event(block_on(subscription.next_event()).unwrap());
 
     assert_eq!(
-        sorted_related_text_values(
-            &maintained,
-            &schema,
-            "todos",
-            row(0x51),
-            "comments",
-            "comments",
-            "body"
-        ),
+        terminal_nested_text_values(&maintained, row(0x51), "comments", "body"),
         sorted_related_text_values(
             &one_shot,
             &schema,
@@ -3476,15 +3468,7 @@ fn array_subquery_subscription_projects_late_root_and_existing_forward_target() 
     );
     assert_eq!(root.cell(schema_table(&schema, "todos"), "owner_id"), None);
     assert_eq!(
-        sorted_related_text_values(
-            &snapshot,
-            &schema,
-            "todos",
-            row(0x52),
-            "owner",
-            "users",
-            "name"
-        ),
+        terminal_nested_text_values(&snapshot, row(0x52), "owner", "name"),
         vec!["owner".to_owned()]
     );
 }
@@ -3524,15 +3508,7 @@ fn array_subquery_subscription_projects_late_camel_case_root_and_existing_forwar
     let snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
     assert_eq!(snapshot.root_count, 1);
     assert_eq!(
-        sorted_related_text_values(
-            &snapshot,
-            &schema,
-            "issues",
-            row(0x53),
-            "project",
-            "projects",
-            "name"
-        ),
+        terminal_nested_text_values(&snapshot, row(0x53), "project", "name"),
         vec!["project".to_owned()]
     );
 }

@@ -2204,6 +2204,19 @@ impl IvmRuntime {
                         });
                     }
                 }
+                OpType::CollectBy(collect_by) => {
+                    if let [input] = node.descriptor.inputs.as_slice()
+                        && let Some(input_node) = self.graph.node(*input)
+                    {
+                        referenced.insert(ArrangementKey {
+                            scope: ScopeId::root(),
+                            input: *input,
+                            fields: Arc::from(collect_by.group_fields.clone()),
+                            descriptor: input_node.descriptor.output,
+                            comparison: ValueComparison::Exact,
+                        });
+                    }
+                }
                 OpType::Aggregate(aggregate) => {
                     if let [input] = node.descriptor.inputs.as_slice()
                         && let Some(input_node) = self.graph.node(*input)
@@ -7503,7 +7516,7 @@ fn collect_by_descriptor(
         let index = resolve_field_ref(input, &field.field)?;
         output.push((
             field.output_name.clone(),
-            input.fields()[index].value_type.clone(),
+            collect_by_field_value_type(input, index, field)?,
         ));
     }
     let mut child_names = HashSet::new();
@@ -7517,7 +7530,7 @@ fn collect_by_descriptor(
         let index = resolve_field_ref(input, &field.field)?;
         child.push((
             field.output_name.clone(),
-            input.fields()[index].value_type.clone(),
+            collect_by_field_value_type(input, index, field)?,
         ));
     }
     output.push((
@@ -7550,7 +7563,7 @@ fn collect_by_tree_descriptor(
         let index = resolve_field_ref(input, &field.field)?;
         output.push((
             field.output_name.clone(),
-            input.fields()[index].value_type.clone(),
+            collect_by_field_value_type(input, index, field)?,
         ));
     }
     for slot in slots {
@@ -7600,7 +7613,7 @@ fn collect_by_slot_descriptor(
         let index = resolve_field_ref(input, &field.field)?;
         output.push((
             field.output_name.clone(),
-            input.fields()[index].value_type.clone(),
+            collect_by_field_value_type(input, index, field)?,
         ));
     }
     for nested in &slot.slots {
@@ -7760,7 +7773,7 @@ fn collect_by_expand_descriptor(
             let index = resolve_field_ref(input, &field.field)?;
             Ok((
                 field.output_name.clone(),
-                input.fields()[index].value_type.clone(),
+                collect_by_field_value_type(input, index, field)?,
             ))
         })
         .collect::<Result<Vec<_>, IvmRuntimeError>>()
@@ -7778,9 +7791,25 @@ fn collect_by_projections(
                 field: field_ref_name(input, &field.field)?,
                 field_idx: resolve_field_ref(input, &field.field)?,
                 output_name: field.output_name.clone(),
+                unwrap_nullable: field.unwrap_nullable,
             })
         })
         .collect()
+}
+
+fn collect_by_field_value_type(
+    input: &RecordDescriptor,
+    index: usize,
+    field: &CollectByField,
+) -> Result<ValueType, IvmRuntimeError> {
+    let value_type = input.fields()[index].value_type.clone();
+    if !field.unwrap_nullable {
+        return Ok(value_type);
+    }
+    Ok(match value_type {
+        ValueType::Nullable(inner) => *inner,
+        value_type => value_type,
+    })
 }
 
 fn validate_collect_by_key_types(
@@ -9691,6 +9720,46 @@ fn records_before_deltas(
     records.into_iter().collect()
 }
 
+fn collect_by_projection_value_type(
+    input_desc: RecordDescriptor,
+    field: &CollectByProjection,
+) -> Result<ValueType, IvmRuntimeError> {
+    let value_type = input_desc
+        .fields()
+        .get(field.field_idx)
+        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))?
+        .value_type
+        .clone();
+    if !field.unwrap_nullable {
+        return Ok(value_type);
+    }
+    Ok(match value_type {
+        ValueType::Nullable(inner) => *inner,
+        value_type => value_type,
+    })
+}
+
+fn collect_by_projected_value(
+    values: &[Value],
+    field: &CollectByProjection,
+) -> Result<Value, IvmRuntimeError> {
+    let value = values
+        .get(field.field_idx)
+        .cloned()
+        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))?;
+    if !field.unwrap_nullable {
+        return Ok(value);
+    }
+    match value {
+        Value::Nullable(Some(value)) => Ok(*value),
+        Value::Nullable(None) => Err(IvmRuntimeError::InvalidCollectBy(format!(
+            "collect field {:?} cannot unwrap NULL on a present row",
+            field.output_name
+        ))),
+        value => Ok(value),
+    }
+}
+
 fn collect_by_parent_from_records(
     input_desc: RecordDescriptor,
     output_desc: RecordDescriptor,
@@ -9706,12 +9775,7 @@ fn collect_by_parent_from_records(
     let mut values = collect_by
         .parent_fields
         .iter()
-        .map(|field| {
-            parent_values
-                .get(field.field_idx)
-                .cloned()
-                .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))
-        })
+        .map(|field| collect_by_projected_value(&parent_values, field))
         .collect::<Result<Vec<_>, _>>()?;
     let window = collect_by_window_from_records(input_desc, records, collect_by)?;
     let mut children = Vec::new();
@@ -9722,12 +9786,7 @@ fn collect_by_parent_from_records(
         let child_values = collect_by
             .child_fields
             .iter()
-            .map(|field| {
-                source_values
-                    .get(field.field_idx)
-                    .cloned()
-                    .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))
-            })
+            .map(|field| collect_by_projected_value(&source_values, field))
             .collect::<Result<Vec<_>, _>>()?;
         let child = OwnedRecord::new(
             collect_by.child_descriptor.create(&child_values)?,
@@ -9756,12 +9815,7 @@ fn collect_by_tree_parent_from_records(
     let mut values = collect_by
         .parent_fields
         .iter()
-        .map(|field| {
-            parent_values
-                .get(field.field_idx)
-                .cloned()
-                .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))
-        })
+        .map(|field| collect_by_projected_value(&parent_values, field))
         .collect::<Result<Vec<_>, _>>()?;
     values.extend(render_collect_by_slots(
         input_desc,
@@ -9789,13 +9843,17 @@ fn render_collect_by_slots(
             // A nested flat association can repeat its owning child once for
             // every grandchild. Collapse those repetitions by the rendered
             // child projection before applying this slot's order/window.
-            let child_key_descriptor =
-                RecordDescriptor::new(slot.child_fields.iter().map(|field| {
-                    (
+            let child_key_fields = slot
+                .child_fields
+                .iter()
+                .map(|field| {
+                    Ok((
                         field.output_name.clone(),
-                        input_desc.fields()[field.field_idx].value_type.clone(),
-                    )
-                }));
+                        collect_by_projection_value_type(input_desc, field)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+            let child_key_descriptor = RecordDescriptor::new(child_key_fields);
             let mut candidates = BTreeMap::<Bytes, Bytes>::new();
             for (record, weight) in records {
                 if *weight <= 0
@@ -9815,12 +9873,7 @@ fn render_collect_by_slots(
                 let child_values = slot
                     .child_fields
                     .iter()
-                    .map(|field| {
-                        source_values
-                            .get(field.field_idx)
-                            .cloned()
-                            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))
-                    })
+                    .map(|field| collect_by_projected_value(&source_values, field))
                     .collect::<Result<Vec<_>, _>>()?;
                 candidates
                     .entry(child_key_descriptor.create(&child_values)?.into())
@@ -9839,12 +9892,7 @@ fn render_collect_by_slots(
                 let mut child_values = slot
                     .child_fields
                     .iter()
-                    .map(|field| {
-                        source_values
-                            .get(field.field_idx)
-                            .cloned()
-                            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))
-                    })
+                    .map(|field| collect_by_projected_value(&source_values, field))
                     .collect::<Result<Vec<_>, _>>()?;
                 child_values.extend(render_collect_by_slots(
                     input_desc,
@@ -9922,12 +9970,7 @@ fn collect_by_expanded_window(
         let tuple = collect_by
             .tuple_fields
             .iter()
-            .map(|field| {
-                values
-                    .get(field.field_idx)
-                    .cloned()
-                    .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))
-            })
+            .map(|field| collect_by_projected_value(&values, field))
             .collect::<Result<Vec<_>, _>>()?;
         expanded.insert(occurrence, output_desc.create(&tuple)?.into());
     }

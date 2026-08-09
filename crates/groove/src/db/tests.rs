@@ -5180,6 +5180,37 @@ fn collect_by_suppresses_unchanged_rendered_group_and_replaces_once_at_boundary(
 }
 
 #[test]
+fn one_shot_query_does_not_discard_live_collect_by_arrangement() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database.subscribe_one_sink(history_collect_by(2)).unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(collect_parent(1, &[(10, "first")]), 1)]
+    );
+
+    // One-shot queries collect their ephemeral graph immediately. That GC
+    // boundary must retain arrangements owned by an unrelated live terminal.
+    let snapshot = database.query_graph(GraphBuilder::table("rows")).unwrap();
+    assert!(snapshot.is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 20, 20, "second"));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (collect_parent(1, &[(10, "first")]), -1),
+            (collect_parent(1, &[(10, "first"), (20, "second")]), 1),
+        ]
+    );
+}
+
+#[test]
 fn collect_by_tree_renders_sibling_slots_and_grandchildren_with_independent_windows() {
     let storage = MemoryStorage::new(&["tree"]);
     let mut database = Database::new(collect_tree_schema(), storage).unwrap();

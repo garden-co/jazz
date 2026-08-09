@@ -859,6 +859,10 @@ pub struct TopByOrder {
 pub struct CollectByField {
     pub field: FieldRef,
     pub output_name: String,
+    /// Remove at most one nullable wrapper while rendering the terminal field.
+    /// This is useful when a flat union makes an otherwise required field
+    /// nullable solely to represent an absent child row.
+    pub unwrap_nullable: bool,
 }
 
 impl CollectByField {
@@ -867,6 +871,7 @@ impl CollectByField {
         Self {
             field: FieldRef::name(field.clone()),
             output_name: field,
+            unwrap_nullable: false,
         }
     }
 
@@ -874,6 +879,18 @@ impl CollectByField {
         Self {
             field: FieldRef::name(field),
             output_name: output_name.into(),
+            unwrap_nullable: false,
+        }
+    }
+
+    pub fn renamed_unwrap_nullable(
+        field: impl Into<String>,
+        output_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            field: FieldRef::name(field),
+            output_name: output_name.into(),
+            unwrap_nullable: true,
         }
     }
 }
@@ -891,6 +908,19 @@ impl TopByOrder {
             field: FieldRef::name(field),
             direction: TopByDirection::Desc,
         }
+    }
+}
+
+fn collect_projection_output_type(
+    input: &ValueType,
+    projection: &CollectByProjection,
+) -> Option<ValueType> {
+    if !projection.unwrap_nullable {
+        return Some(input.clone());
+    }
+    match input {
+        ValueType::Nullable(inner) => Some((**inner).clone()),
+        other => Some(other.clone()),
     }
 }
 
@@ -1156,7 +1186,9 @@ impl NodeDescriptor {
                     {
                         let input_field = &input_outputs[0].fields()[projection.field_idx];
                         if output_field.name.as_deref() != Some(projection.output_name.as_str())
-                            || output_field.value_type != input_field.value_type
+                            || collect_projection_output_type(&input_field.value_type, projection)
+                                .as_ref()
+                                != Some(&output_field.value_type)
                         {
                             return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
                         }
@@ -1210,7 +1242,9 @@ impl NodeDescriptor {
                                 len: input_outputs[0].fields().len(),
                             })?;
                         if output_field.name.as_deref() != Some(projection.output_name.as_str())
-                            || output_field.value_type != input_field.value_type
+                            || collect_projection_output_type(&input_field.value_type, projection)
+                                .as_ref()
+                                != Some(&output_field.value_type)
                         {
                             return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
                         }
@@ -1293,7 +1327,9 @@ impl NodeDescriptor {
                 {
                     let input_field = &input_outputs[0].fields()[projection.field_idx];
                     if output_field.name.as_deref() != Some(projection.output_name.as_str())
-                        || output_field.value_type != input_field.value_type
+                        || collect_projection_output_type(&input_field.value_type, projection)
+                            .as_ref()
+                            != Some(&output_field.value_type)
                     {
                         return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
                     }
@@ -1306,7 +1342,9 @@ impl NodeDescriptor {
                 {
                     let input_field = &input_outputs[0].fields()[projection.field_idx];
                     if child_field.name.as_deref() != Some(projection.output_name.as_str())
-                        || child_field.value_type != input_field.value_type
+                        || collect_projection_output_type(&input_field.value_type, projection)
+                            .as_ref()
+                            != Some(&child_field.value_type)
                     {
                         return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
                     }
@@ -1866,11 +1904,13 @@ mod tests {
                         field: "f0".to_owned(),
                         field_idx: 0,
                         output_name: "f0".to_owned(),
+                        unwrap_nullable: false,
                     }],
                     child_fields: vec![CollectByProjection {
                         field: "f0".to_owned(),
                         field_idx: 0,
                         output_name: "f0".to_owned(),
+                        unwrap_nullable: false,
                     }],
                     child_descriptor: child,
                     collection_field: "children".to_owned(),
