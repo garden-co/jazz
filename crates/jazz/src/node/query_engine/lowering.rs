@@ -4944,25 +4944,10 @@ fn lowered_terminals(
     // domain rather than only `root_route_fields` to keep routed maintained
     // array queries on their existing fact-terminal path; the tree collector
     // cannot retain any routed binding fields yet.
-    let has_routed_tree_app_projection = matches!(
-        &request.output.app_rows,
-        Some(AppRowOutputRequest {
-            projection: PayloadProjection::Tree(tree),
-            ..
-        }) if !tree.paths.is_empty() && !routing_param_fields.is_empty()
-    );
-    if let Some(app_rows) = &request.output.app_rows
-        && !has_routed_tree_app_projection
-    {
+    if let Some(app_rows) = &request.output.app_rows {
         let projected_output = projected_multisource_terminal(plan, source);
         let (graph, descriptor, hidden_fields) = match app_rows.projection.clone() {
             PayloadProjection::Tree(tree) if !tree.paths.is_empty() => {
-                if !root_route_fields.is_empty() {
-                    return Err(single_gap_report(UnsupportedReason::Operator(
-                        "tree app projections with routed parameters are not lowered yet"
-                            .to_owned(),
-                    )));
-                }
                 let collected = lower_collect_by_app_rows(
                     closure.visible_root.clone(),
                     &tree,
@@ -4970,6 +4955,7 @@ fn lowered_terminals(
                     source,
                     resolved_sources,
                     request,
+                    &root_route_fields,
                 )?;
                 (
                     collected.graph,
@@ -5303,8 +5289,34 @@ fn lower_collect_by_app_rows(
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
+    route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<LoweredCollectByAppRows> {
     let mut layout = collect_layout(projection, root_source, resolved_sources)?;
+    let domain = parameter_domain_for_request(request).map_err(single_gap_report)?;
+    for route_field in route_fields {
+        let value_type = domain
+            .claim_params
+            .get(route_field)
+            .map(|claim| claim.ty.clone())
+            .or_else(|| {
+                domain.user_params.iter().find_map(|(name, ty)| {
+                    (route_param_field(name) == *route_field).then(|| ty.clone())
+                })
+            })
+            .ok_or_else(|| {
+                single_gap_report(UnsupportedReason::Runtime(format!(
+                    "collector route field '{route_field}' has no parameter type"
+                )))
+            })?;
+        layout.root_fields.push(CollectFlatField {
+            input: route_field.clone(),
+            output: route_field.clone(),
+            value_type,
+            source_field: Some(route_field.clone()),
+            is_row_id: false,
+            is_presence: false,
+        });
+    }
     align_collect_join_key_types(&mut layout.slots, plan, resolved_sources, request)?;
     let root_context = root_collect_context_graph(visible_root.clone(), &layout)?;
     let mut association_graphs = Vec::new();
@@ -5343,7 +5355,7 @@ fn lower_collect_by_app_rows(
         .clone();
     let graph = GraphBuilder::collect_by_tree(
         input,
-        [root_group.clone()],
+        std::iter::once(root_group.clone()).chain(route_fields.iter().cloned()),
         layout
             .root_fields
             .iter()
@@ -5351,12 +5363,15 @@ fn lower_collect_by_app_rows(
         layout
             .slots
             .iter()
-            .map(|slot| collect_slot_builder(slot, &root_group)),
+            .map(|slot| collect_slot_builder(slot, &root_group, route_fields)),
     );
     Ok(LoweredCollectByAppRows {
         graph,
         descriptor,
-        hidden_fields: hidden_source_fields(&root_source.row_shape),
+        hidden_fields: hidden_source_fields(&root_source.row_shape)
+            .into_iter()
+            .chain(route_fields.iter().cloned())
+            .collect(),
     })
 }
 
@@ -5733,16 +5748,20 @@ fn collect_slot_flat_field_names(slot: &CollectSlotLayout) -> BTreeSet<String> {
         .collect()
 }
 
-fn collect_slot_builder(slot: &CollectSlotLayout, parent_row_id: &str) -> CollectBySlotBuilder {
+fn collect_slot_builder(
+    slot: &CollectSlotLayout,
+    parent_row_id: &str,
+    route_fields: &BTreeSet<String>,
+) -> CollectBySlotBuilder {
     CollectBySlotBuilder::new(
-        [parent_row_id],
+        std::iter::once(parent_row_id.to_owned()).chain(route_fields.iter().cloned()),
         slot.fields
             .iter()
             .map(|field| CollectByField::renamed(&field.input, &field.output)),
         &slot.collection_field,
         slot.children
             .iter()
-            .map(|child| collect_slot_builder(child, &slot.row_id_input)),
+            .map(|child| collect_slot_builder(child, &slot.row_id_input, route_fields)),
         [TopByOrder::asc(&slot.row_id_input)],
         [&slot.row_id_input],
         0,

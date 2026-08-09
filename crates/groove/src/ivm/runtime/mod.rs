@@ -4170,14 +4170,33 @@ fn bound_routed_multisink_graph(
         .zip(&terminal.route_value_indices)
         .map(|(field, index)| route_predicate(field, &binding_values[*index]))
         .collect::<Vec<_>>();
-    let graph = match predicates.as_slice() {
-        [] => terminal.graph.clone(),
-        [predicate] => terminal.graph.clone().filter(predicate.clone()),
-        _ => terminal
-            .graph
-            .clone()
-            .filter(PredicateExpr::And(predicates).canonicalize()),
+    let predicate = match predicates.as_slice() {
+        [] => None,
+        [predicate] => Some(predicate.clone()),
+        _ => Some(PredicateExpr::And(predicates).canonicalize()),
     };
+    if let GraphBuilder::CollectBy { input, collect } = &terminal.graph {
+        // CollectBy is terminal-only. Route its flat input before rendering and
+        // remove hidden route columns from the collector's own projection,
+        // rather than appending filter/project consumers after the collector.
+        let mut collect = collect.as_ref().clone();
+        collect
+            .parent_fields
+            .retain(|field| terminal.public_fields.contains(&field.output_name));
+        collect
+            .tuple_fields
+            .retain(|field| terminal.public_fields.contains(&field.output_name));
+        let input = predicate
+            .map(|predicate| input.as_ref().clone().filter(predicate))
+            .unwrap_or_else(|| input.as_ref().clone());
+        return GraphBuilder::CollectBy {
+            input: Box::new(input),
+            collect: Box::new(collect),
+        };
+    }
+    let graph = predicate
+        .map(|predicate| terminal.graph.clone().filter(predicate))
+        .unwrap_or_else(|| terminal.graph.clone());
     graph.project(terminal.public_fields.clone())
 }
 
