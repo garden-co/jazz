@@ -1,24 +1,17 @@
 #[test]
-fn exclusive_base_snapshot_rejects_foreign_dots_at_creation() {
+fn exclusive_base_snapshot_preserves_sparse_local_and_foreign_dots() {
     let owner = node(1);
     let own_dot = TxId::new(TxTime::from(10), owner);
     let foreign_dot = TxId::new(TxTime::from(11), node(2));
 
-    let snapshot =
-        crate::tx::Snapshot::exclusive_base(owner, GlobalSeq(3), TxTime::from(12), vec![own_dot])
-            .unwrap();
-    assert_eq!(snapshot.dots, vec![own_dot]);
-
-    assert_eq!(
-        crate::tx::Snapshot::exclusive_base(
-            owner,
-            GlobalSeq(3),
-            TxTime::from(12),
-            vec![foreign_dot],
-        )
-        .unwrap_err(),
-        "exclusive base snapshot cannot include foreign dots"
-    );
+    let snapshot = crate::tx::Snapshot::exclusive_base(
+        owner,
+        GlobalSeq(3),
+        TxTime::from(12),
+        vec![own_dot, foreign_dot],
+    )
+    .unwrap();
+    assert_eq!(snapshot.dots, vec![own_dot, foreign_dot]);
 }
 
 #[test]

@@ -4260,8 +4260,8 @@ fn exclusive_tx_blind_writes_are_first_committer_wins() {
 
     first.commit().unwrap();
     let err = second.commit().unwrap_err();
-    assert_eq!(err.code, ErrorCode::WriteRejected);
-    assert!(err.message.contains("ExclusiveConflict"));
+    assert_eq!(err.code, ErrorCode::TransactionConflict);
+    assert!(err.message.contains("visible parent changed"));
     assert_eq!(
         core.one(&core.table("todos"))
             .unwrap()
@@ -11860,7 +11860,9 @@ fn db_sync_surface_returns_exclusive_conflict_fate_to_client() {
         .insert_with_id("todos", row, cells("second", false, author))
         .unwrap();
     let first_tx = first.commit().unwrap();
-    let second_tx = second.commit().unwrap();
+    let second_error = second.commit().unwrap_err();
+    assert_eq!(second_error.code, ErrorCode::TransactionConflict);
+    assert!(second_error.message.contains("visible parent changed"));
 
     client.tick().unwrap();
     server.tick().unwrap();
@@ -11873,14 +11875,6 @@ fn db_sync_surface_returns_exclusive_conflict_fate_to_client() {
             durability: DurabilityTier::Global,
         }
     );
-    assert_eq!(
-        client.write_state(second_tx).unwrap(),
-        WriteState {
-            fate: Fate::Rejected(RejectionReason::ExclusiveConflict),
-            durability: DurabilityTier::Local,
-        }
-    );
-
     let rows = server.read(&Query::from("todos")).unwrap();
     assert_eq!(rows.len(), 1);
     let table = &schema.tables[0];

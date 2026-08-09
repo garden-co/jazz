@@ -43,11 +43,24 @@ where
             return Err(Error::DuplicateOpenBatch(id));
         }
         let local_base = self.clock.tx_time;
+        let mut dots = Vec::new();
+        for tx_id in self.transaction_ids()? {
+            let Some(stored) = self.query_transaction(tx_id)? else {
+                continue;
+            };
+            if !matches!(stored.fate, Fate::Rejected(_))
+                && stored
+                    .global_seq
+                    .is_some_and(|global_seq| global_seq > self.clock.applied_global_watermark)
+            {
+                dots.push(tx_id);
+            }
+        }
         let base_snapshot = Snapshot::exclusive_base(
             self.node_uuid,
             self.clock.applied_global_watermark,
             local_base,
-            Vec::new(),
+            dots,
         )
         .map_err(Error::InvalidStoredValue)?;
         self.open_tx.open_transactions.insert(
@@ -574,27 +587,36 @@ where
     ) -> Result<bool, Error> {
         let open_tx = self.open_tx(open_batch_id)?.clone();
         for read in &open_tx.row_reads {
-            if self.local_content_winner_tx_id(&read.table, read.row_uuid)? != Some(read.version) {
-                return Ok(false);
+            for version in self.query_row_versions(&read.table, read.row_uuid)? {
+                let tx_id = self.version_tx_id(&version)?;
+                let visible = self
+                    .query_transaction(tx_id)?
+                    .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
+                if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot) {
+                    return Ok(false);
+                }
             }
         }
         for absent in &open_tx.absent_reads {
-            if self
-                .local_content_winner_tx_id(&absent.table, absent.row_uuid)?
-                .is_some()
-            {
-                return Ok(false);
+            for version in self.query_row_versions(&absent.table, absent.row_uuid)? {
+                let tx_id = self.version_tx_id(&version)?;
+                let visible = self
+                    .query_transaction(tx_id)?
+                    .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
+                if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot) {
+                    return Ok(false);
+                }
             }
         }
         for write in &open_tx.writes {
-            let current = self.local_content_winner_tx_id(&write.table, write.row_uuid)?;
-            let parent = match write.parents.as_slice() {
-                [] => None,
-                [parent] => Some(*parent),
-                _ => return Ok(false),
-            };
-            if current != parent {
-                return Ok(false);
+            for version in self.query_row_versions(&write.table, write.row_uuid)? {
+                let tx_id = self.version_tx_id(&version)?;
+                let visible = self
+                    .query_transaction(tx_id)?
+                    .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
+                if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot) {
+                    return Ok(false);
+                }
             }
         }
         for predicate in &open_tx.predicate_reads {
