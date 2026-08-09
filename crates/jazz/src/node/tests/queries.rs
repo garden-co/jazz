@@ -1292,24 +1292,17 @@ fn relation_snapshot_single_level_array_uses_query_engine_edges() {
         .query_relation_snapshot_for_link(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
         .unwrap();
 
-    assert_eq!(
-        snapshot
-            .rows
-            .iter()
-            .map(|row| (row.table().to_owned(), row.row_uuid()))
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([("users".to_owned(), alice), ("todos".to_owned(), todo_a)])
-    );
-    assert_eq!(
-        snapshot.edges.into_iter().collect::<BTreeSet<_>>(),
-        BTreeSet::from([RelationEdge {
-            source_table: "users".to_owned(),
-            source_row: alice,
-            relation: "todosViaOwner".to_owned(),
-            target_table: "todos".to_owned(),
-            target_row: todo_a,
-        }])
-    );
+    assert_eq!(snapshot.rows.len(), 1);
+    assert_eq!(snapshot.rows[0].row_uuid(), alice);
+    assert!(snapshot.edges.is_empty());
+    let (descriptor, raw) = snapshot.rows[0].encoded_record();
+    let Value::Array(todos) = descriptor.bind(raw).get("todosViaOwner").unwrap() else {
+        panic!("expected terminal todo array")
+    };
+    let Value::Record(todo) = &todos[0] else {
+        panic!("expected terminal todo record")
+    };
+    assert_eq!(todo.get("row_uuid"), Ok(Value::Uuid(todo_a.0)));
 }
 
 #[test]
@@ -1372,37 +1365,24 @@ fn relation_snapshot_materializes_reverse_array_edges() {
         .query_relation_snapshot_for_link(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
         .unwrap();
 
-    assert_eq!(
-        snapshot
-            .rows
-            .iter()
-            .map(|row| (row.table().to_owned(), row.row_uuid()))
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            ("users".to_owned(), alice),
-            ("todos".to_owned(), todo_a),
-            ("comments".to_owned(), comment),
-        ])
-    );
-    assert_eq!(
-        snapshot.edges.into_iter().collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            RelationEdge {
-                source_table: "users".to_owned(),
-                source_row: alice,
-                relation: "todosViaOwner".to_owned(),
-                target_table: "todos".to_owned(),
-                target_row: todo_a,
-            },
-            RelationEdge {
-                source_table: "todos".to_owned(),
-                source_row: todo_a,
-                relation: "commentsViaTodo".to_owned(),
-                target_table: "comments".to_owned(),
-                target_row: comment,
-            },
-        ])
-    );
+    assert_eq!(snapshot.rows.len(), 1);
+    assert_eq!(snapshot.rows[0].row_uuid(), alice);
+    assert!(snapshot.edges.is_empty());
+    let (descriptor, raw) = snapshot.rows[0].encoded_record();
+    let Value::Array(todos) = descriptor.bind(raw).get("todosViaOwner").unwrap() else {
+        panic!("expected terminal todo array")
+    };
+    let Value::Record(todo) = &todos[0] else {
+        panic!("expected terminal todo record")
+    };
+    assert_eq!(todo.get("row_uuid"), Ok(Value::Uuid(todo_a.0)));
+    let Value::Array(comments) = todo.get("commentsViaTodo").unwrap() else {
+        panic!("expected terminal comment array")
+    };
+    let Value::Record(comment_row) = &comments[0] else {
+        panic!("expected terminal comment record")
+    };
+    assert_eq!(comment_row.get("row_uuid"), Ok(Value::Uuid(comment.0)));
 }
 
 #[test]
