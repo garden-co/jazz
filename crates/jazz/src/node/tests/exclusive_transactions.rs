@@ -580,6 +580,37 @@ fn exclusive_filtered_shape_phantom_conflict_rejects() {
     };
     assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
 }
+
+#[test]
+fn local_exclusive_predicate_rejects_remote_phantom_ingested_after_begin() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_other_dir, mut other) = open_node_with_uuid(node(2));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let tx_id = OpenBatchId::new();
+    client.open_exclusive(tx_id).unwrap();
+    assert!(client.tx_current_rows(tx_id, "todos").unwrap().is_empty());
+
+    let (_remote, unit) = other
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(1), 10).cells(title_cells("phantom")),
+        )
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message(unit.clone())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    client.apply_sync_message(unit).unwrap();
+    client.apply_sync_message(fate).unwrap();
+
+    client
+        .tx_write(tx_id, "todos", row(2), title_cells("mine"), None)
+        .unwrap();
+    assert!(matches!(
+        client.commit_exclusive(tx_id, AuthorId::SYSTEM, 11),
+        Err(Error::TransactionConflict)
+    ));
+}
 #[test]
 fn exclusive_filtered_shape_ignores_irrelevant_changes() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));

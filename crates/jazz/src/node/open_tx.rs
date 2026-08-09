@@ -600,7 +600,10 @@ where
         for predicate in &open_tx.predicate_reads {
             for version in self.query_table_versions(&predicate.table)? {
                 let tx_id = self.version_tx_id(&version)?;
-                if tx_id.node == self.node_uuid && tx_id.time > open_tx.base_snapshot.local_base {
+                let visible = self
+                    .query_transaction(tx_id)?
+                    .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
+                if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot) {
                     return Ok(false);
                 }
             }
