@@ -961,19 +961,38 @@ where
             };
             (graph, descriptor, metadata, BTreeSet::new())
         } else if let Some(tx_id) = open_tx_overlay {
-            if request.visibility != RowVisibility::Visible {
-                return Err(source_resolution_error(
-                    request,
-                    SourceGap::TransactionReadOverlay,
-                ));
-            }
+            let include_deleted = request.visibility == RowVisibility::IncludeDeleted;
             let rows = self
                 .node
-                .tx_current_rows_in_schema(tx_id, self.read_view.read_schema, &request.source.table)
+                .tx_current_rows_in_schema_with_options(
+                    tx_id,
+                    self.read_view.read_schema,
+                    &request.source.table,
+                    include_deleted,
+                )
                 .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
-            let graph = inline_current_graph(&table, rows)
-                .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
-            let descriptor = current_row_descriptor(&table);
+            let (graph, descriptor) = if include_deleted {
+                let rows = rows
+                    .into_iter()
+                    .map(|row| {
+                        let deleted = row.is_deleted();
+                        (row, deleted)
+                    })
+                    .collect();
+                (
+                    inline_include_deleted_current_graph(&table, rows).map_err(|_| {
+                        source_resolution_error(request, SourceGap::TransactionReadOverlay)
+                    })?,
+                    include_deleted_current_row_descriptor(&table),
+                )
+            } else {
+                (
+                    inline_current_graph(&table, rows).map_err(|_| {
+                        source_resolution_error(request, SourceGap::TransactionReadOverlay)
+                    })?,
+                    current_row_descriptor(&table),
+                )
+            };
             (graph, descriptor, BTreeMap::new(), BTreeSet::new())
         } else if request.visibility == RowVisibility::Visible
             && self.needs_projected_current_source(&request.source.table)
@@ -5706,6 +5725,7 @@ where
         binding: &Binding,
         identity: AuthorId,
         output: CurrentQueryProgramOutput,
+        include_deleted: bool,
     ) -> Result<QueryProgram, Error> {
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
         let read_schema = self
@@ -5716,7 +5736,11 @@ where
         let lowered_shape =
             inline_snapshot_bind_filter_literals(shape, binding, &read_schema.schema)?;
         let binding = lowered_shape.bind(BTreeMap::new())?;
-        let input_shape = self.normalized_row_set_shape(&lowered_shape, &binding)?;
+        let input_shape = if include_deleted {
+            self.normalized_include_deleted_row_set_shape(&lowered_shape, &binding)?
+        } else {
+            self.normalized_row_set_shape(&lowered_shape, &binding)?
+        };
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape(
                 &lowered_shape,
@@ -9417,6 +9441,19 @@ where
         binding: &Binding,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.tx_query_for_identity_with_options(tx_id, shape, binding, identity, false)
+    }
+
+    /// Evaluate a validated query inside an open transaction with explicit
+    /// root-row deletion visibility.
+    pub fn tx_query_for_identity_with_options(
+        &mut self,
+        tx_id: OpenBatchId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorId,
+        include_deleted: bool,
+    ) -> Result<Vec<CurrentRow>, Error> {
         let query = shape.query();
         let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
         let table = self.table_in_schema(&query.table, shape.schema_version())?;
@@ -9426,6 +9463,7 @@ where
             binding,
             identity,
             CurrentQueryProgramOutput::AppRows,
+            include_deleted,
         )?;
         let deltas = self
             .database

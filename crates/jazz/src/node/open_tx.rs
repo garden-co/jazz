@@ -154,7 +154,7 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         let schema_version = self.catalogue.current_write_schema.schema;
         let table_schema = self.table(table)?.clone();
-        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema)
+        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, false)
     }
 
     /// Read current rows through an explicit registered schema view.
@@ -165,7 +165,20 @@ where
         table: &str,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table_schema = self.table_in_schema(table, schema_version)?;
-        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema)
+        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, false)
+    }
+
+    /// Read transaction rows through a registered schema view, optionally
+    /// retaining root rows whose deletion register wins.
+    pub(crate) fn tx_current_rows_in_schema_with_options(
+        &mut self,
+        tx_id: OpenBatchId,
+        schema_version: SchemaVersionId,
+        table: &str,
+        include_deleted: bool,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let table_schema = self.table_in_schema(table, schema_version)?;
+        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, include_deleted)
     }
 
     fn tx_current_rows_with_table(
@@ -174,6 +187,7 @@ where
         schema_version: SchemaVersionId,
         table: &str,
         table_schema: TableSchema,
+        include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
         let rows = self
@@ -193,19 +207,30 @@ where
         for row_uuid in rows {
             let snapshot_row =
                 self.snapshot_row_in_schema(schema_version, table, row_uuid, &snapshot)?;
-            if let Some(cells) = self.overlay_pending_writes_with_table(
+            let provenance = snapshot_row.provenance.clone();
+            let (cells, deleted) = self.overlay_pending_cells_and_deletion_with_table(
                 tx_id,
                 &table_schema,
                 table,
                 row_uuid,
                 snapshot_row,
-            )? {
-                let cells = positional_cells_from_map(&table_schema, &cells)?;
-                current.push(current_row_from_positional_cells(
-                    &table_schema,
-                    row_uuid,
-                    &cells,
-                )?);
+            )?;
+            if let Some(cells) = cells
+                && (!deleted || include_deleted)
+            {
+                let row = if let Some((created, updated)) = provenance {
+                    current_row_from_materialized_cells_with_layer_provenance(
+                        &table_schema,
+                        &created,
+                        &created,
+                        &updated,
+                        &cells,
+                    )?
+                } else {
+                    let cells = positional_cells_from_map(&table_schema, &cells)?;
+                    current_row_from_positional_cells(&table_schema, row_uuid, &cells)?
+                };
+                current.push(if deleted { row.into_deleted() } else { row });
             }
         }
         sort_current_rows(&mut current);
@@ -859,6 +884,24 @@ where
         } else {
             None
         };
+        let provenance = if let Some(content) = content.as_ref() {
+            let content_tx = self.version_tx_id(content)?;
+            let updated = if let Some(deletion) = deletion.as_ref() {
+                let deletion_tx = self.version_tx_id(deletion)?;
+                if deletion.tx_time().sort_key(deletion_tx.node)
+                    > content.tx_time().sort_key(content_tx.node)
+                {
+                    deletion
+                } else {
+                    content
+                }
+            } else {
+                content
+            };
+            Some((content.clone(), updated.clone()))
+        } else {
+            None
+        };
         Ok(SnapshotRow {
             content_cells,
             content_version: content
@@ -874,6 +917,7 @@ where
                     .and_then(|version| self.version_tx_id(version).ok())
             },
             deleted,
+            provenance,
         })
     }
 
@@ -920,6 +964,24 @@ where
         row_uuid: RowUuid,
         snapshot_row: SnapshotRow,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
+        let (cells, deleted) = self.overlay_pending_cells_and_deletion_with_table(
+            tx_id,
+            table_schema,
+            table,
+            row_uuid,
+            snapshot_row,
+        )?;
+        Ok(if deleted { None } else { cells })
+    }
+
+    fn overlay_pending_cells_and_deletion_with_table(
+        &self,
+        tx_id: OpenBatchId,
+        table_schema: &TableSchema,
+        table: &str,
+        row_uuid: RowUuid,
+        snapshot_row: SnapshotRow,
+    ) -> Result<(Option<BTreeMap<String, Value>>, bool), Error> {
         let mut cells = snapshot_row
             .content_cells
             .map(|cells| cells_from_positional(table_schema, &cells));
@@ -945,7 +1007,7 @@ where
                 None => {}
             }
         }
-        Ok(if deleted { None } else { cells })
+        Ok((cells, deleted))
     }
 }
 
@@ -1011,4 +1073,5 @@ pub(super) struct SnapshotRow {
     content_version: Option<TxId>,
     read_version: Option<TxId>,
     deleted: bool,
+    provenance: Option<(VersionRow, VersionRow)>,
 }

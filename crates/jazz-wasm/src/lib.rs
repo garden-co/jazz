@@ -509,18 +509,22 @@ impl WasmDbInner {
         tx_id: OpenBatchId,
         query: &PreparedQuery,
         author: AuthorId,
+        opts: ReadOpts,
     ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
         with_wasm_db!(self, |db| db
             .exclusive_tx_ref(tx_id)
-            .all_prepared_for_identity(query, author))
+            .all_prepared_for_identity_with_opts(query, author, opts))
     }
 
     fn exclusive_all(
         &self,
         tx_id: OpenBatchId,
         query: &PreparedQuery,
+        opts: ReadOpts,
     ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
-        with_wasm_db!(self, |db| db.exclusive_tx_ref(tx_id).all_prepared(query))
+        with_wasm_db!(self, |db| db
+            .exclusive_tx_ref(tx_id)
+            .all_prepared_with_opts(query, opts))
     }
 
     fn mergeable_all_for_identity(
@@ -528,18 +532,22 @@ impl WasmDbInner {
         tx_id: OpenBatchId,
         query: &PreparedQuery,
         author: AuthorId,
+        opts: ReadOpts,
     ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
         with_wasm_db!(self, |db| db
             .mergeable_tx_ref(tx_id)
-            .all_prepared_for_identity(query, author))
+            .all_prepared_for_identity_with_opts(query, author, opts))
     }
 
     fn mergeable_all(
         &self,
         tx_id: OpenBatchId,
         query: &PreparedQuery,
+        opts: ReadOpts,
     ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
-        with_wasm_db!(self, |db| db.mergeable_tx_ref(tx_id).all_prepared(query))
+        with_wasm_db!(self, |db| db
+            .mergeable_tx_ref(tx_id)
+            .all_prepared_with_opts(query, opts))
     }
 
     fn abandon_transaction(&self, tx_id: OpenBatchId) -> Result<(), jazz::db::Error> {
@@ -1365,11 +1373,11 @@ impl WasmDb {
         tx: &WasmTx,
         opts: JsValue,
     ) -> Result<Vec<u8>, JsValue> {
-        let _opts = read_opts_from_js(opts)?;
+        let opts = read_opts_from_js(opts)?;
         let tx_id = tx.open_tx_for_read()?;
         let rows = match tx.kind {
-            WasmTxKind::Mergeable => self.inner.mergeable_all(tx_id, &query.inner),
-            WasmTxKind::Exclusive => self.inner.exclusive_all(tx_id, &query.inner),
+            WasmTxKind::Mergeable => self.inner.mergeable_all(tx_id, &query.inner, opts),
+            WasmTxKind::Exclusive => self.inner.exclusive_all(tx_id, &query.inner, opts),
         }
         .map_err(to_js_error)?;
         encode_rows(&rows).map_err(to_js_error)
@@ -1383,17 +1391,17 @@ impl WasmDb {
         author: Vec<u8>,
         opts: JsValue,
     ) -> Result<Vec<u8>, JsValue> {
-        let _opts = read_opts_from_js(opts)?;
+        let opts = read_opts_from_js(opts)?;
         let author = author_id_from_bytes(&author)?;
         let tx_id = tx.open_tx_for_read()?;
         let rows = match tx.kind {
             WasmTxKind::Mergeable => {
                 self.inner
-                    .mergeable_all_for_identity(tx_id, &query.inner, author)
+                    .mergeable_all_for_identity(tx_id, &query.inner, author, opts)
             }
             WasmTxKind::Exclusive => {
                 self.inner
-                    .exclusive_all_for_identity(tx_id, &query.inner, author)
+                    .exclusive_all_for_identity(tx_id, &query.inner, author, opts)
             }
         }
         .map_err(to_js_error)?;
@@ -2237,17 +2245,21 @@ fn read_rows_for_transaction(
     author: Option<AuthorId>,
     opts: JsValue,
 ) -> Result<Vec<jazz::node::CurrentRow>, JsValue> {
-    let _opts = read_opts_from_js(opts)?;
+    let opts = read_opts_from_js(opts)?;
     let tx_id = tx.open_tx_for_read()?;
     match (tx.kind, author) {
         (WasmTxKind::Mergeable, Some(author)) => db
-            .mergeable_all_for_identity(tx_id, &query.inner, author)
+            .mergeable_all_for_identity(tx_id, &query.inner, author, opts)
             .map_err(to_js_error),
-        (WasmTxKind::Mergeable, None) => db.mergeable_all(tx_id, &query.inner).map_err(to_js_error),
+        (WasmTxKind::Mergeable, None) => db
+            .mergeable_all(tx_id, &query.inner, opts)
+            .map_err(to_js_error),
         (WasmTxKind::Exclusive, Some(author)) => db
-            .exclusive_all_for_identity(tx_id, &query.inner, author)
+            .exclusive_all_for_identity(tx_id, &query.inner, author, opts)
             .map_err(to_js_error),
-        (WasmTxKind::Exclusive, None) => db.exclusive_all(tx_id, &query.inner).map_err(to_js_error),
+        (WasmTxKind::Exclusive, None) => db
+            .exclusive_all(tx_id, &query.inner, opts)
+            .map_err(to_js_error),
     }
 }
 

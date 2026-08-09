@@ -2908,24 +2908,33 @@ where
             .map_err(Into::into)
     }
 
-    fn exclusive_all(
+    fn transaction_all(
         &self,
         tx_id: OpenBatchId,
         prepared: &PreparedQuery,
+        opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.exclusive_all_for_identity(tx_id, prepared, self.identity.author)
+        self.transaction_all_for_identity(tx_id, prepared, self.identity.author, opts)
     }
 
-    pub(crate) fn exclusive_all_for_identity(
+    pub(crate) fn transaction_all_for_identity(
         &self,
         tx_id: OpenBatchId,
         prepared: &PreparedQuery,
         author: AuthorId,
+        opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
+        ensure_default_read_view(&opts)?;
         self.node
             .node
             .borrow_mut()
-            .tx_query_for_identity(tx_id, &prepared.shape, &prepared.binding, author)
+            .tx_query_for_identity_with_options(
+                tx_id,
+                &prepared.shape,
+                &prepared.binding,
+                author,
+                opts.include_deleted,
+            )
             .map_err(Into::into)
     }
 
@@ -8356,7 +8365,16 @@ where
 
     /// Read a prepared query with this transaction's pending writes overlaid.
     fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
-        self.db().exclusive_all(self.tx_id(), prepared)
+        self.all_prepared_with_opts(prepared, ReadOpts::default())
+    }
+
+    /// Read a prepared query with transaction-local writes and explicit read semantics.
+    fn all_prepared_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.db().transaction_all(self.tx_id(), prepared, opts)
     }
 
     /// Read a prepared query inside this transaction as `author`.
@@ -8365,8 +8383,18 @@ where
         prepared: &PreparedQuery,
         author: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.all_prepared_for_identity_with_opts(prepared, author, ReadOpts::default())
+    }
+
+    /// Read a prepared query as `author` with explicit read semantics.
+    fn all_prepared_for_identity_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
         self.db()
-            .exclusive_all_for_identity(self.tx_id(), prepared, author)
+            .transaction_all_for_identity(self.tx_id(), prepared, author, opts)
     }
 
     /// Stage an insert with an optional explicit provenance time.
@@ -8536,7 +8564,16 @@ where
 
     /// Read a prepared query inside the exclusive transaction.
     fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
-        self.db().exclusive_all(self.tx_id(), prepared)
+        self.all_prepared_with_opts(prepared, ReadOpts::default())
+    }
+
+    /// Read a prepared query with transaction-local writes and explicit read semantics.
+    fn all_prepared_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.db().transaction_all(self.tx_id(), prepared, opts)
     }
 
     /// Read a prepared query inside the exclusive transaction as `author`.
@@ -8545,8 +8582,18 @@ where
         prepared: &PreparedQuery,
         author: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.all_prepared_for_identity_with_opts(prepared, author, ReadOpts::default())
+    }
+
+    /// Read a prepared query as `author` with explicit read semantics.
+    fn all_prepared_for_identity_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
         self.db()
-            .exclusive_all_for_identity(self.tx_id(), prepared, author)
+            .transaction_all_for_identity(self.tx_id(), prepared, author, opts)
     }
 
     /// Stage an insert with a generated row id.

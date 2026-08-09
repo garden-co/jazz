@@ -554,9 +554,13 @@ impl Backend {
         author: CoreAuthorId,
     ) -> std::result::Result<Vec<crate::node::CurrentRow>, CoreDbError> {
         match self {
-            Self::Memory(db) => db.exclusive_all_for_identity(tx_id, prepared, author),
+            Self::Memory(db) => {
+                db.transaction_all_for_identity(tx_id, prepared, author, CoreReadOpts::default())
+            }
             #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.exclusive_all_for_identity(tx_id, prepared, author),
+            Self::RocksDb(db) => {
+                db.transaction_all_for_identity(tx_id, prepared, author, CoreReadOpts::default())
+            }
         }
     }
 
@@ -750,6 +754,7 @@ impl ClientDb {
     fn query_transaction_rows(
         &self,
         query: crate::query::Query,
+        opts: CoreReadOpts,
         batch_id: OpenBatchId,
         table: String,
         author: CoreAuthorId,
@@ -766,7 +771,7 @@ impl ClientDb {
             inner.ensure_transaction_open(batch_id)?;
             inner
                 .db
-                .exclusive_all_for_identity(batch_id, &prepared, author)
+                .transaction_all_for_identity(batch_id, &prepared, author, opts)
                 .map_err(|error| JazzError::Query(error.to_string()))?
         };
         self.inner.borrow_mut().remember_rows(&table, &rows);
@@ -2271,14 +2276,13 @@ impl JazzClient {
                 .unwrap_or(CoreDurabilityTier::Local),
             local_updates: CoreLocalUpdates::Immediate,
             propagation: CorePropagation::Full,
-            include_deleted: false,
+            include_deleted: query.include_deleted,
             read_view,
         })
     }
     fn core_query(&self, query: &Query) -> Result<crate::query::Query> {
         if query.disjuncts.len() != 1
             || query.recursive.is_some()
-            || query.include_deleted
             || query.result_element_index.is_some()
             || (query.aggregate.is_some() && query.select_columns.is_some())
             || (!query.joins.is_empty()
@@ -2930,8 +2934,13 @@ impl JazzClient {
                     let author = self
                         .write_identity()
                         .unwrap_or_else(|| self.db.inner.borrow().identity.author);
-                    self.db
-                        .query_transaction_rows(core_query, batch_id, table, author)?
+                    self.db.query_transaction_rows(
+                        core_query,
+                        Self::core_read_opts(&query, durability_tier)?,
+                        batch_id,
+                        table,
+                        author,
+                    )?
                 } else {
                     self.db
                         .query_rows(
