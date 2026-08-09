@@ -16,6 +16,20 @@ fn schema(default: &str) -> JazzSchema {
     .with_write_policy(Policy::public())])
 }
 
+fn schema_with_note(default: &str) -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "items",
+        [
+            ColumnSchema::new("label", ColumnType::String)
+                .with_default(Value::String(default.to_owned())),
+            ColumnSchema::new("note", ColumnType::String)
+                .with_default(Value::String(String::new())),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public())])
+}
+
 fn open_owner(schema: JazzSchema) -> Db<MemoryStorage> {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -108,5 +122,34 @@ fn empty_owner_accepts_first_typed_schema_view() {
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), RowUuid::from_bytes([3; 16]));
+    owner.commit_mergeable_handle(batch).unwrap();
+}
+
+/// Structurally distinct schema views may stage rows in one owner-wide batch;
+/// each pending write retains the schema version selected by its view.
+#[test]
+fn one_batch_accepts_writes_from_structurally_distinct_views() {
+    let owner = open_owner(JazzSchema::new([]));
+    let batch = OpenBatchId::new();
+    owner.begin_mergeable(batch).unwrap();
+    let first = owner.register_schema_view(schema("same")).unwrap();
+    first
+        .mergeable_tx_ref(batch)
+        .insert_with_id("items", RowUuid::from_bytes([4; 16]), Default::default())
+        .unwrap();
+    let second = owner
+        .register_schema_view(schema_with_note("same"))
+        .unwrap();
+    second
+        .mergeable_tx_ref(batch)
+        .insert_with_id("items", RowUuid::from_bytes([5; 16]), Default::default())
+        .unwrap();
+
+    let prepared = second.prepare_query(&second.table("items")).unwrap();
+    let rows = second
+        .mergeable_tx_ref(batch)
+        .all_prepared(&prepared)
+        .unwrap();
+    assert_eq!(rows.len(), 2);
     owner.commit_mergeable_handle(batch).unwrap();
 }
