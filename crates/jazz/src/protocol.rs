@@ -155,6 +155,10 @@ pub enum SyncMessage {
         result_member_adds: Vec<ResultMemberEntry>,
         /// Typed result membership removals for the subscription.
         result_member_removes: Vec<ResultMemberEntry>,
+        /// Terminal-owned structural edits, addressed by stable result keys and
+        /// typed paths. These are applied after an authoritative reset or the
+        /// preceding update on this FIFO link.
+        terminal_operations: Vec<groove::ivm::TerminalOperation>,
         /// Non-row program fact additions, such as relation edges.
         program_fact_adds: Vec<ProgramFactEntry>,
         /// Non-row program fact removals, such as relation edges.

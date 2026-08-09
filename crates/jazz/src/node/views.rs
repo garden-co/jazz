@@ -628,6 +628,7 @@ where
             },
             result_member_adds: result_member_adds.into_iter().collect(),
             result_member_removes: result_member_removes.into_iter().collect(),
+            terminal_operations: Vec::new(),
             program_fact_adds,
             program_fact_removes,
         })
@@ -753,6 +754,7 @@ where
             authorization_progress,
             result_member_adds,
             result_member_removes,
+            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         } = update;
@@ -781,8 +783,18 @@ where
         }
         if reset_result_set {
             self.query
+                .pending_terminal_operations_by_binding_view
+                .remove(&binding_view_key);
+            self.query
                 .initial_hydration_binding_views
                 .insert(binding_view_key);
+        }
+        if !terminal_operations.is_empty() {
+            self.query
+                .pending_terminal_operations_by_binding_view
+                .entry(binding_view_key)
+                .or_default()
+                .extend(terminal_operations);
         }
         if defer_settlement {
             self.query

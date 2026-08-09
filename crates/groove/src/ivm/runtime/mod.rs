@@ -3958,20 +3958,18 @@ fn terminal_deltas_from_record_deltas(
     for key in keys {
         match (before.get(&key), after.get(&key)) {
             (None, Some(record)) => operations.push(TerminalOperation {
-                root_key: key.clone().into(),
+                root_key: key.clone(),
                 path: Vec::new(),
                 edit: TerminalEdit::Insert {
                     index: 0,
-                    key: key.clone().into(),
-                    value: record.raw().to_vec().into(),
+                    key: key.clone(),
+                    value: record.raw().to_vec(),
                 },
             }),
             (Some(_), None) => operations.push(TerminalOperation {
-                root_key: key.clone().into(),
+                root_key: key.clone(),
                 path: Vec::new(),
-                edit: TerminalEdit::Remove {
-                    key: key.clone().into(),
-                },
+                edit: TerminalEdit::Remove { key: key.clone() },
             }),
             (Some(before), Some(after)) => {
                 diff_terminal_record(&key, Vec::new(), before, after, &mut operations)?
@@ -4021,11 +4019,11 @@ fn diff_terminal_record(
     if scalar_changed {
         let key = encoded_record_key_part(*after.descriptor(), after.raw(), &[0])?;
         operations.push(TerminalOperation {
-            root_key: root_key.to_vec().into(),
+            root_key: root_key.to_vec(),
             path,
             edit: TerminalEdit::Update {
-                key: key.into(),
-                value: after.raw().to_vec().into(),
+                key,
+                value: after.raw().to_vec(),
             },
         });
     }
@@ -4063,34 +4061,32 @@ fn diff_terminal_collection(
     for key in keys {
         match (before.get(&key), after.get(&key)) {
             (None, Some((index, record))) => operations.push(TerminalOperation {
-                root_key: root_key.to_vec().into(),
+                root_key: root_key.to_vec(),
                 path: path.clone(),
                 edit: TerminalEdit::Insert {
                     index: *index,
-                    key: key.clone().into(),
-                    value: record.raw().to_vec().into(),
+                    key: key.clone(),
+                    value: record.raw().to_vec(),
                 },
             }),
             (Some(_), None) => operations.push(TerminalOperation {
-                root_key: root_key.to_vec().into(),
+                root_key: root_key.to_vec(),
                 path: path.clone(),
-                edit: TerminalEdit::Remove {
-                    key: key.clone().into(),
-                },
+                edit: TerminalEdit::Remove { key: key.clone() },
             }),
             (Some((before_index, before_record)), Some((after_index, after_record))) => {
                 if before_index != after_index {
                     operations.push(TerminalOperation {
-                        root_key: root_key.to_vec().into(),
+                        root_key: root_key.to_vec(),
                         path: path.clone(),
                         edit: TerminalEdit::Move {
-                            key: key.clone().into(),
+                            key: key.clone(),
                             index: *after_index,
                         },
                     });
                 }
                 let mut descendant_path = path.clone();
-                descendant_path.push(TerminalPathSegment::Key(key.into()));
+                descendant_path.push(TerminalPathSegment::Key(key));
                 diff_terminal_record(
                     root_key,
                     descendant_path,
@@ -5829,8 +5825,11 @@ enum OperatorState {
 
 #[derive(Clone, Debug, Default)]
 struct CollectByIncrementalState {
-    groups: BTreeMap<Vec<u8>, BTreeMap<(Vec<TopBySortPart>, Bytes), i64>>,
+    groups: CollectByGroups,
 }
+
+type CollectByOrderKey = (Vec<TopBySortPart>, Bytes);
+type CollectByGroups = BTreeMap<Vec<u8>, BTreeMap<CollectByOrderKey, i64>>;
 
 fn operator_state_for(operator: &OpType) -> OperatorState {
     match operator {

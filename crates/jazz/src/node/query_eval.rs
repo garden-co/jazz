@@ -4854,6 +4854,16 @@ where
         std::mem::take(&mut self.query.pending_authoritative_reset_binding_views)
     }
 
+    pub(crate) fn take_pending_terminal_operations(
+        &mut self,
+        binding_view_key: BindingViewKey,
+    ) -> Vec<groove::ivm::TerminalOperation> {
+        self.query
+            .pending_terminal_operations_by_binding_view
+            .remove(&binding_view_key)
+            .unwrap_or_default()
+    }
+
     pub(crate) fn defer_authoritative_reset_for_binding_view(
         &mut self,
         binding_view_key: BindingViewKey,

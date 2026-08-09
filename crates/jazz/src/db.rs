@@ -4431,6 +4431,9 @@ where
                         retained.push(Rc::downgrade(&state));
                         continue;
                     }
+                    let peer_terminal_operations = node
+                        .borrow_mut()
+                        .take_pending_terminal_operations(delivered_binding_view);
                     let snapshot_tier = remote_settled_tier.unwrap_or(read_tier);
                     let authoritative_reset = authoritative_reset_pending;
                     if authoritative_reset && terminal_rows {
@@ -4569,6 +4572,31 @@ where
                             force_reset_event,
                         )
                     } else {
+                        if terminal_rows && !peer_terminal_operations.is_empty() {
+                            let settled = subscription_is_settled(
+                                &node.borrow(),
+                                &shape,
+                                &binding,
+                                settled_tier,
+                                read_view.clone(),
+                            );
+                            let state_ref = &mut *state_ref;
+                            let event = SubscriptionEvent::Delta {
+                                reset: false,
+                                added: Vec::new(),
+                                updated: Vec::new(),
+                                removed: Vec::new(),
+                                terminal_operations: peer_terminal_operations,
+                                settled,
+                                tier: snapshot_tier,
+                            };
+                            state_ref.settled = settled;
+                            retained.push(Rc::downgrade(&state));
+                            if state_ref.sender.unbounded_send(event).is_ok() {
+                                changed += 1;
+                            }
+                            continue;
+                        }
                         let maintained_update = if let Some(maintained) =
                             maintained_subscription.as_mut()
                         {
@@ -7042,6 +7070,7 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
+            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         } => ViewUpdateParts {
@@ -7055,6 +7084,7 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             authorization_progress: peer_payload_inventory.authorization_progress,
             result_member_adds,
             result_member_removes,
+            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         },

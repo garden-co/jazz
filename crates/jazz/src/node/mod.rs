@@ -384,6 +384,10 @@ struct QueryServing {
     /// Binding views whose settled state was replaced by an authoritative
     /// server-provided reset since the last facade refresh.
     pending_authoritative_reset_binding_views: BTreeSet<BindingViewKey>,
+    /// FIFO terminal edits received from the serving peer and not yet
+    /// published by the local subscription facade.
+    pending_terminal_operations_by_binding_view:
+        BTreeMap<BindingViewKey, Vec<groove::ivm::TerminalOperation>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -674,6 +678,7 @@ where
                 initial_hydration_binding_views: BTreeSet::new(),
                 deferred_publication_binding_views: BTreeSet::new(),
                 pending_authoritative_reset_binding_views: BTreeSet::new(),
+                pending_terminal_operations_by_binding_view: BTreeMap::new(),
             },
             open_tx: OpenTxState {
                 open_transactions: BTreeMap::new(),
@@ -5667,6 +5672,7 @@ pub(crate) struct ViewUpdateParts {
     pub(crate) authorization_progress: Option<u64>,
     pub(crate) result_member_adds: Vec<ResultMemberEntry>,
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
+    pub(crate) terminal_operations: Vec<groove::ivm::TerminalOperation>,
     pub(crate) program_fact_adds: Vec<ViewFactEntry>,
     pub(crate) program_fact_removes: Vec<ViewFactEntry>,
 }

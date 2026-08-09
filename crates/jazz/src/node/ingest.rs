@@ -479,6 +479,7 @@ where
                 peer_payload_inventory,
                 result_member_adds,
                 result_member_removes,
+                terminal_operations,
                 program_fact_adds,
                 program_fact_removes,
             } => {
@@ -493,6 +494,7 @@ where
                     authorization_progress: peer_payload_inventory.authorization_progress,
                     result_member_adds,
                     result_member_removes,
+                    terminal_operations,
                     program_fact_adds,
                     program_fact_removes,
                 })?;

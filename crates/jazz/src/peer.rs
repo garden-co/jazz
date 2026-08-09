@@ -594,6 +594,7 @@ impl PeerState {
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             });
@@ -676,7 +677,7 @@ impl PeerState {
             allow_storage_witness_fallback,
             observed_delta_batches: _,
             observed_result_delta_batches,
-            terminal_operations: _,
+            terminal_operations,
         } = transitions;
         let result_add_count = result_member_adds.len();
         let result_remove_count = result_member_removes.len();
@@ -690,6 +691,7 @@ impl PeerState {
         if observed_result_delta_batches > 0
             && result_member_adds.is_empty()
             && result_member_removes.is_empty()
+            && terminal_operations.is_empty()
             && program_fact_adds.is_empty()
             && program_fact_removes.is_empty()
         {
@@ -751,6 +753,7 @@ impl PeerState {
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             });
@@ -804,7 +807,14 @@ impl PeerState {
                 },
             )
         };
-        let update = update?;
+        let mut update = update?;
+        if let SyncMessage::ViewUpdate {
+            terminal_operations: outgoing,
+            ..
+        } = &mut update
+        {
+            *outgoing = terminal_operations;
+        }
         let bundle_elapsed = bundle_start.elapsed();
         let bundle_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         if trace_rehydrate {
@@ -1333,10 +1343,11 @@ impl PeerState {
             allow_storage_witness_fallback: source_allow_storage_witness_fallback,
             observed_delta_batches: _,
             observed_result_delta_batches: _,
-            terminal_operations: _,
+            terminal_operations: source_terminal_operations,
         } = source_transitions;
         if !source_adds.is_empty()
             || !source_removes.is_empty()
+            || !source_terminal_operations.is_empty()
             || !source_program_fact_adds.is_empty()
             || !source_program_fact_removes.is_empty()
         {
@@ -1349,6 +1360,7 @@ impl PeerState {
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: source_adds,
                 result_member_removes: source_removes,
+                terminal_operations: source_terminal_operations,
                 program_fact_adds: source_program_fact_adds,
                 program_fact_removes: source_program_fact_removes,
             });
@@ -2480,6 +2492,7 @@ mod tests {
             peer_payload_inventory: Default::default(),
             result_member_adds: adds,
             result_member_removes: removes,
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         };
@@ -4346,6 +4359,7 @@ mod tests {
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             }

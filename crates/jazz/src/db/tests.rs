@@ -1211,6 +1211,7 @@ fn view_update_is_not_empty_when_it_only_carries_program_facts() {
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     };
@@ -1225,6 +1226,7 @@ fn view_update_is_not_empty_when_it_only_carries_program_facts() {
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
         program_fact_adds: vec![crate::protocol::ViewFactEntry::PathCorrelationCoverage(
             crate::protocol::PathCorrelationCoverageEntry {
                 path: "owner".to_owned(),
