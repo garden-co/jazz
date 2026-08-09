@@ -8556,9 +8556,6 @@ impl std::ops::Deref for SubscriptionOutputRow {
     }
 }
 
-/// Materialized relation edge removed from a subscription result.
-pub type RemovedRelationEdge = RelationEdge;
-
 /// Delta event emitted by a database subscription stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubscriptionEvent {
@@ -8574,25 +8571,10 @@ pub enum SubscriptionEvent {
         updated: Vec<SubscriptionOutputRow>,
         /// Rows no longer visible to the subscription.
         removed: Vec<RemovedRow>,
-        /// Related rows newly referenced by relation edges.
-        ///
-        /// Relation subscriptions reduce `added`, `updated`, `removed`,
-        /// `added_related`, `added_edges`, and `removed_edges` into their local
-        /// view. The producer does not attach a full current snapshot to
-        /// incremental deltas.
-        added_related: Vec<CurrentRow>,
-        /// Relation edges newly visible to the subscription.
-        added_edges: Vec<RelationEdge>,
-        /// Relation edges no longer visible to the subscription.
-        removed_edges: Vec<RemovedRelationEdge>,
         /// Whether the result is complete at the requested read tier.
         settled: bool,
         /// Read tier used to materialize the rows.
         tier: DurabilityTier,
-        /// Whether `added`/`updated` are the authoritative Groove terminal
-        /// rows, including any nested values. Relation facts are then internal
-        /// evidence and must not be assembled by the receiver.
-        terminal_rows: bool,
     },
     /// The serving peer rejected the propagated upstream subscription.
     Rejected {
@@ -8708,16 +8690,16 @@ fn subscription_delta_event(
     settled: bool,
     previous: &RelationSnapshot,
     current: &RelationSnapshot,
-    terminal_rows: bool,
+    _terminal_rows: bool,
 ) -> SubscriptionEvent {
-    subscription_delta_event_with_reset(tier, settled, previous, current, false, terminal_rows)
+    subscription_delta_event_with_reset(tier, settled, previous, current, false, _terminal_rows)
 }
 
 fn subscription_reset_event(
     tier: DurabilityTier,
     settled: bool,
     current: RelationSnapshot,
-    terminal_rows: bool,
+    _terminal_rows: bool,
 ) -> SubscriptionEvent {
     SubscriptionEvent::Delta {
         reset: true,
@@ -8728,12 +8710,8 @@ fn subscription_reset_event(
             .collect(),
         updated: Vec::new(),
         removed: Vec::new(),
-        added_related: Vec::new(),
-        added_edges: current.edges,
-        removed_edges: Vec::new(),
         settled,
         tier,
-        terminal_rows,
     }
 }
 
@@ -8743,7 +8721,7 @@ fn subscription_delta_event_with_reset(
     previous: &RelationSnapshot,
     current: &RelationSnapshot,
     reset: bool,
-    terminal_rows: bool,
+    _terminal_rows: bool,
 ) -> SubscriptionEvent {
     let mut previous_by_id = BTreeMap::new();
     for row in &previous.rows {
@@ -8758,17 +8736,6 @@ fn subscription_delta_event_with_reset(
     let mut added = Vec::new();
     let mut updated = Vec::new();
     let mut removed = Vec::new();
-    let previous_edges = previous.edges.iter().cloned().collect::<BTreeSet<_>>();
-    let current_edges = current.edges.iter().cloned().collect::<BTreeSet<_>>();
-    let added_edges = current_edges
-        .difference(&previous_edges)
-        .cloned()
-        .collect::<Vec<_>>();
-    let removed_edges = previous_edges
-        .difference(&current_edges)
-        .cloned()
-        .collect::<Vec<_>>();
-
     for (key, row) in &current_by_id {
         match previous_by_id.get(key) {
             None => added.push(subscription_output_row((*row).clone())),
@@ -8795,12 +8762,8 @@ fn subscription_delta_event_with_reset(
         added,
         updated,
         removed,
-        added_related: Vec::new(),
-        added_edges,
-        removed_edges,
         settled,
         tier,
-        terminal_rows,
     }
 }
 
@@ -8810,7 +8773,7 @@ fn apply_maintained_update_to_snapshot(
     update: LocalMaintainedViewSubscriptionUpdate,
     tier: DurabilityTier,
     settled: bool,
-    terminal_rows: bool,
+    _terminal_rows: bool,
 ) -> SubscriptionEvent {
     let LocalMaintainedViewSubscriptionUpdate {
         added: update_added,
@@ -8838,12 +8801,8 @@ fn apply_maintained_update_to_snapshot(
                     .collect(),
                 updated: Vec::new(),
                 removed: Vec::new(),
-                added_related: Vec::new(),
-                added_edges: Vec::new(),
-                removed_edges: Vec::new(),
                 settled,
                 tier,
-                terminal_rows,
             };
         }
 
@@ -8885,15 +8844,8 @@ fn apply_maintained_update_to_snapshot(
                 .collect(),
             updated: Vec::new(),
             removed: Vec::new(),
-            added_related,
-            added_edges: update_added_edges
-                .iter()
-                .map(|(edge, _)| edge.clone())
-                .collect(),
-            removed_edges: Vec::new(),
             settled,
             tier,
-            terminal_rows,
         };
     }
 
@@ -9007,15 +8959,8 @@ fn apply_maintained_update_to_snapshot(
         added,
         updated,
         removed,
-        added_related,
-        added_edges: update_added_edges
-            .iter()
-            .map(|(edge, _)| edge.clone())
-            .collect(),
-        removed_edges: update_removed_edges,
         settled,
         tier,
-        terminal_rows,
     }
 }
 

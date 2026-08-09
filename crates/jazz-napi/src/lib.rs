@@ -127,17 +127,6 @@ struct CoreSubscriptionDelta<'a> {
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
-struct CoreRelationSubscriptionDelta<'a> {
-    base_cursor: Option<u64>,
-    cursor: u64,
-    added: Vec<CoreRowBatch<'a>>,
-    updated: Vec<CoreRowBatch<'a>>,
-    removed: Vec<CoreRemovedRow>,
-    added_edges: Vec<CoreRelationEdge>,
-    removed_edges: Vec<CoreRelationEdge>,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
 struct CoreRemovedRow {
     table: String,
     row_id: CoreRowUuid,
@@ -1897,34 +1886,6 @@ fn encode_core_subscription_delta<'a>(
     })
 }
 
-fn encode_core_relation_subscription_delta<'a>(
-    added: &'a [jazz::node::CurrentRow],
-    updated: &'a [jazz::node::CurrentRow],
-    removed: &[jazz::db::RemovedRow],
-    added_related: &'a [jazz::node::CurrentRow],
-    added_edges: &[jazz::node::RelationEdge],
-    removed_edges: &[jazz::db::RemovedRelationEdge],
-) -> std::result::Result<Vec<u8>, postcard::Error> {
-    let mut relation_added = Vec::with_capacity(added.len() + added_related.len());
-    relation_added.extend_from_slice(added);
-    relation_added.extend_from_slice(added_related);
-    postcard::to_allocvec(&CoreRelationSubscriptionDelta {
-        base_cursor: None,
-        cursor: 0,
-        added: core_row_batches(&relation_added),
-        updated: core_row_batches(updated),
-        removed: removed
-            .iter()
-            .map(|row| CoreRemovedRow {
-                table: row.table.clone(),
-                row_id: row.row_uuid,
-            })
-            .collect(),
-        added_edges: added_edges.iter().map(core_relation_edge).collect(),
-        removed_edges: removed_edges.iter().map(core_relation_edge).collect(),
-    })
-}
-
 fn core_row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<CoreRowBatch<'_>> {
     let mut batches: Vec<CoreRowBatch<'_>> = Vec::new();
     for row in rows {
@@ -1968,12 +1929,9 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
             added,
             updated,
             removed,
-            added_related,
-            added_edges,
-            removed_edges,
             settled,
             tier,
-            terminal_rows,
+            ..
         } => {
             // Keep the current native wire source-row addressed until a later
             // revision carries occurrence identity explicitly.
@@ -1987,26 +1945,13 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
                 .collect::<Vec<_>>();
             let delta = encode_core_subscription_delta(&added, &updated, removed)
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-            let mut payload = serde_json::json!({
+            let payload = serde_json::json!({
                 "type": "delta",
                 "reset": reset,
                 "delta": delta,
-                "output_mode": if *terminal_rows { "terminal_rows" } else { "relation_facts" },
                 "settled": settled,
                 "tier": format!("{tier:?}"),
             });
-            if !terminal_rows {
-                let relation_delta = encode_core_relation_subscription_delta(
-                    &added,
-                    &updated,
-                    removed,
-                    added_related,
-                    added_edges,
-                    removed_edges,
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                payload["relation_delta"] = serde_json::json!(relation_delta);
-            }
             Ok(payload)
         }
         SubscriptionEvent::Rejected { reason } => {
@@ -2486,22 +2431,18 @@ mod tests {
     }
 
     #[test]
-    fn terminal_subscription_payload_omits_relation_delta() {
+    fn subscription_payload_exposes_only_terminal_rows() {
         let payload = core_subscription_event_to_json(&SubscriptionEvent::Delta {
             reset: false,
             added: Vec::new(),
             updated: Vec::new(),
             removed: Vec::new(),
-            added_related: Vec::new(),
-            added_edges: Vec::new(),
-            removed_edges: Vec::new(),
             settled: true,
             tier: DurabilityTier::Local,
-            terminal_rows: true,
         })
         .expect("encode terminal delta");
 
-        assert_eq!(payload["output_mode"], "terminal_rows");
         assert!(payload.get("relation_delta").is_none());
+        assert!(payload.get("output_mode").is_none());
     }
 }

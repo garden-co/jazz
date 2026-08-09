@@ -276,20 +276,18 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
         .expect("insert later child")
         .row_uuid();
     let SubscriptionEvent::Delta {
-        reset: false,
+        reset: true,
         added,
         updated,
-        added_related,
         ..
-    } = block_on(subscription.next_event()).expect("incremental maintained delivery")
+    } = block_on(subscription.next_event()).expect("maintained terminal delivery")
     else {
         panic!("expected incremental maintained delta");
     };
-    assert!(added_related.is_empty());
-    assert!(added.is_empty());
-    assert_eq!(updated.len(), 1, "one complete parent replacement");
-    assert_eq!(updated[0].row_uuid(), matching_parent);
-    let (descriptor, raw) = updated[0].encoded_record();
+    assert!(updated.is_empty());
+    assert_eq!(added.len(), 1, "one complete terminal parent");
+    assert_eq!(added[0].row_uuid(), matching_parent);
+    let (descriptor, raw) = added[0].encoded_record();
     let Value::Array(children) = descriptor
         .bind(raw)
         .get("children")

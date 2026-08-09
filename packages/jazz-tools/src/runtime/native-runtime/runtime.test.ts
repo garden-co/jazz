@@ -4,7 +4,6 @@ import { performance } from "node:perf_hooks";
 import type { ColumnDescriptor, NativeRowDelta, WasmSchema } from "../../drivers/types.js";
 import {
   createRecord,
-  type NativeRelationSubscriptionEdge,
   PostcardReader,
   PostcardWriter,
   queryWithPredicates,
@@ -3303,15 +3302,6 @@ describe("NativeRuntimeAdapter server transport", () => {
         updated: [],
         removed: [],
       }),
-      relation_delta: encodeRelationSubscriptionDelta({
-        baseCursor: 0,
-        cursor: 1,
-        added: [],
-        updated: [],
-        removed: [],
-        addedEdges: [],
-        removedEdges: [],
-      }),
     };
     const runtime = runtimeWithNativeSubscriptionChunk(chunk);
     const deltas: NativeRowDelta[] = [];
@@ -3347,19 +3337,16 @@ describe("NativeRuntimeAdapter server transport", () => {
       relationSubscriptionChunk({
         reset: true,
         rootAdded: [{ table: "todos", rowId: first, title: "first" }],
-        relationAdded: [{ table: "todos", rowId: first, title: "first" }],
       }),
       relationSubscriptionChunk({
         rootUpdated: [{ table: "todos", rowId: first, title: "first updated" }],
       }),
       relationSubscriptionChunk({
         rootRemoved: [{ table: "todos", rowId: first }],
-        relationRemoved: [{ table: "todos", rowId: first }],
       }),
       relationSubscriptionChunk({
         reset: true,
         rootAdded: [{ table: "todos", rowId: second, title: "second" }],
-        relationAdded: [{ table: "todos", rowId: second, title: "second" }],
       }),
     ];
     const runtime = runtimeWithNativeRelationSubscriptionChunks(chunks);
@@ -3430,15 +3417,6 @@ describe("NativeRuntimeAdapter server transport", () => {
         rowId: uuidBytes("00000000-0000-0000-0000-000000000321"),
         title: "plain public title",
         note: "nullable public note",
-      }),
-      relation_delta: encodeRelationSubscriptionDelta({
-        baseCursor: 0,
-        cursor: 1,
-        added: [],
-        updated: [],
-        removed: [],
-        addedEdges: [],
-        removedEdges: [],
       }),
     };
     const runtime = runtimeWithNativeSubscriptionChunk(chunk, schema);
@@ -4810,17 +4788,11 @@ function relationSubscriptionChunk({
   rootAdded = [],
   rootUpdated = [],
   rootRemoved = [],
-  relationAdded = [],
-  relationUpdated = [],
-  relationRemoved = [],
 }: {
   reset?: boolean;
   rootAdded?: EncodedTestRow[];
   rootUpdated?: EncodedTestRow[];
   rootRemoved?: Array<{ table: string; rowId: Uint8Array }>;
-  relationAdded?: EncodedTestRow[];
-  relationUpdated?: EncodedTestRow[];
-  relationRemoved?: Array<{ table: string; rowId: Uint8Array }>;
 }): unknown {
   return {
     type: "delta",
@@ -4830,15 +4802,6 @@ function relationSubscriptionChunk({
       added: rootAdded,
       updated: rootUpdated,
       removed: rootRemoved,
-    }),
-    relation_delta: encodeRelationSubscriptionDelta({
-      baseCursor: 0,
-      cursor: 1,
-      added: relationAdded,
-      updated: relationUpdated,
-      removed: relationRemoved,
-      addedEdges: [],
-      removedEdges: [],
     }),
   };
 }
@@ -5955,40 +5918,6 @@ function encodeSubscriptionDelta(delta: {
   return writer.finish();
 }
 
-function encodeRelationSubscriptionDelta(delta: {
-  baseCursor?: number;
-  cursor: number;
-  added: EncodedTestRow[];
-  updated: EncodedTestRow[];
-  removed: Array<{ table: string; rowId: Uint8Array }>;
-  addedEdges: NativeRelationSubscriptionEdge[];
-  removedEdges: NativeRelationSubscriptionEdge[];
-}): Uint8Array {
-  const writer = new PostcardWriter();
-  if (delta.baseCursor === undefined) {
-    writer.none();
-  } else {
-    writer.some((value) => value.u64(delta.baseCursor!));
-  }
-  writer.u64(delta.cursor);
-  writeRowBatches(writer, delta.added);
-  writeRowBatches(writer, delta.updated);
-  writer.vec((removed, index) => {
-    const source = delta.removed[index]!;
-    removed.string(source.table);
-    removed.bytes(source.rowId);
-  }, delta.removed.length);
-  writer.vec(
-    (edge, index) => writeRelationEdge(edge, delta.addedEdges[index]!),
-    delta.addedEdges.length,
-  );
-  writer.vec(
-    (edge, index) => writeRelationEdge(edge, delta.removedEdges[index]!),
-    delta.removedEdges.length,
-  );
-  return writer.finish();
-}
-
 function encodeUserWrappedSubscriptionDelta(row: {
   table: string;
   rowId: Uint8Array;
@@ -6028,14 +5957,6 @@ function presentBytes(bytes: Uint8Array): Uint8Array {
   output[0] = 1;
   output.set(bytes, 1);
   return output;
-}
-
-function writeRelationEdge(writer: PostcardWriter, edge: NativeRelationSubscriptionEdge): void {
-  writer.string(edge.sourceTable);
-  writer.bytes(edge.sourceRowId);
-  writer.string(edge.relation);
-  writer.string(edge.targetTable);
-  writer.bytes(edge.targetRowId);
 }
 
 function encodeBinaryLargeValueRows(): Uint8Array {

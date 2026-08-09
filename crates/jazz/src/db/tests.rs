@@ -51,9 +51,6 @@ fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: Subscription
             added,
             updated,
             removed,
-            added_related,
-            added_edges,
-            removed_edges,
             ..
         } => {
             if reset {
@@ -101,52 +98,6 @@ fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: Subscription
                 } else {
                     snapshot.rows.insert(snapshot.root_count, row);
                     snapshot.root_count += 1;
-                }
-            }
-
-            for row in added_related {
-                if snapshot
-                    .rows
-                    .iter()
-                    .take(snapshot.root_count)
-                    .any(|root| root.table() == row.table() && root.row_uuid() == row.row_uuid())
-                {
-                    continue;
-                }
-                if let Some(position) =
-                    snapshot
-                        .rows
-                        .iter()
-                        .skip(snapshot.root_count)
-                        .position(|current| {
-                            current.table() == row.table() && current.row_uuid() == row.row_uuid()
-                        })
-                {
-                    snapshot.rows[snapshot.root_count + position] = row;
-                } else {
-                    snapshot.rows.push(row);
-                }
-            }
-
-            snapshot
-                .edges
-                .retain(|edge| !removed_edges.iter().any(|removed| removed == edge));
-            for edge in added_edges {
-                if !snapshot.edges.iter().any(|current| current == &edge) {
-                    snapshot.edges.push(edge);
-                }
-            }
-
-            let mut index = snapshot.root_count;
-            while index < snapshot.rows.len() {
-                let row = &snapshot.rows[index];
-                let still_referenced = snapshot.edges.iter().any(|edge| {
-                    edge.target_table == row.table() && edge.target_row == row.row_uuid()
-                });
-                if still_referenced {
-                    index += 1;
-                } else {
-                    snapshot.rows.remove(index);
                 }
             }
         }
@@ -2995,10 +2946,9 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
     let opened = block_on(subscription.next_event()).unwrap();
-    let SubscriptionEvent::Delta { terminal_rows, .. } = &opened else {
+    let SubscriptionEvent::Delta { .. } = &opened else {
         panic!("expected terminal reset")
     };
-    assert!(*terminal_rows);
     let mut snapshot = snapshot_from_event(opened);
     assert_eq!(
         terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
@@ -3021,20 +2971,14 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
     while let Some(next) = subscription.try_next_event() {
         child_added = next;
     }
-    let SubscriptionEvent::Delta {
-        updated,
-        added_edges,
-        terminal_rows,
-        ..
-    } = &child_added
-    else {
+    let SubscriptionEvent::Delta { reset, added, .. } = &child_added else {
         panic!("expected root replacement")
     };
-    assert!(*terminal_rows);
-    assert_eq!(updated.len(), 1, "a child insertion replaces one root");
-    assert!(
-        added_edges.is_empty(),
-        "relation facts are not public output"
+    assert!(*reset);
+    assert_eq!(
+        added.len(),
+        1,
+        "a child insertion replaces the terminal root set"
     );
     apply_subscription_event(&mut snapshot, child_added);
     assert_eq!(

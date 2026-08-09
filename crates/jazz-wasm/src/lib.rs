@@ -200,17 +200,6 @@ struct WasmSubscriptionDelta<'a> {
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct WasmRelationSubscriptionDelta<'a> {
-    base_cursor: Option<u64>,
-    cursor: u64,
-    added: Vec<WasmRowBatch<'a>>,
-    updated: Vec<WasmRowBatch<'a>>,
-    removed: Vec<WasmRemovedRow>,
-    added_edges: Vec<WasmRelationEdge>,
-    removed_edges: Vec<WasmRelationEdge>,
-}
-
-#[derive(Clone, Debug, Serialize)]
 struct WasmRelationEdge {
     source_table: String,
     source_row_id: RowUuid,
@@ -2387,34 +2376,6 @@ fn encode_subscription_delta<'a>(
     })
 }
 
-fn encode_relation_subscription_delta<'a>(
-    added: &'a [jazz::node::CurrentRow],
-    updated: &'a [jazz::node::CurrentRow],
-    removed: &[jazz::db::RemovedRow],
-    added_related: &'a [jazz::node::CurrentRow],
-    added_edges: &[jazz::node::RelationEdge],
-    removed_edges: &[jazz::db::RemovedRelationEdge],
-) -> Result<Vec<u8>, postcard::Error> {
-    let mut relation_added = Vec::with_capacity(added.len() + added_related.len());
-    relation_added.extend_from_slice(added);
-    relation_added.extend_from_slice(added_related);
-    postcard::to_allocvec(&WasmRelationSubscriptionDelta {
-        base_cursor: None,
-        cursor: 0,
-        added: row_batches(&relation_added),
-        updated: row_batches(updated),
-        removed: removed
-            .iter()
-            .map(|row| WasmRemovedRow {
-                table: row.table.clone(),
-                row_id: row.row_uuid,
-            })
-            .collect(),
-        added_edges: added_edges.iter().map(wasm_relation_edge).collect(),
-        removed_edges: removed_edges.iter().map(wasm_relation_edge).collect(),
-    })
-}
-
 fn row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<WasmRowBatch<'_>> {
     let mut batches: Vec<WasmRowBatch<'_>> = Vec::new();
     for row in rows {
@@ -2459,12 +2420,9 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             added,
             updated,
             removed,
-            added_related,
-            added_edges,
-            removed_edges,
             settled,
             tier,
-            terminal_rows,
+            ..
         } => {
             // The current native wire remains source-row addressed. Occurrence
             // identity is maintained in the Rust subscription boundary until a
@@ -2485,34 +2443,9 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
                 "delta",
                 js_sys::Uint8Array::from(delta.as_slice()).into(),
             )?;
-            if !terminal_rows {
-                let relation_delta = encode_relation_subscription_delta(
-                    &added,
-                    &updated,
-                    &removed,
-                    &added_related,
-                    &added_edges,
-                    &removed_edges,
-                )
-                .map_err(to_js_error)?;
-                set_prop(
-                    &object,
-                    "relation_delta",
-                    js_sys::Uint8Array::from(relation_delta.as_slice()).into(),
-                )?;
-            }
             set_prop(&object, "reset", JsValue::from_bool(reset))?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;
             set_prop(&object, "tier", JsValue::from_str(&format!("{tier:?}")))?;
-            set_prop(
-                &object,
-                "output_mode",
-                JsValue::from_str(if terminal_rows {
-                    "terminal_rows"
-                } else {
-                    "relation_facts"
-                }),
-            )?;
         }
         SubscriptionEvent::Closed => {
             set_prop(&object, "type", JsValue::from_str("closed"))?;

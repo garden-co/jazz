@@ -299,18 +299,10 @@ fn drain_until_idle(server: &Db<MemoryStorage>, client: &Db<MemoryStorage>) {
 
 fn expect_parent_snapshot(event: SubscriptionEvent, parent: RowUuid, label: &str) {
     match event {
-        SubscriptionEvent::Delta {
-            added,
-            added_related,
-            added_edges,
-            reset,
-            ..
-        } => {
+        SubscriptionEvent::Delta { added, .. } => {
             assert!(
-                added.iter().any(|row| row.row_uuid() == parent)
-                    || added_related.iter().any(|row| row.row_uuid() == parent)
-                    || (!reset && !added_edges.is_empty()),
-                "{label}: relation delta did not include parent state or edge additions"
+                added.iter().any(|row| row.row_uuid() == parent),
+                "{label}: terminal delta did not include parent state"
             );
         }
         other => panic!("{label}: expected relation event, got {other:?}"),
