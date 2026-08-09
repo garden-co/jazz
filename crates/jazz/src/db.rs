@@ -3604,10 +3604,8 @@ impl DbMaintainedSubscriptionFootprint {
 #[cfg(feature = "testing")]
 #[derive(serde::Serialize)]
 struct SizeRelationSnapshot<'a> {
-    cursor: u64,
     root_count: u64,
     rows: Vec<SizeRowBatch<'a>>,
-    edges: Vec<SizeRelationEdge>,
 }
 
 #[cfg(feature = "testing")]
@@ -3642,24 +3640,12 @@ struct SizeRemovedRow {
 }
 
 #[cfg(feature = "testing")]
-#[derive(serde::Serialize)]
-struct SizeRelationEdge {
-    source_table: String,
-    source_row_id: RowUuid,
-    relation: String,
-    target_table: String,
-    target_row_id: RowUuid,
-}
-
-#[cfg(feature = "testing")]
 fn encode_relation_snapshot_for_size(
     snapshot: &RelationSnapshot,
 ) -> Result<Vec<u8>, postcard::Error> {
     postcard::to_allocvec(&SizeRelationSnapshot {
-        cursor: 0,
         root_count: snapshot.root_count as u64,
         rows: size_row_batches(&snapshot.rows),
-        edges: snapshot.edges.iter().map(size_relation_edge).collect(),
     })
 }
 
@@ -3702,17 +3688,6 @@ fn size_row<'a>(row: &CurrentRow, raw: &'a [u8]) -> SizeRow<'a> {
         row_id: row.row_uuid(),
         deleted: row.is_deleted(),
         raw,
-    }
-}
-
-#[cfg(feature = "testing")]
-fn size_relation_edge(edge: &RelationEdge) -> SizeRelationEdge {
-    SizeRelationEdge {
-        source_table: edge.source_table.clone(),
-        source_row_id: edge.source_row,
-        relation: edge.relation.clone(),
-        target_table: edge.target_table.clone(),
-        target_row_id: edge.target_row,
     }
 }
 
@@ -7211,8 +7186,9 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             result_member_removes,
             program_fact_adds,
             program_fact_removes,
+            terminal_operations,
         } => format!(
-            "ViewUpdate {} settled={} reset={} bundles={} inventory={} adds={} removes={} fact_adds={} fact_removes={}",
+            "ViewUpdate {} settled={} reset={} bundles={} inventory={} adds={} removes={} fact_adds={} fact_removes={} terminal_ops={}",
             summarize_subscription_key(*subscription),
             settled_through.0,
             reset_result_set,
@@ -7224,7 +7200,8 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             result_member_adds.len(),
             result_member_removes.len(),
             program_fact_adds.len(),
-            program_fact_removes.len()
+            program_fact_removes.len(),
+            terminal_operations.len()
         ),
         SyncMessage::CommitUnit { tx, .. } => format!("CommitUnit tx={:?}", tx.tx_id),
         SyncMessage::FateUpdate { tx_id, fate, .. } => {

@@ -20,27 +20,9 @@ export type NativeSubscriptionDelta = {
   updated: NativeRowBatch[];
   removed: NativeRemovedRow[];
 };
-export type NativeRelationSubscriptionEdge = {
-  sourceTable: string;
-  sourceRowId: Uint8Array;
-  relation: string;
-  targetTable: string;
-  targetRowId: Uint8Array;
-};
 export type NativeRelationSubscriptionSnapshot = {
-  cursor: number;
   rootCount: number;
   rows: NativeRowBatch[];
-  edges: NativeRelationSubscriptionEdge[];
-};
-export type NativeRelationSubscriptionDelta = {
-  baseCursor?: number;
-  cursor: number;
-  added: NativeRowBatch[];
-  updated: NativeRowBatch[];
-  removed: NativeRemovedRow[];
-  addedEdges: NativeRelationSubscriptionEdge[];
-  removedEdges: NativeRelationSubscriptionEdge[];
 };
 
 type PostcardReaderLike = {
@@ -85,44 +67,15 @@ export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeS
 export function readNativeRelationSubscriptionSnapshot(
   reader: PostcardReaderLike,
 ): NativeRelationSubscriptionSnapshot {
-  return {
-    cursor: reader.u64(),
-    rootCount: reader.u64(),
-    rows: reader.readVec(readNativeRowBatch),
-    edges: reader.readVec(readNativeRelationSubscriptionEdge),
-  };
-}
-
-export function readNativeRelationSubscriptionDelta(
-  reader: PostcardReaderLike,
-): NativeRelationSubscriptionDelta {
-  return {
-    baseCursor: reader.option((value) => value.u64()),
-    cursor: reader.u64(),
-    added: reader.readVec(readNativeRowBatch),
-    updated: reader.readVec(readNativeRowBatch),
-    removed: reader.readVec(readNativeRemovedRow),
-    addedEdges: reader.readVec(readNativeRelationSubscriptionEdge),
-    removedEdges: reader.readVec(readNativeRelationSubscriptionEdge),
-  };
+  const rootCount = reader.u64();
+  const rows = reader.readVec(readNativeRowBatch);
+  return { rootCount, rows };
 }
 
 export function readNativeRemovedRow(reader: PostcardReaderLike): NativeRemovedRow {
   return {
     table: reader.string(),
     rowId: reader.bytes(),
-  };
-}
-
-export function readNativeRelationSubscriptionEdge(
-  reader: PostcardReaderLike,
-): NativeRelationSubscriptionEdge {
-  return {
-    sourceTable: reader.string(),
-    sourceRowId: reader.bytes(),
-    relation: reader.string(),
-    targetTable: reader.string(),
-    targetRowId: reader.bytes(),
   };
 }
 

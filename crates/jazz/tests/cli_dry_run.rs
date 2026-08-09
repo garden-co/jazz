@@ -762,19 +762,6 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
         .unwrap();
     assert!(pump_websocket(&mut writer.socket, &writer.db, &writer.wire));
 
-    let mut first_reader = open_connected_client(
-        schema.clone(),
-        &server.ws_url,
-        subject,
-        identity_for_subject(0xd2, subject),
-    );
-    let _ = pump_websocket(
-        &mut first_reader.socket,
-        &first_reader.db,
-        &first_reader.wire,
-    );
-    drop(first_reader.socket);
-
     let mut reader = open_connected_client(
         schema.clone(),
         &server.ws_url,
@@ -808,6 +795,10 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
     ));
     while subscription.next().now_or_never().flatten().is_some() {}
 
+    // Break the actual socket while retaining this Db, its terminal cache,
+    // and the same SubscriptionStream.
+    drop(reader.socket);
+
     writer
         .db
         .insert_with_id(
@@ -815,6 +806,49 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
             RowUuid::from_bytes([0xb2; 16]),
             BTreeMap::from([
                 ("title".to_owned(), Value::String("second".to_owned())),
+                (
+                    "owner_id".to_owned(),
+                    Value::Uuid(RowUuid::from_bytes([0xa1; 16]).0),
+                ),
+            ]),
+        )
+        .unwrap();
+    assert!(pump_websocket(&mut writer.socket, &writer.db, &writer.wire));
+
+    let reconnected_wire = QueuedWireTransport::default();
+    reader
+        .db
+        .connect_upstream(Box::new(WireTransportAdapter::current(
+            reconnected_wire.clone(),
+        )));
+    reader.wire = reconnected_wire;
+    reader.socket = connect_server_ws(&server.ws_url, subject);
+    assert!(pump_websocket(&mut reader.socket, &reader.db, &reader.wire));
+    let reconnect_reset = block_on(subscription.next()).expect("authoritative reconnect reset");
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        terminal_operations,
+        ..
+    } = reconnect_reset
+    else {
+        panic!("expected reconnect reset delta")
+    };
+    assert!(reset);
+    assert!(
+        added.is_empty(),
+        "reset state arrives through version carriers"
+    );
+    assert!(terminal_operations.is_empty());
+    while subscription.next().now_or_never().flatten().is_some() {}
+
+    writer
+        .db
+        .insert_with_id(
+            "todos",
+            RowUuid::from_bytes([0xb3; 16]),
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("third".to_owned())),
                 (
                     "owner_id".to_owned(),
                     Value::Uuid(RowUuid::from_bytes([0xa1; 16]).0),
@@ -856,6 +890,23 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
         ),
         "unexpected post-reconnect structured event: {patch:?}"
     );
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = patch
+    else {
+        unreachable!()
+    };
+    assert!(matches!(
+        terminal_operations.as_slice(),
+        [jazz::groove::ivm::TerminalOperation {
+            path,
+            edit: jazz::groove::ivm::TerminalEdit::Insert { index: 2, .. },
+            ..
+        }] if path == &[jazz::groove::ivm::TerminalPathSegment::Collection(
+            "todosViaOwner".to_owned()
+        )]
+    ));
 
     drop(reader.socket);
     drop(writer.socket);

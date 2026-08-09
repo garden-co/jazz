@@ -186,10 +186,8 @@ struct WasmRow<'a> {
 
 #[derive(Clone, Debug, Serialize)]
 struct WasmRelationSnapshot<'a> {
-    cursor: u64,
     root_count: u64,
     rows: Vec<WasmRowBatch<'a>>,
-    edges: Vec<WasmRelationEdge>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -197,15 +195,6 @@ struct WasmSubscriptionDelta<'a> {
     added: Vec<WasmRowBatch<'a>>,
     updated: Vec<WasmRowBatch<'a>>,
     removed: Vec<WasmRemovedRow>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct WasmRelationEdge {
-    source_table: String,
-    source_row_id: RowUuid,
-    relation: String,
-    target_table: String,
-    target_row_id: RowUuid,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2351,10 +2340,8 @@ fn encode_relation_snapshot(
     snapshot: &jazz::node::RelationSnapshot,
 ) -> Result<Vec<u8>, postcard::Error> {
     postcard::to_allocvec(&WasmRelationSnapshot {
-        cursor: 0,
         root_count: snapshot.root_count as u64,
         rows: row_batches(&snapshot.rows),
-        edges: snapshot.edges.iter().map(wasm_relation_edge).collect(),
     })
 }
 
@@ -2392,16 +2379,6 @@ fn row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<WasmRowBatch<'_>> {
         }
     }
     batches
-}
-
-fn wasm_relation_edge(edge: &jazz::node::RelationEdge) -> WasmRelationEdge {
-    WasmRelationEdge {
-        source_table: edge.source_table.clone(),
-        source_row_id: edge.source_row,
-        relation: edge.relation.clone(),
-        target_table: edge.target_table.clone(),
-        target_row_id: edge.target_row,
-    }
 }
 
 fn wasm_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> WasmRow<'a> {

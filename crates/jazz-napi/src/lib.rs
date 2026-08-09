@@ -113,10 +113,8 @@ struct CoreRow<'a> {
 
 #[derive(Clone, Debug, serde::Serialize)]
 struct CoreRelationSnapshot<'a> {
-    cursor: u64,
     root_count: u64,
     rows: Vec<CoreRowBatch<'a>>,
-    edges: Vec<CoreRelationEdge>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -130,15 +128,6 @@ struct CoreSubscriptionDelta<'a> {
 struct CoreRemovedRow {
     table: String,
     row_id: CoreRowUuid,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-struct CoreRelationEdge {
-    source_table: String,
-    source_row_id: CoreRowUuid,
-    relation: String,
-    target_table: String,
-    target_row_id: CoreRowUuid,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -1861,10 +1850,8 @@ fn encode_core_relation_snapshot(
     snapshot: &jazz::node::RelationSnapshot,
 ) -> std::result::Result<Vec<u8>, postcard::Error> {
     postcard::to_allocvec(&CoreRelationSnapshot {
-        cursor: 0,
         root_count: snapshot.root_count as u64,
         rows: core_row_batches(&snapshot.rows),
-        edges: snapshot.edges.iter().map(core_relation_edge).collect(),
     })
 }
 
@@ -1902,16 +1889,6 @@ fn core_row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<CoreRowBatch<'_>> {
         }
     }
     batches
-}
-
-fn core_relation_edge(edge: &jazz::node::RelationEdge) -> CoreRelationEdge {
-    CoreRelationEdge {
-        source_table: edge.source_table.clone(),
-        source_row_id: edge.source_row,
-        relation: edge.relation.clone(),
-        target_table: edge.target_table.clone(),
-        target_row_id: edge.target_row,
-    }
 }
 
 fn core_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> CoreRow<'a> {

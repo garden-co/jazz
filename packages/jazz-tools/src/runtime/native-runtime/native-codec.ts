@@ -1,15 +1,11 @@
 import {
   type NativeRowBatch,
-  type NativeRelationSubscriptionDelta,
-  type NativeRelationSubscriptionEdge,
   type NativeRelationSubscriptionSnapshot,
   type NativeRemovedRow,
   type NativeSubscriptionDelta,
   type DescriptorField,
   createRecord,
   readNativeRowBatch,
-  readNativeRelationSubscriptionDelta,
-  readNativeRelationSubscriptionEdge,
   readNativeRelationSubscriptionSnapshot,
   readNativeRemovedRow,
   readNativeSubscriptionDelta,
@@ -24,8 +20,6 @@ export {
   decodeRecordString,
   fieldIndex,
   readNativeRowBatch,
-  readNativeRelationSubscriptionDelta,
-  readNativeRelationSubscriptionEdge,
   readNativeRelationSubscriptionSnapshot,
   readNativeRemovedRow,
   readNativeSubscriptionDelta,
@@ -35,8 +29,6 @@ export {
   writeValueType,
 } from "./native-row-codec.js";
 export type {
-  NativeRelationSubscriptionDelta,
-  NativeRelationSubscriptionEdge,
   NativeRelationSubscriptionSnapshot,
   NativeRemovedRow,
   NativeRow,
