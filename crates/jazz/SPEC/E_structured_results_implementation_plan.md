@@ -31,6 +31,72 @@ Therefore `INV-STORAGE-27` must remain `target`/`untested` after #1251 and is
 closed by PR 1 below, not credited merely because #1251 adds a `Record` enum
 variant.
 
+## Status (2026-08-06)
+
+| stage | state |
+|---|---|
+| PR 1 — durable-key rejection | **merged** (#1260); `INV-STORAGE-27` now/✓ |
+| PR 2 — Groove `CollectBy` terminal | **merged** (#1263); `INV-QUERY-27`, `INV-QUERY-28`, `G-INV-REC-16` now/✓ |
+| PR 3 — canonical `ResultTree`, explicit boundedness | **merged** (#1282); `INV-QUERY-29` now/✓ |
+| PR 3.5 — terminal integration | **blocked**, see _Terminal integration blocker_ below |
+| PR 4 — atomic structured delivery on v4 | **blocked** on the same question |
+| PR 5 — structured differential oracle | not started; `INV-TEST-5` target |
+
+Two decisions taken after this plan was written, and not part of its original
+five stages:
+
+- **Explicit boundedness.** `INV-QUERY-29` means *boundedness must be declared*,
+  not *a finite limit must be present*. An array subquery declares `limit(n)`
+  (zero valid, rendering `[]`) or `unbounded()`; declaring neither is a
+  validation error. `unbounded()` is a first-class supported mode — three
+  correctness gates use it deliberately, so a literal ban would have forced them
+  through a code path production never takes.
+- **One unified output terminal** (#1279, spec; #1281, Expand mode). Joins
+  produce flat wide rows in the graph; the terminal decides output shape, nest
+  or expand; nothing else renders. `CollectBy` gained an Expand mode over the
+  same machinery, and `INV-INC-2` was restated to bound both modes.
+
+## Terminal integration blocker
+
+Two attempts to split terminal integration from the v4 delivery cut both
+stopped before mutating anything. The reasons compose into one question.
+
+**`CollectBy` renders one collection slot.** `CollectByOp` carries a single
+`collection_field` and produces one parent with one `Array<Record>`.
+`ResultTree` requires *named ordered child arrays* — sibling relations — and
+recursion through parent → child → grandchild. The obvious bridge is composing
+collectors, but `INV-QUERY-27` forbids precisely that: a collector may not be
+an input to any graph node, *including another collector*. The rule that makes
+the terminal clean is the rule that prevents composing one into a tree.
+
+**The carrier forces flattening.** The only public maintained carrier is
+`SubscriptionEvent`, exposing flat root rows, related rows and `RelationEdge`
+deltas (`crates/jazz/src/db.rs:8128`); the remote carrier encodes
+`RelationEdgeEntry` (`crates/jazz/src/protocol.rs:1890`). A structured terminal
+result cannot traverse either without flattening back into rows and edges —
+which is the facade-side reconstruction the design forbids. So over the
+retained v3 path a changed child *cannot* be delivered as a whole-parent
+replacement.
+
+Together these mean terminal integration and the wire cut cannot be separated
+while the carrier is unchanged.
+
+🔶 **Open question — should one `CollectBy` render a whole tree?** Three
+candidate resolutions:
+
+1. **One atomic PR** combining terminal integration and the v4 cut. Honest, but
+   it enlarges the stage the plan already identifies as riskiest.
+2. **Extend `CollectByOp` to describe a tree** — nested collection slots within
+   a single terminal operator. `INV-QUERY-27` survives intact because there is
+   still exactly one terminal, and the operator comes to match what §6.4 already
+   promises. This is the current recommendation.
+3. **Narrow the scope** — terminalize only one-shot `all_result_tree` and leave
+   maintained delivery explicitly flat. Cheapest, at the cost of a structured
+   read path and an unstructured subscription path.
+
+If the answer is that a single terminal should not render sibling and recursive
+arrays, then `ResultTree`'s shape needs revisiting before any of these.
+
 ## Stack
 
 ### PR 1 — Reject record-containing durable keys at schema admission
