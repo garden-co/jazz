@@ -109,6 +109,8 @@ export interface ColumnDescriptor {
   name: string;
   column_type: ColumnType;
   nullable: boolean;
+  /** Physical current-row carriers may omit this wildcard field. */
+  sparse?: boolean;
   default?: Value;
   references?: string;
   merge_strategy?: ColumnMergeStrategy;

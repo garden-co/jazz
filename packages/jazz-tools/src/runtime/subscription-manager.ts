@@ -271,7 +271,10 @@ export class SubscriptionManager<T extends { id: string }> {
         if (reset) {
           this.clear();
         }
-        const decoded = decodeNativeDelta(delta, nativeColumns);
+        // Packed row deltas have already been normalized to the public logical
+        // record layout. Only Groove terminal edit payloads retain the outer
+        // sparse current-row carrier described by `sparse`.
+        const decoded = decodeNativeDelta(delta, logicalTransportColumns(nativeColumns));
         for (const change of decoded) {
           if (change.kind === RowChangeKind.Removed) {
             this.terminalRows.delete(change.id);
@@ -607,6 +610,30 @@ export class SubscriptionManager<T extends { id: string }> {
   get size(): number {
     return this.currentResults.size;
   }
+}
+
+function logicalTransportColumns(
+  columns: readonly ColumnDescriptor[],
+): readonly ColumnDescriptor[] {
+  return columns.map((column) => ({
+    ...column,
+    sparse: undefined,
+    column_type:
+      column.column_type.type === "Row"
+        ? {
+            ...column.column_type,
+            columns: [...logicalTransportColumns(column.column_type.columns)],
+          }
+        : column.column_type.type === "Array" && column.column_type.element.type === "Row"
+          ? {
+              ...column.column_type,
+              element: {
+                ...column.column_type.element,
+                columns: [...logicalTransportColumns(column.column_type.element.columns)],
+              },
+            }
+          : column.column_type,
+  }));
 }
 
 export function isNativeRowDelta(delta: SubscriptionWireDelta): delta is NativeRowDelta {

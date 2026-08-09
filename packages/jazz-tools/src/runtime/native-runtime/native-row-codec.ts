@@ -527,16 +527,29 @@ function descriptorFromColumns(columns: readonly ColumnDescriptor[]): Descriptor
 }
 
 function encodeValueForColumn(column: ColumnDescriptor, value: Value | undefined): Uint8Array {
-  if (!value || value.type === "Null") {
+  const logicalType = storageColumnTypeToValueType(column.column_type);
+  const nullableType: ValueType = column.nullable ? { tag: 14, inner: logicalType } : logicalType;
+
+  if (!value) {
+    if (column.sparse) return encodeNullValue({ tag: 14, inner: nullableType });
     if (!column.nullable) {
       throw new Error(`missing non-nullable value for ${column.name}`);
     }
-    return encodeNullValue(storageColumnValueType(column));
+    return encodeNullValue(nullableType);
   }
-  const encoded = encodeNonNullValue(column.column_type, value);
-  if (!column.nullable) return encoded;
-  const valueType = storageColumnValueType(column);
-  const inner = valueType.inner ?? storageColumnTypeToValueType(column.column_type);
+  if (value.type === "Null") {
+    if (!column.nullable) {
+      throw new Error(`missing non-nullable value for ${column.name}`);
+    }
+    const encodedNull = encodeNullValue(nullableType);
+    return column.sparse ? encodePresentValue(encodedNull, nullableType) : encodedNull;
+  }
+  let encoded = encodeNonNullValue(column.column_type, value);
+  if (column.nullable) encoded = encodePresentValue(encoded, logicalType);
+  return column.sparse ? encodePresentValue(encoded, nullableType) : encoded;
+}
+
+function encodePresentValue(encoded: Uint8Array, inner: ValueType): Uint8Array {
   if (fixedSize(inner) == null) {
     return concatBytes([Uint8Array.of(1), encoded]);
   }
@@ -655,8 +668,9 @@ function parseUuid(value: string): Uint8Array {
 }
 
 export function storageColumnValueType(column: ColumnDescriptor): ValueType {
-  const valueType = storageColumnTypeToValueType(column.column_type);
-  return column.nullable ? { tag: 14, inner: valueType } : valueType;
+  let valueType = storageColumnTypeToValueType(column.column_type);
+  if (column.nullable) valueType = { tag: 14, inner: valueType };
+  return column.sparse ? { tag: 14, inner: valueType } : valueType;
 }
 
 export function storageColumnTypeToValueType(type: ColumnType): ValueType {

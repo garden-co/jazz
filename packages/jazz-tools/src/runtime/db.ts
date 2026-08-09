@@ -431,8 +431,12 @@ function resolveNativeSubscriptionColumns(
   includes: NormalizedIncludeSpec,
   projection?: readonly string[],
 ): ColumnDescriptor[] {
+  const wildcard = projection === undefined || projection.length === 0;
   const columns = resolveSelectedColumns(tableName, schema, projection)
-    .map((columnName) => resolveOutputColumnDescriptor(tableName, schema, columnName))
+    .map((columnName) => {
+      const column = resolveOutputColumnDescriptor(tableName, schema, columnName);
+      return column && wildcard ? { ...column, sparse: true } : column;
+    })
     .filter((column): column is ColumnDescriptor => column !== undefined);
 
   if (Object.keys(includes).length === 0) {

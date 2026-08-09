@@ -2248,11 +2248,12 @@ function outputColumnsForTable(
 ): ColumnDescriptor[] {
   const tableSchema = schema[table];
   if (!tableSchema) throw new Error(`missing schema for subscription table ${table}`);
+  const wildcard = select === undefined;
   const selected = select ?? tableSchema.columns.map((column) => column.name);
   const columns = selected
     .map((columnName) => {
       const declared = tableSchema.columns.find((column) => column.name === columnName);
-      if (declared) return declared;
+      if (declared) return wildcard ? { ...declared, sparse: true } : declared;
       const magicType = magicColumnType(columnName);
       return magicType
         ? ({ name: columnName, column_type: magicType, nullable: false } satisfies ColumnDescriptor)
