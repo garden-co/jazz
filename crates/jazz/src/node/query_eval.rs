@@ -13506,6 +13506,139 @@ mod tests {
         (temp_dir, node)
     }
 
+    /// Stores a version in the non-base schema partition. The extra `body`
+    /// cell makes using the base history descriptor observably wrong at the
+    /// native row-batch boundary.
+    fn evolved_todos_version() -> (
+        tempfile::TempDir,
+        NodeState<RocksDbStorage>,
+        TableSchema,
+        RowUuid,
+        TxId,
+    ) {
+        let base = JazzSchema::new([TableSchema::new(
+            "todos",
+            [ColumnSchema::new("title", ColumnType::String)],
+        )]);
+        let evolved_todos = TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("body", ColumnType::String),
+            ],
+        );
+        let evolved_payload = SchemaVersion::new(JazzSchema::new([evolved_todos.clone()]));
+        let (dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xe1; 16]), base.clone());
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                evolved_payload.clone(),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved_payload.id,
+                    vec![TableLens {
+                        source_table: "todos".to_owned(),
+                        target_table: "todos".to_owned(),
+                        ops: vec![LensOp::AddColumn {
+                            column: "body".to_owned(),
+                            default: Value::String("base-default".to_owned()),
+                        }],
+                    }],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .unwrap();
+        node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: evolved_payload.id,
+            },
+        })
+        .unwrap();
+        let todo = row(0xe2);
+        let tx_id = node
+            .commit_mergeable(
+                MergeableCommit::new("todos", todo, 0xe3).cells(BTreeMap::from([
+                    (
+                        "title".to_owned(),
+                        Value::String("partition-title".to_owned()),
+                    ),
+                    (
+                        "body".to_owned(),
+                        Value::String("partition-body".to_owned()),
+                    ),
+                ])),
+            )
+            .unwrap();
+        (dir, node, evolved_todos, todo, tx_id)
+    }
+
+    #[test]
+    fn authoritative_reset_version_uses_non_base_partition_descriptor() {
+        let (_dir, mut node, evolved_table, todo, tx_id) = evolved_todos_version();
+        let table = node.table("todos").unwrap().clone();
+        let row = node
+            .materialize_authoritative_reset_version_row("todos", todo, tx_id, None)
+            .unwrap()
+            .expect("stored evolved version");
+        assert_eq!(
+            row.cell(&table, "title"),
+            Some(Value::String("partition-title".to_owned()))
+        );
+        let alias = *node
+            .node_aliases
+            .get(&tx_id.node)
+            .expect("local node alias");
+        let version = node
+            .query_version_by_alias("todos", todo, VersionLayer::Content, tx_id.time, alias)
+            .unwrap()
+            .expect("non-base partition version");
+        assert_eq!(version.tx_time(), tx_id.time);
+        assert_eq!(version.tx_node_alias(), alias);
+        assert_eq!(
+            version.cell(&evolved_table, "body").unwrap(),
+            Some(Value::String("partition-body".to_owned()))
+        );
+    }
+
+    #[test]
+    fn relation_edge_target_uses_non_base_partition_descriptor() {
+        let (_dir, mut node, evolved_table, todo, tx_id) = evolved_todos_version();
+        let table = node.table("todos").unwrap().clone();
+        let alias = *node
+            .node_aliases
+            .get(&tx_id.node)
+            .expect("local node alias");
+        let row = node
+            .materialize_relation_edge_target_row(
+                &ReadViewSpec::default(),
+                &table,
+                "todos",
+                todo,
+                tx_id.time,
+                alias,
+            )
+            .unwrap();
+        assert_eq!(
+            row.cell(&table, "title"),
+            Some(Value::String("partition-title".to_owned()))
+        );
+        let version = node
+            .query_version_by_alias("todos", todo, VersionLayer::Content, tx_id.time, alias)
+            .unwrap()
+            .expect("non-base partition version");
+        assert_eq!(version.tx_time(), tx_id.time);
+        assert_eq!(version.tx_node_alias(), alias);
+        assert_eq!(
+            version.cell(&evolved_table, "body").unwrap(),
+            Some(Value::String("partition-body".to_owned()))
+        );
+    }
+
     fn recursive_schema() -> JazzSchema {
         JazzSchema::new([
             TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
