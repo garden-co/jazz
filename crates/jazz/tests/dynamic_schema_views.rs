@@ -3,7 +3,7 @@ use jazz::groove::records::Value;
 use jazz::groove::schema::ColumnType;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::query::{OrderDirection, col, gt, lit};
+use jazz::query::{OrderDirection, col, eq, gt, lit};
 use jazz::schema::{ColumnSchema, JazzSchema, Policy, TableSchema};
 use jazz::tools::OpenBatchId;
 
@@ -29,6 +29,18 @@ fn schema_with_note(default: &str) -> JazzSchema {
     )
     .with_read_policy(Policy::public())
     .with_write_policy(Policy::public())])
+}
+
+fn owner_only_schema(default: &str) -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "items",
+        [ColumnSchema::new("label", ColumnType::String)
+            .with_default(Value::String(default.to_owned()))],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::shape(
+        jazz::query::Query::from("items").filter(eq(lit(1_i64), lit(2_i64))),
+    ))])
 }
 
 fn open_owner(schema: JazzSchema) -> Db<MemoryStorage> {
@@ -103,6 +115,32 @@ fn schema_view_registration_is_idempotent_and_explicit() {
             .schema_view_id(),
         first.schema_view_id()
     );
+}
+
+/// Exact view policy is an authorization boundary even when its physical
+/// structure shares one SchemaVersionId with a public catalogue schema.
+#[test]
+fn exact_schema_view_policy_cannot_inherit_public_structural_policy() {
+    let owner = open_owner(schema("public"));
+    let restricted = owner
+        .register_schema_view(owner_only_schema("not-the-author"))
+        .unwrap();
+    assert_eq!(
+        schema("public").version_id(),
+        owner_only_schema("not-the-author").version_id()
+    );
+    assert_ne!(owner.schema_view_id(), restricted.schema_view_id());
+
+    let error = match restricted.insert_with_id(
+        "items",
+        RowUuid::from_bytes([9; 16]),
+        Default::default(),
+    ) {
+        Ok(_) => panic!("restricted exact view unexpectedly inherited public policy"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, jazz::db::ErrorCode::WriteRejected);
+    assert!(error.message.contains("policy denied INSERT"));
 }
 
 /// A runtime owner may exist before any typed application schema is known;
