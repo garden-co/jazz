@@ -629,6 +629,50 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(firstDelta.row.values[0]).toEqual({ type: "Text", value: "settled row" });
   });
 
+  it("preserves terminal operations while settle-gating global subscriptions", () => {
+    const key = [10, ...uuidBytes("00000000-0000-0000-0000-000000000123")];
+    const terminalOperations = [{ root_key: key, path: [], edit: { Move: { key, index: 0 } } }];
+    const events = [
+      {
+        type: "delta",
+        reset: false,
+        settled: false,
+        delta: encodeSubscriptionDelta({ added: [], updated: [], removed: [] }),
+        terminalOperations,
+      },
+      {
+        type: "delta",
+        reset: false,
+        settled: true,
+        delta: encodeSubscriptionDelta({ added: [], updated: [], removed: [] }),
+      },
+    ];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => ({}),
+            subscribe: () => ({ readAll: () => events.splice(0), close: () => true }),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "global");
+    const updates = vi.fn();
+    runtime.executeSubscription(handle, updates);
+
+    expect(updates).toHaveBeenCalledTimes(1);
+    expect(updates.mock.calls[0]![0].terminalOperations).toEqual(terminalOperations);
+  });
+
   it("uses the caller-supplied table for update and delete", () => {
     const calls: unknown[] = [];
     const write = {

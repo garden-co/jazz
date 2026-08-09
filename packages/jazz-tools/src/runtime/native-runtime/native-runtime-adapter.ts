@@ -304,6 +304,7 @@ type SubscriptionState = {
   visibleOpened: boolean;
   deferredVisiblePublication: boolean;
   deferredVisibleReset: boolean;
+  deferredTerminalOperations: NativeTerminalOperation[];
   callback?: Function;
   cancelled: boolean;
 };
@@ -935,6 +936,7 @@ export class NativeRuntimeAdapter implements Runtime {
       visibleOpened: false,
       deferredVisiblePublication: false,
       deferredVisibleReset: false,
+      deferredTerminalOperations: [],
       cancelled: false,
     });
     return handle;
@@ -1639,6 +1641,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.subscriptionCallbacksAreSettledGated(subscription) && settled === false) {
       subscription.deferredVisiblePublication = true;
       subscription.deferredVisibleReset ||= reset;
+      subscription.deferredTerminalOperations.push(...(wireDelta.terminalOperations ?? []));
       return;
     }
 
@@ -1667,6 +1670,12 @@ export class NativeRuntimeAdapter implements Runtime {
       }
     }
 
+    const terminalOperations = [
+      ...subscription.deferredTerminalOperations,
+      ...(wireDelta.terminalOperations ?? []),
+    ];
+    if (terminalOperations.length > 0) visibleDelta.terminalOperations = terminalOperations;
+
     subscription.callback?.(visibleDelta);
     if (visibleDelta === subscription.packedResetRows) {
       subscription.visibleRows = [];
@@ -1678,6 +1687,7 @@ export class NativeRuntimeAdapter implements Runtime {
     subscription.visibleOpened = true;
     subscription.deferredVisiblePublication = false;
     subscription.deferredVisibleReset = false;
+    subscription.deferredTerminalOperations = [];
   }
 
   private subscriptionCallbacksAreSettledGated(subscription: SubscriptionState): boolean {
