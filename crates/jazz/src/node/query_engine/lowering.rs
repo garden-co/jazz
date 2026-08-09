@@ -6040,6 +6040,7 @@ fn collect_layout(
     parameter_domain: &ParameterDomain,
     available_fields: &BTreeSet<String>,
 ) -> CapabilityResult<CollectLayout> {
+    let explicit_root_projection = matches!(projection.fields, FieldProjection::Fields(_));
     let mut selected_root = BTreeSet::from([root_source.row_shape.row_uuid_field.clone()]);
     match &projection.fields {
         FieldProjection::All => selected_root.extend(
@@ -6070,11 +6071,11 @@ fn collect_layout(
                     collect_projection_output_field(name)
                 },
                 value_type: field.value_type.clone(),
-                output_value_type: collect_logical_output_type(
-                    root_source,
-                    name,
-                    &field.value_type,
-                ),
+                output_value_type: if explicit_root_projection {
+                    collect_logical_output_type(root_source, name, &field.value_type)
+                } else {
+                    field.value_type.clone()
+                },
                 source_field: Some(name.clone()),
                 is_row_id: name == &root_source.row_shape.row_uuid_field,
                 is_presence: false,
