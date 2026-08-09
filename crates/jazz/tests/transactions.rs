@@ -743,8 +743,10 @@ async fn global_wait_after_over_one_mib_websocket_import_settles() {
         )
         .expect("insert target row");
 
-    let import_payload = "x".repeat(600);
-    for index in 0..2_048 {
+    // Keep the logical payload above 1 MiB while avoiding a throughput-shaped
+    // test with thousands of independently committed rows.
+    let import_payload = "x".repeat(1_600);
+    for index in 0..768 {
         client
             .insert(
                 "todos",
