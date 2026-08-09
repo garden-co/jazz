@@ -13,13 +13,14 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
   const receipt = (
     writeContextJson: string | null | undefined,
     committedId: string,
-  ): WriteReceipt =>
-    writeContextJson
-      ? {
-          kind: "staged",
-          openBatchId: JSON.parse(writeContextJson).batch_id as OpenBatchId,
-        }
+  ): WriteReceipt => {
+    const openBatchId = writeContextJson
+      ? (JSON.parse(writeContextJson).batch_id as OpenBatchId | undefined)
+      : undefined;
+    return openBatchId
+      ? { kind: "staged", openBatchId }
       : { kind: "committed", batchId: committedId as BatchId };
+  };
   const insertCalls: Array<
     [string, Record<string, unknown>, string | undefined, string | undefined]
   > = [];

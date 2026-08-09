@@ -2045,30 +2045,30 @@ function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
   return updatedAtMsFromWriteContext(writeContext) ?? Date.now();
 }
 
-function txStateMessage(transactionId: string, completedTxs: Map<string, CompletedTx>): string {
-  const completed = completedTxs.get(transactionId);
+function txStateMessage(openBatchId: string, completedBatches: Map<string, CompletedTx>): string {
+  const completed = completedBatches.get(openBatchId);
   if (completed?.state === "committed") {
-    return `transaction ${transactionId} is already committed`;
+    return `open batch ${openBatchId} is already committed`;
   }
-  return `transaction ${transactionId} has already been completed or was never opened`;
+  return `open batch ${openBatchId} has already been completed or was never opened`;
 }
 
 function commitTransactionMessage(
-  transactionId: string,
-  completedTxs: Map<string, CompletedTx>,
+  openBatchId: string,
+  completedBatches: Map<string, CompletedTx>,
 ): string {
-  const message = txStateMessage(transactionId, completedTxs);
-  return completedTxs.get(transactionId)?.state === "committed"
+  const message = txStateMessage(openBatchId, completedBatches);
+  return completedBatches.get(openBatchId)?.state === "committed"
     ? `Write error: ${message}`
     : `Commit transaction failed: Write error: ${message}`;
 }
 
 function rollbackTransactionMessage(
-  transactionId: string,
-  completedTxs: Map<string, CompletedTx>,
+  openBatchId: string,
+  completedBatches: Map<string, CompletedTx>,
 ): string {
-  const message = txStateMessage(transactionId, completedTxs);
-  return completedTxs.get(transactionId)?.state === "committed"
+  const message = txStateMessage(openBatchId, completedBatches);
+  return completedBatches.get(openBatchId)?.state === "committed"
     ? `Write error: ${message}`
     : `Rollback transaction failed: Write error: ${message}`;
 }
@@ -2078,27 +2078,25 @@ function assertTransactionReadOpen(
   pendingTxs: Map<string, PendingTx>,
   completedTxs: Map<string, CompletedTx>,
 ): void {
-  const transactionId = txIdFromOptions(optionsJson);
-  if (!transactionId || pendingTxs.has(transactionId)) return;
-  throw new Error(
-    `Query setup failed: Write error: ${txStateMessage(transactionId, completedTxs)}`,
-  );
+  const openBatchId = openBatchIdFromOptions(optionsJson);
+  if (!openBatchId || pendingTxs.has(openBatchId)) return;
+  throw new Error(`Query setup failed: Write error: ${txStateMessage(openBatchId, completedTxs)}`);
 }
 
 function pendingTxFromOptions(
   optionsJson: string | null | undefined,
   pendingTxs: Map<string, PendingTx>,
 ): PendingTx | undefined {
-  const transactionId = txIdFromOptions(optionsJson);
-  return transactionId ? pendingTxs.get(transactionId) : undefined;
+  const openBatchId = openBatchIdFromOptions(optionsJson);
+  return openBatchId ? pendingTxs.get(openBatchId) : undefined;
 }
 
-function txIdFromOptions(optionsJson?: string | null): string | undefined {
+function openBatchIdFromOptions(optionsJson?: string | null): OpenBatchId | undefined {
   if (!optionsJson) return undefined;
   try {
     const parsed = JSON.parse(optionsJson) as { transaction_batch_id?: unknown };
     return typeof parsed.transaction_batch_id === "string"
-      ? parsed.transaction_batch_id
+      ? (parsed.transaction_batch_id as OpenBatchId)
       : undefined;
   } catch {
     return undefined;

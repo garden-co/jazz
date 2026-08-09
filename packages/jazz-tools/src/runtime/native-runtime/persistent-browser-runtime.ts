@@ -772,31 +772,31 @@ function errorMessage(error: unknown): string {
 }
 
 function txStateMessage(
-  transactionId: string,
-  completedTxs: Map<string, CompletedTxState>,
+  openBatchId: string,
+  completedBatches: Map<string, CompletedTxState>,
 ): string {
-  if (completedTxs.get(transactionId) === "committed") {
-    return `transaction ${transactionId} is already committed`;
+  if (completedBatches.get(openBatchId) === "committed") {
+    return `open batch ${openBatchId} is already committed`;
   }
-  return `transaction ${transactionId} has already been completed or was never opened`;
+  return `open batch ${openBatchId} has already been completed or was never opened`;
 }
 
 function commitTransactionMessage(
-  transactionId: string,
-  completedTxs: Map<string, CompletedTxState>,
+  openBatchId: string,
+  completedBatches: Map<string, CompletedTxState>,
 ): string {
-  const message = txStateMessage(transactionId, completedTxs);
-  return completedTxs.get(transactionId) === "committed"
+  const message = txStateMessage(openBatchId, completedBatches);
+  return completedBatches.get(openBatchId) === "committed"
     ? `Write error: ${message}`
     : `Commit transaction failed: Write error: ${message}`;
 }
 
 function rollbackTransactionMessage(
-  transactionId: string,
-  completedTxs: Map<string, CompletedTxState>,
+  openBatchId: string,
+  completedBatches: Map<string, CompletedTxState>,
 ): string {
-  const message = txStateMessage(transactionId, completedTxs);
-  return completedTxs.get(transactionId) === "committed"
+  const message = txStateMessage(openBatchId, completedBatches);
+  return completedBatches.get(openBatchId) === "committed"
     ? `Write error: ${message}`
     : `Rollback transaction failed: Write error: ${message}`;
 }

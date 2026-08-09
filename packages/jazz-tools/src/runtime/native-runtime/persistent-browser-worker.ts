@@ -65,8 +65,8 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
         return;
       }
       case "waitForTransaction": {
-        const [transactionId, tier] = message.args;
-        const result = await getRuntime().waitForTransaction(transactionId, tier);
+        const [batchId, tier] = message.args;
+        const result = await getRuntime().waitForTransaction(batchId, tier);
         postResult(message.id, result);
         return;
       }
@@ -77,14 +77,14 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
         return;
       }
       case "commitTransaction": {
-        const [transactionId] = message.args;
-        const result = getRuntime().commitTransaction(transactionId);
+        const [openBatchId] = message.args;
+        const result = getRuntime().commitTransaction(openBatchId);
         postResult(message.id, result);
         return;
       }
       case "rollbackTransaction": {
-        const [transactionId] = message.args;
-        const result = await getRuntime().rollbackTransaction(transactionId);
+        const [openBatchId] = message.args;
+        const result = await getRuntime().rollbackTransaction(openBatchId);
         postResult(message.id, result);
         return;
       }

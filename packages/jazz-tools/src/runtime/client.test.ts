@@ -294,7 +294,7 @@ describe("JazzClient transaction query plumbing", () => {
     await expect(
       client.query(JSON.stringify({ relation_ir: { table: "todos" } }), {
         localUpdates: "deferred",
-        transactionId,
+        openBatchId: transactionId,
       }),
     ).resolves.toEqual([{ id: "todo-transaction-query", values: [] }]);
 
@@ -313,7 +313,9 @@ describe("JazzClient runtime transaction waits", () => {
     runtime.waitForTransaction = vi.fn(async () => undefined);
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
 
-    await expect(client.waitForTransaction("transaction-runtime", "edge")).resolves.toBeUndefined();
+    await expect(
+      client.waitForTransaction("transaction-runtime" as BatchId, "edge"),
+    ).resolves.toBeUndefined();
 
     expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-runtime", "edge");
   });
@@ -321,7 +323,7 @@ describe("JazzClient runtime transaction waits", () => {
   it("waits for connected exclusive transactions at the global tier", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const handle = new ExclusiveWriteHandle("transaction-exclusive", client);
+    const handle = new ExclusiveWriteHandle("transaction-exclusive" as BatchId, client);
 
     await expect(handle.wait()).resolves.toBeUndefined();
 
@@ -334,7 +336,7 @@ describe("JazzClient runtime transaction waits", () => {
       ...makeContext(),
       serverUrl: undefined,
     });
-    const handle = new ExclusiveWriteHandle("transaction-exclusive", client);
+    const handle = new ExclusiveWriteHandle("transaction-exclusive" as BatchId, client);
 
     await expect(handle.wait()).resolves.toBeUndefined();
 
@@ -343,7 +345,7 @@ describe("JazzClient runtime transaction waits", () => {
 
   it("surfaces runtime wait rejection as PersistedWriteRejectedError", async () => {
     const runtime = makeFakeRuntime();
-    const transactionId = "transaction-runtime-rejected";
+    const batchId = "transaction-runtime-rejected" as BatchId;
     let rejectWait!: (error: unknown) => void;
     runtime.waitForTransaction = vi.fn(
       () =>
@@ -353,12 +355,12 @@ describe("JazzClient runtime transaction waits", () => {
     );
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
 
-    const waitPromise = client.waitForTransaction(transactionId, "edge");
+    const waitPromise = client.waitForTransaction(batchId, "edge");
     await Promise.resolve();
 
     rejectWait({
       kind: "rejected",
-      transactionId: transactionId,
+      transactionId: batchId,
       code: "permission_denied",
       reason: "write rejected by policy",
     });
