@@ -4498,9 +4498,6 @@ where
         table: &str,
         schema_version: SchemaVersionId,
     ) -> Result<TableSchema, Error> {
-        if schema_version == self.catalogue.current_schema_version_id {
-            return self.table(table).cloned();
-        }
         self.catalogue
             .catalogue_schemas
             .get(&schema_version)
@@ -4511,6 +4508,11 @@ where
                     .iter()
                     .find(|candidate| candidate.name == table)
                     .cloned()
+            })
+            .or_else(|| {
+                (schema_version == self.catalogue.current_schema_version_id)
+                    .then(|| self.table(table).ok().cloned())
+                    .flatten()
             })
             .ok_or_else(|| Error::TableNotFound(table.to_owned()))
     }

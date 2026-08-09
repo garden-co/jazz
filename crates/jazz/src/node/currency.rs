@@ -59,13 +59,13 @@ where
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
         let schema_version = if self
-            .table_in_schema(table, self.catalogue.current_schema_version_id)
+            .table_in_schema(table, self.catalogue.current_write_schema.schema)
             .is_ok()
         {
-            self.catalogue.current_schema_version_id
-        } else {
-            self.table_in_schema(table, self.catalogue.current_write_schema.schema)?;
             self.catalogue.current_write_schema.schema
+        } else {
+            self.table_in_schema(table, self.catalogue.current_schema_version_id)?;
+            self.catalogue.current_schema_version_id
         };
         let current_table = self.physical_current_table_for_schema(
             schema_version,
