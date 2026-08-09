@@ -549,7 +549,7 @@ impl Backend {
 
     fn exclusive_all_for_identity(
         &self,
-        tx_id: CoreOpenTxId,
+        tx_id: OpenBatchId,
         prepared: &crate::db::PreparedQuery,
         author: CoreAuthorId,
     ) -> std::result::Result<Vec<crate::node::CurrentRow>, CoreDbError> {
@@ -750,7 +750,7 @@ impl ClientDb {
     fn query_transaction_rows(
         &self,
         query: crate::query::Query,
-        batch_id: BatchId,
+        batch_id: OpenBatchId,
         table: String,
         author: CoreAuthorId,
     ) -> Result<Vec<crate::node::CurrentRow>> {
@@ -763,22 +763,10 @@ impl ClientDb {
         };
         let rows = {
             let inner = self.inner.borrow();
-            let tx_id = inner
-                .transactions
-                .get(&batch_id)
-                .map(|state| state.tx_id)
-                .ok_or_else(|| {
-                    let message = inner
-                        .closed_transactions
-                        .get(&batch_id)
-                        .copied()
-                        .map(|state| ClientDbInner::closed_transaction_message(batch_id, state))
-                        .unwrap_or_else(|| format!("transaction {batch_id} is not open"));
-                    JazzError::Query(message)
-                })?;
+            inner.ensure_transaction_open(batch_id)?;
             inner
                 .db
-                .exclusive_all_for_identity(tx_id, &prepared, author)
+                .exclusive_all_for_identity(batch_id, &prepared, author)
                 .map_err(|error| JazzError::Query(error.to_string()))?
         };
         self.inner.borrow_mut().remember_rows(&table, &rows);
@@ -2828,64 +2816,6 @@ impl JazzClient {
             })
             .collect()
     }
-    fn apply_core_transaction_overlay(
-        &self,
-        query: &Query,
-        batch_id: OpenBatchId,
-        rows: &mut Vec<(ObjectId, Vec<Value>)>,
-    ) -> Result<()> {
-        let table = query.table.as_str();
-        let schema = self.schema()?;
-        let table_schema = schema
-            .get(&TableName::new(table))
-            .ok_or_else(|| JazzError::Query(format!("unknown table {table}")))?;
-        let columns = query.select_columns.clone().unwrap_or_else(|| {
-            table_schema
-                .columns
-                .columns
-                .iter()
-                .map(|column| column.name.as_str().to_string())
-                .collect()
-        });
-
-        let inner = self.db.inner.borrow();
-        let tx = inner.transactions.get(&batch_id).ok_or_else(|| {
-            let message = inner
-                .closed_transactions
-                .get(&batch_id)
-                .copied()
-                .map(|state| ClientDbInner::closed_transaction_message(batch_id, state))
-                .unwrap_or_else(|| format!("transaction {batch_id} is not open"));
-            JazzError::Query(message)
-        })?;
-
-        for write in tx.writes.iter().filter(|write| write.table == table) {
-            if write.deletion == Some(CoreDeletionEvent::Deleted) {
-                rows.retain(|(row_id, _)| *row_id != write.row_id);
-                continue;
-            }
-
-            let existing_position = rows.iter().position(|(row_id, _)| *row_id == write.row_id);
-            let mut values = existing_position
-                .map(|position| rows[position].1.clone())
-                .unwrap_or_else(|| vec![Value::Null; columns.len()]);
-
-            for (column, value) in &write.cells {
-                if let Some(position) = columns.iter().position(|candidate| candidate == column) {
-                    values[position] = core_to_public_value(value.clone())?;
-                }
-            }
-
-            if let Some(position) = existing_position {
-                rows[position].1 = values;
-            } else {
-                rows.push((write.row_id, values));
-            }
-        }
-
-        Ok(())
-    }
-
     /// Connect to Jazz with the given configuration.
     pub async fn connect(context: AppContext) -> Result<Self> {
         Self::connect_inner(context).await
