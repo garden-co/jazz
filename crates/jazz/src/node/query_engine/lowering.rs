@@ -5627,12 +5627,7 @@ fn lower_collect_by_app_rows(
     align_collect_root_window(&mut layout, plan)?;
     align_collect_join_key_types(&mut layout.slots, plan, resolved_sources, request)?;
     if layout.slots.is_empty() {
-        let mut anchor = collect_anchor_graph(visible_root, &layout)?;
-        for field in layout.root_fields.iter().filter(|field| {
-            field.is_output && !field.is_row_id && field.value_type != field.output_value_type
-        }) {
-            anchor = anchor.unwrap_nullable(&field.input);
-        }
+        let anchor = collect_anchor_graph(visible_root, &layout)?;
         let has_window = root_linear_steps(plan).is_some_and(|steps| {
             steps
                 .iter()
@@ -5666,7 +5661,13 @@ fn lower_collect_by_app_rows(
                 .root_fields
                 .iter()
                 .filter(|field| field.is_output)
-                .map(|field| CollectByField::renamed(&field.input, &field.output)),
+                .map(|field| {
+                    if field.is_row_id || field.value_type == field.output_value_type {
+                        CollectByField::renamed(&field.input, &field.output)
+                    } else {
+                        CollectByField::renamed_unwrap_nullable(&field.input, &field.output)
+                    }
+                }),
             layout.root_order_cols.clone(),
             layout.root_tie_cols.clone(),
             layout.root_offset,
@@ -6069,10 +6070,11 @@ fn collect_layout(
                     collect_projection_output_field(name)
                 },
                 value_type: field.value_type.clone(),
-                // Root current-row carriers are sparse. Retain their nullable
-                // physical wrapper so an absent non-nullable field does not
-                // filter the whole row during terminal rendering.
-                output_value_type: field.value_type.clone(),
+                output_value_type: collect_logical_output_type(
+                    root_source,
+                    name,
+                    &field.value_type,
+                ),
                 source_field: Some(name.clone()),
                 is_row_id: name == &root_source.row_shape.row_uuid_field,
                 is_presence: false,
