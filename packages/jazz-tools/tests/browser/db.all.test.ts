@@ -617,6 +617,17 @@ describe("db.all browser integration", () => {
         "local",
       )) as unknown[];
       expect(rows).toHaveLength(2);
+
+      const emptyMergeable = createOpenBatchId();
+      runtime.beginTransaction("mergeable", emptyMergeable);
+      await expect(runtime.commitTransaction(emptyMergeable)).rejects.toThrow(
+        "empty mergeable batch has no committed unit; roll it back instead",
+      );
+      await runtime.rollbackTransaction(emptyMergeable);
+
+      const emptyExclusive = createOpenBatchId();
+      runtime.beginTransaction("exclusive", emptyExclusive);
+      await expect(runtime.commitTransaction(emptyExclusive)).resolves.toMatch(/^[0-9a-f]{32}$/);
     } finally {
       await runtime.close();
     }
@@ -638,13 +649,22 @@ describe("db.all browser integration", () => {
     if (receipt.kind !== "committed") throw new Error("expected committed write");
     const batchId = await receipt.batchId;
     const wait = runtime.waitForTransaction(batchId, "edge");
+    const laterReceipt = runtime.insert("todos", {
+      title: { type: "Text", value: "queued behind wait" },
+      done: { type: "Boolean", value: false },
+      tags: { type: "Array", value: [] },
+    });
+    if (laterReceipt.kind !== "committed") throw new Error("expected committed write");
+    const waitRejected = expect(wait).rejects.toThrow("closed");
+    const laterWriteRejected = expect(laterReceipt.batchId).rejects.toThrow("closed");
     await expect(
       Promise.race([
         runtime.close(),
         new Promise((_, reject) => setTimeout(() => reject(new Error("close timed out")), 2_000)),
       ]),
     ).resolves.toBeUndefined();
-    await expect(wait).rejects.toThrow("closed");
+    await waitRejected;
+    await laterWriteRejected;
   });
 
   it("supports multi-hop queries", async () => {

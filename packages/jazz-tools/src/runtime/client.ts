@@ -424,7 +424,7 @@ function rejectionFromRuntimeWaitError(error: unknown): PersistedWriteRejectedEr
   }
   const candidate = error as {
     kind?: unknown;
-    transactionId?: unknown;
+    batchId?: unknown;
     code?: unknown;
     reason?: unknown;
   };
@@ -434,12 +434,12 @@ function rejectionFromRuntimeWaitError(error: unknown): PersistedWriteRejectedEr
   if (
     typeof candidate.code !== "string" ||
     typeof candidate.reason !== "string" ||
-    typeof candidate.transactionId !== "string"
+    typeof candidate.batchId !== "string"
   ) {
     return null;
   }
   return new PersistedWriteRejectedError(
-    candidate.transactionId as BatchId,
+    candidate.batchId as BatchId,
     candidate.code,
     candidate.reason,
   );

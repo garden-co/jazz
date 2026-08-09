@@ -983,10 +983,10 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(stagedTransactions).toEqual([["todos", "todos"]]);
   });
 
-  it("commits an empty batch and rejects waits for unknown committed identities", async () => {
+  it("commits empty exclusive batches, rejects empty mergeable batches, and rejects unknown waits", async () => {
     const runtime = new NativeRuntimeAdapter(
       {
-        openMemory: () => fakeDb({ mergeableTx: () => fakeTx() }),
+        openMemory: () => fakeDb({ exclusiveTx: () => fakeTx() }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -997,8 +997,15 @@ describe("NativeRuntimeAdapter server transport", () => {
       1,
       true,
     );
+    const emptyMergeable = createOpenBatchId();
+    runtime.beginTransaction("mergeable", emptyMergeable);
+    expect(() => runtime.commitTransaction(emptyMergeable)).toThrow(
+      "empty mergeable batch has no committed unit; roll it back instead",
+    );
+    await runtime.rollbackTransaction(emptyMergeable);
+
     const openBatchId = createOpenBatchId();
-    runtime.beginTransaction("mergeable", openBatchId);
+    runtime.beginTransaction("exclusive", openBatchId);
     const committed = await runtime.commitTransaction(openBatchId);
     expect(committed).toBe("00000000000070008000000000000001");
     await expect(
@@ -1007,7 +1014,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     const reopened = new NativeRuntimeAdapter(
       {
-        openMemory: () => fakeDb({ mergeableTx: () => fakeTx() }),
+        openMemory: () => fakeDb({ exclusiveTx: () => fakeTx() }),
         openBrowser: async () => {
           throw new Error("not used");
         },

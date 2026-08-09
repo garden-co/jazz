@@ -49,8 +49,8 @@ export function mockRow(id = "todo-1"): InsertResult {
   return { id, values: [], ...committed(`transaction-${id}`) };
 }
 
-export function mockMutation(transactionId = "transaction-id"): MutationResult {
-  return committed(transactionId);
+export function mockMutation(batchId = "00000000000070008000000000000001"): MutationResult {
+  return committed(batchId);
 }
 
 export const runtimeTransactionRecordStubs = {
