@@ -66,7 +66,7 @@ export interface Runtime {
     session?: Session,
   ): boolean;
   canDelete?(table: string, objectId: string, session?: Session): boolean;
-  waitForTransaction(transactionId: string, tier: string): Promise<void>;
+  waitForTransaction(transactionId: BatchId, tier: string): Promise<void>;
   query(
     query_json: string,
     session_json?: string | null,
@@ -100,9 +100,33 @@ export interface Runtime {
 }
 
 export interface TransactionalRuntime extends Runtime {
-  beginTransaction(transactionKind: TransactionKind): string;
-  commitTransaction(transactionId: string): void;
-  rollbackTransaction(transactionId: string): boolean;
+  beginTransaction(transactionKind: TransactionKind, id: OpenBatchId): OpenBatchId;
+  commitTransaction(id: OpenBatchId): Promise<BatchId>;
+  rollbackTransaction(id: OpenBatchId): boolean;
+}
+
+declare const openBatchIdBrand: unique symbol;
+declare const batchIdBrand: unique symbol;
+
+/** Identity of a mutable batch. Invalid after commit or rollback. */
+export type OpenBatchId = string & { readonly [openBatchIdBrand]: true };
+/** Immutable identity assigned to a successfully committed batch. */
+export type BatchId = string & { readonly [batchIdBrand]: true };
+
+/** Generate a coordination-free UUIDv7 identity for a new mutable batch. */
+export function createOpenBatchId(): OpenBatchId {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  const timestamp = Date.now();
+  bytes[0] = Math.floor(timestamp / 2 ** 40) & 0xff;
+  bytes[1] = Math.floor(timestamp / 2 ** 32) & 0xff;
+  bytes[2] = Math.floor(timestamp / 2 ** 24) & 0xff;
+  bytes[3] = Math.floor(timestamp / 2 ** 16) & 0xff;
+  bytes[4] = Math.floor(timestamp / 2 ** 8) & 0xff;
+  bytes[5] = timestamp & 0xff;
+  bytes[6] = (bytes[6]! & 0x0f) | 0x70;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return hex as OpenBatchId;
 }
 
 /**
@@ -174,7 +198,7 @@ export interface QueryExecutionOptions {
 }
 
 type InternalQueryExecutionOptions = QueryExecutionOptions & {
-  transactionId?: string;
+  transactionId?: OpenBatchId;
   runtimeSettledTier?: DurabilityTier | null;
 };
 
@@ -186,7 +210,7 @@ export interface ResolvedQueryExecutionOptions {
 }
 
 type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
-  transactionId?: string;
+  transactionId?: OpenBatchId;
 };
 
 interface TimestampOverrideOptions {
@@ -249,11 +273,11 @@ export interface Row {
 }
 
 export interface InsertResult extends Row {
-  transactionId: TransactionId;
+  transactionId: BatchId | OpenBatchId;
 }
 
 export interface MutationResult {
-  transactionId: TransactionId;
+  transactionId: BatchId | OpenBatchId;
 }
 
 interface WriteContextPayload {
@@ -366,7 +390,7 @@ function normalizeSubscriptionCallbackArgs(
   return undefined;
 }
 
-type TransactionId = string;
+type TransactionId = BatchId;
 
 function requireTransactionalRuntime(runtime: Runtime): TransactionalRuntime {
   if (
@@ -410,7 +434,11 @@ function rejectionFromRuntimeWaitError(error: unknown): PersistedWriteRejectedEr
   ) {
     return null;
   }
-  return new PersistedWriteRejectedError(candidate.transactionId, candidate.code, candidate.reason);
+  return new PersistedWriteRejectedError(
+    candidate.transactionId as BatchId,
+    candidate.code,
+    candidate.reason,
+  );
 }
 
 /**
@@ -603,17 +631,19 @@ export class JazzClient {
     return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
   }
 
-  beginTransaction(kind: TransactionKind): TransactionId {
-    return requireTransactionalRuntime(this.runtime).beginTransaction(kind);
+  beginTransaction(kind: TransactionKind): OpenBatchId {
+    const id = createOpenBatchId();
+    return requireTransactionalRuntime(this.runtime).beginTransaction(kind, id);
   }
 
-  commitTransaction(transactionId: TransactionId): WriteHandle {
-    requireTransactionalRuntime(this.runtime).commitTransaction(transactionId);
-    return new WriteHandle(transactionId, this);
+  commitTransaction(id: OpenBatchId): Promise<WriteHandle> {
+    return requireTransactionalRuntime(this.runtime)
+      .commitTransaction(id)
+      .then((transactionId) => new WriteHandle(transactionId, this));
   }
 
-  rollbackTransaction(transactionId: TransactionId): void {
-    requireTransactionalRuntime(this.runtime).rollbackTransaction(transactionId);
+  rollbackTransaction(id: OpenBatchId): void {
+    requireTransactionalRuntime(this.runtime).rollbackTransaction(id);
   }
 
   /**
@@ -667,7 +697,7 @@ export class JazzClient {
   private encodeWriteContext(
     session?: Session,
     attribution?: string,
-    transactionId?: TransactionId,
+    transactionId?: OpenBatchId,
     updatedAt?: number,
   ): string | undefined {
     if (!session && attribution === undefined && !transactionId && updatedAt === undefined) {
@@ -714,7 +744,7 @@ export class JazzClient {
     attribution?: string,
   ): WriteResult<Row> {
     const row = this.insertInternal(table, values, options, session, attribution);
-    return new WriteResult(row, row.transactionId, this);
+    return new WriteResult(row, row.transactionId as BatchId, this);
   }
 
   /**
@@ -726,7 +756,7 @@ export class JazzClient {
     options?: CreateOptions,
     session?: Session,
     attribution?: string,
-    transactionId?: TransactionId,
+    transactionId?: OpenBatchId,
   ): InsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
@@ -754,7 +784,7 @@ export class JazzClient {
     attribution?: string,
   ): WriteResult<Row> {
     const row = this.restoreInternal(table, objectId, values, options, session, attribution);
-    return new WriteResult(row, row.transactionId, this);
+    return new WriteResult(row, row.transactionId as BatchId, this);
   }
 
   /**
@@ -767,7 +797,7 @@ export class JazzClient {
     options?: RestoreOptions,
     session?: Session,
     attribution?: string,
-    transactionId?: TransactionId,
+    transactionId?: OpenBatchId,
   ): InsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
@@ -794,7 +824,7 @@ export class JazzClient {
     attribution?: string,
   ): WriteHandle {
     const result = this.upsertInternal(table, values, options, session, attribution);
-    return new WriteHandle(result.transactionId, this);
+    return new WriteHandle(result.transactionId as BatchId, this);
   }
 
   /**
@@ -806,7 +836,7 @@ export class JazzClient {
     options: UpsertOptions,
     session?: Session,
     attribution?: string,
-    transactionId?: TransactionId,
+    transactionId?: OpenBatchId,
   ): MutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
@@ -865,7 +895,7 @@ export class JazzClient {
       attribution,
       undefined,
     );
-    return new WriteHandle(result.transactionId, this);
+    return new WriteHandle(result.transactionId as BatchId, this);
   }
 
   /**
@@ -878,7 +908,7 @@ export class JazzClient {
     updatedAt?: number,
     session?: Session,
     attribution?: string,
-    transactionId?: TransactionId,
+    transactionId?: OpenBatchId,
   ): MutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
@@ -901,7 +931,7 @@ export class JazzClient {
     attribution?: string,
   ): WriteHandle {
     const result = this.deleteInternal(table, objectId, options?.updatedAt, session, attribution);
-    return new WriteHandle(result.transactionId, this);
+    return new WriteHandle(result.transactionId as BatchId, this);
   }
 
   canInsert(table: string, values: InsertValues, session?: Session): boolean {
@@ -951,7 +981,7 @@ export class JazzClient {
     updatedAt?: number,
     session?: Session,
     attribution?: string,
-    transactionId?: TransactionId,
+    transactionId?: OpenBatchId,
   ): MutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
