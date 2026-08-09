@@ -619,6 +619,7 @@ impl SourceResolver for FakeSourceResolver {
                 metadata,
             },
             routing_fields: BTreeSet::new(),
+            authorization_scoped: false,
             content_version,
             deletion_register,
         })
@@ -723,6 +724,7 @@ impl SourceResolver for InlineCollectorResolver {
                 metadata: BTreeMap::new(),
             },
             routing_fields: BTreeSet::new(),
+            authorization_scoped: false,
             content_version: None,
             deletion_register: None,
         })

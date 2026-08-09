@@ -695,6 +695,7 @@ where
                                 metadata,
                             },
                             routing_fields: BTreeSet::new(),
+                            authorization_scoped: false,
                             content_version: None,
                             deletion_register: None,
                         });
@@ -788,6 +789,7 @@ where
                     metadata: BTreeMap::new(),
                 },
                 routing_fields: BTreeSet::new(),
+                authorization_scoped: false,
                 content_version: None,
                 deletion_register: None,
             });
@@ -1262,6 +1264,7 @@ where
                 metadata,
             },
             routing_fields,
+            authorization_scoped: !matches!(authorization, SourceAuthorizationRequest::System),
             content_version,
             deletion_register,
         })

@@ -122,6 +122,8 @@ pub(crate) struct ResolvedSource {
     /// Hidden routing fields emitted by the source graph outside the app row
     /// descriptor.
     pub(crate) routing_fields: BTreeSet<String>,
+    /// Whether row-level authorization narrowed this source for the caller.
+    pub(crate) authorization_scoped: bool,
     /// Content version rows for the same source, when version witnesses are
     /// requested explicitly.
     pub(crate) content_version: Option<ContentVersionSource>,
