@@ -46,7 +46,7 @@ class TestDb extends Db {
 
 function makeClient() {
   const query = vi.fn(async (_queryJson: string, _options?: unknown) => [todoRow]);
-  const beginTransaction = vi.fn(() => "transaction-1");
+  const beginTransaction = vi.fn(() => "00000000000070008000000000000001");
   const client = {
     getSchema: () => new Map(Object.entries(app.wasmSchema)),
     query,
@@ -105,10 +105,10 @@ describe("Db.one", () => {
 
     await tx.one(app.todos.where({ done: false }));
 
-    expect(beginTransaction).toHaveBeenCalledWith("mergeable");
+    expect(beginTransaction).toHaveBeenCalledWith("mergeable", undefined, undefined);
     expect(rootLimit(firstQueryJson(query))).toBe(1);
     expect(query.mock.calls[0]?.[1]).toMatchObject({
-      transactionId: "transaction-1",
+      openBatchId: "00000000000070008000000000000001",
     });
   });
 });

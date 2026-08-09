@@ -532,7 +532,13 @@ fn policy_dependency_reads_do_not_expose_dependency_rows() {
     seed(&db, team_a, team_b, "region-a", "region-b");
     db.set_identity_claims(
         USER_A,
-        BTreeMap::from([("region".to_owned(), Value::String("region-a".to_owned()))]),
+        BTreeMap::from([
+            ("region".to_owned(), Value::String("region-a".to_owned())),
+            (
+                "membership_region".to_owned(),
+                Value::String("not-region-a".to_owned()),
+            ),
+        ]),
     );
     db.set_identity_claims(
         USER_B,
@@ -838,8 +844,7 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
     stream_b.try_next_event().expect("B reset");
 
     let v2 = SchemaVersion::new(evolved_schema());
-    db.publish_schema(v2.clone()).expect("publish v2 schema");
-    db.publish_lens(MigrationLens::new(
+    let lens = MigrationLens::new(
         schema().version_id(),
         v2.id,
         vec![
@@ -862,8 +867,12 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
                 ops: Vec::new(),
             },
         ],
-    ))
-    .expect("publish v1-to-v2 lens");
+    );
+    db.publish_schema_with_lens(
+        1,
+        SchemaLineagePublication::new(v2.clone(), lens, Vec::<String>::new(), Vec::<String>::new()),
+    )
+    .expect("publish v1-to-v2 lineage");
     db.set_current_write_schema(CurrentWriteSchema {
         revision: 1,
         schema: v2.id,
@@ -874,7 +883,13 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
         row(0x41),
         BTreeMap::from([("updated_at".to_owned(), Value::U64(11))]),
     )
-    .expect("trigger subscription rehydration");
+    .expect("trigger A subscription rehydration");
+    db.update(
+        DOCUMENTS,
+        row(0x42),
+        BTreeMap::from([("updated_at".to_owned(), Value::U64(21))]),
+    )
+    .expect("trigger B subscription rehydration");
     stream_a.try_next_event().expect("A rehydration reset");
     stream_b.try_next_event().expect("B rehydration reset");
     assert_eq!(db.active_groove_subscriptions_for_test(), 2);

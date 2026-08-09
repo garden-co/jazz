@@ -2340,6 +2340,7 @@ mod tests {
     };
     use crate::schema::{JazzSchema, Policy, TableSchema};
     use crate::time::{GlobalSeq, TxTime};
+    use crate::tools::OpenBatchId;
     use crate::tx::DeletionEvent;
     use crate::tx::{DurabilityTier, Fate, TxKind};
     use groove::records::{BorrowedRecord, RecordDescriptor, Value, ValueType};
@@ -4825,7 +4826,8 @@ mod tests {
         let mut peer = PeerState::new();
 
         peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-        let tx = core.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        core.open_exclusive(tx).unwrap();
         core.tx_write(tx, "todos", row(0x61), title_cells("match"), None)
             .unwrap();
         let (tx_id, _unit) = core.commit_exclusive(tx, AuthorId::SYSTEM, 1_000).unwrap();
@@ -4859,7 +4861,8 @@ mod tests {
         let mut peer = PeerState::new();
 
         peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-        let tx = core.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        core.open_exclusive(tx).unwrap();
         core.tx_write(tx, "todos", row(0x71), title_cells("match"), None)
             .unwrap();
         core.tx_write(tx, "todos", row(0x72), title_cells("other"), None)
@@ -4906,7 +4909,8 @@ mod tests {
         peer.set_ship_complete_exclusive_payloads(true);
 
         peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-        let tx = core.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        core.open_exclusive(tx).unwrap();
         core.tx_write(tx, "todos", row(0x71), title_cells("match"), None)
             .unwrap();
         core.tx_write(tx, "todos", row(0x72), title_cells("other"), None)
@@ -4959,7 +4963,8 @@ mod tests {
                 (row(0x72), title_cells("other")),
             ]
         );
-        let open = reader.open_exclusive().unwrap();
+        let open = OpenBatchId::new();
+        reader.open_exclusive(open).unwrap();
         assert_eq!(
             reader.tx_read(open, "todos", row(0x72)).unwrap(),
             Some(title_cells("other"))
@@ -5037,7 +5042,8 @@ mod tests {
         let doc_b = row(0x82);
         let project = row(0x83);
 
-        let tx = core.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        core.open_exclusive(tx).unwrap();
         core.tx_write(tx, "docs", doc_a, doc_cells("a", project), None)
             .unwrap();
         core.tx_write(tx, "docs", doc_b, doc_cells("b", project), None)
@@ -5316,7 +5322,8 @@ mod tests {
         let doc_two = row(2);
         let project = row(9);
 
-        let tx = writer.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        writer.open_exclusive(tx).unwrap();
         writer
             .tx_write(tx, "docs", doc_one, doc_cells("one", project), None)
             .unwrap();
@@ -5444,7 +5451,8 @@ mod tests {
         assert!(result_member_adds.is_empty());
         assert!(version_bundles.is_empty());
 
-        let tx = core.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        core.open_exclusive(tx).unwrap();
         core.tx_write(tx, "todos", row_one, title_cells("one"), None)
             .unwrap();
         core.tx_write(tx, "todos", row_two, title_cells("two"), None)

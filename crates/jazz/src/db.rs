@@ -39,17 +39,17 @@ pub use crate::node::CommitUnitTrust;
 use crate::node::{
     CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LargeValueEditCommit, LargeValueEditOp,
     LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate, MergeableCommit,
-    NodeState, OpenTxId, PreparedQueryPlanHandle, QueryReadProfile, RelationEdge, RelationSnapshot,
+    NodeState, PreparedQueryPlanHandle, QueryReadProfile, RelationEdge, RelationSnapshot,
     RowProvenance, ViewUpdateParts,
 };
 use crate::peer::{PeerRole, PeerState};
 #[cfg(feature = "sync-autopsy")]
 use crate::protocol::expand_version_carriers;
 use crate::protocol::{
-    BindingViewKey, ContentExtent, CoverageKey, CurrentWriteSchema, LargeValueOwnerRef,
+    BindingViewKey, ContentExtent, CoverageKey, CurrentWriteSchema, LargeValueOwnerRef, LensOp,
     MigrationLens, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
     SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
-    SubscribeServerFailureCode, SubscriptionKey, SyncMessage,
+    SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens,
 };
 use crate::protocol_limits::{
     MAX_FETCH_BRANCH_METADATA, MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES, MAX_INFLIGHT_LOGICAL_MESSAGES,
@@ -69,6 +69,7 @@ use crate::query::{
 pub use crate::result_tree::{ResultNode, ResultRelation, ResultTree, ResultTreeReplacement};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
+use crate::tools::OpenBatchId;
 use crate::tools::{ObjectId, OutputOccurrenceId};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
 use crate::wire::{
@@ -191,10 +192,31 @@ where
 {
     schema: JazzSchema,
     schema_version_id: SchemaVersionId,
+    schema_view_is_fixed: bool,
+    schema_views: Rc<RefCell<BTreeMap<SchemaViewId, JazzSchema>>>,
     identity: DbIdentity,
-    node: Node<S>,
-    row_id_source: RefCell<Box<dyn RowIdSource>>,
-    next_now_ms: Cell<u64>,
+    node: Rc<Node<S>>,
+    row_id_source: Rc<RefCell<Box<dyn RowIdSource>>>,
+    next_now_ms: Rc<Cell<u64>>,
+}
+
+/// Process-local, content-addressed identity for an exact typed schema view.
+///
+/// Unlike [`SchemaVersionId`], which identifies structural migration lineage,
+/// this includes defaults and policy metadata used by a typed client facade.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SchemaViewId([u8; 32]);
+
+impl SchemaViewId {
+    /// Stable bytes suitable for binding-level map keys.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    fn for_schema(schema: &JazzSchema) -> Self {
+        let bytes = postcard::to_allocvec(schema).expect("JazzSchema always serializes");
+        Self(blake3::derive_key("jazz typed schema view id v1", &bytes))
+    }
 }
 
 /// Shared list of live subscriptions. Held by both the `Node` and any
@@ -231,6 +253,127 @@ fn default_cell_for_column_type(column_type: &GrooveColumnType, default: &Value)
         }
         _ => default.clone(),
     }
+}
+
+fn schema_view_column_default(column: &crate::schema::ColumnSchema) -> Result<Value, Error> {
+    if let Some(default) = &column.default {
+        return Ok(default.clone());
+    }
+    if matches!(column.column_type, GrooveColumnType::Nullable(_)) {
+        return Ok(Value::Nullable(None));
+    }
+    Err(Error::new(
+        ErrorCode::Schema,
+        format!(
+            "schema view column {} requires a migration default",
+            column.name
+        ),
+    ))
+}
+
+fn direct_schema_view_lens(
+    source: &JazzSchema,
+    target: &JazzSchema,
+) -> Result<(MigrationLens, Vec<String>, Vec<String>), Error> {
+    let source_id = source.version_id();
+    let target_id = target.version_id();
+    let mut table_lenses = Vec::new();
+    for source_table in &source.tables {
+        let Some(target_table) = target
+            .tables
+            .iter()
+            .find(|table| table.name == source_table.name)
+        else {
+            continue;
+        };
+        if source_table.references != target_table.references {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                format!(
+                    "schema view changes references on {} without an explicit lens",
+                    target_table.name
+                ),
+            ));
+        }
+        if source_table.merge_strategies != target_table.merge_strategies {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                format!(
+                    "schema view changes merge strategies on {} without an explicit lens",
+                    target_table.name
+                ),
+            ));
+        }
+        if source_table.indexed_columns != target_table.indexed_columns {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                format!(
+                    "schema view changes indices on {} without explicit index admission",
+                    target_table.name
+                ),
+            ));
+        }
+        let mut ops = Vec::new();
+        for target_column in &target_table.columns {
+            match source_table
+                .columns
+                .iter()
+                .find(|column| column.name == target_column.name)
+            {
+                Some(source_column)
+                    if source_column.column_type == target_column.column_type
+                        && source_column.large_value == target_column.large_value
+                        && source_column.text_merge_spec == target_column.text_merge_spec => {}
+                Some(_) => {
+                    return Err(Error::new(
+                        ErrorCode::Schema,
+                        format!(
+                            "schema view changes type of {}.{} without an explicit lens",
+                            target_table.name, target_column.name
+                        ),
+                    ));
+                }
+                None => ops.push(LensOp::AddColumn {
+                    column: target_column.name.clone(),
+                    default: schema_view_column_default(target_column)?,
+                }),
+            }
+        }
+        for source_column in &source_table.columns {
+            if target_table
+                .columns
+                .iter()
+                .all(|column| column.name != source_column.name)
+            {
+                ops.push(LensOp::DropColumn {
+                    column: source_column.name.clone(),
+                    backwards_default: schema_view_column_default(source_column)?,
+                });
+            }
+        }
+        table_lenses.push(TableLens {
+            source_table: source_table.name.clone(),
+            target_table: target_table.name.clone(),
+            ops,
+        });
+    }
+    let new_tables = target
+        .tables
+        .iter()
+        .filter(|table| source.tables.iter().all(|source| source.name != table.name))
+        .map(|table| table.name.clone())
+        .collect::<Vec<_>>();
+    let dropped_tables = source
+        .tables
+        .iter()
+        .filter(|table| target.tables.iter().all(|target| target.name != table.name))
+        .map(|table| table.name.clone())
+        .collect::<Vec<_>>();
+    Ok((
+        MigrationLens::new(source_id, target_id, table_lenses),
+        new_tables,
+        dropped_tables,
+    ))
 }
 
 struct WriteStateWaiter {
@@ -401,6 +544,10 @@ where
     /// ```
     pub async fn open(config: DbConfig<S>) -> Result<Self, Error> {
         let schema_version_id = config.schema.version_id();
+        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
+            SchemaViewId::for_schema(&config.schema),
+            config.schema.clone(),
+        )])));
         let node = NodeState::new_with_large_value_checkpoint_op_interval(
             config.identity.node,
             config.schema.clone(),
@@ -413,14 +560,16 @@ where
         Ok(Self {
             schema: config.schema,
             schema_version_id,
+            schema_view_is_fixed: false,
+            schema_views,
             identity: config.identity,
-            node,
-            row_id_source: RefCell::new(
+            node: Rc::new(node),
+            row_id_source: Rc::new(RefCell::new(
                 config
                     .id_source
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
-            ),
-            next_now_ms: Cell::new(1),
+            )),
+            next_now_ms: Rc::new(Cell::new(1)),
         })
     }
 
@@ -430,6 +579,10 @@ where
     /// in-memory history rather than a partial client replica.
     pub async fn open_history_complete(config: DbConfig<S>) -> Result<Self, Error> {
         let schema_version_id = config.schema.version_id();
+        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
+            SchemaViewId::for_schema(&config.schema),
+            config.schema.clone(),
+        )])));
         let node = NodeState::new_history_complete(
             config.identity.node,
             config.schema.clone(),
@@ -438,20 +591,150 @@ where
         Ok(Self {
             schema: config.schema,
             schema_version_id,
+            schema_view_is_fixed: false,
+            schema_views,
             identity: config.identity,
-            node: Node::new(node),
-            row_id_source: RefCell::new(
+            node: Rc::new(Node::new(node)),
+            row_id_source: Rc::new(RefCell::new(
                 config
                     .id_source
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
-            ),
-            next_now_ms: Cell::new(1),
+            )),
+            next_now_ms: Rc::new(Cell::new(1)),
         })
+    }
+
+    /// Register a typed schema view on this database owner.
+    ///
+    /// Registration is process-local and idempotent by the exact typed schema
+    /// content. It does not publish a catalogue entry or select the current
+    /// write schema. The returned handle shares the owner's node, open batches,
+    /// connections, row-id source, and logical clock while validating typed
+    /// operations against this exact schema view.
+    pub fn register_schema_view(&self, schema: JazzSchema) -> Result<Self, Error> {
+        let schema_version_id = schema.version_id();
+        let schema_view_id = SchemaViewId::for_schema(&schema);
+        self.admit_local_schema_view_if_needed(&schema)?;
+        {
+            let node = self.node.node.borrow();
+            let admitted = node
+                .catalogue_schemas()
+                .get(&schema_version_id)
+                .ok_or_else(|| Error::new(ErrorCode::Schema, "registered schema is missing"))?;
+            if !schema_policy_metadata_matches(&admitted.schema, &schema) {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    "schema view policy metadata conflicts with its admitted structural schema",
+                ));
+            }
+            if !schema_index_metadata_matches(&admitted.schema, &schema) {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    "schema view index metadata conflicts with its admitted structural schema",
+                ));
+            }
+        }
+        let mut views = self.schema_views.borrow_mut();
+        if let Some(existing) = views.get(&schema_view_id) {
+            if existing != &schema {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    format!("schema view id collision for {schema_view_id:?}"),
+                ));
+            }
+        } else {
+            views.insert(schema_view_id, schema.clone());
+        }
+        drop(views);
+        Ok(Self {
+            schema,
+            schema_version_id,
+            schema_view_is_fixed: true,
+            schema_views: Rc::clone(&self.schema_views),
+            identity: self.identity,
+            node: Rc::clone(&self.node),
+            row_id_source: Rc::clone(&self.row_id_source),
+            next_now_ms: Rc::clone(&self.next_now_ms),
+        })
+    }
+
+    /// Attach an already-registered typed schema view to this owner.
+    pub fn schema_view(&self, schema_view_id: SchemaViewId) -> Result<Self, Error> {
+        let schema = self
+            .schema_views
+            .borrow()
+            .get(&schema_view_id)
+            .cloned()
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Schema,
+                    format!("schema view {schema_view_id:?} is not registered"),
+                )
+            })?;
+        self.register_schema_view(schema)
+    }
+
+    /// Canonical id of this handle's typed schema view.
+    pub fn schema_view_id(&self) -> SchemaViewId {
+        SchemaViewId::for_schema(&self.schema)
+    }
+
+    /// Admit the first application schema into an owner deliberately opened
+    /// with the empty schema. This is the local-first bootstrap equivalent of
+    /// having opened the runtime with that schema originally; later schemas
+    /// still arrive through ordinary catalogue lineage publication.
+    fn admit_local_schema_view_if_needed(&self, schema: &JazzSchema) -> Result<(), Error> {
+        let empty_schema = JazzSchema::new([]);
+        let empty_id = empty_schema.version_id();
+        let target_id = schema.version_id();
+        let (source, catalogue_seq, bootstrap_current) = {
+            let node = self.node.node.borrow();
+            if node.catalogue_schemas().contains_key(&target_id) {
+                return Ok(());
+            }
+            let current = node.current_write_schema();
+            let source = node
+                .catalogue_schemas()
+                .get(&current.schema)
+                .map(|version| version.schema.clone())
+                .ok_or_else(|| Error::new(ErrorCode::Schema, "current schema view is missing"))?;
+            (
+                source,
+                node.active_catalogue_seq().saturating_add(1),
+                current.schema == empty_id && node.catalogue_schemas().len() == 1,
+            )
+        };
+        let (lens, new_tables, dropped_tables) = direct_schema_view_lens(&source, schema)?;
+        let publication = SchemaLineagePublication::new(
+            SchemaVersion::new(schema.clone()),
+            lens,
+            new_tables,
+            dropped_tables,
+        );
+        let mut node = self.node.node.borrow_mut();
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq,
+            publication: Box::new(publication),
+        })?;
+        if bootstrap_current {
+            node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+                author: AuthorId::SYSTEM,
+                pointer: CurrentWriteSchema {
+                    revision: 1,
+                    schema: target_id,
+                },
+            })?;
+        }
+        Ok(())
     }
 
     /// Flush node-local maintenance state, write a clean-close marker, and
     /// close the underlying storage.
     pub fn close(&self) -> Result<(), Error> {
+        if self.schema_view_is_fixed {
+            return Ok(());
+        }
         Ok(self.node.node.borrow_mut().close()?)
     }
 
@@ -1612,7 +1895,8 @@ where
             .node
             .node
             .borrow_mut()
-            .dry_run_insert_allows(
+            .dry_run_mergeable_write_allows_for_view(
+                &self.schema,
                 MergeableCommit::new(table, row, self.next_now_ms())
                     .made_by(identity)
                     .permission_subject(identity)
@@ -1651,7 +1935,8 @@ where
             .node
             .node
             .borrow_mut()
-            .dry_run_insert_allows(
+            .dry_run_mergeable_write_allows_for_view(
+                &self.schema,
                 MergeableCommit::new(table, row, now_ms)
                     .made_by(identity)
                     .permission_subject(identity)
@@ -1699,7 +1984,8 @@ where
         self.node
             .node
             .borrow_mut()
-            .dry_run_insert_allows(
+            .dry_run_mergeable_write_allows_for_view(
+                &self.schema,
                 MergeableCommit::new(table, RowUuid::from_bytes([0; 16]), 0)
                     .made_by(identity)
                     .permission_subject(identity)
@@ -1824,7 +2110,7 @@ where
             .node
             .node
             .borrow_mut()
-            .dry_run_mergeable_write_allows(dry_run)
+            .dry_run_mergeable_write_allows_for_view(&self.schema, dry_run)
             .map_err(Error::from)?;
         if !allowed {
             return Err(Error::new(
@@ -1868,7 +2154,7 @@ where
             .node
             .node
             .borrow_mut()
-            .dry_run_mergeable_write_allows(dry_run)
+            .dry_run_mergeable_write_allows_for_view(&self.schema, dry_run)
             .map_err(Error::from)?;
         if !allowed {
             return Err(Error::new(
@@ -2279,9 +2565,11 @@ where
 
     /// Build a mergeable transaction that commits multiple writes under one id.
     pub fn mergeable_tx(&self) -> Result<MergeableTx<'_, S>, Error> {
+        let tx_id = OpenBatchId::new();
+        self.begin_mergeable(tx_id)?;
         Ok(MergeableTx {
             db: self,
-            tx_id: self.begin_mergeable()?,
+            tx_id,
             committed: false,
         })
     }
@@ -2302,9 +2590,11 @@ where
 
     /// Build a mergeable transaction authored and permission-checked as `author`.
     pub fn mergeable_tx_for_identity(&self, author: AuthorId) -> Result<MergeableTx<'_, S>, Error> {
+        let tx_id = OpenBatchId::new();
+        self.begin_mergeable_for_identity(tx_id, author)?;
         Ok(MergeableTx {
             db: self,
-            tx_id: self.begin_mergeable_for_identity(author)?,
+            tx_id,
             committed: false,
         })
     }
@@ -2427,22 +2717,26 @@ where
     /// [`MergeableTxRef`], which can be reconstructed from this id for each
     /// foreign-function call. Rust callers that want RAII should use
     /// [`Db::mergeable_tx`] instead.
-    pub fn begin_mergeable(&self) -> Result<OpenTxId, Error> {
+    pub fn begin_mergeable(&self, id: OpenBatchId) -> Result<(), Error> {
         self.node
             .node
             .borrow_mut()
-            .open_mergeable(self.identity.author, None)
+            .open_mergeable(id, self.identity.author, None)
             .map_err(Into::into)
     }
 
     /// Open a mergeable transaction authored and permission-checked as `author`.
     ///
     /// See [`Db::begin_mergeable`] for ownership and operation-handle guidance.
-    pub fn begin_mergeable_for_identity(&self, author: AuthorId) -> Result<OpenTxId, Error> {
+    pub fn begin_mergeable_for_identity(
+        &self,
+        id: OpenBatchId,
+        author: AuthorId,
+    ) -> Result<(), Error> {
         self.node
             .node
             .borrow_mut()
-            .open_mergeable(author, Some(author))
+            .open_mergeable(id, author, Some(author))
             .map_err(Into::into)
     }
 
@@ -2452,53 +2746,67 @@ where
     /// for a single call in a binding that retains `tx_id` between calls. Its
     /// CRUD API is defined by [`MergeableTxOps`] and is shared with the owning
     /// [`MergeableTx`] handle.
-    pub fn mergeable_tx_ref(&self, tx_id: OpenTxId) -> MergeableTxRef<'_, S> {
+    pub fn mergeable_tx_ref(&self, tx_id: OpenBatchId) -> MergeableTxRef<'_, S> {
         MergeableTxRef { db: self, tx_id }
     }
 
     fn stage_mergeable_insert(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
             .node
             .borrow_mut()
-            .tx_write_mergeable(tx_id, table, row, cells, None, Vec::new(), now_ms, false)
+            .tx_write_mergeable_in_schema(
+                tx_id,
+                self.schema_version_id,
+                table,
+                row,
+                cells,
+                None,
+                Vec::new(),
+                now_ms,
+                false,
+            )
             .map_err(Into::into)
     }
 
     fn stage_mergeable_update(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
         patch: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         self.node
             .node
             .borrow_mut()
-            .tx_patch_mergeable(tx_id, table, row, patch, now_ms)
+            .tx_patch_mergeable_in_schema(tx_id, self.schema_version_id, table, row, patch, now_ms)
             .map_err(Into::into)
     }
 
     fn stage_mergeable_delete(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         self.node
             .node
             .borrow_mut()
-            .tx_write_mergeable(
+            .tx_write_mergeable_in_schema(
                 tx_id,
+                self.schema_version_id,
                 table,
                 row,
                 BTreeMap::new(),
@@ -2512,12 +2820,13 @@ where
 
     fn stage_mergeable_restore(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.borrow_mut();
         let content_parents = node
@@ -2528,8 +2837,9 @@ where
             .local_deletion_winner_tx_id(table, row)?
             .into_iter()
             .collect();
-        node.tx_write_mergeable(
+        node.tx_write_mergeable_in_schema(
             tx_id,
+            self.schema_version_id,
             table,
             row,
             cells,
@@ -2538,8 +2848,9 @@ where
             now_ms,
             true,
         )?;
-        node.tx_write_mergeable(
+        node.tx_write_mergeable_in_schema(
             tx_id,
+            self.schema_version_id,
             table,
             row,
             BTreeMap::new(),
@@ -2552,7 +2863,7 @@ where
     }
 
     /// Commit an owned mergeable transaction handle.
-    pub fn commit_mergeable_handle(&self, open_tx_id: OpenTxId) -> Result<TxId, Error> {
+    pub fn commit_mergeable_handle(&self, open_tx_id: OpenBatchId) -> Result<TxId, Error> {
         let tx_id = self
             .node
             .node
@@ -2564,7 +2875,7 @@ where
     }
 
     /// Abandon an owned open transaction handle.
-    pub fn abandon_transaction_handle(&self, open_tx_id: OpenTxId) -> Result<(), Error> {
+    pub fn abandon_transaction_handle(&self, open_tx_id: OpenBatchId) -> Result<(), Error> {
         self.node
             .node
             .borrow_mut()
@@ -2576,9 +2887,10 @@ where
     ///
     /// This is the owning, RAII flavour. It abandons an uncommitted transaction
     /// on drop. Use [`Db::exclusive_tx_ref`] only when another layer retains the
-    /// `OpenTxId` and owns that lifetime explicitly.
+    /// `OpenBatchId` and owns that lifetime explicitly.
     pub fn exclusive_tx(&self) -> Result<ExclusiveTx<'_, S>, Error> {
-        let tx_id = self.open_exclusive_handle()?;
+        let tx_id = OpenBatchId::new();
+        self.open_exclusive_handle(tx_id)?;
         Ok(ExclusiveTx {
             db: self,
             tx_id,
@@ -2593,8 +2905,8 @@ where
     /// [`Db::abandon_exclusive_handle`]. Perform its operations through an
     /// [`ExclusiveTxRef`]. Rust callers that want RAII should use
     /// [`Db::exclusive_tx`] instead.
-    pub fn begin_exclusive(&self) -> Result<OpenTxId, Error> {
-        self.open_exclusive_handle()
+    pub fn begin_exclusive(&self, id: OpenBatchId) -> Result<(), Error> {
+        self.open_exclusive_handle(id)
     }
 
     /// Return a non-owning operations handle for an already-open exclusive transaction.
@@ -2603,104 +2915,136 @@ where
     /// for a single call in a binding that retains `tx_id` between calls. Its
     /// CRUD API is defined by [`ExclusiveTxOps`] and is shared with the owning
     /// [`ExclusiveTx`] handle.
-    pub fn exclusive_tx_ref(&self, tx_id: OpenTxId) -> ExclusiveTxRef<'_, S> {
+    pub fn exclusive_tx_ref(&self, tx_id: OpenBatchId) -> ExclusiveTxRef<'_, S> {
         ExclusiveTxRef { db: self, tx_id }
     }
 
     fn exclusive_read(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
     ) -> Result<Option<RowCells>, Error> {
         self.node
             .node
             .borrow_mut()
-            .tx_read(tx_id, table, row)
+            .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
             .map_err(Into::into)
     }
 
-    fn exclusive_all(
+    fn transaction_all(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         prepared: &PreparedQuery,
+        opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.exclusive_all_for_identity(tx_id, prepared, self.identity.author)
+        self.transaction_all_for_identity(tx_id, prepared, self.identity.author, opts)
     }
 
-    pub(crate) fn exclusive_all_for_identity(
+    pub(crate) fn transaction_all_for_identity(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         prepared: &PreparedQuery,
         author: AuthorId,
+        opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
+        ensure_default_read_view(&opts)?;
         self.node
             .node
             .borrow_mut()
-            .tx_query_for_identity(tx_id, &prepared.shape, &prepared.binding, author)
+            .tx_query_for_identity_with_options(
+                tx_id,
+                &prepared.shape,
+                &prepared.binding,
+                author,
+                opts.include_deleted,
+            )
             .map_err(Into::into)
     }
 
     fn stage_exclusive_insert(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
         cells: RowCells,
     ) -> Result<(), Error> {
+        let now_ms = self.next_now_ms();
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
             .node
             .borrow_mut()
-            .tx_write(tx_id, table, row, cells, None)
+            .tx_write_in_schema_at_ms(
+                tx_id,
+                self.schema_version_id,
+                table,
+                row,
+                cells,
+                None,
+                Some(now_ms),
+            )
             .map_err(Into::into)
     }
 
     fn stage_exclusive_delete(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
     ) -> Result<(), Error> {
+        let now_ms = self.next_now_ms();
         self.node
             .node
             .borrow_mut()
-            .tx_write(
+            .tx_write_in_schema_at_ms(
                 tx_id,
+                self.schema_version_id,
                 table,
                 row,
                 BTreeMap::<String, Value>::new(),
                 Some(DeletionEvent::Deleted),
+                Some(now_ms),
             )
             .map_err(Into::into)
     }
 
     fn stage_exclusive_restore(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
         cells: RowCells,
     ) -> Result<(), Error> {
+        let now_ms = self.next_now_ms();
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.borrow_mut();
         // Restore needs one content version and one deletion-register version:
         // `tx_write` rejects a version carrying both. The layers have separate
         // winners and parent chains; see `restore`'s `local_*_winner_tx_id` pair.
         // Keep this staged form aligned with the committed restore path.
-        node.tx_write(tx_id, table, row, cells, None)?;
-        node.tx_write(
+        node.tx_write_in_schema_at_ms(
             tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            cells,
+            None,
+            Some(now_ms),
+        )?;
+        node.tx_write_in_schema_at_ms(
+            tx_id,
+            self.schema_version_id,
             table,
             row,
             BTreeMap::<String, Value>::new(),
             Some(DeletionEvent::Restored),
+            Some(now_ms),
         )?;
         Ok(())
     }
 
     /// Commit an owned exclusive transaction handle.
-    pub fn commit_exclusive_handle(&self, open_tx_id: OpenTxId) -> Result<TxId, Error> {
+    pub fn commit_exclusive_handle(&self, open_tx_id: OpenBatchId) -> Result<TxId, Error> {
         let (tx_id, unit) = self.node.node.borrow_mut().commit_exclusive(
             open_tx_id,
             self.identity.author,
@@ -2712,15 +3056,15 @@ where
     }
 
     /// Abandon an owned exclusive transaction handle.
-    pub fn abandon_exclusive_handle(&self, open_tx_id: OpenTxId) -> Result<(), Error> {
+    pub fn abandon_exclusive_handle(&self, open_tx_id: OpenBatchId) -> Result<(), Error> {
         self.abandon_transaction_handle(open_tx_id)
     }
 
-    pub(crate) fn open_exclusive_handle(&self) -> Result<OpenTxId, Error> {
+    pub(crate) fn open_exclusive_handle(&self, id: OpenBatchId) -> Result<(), Error> {
         self.node
             .node
             .borrow_mut()
-            .open_exclusive()
+            .open_exclusive_for_identity(id, self.identity.author)
             .map_err(Into::into)
     }
 
@@ -3047,7 +3391,7 @@ where
             .node
             .node
             .borrow_mut()
-            .dry_run_mergeable_write_allows(commit.clone())
+            .dry_run_mergeable_write_allows_for_view(&self.schema, commit.clone())
             .map_err(Error::from)?;
         if !allowed {
             return Err(Error::new(
@@ -3107,6 +3451,9 @@ where
     }
 
     fn current_write_schema_for_query(&self) -> Result<(JazzSchema, SchemaVersionId), Error> {
+        if self.schema_view_is_fixed {
+            return Ok((self.schema.clone(), self.schema_version_id));
+        }
         let node = self.node.node.borrow();
         let current = node.current_write_schema();
         if current.schema == self.schema_version_id {
@@ -3593,6 +3940,29 @@ where
             })
             .collect()
     }
+}
+
+fn schema_policy_metadata_matches(left: &JazzSchema, right: &JazzSchema) -> bool {
+    left.branch_read_policy == right.branch_read_policy
+        && left.branch_write_policy == right.branch_write_policy
+        && left.tables.len() == right.tables.len()
+        && left.tables.iter().all(|left_table| {
+            right.tables.iter().any(|right_table| {
+                left_table.name == right_table.name
+                    && left_table.read_policy == right_table.read_policy
+                    && left_table.write_policies == right_table.write_policies
+            })
+        })
+}
+
+fn schema_index_metadata_matches(left: &JazzSchema, right: &JazzSchema) -> bool {
+    left.tables.len() == right.tables.len()
+        && left.tables.iter().all(|left_table| {
+            right.tables.iter().any(|right_table| {
+                left_table.name == right_table.name
+                    && left_table.indexed_columns == right_table.indexed_columns
+            })
+        })
 }
 
 #[cfg(feature = "testing")]
@@ -7534,14 +7904,26 @@ pub enum Propagation {
 }
 
 /// Public API error with stable machine-readable codes.
-#[derive(Debug, Error, serde::Deserialize, serde::Serialize)]
-#[error("{code:?}: {message}")]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct Error {
     /// Stable error code.
     pub code: ErrorCode,
     /// Human-readable detail.
     pub message: String,
 }
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.code {
+            ErrorCode::TransactionConflict => {
+                write!(formatter, "(transaction_conflict): {}", self.message)
+            }
+            _ => write!(formatter, "{:?}: {}", self.code, self.message),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 impl Error {
     fn new(code: ErrorCode, message: impl Into<String>) -> Self {
@@ -7577,6 +7959,8 @@ pub enum ErrorCode {
     Query,
     /// Write was rejected.
     WriteRejected,
+    /// An exclusive transaction's fixed snapshot was invalidated locally.
+    TransactionConflict,
     /// Storage failed.
     Storage,
     /// Protocol or local node operation failed.
@@ -7597,6 +7981,7 @@ impl From<crate::node::Error> for Error {
             }
             crate::node::Error::Storage(_) | crate::node::Error::Groove(_) => ErrorCode::Storage,
             crate::node::Error::Query(_) => ErrorCode::Query,
+            crate::node::Error::TransactionConflict => ErrorCode::TransactionConflict,
             crate::node::Error::TableNotFound(_)
             | crate::node::Error::UnsupportedColumnType(_)
             | crate::node::Error::InvalidMergeableCommit(_) => ErrorCode::Schema,
@@ -7954,7 +8339,7 @@ where
     fn db(&self) -> &Db<S>;
 
     /// The id of the already-open transaction.
-    fn tx_id(&self) -> OpenTxId;
+    fn tx_id(&self) -> OpenBatchId;
 
     /// Stage an insert with a generated row id.
     fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
@@ -8027,8 +8412,42 @@ where
             .node
             .node
             .borrow_mut()
-            .tx_read(self.tx_id(), table, row)
+            .tx_read_in_schema(self.tx_id(), self.db().schema_version_id, table, row)
             .map_err(Into::into)
+    }
+
+    /// Read a prepared query with this transaction's pending writes overlaid.
+    fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
+        self.all_prepared_with_opts(prepared, ReadOpts::default())
+    }
+
+    /// Read a prepared query with transaction-local writes and explicit read semantics.
+    fn all_prepared_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.db().transaction_all(self.tx_id(), prepared, opts)
+    }
+
+    /// Read a prepared query inside this transaction as `author`.
+    fn all_prepared_for_identity(
+        &self,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.all_prepared_for_identity_with_opts(prepared, author, ReadOpts::default())
+    }
+
+    /// Read a prepared query as `author` with explicit read semantics.
+    fn all_prepared_for_identity_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.db()
+            .transaction_all_for_identity(self.tx_id(), prepared, author, opts)
     }
 
     /// Stage an insert with an optional explicit provenance time.
@@ -8083,13 +8502,13 @@ where
 ///
 /// This handle owns the transaction lifetime and abandons an uncommitted
 /// transaction on drop. Use [`MergeableTxRef`] when a caller retains an
-/// [`OpenTxId`] between calls and must not close the transaction on return.
+/// [`OpenBatchId`] between calls and must not close the transaction on return.
 pub struct MergeableTx<'a, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
-    tx_id: OpenTxId,
+    tx_id: OpenBatchId,
     /// Set once the transaction has been committed, so `Drop` does not then
     /// abandon it. Without this, `commit` consumed `self` and `Drop` still ran
     /// `abandon_transaction_handle` on an already-committed transaction — benign
@@ -8124,7 +8543,7 @@ where
         self.db
     }
 
-    fn tx_id(&self) -> OpenTxId {
+    fn tx_id(&self) -> OpenBatchId {
         self.tx_id
     }
 }
@@ -8132,13 +8551,13 @@ where
 /// Non-owning operations handle for an already-open mergeable transaction.
 ///
 /// Construct this with [`Db::mergeable_tx_ref`] when another layer owns the
-/// [`OpenTxId`] lifetime. Dropping this ref never abandons the transaction.
+/// [`OpenBatchId`] lifetime. Dropping this ref never abandons the transaction.
 pub struct MergeableTxRef<'a, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
-    tx_id: OpenTxId,
+    tx_id: OpenBatchId,
 }
 
 impl<S> MergeableTxOps<S> for MergeableTxRef<'_, S>
@@ -8149,7 +8568,7 @@ where
         self.db
     }
 
-    fn tx_id(&self) -> OpenTxId {
+    fn tx_id(&self) -> OpenBatchId {
         self.tx_id
     }
 }
@@ -8179,7 +8598,7 @@ where
     fn db(&self) -> &Db<S>;
 
     /// The id of the already-open transaction.
-    fn tx_id(&self) -> OpenTxId;
+    fn tx_id(&self) -> OpenBatchId;
 
     /// Read one row inside the exclusive transaction.
     fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
@@ -8198,7 +8617,16 @@ where
 
     /// Read a prepared query inside the exclusive transaction.
     fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
-        self.db().exclusive_all(self.tx_id(), prepared)
+        self.all_prepared_with_opts(prepared, ReadOpts::default())
+    }
+
+    /// Read a prepared query with transaction-local writes and explicit read semantics.
+    fn all_prepared_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.db().transaction_all(self.tx_id(), prepared, opts)
     }
 
     /// Read a prepared query inside the exclusive transaction as `author`.
@@ -8207,8 +8635,18 @@ where
         prepared: &PreparedQuery,
         author: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.all_prepared_for_identity_with_opts(prepared, author, ReadOpts::default())
+    }
+
+    /// Read a prepared query as `author` with explicit read semantics.
+    fn all_prepared_for_identity_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
         self.db()
-            .exclusive_all_for_identity(self.tx_id(), prepared, author)
+            .transaction_all_for_identity(self.tx_id(), prepared, author, opts)
     }
 
     /// Stage an insert with a generated row id.
@@ -8247,13 +8685,13 @@ where
 ///
 /// This handle owns the transaction lifetime and abandons an uncommitted
 /// transaction on drop. Use [`ExclusiveTxRef`] when a caller retains an
-/// [`OpenTxId`] between calls and must not close the transaction on return.
+/// [`OpenBatchId`] between calls and must not close the transaction on return.
 pub struct ExclusiveTx<'a, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
-    tx_id: OpenTxId,
+    tx_id: OpenBatchId,
     committed: bool,
 }
 
@@ -8283,7 +8721,7 @@ where
         self.db
     }
 
-    fn tx_id(&self) -> OpenTxId {
+    fn tx_id(&self) -> OpenBatchId {
         self.tx_id
     }
 }
@@ -8303,13 +8741,13 @@ where
 /// Non-owning operations handle for an already-open exclusive transaction.
 ///
 /// Construct this with [`Db::exclusive_tx_ref`] when another layer owns the
-/// [`OpenTxId`] lifetime. Dropping this ref never abandons the transaction.
+/// [`OpenBatchId`] lifetime. Dropping this ref never abandons the transaction.
 pub struct ExclusiveTxRef<'a, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
-    tx_id: OpenTxId,
+    tx_id: OpenBatchId,
 }
 
 impl<S> ExclusiveTxOps<S> for ExclusiveTxRef<'_, S>
@@ -8320,7 +8758,7 @@ where
         self.db
     }
 
-    fn tx_id(&self) -> OpenTxId {
+    fn tx_id(&self) -> OpenBatchId {
         self.tx_id
     }
 }

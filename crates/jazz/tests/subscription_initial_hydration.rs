@@ -40,11 +40,17 @@ async fn fresh_subscription_first_delivery_reduces_from_empty_to_initial_view() 
                 .insert("items", row_input!("label" => "second"))
                 .expect("insert second initial item");
             writer
-                .wait_for_batch(first_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    first_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("first initial item settles");
             writer
-                .wait_for_batch(second_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    second_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("second initial item settles");
 

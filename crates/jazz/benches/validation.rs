@@ -14,6 +14,7 @@ use jazz::peer::PeerState;
 use jazz::protocol::{SyncMessage, VersionRecord};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::time::GlobalSeq;
+use jazz::tools::OpenBatchId;
 use jazz::tx::{DurabilityTier, Fate, RejectionReason, Transaction, TxId};
 use support::{emit_json_line, insert_node_metrics, phase_fields, reset_phase_counters};
 
@@ -132,8 +133,9 @@ impl ValidationBench {
         let run_start = Instant::now();
         for step in 0..self.config.commits {
             let client_idx = self.rng.usize(self.config.clients);
-            let tx_id = self.clients[client_idx]
-                .open_exclusive()
+            let tx_id = OpenBatchId::new();
+            self.clients[client_idx]
+                .open_exclusive(tx_id)
                 .expect("open exclusive");
 
             let read_count = 1 + self.rng.usize(3);

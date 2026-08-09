@@ -76,7 +76,8 @@
 //! let [fate] = core.ingest_commit_unit(tx, versions, 1_000).unwrap().try_into().unwrap();
 //! writer.apply_sync_message(fate).unwrap();
 //!
-//! let tx_id = core.open_exclusive().unwrap();
+//! let tx_id = jazz::tools::OpenBatchId::new();
+//! core.open_exclusive(tx_id).unwrap();
 //! core.tx_read(tx_id, "todos", row).unwrap();
 //! core.tx_write(
 //!     tx_id,

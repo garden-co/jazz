@@ -632,7 +632,7 @@ impl NullableValue for Value {
     }
 }
 
-/// Compact dotted view description owned by the node that created it.
+/// Compact dotted view description captured by the node that created it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct Snapshot {
     /// Node that opened the transaction.
@@ -646,16 +646,13 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// Create a v0 exclusive base snapshot, rejecting foreign dots at admission.
+    /// Create an exclusive base snapshot.
     pub fn exclusive_base(
         owner: NodeUuid,
         global_base: GlobalSeq,
         local_base: TxTime,
         dots: Vec<TxId>,
     ) -> Result<Self, &'static str> {
-        if dots.iter().any(|dot| dot.node != owner) {
-            return Err("exclusive base snapshot cannot include foreign dots");
-        }
         Ok(Self {
             owner,
             global_base,

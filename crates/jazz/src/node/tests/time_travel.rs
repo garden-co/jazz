@@ -277,7 +277,8 @@ fn snapshot_reads_survive_mid_tx_current_winner_shift() {
         )
         .unwrap();
 
-    let tx_id = node_under_test.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    node_under_test.open_exclusive(tx_id).unwrap();
     assert_eq!(
         node_under_test
             .tx_read(tx_id, "todos", row)

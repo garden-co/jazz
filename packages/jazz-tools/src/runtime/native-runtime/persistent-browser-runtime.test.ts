@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { NativeRowDelta, WasmSchema } from "../../drivers/types.js";
+import { createOpenBatchId, type BatchId } from "../client.js";
+import type { InsertResult, MutationResult } from "../client.js";
 import type { PersistentBrowserSubscriptionMessage } from "./persistent-browser-protocol.js";
 import {
   PersistentBrowserOpfsRuntime,
@@ -11,6 +13,13 @@ const schema = {
     columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
   },
 } satisfies WasmSchema;
+
+function committed<T extends InsertResult | MutationResult>(
+  result: T,
+): Extract<T, { kind: "committed" }> {
+  if (result.kind !== "committed") throw new Error("expected committed write");
+  return result as Extract<T, { kind: "committed" }>;
+}
 
 class FakeWorker {
   static instances: FakeWorker[] = [];
@@ -130,7 +139,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
     );
     const worker = FakeWorker.instances[0];
 
-    const wait = runtime.waitForTransaction("local-only-transaction", "edge");
+    const wait = runtime.waitForTransaction("local-only-transaction" as BatchId, "edge");
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
     });
@@ -205,9 +214,9 @@ describe("PersistentBrowserOpfsRuntime", () => {
       worker.messages.find((message) => message.method === "connect")!.id,
       "arbitrary websocket failure",
     );
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let attempt = 0; surfaced.length === 0 && attempt < 10; attempt += 1) {
+      await Promise.resolve();
+    }
 
     expect(surfaced).toHaveLength(1);
     expect(() => surfaced[0]!()).toThrow("arbitrary websocket failure");
@@ -237,7 +246,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
     await disconnect;
 
     const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null);
-    const wait = runtime.waitForTransaction("parked-transaction", "global");
+    const wait = runtime.waitForTransaction("parked-transaction" as BatchId, "global");
     const queryRejection = expect(query).rejects.toThrow(
       "Persistent browser native runtime is closed",
     );
@@ -368,6 +377,58 @@ describe("PersistentBrowserOpfsRuntime", () => {
     await close;
   });
 
+  it("posts createSubscription before a subsequently called write", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-subscription-write-fifo-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0]!;
+
+    runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "local", null);
+    runtime.insert("todos", { title: { type: "Text", value: "after" } });
+
+    await vi.waitFor(() => expect(worker.messages).toHaveLength(2));
+    expect(worker.messages.map(({ method }) => method)).toEqual([
+      "open",
+      "createExecutedSubscription",
+    ]);
+    worker.respond(worker.messages[1]!.id, 1);
+    await vi.waitFor(() => expect(worker.messages).toHaveLength(3));
+    expect(worker.messages[2]!.method).toBe("insert");
+    worker.respond(worker.messages[2]!.id, { kind: "committed", batchId: "batch-1" });
+    await runtime.close();
+  });
+
+  it("posts a write before a subsequently called createSubscription", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-write-subscription-fifo-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0]!;
+
+    runtime.insert("todos", { title: { type: "Text", value: "before" } });
+    runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "local", null);
+
+    await vi.waitFor(() =>
+      expect(worker.messages.some(({ method }) => method === "insert")).toBe(true),
+    );
+    expect(worker.messages.map(({ method }) => method)).toEqual(["open", "insert"]);
+    const write = worker.messages[1]!;
+    worker.respond(write.id, { kind: "committed", batchId: "batch-1" });
+    await vi.waitFor(() => expect(worker.messages).toHaveLength(3));
+    expect(worker.messages[2]!.method).toBe("createExecutedSubscription");
+    worker.respond(worker.messages[2]!.id, 1);
+    await runtime.close();
+  });
+
   it("returns a pending write handle and waits on the worker transaction id", async () => {
     vi.stubGlobal("Worker", FakeWorker);
 
@@ -386,16 +447,19 @@ describe("PersistentBrowserOpfsRuntime", () => {
       undefined,
       "00000000-0000-0000-0000-000000000001",
     );
-    expect(insert.transactionId).toMatch(/^pending-worker-write-/);
+    expect(insert.kind).toBe("committed");
 
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
     });
     const insertMessage = worker.messages.find((message) => message.method === "insert");
     expect(insertMessage).toBeDefined();
-    worker.respond(insertMessage!.id, { transactionId: "native-runtime-transaction" });
+    worker.respond(insertMessage!.id, {
+      kind: "committed",
+      batchId: "native-runtime-transaction",
+    });
 
-    const waitPromise = runtime.waitForTransaction(insert.transactionId, "local");
+    const waitPromise = runtime.waitForTransaction(await committed(insert).batchId, "local");
 
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
@@ -444,7 +508,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
       expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
     });
     const insert = worker.messages.find((message) => message.method === "insert");
-    worker.respond(insert!.id, { transactionId: "native-runtime-transaction" });
+    worker.respond(insert!.id, { kind: "committed", batchId: "native-runtime-transaction" });
 
     await runtime.close();
   });
@@ -478,7 +542,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
     );
 
     const insert = worker.messages.find((message) => message.method === "insert")!;
-    worker.respond(insert.id, { transactionId: "native-runtime-transaction" });
+    worker.respond(insert.id, { kind: "committed", batchId: "native-runtime-transaction" });
     await vi.waitFor(() => {
       expect(
         worker.messages.some((message) => message.method === "createExecutedSubscription"),
@@ -519,7 +583,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
     expect(updateMessage).toBeDefined();
     worker.reject(updateMessage!.id, "native runtime rejected write");
 
-    await expect(runtime.waitForTransaction(update.transactionId, "local")).rejects.toThrow(
+    await expect(update.kind === "committed" ? update.batchId : Promise.resolve()).rejects.toThrow(
       "native runtime rejected write",
     );
     expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(false);
@@ -549,22 +613,23 @@ describe("PersistentBrowserOpfsRuntime", () => {
 
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "connect")).toBe(true);
-      expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
     });
 
     const connectMessage = worker.messages.find((message) => message.method === "connect");
+    expect(worker.messages.some((message) => message.method === "insert")).toBe(false);
+    worker.respond(connectMessage!.id, undefined);
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
+    });
     const insertMessage = worker.messages.find((message) => message.method === "insert");
     expect(connectMessage).toBeDefined();
     expect(insertMessage).toBeDefined();
-    worker.respond(insertMessage!.id, { transactionId: "native-runtime-transaction" });
+    worker.respond(insertMessage!.id, {
+      kind: "committed",
+      batchId: "native-runtime-transaction",
+    });
 
-    const waitPromise = runtime.waitForTransaction(insert.transactionId, "edge");
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(false);
-
-    worker.respond(connectMessage!.id, undefined);
-
+    const waitPromise = runtime.waitForTransaction(await committed(insert).batchId, "edge");
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
     });
@@ -597,14 +662,19 @@ describe("PersistentBrowserOpfsRuntime", () => {
     );
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "connect")).toBe(true);
-      expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
     });
     const connectMessage = worker.messages.find((message) => message.method === "connect");
-    const insertMessage = worker.messages.find((message) => message.method === "insert");
     worker.respond(connectMessage!.id, undefined);
-    worker.respond(insertMessage!.id, { transactionId: "native-runtime-transaction" });
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
+    });
+    const insertMessage = worker.messages.find((message) => message.method === "insert");
+    worker.respond(insertMessage!.id, {
+      kind: "committed",
+      batchId: "native-runtime-transaction",
+    });
 
-    const waitPromise = runtime.waitForTransaction(insert.transactionId, "edge");
+    const waitPromise = runtime.waitForTransaction(await committed(insert).batchId, "edge");
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
     });
@@ -707,7 +777,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
     await disconnect;
 
     const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null);
-    const wait = runtime.waitForTransaction("disconnected-auth-transaction", "global");
+    const wait = runtime.waitForTransaction("disconnected-auth-transaction" as BatchId, "global");
     runtime.updateAuth('{"token":"replacement"}');
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "updateAuth")).toBe(true);
@@ -726,16 +796,16 @@ describe("PersistentBrowserOpfsRuntime", () => {
     });
     worker.respond(worker.messages.find((message) => message.method === "connect")!.id, undefined);
     await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "query")).toBe(true);
+    });
+    worker.respond(worker.messages.find((message) => message.method === "query")!.id, []);
+    await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
     });
     worker.respond(
       worker.messages.find((message) => message.method === "waitForTransaction")!.id,
       undefined,
     );
-    await vi.waitFor(() => {
-      expect(worker.messages.some((message) => message.method === "query")).toBe(true);
-    });
-    worker.respond(worker.messages.find((message) => message.method === "query")!.id, []);
 
     await expect(query).resolves.toEqual([]);
     await expect(wait).resolves.toBeUndefined();
@@ -764,15 +834,20 @@ describe("PersistentBrowserOpfsRuntime", () => {
 
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "connect")).toBe(true);
-      expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
     });
 
     const connectMessage = worker.messages.find((message) => message.method === "connect");
-    const insertMessage = worker.messages.find((message) => message.method === "insert");
     worker.respond(connectMessage!.id, undefined);
-    worker.respond(insertMessage!.id, { transactionId: "native-runtime-transaction" });
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
+    });
+    const insertMessage = worker.messages.find((message) => message.method === "insert");
+    worker.respond(insertMessage!.id, {
+      kind: "committed",
+      batchId: "native-runtime-transaction",
+    });
 
-    const waitPromise = runtime.waitForTransaction(insert.transactionId, "edge");
+    const waitPromise = runtime.waitForTransaction(await committed(insert).batchId, "edge");
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
     });
@@ -829,16 +904,18 @@ describe("PersistentBrowserOpfsRuntime", () => {
 
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "query")).toBe(true);
+    });
+
+    const queryMessage = worker.messages.find((message) => message.method === "query");
+    worker.respond(queryMessage!.id, []);
+    await vi.waitFor(() => {
       expect(
         worker.messages.some((message) => message.method === "createExecutedSubscription"),
       ).toBe(true);
     });
-
-    const queryMessage = worker.messages.find((message) => message.method === "query");
     const createSubscriptionMessage = worker.messages.find(
       (message) => message.method === "createExecutedSubscription",
     );
-    worker.respond(queryMessage!.id, []);
     worker.respond(createSubscriptionMessage!.id, 7);
 
     await expect(queryPromise).resolves.toEqual([]);
@@ -1016,7 +1093,10 @@ describe("PersistentBrowserOpfsRuntime", () => {
     expect(worker.messages.some((message) => message.method === "query")).toBe(false);
 
     const insertMessage = worker.messages.find((message) => message.method === "insert");
-    worker.respond(insertMessage!.id, { transactionId: "native-runtime-transaction" });
+    worker.respond(insertMessage!.id, {
+      kind: "committed",
+      batchId: "native-runtime-transaction",
+    });
 
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "query")).toBe(true);
@@ -1040,12 +1120,14 @@ describe("PersistentBrowserOpfsRuntime", () => {
     );
     const worker = FakeWorker.instances[0];
 
-    const localTxId = runtime.beginTransaction("mergeable");
+    const localTxId = createOpenBatchId();
+    runtime.beginTransaction("mergeable", localTxId);
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "beginTransaction")).toBe(true);
     });
     const beginMessage = worker.messages.find((message) => message.method === "beginTransaction");
-    worker.respond(beginMessage!.id, "worker-tx-1");
+    expect(beginMessage?.args).toEqual(["mergeable", localTxId]);
+    worker.respond(beginMessage!.id, localTxId);
 
     runtime.insert(
       "todos",
@@ -1058,7 +1140,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
       expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
     });
     const insertMessage = worker.messages.find((message) => message.method === "insert");
-    expect(insertMessage?.args[2]).toBe(JSON.stringify({ batch_id: "worker-tx-1" }));
+    expect(insertMessage?.args[2]).toBe(JSON.stringify({ batch_id: localTxId }));
 
     const queryPromise = runtime.query(
       JSON.stringify({ table: "todos" }),
@@ -1069,13 +1151,13 @@ describe("PersistentBrowserOpfsRuntime", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(worker.messages.some((message) => message.method === "query")).toBe(false);
 
-    worker.respond(insertMessage!.id, { transactionId: "worker-tx-1" });
+    worker.respond(insertMessage!.id, { kind: "staged", openBatchId: localTxId });
 
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "query")).toBe(true);
     });
     const queryMessage = worker.messages.find((message) => message.method === "query");
-    expect(queryMessage?.args[3]).toBe(JSON.stringify({ transaction_batch_id: "worker-tx-1" }));
+    expect(queryMessage?.args[3]).toBe(JSON.stringify({ transaction_batch_id: localTxId }));
     worker.respond(queryMessage!.id, []);
 
     await expect(queryPromise).resolves.toEqual([]);
@@ -1094,20 +1176,21 @@ describe("PersistentBrowserOpfsRuntime", () => {
     );
     const worker = FakeWorker.instances[0];
 
-    const tx = runtime.beginTransaction("mergeable");
+    const tx = createOpenBatchId();
+    runtime.beginTransaction("mergeable", tx);
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "beginTransaction")).toBe(true);
     });
     const beginMessage = worker.messages.find((message) => message.method === "beginTransaction");
-    worker.respond(beginMessage!.id, "worker-tx-1");
+    worker.respond(beginMessage!.id, tx);
 
-    runtime.commitTransaction(tx);
+    const committed = runtime.commitTransaction(tx);
 
     expect(() => runtime.commitTransaction(tx)).toThrow(
-      `Write error: transaction ${tx} is already committed`,
+      `Commit transaction failed: batch ${tx} is already committing`,
     );
     expect(() => runtime.rollbackTransaction(tx)).toThrow(
-      `Write error: transaction ${tx} is already committed`,
+      `Rollback transaction failed: batch ${tx} is already committing`,
     );
     expect(() =>
       runtime.insert(
@@ -1116,14 +1199,103 @@ describe("PersistentBrowserOpfsRuntime", () => {
         JSON.stringify({ batch_id: tx }),
         "00000000-0000-0000-0000-000000000001",
       ),
-    ).toThrow(`Insert failed: WriteError("transaction ${tx} is already committed")`);
+    ).toThrow(`Insert failed: batch ${tx} is completing`);
 
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "commitTransaction")).toBe(true);
     });
     const commitMessage = worker.messages.find((message) => message.method === "commitTransaction");
-    worker.respond(commitMessage!.id, undefined);
+    worker.respond(commitMessage!.id, "00000000-0000-7000-8000-000000000001");
+    await expect(committed).resolves.toBe("00000000-0000-7000-8000-000000000001");
 
+    await runtime.close();
+  });
+
+  it("rejects a duplicate live OpenBatchId before it can overwrite staged worker state", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-duplicate-open-batch-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+    const id = createOpenBatchId();
+    runtime.beginTransaction("mergeable", id);
+    await vi.waitFor(() =>
+      expect(worker.messages.some((message) => message.method === "beginTransaction")).toBe(true),
+    );
+    const begin = worker.messages.find((message) => message.method === "beginTransaction")!;
+    worker.respond(begin.id, id);
+
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "first" } },
+      JSON.stringify({ batch_id: id }),
+    );
+    await vi.waitFor(() =>
+      expect(worker.messages.filter((message) => message.method === "insert")).toHaveLength(1),
+    );
+    const first = worker.messages.find((message) => message.method === "insert")!;
+    worker.respond(first.id, { kind: "staged", openBatchId: id });
+
+    expect(() => runtime.beginTransaction("mergeable", id)).toThrow(
+      `Begin transaction failed: batch ${id} has already been opened`,
+    );
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "second" } },
+      JSON.stringify({ batch_id: id }),
+    );
+    await vi.waitFor(() =>
+      expect(worker.messages.filter((message) => message.method === "insert")).toHaveLength(2),
+    );
+    expect(worker.messages.filter((message) => message.method === "beginTransaction")).toHaveLength(
+      1,
+    );
+    const second = worker.messages.filter((message) => message.method === "insert")[1]!;
+    worker.respond(second.id, { kind: "staged", openBatchId: id });
+    await runtime.close();
+  });
+
+  it("fences commands for a failed begin without poisoning unrelated FIFO work", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-failed-begin-fence-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+    const id = createOpenBatchId();
+    runtime.beginTransaction("mergeable", id);
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "must not send" } },
+      JSON.stringify({ batch_id: id }),
+    );
+    const commit = runtime.commitTransaction(id);
+    const unrelated = committed(
+      runtime.insert("todos", { title: { type: "Text", value: "unrelated" } }),
+    );
+    await vi.waitFor(() =>
+      expect(worker.messages.some((message) => message.method === "beginTransaction")).toBe(true),
+    );
+    const begin = worker.messages.find((message) => message.method === "beginTransaction")!;
+    worker.reject(begin.id, "forced OpenBatchId collision");
+
+    await expect(commit).rejects.toThrow("forced OpenBatchId collision");
+    await vi.waitFor(() =>
+      expect(worker.messages.filter((message) => message.method === "insert")).toHaveLength(1),
+    );
+    const sent = worker.messages.find((message) => message.method === "insert")!;
+    worker.respond(sent.id, { kind: "committed", batchId: "00000000000070008000000000000009" });
+    await expect(unrelated.batchId).resolves.toBe("00000000000070008000000000000009");
+    expect(() => runtime.beginTransaction("mergeable", id)).toThrow(
+      `Begin transaction failed: batch ${id} has already been opened`,
+    );
     await runtime.close();
   });
 
@@ -1147,6 +1319,31 @@ describe("PersistentBrowserOpfsRuntime", () => {
 
     expect(worker.terminated).toBe(true);
     expect(worker.messages.some((message) => message.method === "close")).toBe(true);
+  });
+
+  it("lets close preempt a durability wait without interleaving ordinary FIFO commands", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-close-behind-wait-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+    const wait = runtime.waitForTransaction("00000000000070008000000000000003" as never, "local");
+    await vi.waitFor(() =>
+      expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true),
+    );
+    const laterWrite = committed(
+      runtime.insert("todos", { title: { type: "Text", value: "queued behind wait" } }),
+    );
+
+    await expect(runtime.close()).resolves.toBeUndefined();
+    await expect(wait).rejects.toThrow("closed");
+    await expect(laterWrite.batchId).rejects.toThrow("closed");
+    expect(worker.messages.map((message) => message.method)).toContain("close");
+    expect(worker.terminated).toBe(true);
   });
 
   it("forwards the configured initial-sync flush cadence to the OPFS owner", async () => {

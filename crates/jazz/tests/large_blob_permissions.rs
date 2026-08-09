@@ -141,7 +141,7 @@ async fn large_blob_values_follow_ordinary_row_permissions() {
                 )
                 .expect("alice creates blob asset");
             alice
-                .wait_for_batch(alice_batch_id, DurabilityTier::EdgeServer)
+                .wait_for_batch(alice_batch_id.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
                 .await
                 .expect("alice blob asset reaches edge");
 
