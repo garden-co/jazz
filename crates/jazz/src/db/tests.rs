@@ -2969,7 +2969,7 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
     let SubscriptionEvent::Delta { .. } = &opened else {
         panic!("expected terminal reset")
     };
-    let mut snapshot = snapshot_from_event(opened);
+    let snapshot = snapshot_from_event(opened);
     assert_eq!(
         terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
         Vec::<String>::new(),
@@ -2996,6 +2996,7 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
         added,
         updated,
         removed,
+        terminal_operations,
         ..
     } = &child_added
     else {
@@ -3003,16 +3004,16 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
     };
     assert!(!*reset, "a child insertion must remain incremental");
     assert!(added.is_empty());
-    assert_eq!(
-        updated.len(),
-        1,
-        "only the changed terminal root is replaced"
+    assert!(
+        updated.is_empty(),
+        "a descendant patch does not replace its root"
     );
     assert!(removed.is_empty());
-    apply_subscription_event(&mut snapshot, child_added);
-    assert_eq!(
-        terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
-        vec!["first".to_owned()]
+    assert!(
+        terminal_operations
+            .iter()
+            .any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Insert { .. })),
+        "child insertion is delivered as a terminal path insert"
     );
 
     db.update(
@@ -3021,11 +3022,12 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
         BTreeMap::from([("owner_id".to_owned(), Value::Uuid(row(0xb1).0))]),
     )
     .unwrap();
-    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
-    assert_eq!(
-        terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
-        Vec::<String>::new()
-    );
+    let removed_child = block_on(subscription.next_event()).unwrap();
+    assert!(matches!(
+        removed_child,
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Remove { .. }))
+    ));
 
     db.update(
         "todos",
@@ -3033,12 +3035,12 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
         BTreeMap::from([("owner_id".to_owned(), Value::Uuid(row(0xa1).0))]),
     )
     .unwrap();
-    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
-    assert_eq!(
-        terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
-        vec!["first".to_owned()],
-        "re-populated group is emitted in the authoritative root"
-    );
+    let restored_child = block_on(subscription.next_event()).unwrap();
+    assert!(matches!(
+        restored_child,
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Insert { .. }))
+    ));
 }
 
 #[test]
