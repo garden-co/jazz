@@ -262,7 +262,10 @@ describe("attachDevTools mutation bridge", () => {
     expect(response.ok).toBe(true);
     expect(response.payload).toEqual(insertedRow);
     expect(insert).toHaveBeenCalledWith("todos", { title: { type: "Text", value: "hello" } });
-    expect(waitForTransaction).toHaveBeenCalledWith("transaction-insert-devtools", "local");
+    await expect(waitForTransaction.mock.calls[0]?.[0]).resolves.toBe(
+      "transaction-insert-devtools",
+    );
+    expect(waitForTransaction.mock.calls[0]?.[1]).toBe("local");
   });
 
   it("routes client.updateDurable to runtime update + wait", async () => {
@@ -323,7 +326,10 @@ describe("attachDevTools mutation bridge", () => {
     expect(update).toHaveBeenCalledWith("todos", "row-1", {
       title: { type: "Text", value: "updated" },
     });
-    expect(waitForTransaction).toHaveBeenCalledWith("transaction-update-devtools", "edge");
+    await expect(waitForTransaction.mock.calls[0]?.[0]).resolves.toBe(
+      "transaction-update-devtools",
+    );
+    expect(waitForTransaction.mock.calls[0]?.[1]).toBe("edge");
   });
 
   it("routes client.deleteDurable to runtime delete + wait", async () => {
@@ -379,7 +385,10 @@ describe("attachDevTools mutation bridge", () => {
     expect(response.ok).toBe(true);
     expect(response.payload).toEqual({ deleted: true });
     expect(deleteMutation).toHaveBeenCalledWith("todos", "row-1");
-    expect(waitForTransaction).toHaveBeenCalledWith("transaction-delete-devtools", "global");
+    await expect(waitForTransaction.mock.calls[0]?.[0]).resolves.toBe(
+      "transaction-delete-devtools",
+    );
+    expect(waitForTransaction.mock.calls[0]?.[1]).toBe("global");
   });
 
   it("returns command-specific errors for invalid mutation payloads", async () => {

@@ -149,7 +149,10 @@ describe("Db write handles", () => {
       title: "Buy milk",
       done: false,
     });
-    expect(handleClient.waitForTransaction).toHaveBeenCalledWith("transaction-insert", "global");
+    await expect(handleClient.waitForTransaction.mock.calls[0]?.[0]).resolves.toBe(
+      "transaction-insert",
+    );
+    expect(handleClient.waitForTransaction.mock.calls[0]?.[1]).toBe("global");
   });
 
   it("keeps update and delete handles waitable by durability tier", async () => {
@@ -181,8 +184,14 @@ describe("Db write handles", () => {
     expect(remove).toHaveBeenCalledWith("todos", "todo-1", undefined, undefined, undefined);
     await expect(updated.wait({ tier: "edge" })).resolves.toBeUndefined();
     await expect(deleted.wait({ tier: "global" })).resolves.toBeUndefined();
-    expect(updateClient.waitForTransaction).toHaveBeenCalledWith("transaction-update", "edge");
-    expect(deleteClient.waitForTransaction).toHaveBeenCalledWith("transaction-delete", "global");
+    await expect(updateClient.waitForTransaction.mock.calls[0]?.[0]).resolves.toBe(
+      "transaction-update",
+    );
+    expect(updateClient.waitForTransaction.mock.calls[0]?.[1]).toBe("edge");
+    await expect(deleteClient.waitForTransaction.mock.calls[0]?.[0]).resolves.toBe(
+      "transaction-delete",
+    );
+    expect(deleteClient.waitForTransaction.mock.calls[0]?.[1]).toBe("global");
   });
 
   it("routes write handles through the session-aware client-backed db path", async () => {
@@ -260,17 +269,17 @@ describe("Db write handles", () => {
     });
     await expect(updated.wait({ tier: "edge" })).resolves.toBeUndefined();
     await expect(deleted.wait({ tier: "local" })).resolves.toBeUndefined();
-    expect(insertClient.waitForTransaction).toHaveBeenCalledWith(
+    await expect(insertClient.waitForTransaction.mock.calls[0]?.[0]).resolves.toBe(
       "transaction-session-insert",
-      "global",
     );
-    expect(updateClient.waitForTransaction).toHaveBeenCalledWith(
+    expect(insertClient.waitForTransaction.mock.calls[0]?.[1]).toBe("global");
+    await expect(updateClient.waitForTransaction.mock.calls[0]?.[0]).resolves.toBe(
       "transaction-session-update",
-      "edge",
     );
-    expect(deleteClient.waitForTransaction).toHaveBeenCalledWith(
+    expect(updateClient.waitForTransaction.mock.calls[0]?.[1]).toBe("edge");
+    await expect(deleteClient.waitForTransaction.mock.calls[0]?.[0]).resolves.toBe(
       "transaction-session-delete",
-      "local",
     );
+    expect(deleteClient.waitForTransaction.mock.calls[0]?.[1]).toBe("local");
   });
 });
