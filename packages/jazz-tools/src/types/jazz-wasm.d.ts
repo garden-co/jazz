@@ -21,6 +21,7 @@ declare module "jazz-wasm" {
   export class QueryAttachment {}
 
   export class WasmWrite {
+    readonly batchId: string;
     readonly payload: Uint8Array;
     writeState(): unknown;
     nextWriteStateChange(): Promise<void>;
@@ -143,8 +144,8 @@ declare module "jazz-wasm" {
     close(): boolean;
     connectUpstream(): WasmTransport;
     acceptSubscriber(identity: Uint8Array): WasmTransport;
-    mergeableTx(): WasmTx;
-    mergeableTxForIdentity(author: Uint8Array): WasmTx;
-    exclusiveTx(): WasmTx;
+    mergeableTx(openBatchId: string): WasmTx;
+    mergeableTxForIdentity(openBatchId: string, author: Uint8Array): WasmTx;
+    exclusiveTx(openBatchId: string): WasmTx;
   }
 }

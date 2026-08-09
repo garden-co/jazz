@@ -44,8 +44,8 @@ export declare class NapiDb {
   restoreEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   tick(): void
   connectUpstream(): Transport
-  mergeableTx(): Tx
-  mergeableTxForIdentity(author: Uint8Array): Tx
+  mergeableTx(openBatchId: string): Tx
+  mergeableTxForIdentity(openBatchId: string, author: Uint8Array): Tx
   close(): void
 }
 
@@ -89,6 +89,7 @@ export declare class Tx {
 }
 
 export declare class Write {
+  get batchId(): string
   get payload(): Uint8Array
   wait(tier: string): void
   writeState(): any
