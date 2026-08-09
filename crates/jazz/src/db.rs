@@ -2738,6 +2738,7 @@ where
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
             .node
@@ -2764,6 +2765,7 @@ where
         patch: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         self.node
             .node
             .borrow_mut()
@@ -2778,6 +2780,7 @@ where
         row: RowUuid,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         self.node
             .node
             .borrow_mut()
@@ -2803,6 +2806,7 @@ where
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.borrow_mut();
         let content_parents = node
@@ -2945,11 +2949,20 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<(), Error> {
+        let now_ms = self.next_now_ms();
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
             .node
             .borrow_mut()
-            .tx_write_in_schema(tx_id, self.schema_version_id, table, row, cells, None)
+            .tx_write_in_schema_at_ms(
+                tx_id,
+                self.schema_version_id,
+                table,
+                row,
+                cells,
+                None,
+                Some(now_ms),
+            )
             .map_err(Into::into)
     }
 
@@ -2959,16 +2972,18 @@ where
         table: &str,
         row: RowUuid,
     ) -> Result<(), Error> {
+        let now_ms = self.next_now_ms();
         self.node
             .node
             .borrow_mut()
-            .tx_write_in_schema(
+            .tx_write_in_schema_at_ms(
                 tx_id,
                 self.schema_version_id,
                 table,
                 row,
                 BTreeMap::<String, Value>::new(),
                 Some(DeletionEvent::Deleted),
+                Some(now_ms),
             )
             .map_err(Into::into)
     }
@@ -2980,20 +2995,30 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<(), Error> {
+        let now_ms = self.next_now_ms();
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.borrow_mut();
         // Restore needs one content version and one deletion-register version:
         // `tx_write` rejects a version carrying both. The layers have separate
         // winners and parent chains; see `restore`'s `local_*_winner_tx_id` pair.
         // Keep this staged form aligned with the committed restore path.
-        node.tx_write_in_schema(tx_id, self.schema_version_id, table, row, cells, None)?;
-        node.tx_write_in_schema(
+        node.tx_write_in_schema_at_ms(
+            tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            cells,
+            None,
+            Some(now_ms),
+        )?;
+        node.tx_write_in_schema_at_ms(
             tx_id,
             self.schema_version_id,
             table,
             row,
             BTreeMap::<String, Value>::new(),
             Some(DeletionEvent::Restored),
+            Some(now_ms),
         )?;
         Ok(())
     }
@@ -3019,7 +3044,7 @@ where
         self.node
             .node
             .borrow_mut()
-            .open_exclusive(id)
+            .open_exclusive_for_identity(id, self.identity.author)
             .map_err(Into::into)
     }
 

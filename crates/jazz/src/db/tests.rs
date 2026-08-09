@@ -3057,6 +3057,136 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
 }
 
 #[test]
+fn mergeable_overlay_uses_staged_provenance_and_preserves_it_at_commit() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let existing = row(0xa1);
+    db.insert_with_id_at_ms(
+        "todos",
+        existing,
+        doctest_support::todo_cells("existing", false),
+        100,
+    )
+    .unwrap();
+    let inserted = row(0xa2);
+    let tx = db.mergeable_tx().unwrap();
+    tx.insert_with_id_at_ms(
+        "todos",
+        inserted,
+        doctest_support::todo_cells("inserted", false),
+        200,
+    )
+    .unwrap();
+    tx.update_at_ms(
+        "todos",
+        existing,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        300,
+    )
+    .unwrap();
+    let query = db
+        .prepare_query(
+            &db.table("todos")
+                .select(["title", "$createdAt", "$updatedAt"]),
+        )
+        .unwrap();
+
+    let overlay = tx.all_prepared(&query).unwrap();
+    let repeated = tx.all_prepared(&query).unwrap();
+    assert_eq!(overlay, repeated, "transaction provenance must be stable");
+    let inserted_overlay = overlay
+        .iter()
+        .find(|row| row.row_uuid() == inserted)
+        .unwrap()
+        .provenance()
+        .unwrap()
+        .unwrap();
+    assert_eq!(inserted_overlay.created_at, TxTime(200));
+    assert_eq!(inserted_overlay.updated_at, TxTime(200));
+    assert_eq!(inserted_overlay.created_by, db.identity.author);
+    let updated_overlay = overlay
+        .iter()
+        .find(|row| row.row_uuid() == existing)
+        .unwrap()
+        .provenance()
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated_overlay.created_at, TxTime(100));
+    assert_eq!(updated_overlay.updated_at, TxTime(300));
+    assert_eq!(updated_overlay.updated_by, db.identity.author);
+
+    tx.commit().unwrap();
+    let committed = db.read(&query).unwrap();
+    for (row_id, staged) in [(inserted, inserted_overlay), (existing, updated_overlay)] {
+        let committed = committed
+            .iter()
+            .find(|row| row.row_uuid() == row_id)
+            .unwrap()
+            .provenance()
+            .unwrap()
+            .unwrap();
+        assert_eq!(committed.created_by, staged.created_by);
+        assert_eq!(committed.created_at, staged.created_at);
+        assert_eq!(committed.updated_by, staged.updated_by);
+        assert_eq!(committed.updated_at, staged.updated_at);
+    }
+}
+
+#[test]
+fn exclusive_overlay_reserves_stable_provenance_for_insert_and_update() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let existing = row(0xb1);
+    db.insert_with_id_at_ms(
+        "todos",
+        existing,
+        doctest_support::todo_cells("existing", false),
+        100,
+    )
+    .unwrap();
+    let inserted = row(0xb2);
+    let tx = db.exclusive_tx().unwrap();
+    tx.insert_with_id(
+        "todos",
+        inserted,
+        doctest_support::todo_cells("inserted", false),
+    )
+    .unwrap();
+    tx.update(
+        "todos",
+        existing,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+    )
+    .unwrap();
+    let query = db
+        .prepare_query(
+            &db.table("todos")
+                .select(["title", "$createdAt", "$updatedAt"]),
+        )
+        .unwrap();
+    let overlay = tx.all_prepared(&query).unwrap();
+    let repeated = tx.all_prepared(&query).unwrap();
+    assert_eq!(overlay, repeated, "exclusive provenance must be stable");
+    let provenance = |rows: &[CurrentRow], id| {
+        rows.iter()
+            .find(|row| row.row_uuid() == id)
+            .unwrap()
+            .provenance()
+            .unwrap()
+            .unwrap()
+    };
+    let inserted_overlay = provenance(&overlay, inserted);
+    let updated_overlay = provenance(&overlay, existing);
+    assert_ne!(inserted_overlay.created_at, TxTime(0));
+    assert_eq!(inserted_overlay.created_at, inserted_overlay.updated_at);
+    assert_eq!(updated_overlay.created_at, TxTime(100));
+    assert_ne!(updated_overlay.updated_at, TxTime(0));
+
+    tx.commit().unwrap();
+    let committed = db.read(&query).unwrap();
+    assert_eq!(provenance(&committed, inserted), inserted_overlay);
+    assert_eq!(provenance(&committed, existing), updated_overlay);
+}
+
+#[test]
 fn array_subquery_live_subscription_tracks_child_edges() {
     let schema = relation_schema();
     let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);

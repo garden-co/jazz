@@ -13,7 +13,15 @@ where
 {
     /// Open an exclusive transaction over the current snapshot.
     pub fn open_exclusive(&mut self, id: OpenBatchId) -> Result<(), Error> {
-        self.open_transaction(id, OpenTransactionKind::Exclusive)
+        self.open_exclusive_for_identity(id, AuthorId::SYSTEM)
+    }
+
+    pub(crate) fn open_exclusive_for_identity(
+        &mut self,
+        id: OpenBatchId,
+        made_by: AuthorId,
+    ) -> Result<(), Error> {
+        self.open_transaction(id, OpenTransactionKind::Exclusive, made_by)
     }
 
     /// Open a mergeable transaction over the current snapshot.
@@ -29,6 +37,7 @@ where
                 made_by,
                 permission_subject,
             },
+            made_by,
         )
     }
 
@@ -36,6 +45,7 @@ where
         &mut self,
         id: OpenBatchId,
         kind: OpenTransactionKind,
+        provisional_author: AuthorId,
     ) -> Result<(), Error> {
         if self.open_tx.open_transactions.contains_key(&id)
             || self.open_tx.closed_batches.contains(&id)
@@ -58,6 +68,7 @@ where
             id,
             OpenTransaction {
                 kind,
+                provisional_author,
                 base_snapshot,
                 base_snapshot_rows: BTreeMap::new(),
                 row_reads: Vec::new(),
@@ -207,7 +218,15 @@ where
         for row_uuid in rows {
             let snapshot_row =
                 self.snapshot_row_in_schema(schema_version, table, row_uuid, &snapshot)?;
-            let provenance = snapshot_row.provenance.clone();
+            let snapshot_provenance = snapshot_row.provenance.clone();
+            let open_tx = self.open_tx(tx_id)?;
+            let provisional_author = open_tx.provisional_author;
+            let pending_writes = open_tx
+                .writes
+                .iter()
+                .filter(|write| write.table == table && write.row_uuid == row_uuid)
+                .cloned()
+                .collect::<Vec<_>>();
             let (cells, deleted) = self.overlay_pending_cells_and_deletion_with_table(
                 tx_id,
                 &table_schema,
@@ -218,13 +237,44 @@ where
             if let Some(cells) = cells
                 && (!deleted || include_deleted)
             {
-                let row = if let Some((created, updated)) = provenance {
-                    current_row_from_materialized_cells_with_layer_provenance(
+                let snapshot_projection = snapshot_provenance.as_ref().map(|(created, updated)| {
+                    (
+                        RowProvenance {
+                            created_by: created.created_by(),
+                            created_at: created.created_at(),
+                            updated_by: updated.updated_by(),
+                            updated_at: updated.updated_at(),
+                        },
+                        (updated.tx_time(), updated.tx_node_alias()),
+                    )
+                });
+                let mut provenance = snapshot_projection.map(|(provenance, _)| provenance);
+                for write in &pending_writes {
+                    let Some(now_ms) = write.now_ms else {
+                        continue;
+                    };
+                    let updated_at = TxTime(now_ms);
+                    provenance = Some(match provenance {
+                        Some(existing) => RowProvenance {
+                            updated_by: provisional_author,
+                            updated_at,
+                            ..existing
+                        },
+                        None => RowProvenance {
+                            created_by: provisional_author,
+                            created_at: updated_at,
+                            updated_by: provisional_author,
+                            updated_at,
+                        },
+                    });
+                }
+                let row = if let Some(provenance) = provenance {
+                    current_row_from_cells_with_explicit_provenance(
                         &table_schema,
-                        &created,
-                        &created,
-                        &updated,
+                        row_uuid,
                         &cells,
+                        provenance,
+                        snapshot_projection.map(|(_, projected)| projected),
                     )?
                 } else {
                     let cells = positional_cells_from_map(&table_schema, &cells)?;
@@ -282,6 +332,27 @@ where
         cells: BTreeMap<String, V>,
         deletion: Option<DeletionEvent>,
     ) -> Result<(), Error> {
+        self.tx_write_in_schema_at_ms(
+            tx_id,
+            write_schema_version,
+            table,
+            row_uuid,
+            cells,
+            deletion,
+            None,
+        )
+    }
+
+    pub(crate) fn tx_write_in_schema_at_ms<V: Into<Value>>(
+        &mut self,
+        tx_id: OpenBatchId,
+        write_schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        cells: BTreeMap<String, V>,
+        deletion: Option<DeletionEvent>,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
         if !matches!(self.open_tx(tx_id)?.kind, OpenTransactionKind::Exclusive) {
             return Err(Error::InvalidMergeableCommit(
                 "open transaction is not exclusive",
@@ -318,7 +389,7 @@ where
             cells: PendingCells::Replace(cells),
             deletion,
             parents: parent.into_iter().collect(),
-            now_ms: None,
+            now_ms,
             refresh_parents_at_commit: false,
         };
         let open_tx = self.open_tx_mut(tx_id)?;
@@ -543,10 +614,17 @@ where
         }
         let made_at = self.mint_tx_time(now_ms);
         let tx_id = TxId::new(made_at, self.node_uuid);
+        let provenance_snapshot = open_tx.base_snapshot.clone();
         let versions = open_tx
             .writes
             .into_iter()
             .map(|write| {
+                let snapshot_content = self.snapshot_layer_winner(
+                    &write.table,
+                    write.row_uuid,
+                    VersionLayer::Content,
+                    &provenance_snapshot,
+                );
                 let table_schema = self.table_in_schema(&write.table, write.schema_version)?;
                 let PendingCells::Replace(cells) = write.cells else {
                     return Err(Error::InvalidMergeableCommit(
@@ -554,15 +632,20 @@ where
                     ));
                 };
                 let cells = positional_cells_from_map(&table_schema, &cells)?;
+                let provenance_at = TxTime(write.now_ms.unwrap_or(now_ms));
+                let (created_by, created_at) = snapshot_content
+                    .as_ref()
+                    .map(|version| (version.created_by(), version.created_at()))
+                    .unwrap_or((made_by, provenance_at));
                 Ok(VersionRecord::encode(
                     &table_schema,
                     write.schema_version,
                     write.row_uuid,
                     write.parents,
+                    created_by,
+                    created_at,
                     made_by,
-                    made_at,
-                    made_by,
-                    made_at,
+                    provenance_at,
                     &cells,
                     write.deletion,
                 )?)
@@ -1024,6 +1107,8 @@ pub(super) enum OpenTransactionKind {
 pub(super) struct OpenTransaction {
     /// Commit semantics and attribution carried by this open transaction.
     pub(super) kind: OpenTransactionKind,
+    /// Author reflected by transaction-local provenance before commit.
+    pub(super) provisional_author: AuthorId,
     /// Snapshot captured when the transaction opened.
     pub(super) base_snapshot: Snapshot,
     /// Base snapshot row derivations observed by point reads in this transaction.
