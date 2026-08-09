@@ -997,7 +997,7 @@ where
         self.branch_current_rows_for_schema(table, branch, self.catalogue.current_schema_version_id)
     }
 
-    fn branch_current_rows_for_schema(
+    pub(super) fn branch_current_rows_for_schema(
         &mut self,
         table: &str,
         branch: &BranchRecord,
@@ -1366,7 +1366,7 @@ where
         Ok(heads)
     }
 
-    fn validated_target_source_dots(
+    pub(super) fn validated_target_source_dots(
         &mut self,
         source: BranchLineage,
         target: BranchLineage,
@@ -1460,22 +1460,24 @@ where
                     {
                         let tx_id = self.version_tx_id(&version)?;
                         let coordinates = match layer {
-                            VersionLayer::Content => self
-                                .project_branch_version(
-                                    &version,
-                                    write_schema_version,
-                                    &table.name,
-                                )?
-                                .2
-                                .unwrap_or_default()
-                                .into_iter()
-                                .map(|column| ContributionCoordinate {
-                                    table: table.name.clone(),
-                                    row_uuid,
-                                    layer: MergeAspect::Content,
-                                    component: ContributionComponent::Column(column),
-                                })
-                                .collect::<Vec<_>>(),
+                            VersionLayer::Content => {
+                                let (_, projected_cells, projected_authored) = self
+                                    .project_branch_version(
+                                        &version,
+                                        write_schema_version,
+                                        &table.name,
+                                    )?;
+                                projected_authored
+                                    .unwrap_or_else(|| projected_cells.into_keys().collect())
+                                    .into_iter()
+                                    .map(|column| ContributionCoordinate {
+                                        table: table.name.clone(),
+                                        row_uuid,
+                                        layer: MergeAspect::Content,
+                                        component: ContributionComponent::Column(column),
+                                    })
+                                    .collect::<Vec<_>>()
+                            }
                             VersionLayer::Deletion => vec![ContributionCoordinate {
                                 table: table.name.clone(),
                                 row_uuid,

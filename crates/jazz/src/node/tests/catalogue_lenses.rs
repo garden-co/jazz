@@ -1103,7 +1103,7 @@ fn catalogue_arrival_drains_branch_relay_into_branch_partition() {
     relay
         .apply_sync_message(SyncMessage::PublishSchema {
             author: AuthorId::SYSTEM,
-            schema: Box::new(SchemaVersion::new(evolved)),
+            schema: Box::new(SchemaVersion::new(evolved.clone())),
         })
         .unwrap();
     let stored = relay.transaction_record(tx.tx_id).unwrap();
@@ -1112,7 +1112,11 @@ fn catalogue_arrival_drains_branch_relay_into_branch_partition() {
         crate::tx::BranchLineage::Branch(branch_id)
     );
     assert_eq!(stored.fate, Fate::Pending);
-    let shape = Query::from("todos").validate(&relay.catalogue.schema).unwrap();
+    // The relayed row is authored in the newly arrived schema. Until a lens
+    // relates that schema to the active base schema, it is readable through
+    // its own physical lineage rather than through an invented name-based
+    // projection into the base schema.
+    let shape = Query::from("todos").validate(&evolved).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let rows = relay
         .query_rows_on_branch(branch_id, &shape, &binding)

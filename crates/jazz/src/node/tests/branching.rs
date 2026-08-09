@@ -1256,6 +1256,79 @@ fn merge_back_accumulates_authored_columns_across_successive_branch_patches() {
     );
 }
 
+/// Legacy wire versions carry no explicit authored-column set. Their present
+/// cells remain native target contributions after projection; otherwise a
+/// later branch merge can forget the target dot while validating provenance.
+///
+/// Planted positive: replace the projected-cell-key fallback in
+/// `validated_target_source_dots` with `unwrap_or_default()`. The direct dot
+/// assertion then loses `title`.
+#[test]
+fn legacy_target_version_without_authored_columns_contributes_present_cells() {
+    let schema = schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0x91), schema.clone());
+    let (_core_dir, mut core) = open_history_complete_node_with_schema(node(0x92), schema.clone());
+    let root_tx = writer
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0x91), 10).cells(title_cells("legacy root")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = writer.commit_unit_for(root_tx).unwrap() else {
+        panic!("commit unit expected");
+    };
+    let legacy_versions = versions
+        .into_iter()
+        .map(|version| {
+            VersionRecord::from_cells(
+                &schema.tables[0],
+                schema.version_id(),
+                version.row_uuid(),
+                version.parents(),
+                version.created_by(),
+                version.created_at(),
+                version.updated_by(),
+                version.updated_at(),
+                &version_record_cells(&version, &schema.tables[0]),
+                version.deletion(),
+            )
+            .unwrap()
+        })
+        .collect();
+    core.ingest_relay_commit_unit(tx, legacy_versions).unwrap();
+
+    let branch_id = branch(0x91);
+    core.create_root_branch(branch_id).unwrap();
+    let known = core
+        .validated_target_source_dots(
+            BranchLineage::Branch(branch_id),
+            BranchLineage::Root,
+        )
+        .unwrap();
+    assert!(known.contains(&ContributionDot {
+        lineage: BranchLineage::Root,
+        tx_id: root_tx,
+        coordinate: ContributionCoordinate {
+            table: "todos".to_owned(),
+            row_uuid: row(0x91),
+            layer: MergeAspect::Content,
+            component: ContributionComponent::Column("title".to_owned()),
+        },
+    }));
+
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row(0x92), 20).cells(title_cells("first")),
+    )
+    .unwrap();
+    core.merge_back_branch(branch_id).unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row(0x93), 21).cells(title_cells("second")),
+    )
+    .unwrap();
+    assert!(core.merge_back_branch(branch_id).is_ok());
+}
+
 #[test]
 fn merge_back_deduplicates_shared_transaction_parent_edges() {
     let (_core_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());

@@ -875,7 +875,11 @@ where
                 .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
             let rows = self
                 .node
-                .branch_current_rows(&request.source.table, &branch)
+                .branch_current_rows_for_schema(
+                    &request.source.table,
+                    &branch,
+                    self.read_view.read_schema,
+                )
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             let schema_version_alias = self
                 .node
