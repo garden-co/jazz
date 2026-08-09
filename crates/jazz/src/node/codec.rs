@@ -1792,6 +1792,35 @@ pub(super) fn current_row_from_materialized_cells_with_layer_provenance(
     ))
 }
 
+pub(super) fn current_row_from_cells_with_explicit_provenance(
+    table: &TableSchema,
+    row_uuid: RowUuid,
+    cells: &BTreeMap<String, Value>,
+    provenance: RowProvenance,
+    projected_tx: Option<(TxTime, NodeAlias)>,
+) -> Result<CurrentRow, Error> {
+    let descriptor = current_row_descriptor(table);
+    let mut values = Vec::with_capacity(table.columns.len() + 7);
+    values.push(Value::Uuid(row_uuid.0));
+    for column in &table.columns {
+        values.push(Value::Nullable(
+            cells.get(&column.name).cloned().map(Box::new),
+        ));
+    }
+    values.push(Value::Uuid(provenance.created_by.0));
+    values.push(Value::U64(provenance.created_at.0));
+    values.push(Value::Uuid(provenance.updated_by.0));
+    values.push(Value::U64(provenance.updated_at.0));
+    let (tx_time, tx_node_alias) = projected_tx.unwrap_or((TxTime(0), NodeAlias(0)));
+    values.push(Value::U64(tx_time.0));
+    values.push(Value::U64(tx_node_alias.0));
+    let raw = descriptor.create(&values)?;
+    Ok(CurrentRow::new(
+        table.name.clone(),
+        OwnedRecord::new(raw, descriptor),
+    ))
+}
+
 fn current_row_prefix_and_cells_from_version(
     table: &TableSchema,
     version: &VersionRow,
