@@ -362,6 +362,7 @@ pub struct CollectByOp {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CollectByMode {
     Collect,
+    Root,
     Expand,
 }
 

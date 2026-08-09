@@ -3478,6 +3478,26 @@ fn flat_subscription_hydrates_in_declared_root_order() {
 }
 
 #[test]
+fn flat_subscription_hydrates_in_default_row_id_order() {
+    let schema = relation_schema();
+    let db = open_db(0xd7, AuthorId::from_bytes([0xd7; 16]), &schema);
+    for id in [0xb1, 0xa1] {
+        db.insert_with_id(
+            "users",
+            row(id),
+            BTreeMap::from([("name".to_owned(), Value::String(format!("user-{id}")))]),
+        )
+        .unwrap();
+    }
+
+    let prepared_query = prepared(&db, &Query::from("users"));
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+
+    assert_eq!(row_ids(&initial.rows), vec![row(0xa1), row(0xb1)]);
+}
+
+#[test]
 fn flat_subscription_inserts_at_declared_root_position() {
     let schema = relation_schema();
     let db = open_db(0xd5, AuthorId::from_bytes([0xd5; 16]), &schema);
@@ -3529,6 +3549,50 @@ fn flat_subscription_inserts_at_declared_root_position() {
                 operation.edit,
                 groove::ivm::TerminalEdit::Update { .. }
             ))
+    ));
+}
+
+#[test]
+fn flat_subscription_updates_with_nullable_sort_payload() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "users",
+        [
+            ColumnSchema::new("name", ColumnType::String),
+            ColumnSchema::new("rank", ColumnType::Nullable(Box::new(ColumnType::I32))),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public())]);
+    let db = open_db(0xd6, AuthorId::from_bytes([0xd6; 16]), &schema);
+    db.insert_with_id(
+        "users",
+        row(0xa1),
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("before".to_owned())),
+            (
+                "rank".to_owned(),
+                Value::Nullable(Some(Box::new(Value::I32(1)))),
+            ),
+        ]),
+    )
+    .unwrap();
+    let query = Query::from("users").order_by("rank", OrderDirection::Asc);
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let _initial = block_on(subscription.next_event()).unwrap();
+
+    db.update(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("after".to_owned()))]),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let event = block_on(subscription.next_event()).unwrap();
+    assert!(matches!(
+        event,
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Update { .. }))
     ));
 }
 

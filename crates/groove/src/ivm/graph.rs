@@ -644,6 +644,36 @@ impl GraphBuilder {
         }
     }
 
+    /// Render one public root record without child collection slots.
+    #[allow(clippy::too_many_arguments)]
+    pub fn collect_root_ordered(
+        input: GraphBuilder,
+        group_cols: impl IntoIterator<Item = impl Into<String>>,
+        parent_fields: impl IntoIterator<Item = CollectByField>,
+        order_cols: impl IntoIterator<Item = TopByOrder>,
+        tie_cols: impl IntoIterator<Item = impl Into<String>>,
+        offset: u64,
+        limit: TopByLimit,
+    ) -> Self {
+        Self::CollectBy {
+            input: Box::new(input),
+            collect: Box::new(CollectByBuilder {
+                mode: CollectByMode::Root,
+                group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
+                parent_fields: parent_fields.into_iter().collect(),
+                child_fields: Vec::new(),
+                collection_field: String::new(),
+                slots: Vec::new(),
+                tuple_fields: Vec::new(),
+                occurrence_id_cols: Vec::new(),
+                order_cols: order_cols.into_iter().collect(),
+                tie_cols: tie_cols.into_iter().map(FieldRef::name).collect(),
+                offset,
+                limit,
+            }),
+        }
+    }
+
     /// Render the selected rows of a grouped ordered stream as flat tuples.
     ///
     /// `occurrence_id_cols` are source-row ids in root-then-join order. They
@@ -1233,6 +1263,57 @@ impl NodeDescriptor {
                         let value_type = &input_outputs[0].fields()[field_idx].value_type;
                         let scalar = collect_by_ordered_scalar(value_type);
                         if !scalar || value_type.contains_record() {
+                            return Err(GraphValidationError::CollectByKeyFieldMustBeScalar);
+                        }
+                    }
+                    return Ok(());
+                }
+                if collect_by.mode == CollectByMode::Root {
+                    if !collect_by.slots.is_empty()
+                        || !collect_by.child_fields.is_empty()
+                        || !collect_by.collection_field.is_empty()
+                        || self.output.fields().len() != collect_by.parent_fields.len()
+                        || collect_by.sort_field_indices.len() != collect_by.sort_directions.len()
+                        || collect_by.sort_field_indices.len()
+                            != collect_by.order_fields.len() + collect_by.tie_fields.len()
+                        || collect_by.order_fields.is_empty()
+                        || collect_by.tie_fields.is_empty()
+                    {
+                        return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
+                    }
+                    for (output_field, projection) in
+                        self.output.fields().iter().zip(&collect_by.parent_fields)
+                    {
+                        let input_field = input_outputs[0]
+                            .fields()
+                            .get(projection.field_idx)
+                            .ok_or(GraphValidationError::FieldIndexOutOfBounds {
+                                index: projection.field_idx,
+                                len: input_outputs[0].fields().len(),
+                            })?;
+                        if output_field.name.as_deref() != Some(projection.output_name.as_str())
+                            || collect_projection_output_type(&input_field.value_type, projection)
+                                .as_ref()
+                                != Some(&output_field.value_type)
+                        {
+                            return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
+                        }
+                    }
+                    for &field_idx in collect_by
+                        .group_field_indices
+                        .iter()
+                        .chain(&collect_by.sort_field_indices)
+                    {
+                        let value_type = input_outputs[0]
+                            .fields()
+                            .get(field_idx)
+                            .ok_or(GraphValidationError::FieldIndexOutOfBounds {
+                                index: field_idx,
+                                len: input_outputs[0].fields().len(),
+                            })?
+                            .value_type
+                            .clone();
+                        if !collect_by_ordered_scalar(&value_type) || value_type.contains_record() {
                             return Err(GraphValidationError::CollectByKeyFieldMustBeScalar);
                         }
                     }

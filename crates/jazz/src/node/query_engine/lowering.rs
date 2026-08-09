@@ -5371,18 +5371,49 @@ fn lower_collect_by_app_rows(
     align_collect_root_window(&mut layout, plan)?;
     align_collect_join_key_types(&mut layout.slots, plan, resolved_sources, request)?;
     if layout.slots.is_empty() {
-        let mut graph = collect_anchor_graph(visible_root, &layout)?;
-        for field in layout.root_fields.iter().filter(|field| {
-            field.is_output && !field.is_row_id && field.value_type != field.output_value_type
-        }) {
-            graph = graph.unwrap_nullable(&field.input);
-        }
-        let graph = graph.project_fields(
+        let anchor = collect_anchor_graph(visible_root, &layout)?;
+        let has_window = root_linear_steps(plan).is_some_and(|steps| {
+            steps
+                .iter()
+                .any(|step| matches!(step, LinearStep::OrderBy(_) | LinearStep::Slice { .. }))
+        });
+        let anchor = if has_window {
+            anchor
+        } else {
+            GraphBuilder::top_by(
+                anchor,
+                Vec::<String>::new(),
+                layout.root_order_cols.clone(),
+                layout.root_tie_cols.clone(),
+                0,
+                TopByLimit::Unbounded,
+            )
+        };
+        let root_group = layout
+            .root_fields
+            .iter()
+            .find(|field| field.is_row_id)
+            .expect("collector root retains row id")
+            .input
+            .clone();
+        let graph = GraphBuilder::collect_root_ordered(
+            anchor,
+            std::iter::once(root_group).chain(route_fields.iter().cloned()),
             layout
                 .root_fields
                 .iter()
                 .filter(|field| field.is_output)
-                .map(|field| ProjectField::renamed(&field.input, &field.output)),
+                .map(|field| {
+                    if field.is_row_id || field.value_type == field.output_value_type {
+                        CollectByField::renamed(&field.input, &field.output)
+                    } else {
+                        CollectByField::renamed_unwrap_nullable(&field.input, &field.output)
+                    }
+                }),
+            layout.root_order_cols.clone(),
+            layout.root_tie_cols.clone(),
+            layout.root_offset,
+            layout.root_limit,
         );
         let descriptor = collect_output_descriptor(&layout)?;
         return Ok(LoweredCollectByAppRows {

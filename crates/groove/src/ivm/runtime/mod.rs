@@ -1828,6 +1828,9 @@ impl IvmRuntime {
             GraphBuilder::CollectBy { input, collect, .. } => {
                 let input = self.infer_builder_output_cached(input, output_memo)?;
                 match collect.mode {
+                    CollectByMode::Root => {
+                        collect_by_root_descriptor(&input, &collect.parent_fields)
+                    }
                     CollectByMode::Collect if collect.slots.is_empty() => collect_by_descriptor(
                         &input,
                         &collect.parent_fields,
@@ -3162,7 +3165,9 @@ impl IvmRuntime {
             .map(|field| resolve_field_ref(&input_output, field))
             .collect::<Result<Vec<_>, _>>()?;
         let parent_fields = collect_by_projections(&input_output, &collect.parent_fields)?;
-        if collect.mode == CollectByMode::Collect && !collect.slots.is_empty() {
+        if matches!(collect.mode, CollectByMode::Collect | CollectByMode::Root)
+            && (!collect.slots.is_empty() || collect.mode == CollectByMode::Root)
+        {
             if parent_fields.is_empty() {
                 return Err(IvmRuntimeError::InvalidCollectBy(
                     "tree collect requires a parent projection".into(),
@@ -6436,7 +6441,10 @@ where
                 .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
             match &node.descriptor.operator {
                 OpType::CollectBy(collect_by) => {
-                    return Ok(collect_by.mode == CollectByMode::Collect);
+                    return Ok(matches!(
+                        collect_by.mode,
+                        CollectByMode::Collect | CollectByMode::Root
+                    ));
                 }
                 _ => pending.extend(node.descriptor.inputs.iter().copied()),
             }
@@ -7567,9 +7575,10 @@ where
             let after_records = arrangement.value().records_for_key(&group_prefix);
             let before_records = records_before_deltas(after_records.clone(), &group_deltas);
             match collect_by.mode {
-                CollectByMode::Collect => {
+                CollectByMode::Collect | CollectByMode::Root => {
                     let render = |records: &[(Bytes, i64)]| {
-                        if collect_by.slots.is_empty() {
+                        if collect_by.mode == CollectByMode::Collect && collect_by.slots.is_empty()
+                        {
                             collect_by_parent_from_records(
                                 input_desc,
                                 output_desc,
@@ -8239,6 +8248,28 @@ fn collect_by_descriptor(
     Ok(RecordDescriptor::new(output))
 }
 
+fn collect_by_root_descriptor(
+    input: &RecordDescriptor,
+    parent_fields: &[CollectByField],
+) -> Result<RecordDescriptor, IvmRuntimeError> {
+    if parent_fields.is_empty() {
+        return Err(IvmRuntimeError::InvalidCollectBy(
+            "root collect requires a parent projection".into(),
+        ));
+    }
+    parent_fields
+        .iter()
+        .map(|field| {
+            let index = resolve_field_ref(input, &field.field)?;
+            Ok((
+                field.output_name.clone(),
+                collect_by_field_value_type(input, index, field)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, IvmRuntimeError>>()
+        .map(RecordDescriptor::new)
+}
+
 fn collect_by_tree_descriptor(
     input: &RecordDescriptor,
     parent_fields: &[CollectByField],
@@ -8513,28 +8544,9 @@ fn validate_collect_by_key_types(
     input: &RecordDescriptor,
     indices: &[usize],
 ) -> Result<(), IvmRuntimeError> {
-    for &index in indices {
-        let value_type = &input
-            .fields()
-            .get(index)
-            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(index))?
-            .value_type;
-        let scalar = match value_type {
-            ValueType::Nullable(inner) => matches!(
-                inner.as_ref(),
-                ValueType::U8
-                    | ValueType::U16
-                    | ValueType::U32
-                    | ValueType::U64
-                    | ValueType::I32
-                    | ValueType::I64
-                    | ValueType::F64
-                    | ValueType::Bool
-                    | ValueType::String
-                    | ValueType::Bytes
-                    | ValueType::Uuid
-                    | ValueType::Enum(_)
-            ),
+    fn ordered_scalar(value_type: &ValueType) -> bool {
+        match value_type {
+            ValueType::Nullable(inner) => ordered_scalar(inner),
             ValueType::U8
             | ValueType::U16
             | ValueType::U32
@@ -8548,7 +8560,15 @@ fn validate_collect_by_key_types(
             | ValueType::Uuid
             | ValueType::Enum(_) => true,
             _ => false,
-        };
+        }
+    }
+    for &index in indices {
+        let value_type = &input
+            .fields()
+            .get(index)
+            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(index))?
+            .value_type;
+        let scalar = ordered_scalar(value_type);
         if value_type.contains_record() || !scalar {
             return Err(IvmRuntimeError::InvalidCollectBy(
                 "group, order, and tie fields must be scalar ordered values without records".into(),
@@ -10701,7 +10721,16 @@ fn collect_by_parent_from_records(
     let mut values = collect_by
         .parent_fields
         .iter()
-        .map(|field| collect_by_projected_value(&parent_values, field))
+        .enumerate()
+        .map(|(index, field)| {
+            let value = collect_by_projected_value(&parent_values, field)?;
+            let output_type = &output_desc.fields()[index].value_type;
+            Ok::<Value, IvmRuntimeError>(match (output_type, value) {
+                (ValueType::Nullable(_), value @ Value::Nullable(_)) => value,
+                (ValueType::Nullable(_), value) => Value::Nullable(Some(Box::new(value))),
+                (_, value) => value,
+            })
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let window = collect_by_window_from_records(input_desc, records, collect_by)?;
     let mut children = Vec::new();

@@ -3692,7 +3692,10 @@ where
                 continue;
             }
             if let Some(value) = existing.cell(table_schema, &column.name) {
-                cells.insert(column.name.clone(), value);
+                cells.insert(
+                    column.name.clone(),
+                    default_cell_for_column_type(&column.column_type, &value),
+                );
             }
         }
         let parent = self.node.node.borrow_mut().current_row_tx_id(&existing);
