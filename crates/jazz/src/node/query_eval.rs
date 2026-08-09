@@ -7504,9 +7504,6 @@ where
         let mut rows = self.query_rows_at_with_query_engine(shape, binding, position, identity)?;
         let query = shape.query();
         self.finish_engine_query_rows(query, &mut rows)?;
-        if query.array_subqueries.is_empty() {
-            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
-        }
         Ok(rows)
     }
 
@@ -7534,7 +7531,7 @@ where
         )?;
         let deltas = self
             .database
-            .query_graph(lowered_materialization_app_rows_graph(&program)?)
+            .query_graph(lowered_app_rows_graph(&program)?)
             .map_err(Error::Groove)?;
         let table = self
             .table_in_schema(&lowered_shape.query().table, lowered_shape.schema_version())?
@@ -9093,7 +9090,7 @@ where
             self.compile_query_program_request_with_access_paths(request, BTreeMap::new())?;
         let deltas = self
             .database
-            .query_graph(lowered_materialization_app_rows_graph(&program)?)
+            .query_graph(lowered_app_rows_graph(&program)?)
             .map_err(Error::Groove)?;
         let mut rows = if shape.query().aggregate.is_some() {
             self.materialize_aggregate_query_rows(shape.query(), &table, deltas)?
@@ -9102,9 +9099,6 @@ where
         };
         let query = shape.query();
         self.finish_engine_query_rows(query, &mut rows)?;
-        if query.array_subqueries.is_empty() {
-            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
-        }
         Ok(rows)
     }
 
