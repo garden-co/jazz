@@ -111,6 +111,32 @@ fn insert_membership(db: &Db<MemoryStorage>, id: RowUuid, team: RowUuid, user: A
     .expect("insert membership");
 }
 
+/// An explicit-id upsert by Bob follows INSERT policy when the id is genuinely
+/// absent, but the same call cannot merge a now-existing row hidden by read
+/// policy. This distinguishes storage existence from policy-filtered absence
+/// without exposing hidden cells.
+///
+/// bob ──upsert(absent)──► insert ✓ ──upsert(hidden existing)──► denied
+#[test]
+fn upsert_applies_insert_policy_only_to_a_genuinely_absent_target() {
+    let db = open_db();
+    let document = row(0xd0);
+    let hidden_team = row(0xd1);
+    let cells = BTreeMap::from([
+        ("team".to_owned(), Value::Uuid(hidden_team.0)),
+        ("rank".to_owned(), Value::U64(1)),
+    ]);
+
+    db.upsert_for_identity(READER, DOCUMENTS, document, cells.clone())
+        .expect("absent target follows public insert policy");
+    let error = match db.upsert_for_identity(READER, DOCUMENTS, document, cells) {
+        Ok(_) => panic!("hidden existing target requires read permission"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    assert!(error.message.contains("read policy denied UPSERT"));
+}
+
 fn ordered_page(
     db: &Db<MemoryStorage>,
     identity: AuthorId,

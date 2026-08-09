@@ -274,13 +274,6 @@ fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
     pump_client_edge(&bob, &bob_wire, &mut core, bob_session);
     pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
 
-    // An empty partial update is a real provenance event with an explicitly
-    // empty authored-column set. It must not become a legacy "all materialized
-    // cells authored" write. Planted positive: omit that empty set from the
-    // commit and this newer event incorrectly claims/clobbers Alice's cells.
-    bob.update_at_ms("todos", row, BTreeMap::new(), 250)
-        .expect("empty patch remains a safe no-op");
-
     // Neither client is pumped after these writes until both heads exist, so
     // they remain concurrent children of the shared t=100 base.
     alice
@@ -294,13 +287,21 @@ fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
             200,
         )
         .unwrap();
-    bob.update_at_ms(
-        "todos",
-        row,
-        BTreeMap::from([("title".to_owned(), Value::String("base".to_owned()))]),
-        300,
-    )
-    .unwrap();
+    let explicit_write = bob
+        .update_at_ms(
+            "todos",
+            row,
+            BTreeMap::from([("title".to_owned(), Value::String("base".to_owned()))]),
+            300,
+        )
+        .unwrap();
+    // An empty partial update is not a content mutation. It reuses the current
+    // write identity instead of emitting a newer legacy "all materialized cells
+    // authored" version that could clobber Alice's cells during reconciliation.
+    let no_op = bob
+        .update_at_ms("todos", row, BTreeMap::new(), 400)
+        .expect("empty patch remains a safe no-op");
+    assert_eq!(no_op.mergeable_tx_id(), explicit_write.mergeable_tx_id());
 
     pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
     pump_client_edge(&bob, &bob_wire, &mut core, bob_session);

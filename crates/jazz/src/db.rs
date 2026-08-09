@@ -1714,6 +1714,9 @@ where
         row: RowUuid,
         patch: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
+        if patch.is_empty() {
+            return self.no_op_update_handle(table, row, self.identity.author);
+        }
         let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
         self.write_mergeable_with_authored_columns(
             self.identity.author,
@@ -1735,6 +1738,9 @@ where
         patch: RowCells,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
+        if patch.is_empty() {
+            return self.no_op_update_handle(table, row, self.identity.author);
+        }
         let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
         self.write_mergeable_at_ms_with_authorship(
             self.identity.author,
@@ -1759,6 +1765,10 @@ where
         row: RowUuid,
         patch: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
+        self.check_attribution_allowed(made_by)?;
+        if patch.is_empty() {
+            return self.no_op_update_handle(table, row, self.identity.author);
+        }
         let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
         self.write_mergeable_as_session_subject_with_authored_columns(
             made_by,
@@ -1779,6 +1789,9 @@ where
         row: RowUuid,
         patch: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
+        if patch.is_empty() {
+            return self.no_op_update_handle(table, row, identity);
+        }
         let (cells, parent, authored_columns) =
             self.merge_existing_cells_for_identity(table, row, patch, identity)?;
         let parents = parent.into_iter().collect::<Vec<_>>();
@@ -1820,6 +1833,9 @@ where
         patch: RowCells,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
+        if patch.is_empty() {
+            return self.no_op_update_handle(table, row, identity);
+        }
         let (cells, parent, authored_columns) =
             self.merge_existing_cells_for_identity(table, row, patch, identity)?;
         let parents = parent.into_iter().collect::<Vec<_>>();
@@ -2444,6 +2460,9 @@ where
         patch: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        if patch.is_empty() {
+            return Ok(());
+        }
         self.node
             .node
             .borrow_mut()
@@ -3257,6 +3276,31 @@ where
             )?
             .into_iter()
             .find(|candidate| candidate.row_uuid() == row))
+    }
+
+    fn no_op_update_handle(
+        &self,
+        table: &str,
+        row: RowUuid,
+        identity: AuthorId,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_row_not_deleted(table, row)?;
+        let existing = self
+            .local_row_for_identity(table, row, identity)?
+            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+        let tx_id = self
+            .node
+            .node
+            .borrow_mut()
+            .current_row_tx_id(&existing)
+            .ok_or_else(|| Error::new(ErrorCode::NotObserved, "current row has no transaction"))?;
+        let local_tier = self.write_state(tx_id)?.durability;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier,
+        })
     }
 
     fn merge_existing_cells(
