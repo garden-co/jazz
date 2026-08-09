@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts};
+use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, ReadOpts};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
@@ -131,4 +131,38 @@ fn deletion_advances_updated_provenance_without_replacing_creation_provenance() 
     assert_eq!(provenance.created_at.0, 1_000);
     assert_eq!(provenance.updated_by, alice);
     assert_eq!(provenance.updated_at.0, 3_000);
+}
+
+/// Empty mergeable-batch updates remain no-ops only after validating both the
+/// open transaction handle and the target row; they cannot turn a stale handle
+/// or absent target into a silently accepted operation.
+///
+/// alice ──abandon(batch)──► empty update ✗
+/// alice ──open(batch)──► empty update(absent row) ✗
+#[test]
+fn empty_batched_update_still_validates_handle_and_target() {
+    let db = open_db(author(0xa1));
+    let row = RowUuid::from_bytes([0x55; 16]);
+
+    let abandoned = db.begin_mergeable().expect("open batch");
+    db.abandon_transaction_handle(abandoned)
+        .expect("abandon batch");
+    let stale_error = db
+        .mergeable_tx_ref(abandoned)
+        .update("todos", row, BTreeMap::new())
+        .expect_err("stale batch handle must be rejected");
+    assert!(stale_error.message.contains("open transaction"));
+
+    let open = db.begin_mergeable().expect("open batch");
+    let absent_error = db
+        .mergeable_tx_ref(open)
+        .update("todos", row, BTreeMap::new())
+        .expect_err("absent target must be rejected");
+    assert!(
+        absent_error.message.contains("must carry content cells"),
+        "unexpected absent-target error: {}",
+        absent_error.message
+    );
+    db.abandon_transaction_handle(open)
+        .expect("abandon checked batch");
 }
