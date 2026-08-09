@@ -3379,6 +3379,76 @@ fn prepared_subscription_routes_nullable_uuid_and_string_binding_keys() {
 }
 
 #[test]
+fn prepared_nullable_binding_arg_max_emits_initial_snapshot() {
+    let storage = MemoryStorage::new(&["docs"]);
+    let mut database = Database::new(nullable_routed_docs_schema(), storage).unwrap();
+    let join_code = "invite-code";
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "docs",
+        vec![
+            Value::U64(1),
+            Value::Nullable(None),
+            Value::Nullable(Some(Box::new(Value::String(join_code.to_owned())))),
+            Value::String("initial invite row".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let binding_descriptor = RecordDescriptor::new([(
+        "join_code",
+        ValueType::Nullable(Box::new(ValueType::String)),
+    )]);
+    let routed_docs = GraphBuilder::table("docs")
+        .unwrap_nullable("tag")
+        .project_fields([
+            ProjectField::named("id"),
+            ProjectField::named("title"),
+            ProjectField::nullable("tag", "__route_join_code"),
+        ]);
+    let bound = GraphBuilder::join(
+        GraphBuilder::binding_source("invite", binding_descriptor),
+        routed_docs,
+        ["join_code"],
+        ["__route_join_code"],
+    )
+    .project_fields([
+        ProjectField::renamed("right.__route_join_code", "join_code"),
+        ProjectField::renamed("right.id", "id"),
+        ProjectField::renamed("right.title", "title"),
+    ]);
+    let shape = database
+        .prepare_one_sink(
+            GraphBuilder::arg_max_by(bound, ["join_code"], ["id"]),
+            "invite",
+            binding_descriptor,
+            ["join_code"],
+        )
+        .unwrap();
+
+    let subscription = database
+        .bind_shape_one_sink(
+            shape.id(),
+            &[Value::Nullable(Some(Box::new(Value::String(
+                join_code.to_owned(),
+            ))))],
+        )
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(
+            vec![
+                Value::Nullable(Some(Box::new(Value::String(join_code.to_owned())))),
+                Value::U64(1),
+                Value::String("initial invite row".to_owned()),
+            ],
+            1,
+        )]
+    );
+}
+
+#[test]
 fn prepared_subscription_routes_null_nullable_binding_keys() {
     let storage = MemoryStorage::new(&["docs"]);
     let mut database = Database::new(nullable_routed_docs_schema(), storage).unwrap();
