@@ -15,6 +15,46 @@ fn exclusive_base_snapshot_preserves_sparse_local_and_foreign_dots() {
 }
 
 #[test]
+fn exclusive_begin_resolves_sparse_global_dots_without_scanning_history_after_reopen() {
+    let (dir, mut core) = open_node();
+    for ordinal in 1..=128 {
+        core.commit_mergeable(
+            MergeableCommit::new("todos", row(ordinal), ordinal as u64)
+                .cells(title_cells(&format!("history-{ordinal}"))),
+        )
+        .unwrap();
+    }
+
+    let sparse = TxId::new(TxTime::from(200), node(0xf0));
+    ingest_relay_version(
+        &mut core,
+        sparse,
+        200,
+        Vec::new(),
+        row(0xf0),
+        "sparse",
+    );
+    core.apply_fate_update(
+        sparse,
+        Fate::Accepted,
+        Some(GlobalSeq(100)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+
+    drop(core);
+    let mut reopened = reopen_node_at(&dir, node(9), schema());
+    reopened.reset_storage_read_metrics();
+    let batch = OpenBatchId::new();
+    reopened.open_exclusive(batch).unwrap();
+    assert_eq!(reopened.open_tx(batch).unwrap().base_snapshot.dots, vec![sparse]);
+
+    let metrics = reopened.take_storage_read_metrics();
+    assert_eq!(metrics.transactions_rows.reads, 1);
+    assert_eq!(metrics.transactions_indexes.ranges, 1);
+}
+
+#[test]
 fn open_batch_identity_is_unique_and_terminal() {
     let (_temp_dir, mut node) = open_node();
     let rolled_back = OpenBatchId::new();
