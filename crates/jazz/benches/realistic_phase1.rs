@@ -6,7 +6,7 @@
 #![allow(clippy::single_element_loop, dead_code)]
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 #[cfg(feature = "rocksdb")]
 use std::env;
 #[cfg(all(feature = "rocksdb", target_os = "linux"))]
@@ -16,7 +16,6 @@ use std::os::fd::AsRawFd;
 #[cfg(feature = "rocksdb")]
 use std::path::Path;
 use std::rc::Rc;
-#[cfg(feature = "rocksdb")]
 use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
@@ -237,6 +236,17 @@ fn recursive_permissions_schema() -> JazzSchema {
         .with_read_policy(Policy::public())
         .with_write_policy(Policy::public()),
     ])
+}
+
+fn claim_resume_schema() -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "claim_docs",
+        [ColumnSchema::new("title", ColumnType::String)],
+    )
+    .with_read_policy(Policy::shape(
+        Query::from("claim_docs").filter(eq(claim("access"), lit("allowed"))),
+    ))
+    .with_write_policy(Policy::public())])
 }
 
 fn open_db(seed: u64) -> BenchDb {
@@ -758,6 +768,8 @@ const RESUME_ACCESS_GRANTED: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0
 const RESUME_ACCESS_NEVER: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000104"));
 const RESUME_EDGE_READER_PARENT: RowUuid =
     RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000201"));
+const CLAIM_RESUME_DOC_A: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000301"));
+const CLAIM_RESUME_DOC_B: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000302"));
 
 fn recursive_doc_cells(title: &str, kind: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([
@@ -804,6 +816,10 @@ fn open_recursive_permissions_db_with_author(
         history_complete,
         recursive_permissions_schema(),
     )
+}
+
+fn open_claim_resume_db(seed: u64, author: AuthorId, history_complete: bool) -> BenchDb {
+    open_db_with_schema(seed, author, history_complete, claim_resume_schema())
 }
 
 fn seed_recursive_permissions_fixture(db: &BenchDb) {
@@ -944,25 +960,94 @@ fn assert_permission_resume_docs(rows: &[jazz::node::CurrentRow], visible: &[Row
     assert_eq!(rows.len(), visible.len());
 }
 
-fn drain_permission_resume_delta(event: Option<SubscriptionEvent>) -> (usize, usize, usize) {
-    match event {
+#[derive(Clone, Copy, Debug)]
+enum PermissionResumeChurn {
+    Unchanged,
+    Grant,
+    Revoke,
+    GrantAndRevoke,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ClaimResumeChurn {
+    Revoke,
+    Restore,
+}
+
+impl ClaimResumeChurn {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Revoke => "claim_revoke",
+            Self::Restore => "claim_restore",
+        }
+    }
+
+    fn initial_access(self) -> &'static str {
+        match self {
+            Self::Revoke => "allowed",
+            Self::Restore => "denied",
+        }
+    }
+
+    fn resumed_access(self) -> &'static str {
+        match self {
+            Self::Revoke => "denied",
+            Self::Restore => "allowed",
+        }
+    }
+}
+
+impl PermissionResumeChurn {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Unchanged => "unchanged",
+            Self::Grant => "grant_only",
+            Self::Revoke => "revoke_only",
+            Self::GrantAndRevoke => "grant_and_revoke",
+        }
+    }
+
+    fn grants(self) -> bool {
+        matches!(self, Self::Grant | Self::GrantAndRevoke)
+    }
+
+    fn revokes(self) -> bool {
+        matches!(self, Self::Revoke | Self::GrantAndRevoke)
+    }
+}
+
+fn assert_resume_delta(
+    event: Option<SubscriptionEvent>,
+    expected_added: &[RowUuid],
+    expected_removed: &[RowUuid],
+) -> (usize, usize, usize) {
+    let (added, updated, removed) = match event {
         Some(SubscriptionEvent::Delta {
             added,
             updated,
             removed,
             ..
-        }) => {
-            for row in added.iter().chain(updated.iter()) {
-                assert_ne!(row.row_uuid(), RESUME_DOC_REVOKED);
-                assert_ne!(row.row_uuid(), RESUME_DOC_NEVER);
-            }
-            assert!(removed.iter().any(|row| row.row_uuid == RESUME_DOC_REVOKED));
-            assert!(!removed.iter().any(|row| row.row_uuid == RESUME_DOC_NEVER));
-            (added.len(), updated.len(), removed.len())
+        }) => (added, updated, removed),
+        None if expected_added.is_empty() && expected_removed.is_empty() => {
+            return (0, 0, 0);
         }
         None => panic!("permission-filtered resume emitted no delta event"),
         other => panic!("expected permission-filtered resume delta event, got {other:?}"),
-    }
+    };
+    let actual_added = added
+        .iter()
+        .chain(updated.iter())
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    let actual_removed = removed
+        .iter()
+        .map(|row| row.row_uuid)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual_added, expected_added.iter().copied().collect());
+    assert_eq!(actual_removed, expected_removed.iter().copied().collect());
+    assert_eq!(added.len() + updated.len(), expected_added.len());
+    assert_eq!(removed.len(), expected_removed.len());
+    (added.len(), updated.len(), removed.len())
 }
 
 fn drain_optional_permission_rows(event: Option<SubscriptionEvent>) -> usize {
@@ -1804,154 +1889,368 @@ fn r12_recursive_permissions(c: &mut Criterion) {
     group.finish();
 }
 
+fn run_permission_filtered_resume(
+    churn: PermissionResumeChurn,
+) -> (Duration, usize, usize, usize, usize, usize) {
+    let writer = open_recursive_permissions_db_with_author(130, AuthorId::SYSTEM, false);
+    let server = open_recursive_permissions_db_with_author(131, AuthorId::SYSTEM, true);
+    let client = open_recursive_permissions_db_with_author(132, READER_AUTHOR, false);
+    seed_permission_resume_fixture(&writer);
+    let prepared = client
+        .prepare_query(&Query::from("docs"))
+        .expect("prepare permission-filtered docs query");
+
+    let (writer_transport, server_writer_transport) =
+        byte_duplex_with_session(AuthorId::SYSTEM, 13_001);
+    let writer_upstream = writer.connect_upstream(writer_transport);
+    let writer_subscriber = server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
+    writer.tick().expect("ship permission seed rows");
+    server.tick().expect("ingest permission seed rows");
+    assert!(writer.detach_connection(&writer_upstream));
+    assert!(server.detach_connection(&writer_subscriber));
+
+    let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_002);
+    let upstream = client.connect_upstream(client_transport);
+    let subscriber = server.accept_subscriber(server_transport, READER_AUTHOR);
+    let mut subscription = block_on(client.subscribe(&prepared, global_subscribe_opts()))
+        .expect("subscribe permission-filtered docs");
+    assert_eq!(
+        drain_opened(block_on(subscription.next_event()), "permission docs"),
+        0
+    );
+
+    client
+        .tick()
+        .expect("announce permission docs subscription");
+    server.tick().expect("serve full permission docs snapshot");
+    let full_bytes = subscriber
+        .borrow()
+        .last_resume_bytes()
+        .expect("full permission current-row bytes");
+    client.tick().expect("apply full permission docs snapshot");
+    client
+        .tick()
+        .expect("materialize full permission docs snapshot event");
+    let seeded = drain_optional_permission_rows(subscription.try_next_event());
+    assert!(full_bytes > 0);
+    let rows = client
+        .read(&prepared)
+        .expect("read initial permission-filtered docs");
+    assert_permission_resume_docs(&rows, &[RESUME_DOC_DIRECT, RESUME_DOC_REVOKED]);
+    if seeded > 0 {
+        assert_eq!(seeded, rows.len());
+    }
+
+    server.tick().expect("refresh permission docs cursor");
+    client.tick().expect("apply permission docs cursor state");
+    let cursor = subscriber
+        .borrow_mut()
+        .take_resume_cursor()
+        .expect("take permission subscriber resume cursor");
+    assert!(client.detach_connection(&upstream));
+    assert!(server.detach_connection(&subscriber));
+
+    if churn.revokes() {
+        wait_local(
+            writer
+                .update(
+                    "doc_access",
+                    RESUME_ACCESS_REVOKED,
+                    recursive_doc_access_cells(RESUME_DOC_REVOKED, RECURSIVE_HIDDEN_TEAM),
+                )
+                .expect("hide disconnected doc access before revoke"),
+        );
+        wait_local(
+            writer
+                .delete("doc_access", RESUME_ACCESS_REVOKED)
+                .expect("revoke disconnected doc access"),
+        );
+    }
+    if churn.grants() {
+        wait_local(
+            writer
+                .insert_with_id(
+                    "doc_access",
+                    RESUME_ACCESS_GRANTED,
+                    recursive_doc_access_cells(RESUME_DOC_GRANTED, RECURSIVE_PARENT_TEAM),
+                )
+                .expect("grant disconnected doc access"),
+        );
+    }
+
+    if churn.grants() || churn.revokes() {
+        let (writer_transport, server_writer_transport) =
+            byte_duplex_with_session(AuthorId::SYSTEM, 13_003);
+        let writer_upstream = writer.connect_upstream(writer_transport);
+        let writer_subscriber = server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
+        writer.tick().expect("ship disconnected permission changes");
+        server
+            .tick()
+            .expect("ingest disconnected permission changes");
+        writer
+            .tick()
+            .expect("ship settled disconnected permission changes");
+        server
+            .tick()
+            .expect("ingest settled disconnected permission changes");
+        assert!(writer.detach_connection(&writer_upstream));
+        assert!(server.detach_connection(&writer_subscriber));
+    }
+
+    let server_query = recursive_docs_query(&server);
+    let server_rows =
+        block_on(server.all_for_identity(&server_query, ReadOpts::default(), READER_AUTHOR))
+            .expect("read disconnected permission state on server");
+    let mut expected_server_rows = vec![RESUME_DOC_DIRECT];
+    if !churn.revokes() {
+        expected_server_rows.push(RESUME_DOC_REVOKED);
+    }
+    if churn.grants() {
+        expected_server_rows.push(RESUME_DOC_GRANTED);
+    }
+    assert_permission_resume_docs(&server_rows, &expected_server_rows);
+
+    let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_004);
+    let _resumed_upstream = client.connect_upstream(client_transport);
+    let resumed = server.accept_subscriber_with_resume(server_transport, READER_AUTHOR, cursor);
+
+    let resume_started = Instant::now();
+    client
+        .tick()
+        .expect("announce resumed permission docs subscription");
+    server.tick().expect("serve permission resume catch-up");
+    client.tick().expect("apply permission resume catch-up");
+    client.tick().expect("materialize permission resume event");
+    server
+        .tick()
+        .expect("serve settled permission resume state");
+    client
+        .tick()
+        .expect("apply settled permission resume state");
+    client
+        .tick()
+        .expect("materialize settled permission resume state");
+    let resume_elapsed = resume_started.elapsed();
+
+    let resume_bytes = resumed
+        .borrow()
+        .last_resume_bytes()
+        .expect("permission resume catch-up bytes");
+    assert!(resume_bytes > 0);
+
+    let unchanged_members = [RESUME_DOC_DIRECT, RESUME_DOC_REVOKED];
+    let granted_member = [RESUME_DOC_GRANTED];
+    let expected_added = match churn {
+        PermissionResumeChurn::Unchanged => unchanged_members.as_slice(),
+        PermissionResumeChurn::Grant | PermissionResumeChurn::GrantAndRevoke => {
+            granted_member.as_slice()
+        }
+        PermissionResumeChurn::Revoke => &[],
+    };
+    let expected_removed = churn.revokes().then_some(RESUME_DOC_REVOKED);
+    let (added, updated, removed) = assert_resume_delta(
+        subscription.try_next_event(),
+        expected_added,
+        expected_removed.as_slice(),
+    );
+    assert!(subscription.try_next_event().is_none());
+    // `Db::read` is intentionally a local-preview read; it may still
+    // see retained row bodies after upstream membership is revoked.
+    // The authoritative reconnect contract is the subscription delta
+    // asserted above.
+
+    (
+        resume_elapsed,
+        resume_bytes,
+        full_bytes,
+        added,
+        updated,
+        removed,
+    )
+}
+
+fn run_claim_filtered_resume(
+    churn: ClaimResumeChurn,
+) -> (Duration, usize, usize, usize, usize, usize) {
+    let writer = open_claim_resume_db(133, AuthorId::SYSTEM, false);
+    let server = open_claim_resume_db(134, AuthorId::SYSTEM, true);
+    let client = open_claim_resume_db(135, READER_AUTHOR, false);
+    for (row, title) in [
+        (CLAIM_RESUME_DOC_A, "claim-a"),
+        (CLAIM_RESUME_DOC_B, "claim-b"),
+    ] {
+        wait_local(
+            writer
+                .insert_with_id(
+                    "claim_docs",
+                    row,
+                    BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+                )
+                .expect("seed claim-resume doc"),
+        );
+    }
+    let prepared = client
+        .prepare_query(&Query::from("claim_docs"))
+        .expect("prepare claim-filtered docs query");
+
+    let (writer_transport, server_writer_transport) =
+        byte_duplex_with_session(AuthorId::SYSTEM, 13_101);
+    let writer_upstream = writer.connect_upstream(writer_transport);
+    let writer_subscriber = server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
+    writer.tick().expect("ship claim-resume seed rows");
+    server.tick().expect("ingest claim-resume seed rows");
+    assert!(writer.detach_connection(&writer_upstream));
+    assert!(server.detach_connection(&writer_subscriber));
+
+    server.set_identity_claims(
+        READER_AUTHOR,
+        BTreeMap::from([(
+            "access".to_owned(),
+            Value::String(churn.initial_access().to_owned()),
+        )]),
+    );
+    let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_102);
+    let upstream = client.connect_upstream(client_transport);
+    let subscriber = server.accept_subscriber(server_transport, READER_AUTHOR);
+    let mut subscription = block_on(client.subscribe(&prepared, global_subscribe_opts()))
+        .expect("subscribe claim-filtered docs");
+    assert_eq!(
+        drain_opened(block_on(subscription.next_event()), "claim-filtered docs"),
+        0
+    );
+    client.tick().expect("announce claim-filtered subscription");
+    server.tick().expect("serve full claim-filtered snapshot");
+    let full_bytes = subscriber
+        .borrow()
+        .last_resume_bytes()
+        .expect("full claim-filtered snapshot bytes");
+    client.tick().expect("apply claim-filtered snapshot");
+    client.tick().expect("materialize claim-filtered snapshot");
+    let visible_claim_docs = [CLAIM_RESUME_DOC_A, CLAIM_RESUME_DOC_B];
+    let expected_initial = match churn {
+        ClaimResumeChurn::Revoke => visible_claim_docs.as_slice(),
+        ClaimResumeChurn::Restore => &[],
+    };
+    assert_resume_delta(subscription.try_next_event(), expected_initial, &[]);
+
+    server.tick().expect("refresh claim-filtered cursor");
+    client.tick().expect("apply claim-filtered cursor state");
+    let cursor = subscriber
+        .borrow_mut()
+        .take_resume_cursor()
+        .expect("take claim-filtered resume cursor");
+    assert!(client.detach_connection(&upstream));
+    assert!(server.detach_connection(&subscriber));
+
+    server.set_identity_claims(
+        READER_AUTHOR,
+        BTreeMap::from([(
+            "access".to_owned(),
+            Value::String(churn.resumed_access().to_owned()),
+        )]),
+    );
+    let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_103);
+    let _resumed_upstream = client.connect_upstream(client_transport);
+    let resumed = server.accept_subscriber_with_resume(server_transport, READER_AUTHOR, cursor);
+
+    let resume_started = Instant::now();
+    client.tick().expect("announce resumed claim subscription");
+    server.tick().expect("serve claim resume catch-up");
+    client.tick().expect("apply claim resume catch-up");
+    client.tick().expect("materialize claim resume event");
+    server.tick().expect("serve settled claim resume state");
+    client.tick().expect("apply settled claim resume state");
+    client
+        .tick()
+        .expect("materialize settled claim resume state");
+    let resume_elapsed = resume_started.elapsed();
+    let resume_bytes = resumed
+        .borrow()
+        .last_resume_bytes()
+        .expect("claim resume catch-up bytes");
+    assert!(resume_bytes > 0);
+
+    let (expected_added, expected_removed) = match churn {
+        ClaimResumeChurn::Revoke => (&[][..], visible_claim_docs.as_slice()),
+        ClaimResumeChurn::Restore => (visible_claim_docs.as_slice(), &[][..]),
+    };
+    let (added, updated, removed) = assert_resume_delta(
+        subscription.try_next_event(),
+        expected_added,
+        expected_removed,
+    );
+    assert!(subscription.try_next_event().is_none());
+    (
+        resume_elapsed,
+        resume_bytes,
+        full_bytes,
+        added,
+        updated,
+        removed,
+    )
+}
+
 fn r13_permission_filtered_resume(c: &mut Criterion) {
     let mut group = c.benchmark_group("realistic_phase1/r13_permission_filtered_resume");
     group.throughput(Throughput::Elements(1));
 
-    group.bench_function("docs_recursive_resume_s", |b| {
-        b.iter(|| {
-            let writer = open_recursive_permissions_db_with_author(130, AuthorId::SYSTEM, false);
-            let server = open_recursive_permissions_db_with_author(131, AuthorId::SYSTEM, true);
-            let client = open_recursive_permissions_db_with_author(132, READER_AUTHOR, false);
-            seed_permission_resume_fixture(&writer);
-            let prepared = client
-                .prepare_query(&Query::from("docs"))
-                .expect("prepare permission-filtered docs query");
-
-            let (writer_transport, server_writer_transport) =
-                byte_duplex_with_session(AuthorId::SYSTEM, 13_001);
-            let writer_upstream = writer.connect_upstream(writer_transport);
-            let writer_subscriber =
-                server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
-            writer.tick().expect("ship permission seed rows");
-            server.tick().expect("ingest permission seed rows");
-            assert!(writer.detach_connection(&writer_upstream));
-            assert!(server.detach_connection(&writer_subscriber));
-
-            let (client_transport, server_transport) =
-                byte_duplex_with_session(READER_AUTHOR, 13_002);
-            let upstream = client.connect_upstream(client_transport);
-            let subscriber = server.accept_subscriber(server_transport, READER_AUTHOR);
-            let mut subscription = block_on(client.subscribe(&prepared, global_subscribe_opts()))
-                .expect("subscribe permission-filtered docs");
-            assert_eq!(
-                drain_opened(block_on(subscription.next_event()), "permission docs"),
-                0
-            );
-
-            client
-                .tick()
-                .expect("announce permission docs subscription");
-            server.tick().expect("serve full permission docs snapshot");
-            let full_bytes = subscriber
-                .borrow()
-                .last_resume_bytes()
-                .expect("full permission current-row bytes");
-            client.tick().expect("apply full permission docs snapshot");
-            client
-                .tick()
-                .expect("materialize full permission docs snapshot event");
-            let seeded = drain_optional_permission_rows(subscription.try_next_event());
-            assert!(full_bytes > 0);
-            let rows = client
-                .read(&prepared)
-                .expect("read initial permission-filtered docs");
-            assert_permission_resume_docs(&rows, &[RESUME_DOC_DIRECT, RESUME_DOC_REVOKED]);
-            if seeded > 0 {
-                assert_eq!(seeded, rows.len());
-            }
-
-            server.tick().expect("refresh permission docs cursor");
-            client.tick().expect("apply permission docs cursor state");
-            let cursor = subscriber
-                .borrow_mut()
-                .take_resume_cursor()
-                .expect("take permission subscriber resume cursor");
-            assert!(client.detach_connection(&upstream));
-            assert!(server.detach_connection(&subscriber));
-
-            wait_local(
-                writer
-                    .update(
-                        "doc_access",
-                        RESUME_ACCESS_REVOKED,
-                        recursive_doc_access_cells(RESUME_DOC_REVOKED, RECURSIVE_HIDDEN_TEAM),
-                    )
-                    .expect("hide disconnected doc access before revoke"),
-            );
-            wait_local(
-                writer
-                    .delete("doc_access", RESUME_ACCESS_REVOKED)
-                    .expect("revoke disconnected doc access"),
-            );
-            wait_local(
-                writer
-                    .insert_with_id(
-                        "doc_access",
-                        RESUME_ACCESS_GRANTED,
-                        recursive_doc_access_cells(RESUME_DOC_GRANTED, RECURSIVE_PARENT_TEAM),
-                    )
-                    .expect("grant disconnected doc access"),
-            );
-
-            let (writer_transport, server_writer_transport) =
-                byte_duplex_with_session(AuthorId::SYSTEM, 13_003);
-            let writer_upstream = writer.connect_upstream(writer_transport);
-            let writer_subscriber =
-                server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
-            writer.tick().expect("ship disconnected permission changes");
-            server
-                .tick()
-                .expect("ingest disconnected permission changes");
-            writer
-                .tick()
-                .expect("ship settled disconnected permission changes");
-            server
-                .tick()
-                .expect("ingest settled disconnected permission changes");
-            assert!(writer.detach_connection(&writer_upstream));
-            assert!(server.detach_connection(&writer_subscriber));
-
-            let (client_transport, server_transport) =
-                byte_duplex_with_session(READER_AUTHOR, 13_004);
-            let _resumed_upstream = client.connect_upstream(client_transport);
-            let resumed =
-                server.accept_subscriber_with_resume(server_transport, READER_AUTHOR, cursor);
-
-            client
-                .tick()
-                .expect("announce resumed permission docs subscription");
-            server.tick().expect("serve permission resume catch-up");
-            client.tick().expect("apply permission resume catch-up");
-            client.tick().expect("materialize permission resume event");
-            server
-                .tick()
-                .expect("serve settled permission resume state");
-            client
-                .tick()
-                .expect("apply settled permission resume state");
-            client
-                .tick()
-                .expect("materialize settled permission resume state");
-
-            let resume_bytes = resumed
-                .borrow()
-                .last_resume_bytes()
-                .expect("permission resume catch-up bytes");
-            assert!(resume_bytes > 0);
-
-            let (added, updated, removed) =
-                drain_permission_resume_delta(subscription.try_next_event());
-            assert_eq!(added + updated, 1);
-            assert_eq!(removed, 1);
-            // `Db::read` is intentionally a local-preview read; it may still
-            // see retained row bodies after upstream membership is revoked.
-            // The authoritative reconnect contract is the subscription delta
-            // asserted above.
-
-            black_box((resume_bytes, full_bytes, added, updated, removed))
+    for churn in [
+        PermissionResumeChurn::Unchanged,
+        PermissionResumeChurn::Grant,
+        PermissionResumeChurn::Revoke,
+        PermissionResumeChurn::GrantAndRevoke,
+    ] {
+        let (elapsed, resume_bytes, full_bytes, added, updated, removed) =
+            run_permission_filtered_resume(churn);
+        eprintln!(
+            "{{\"scenario\":\"r13_permission_filtered_resume\",\"case\":\"{}\",\"resume_us\":{},\"resume_bytes\":{},\"full_bytes\":{},\"added\":{},\"updated\":{},\"removed\":{}}}",
+            churn.name(),
+            elapsed.as_micros(),
+            resume_bytes,
+            full_bytes,
+            added,
+            updated,
+            removed,
+        );
+        group.bench_function(churn.name(), |b| {
+            b.iter_custom(|iterations| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iterations {
+                    let (resume_elapsed, resume_bytes, full_bytes, added, updated, removed) =
+                        run_permission_filtered_resume(churn);
+                    black_box((resume_bytes, full_bytes, added, updated, removed));
+                    elapsed += resume_elapsed;
+                }
+                elapsed
+            });
         });
-    });
+    }
+    for churn in [ClaimResumeChurn::Revoke, ClaimResumeChurn::Restore] {
+        let (elapsed, resume_bytes, full_bytes, added, updated, removed) =
+            run_claim_filtered_resume(churn);
+        eprintln!(
+            "{{\"scenario\":\"r13_permission_filtered_resume\",\"case\":\"{}\",\"resume_us\":{},\"resume_bytes\":{},\"full_bytes\":{},\"added\":{},\"updated\":{},\"removed\":{}}}",
+            churn.name(),
+            elapsed.as_micros(),
+            resume_bytes,
+            full_bytes,
+            added,
+            updated,
+            removed,
+        );
+        group.bench_function(churn.name(), |b| {
+            b.iter_custom(|iterations| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iterations {
+                    let (resume_elapsed, resume_bytes, full_bytes, added, updated, removed) =
+                        run_claim_filtered_resume(churn);
+                    black_box((resume_bytes, full_bytes, added, updated, removed));
+                    elapsed += resume_elapsed;
+                }
+                elapsed
+            });
+        });
+    }
 
     group.finish();
 }

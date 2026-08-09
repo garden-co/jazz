@@ -490,7 +490,7 @@ export function buildNativeExampleBaseCommand(benchmark, args) {
     "run",
     "--release",
     "-p",
-    "jazz-tools",
+    "jazz",
     "--features",
     features,
     "--example",
@@ -514,7 +514,7 @@ export function buildNativeCriterionCommand(benchmark) {
     "cargo",
     "bench",
     "-p",
-    "jazz-tools",
+    "jazz",
     "--features",
     features,
     "--bench",
@@ -522,6 +522,10 @@ export function buildNativeCriterionCommand(benchmark) {
     "--",
     benchmark.criterion_filter,
   ];
+}
+
+export function benchmarkTimeoutSeconds(benchmark, defaultTimeoutSeconds) {
+  return benchmark.timeout_seconds ?? defaultTimeoutSeconds;
 }
 
 export function buildJazzSimCommand(benchmark) {
@@ -715,6 +719,7 @@ async function runNativeBenchmark(benchmark, args) {
   const logFile = path.resolve(args.outDir, benchmark.log_path);
 
   const command = buildNativeCriterionCommand(benchmark);
+  const timeoutSeconds = benchmarkTimeoutSeconds(benchmark, args.timeoutSeconds);
 
   console.log(`\n==> ${benchmark.label}`);
   console.log(shellQuote(command));
@@ -722,7 +727,7 @@ async function runNativeBenchmark(benchmark, args) {
     command,
     cwd: process.cwd(),
     env: { ...process.env, ...benchmark.env },
-    timeoutSeconds: args.timeoutSeconds,
+    timeoutSeconds,
     logFile,
     streamStdoutToConsole: true,
   });
@@ -733,7 +738,7 @@ async function runNativeBenchmark(benchmark, args) {
     log_path: rel(logFile),
     exit_code: result.code,
     signal: result.signal,
-    timeout_seconds: args.timeoutSeconds,
+    timeout_seconds: timeoutSeconds,
     note: failureNote(result),
   });
 }

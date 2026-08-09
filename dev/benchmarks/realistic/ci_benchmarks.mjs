@@ -97,6 +97,15 @@ const NATIVE_CRITERION_SCENARIOS = [
       sqlite: "realistic_phase1/r12_recursive_permissions",
     },
   },
+  {
+    id: "r13_permission_filtered_resume",
+    label: "Criterion R13 permission-filtered resume",
+    timeout_seconds: 90,
+    criterion_filter_by_engine: {
+      rocksdb: "realistic_phase1/r13_permission_filtered_resume",
+      sqlite: "realistic_phase1/r13_permission_filtered_resume",
+    },
+  },
 ];
 
 export const NATIVE_BENCHMARKS = NATIVE_STORAGE_ENGINES.flatMap((storage_engine) => [
@@ -124,6 +133,7 @@ export const NATIVE_BENCHMARKS = NATIVE_STORAGE_ENGINES.flatMap((storage_engine)
         kind: "criterion",
         log_path: `logs/criterion_${scenario.id}.log`,
         criterion_filter,
+        timeout_seconds: scenario.timeout_seconds,
         env: {
           JAZZ_REALISTIC_VARIANT: "ci",
         },
