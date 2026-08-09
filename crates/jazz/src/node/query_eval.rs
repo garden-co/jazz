@@ -943,7 +943,7 @@ where
             }
             let rows = self
                 .node
-                .tx_current_rows(tx_id, &request.source.table)
+                .tx_current_rows_in_schema(tx_id, self.read_view.read_schema, &request.source.table)
                 .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
             let graph = inline_current_graph(&table, rows)
                 .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
@@ -5452,7 +5452,7 @@ where
             return Ok(BTreeMap::new());
         }
         let mut access_paths = self.current_query_primary_key_access_paths(shape, binding)?;
-        let table = self.table_in_schema(&query.table, shape.schema_version())?;
+        let table = self.table(&query.table)?.clone();
         let equalities = root_literal_equalities(query, binding)?;
         let Some(access_path) = select_current_access_path(&table, &equalities) else {
             return Ok(access_paths);
@@ -9283,7 +9283,7 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         let query = shape.query();
         let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
-        let table = self.table(&query.table)?.clone();
+        let table = self.table_in_schema(&query.table, shape.schema_version())?;
         let program = self.compile_open_tx_query_program(
             tx_id,
             shape,

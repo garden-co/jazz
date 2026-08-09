@@ -101,5 +101,12 @@ fn empty_owner_accepts_first_typed_schema_view() {
     view.mergeable_tx_ref(batch)
         .insert_with_id("items", RowUuid::from_bytes([3; 16]), Default::default())
         .unwrap();
+    let prepared = view.prepare_query(&view.table("items")).unwrap();
+    let rows = view
+        .mergeable_tx_ref(batch)
+        .all_prepared(&prepared)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), RowUuid::from_bytes([3; 16]));
     owner.commit_mergeable_handle(batch).unwrap();
 }
