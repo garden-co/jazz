@@ -392,7 +392,11 @@ where
         let write_schema = self.catalogue.current_write_schema.schema;
         if self.source_reaches_write_policy_table(source, write_schema, table)? {
             Ok(write_schema)
-        } else if self
+        } else if self.source_reaches_write_policy_table(
+            source,
+            self.catalogue.current_schema_version_id,
+            table,
+        )? || self
             .table_in_schema(table, self.catalogue.current_schema_version_id)
             .is_ok()
         {
