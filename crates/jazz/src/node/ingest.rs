@@ -23,7 +23,6 @@ use crate::text_merge::{
 use crate::time::TxTimeSortKey;
 use groove::records::ValueType;
 
-const MAX_SCHEMA_LINEAGE_PUBLICATION_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SCHEMA_LINEAGE_DECLARATIONS: usize = 4096;
 const MAX_SCHEMA_LINEAGE_NAME_BYTES: usize = 1024;
 const MAX_SCHEMA_LINEAGE_OPS: usize = 16_384;
@@ -1224,7 +1223,6 @@ where
         &self,
         publication: &SchemaLineagePublication,
     ) -> Result<(), Error> {
-        let encoded = serde_json::to_vec(publication)?;
         let declaration_count = publication
             .lens
             .table_lenses
@@ -1249,13 +1247,12 @@ where
                     .flat_map(|table| [&table.source_table, &table.target_table]),
             )
             .all(|name| !name.is_empty() && name.len() <= MAX_SCHEMA_LINEAGE_NAME_BYTES);
-        if encoded.len() > MAX_SCHEMA_LINEAGE_PUBLICATION_BYTES
-            || declaration_count > MAX_SCHEMA_LINEAGE_DECLARATIONS
+        if declaration_count > MAX_SCHEMA_LINEAGE_DECLARATIONS
             || operation_count > MAX_SCHEMA_LINEAGE_OPS
             || !names_in_bounds
         {
             return Err(Error::InvalidCatalogueUpdate(
-                "schema lineage publication exceeds semantic limits",
+                "schema lineage publication exceeds structural limits",
             ));
         }
         Ok(())

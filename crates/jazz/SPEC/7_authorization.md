@@ -39,9 +39,9 @@ Invariant digest:
 - `INV-RLS-20`: Reads performed to execute a write MUST satisfy the target row's
   read policy; partial updates and upserts therefore require read permission,
   while full-row writes and row-id deletes do not.
-- `INV-RLS-21`: Policy proofs MUST authorize membership sources separately from
-  payload closure, include recursive seed/step sources, and reject proof cycles
-  with a named table-and-depth error.
+- `INV-RLS-21`: A policy subplan MUST read its dependency tables as raw policy
+  evidence without recursively applying those tables' own read policies, while
+  still enforcing the complete outer policy under authenticated claims.
 
 ## Details
 
@@ -210,63 +210,36 @@ shapes. It composes the root table's read policy into the subscribed shape and
 client-supplied binding values**, so a client cannot widen its visibility by
 choosing a different claim binding (`INV-RLS-10`).
 
-#### Policy-proof source authority
+#### Policy dependency authority
 
-An authorization subplan is a proof of membership, not a user-visible read.
-It has three source-authority modes: `System`, `PolicyFiltered`, and
-`PolicyProof`. `PolicyFiltered` is reserved for ordinary user-visible query
-sources. A proof suspends the policy target at its root, evaluates predicate
-membership sources with `PolicyProof`, and uses `System` for delivery-only
-sources. This distinction is required because applying ordinary source
-resolution while proving policy can re-enter include delivery and create a
-policy cycle.
+An authorization subplan is one complete policy program, not a collection of
+user-visible reads. Every table source it inspects is policy evidence and is
+read under raw (`System`) authority. Jazz MUST NOT recursively apply a
+dependency table's own read policy while evaluating the outer policy. Doing so
+would silently change a declared policy `P` into `P AND dependency-policy`, make
+the result depend on unrelated policy declarations, and make mutually
+referential policy schemas cyclic.
 
-The classification is total for every source class in a normalized
-authorization subplan:
+Raw dependency access does not bypass the outer policy. Jazz still evaluates
+every filter, join correlation, policy branch, inheritance edge, reachability
+seed and step, and other membership constraint declared by that policy. Claims
+are bound from the authenticated identity rather than client-supplied values.
+Only rows selected by that complete identity-bound program authorize the
+protected operation. Failure to compile, bind, or evaluate any required part of
+the policy remains fail-closed.
 
-1. The protected policy-root source is `System`. It is the row set whose policy
-   is being proved; filtering it with that same policy would be circular.
-2. Every analyzed relational membership source whose table declares a read
-   policy is `PolicyProof`: direct join and source-lookup aliases,
-   relation/union branch roots, policy-branch sources, inherited-parent
-   sources, reachable access sources, and every recursive seed and
-   recursive-step source. Each can change whether the predicate holds, so
-   excluding a protected source is an authorization leak. A membership source
-   whose table has no read policy may lower directly to `System`: by
-   `INV-RLS-15` that source is public, so an unrestricted root is equivalent to
-   a trivial policy proof. This optimization MUST NOT apply when the source
-   table declares a read policy.
-3. The recursive frontier is not a table source and has no source-authority
-   decision. It contains only tuples emitted by the already-authorized seed or
-   prior step; its seed and step table sources are covered by item 2.
-4. Bound value sources (claims, query parameters, and literals) are not table
-   sources and have no source-authority decision. Their values remain bound by
-   the authenticated policy context rather than by client authority.
-5. Implicit reference closure targets and explicit include-path targets,
-   including correlated array/include children, are `System`. They ship or
-   validate payload closure after membership; they are not policy predicates.
-6. Auxiliary payload, result-member, version-witness, deletion-register,
-   coverage, provenance, and other metadata-only sources are `System`. They
-   support delivery and validation, not policy membership.
-7. A source occurrence shared by a membership expression and a delivery path
-   is classified by its occurrence, not merely its table name: the analyzed
-   membership occurrence is `PolicyProof` under item 2, while the separately
-   named closure occurrence is `System` under items 5–6.
+This authority is scoped to policy evaluation. Ordinary queries and includes
+against a dependency table still apply that table's own read policy, and policy
+evidence does not become independently deliverable payload. Read and write
+policy subplans use the same rule.
 
-`PolicyProof` recursively builds only these membership graphs; it MUST NOT
-delegate to ordinary `PolicyFiltered` source resolution. Re-entering a table
-already active in the proof stack fails with `PolicyProofCycle`, naming the
-table and attempted depth, rather than exhausting the process stack
-(`INV-RLS-21`).
-
-**INV-RLS-21.** While proving a table read policy, Jazz MUST suspend the
-protected root policy and apply `PolicyProof` semantics to every analyzed
-membership source, including recursive seed and step sources. A membership
-table with no read policy MAY use the equivalent `System` public-source fast
-path; a membership table with a read policy MUST NOT. Delivery-only source
-classes above use `System`. Jazz MUST reject a revisited proof table with a
-named table-and-depth cycle error. No source class may be left implicitly
-authorized.
+**INV-RLS-21.** A read or write policy subplan MUST suspend recursive policy
+application for all table sources it evaluates and read them as raw policy
+evidence. It MUST nevertheless enforce the complete evaluating policy,
+including all filters, joins, authenticated claims, policy branches,
+inheritance, and reachability constraints. Raw dependency rows MUST NOT become
+user-visible merely because they participated in a policy decision, and any
+unsupported or indeterminate policy evaluation MUST deny.
 
 Join policies extend that same identity-bound evaluation across relationships. A
 join policy passes when a matching global-current row in the joined table reaches

@@ -623,13 +623,22 @@ where
         let current_schema_version_alias = schema_version_aliases
             .get(&current_schema_version_id)
             .copied();
+        // Schema identity excludes policy and physical-index metadata. On a
+        // reopen, retain the durable payload previously learned from the
+        // authority instead of reverting to the caller's structural schema;
+        // otherwise the first catalogue snapshot spuriously changes runtime
+        // semantics and rebuilds warm subscriptions during resume.
+        let active_schema = schemas
+            .get(&current_schema_version_id)
+            .map(|version| version.schema.clone())
+            .unwrap_or_else(|| schema.clone());
         let mut node = Self {
             node_uuid,
             self_node_alias: None,
             catalogue: SchemaCatalogue {
                 current_schema_version_id,
                 current_schema_version_alias,
-                schema: schema.clone(),
+                schema: active_schema,
                 schema_version_aliases,
                 catalogue_schemas: schemas,
                 catalogue_lenses: lenses,

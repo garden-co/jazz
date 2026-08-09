@@ -472,6 +472,10 @@ fn owner_read_schema() -> JazzSchema {
 }
 
 fn created_by_read_schema() -> JazzSchema {
+    created_by_read_schema_for_claim("sub")
+}
+
+fn created_by_read_schema_for_claim(claim_name: &str) -> JazzSchema {
     JazzSchema::new([TableSchema::new(
         "todos",
         [
@@ -480,7 +484,7 @@ fn created_by_read_schema() -> JazzSchema {
         ],
     )
     .with_read_policy(Policy::shape(
-        Query::from("todos").filter(eq(col("$createdBy"), claim("sub"))),
+        Query::from("todos").filter(eq(col("$createdBy"), claim(claim_name))),
     ))
     .with_write_policy(Policy::public())])
 }
@@ -4903,6 +4907,88 @@ fn logical_message_larger_than_frame_round_trips_reordered_and_duplicated() {
 }
 
 #[test]
+fn schema_lineage_publication_fragments_before_atomic_admission() {
+    let base = schema();
+    let mut evolved_schema = base.clone();
+    let large_default = Value::String("x".repeat(MAX_WIRE_FRAME_BYTES + 1024));
+    evolved_schema.tables[0].columns.push(
+        crate::schema::ColumnSchema::new("large_default", ColumnType::String)
+            .with_default(large_default.clone()),
+    );
+    let evolved = crate::protocol::SchemaVersion::new(evolved_schema);
+    let publication = crate::protocol::SchemaLineagePublication::new(
+        evolved.clone(),
+        crate::protocol::MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "large_default".to_owned(),
+                    default: large_default,
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    let message = SyncMessage::PublishSchemaWithLens {
+        author: AuthorId::SYSTEM,
+        catalogue_seq: 1,
+        publication: Box::new(publication),
+    };
+    assert!(postcard::to_allocvec(&message).unwrap().len() > MAX_WIRE_FRAME_BYTES);
+
+    let (left, right) = byte_duplex_raw();
+    let staged = Rc::clone(&right.inbound);
+    let features =
+        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
+    let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
+    let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
+    sender.send(message.clone()).unwrap();
+    let frames = staged.borrow_mut().drain(..).collect::<Vec<_>>();
+    assert!(frames.len() > 1);
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame.len() <= MAX_WIRE_FRAME_BYTES)
+    );
+
+    let authority = open_core(0x38, AuthorId::SYSTEM, &base);
+    for frame in &frames[..frames.len() - 1] {
+        staged.borrow_mut().push_back(frame.clone());
+        assert!(receiver.try_recv().is_none());
+        assert!(
+            !authority
+                .node()
+                .borrow()
+                .catalogue_schemas()
+                .contains_key(&evolved.id)
+        );
+    }
+    staged
+        .borrow_mut()
+        .push_back(frames.last().unwrap().clone());
+    let reassembled = receiver
+        .try_recv()
+        .expect("final fragment completes message");
+    assert_eq!(reassembled, message);
+    authority
+        .node()
+        .borrow_mut()
+        .apply_trusted_catalogue_message(reassembled)
+        .unwrap();
+    assert!(
+        authority
+            .node()
+            .borrow()
+            .catalogue_schemas()
+            .contains_key(&evolved.id)
+    );
+}
+
+#[test]
 fn corrupt_fragment_never_admits_a_partial_logical_message() {
     let (left, right) = byte_duplex_raw();
     let staged = Rc::clone(&right.inbound);
@@ -8370,6 +8456,55 @@ fn one_shot_edge_query_attaches_fresh_usage_subscription_for_covered_binding() {
 }
 
 #[test]
+fn missing_permissions_head_gates_sessions_but_not_trusted_backend_query_coverage() {
+    // This stays at the transport boundary because the behavior under test is
+    // the authenticated link's trust discriminator, which the public query API
+    // deliberately does not expose.
+    let schema = schema();
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    server.server.set_permissions_ready(false).unwrap();
+
+    let backend_author = AuthorId::from_bytes([0xb0; 16]);
+    let backend = open_db(0xb0, backend_author, &schema);
+    let (backend_transport, server_backend_transport) = duplex();
+    let _backend_upstream = backend.connect_upstream(backend_transport);
+    let _backend_subscriber = server.accept_subscriber_with_trust(
+        server_backend_transport,
+        backend_author,
+        CommitUnitTrust::TrustedBackend,
+    );
+
+    let session_author = AuthorId::from_bytes([0xc1; 16]);
+    let session = open_db(0xc1, session_author, &schema);
+    let (session_transport, server_session_transport) = duplex();
+    let _session_upstream = session.connect_upstream(session_transport);
+    let _session_subscriber = server.accept_subscriber(server_session_transport, session_author);
+
+    let backend_query = prepared(&backend, &Query::from("todos"));
+    let backend_attachment = backend
+        .attach_query_with_opts(&backend_query, edge_subscribe_opts())
+        .unwrap();
+    let session_query = prepared(&session, &Query::from("todos"));
+    let session_attachment = session
+        .attach_query_with_opts(&session_query, edge_subscribe_opts())
+        .unwrap();
+
+    backend.tick().unwrap();
+    session.tick().unwrap();
+    server.tick().unwrap();
+    backend.tick().unwrap();
+    session.tick().unwrap();
+
+    assert!(backend.query_attachment_is_covered(&backend_attachment));
+    assert!(!session.query_attachment_is_covered(&session_attachment));
+
+    server.server.set_permissions_ready(true).unwrap();
+    server.tick().unwrap();
+    session.tick().unwrap();
+    assert!(session.query_attachment_is_covered(&session_attachment));
+}
+
+#[test]
 fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered_binding() {
     let schema = JazzSchema::new([TableSchema::new(
         "chats",
@@ -10020,6 +10155,44 @@ fn local_propagating_subscription_emits_created_by_scoped_insert_after_empty_see
     let one_shot = prepared_all(&client, &query, ReadOpts::default());
     assert_eq!(row_ids(&one_shot), vec![write.row_uuid()]);
 
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert_eq!(row_ids(&added), vec![write.row_uuid()]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+}
+
+#[test]
+fn local_propagating_subscription_coerces_user_id_claim_for_created_by() {
+    let schema = created_by_read_schema_for_claim("user_id");
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xa1, alice, &schema);
+    let claims = BTreeMap::from([("user_id".to_owned(), Value::String(alice.0.to_string()))]);
+    client.set_identity_claims(alice, claims.clone());
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber_with_claims(server_transport, alice, claims);
+    let query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
+
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    while let Some(event) = subscription.try_next_event() {
+        assert!(opened_rows(event).is_empty());
+    }
+
+    let write = client
+        .insert(
+            "todos",
+            doctest_support::todo_cells("created by alice", false),
+        )
+        .unwrap();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+
+    let one_shot = prepared_all(&client, &query, ReadOpts::default());
+    assert_eq!(row_ids(&one_shot), vec![write.row_uuid()]);
     let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
     assert_eq!(row_ids(&added), vec![write.row_uuid()]);
     assert!(updated.is_empty());

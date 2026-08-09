@@ -490,9 +490,9 @@ impl Backend {
         query: &crate::query::Query,
     ) -> std::result::Result<crate::db::PreparedQuery, CoreDbError> {
         match self {
-            Self::Memory(db) => db.prepare_query(query),
+            Self::Memory(db) => db.prepare_query_for_open_schema(query),
             #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.prepare_query(query),
+            Self::RocksDb(db) => db.prepare_query_for_open_schema(query),
         }
     }
 
