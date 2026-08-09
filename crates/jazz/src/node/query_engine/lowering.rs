@@ -4643,19 +4643,10 @@ fn coerce_literal_for_source_field(
     source: &ResolvedSource,
     field: &str,
 ) -> LiteralValue {
-    if field == source.row_shape.row_uuid_field {
-        return coerce_literal_for_value_type(value, &ValueType::Uuid);
-    }
-    let logical_field = logical_user_column(field);
-    let Some(column) = source
-        .table_schema
-        .columns
-        .iter()
-        .find(|column| column.name == logical_field)
-    else {
+    let Some(value_type) = source_field_type(source, field) else {
         return value;
     };
-    coerce_literal_for_value_type(value, &column.column_type.clone())
+    coerce_literal_for_value_type(value, non_null_value_type(value_type))
 }
 
 fn non_null_value_type(mut value_type: &ValueType) -> &ValueType {
