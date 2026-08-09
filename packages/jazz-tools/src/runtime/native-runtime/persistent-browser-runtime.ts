@@ -55,6 +55,9 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   private readonly settledWrites = new Map<string, Map<string, Promise<void>>>();
   private readonly transactionWrites = new Map<string, Promise<unknown>[]>();
   private readonly completedTxs = new Map<string, CompletedTxState>();
+  private readonly openTxs = new Set<OpenBatchId>();
+  private readonly beginResults = new Map<OpenBatchId, Promise<OpenBatchId>>();
+  private readonly failedBegins = new Map<OpenBatchId, unknown>();
   private readonly committingTxs = new Set<OpenBatchId>();
   private readonly rollingBackTxs = new Set<OpenBatchId>();
   private readonly subscriptions = new Map<number, Function>();
@@ -101,7 +104,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
         this.closed ||
         event.message.includes("Persistent browser native runtime closed")
       ) {
-        this.resolveAll();
+        this.rejectAll(new Error("Persistent browser native runtime closed"));
         return;
       }
       this.rejectAll(
@@ -205,14 +208,24 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   beginTransaction(kind: TransactionKind, id: OpenBatchId): OpenBatchId {
+    if (this.openTxs.has(id) || this.completedTxs.has(id) || this.failedBegins.has(id)) {
+      throw new Error(`Begin transaction failed: batch ${id} has already been opened`);
+    }
+    this.openTxs.add(id);
     const begun = this.enqueueCommand(
       () => this.send("beginTransaction", [kind, id]) as Promise<OpenBatchId>,
     );
-    void begun.catch(ignoreExpectedShutdown);
+    this.beginResults.set(id, begun);
+    void begun.catch((error) => {
+      this.openTxs.delete(id);
+      this.failedBegins.set(id, error);
+    });
+    void begun.catch(() => undefined);
     return id;
   }
 
   commitTransaction(openBatchId: OpenBatchId): Promise<BatchId> {
+    this.assertOpenBatchKnown(openBatchId, "Commit transaction");
     if (this.rollingBackTxs.has(openBatchId)) {
       throw new Error(`Commit transaction failed: batch ${openBatchId} is already rolling back`);
     }
@@ -225,12 +238,15 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     const transactionWrites = this.transactionWrites.get(openBatchId) ?? [];
     this.committingTxs.add(openBatchId);
     return this.enqueueCommand(async () => {
+      await this.awaitBegin(openBatchId);
       await Promise.all(transactionWrites);
       return this.send("commitTransaction", [openBatchId]) as Promise<BatchId>;
     }).then(
       (batchId) => {
         this.committingTxs.delete(openBatchId);
         this.transactionWrites.delete(openBatchId);
+        this.openTxs.delete(openBatchId);
+        this.beginResults.delete(openBatchId);
         this.completedTxs.set(openBatchId, "committed");
         return batchId;
       },
@@ -242,6 +258,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   rollbackTransaction(openBatchId: OpenBatchId): Promise<boolean> {
+    this.assertOpenBatchKnown(openBatchId, "Rollback transaction");
     if (this.committingTxs.has(openBatchId)) {
       throw new Error(`Rollback transaction failed: batch ${openBatchId} is already committing`);
     }
@@ -252,12 +269,15 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       throw new Error(rollbackTransactionMessage(openBatchId, this.completedTxs));
     }
     this.rollingBackTxs.add(openBatchId);
-    return this.enqueueCommand(
-      () => this.send("rollbackTransaction", [openBatchId]) as Promise<boolean>,
-    ).then(
+    return this.enqueueCommand(async () => {
+      await this.awaitBegin(openBatchId);
+      return this.send("rollbackTransaction", [openBatchId]) as Promise<boolean>;
+    }).then(
       (rolledBack) => {
         this.rollingBackTxs.delete(openBatchId);
         this.transactionWrites.delete(openBatchId);
+        this.openTxs.delete(openBatchId);
+        this.beginResults.delete(openBatchId);
         this.completedTxs.set(openBatchId, "rolled_back");
         return rolledBack;
       },
@@ -277,6 +297,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     const readFence = this.captureReadFence(optionsJson);
     return this.enqueueCommand(async () => {
       await this.opened;
+      await this.awaitReadBatchBegin(optionsJson);
       this.assertReadTransactionOpen(optionsJson);
       await this.settleReadFence(readFence);
       if (requiresServerPropagation(tier, optionsJson)) {
@@ -296,6 +317,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     const localHandle = this.nextSubscriptionId++;
     const readFence = this.captureReadFence(optionsJson);
     const remoteHandle = this.enqueueCommand(async () => {
+      await this.awaitReadBatchBegin(optionsJson);
       this.assertReadTransactionOpen(optionsJson);
       await this.settleReadFence(readFence);
       if (requiresServerPropagation(tier, optionsJson)) {
@@ -340,18 +362,16 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     this.closing = true;
     this.rejectConnectionWaiters();
     try {
-      await this.enqueueCommand(async () => {
-        await this.opened;
-        await Promise.allSettled(this.pendingWrites);
-        await this.send("close", []);
-      });
+      await this.opened;
+      await Promise.allSettled(this.pendingWrites);
+      await this.send("close", []);
     } finally {
       this.closed = true;
       this.closing = false;
       this.pagehideAbort?.abort();
       this.pagehideAbort = null;
       this.worker.terminate();
-      this.resolveAll();
+      this.rejectAll(new Error("Persistent browser native runtime closed"));
     }
   }
 
@@ -361,11 +381,9 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     this.rejectConnectionWaiters();
     let namespace = this.dbName;
     try {
-      namespace = await this.enqueueCommand(async () => {
-        await this.opened;
-        await Promise.allSettled(this.pendingWrites);
-        return this.send("closeForStorageClear", []) as Promise<string>;
-      });
+      await this.opened;
+      await Promise.allSettled(this.pendingWrites);
+      namespace = (await this.send("closeForStorageClear", [])) as string;
     } catch (error) {
       if (!isExpectedShutdownError(error)) throw error;
     } finally {
@@ -374,7 +392,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       this.pagehideAbort?.abort();
       this.pagehideAbort = null;
       this.worker.terminate();
-      this.resolveAll();
+      this.rejectAll(new Error("Persistent browser native runtime closed"));
     }
     await destroyBrowserStorage(this.runtimeSources, namespace);
   }
@@ -510,6 +528,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     }
     const write = this.enqueueCommand(async () => {
       await registrationBeforeWrite;
+      if (batchId) await this.awaitBegin(batchId as OpenBatchId);
       if (batchId && this.completedTxs.get(batchId) === "rolled_back") {
         return { kind: "staged", openBatchId: batchId as OpenBatchId } satisfies MutationResult;
       }
@@ -557,6 +576,29 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       return [...(this.transactionWrites.get(openBatchId) ?? [])];
     }
     return [...this.pendingWrites];
+  }
+
+  private async awaitBegin(openBatchId: OpenBatchId): Promise<void> {
+    const failed = this.failedBegins.get(openBatchId);
+    if (failed !== undefined) throw failed;
+    const begun = this.beginResults.get(openBatchId);
+    if (!begun) {
+      throw new Error(`Batch ${openBatchId} was never opened`);
+    }
+    await begun;
+  }
+
+  private async awaitReadBatchBegin(optionsJson: string | null | undefined): Promise<void> {
+    const openBatchId = openBatchIdFromReadOptions(optionsJson);
+    if (openBatchId) await this.awaitBegin(openBatchId as OpenBatchId);
+  }
+
+  private assertOpenBatchKnown(openBatchId: OpenBatchId, operation: string): void {
+    if (this.openTxs.has(openBatchId)) return;
+    const failed = this.failedBegins.get(openBatchId);
+    if (failed !== undefined) throw failed;
+    if (this.completedTxs.has(openBatchId)) return;
+    throw new Error(`${operation} failed: batch ${openBatchId} was never opened`);
   }
 
   private async settleReadFence(fence: readonly Promise<unknown>[]): Promise<void> {
@@ -624,13 +666,6 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   private rejectAll(error: Error): void {
     for (const pending of this.pending.values()) {
       pending.reject(error);
-    }
-    this.pending.clear();
-  }
-
-  private resolveAll(): void {
-    for (const pending of this.pending.values()) {
-      pending.resolve(undefined);
     }
     this.pending.clear();
   }

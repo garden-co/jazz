@@ -685,6 +685,9 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   beginTransaction(kind: TransactionKind, id: OpenBatchId): OpenBatchId {
+    if (this.pendingTxs.has(id) || this.completedTxs.has(id)) {
+      throw new Error(`Begin transaction failed: batch ${id} has already been opened`);
+    }
     this.pendingTxs.set(id, { id, kind, writes: [] });
     return id;
   }
@@ -694,9 +697,10 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!pending) {
       throw new Error(commitTransactionMessage(openBatchId, this.completedTxs));
     }
-    if (!pending.tx) {
-      throw new Error("Commit transaction failed: empty transaction has no committed batch");
-    }
+    pending.tx ??=
+      pending.kind === "exclusive"
+        ? this.exclusiveTx(openBatchId)
+        : this.db.mergeableTx(openBatchId);
     this.rejectMovedExclusiveParents(pending);
     const write = pending.tx.commit();
     this.pendingTxs.delete(openBatchId);
@@ -708,7 +712,9 @@ export class NativeRuntimeAdapter implements Runtime {
 
   async waitForTransaction(batchId: BatchId, tier: string): Promise<void> {
     const write = this.writes.get(batchId);
-    if (!write) return;
+    if (!write) {
+      throw new Error(`Wait for batch failed: unknown batch ${batchId}`);
+    }
     for (;;) {
       this.throwServerTransportErrorForTier(tier);
       try {

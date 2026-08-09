@@ -28,6 +28,10 @@ let commandQueue: Promise<void> = Promise.resolve();
 
 workerScope.onmessage = (event: MessageEvent<PersistentBrowserOpfsOwnerRequest>) => {
   const message = event.data;
+  if (message.method === "close" || message.method === "closeForStorageClear") {
+    void handleMessage(message);
+    return;
+  }
   commandQueue = commandQueue.then(
     () => handleMessage(message),
     () => handleMessage(message),

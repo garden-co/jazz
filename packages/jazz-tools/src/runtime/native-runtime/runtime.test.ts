@@ -906,7 +906,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: () => encodeRows([]),
             allForIdentity: () => encodeRows([]),
-            mergeableTxForIdentity: (author: Uint8Array) => {
+            mergeableTxForIdentity: (_openBatchId: string, author: Uint8Array) => {
               authors.push(formatUuidForTest(author));
               return fakeTx({
                 insertWithIdEncoded: (table: string) => staged.push(table),
@@ -939,6 +939,88 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     expect(authors).toEqual(["00000000-0000-0000-0000-0000000000a1"]);
     expect(staged).toEqual(["todos"]);
+  });
+
+  it("rejects a duplicate live OpenBatchId without replacing its staged transaction", () => {
+    const stagedTransactions: string[][] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            mergeableTx: () => {
+              const staged: string[] = [];
+              stagedTransactions.push(staged);
+              return fakeTx({ insertWithIdEncoded: (table: string) => staged.push(table) });
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const id = createOpenBatchId();
+    runtime.beginTransaction("mergeable", id);
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "first" } },
+      JSON.stringify({ batch_id: id }),
+    );
+
+    expect(() => runtime.beginTransaction("mergeable", id)).toThrow(
+      `Begin transaction failed: batch ${id} has already been opened`,
+    );
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "second" } },
+      JSON.stringify({ batch_id: id }),
+    );
+
+    expect(stagedTransactions).toEqual([["todos", "todos"]]);
+  });
+
+  it("commits an empty batch and rejects waits for unknown committed identities", async () => {
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ mergeableTx: () => fakeTx() }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const openBatchId = createOpenBatchId();
+    runtime.beginTransaction("mergeable", openBatchId);
+    const committed = await runtime.commitTransaction(openBatchId);
+    expect(committed).toBe("00000000000070008000000000000001");
+    await expect(
+      runtime.waitForTransaction("00000000000070008000000000000002" as BatchId, "local"),
+    ).rejects.toThrow("Wait for batch failed: unknown batch 00000000000070008000000000000002");
+
+    const reopened = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ mergeableTx: () => fakeTx() }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    await expect(reopened.waitForTransaction(committed, "local")).rejects.toThrow(
+      `Wait for batch failed: unknown batch ${committed}`,
+    );
   });
 
   it("passes caller-supplied updatedAt into staged mergeable transaction writes", () => {
@@ -6103,6 +6185,7 @@ function fakeTx(overrides: Partial<TxForTest> = {}): TxForTest {
 
 function fakeWrite() {
   return {
+    batchId: "00000000000070008000000000000001",
     payload: new Uint8Array(0),
     wait: () => undefined,
     writeState: () => ({}),

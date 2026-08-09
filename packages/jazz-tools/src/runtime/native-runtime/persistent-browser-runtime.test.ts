@@ -1206,6 +1206,94 @@ describe("PersistentBrowserOpfsRuntime", () => {
     await runtime.close();
   });
 
+  it("rejects a duplicate live OpenBatchId before it can overwrite staged worker state", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-duplicate-open-batch-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+    const id = createOpenBatchId();
+    runtime.beginTransaction("mergeable", id);
+    await vi.waitFor(() =>
+      expect(worker.messages.some((message) => message.method === "beginTransaction")).toBe(true),
+    );
+    const begin = worker.messages.find((message) => message.method === "beginTransaction")!;
+    worker.respond(begin.id, id);
+
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "first" } },
+      JSON.stringify({ batch_id: id }),
+    );
+    await vi.waitFor(() =>
+      expect(worker.messages.filter((message) => message.method === "insert")).toHaveLength(1),
+    );
+    const first = worker.messages.find((message) => message.method === "insert")!;
+    worker.respond(first.id, { kind: "staged", openBatchId: id });
+
+    expect(() => runtime.beginTransaction("mergeable", id)).toThrow(
+      `Begin transaction failed: batch ${id} has already been opened`,
+    );
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "second" } },
+      JSON.stringify({ batch_id: id }),
+    );
+    await vi.waitFor(() =>
+      expect(worker.messages.filter((message) => message.method === "insert")).toHaveLength(2),
+    );
+    expect(worker.messages.filter((message) => message.method === "beginTransaction")).toHaveLength(
+      1,
+    );
+    const second = worker.messages.filter((message) => message.method === "insert")[1]!;
+    worker.respond(second.id, { kind: "staged", openBatchId: id });
+    await runtime.close();
+  });
+
+  it("fences commands for a failed begin without poisoning unrelated FIFO work", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-failed-begin-fence-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+    const id = createOpenBatchId();
+    runtime.beginTransaction("mergeable", id);
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "must not send" } },
+      JSON.stringify({ batch_id: id }),
+    );
+    const commit = runtime.commitTransaction(id);
+    const unrelated = committed(
+      runtime.insert("todos", { title: { type: "Text", value: "unrelated" } }),
+    );
+    await vi.waitFor(() =>
+      expect(worker.messages.some((message) => message.method === "beginTransaction")).toBe(true),
+    );
+    const begin = worker.messages.find((message) => message.method === "beginTransaction")!;
+    worker.reject(begin.id, "forced OpenBatchId collision");
+
+    await expect(commit).rejects.toThrow("forced OpenBatchId collision");
+    await vi.waitFor(() =>
+      expect(worker.messages.filter((message) => message.method === "insert")).toHaveLength(1),
+    );
+    const sent = worker.messages.find((message) => message.method === "insert")!;
+    worker.respond(sent.id, { kind: "committed", batchId: "00000000000070008000000000000009" });
+    await expect(unrelated.batchId).resolves.toBe("00000000000070008000000000000009");
+    expect(() => runtime.beginTransaction("mergeable", id)).toThrow(
+      `Begin transaction failed: batch ${id} has already been opened`,
+    );
+    await runtime.close();
+  });
+
   it("closes the OPFS owner before terminating the worker", async () => {
     vi.stubGlobal("Worker", FakeWorker);
 
@@ -1226,6 +1314,27 @@ describe("PersistentBrowserOpfsRuntime", () => {
 
     expect(worker.terminated).toBe(true);
     expect(worker.messages.some((message) => message.method === "close")).toBe(true);
+  });
+
+  it("lets close preempt a durability wait without interleaving ordinary FIFO commands", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-close-behind-wait-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+    const wait = runtime.waitForTransaction("00000000000070008000000000000003" as never, "local");
+    await vi.waitFor(() =>
+      expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true),
+    );
+
+    await expect(runtime.close()).resolves.toBeUndefined();
+    await expect(wait).rejects.toThrow("closed");
+    expect(worker.messages.map((message) => message.method)).toContain("close");
+    expect(worker.terminated).toBe(true);
   });
 
   it("forwards the configured initial-sync flush cadence to the OPFS owner", async () => {
