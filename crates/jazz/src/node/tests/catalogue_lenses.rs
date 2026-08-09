@@ -129,53 +129,6 @@ fn catalogue_snapshot_fixture() -> crate::protocol::CatalogueSnapshot {
 }
 
 #[test]
-fn schema_lineage_publication_is_not_limited_by_physical_frame_size() {
-    let base = schema();
-    let mut evolved_schema = base.clone();
-    let large_default = Value::String(
-        "x".repeat(crate::protocol_limits::MAX_WIRE_FRAME_BYTES + 1024),
-    );
-    evolved_schema.tables[0]
-        .columns
-        .push(
-            crate::schema::ColumnSchema::new("large_default", ColumnType::String)
-                .with_default(large_default.clone()),
-        );
-    let evolved = SchemaVersion::new(evolved_schema);
-    let publication = SchemaLineagePublication::new(
-        evolved.clone(),
-        MigrationLens::new(
-            base.version_id(),
-            evolved.id,
-            vec![TableLens {
-                source_table: "todos".to_owned(),
-                target_table: "todos".to_owned(),
-                ops: vec![LensOp::AddColumn {
-                    column: "large_default".to_owned(),
-                    default: large_default,
-                }],
-            }],
-        ),
-        Vec::<String>::new(),
-        Vec::<String>::new(),
-    );
-    assert!(
-        serde_json::to_vec(&publication).unwrap().len()
-            > crate::protocol_limits::MAX_WIRE_FRAME_BYTES
-    );
-
-    let (_dir, mut authority) = open_node_with_schema(node(0x38), base);
-    authority
-        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
-            catalogue_seq: 1,
-            publication: Box::new(publication),
-        })
-        .unwrap();
-    assert!(authority.catalogue_schemas().contains_key(&evolved.id));
-}
-
-#[test]
 fn trusted_catalogue_snapshot_rejects_invalid_later_lineage_without_prefix_activation() {
     let base = schema();
     let (dir, mut core) = open_node_with_schema(node(0x38), base.clone());

@@ -4910,6 +4910,88 @@ fn logical_message_larger_than_frame_round_trips_reordered_and_duplicated() {
 }
 
 #[test]
+fn schema_lineage_publication_fragments_before_atomic_admission() {
+    let base = schema();
+    let mut evolved_schema = base.clone();
+    let large_default = Value::String("x".repeat(MAX_WIRE_FRAME_BYTES + 1024));
+    evolved_schema.tables[0].columns.push(
+        crate::schema::ColumnSchema::new("large_default", ColumnType::String)
+            .with_default(large_default.clone()),
+    );
+    let evolved = crate::protocol::SchemaVersion::new(evolved_schema);
+    let publication = crate::protocol::SchemaLineagePublication::new(
+        evolved.clone(),
+        crate::protocol::MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "large_default".to_owned(),
+                    default: large_default,
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    let message = SyncMessage::PublishSchemaWithLens {
+        author: AuthorId::SYSTEM,
+        catalogue_seq: 1,
+        publication: Box::new(publication),
+    };
+    assert!(postcard::to_allocvec(&message).unwrap().len() > MAX_WIRE_FRAME_BYTES);
+
+    let (left, right) = byte_duplex_raw();
+    let staged = Rc::clone(&right.inbound);
+    let features =
+        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
+    let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
+    let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
+    sender.send(message.clone()).unwrap();
+    let frames = staged.borrow_mut().drain(..).collect::<Vec<_>>();
+    assert!(frames.len() > 1);
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame.len() <= MAX_WIRE_FRAME_BYTES)
+    );
+
+    let authority = open_core(0x38, AuthorId::SYSTEM, &base);
+    for frame in &frames[..frames.len() - 1] {
+        staged.borrow_mut().push_back(frame.clone());
+        assert!(receiver.try_recv().is_none());
+        assert!(
+            !authority
+                .node()
+                .borrow()
+                .catalogue_schemas()
+                .contains_key(&evolved.id)
+        );
+    }
+    staged
+        .borrow_mut()
+        .push_back(frames.last().unwrap().clone());
+    let reassembled = receiver
+        .try_recv()
+        .expect("final fragment completes message");
+    assert_eq!(reassembled, message);
+    authority
+        .node()
+        .borrow_mut()
+        .apply_trusted_catalogue_message(reassembled)
+        .unwrap();
+    assert!(
+        authority
+            .node()
+            .borrow()
+            .catalogue_schemas()
+            .contains_key(&evolved.id)
+    );
+}
+
+#[test]
 fn corrupt_fragment_never_admits_a_partial_logical_message() {
     let (left, right) = byte_duplex_raw();
     let staged = Rc::clone(&right.inbound);

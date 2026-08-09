@@ -315,8 +315,8 @@ Protocol size limits are enforced at the layer that can recover correctly:
   `WireEnvelope.payload` is one physical fragment, not a semantic-message
   ceiling. Generic fragmentation/reassembly carries an encoded `SyncMessage`
   of any ordinary database size atomically across bounded frames. Receivers
-  retain configurable advertised-length, decompressed-output, concurrent
-  assembly, and aggregate staged-byte budgets as adversarial resource
+  enforce fixed advertised-length, decompressed-output, concurrent-assembly,
+  and aggregate staged-byte limits as adversarial resource
   defenses; those budgets are transport policy, not query, catalogue, or
   transaction semantics.
 - A `RegisterShape` AST is capped at 64 KiB encoded. This is a semantic
