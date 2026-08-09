@@ -6522,7 +6522,7 @@ fn collect_slot_builder(
     CollectBySlotBuilder::new(
         std::iter::once(parent_row_id.to_owned()).chain(route_fields.iter().cloned()),
         slot.fields.iter().map(|field| {
-            if field.is_row_id {
+            if field.is_row_id || field.value_type == field.output_value_type {
                 CollectByField::renamed(&field.input, &field.output)
             } else {
                 CollectByField::renamed_unwrap_nullable(&field.input, &field.output)

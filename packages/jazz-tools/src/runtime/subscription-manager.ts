@@ -346,17 +346,18 @@ export class SubscriptionManager<T extends { id: string }> {
     // on operation-key ordering.
     for (const operation of rootInserts) {
       const rootId = terminalKeyId(operation.root_key);
+      const rootRowId = terminalPayloadRowId(operation.root_key);
       const edit = operation.edit;
       assertTerminalRootEditKey(operation.root_key, edit);
       if (!("Insert" in edit)) throw new Error("terminal root insert partition is invalid");
       this.terminalRows.set(
         rootId,
-        decodeNativeTerminalRow(rootId, rootColumns, Uint8Array.from(edit.Insert.value)),
+        decodeNativeTerminalRow(rootRowId, rootColumns, Uint8Array.from(edit.Insert.value)),
       );
     }
 
     for (const operation of operations) {
-      const rootId = terminalKeyId(operation.root_key);
+      const rootId = this.terminalRootId(operation.root_key);
       const edit = operation.edit;
       if (operation.path.length === 0) {
         assertTerminalRootEditKey(operation.root_key, edit);
@@ -368,14 +369,20 @@ export class SubscriptionManager<T extends { id: string }> {
           this.insertIdAt(rootId, edit.Insert.index);
         } else if ("Update" in edit) {
           if (!this.terminalRows.has(rootId)) {
+            if (isUuidOnlyTerminalKey(operation.root_key)) continue;
             throw new Error(`terminal root update addressed missing root ${rootId}`);
           }
           this.terminalRows.set(
             rootId,
-            decodeNativeTerminalRow(rootId, rootColumns, Uint8Array.from(edit.Update.value)),
+            decodeNativeTerminalRow(
+              terminalPayloadRowId(operation.root_key),
+              rootColumns,
+              Uint8Array.from(edit.Update.value),
+            ),
           );
         } else if ("Remove" in edit) {
           if (!this.terminalRows.delete(rootId)) {
+            if (isUuidOnlyTerminalKey(operation.root_key)) continue;
             throw new Error(`terminal root removal addressed missing root ${rootId}`);
           }
           this.currentResults.delete(rootId);
@@ -398,24 +405,24 @@ export class SubscriptionManager<T extends { id: string }> {
       if (!target) throw new Error(`terminal child edit addressed an unresolved path on ${rootId}`);
       const { values, columns } = target;
       if ("Insert" in edit) {
-        const id = terminalKeyId(edit.Insert.key);
+        const id = terminalPayloadRowId(edit.Insert.key);
         const row = decodeNativeTerminalRow(id, columns, Uint8Array.from(edit.Insert.value));
         const value: Value = { type: "Row", value: { id, values: row.values } };
         removeTerminalValue(values, id);
         values.splice(Math.max(0, Math.min(edit.Insert.index, values.length)), 0, value);
       } else if ("Update" in edit) {
-        const id = terminalKeyId(edit.Update.key);
+        const id = terminalPayloadRowId(edit.Update.key);
         const index = terminalValueIndex(values, id);
         if (index === -1) throw new Error(`terminal child update addressed missing key ${id}`);
         const row = decodeNativeTerminalRow(id, columns, Uint8Array.from(edit.Update.value));
         values[index] = { type: "Row", value: { id, values: row.values } };
       } else if ("Remove" in edit) {
-        const id = terminalKeyId(edit.Remove.key);
+        const id = terminalPayloadRowId(edit.Remove.key);
         if (!removeTerminalValue(values, id)) {
           throw new Error(`terminal child removal addressed missing key ${id}`);
         }
       } else if ("Move" in edit) {
-        const id = terminalKeyId(edit.Move.key);
+        const id = terminalPayloadRowId(edit.Move.key);
         const index = terminalValueIndex(values, id);
         if (index === -1) throw new Error(`terminal child move addressed missing key ${id}`);
         const [value] = values.splice(index, 1);
@@ -433,7 +440,7 @@ export class SubscriptionManager<T extends { id: string }> {
       }
       if (index === undefined || row === undefined) return [];
       const item = transform(row);
-      this.currentResults.set(id, item);
+      this.currentResults.set(id, withResultIdentity(item, id));
       return [
         beforeIndex === undefined
           ? { kind: RowChangeKind.Added, id, index, item }
@@ -441,6 +448,25 @@ export class SubscriptionManager<T extends { id: string }> {
       ];
     });
     return { delta, all: this.all() } as SubscriptionDelta<T>;
+  }
+
+  /**
+   * Snapshots predating occurrence sidecars seed terminal state by physical
+   * row UUID. Prefer the full ResultKey address, but bridge that legacy
+   * snapshot only when exactly one retained root has the addressed UUID.
+   */
+  private terminalRootId(encoded: readonly number[]): string {
+    const address = terminalKeyId(encoded);
+    if (this.terminalRows.has(address)) return address;
+    // Only UUID-only legacy composite keys have a lossless correspondence to
+    // an occurrence sidecar. Typed values and v2 identities must remain
+    // opaque: matching either by physical UUID would erase a discriminator.
+    if (!address.startsWith("result:01")) return address;
+    const physicalId = terminalPayloadRowId(encoded);
+    const matches = Array.from(this.terminalRows, ([id, row]) =>
+      row.id === physicalId && !id.startsWith("result:") ? id : null,
+    ).filter((id): id is string => id !== null);
+    return matches.length === 1 ? matches[0]! : address;
   }
 
   seed(rows: T[]): SubscriptionDelta<T> {
@@ -625,7 +651,40 @@ function terminalKeyId(encoded: readonly number[]): string {
   if (bytes.length === 17 && bytes[0] === 10) {
     return readUuid(bytes, 1);
   }
+  // Groove terminal operations address roots by an ordered Record key. A
+  // multi-source row is therefore `Uuid, Uuid, …`, while the packed stream's
+  // occurrence sidecar uses the equivalent v1 ResultKey (`1, uuid, uuid,
+  // …`). Normalize only this exact physical form so terminal patches meet the
+  // same full occurrence identity that seeded the subscription state.
+  if (bytes.length > 17 && isUuidOnlyTerminalKey(bytes)) {
+    const occurrence = [1];
+    for (let offset = 0; offset < bytes.length; offset += 17) {
+      if (bytes[offset] !== 10) {
+        return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+      }
+      occurrence.push(...bytes.subarray(offset + 1, offset + 17));
+    }
+    return publicResultKey(Uint8Array.from(occurrence));
+  }
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function isUuidOnlyTerminalKey(encoded: ArrayLike<number>): boolean {
+  const bytes = Uint8Array.from(encoded);
+  return (
+    bytes.length >= 17 &&
+    bytes.length % 17 === 0 &&
+    Array.from({ length: bytes.length / 17 }, (_, index) => bytes[index * 17] === 10).every(Boolean)
+  );
+}
+
+/** Decode the leading UUID key field from Groove's ordered record-key carrier. */
+function terminalPayloadRowId(encoded: readonly number[]): string {
+  const bytes = Uint8Array.from(encoded);
+  if (bytes.length < 17 || bytes[0] !== 10) {
+    throw new Error("terminal key must begin with a UUID row key");
+  }
+  return readUuid(bytes, 1);
 }
 
 function assertTerminalRootEditKey(
@@ -714,7 +773,7 @@ function terminalCollection(
     if (index === path.length - 1) return { values, columns: childColumns };
     const keySegment = path[++index];
     if (!keySegment || !("Key" in keySegment)) return undefined;
-    const childId = terminalKeyId(keySegment.Key);
+    const childId = terminalPayloadRowId(keySegment.Key);
     if (index === path.length - 1) return { values, columns: childColumns };
     const child = values.find((value) => value.type === "Row" && value.value.id === childId);
     if (child?.type !== "Row") return undefined;

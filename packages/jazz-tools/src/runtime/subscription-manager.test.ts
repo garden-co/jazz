@@ -214,6 +214,241 @@ describe("SubscriptionManager", () => {
     expect(result.all).toEqual([{ id, name: "after", count: 2 }]);
   });
 
+  it("matches a compound terminal key to the seeded full occurrence identity", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const id = "00000000-0000-4000-8000-000000000001";
+    const joinedId = "00000000-0000-4000-8000-000000000002";
+    const key = [10, ...uuidBytes(id), 10, ...uuidBytes(joinedId)];
+
+    manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: nativeAddedRecord(id, 0, "before", 6),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 1,
+        removedCount: 0,
+        updatedCount: 0,
+        addedOccurrenceKeys: [Uint8Array.from([1, ...uuidBytes(id), ...uuidBytes(joinedId)])],
+      },
+      transform,
+      nativeColumns,
+    );
+
+    const result = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: key,
+            path: [],
+            edit: { Update: { key, value: [...terminalRowData(id, "joined", 7)] } },
+          },
+        ],
+      },
+      transform,
+      nativeColumns,
+    );
+
+    expect(result.all).toEqual([{ id, name: "joined", count: 7 }]);
+    expect(result.delta[0]?.id).toBe(
+      `result:01${Array.from(uuidBytes(id), (byte) => byte.toString(16).padStart(2, "0")).join("")}${Array.from(uuidBytes(joinedId), (byte) => byte.toString(16).padStart(2, "0")).join("")}`,
+    );
+  });
+
+  it("does not collapse malformed or typed terminal root keys to their leading UUID", () => {
+    const id = "00000000-0000-4000-8000-000000000001";
+    const joinedId = "00000000-0000-4000-8000-000000000002";
+    const fullOccurrence = Uint8Array.from([1, ...uuidBytes(id), ...uuidBytes(joinedId)]);
+    const malformed = [10, ...uuidBytes(id), 10];
+    const typedComponent = [10, ...uuidBytes(id), 8, 0x61];
+
+    for (const key of [malformed, typedComponent]) {
+      const manager = new SubscriptionManager<TestItem>();
+      manager.handleDelta(
+        {
+          __jazzNativeRowDelta: true,
+          added: nativeAddedRecord(id, 0, "before", 6),
+          removed: new Uint8Array(),
+          updated: new Uint8Array(),
+          addedCount: 1,
+          removedCount: 0,
+          updatedCount: 0,
+          addedOccurrenceKeys: [fullOccurrence],
+        },
+        transform,
+        nativeColumns,
+      );
+
+      expect(() =>
+        manager.handleDelta(
+          {
+            __jazzNativeRowDelta: true,
+            added: new Uint8Array(),
+            removed: new Uint8Array(),
+            updated: new Uint8Array(),
+            addedCount: 0,
+            removedCount: 0,
+            updatedCount: 0,
+            terminalOperations: [
+              {
+                root_key: key,
+                path: [],
+                edit: { Update: { key, value: [...terminalRowData(id, "after", 7)] } },
+              },
+            ],
+          },
+          transform,
+          nativeColumns,
+        ),
+      ).toThrow(/addressed missing root/);
+      expect(manager.all()).toEqual([{ id, name: "before", count: 6 }]);
+    }
+
+    const typedV2Occurrence = Uint8Array.from([
+      2,
+      ...uuidBytes(id),
+      0,
+      0,
+      0,
+      1,
+      ...uuidBytes(joinedId),
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      3,
+      0x61,
+      0x72,
+      0x6d,
+    ]);
+    const manager = new SubscriptionManager<TestItem>();
+    manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: nativeAddedRecord(id, 0, "typed", 8),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 1,
+        removedCount: 0,
+        updatedCount: 0,
+        addedOccurrenceKeys: [typedV2Occurrence],
+      },
+      transform,
+      nativeColumns,
+    );
+    const legacyComposite = [10, ...uuidBytes(id), 10, ...uuidBytes(joinedId)];
+    expect(
+      manager.handleDelta(
+        {
+          __jazzNativeRowDelta: true,
+          added: new Uint8Array(),
+          removed: new Uint8Array(),
+          updated: new Uint8Array(),
+          addedCount: 0,
+          removedCount: 0,
+          updatedCount: 0,
+          terminalOperations: [
+            {
+              root_key: legacyComposite,
+              path: [],
+              edit: { Update: { key: legacyComposite, value: [...terminalRowData(id, "bad", 9)] } },
+            },
+          ],
+        },
+        transform,
+        nativeColumns,
+      ),
+    ).toEqual({ delta: [], all: [{ id, name: "typed", count: 8 }] });
+    expect(manager.all()).toEqual([{ id, name: "typed", count: 8 }]);
+  });
+
+  it("bridges a unique legacy snapshot root to its composite terminal address", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const id = "00000000-0000-4000-8000-000000000001";
+    const joinedId = "00000000-0000-4000-8000-000000000002";
+    const key = [10, ...uuidBytes(id), 10, ...uuidBytes(joinedId)];
+    manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: nativeAddedRecord(id, 0, "snapshot", 1),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 1,
+        removedCount: 0,
+        updatedCount: 0,
+      },
+      transform,
+      nativeColumns,
+    );
+
+    const result = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: key,
+            path: [],
+            edit: { Update: { key, value: [...terminalRowData(id, "patched", 2)] } },
+          },
+        ],
+      },
+      transform,
+      nativeColumns,
+    );
+
+    expect(result.all).toEqual([{ id, name: "patched", count: 2 }]);
+    expect(result.delta).toMatchObject([{ kind: 2, id }]);
+  });
+
+  it("treats a missing UUID-only terminal root update as an idempotent stale patch", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const id = "00000000-0000-4000-8000-000000000001";
+    const key = [10, ...uuidBytes(id)];
+
+    const result = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: key,
+            path: [],
+            edit: { Update: { key, value: [...terminalRowData(id, "stale", 1)] } },
+          },
+        ],
+      },
+      transform,
+      nativeColumns,
+    );
+
+    expect(result).toEqual({ delta: [], all: [] });
+  });
+
   it("rejects mismatched terminal identities without mutating subscription state", () => {
     const manager = new SubscriptionManager<TestItem>();
     const id = "00000000-0000-4000-8000-000000000001";

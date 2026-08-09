@@ -3745,7 +3745,13 @@ export function decodeNestedRowBytes(
         name,
         valueBytes == null
           ? { type: "Null" }
-          : decodeBytes(column.column_type, valueBytes, name, payloadDescriptor[index]?.valueType),
+          : decodeBytes(
+              column.column_type,
+              valueBytes,
+              name,
+              payloadDescriptor[index]?.valueType,
+              carrier,
+            ),
       );
     }
     const row: { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } = {

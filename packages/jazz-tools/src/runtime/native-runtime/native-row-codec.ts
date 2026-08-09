@@ -340,7 +340,7 @@ export function decodeNativeTerminalRow(
   raw: Uint8Array,
 ): WasmRow {
   const terminalColumns = [terminalRowKeyColumn, ...columns];
-  const decoded = decodeNativeRowValues(terminalColumns, raw);
+  const decoded = decodeNativeTerminalRowValues(terminalColumns, raw);
   const embeddedKey = decoded[0];
   if (embeddedKey?.type !== "Uuid" || embeddedKey.value !== id) {
     throw new Error(
@@ -356,6 +356,45 @@ export function decodeNativeTerminalRow(
     configurable: true,
   });
   return row;
+}
+
+/**
+ * Groove terminal payloads retain `Record` values for nested relation rows.
+ * Ordinary packed transport deliberately represents those rows as byte arrays
+ * with an id/length envelope instead. Both outer records have the same layout,
+ * but decoding a terminal tree through the ordinary path makes the first UUID
+ * of a child look like that envelope's flag and length.
+ */
+function decodeNativeTerminalRowValues(
+  columns: readonly ColumnDescriptor[],
+  raw: Uint8Array,
+): Value[] {
+  const descriptor = descriptorFromColumns(columns);
+  return columns.map((column, index) => {
+    const bytes = decodeRecordValue(descriptor, raw, index);
+    if (bytes == null) return { type: "Null" };
+    return decodeTerminalBytes(column.column_type, bytes);
+  });
+}
+
+function decodeTerminalBytes(type: ColumnType, bytes: Uint8Array): Value {
+  switch (type.type) {
+    case "Array":
+      return { type: "Array", value: decodeTerminalArray(type.element, bytes) };
+    case "Row": {
+      if (bytes.byteLength < 16) throw new Error("terminal nested row is missing its physical key");
+      const id = formatUuid(bytes.subarray(0, 16));
+      return { type: "Row", value: decodeNativeTerminalRow(id, type.columns, bytes) };
+    }
+    default:
+      return decodeBytes(type, bytes);
+  }
+}
+
+function decodeTerminalArray(elementType: ColumnType, bytes: Uint8Array): Value[] {
+  return decodeArrayElements(elementType, bytes, (element) =>
+    decodeTerminalBytes(elementType, element),
+  );
 }
 
 export function encodeNativeRowValues(
