@@ -2188,6 +2188,7 @@ fn collector_layout_retains_public_magic_timestamp_fields_on_child_rows() {
     projection.paths[0].fields = FieldProjection::Fields(BTreeSet::from([
         "$createdAt".to_owned(),
         "$updatedAt".to_owned(),
+        "title".to_owned(),
     ]));
     let program = lower_query_program(request, &mut InlineCollectorResolver::new(None))
         .expect("magic timestamp child projection should lower");
@@ -2210,6 +2211,8 @@ fn collector_layout_retains_public_magic_timestamp_fields_on_child_rows() {
     let ValueType::Record(row) = row.as_ref() else {
         panic!("tags must contain records");
     };
+    assert!(row.field_index("title").is_some());
+    assert!(row.field_index("user_title").is_none());
     assert!(row.field_index("$createdAt").is_some());
     assert!(row.field_index("$updatedAt").is_some());
     assert!(row.field_index("$createdBy").is_none());

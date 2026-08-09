@@ -6085,7 +6085,7 @@ fn collect_slot_layouts(
                         output: if is_row_id {
                             source_field.clone()
                         } else {
-                            collect_projection_output_field(&source_field)
+                            collect_nested_projection_output_field(&source_field)
                         },
                         value_type,
                         output_value_type,
@@ -6140,6 +6140,19 @@ fn collect_projection_output_field(field: &str) -> String {
         // emitting logical names here makes core CurrentRow decoding silently
         // treat every selected cell as absent.
         _ => field.to_owned(),
+    }
+}
+
+fn collect_nested_projection_output_field(field: &str) -> String {
+    match field {
+        "$createdAt" | "$createdBy" | "$updatedAt" | "$updatedBy" => field.to_owned(),
+        "created_at" => "$createdAt".to_owned(),
+        "created_by" => "$createdBy".to_owned(),
+        "updated_at" => "$updatedAt".to_owned(),
+        "updated_by" => "$updatedBy".to_owned(),
+        // Nested records are public tree payloads rather than CurrentRow codec
+        // records, so their user columns retain the logical schema names.
+        _ => logical_user_column(field).to_owned(),
     }
 }
 
