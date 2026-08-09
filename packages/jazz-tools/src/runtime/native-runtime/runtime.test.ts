@@ -22,6 +22,22 @@ import { decodeNativeDelta } from "../subscription-manager.js";
 import { definePermissions } from "../../permissions/index.js";
 import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
+import { createOpenBatchId, type BatchId, type OpenBatchId, type WriteReceipt } from "../client.js";
+
+function beginTestBatch(runtime: NativeRuntimeAdapter, userId?: string): OpenBatchId {
+  const id = createOpenBatchId();
+  runtime.beginTransaction(
+    "mergeable",
+    id,
+    userId === undefined ? undefined : JSON.stringify({ user_id: userId }),
+  );
+  return id;
+}
+
+async function committedBatchId(receipt: WriteReceipt): Promise<BatchId> {
+  if (receipt.kind !== "committed") throw new Error("expected committed write receipt");
+  return await receipt.batchId;
+}
 
 const previousWebSocket = globalThis.WebSocket;
 
@@ -808,7 +824,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       "00000000-0000-0000-0000-000000000123",
     );
 
-    await runtime.waitForTransaction(inserted.transactionId, "edge");
+    await runtime.waitForTransaction(await committedBatchId(inserted), "edge");
 
     await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual([
       {
@@ -886,6 +902,7 @@ describe("NativeRuntimeAdapter server transport", () => {
   });
 
   it("stages session-scoped mergeable transaction writes through identity-aware core txs", () => {
+    const alice = "00000000-0000-0000-0000-0000000000a1";
     const authors: string[] = [];
     const staged: string[] = [];
     const runtime = new NativeRuntimeAdapter(
@@ -894,7 +911,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: () => encodeRows([]),
             allForIdentity: () => encodeRows([]),
-            mergeableTxForIdentity: (author: Uint8Array) => {
+            mergeableTxForIdentity: (_openBatchId: string, author: Uint8Array) => {
               authors.push(formatUuidForTest(author));
               return fakeTx({
                 insertWithIdEncoded: (table: string) => staged.push(table),
@@ -914,19 +931,108 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
 
-    const tx = runtime.beginTransaction("mergeable");
+    const tx = beginTestBatch(runtime, alice);
     runtime.insert(
       "todos",
       { title: { type: "Text", value: "session tx" } },
       JSON.stringify({
         batch_id: tx,
-        session: { user_id: "00000000-0000-0000-0000-0000000000a1" },
+        session: { user_id: alice },
       }),
       "00000000-0000-0000-0000-000000000001",
     );
 
     expect(authors).toEqual(["00000000-0000-0000-0000-0000000000a1"]);
     expect(staged).toEqual(["todos"]);
+  });
+
+  it("rejects a duplicate live OpenBatchId without replacing its staged transaction", () => {
+    const stagedTransactions: string[][] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            mergeableTx: () => {
+              const staged: string[] = [];
+              stagedTransactions.push(staged);
+              return fakeTx({ insertWithIdEncoded: (table: string) => staged.push(table) });
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const id = createOpenBatchId();
+    runtime.beginTransaction("mergeable", id);
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "first" } },
+      JSON.stringify({ batch_id: id }),
+    );
+
+    expect(() => runtime.beginTransaction("mergeable", id)).toThrow(
+      `Begin transaction failed: batch ${id} has already been opened`,
+    );
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "second" } },
+      JSON.stringify({ batch_id: id }),
+    );
+
+    expect(stagedTransactions).toEqual([["todos", "todos"]]);
+  });
+
+  it("commits empty exclusive batches, rejects empty mergeable batches, and rejects unknown waits", async () => {
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ exclusiveTx: () => fakeTx() }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const emptyMergeable = createOpenBatchId();
+    runtime.beginTransaction("mergeable", emptyMergeable);
+    expect(() => runtime.commitTransaction(emptyMergeable)).toThrow(
+      "empty mergeable batch has no committed unit; roll it back instead",
+    );
+    await runtime.rollbackTransaction(emptyMergeable);
+
+    const openBatchId = createOpenBatchId();
+    runtime.beginTransaction("exclusive", openBatchId);
+    const committed = await runtime.commitTransaction(openBatchId);
+    expect(committed).toBe("00000000000070008000000000000001");
+    await expect(
+      runtime.waitForTransaction("00000000000070008000000000000002" as BatchId, "local"),
+    ).rejects.toThrow("Wait for batch failed: unknown batch 00000000000070008000000000000002");
+
+    const reopened = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ exclusiveTx: () => fakeTx() }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    await expect(reopened.waitForTransaction(committed, "local")).rejects.toThrow(
+      `Wait for batch failed: unknown batch ${committed}`,
+    );
   });
 
   it("passes caller-supplied updatedAt into staged mergeable transaction writes", () => {
@@ -964,7 +1070,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
 
-    const tx = runtime.beginTransaction("mergeable");
+    const tx = beginTestBatch(runtime);
     const context = JSON.stringify({ batch_id: tx, updated_at: updatedAt });
     const rowId = "00000000-0000-0000-0000-000000000001";
     runtime.insert("todos", { title: { type: "Text", value: "inserted" } }, context, rowId);
@@ -983,6 +1089,7 @@ describe("NativeRuntimeAdapter server transport", () => {
   });
 
   it("rejects mixed identities within one mergeable transaction", () => {
+    const alice = "00000000-0000-0000-0000-0000000000a1";
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
@@ -1004,13 +1111,13 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
 
-    const tx = runtime.beginTransaction("mergeable");
+    const tx = beginTestBatch(runtime, alice);
     runtime.insert(
       "todos",
       { title: { type: "Text", value: "one" } },
       JSON.stringify({
         batch_id: tx,
-        session: { user_id: "00000000-0000-0000-0000-0000000000a1" },
+        session: { user_id: alice },
       }),
       "00000000-0000-0000-0000-000000000001",
     );
@@ -1030,7 +1137,6 @@ describe("NativeRuntimeAdapter server transport", () => {
 
   it("routes session-scoped transaction reads through the identity-aware native method", async () => {
     const alice = uuidBytes("00000000-0000-0000-0000-0000000000a1");
-    const bob = uuidBytes("00000000-0000-0000-0000-0000000000b2");
     const tx = fakeTx();
     const seenAuthors: string[] = [];
     const runtime = new NativeRuntimeAdapter(
@@ -1071,7 +1177,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
 
-    const transactionId = runtime.beginTransaction("mergeable");
+    const transactionId = beginTestBatch(runtime, "00000000-0000-0000-0000-0000000000a1");
     runtime.insert(
       "todos",
       { title: { type: "Text", value: "alice pending" } },
@@ -6071,8 +6177,47 @@ function encodeBinaryLargeValueRows(): Uint8Array {
 function fakeDb<T extends object>(
   db: T,
 ): T & { setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void } {
+  type FakeOpenBatch = {
+    kind: "mergeable" | "exclusive";
+    author?: Uint8Array;
+    tx?: TxForTest;
+  };
+  const implementation = db as T & {
+    mergeableTx?(openBatchId: string): TxForTest;
+    mergeableTxForIdentity?(openBatchId: string, author: Uint8Array): TxForTest;
+    exclusiveTx?(openBatchId: string): TxForTest;
+  };
+  const openBatches = new Map<string, FakeOpenBatch>();
+  const attach = (openBatchId: string, kind: FakeOpenBatch["kind"]): TxForTest => {
+    const batch = openBatches.get(openBatchId);
+    if (!batch || batch.kind !== kind) throw new Error(`unknown ${kind} batch ${openBatchId}`);
+    batch.tx ??=
+      kind === "exclusive"
+        ? (implementation.exclusiveTx?.(openBatchId) ?? fakeTx())
+        : batch.author && implementation.mergeableTxForIdentity
+          ? implementation.mergeableTxForIdentity(openBatchId, batch.author)
+          : (implementation.mergeableTx?.(openBatchId) ?? fakeTx());
+    return batch.tx;
+  };
   return {
     setTickScheduler: () => undefined,
+    beginTransaction: (openBatchId: string, kind: FakeOpenBatch["kind"], author?: Uint8Array) => {
+      openBatches.set(openBatchId, { kind, author });
+    },
+    attachMergeableTx: (openBatchId: string) => attach(openBatchId, "mergeable"),
+    attachExclusiveTx: (openBatchId: string) => attach(openBatchId, "exclusive"),
+    commitTransaction: (openBatchId: string) => {
+      const batch = openBatches.get(openBatchId);
+      if (!batch) throw new Error(`unknown batch ${openBatchId}`);
+      openBatches.delete(openBatchId);
+      return batch.tx?.commit() ?? fakeWrite();
+    },
+    rollbackTransaction: (openBatchId: string) => {
+      const batch = openBatches.get(openBatchId);
+      if (!batch) throw new Error(`unknown batch ${openBatchId}`);
+      batch.tx?.rollback();
+      openBatches.delete(openBatchId);
+    },
     ...db,
   };
 }
@@ -6092,6 +6237,7 @@ function fakeTx(overrides: Partial<TxForTest> = {}): TxForTest {
 
 function fakeWrite() {
   return {
+    batchId: "00000000000070008000000000000001",
     payload: new Uint8Array(0),
     wait: () => undefined,
     writeState: () => ({}),

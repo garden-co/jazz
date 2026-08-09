@@ -15,7 +15,7 @@ Because the JavaScript default is mergeable, the wasm implementation now keeps b
 
 - `crates/jazz/src/node/query_eval.rs` keeps `NodeState::tx_query` as the `AuthorId::SYSTEM` compatibility path and adds `tx_query_for_identity` so open-transaction reads can evaluate with the caller identity instead of system identity.
 - `crates/jazz/src/db.rs` exposes `exclusive_all` / `exclusive_all_for_identity` and an abandon helper for open transaction handles.
-- `crates/jazz-wasm/src/lib.rs` backs every `WasmTx` with an `OpenTxId`, stages `insert` / `restore` / `update` / `upsert` / `delete` into that open transaction as writes happen, and exposes `allInTransaction`, `allInTransactionForIdentity`, `oneInTransaction`, and `oneInTransactionForIdentity`.
+- `crates/jazz-wasm/src/lib.rs` backs every `WasmTx` with an `OpenBatchId`, stages `insert` / `restore` / `update` / `upsert` / `delete` into that open transaction as writes happen, and exposes `allInTransaction`, `allInTransactionForIdentity`, `oneInTransaction`, and `oneInTransactionForIdentity`.
 - The wasm boundary still rejects `read_view` in the normal read options parser. This slice uses explicit in-transaction read methods rather than adding `ReadViewSpec` plumbing.
 
 ## TypeScript adapter change

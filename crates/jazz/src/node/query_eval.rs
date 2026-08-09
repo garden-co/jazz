@@ -961,19 +961,38 @@ where
             };
             (graph, descriptor, metadata, BTreeSet::new())
         } else if let Some(tx_id) = open_tx_overlay {
-            if request.visibility != RowVisibility::Visible {
-                return Err(source_resolution_error(
-                    request,
-                    SourceGap::TransactionReadOverlay,
-                ));
-            }
+            let include_deleted = request.visibility == RowVisibility::IncludeDeleted;
             let rows = self
                 .node
-                .tx_current_rows(tx_id, &request.source.table)
+                .tx_current_rows_in_schema_with_options(
+                    tx_id,
+                    self.read_view.read_schema,
+                    &request.source.table,
+                    include_deleted,
+                )
                 .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
-            let graph = inline_current_graph(&table, rows)
-                .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
-            let descriptor = current_row_descriptor(&table);
+            let (graph, descriptor) = if include_deleted {
+                let rows = rows
+                    .into_iter()
+                    .map(|row| {
+                        let deleted = row.is_deleted();
+                        (row, deleted)
+                    })
+                    .collect();
+                (
+                    inline_include_deleted_current_graph(&table, rows).map_err(|_| {
+                        source_resolution_error(request, SourceGap::TransactionReadOverlay)
+                    })?,
+                    include_deleted_current_row_descriptor(&table),
+                )
+            } else {
+                (
+                    inline_current_graph(&table, rows).map_err(|_| {
+                        source_resolution_error(request, SourceGap::TransactionReadOverlay)
+                    })?,
+                    current_row_descriptor(&table),
+                )
+            };
             (graph, descriptor, BTreeMap::new(), BTreeSet::new())
         } else if request.visibility == RowVisibility::Visible
             && self.needs_projected_current_source(&request.source.table)
@@ -1246,7 +1265,7 @@ where
         table: &TableSchema,
         graph_tier: Option<DurabilityTier>,
         history_position: Option<GlobalSeq>,
-        open_tx_overlay: Option<OpenTxId>,
+        open_tx_overlay: Option<OpenBatchId>,
         branch_data: Option<BranchId>,
     ) -> Result<Option<DeletionRegisterSource>, SourceResolutionError> {
         if !request
@@ -1294,7 +1313,7 @@ where
         table: &TableSchema,
         graph_tier: Option<DurabilityTier>,
         history_position: Option<GlobalSeq>,
-        open_tx_overlay: Option<OpenTxId>,
+        open_tx_overlay: Option<OpenBatchId>,
         branch_data: Option<BranchId>,
     ) -> Result<Option<ContentVersionSource>, SourceResolutionError> {
         if !request
@@ -2357,7 +2376,7 @@ fn historical_query_read_set(
 fn tx_query_read_set(
     shape: &NormalizedRowSetShape,
     schema_version: SchemaVersionId,
-    tx_id: OpenTxId,
+    tx_id: OpenBatchId,
     snapshot: Snapshot,
 ) -> RequestedReadSet {
     let projection = SchemaProjection {
@@ -5072,7 +5091,7 @@ where
         // selected roots to their advertised order before sending a reset.
         self.apply_query_order(shape.query(), &mut rows)?;
         if shape.query().flat_join.is_none() {
-            self.apply_projection(shape.query(), &mut rows)?;
+            self.apply_projection_in_schema(shape.query(), shape.schema_version(), &mut rows)?;
         }
         let root_count = rows.len();
         let mut edges = Vec::new();
@@ -5701,11 +5720,12 @@ where
 
     fn compile_open_tx_query_program(
         &mut self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         shape: &ValidatedQuery,
         binding: &Binding,
         identity: AuthorId,
         output: CurrentQueryProgramOutput,
+        include_deleted: bool,
     ) -> Result<QueryProgram, Error> {
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
         let read_schema = self
@@ -5716,7 +5736,11 @@ where
         let lowered_shape =
             inline_snapshot_bind_filter_literals(shape, binding, &read_schema.schema)?;
         let binding = lowered_shape.bind(BTreeMap::new())?;
-        let input_shape = self.normalized_row_set_shape(&lowered_shape, &binding)?;
+        let input_shape = if include_deleted {
+            self.normalized_include_deleted_row_set_shape(&lowered_shape, &binding)?
+        } else {
+            self.normalized_row_set_shape(&lowered_shape, &binding)?
+        };
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape(
                 &lowered_shape,
@@ -6945,7 +6969,7 @@ where
                 .query_rows_including_deleted_with_query_engine(shape, binding, tier, identity)?;
             let query = shape.query();
             self.finish_engine_query_rows(query, &mut rows)?;
-            self.apply_projection(query, &mut rows)?;
+            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
             return Ok(rows);
         }
         let settled_binding_view = (tier == DurabilityTier::Global)
@@ -7067,7 +7091,7 @@ where
         let query = shape.query();
         self.finish_engine_query_rows(query, &mut rows)?;
         if query.flat_join.is_none() {
-            self.apply_projection(query, &mut rows)?;
+            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
         }
         Ok(rows)
     }
@@ -7210,7 +7234,7 @@ where
         profile.finish_rows = phase_started.elapsed();
 
         let phase_started = Instant::now();
-        self.apply_projection(query, &mut rows)?;
+        self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
         profile.apply_projection = phase_started.elapsed();
         profile.total = total_started.elapsed();
         Ok((rows, profile))
@@ -7398,7 +7422,7 @@ where
         let mut rows = self.query_rows_at_with_query_engine(shape, binding, position, identity)?;
         let query = shape.query();
         self.finish_engine_query_rows(query, &mut rows)?;
-        self.apply_projection(query, &mut rows)?;
+        self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
         Ok(rows)
     }
 
@@ -8950,7 +8974,7 @@ where
         };
         let query = shape.query();
         self.finish_engine_query_rows(query, &mut rows)?;
-        self.apply_projection(query, &mut rows)?;
+        self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
         Ok(rows)
     }
 
@@ -9289,15 +9313,28 @@ where
         query: &crate::query::Query,
         rows: &mut Vec<CurrentRow>,
     ) -> Result<(), Error> {
+        self.finish_engine_query_rows_in_schema(
+            query,
+            self.catalogue.current_write_schema.schema,
+            rows,
+        )
+    }
+
+    fn finish_engine_query_rows_in_schema(
+        &self,
+        query: &crate::query::Query,
+        schema_version: SchemaVersionId,
+        rows: &mut Vec<CurrentRow>,
+    ) -> Result<(), Error> {
         if query.aggregate.is_some() {
-            self.apply_query_order(query, rows)?;
+            self.apply_query_order_in_schema(query, schema_version, rows)?;
             apply_query_window(query, rows);
             return Ok(());
         }
         // Groove lowering owns membership/windowing, but one-shot APIs still
         // return a deterministic Vec. Re-apply ordering to the selected rows
         // without re-applying pagination.
-        self.apply_query_order(query, rows)
+        self.apply_query_order_in_schema(query, schema_version, rows)
     }
 
     fn query_output_table(
@@ -9316,6 +9353,15 @@ where
     pub(crate) fn apply_query_order(
         &self,
         query: &crate::query::Query,
+        rows: &mut [CurrentRow],
+    ) -> Result<(), Error> {
+        self.apply_query_order_in_schema(query, self.catalogue.current_write_schema.schema, rows)
+    }
+
+    fn apply_query_order_in_schema(
+        &self,
+        query: &crate::query::Query,
+        schema_version: SchemaVersionId,
         rows: &mut [CurrentRow],
     ) -> Result<(), Error> {
         if query.order_by.is_empty() {
@@ -9342,7 +9388,7 @@ where
             });
             return Ok(());
         }
-        let table = self.table(&query.table)?.clone();
+        let table = self.table_in_schema(&query.table, schema_version)?;
         rows.sort_by(|left, right| {
             for order in &query.order_by {
                 let ordering = compare_optional_values(
@@ -9367,10 +9413,19 @@ where
         query: &crate::query::Query,
         rows: &mut [CurrentRow],
     ) -> Result<(), Error> {
+        self.apply_projection_in_schema(query, self.catalogue.current_write_schema.schema, rows)
+    }
+
+    fn apply_projection_in_schema(
+        &self,
+        query: &crate::query::Query,
+        schema_version: SchemaVersionId,
+        rows: &mut [CurrentRow],
+    ) -> Result<(), Error> {
         let Some(columns) = &query.select else {
             return Ok(());
         };
-        let table = self.table(&query.table)?.clone();
+        let table = self.table_in_schema(&query.table, schema_version)?;
         for row in rows {
             *row = row.project(&table, columns)?;
         }
@@ -9380,7 +9435,7 @@ where
     /// Evaluate a validated query inside an open exclusive transaction.
     pub fn tx_query(
         &mut self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<Vec<CurrentRow>, Error> {
@@ -9390,20 +9445,34 @@ where
     /// Evaluate a validated query inside an open exclusive transaction as `identity`.
     pub fn tx_query_for_identity(
         &mut self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         shape: &ValidatedQuery,
         binding: &Binding,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.tx_query_for_identity_with_options(tx_id, shape, binding, identity, false)
+    }
+
+    /// Evaluate a validated query inside an open transaction with explicit
+    /// root-row deletion visibility.
+    pub fn tx_query_for_identity_with_options(
+        &mut self,
+        tx_id: OpenBatchId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorId,
+        include_deleted: bool,
+    ) -> Result<Vec<CurrentRow>, Error> {
         let query = shape.query();
         let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
-        let table = self.table(&query.table)?.clone();
+        let table = self.table_in_schema(&query.table, shape.schema_version())?;
         let program = self.compile_open_tx_query_program(
             tx_id,
             shape,
             binding,
             identity,
             CurrentQueryProgramOutput::AppRows,
+            include_deleted,
         )?;
         let deltas = self
             .database
@@ -9420,7 +9489,10 @@ where
         let open_tx = self.open_tx_mut(tx_id)?;
         open_tx.predicate_reads.truncate(predicate_len);
         open_tx.predicate_reads.push(predicate_read);
-        self.finish_engine_query_rows(query, &mut rows)?;
+        self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
+        if query.flat_join.is_none() {
+            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
+        }
         Ok(rows)
     }
 
@@ -14893,7 +14965,8 @@ mod tests {
             .bind(BTreeMap::from([("user".to_owned(), Value::Uuid(alice.0))]))
             .unwrap();
 
-        let open = client.open_exclusive().unwrap();
+        let open = OpenBatchId::new();
+        client.open_exclusive(open).unwrap();
         let rows = client
             .tx_query(open, &shape, &binding)
             .unwrap()
@@ -14935,7 +15008,8 @@ mod tests {
             .validate(&schema())
             .unwrap();
         let binding = shape.bind(BTreeMap::new()).unwrap();
-        let tx = node.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        node.open_exclusive(tx).unwrap();
         assert_eq!(node.tx_query(tx, &shape, &binding).unwrap().len(), 1);
         commit_issue(&mut node, 2, "open", author(1));
         assert_eq!(node.tx_query(tx, &shape, &binding).unwrap().len(), 1);
@@ -15009,7 +15083,8 @@ mod tests {
         let binding = shape
             .bind(BTreeMap::from([("team".to_owned(), Value::Uuid(team1.0))]))
             .unwrap();
-        let tx = node.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        node.open_exclusive(tx).unwrap();
         let rows = node
             .tx_query(tx, &shape, &binding)
             .unwrap()

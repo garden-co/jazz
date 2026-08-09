@@ -42,6 +42,7 @@ pub use public_schema::{
     TableName, TablePolicies, TableSchema, Value, WriteContext, permissions, policy_expr,
 };
 pub use schema_lens::{Direction, Lens, LensOp, LensTransform};
+pub use transaction::OpenBatchId;
 
 #[cfg(feature = "client")]
 pub use crate::db::TextEdit;

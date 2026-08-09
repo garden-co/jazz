@@ -358,7 +358,10 @@ async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results_
         )
         .expect("update todo from client a");
     client_a
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("update reaches edge");
 
@@ -431,7 +434,10 @@ async fn delete_through_one_client_removes_row_from_peer_query_results_impl() {
 
     let batch_id = client_a.delete(todo_id).expect("delete todo from client a");
     client_a
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("delete reaches edge");
 
@@ -539,11 +545,17 @@ async fn wait_for_batch_reaches_edge_and_global_tiers() {
                 .expect("insert todo");
 
             alice
-                .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("edge wait_for_batch should resolve from scheduled core progress");
             alice
-                .wait_for_batch(batch_id, DurabilityTier::GlobalServer)
+                .wait_for_batch(
+                    batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::GlobalServer,
+                )
                 .await
                 .expect("global wait_for_batch should resolve from scheduled core progress");
 

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::tools::metadata::SYSTEM_PRINCIPAL_ID;
-use crate::tools::transaction::BatchId;
+use crate::tools::transaction::OpenBatchId;
 
 /// Auth mode derived from the JWT's `iss` claim.
 ///
@@ -177,7 +177,7 @@ pub struct WriteContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub batch_id: Option<BatchId>,
+    pub batch_id: Option<OpenBatchId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_branch_name: Option<String>,
 }
@@ -198,7 +198,7 @@ impl WriteContext {
         self
     }
 
-    pub fn with_batch_id(mut self, batch_id: BatchId) -> Self {
+    pub fn with_batch_id(mut self, batch_id: OpenBatchId) -> Self {
         self.batch_id = Some(batch_id);
         self
     }
@@ -212,7 +212,7 @@ impl WriteContext {
         self.session.as_ref()
     }
 
-    pub fn batch_id(&self) -> Option<BatchId> {
+    pub fn batch_id(&self) -> Option<OpenBatchId> {
         self.batch_id
     }
 
@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn test_write_context_batch_id_override() {
-        let batch_id = BatchId::new();
+        let batch_id = OpenBatchId::new();
         let context =
             WriteContext::from_session(Session::new("session-user")).with_batch_id(batch_id);
 

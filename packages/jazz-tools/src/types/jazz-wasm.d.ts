@@ -21,6 +21,7 @@ declare module "jazz-wasm" {
   export class QueryAttachment {}
 
   export class WasmWrite {
+    readonly batchId: string;
     readonly payload: Uint8Array;
     writeState(): unknown;
     nextWriteStateChange(): Promise<void>;
@@ -69,6 +70,13 @@ declare module "jazz-wasm" {
     static openMemory(schema: Uint8Array, config: Uint8Array): WasmDb;
     static openBrowser(namespace: string, schema: Uint8Array, config: Uint8Array): Promise<WasmDb>;
     static destroyBrowserStorage(namespace: string): Promise<void>;
+
+    registerSchema(schema: Uint8Array): WasmDb;
+    beginTransaction(openBatchId: string, kind: string, author?: Uint8Array | null): void;
+    commitTransaction(openBatchId: string, kind?: string | null): WasmWrite;
+    rollbackTransaction(openBatchId: string): void;
+    attachMergeableTx(openBatchId: string): WasmTx;
+    attachExclusiveTx(openBatchId: string): WasmTx;
 
     prepareQuery(query: Uint8Array): WasmPreparedQuery;
     all(query: WasmPreparedQuery, opts: unknown): Uint8Array;
@@ -143,8 +151,8 @@ declare module "jazz-wasm" {
     close(): boolean;
     connectUpstream(): WasmTransport;
     acceptSubscriber(identity: Uint8Array): WasmTransport;
-    mergeableTx(): WasmTx;
-    mergeableTxForIdentity(author: Uint8Array): WasmTx;
-    exclusiveTx(): WasmTx;
+    mergeableTx(openBatchId: string): WasmTx;
+    mergeableTxForIdentity(openBatchId: string, author: Uint8Array): WasmTx;
+    exclusiveTx(openBatchId: string): WasmTx;
   }
 }

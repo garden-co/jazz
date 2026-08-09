@@ -8,7 +8,14 @@ import type {
   WasmSchema,
 } from "../../drivers/types.js";
 import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
-import type { InsertResult, MutationResult, Runtime, TransactionKind } from "../client.js";
+import type {
+  BatchId,
+  InsertResult,
+  MutationResult,
+  OpenBatchId,
+  Runtime,
+  TransactionKind,
+} from "../client.js";
 import type { Session } from "../context.js";
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
 import {
@@ -61,6 +68,12 @@ type NativeDbConstructor = {
 };
 
 type NativeDb = {
+  registerSchema(schema: Uint8Array): NativeDb;
+  beginTransaction(openBatchId: string, kind: TransactionKind, author?: Uint8Array): void;
+  commitTransaction(openBatchId: string, kind?: TransactionKind): Write;
+  rollbackTransaction(openBatchId: string): void;
+  attachMergeableTx(openBatchId: string): Tx;
+  attachExclusiveTx?(openBatchId: string): Tx;
   all(query: PreparedQuery, opts: unknown): Uint8Array;
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
   allRelationQuery?(queryJson: string, opts: unknown): Uint8Array;
@@ -162,9 +175,9 @@ type NativeDb = {
     author: Uint8Array,
   ): boolean;
   canDeleteForIdentity?(table: string, rowId: Uint8Array, author: Uint8Array): boolean;
-  mergeableTx(): Tx;
-  mergeableTxForIdentity?(author: Uint8Array): Tx;
-  exclusiveTx?(): Tx;
+  mergeableTx(openBatchId: OpenBatchId): Tx;
+  mergeableTxForIdentity?(openBatchId: OpenBatchId, author: Uint8Array): Tx;
+  exclusiveTx?(openBatchId: OpenBatchId): Tx;
   allInTransaction?(query: PreparedQuery, tx: Tx, opts: unknown): Uint8Array;
   allInTransactionForIdentity?(
     query: PreparedQuery,
@@ -192,6 +205,7 @@ type Subscription = {
 };
 
 type Write = {
+  readonly batchId: string;
   payload: Uint8Array;
   wait(tier: string): void;
   writeState(): unknown;
@@ -238,8 +252,9 @@ export type Transport = {
 };
 
 type PendingTx = {
+  id: OpenBatchId;
   kind: TransactionKind;
-  tx?: Tx;
+  txByView: Map<NativeRuntimeAdapter, Tx>;
   identity?: Uint8Array;
   writes: PendingTxWrite[];
 };
@@ -247,7 +262,6 @@ type PendingTx = {
 type PendingTxWrite = {
   table: string;
   rowId: Uint8Array;
-  baseRow?: RowState;
   row?: RowState;
   deleted?: boolean;
 };
@@ -255,6 +269,12 @@ type PendingTxWrite = {
 type CompletedTx = {
   kind: TransactionKind;
   state: "committed" | "rolled_back";
+};
+
+type TransactionOwnerState = {
+  pendingTxs: Map<string, PendingTx>;
+  completedTxs: Map<string, CompletedTx>;
+  writes: Map<string, Write>;
 };
 
 type ServerTransportErrorWaiter = {
@@ -350,9 +370,11 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly peerIdentity: Uint8Array;
   private readonly schemaHash: string;
   private readonly preparedQueries = new Map<string, PreparedQuery>();
-  private readonly pendingTxs = new Map<string, PendingTx>();
-  private readonly completedTxs = new Map<string, CompletedTx>();
-  private readonly writes = new Map<string, Write>();
+  private readonly transactionOwner: TransactionOwnerState;
+  private readonly pendingTxs: Map<string, PendingTx>;
+  private readonly completedTxs: Map<string, CompletedTx>;
+  private readonly writes: Map<string, Write>;
+  private readonly ownerRuntime: NativeRuntimeAdapter;
   private readonly serverPumpObservedWrites = new WeakSet<Write>();
   private readonly subscriptions = new Map<number, SubscriptionState>();
   private authFailureCallback: ((reason: string) => void) | null = null;
@@ -370,7 +392,6 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverPumpScheduled = false;
   private serverPumpAgain = false;
   private closed = false;
-  private nextTransactionId = 1;
   private nextSubscriptionId = 1;
 
   static fromDb(
@@ -384,15 +405,36 @@ export class NativeRuntimeAdapter implements Runtime {
     return new NativeRuntimeAdapter(null, schema, node, author, sourceId, historyComplete, { db });
   }
 
+  registerSchemaView(schema: WasmSchema): NativeRuntimeAdapter {
+    return new NativeRuntimeAdapter(null, schema, this.node, this.peerIdentity, 1, true, {
+      db: this.db.registerSchema(encodeSchema(schema)),
+      owner: this,
+    });
+  }
+
   constructor(
     Runtime: NativeDbConstructor | null,
     private readonly schema: WasmSchema,
-    node: Uint8Array,
+    private readonly node: Uint8Array,
     author: Uint8Array,
     sourceId: number,
     historyComplete: boolean,
-    opts?: { persistentPath?: string; db?: NativeDb; initialSyncFlushEvery?: number },
+    opts?: {
+      persistentPath?: string;
+      db?: NativeDb;
+      initialSyncFlushEvery?: number;
+      owner?: NativeRuntimeAdapter;
+    },
   ) {
+    this.ownerRuntime = opts?.owner?.ownerRuntime ?? this;
+    this.transactionOwner = opts?.owner?.transactionOwner ?? {
+      pendingTxs: new Map(),
+      completedTxs: new Map(),
+      writes: new Map(),
+    };
+    this.pendingTxs = this.transactionOwner.pendingTxs;
+    this.completedTxs = this.transactionOwner.completedTxs;
+    this.writes = this.transactionOwner.writes;
     this.schemaBytes = encodeSchema(schema);
     this.configBytes = openConfig(
       node,
@@ -416,6 +458,7 @@ export class NativeRuntimeAdapter implements Runtime {
       }
       this.db = Runtime.openMemory(this.schemaBytes, this.configBytes);
     }
+    if (opts?.owner) return;
     if (typeof this.db.setTickScheduler !== "function") {
       throw new Error("Native runtime requires db.setTickScheduler");
     }
@@ -432,11 +475,17 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   close(): void {
+    if (this.closed) return;
     this.closed = true;
     for (const subscription of this.subscriptions.values()) {
       for (const source of subscription.sources) {
         closeSubscriptionSource(source.source);
       }
+    }
+    if (this !== this.ownerRuntime) {
+      this.subscriptions.clear();
+      this.db.free?.();
+      return;
     }
     for (const write of this.writes.values()) {
       write.close?.();
@@ -470,14 +519,14 @@ export class NativeRuntimeAdapter implements Runtime {
     const updatedAtMs = effectiveUpdatedAtMs(_writeContext);
     const tx = this.currentTx(_writeContext, "Insert");
     if (tx) {
-      const baseRow = this.baseRowForExclusiveWrite(tx, table, rowId, writeIdentity);
       this.txForWrite(tx, writeIdentity).insertWithIdEncoded(table, rowId, cells, updatedAtMs);
       const row = this.rowStateFromValues(table, rowId, values);
-      tx.writes.push({ table, rowId, baseRow, row });
+      tx.writes.push({ table, rowId, row });
       return {
         id: row.id,
         values: row.values,
-        transactionId: txIdFromContext(_writeContext) ?? "",
+        kind: "staged",
+        openBatchId: txIdFromContext(_writeContext)!,
       };
     }
     const write = writeOrNormalizeRejection("Insert", () =>
@@ -502,11 +551,15 @@ export class NativeRuntimeAdapter implements Runtime {
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Restore");
     if (tx) {
-      const baseRow = this.baseRowForExclusiveWrite(tx, table, rowId, writeIdentity);
       this.txForWrite(tx, writeIdentity).restoreEncoded(table, rowId, cells, updatedAtMs);
       const row = this.rowStateFromValues(table, rowId, values);
-      tx.writes.push({ table, rowId, baseRow, row });
-      return { id: row.id, values: row.values, transactionId: txIdFromContext(writeContext) ?? "" };
+      tx.writes.push({ table, rowId, row });
+      return {
+        id: row.id,
+        values: row.values,
+        kind: "staged",
+        openBatchId: txIdFromContext(writeContext)!,
+      };
     }
     const write = writeOrNormalizeRejection("Restore", () =>
       writeIdentity
@@ -530,15 +583,13 @@ export class NativeRuntimeAdapter implements Runtime {
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Update");
     if (tx) {
-      const baseRow = this.baseRowForExclusiveWrite(tx, table, rowId, writeIdentity);
       this.txForWrite(tx, writeIdentity).updateEncoded(table, rowId, patch, updatedAtMs);
       tx.writes.push({
         table,
         rowId,
-        baseRow,
         row: this.mergeRowState(table, rowId, values, tx, writeIdentity),
       });
-      return { transactionId: txIdFromContext(writeContext) ?? "" };
+      return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Update", () =>
       writeIdentity
@@ -573,17 +624,15 @@ export class NativeRuntimeAdapter implements Runtime {
       throw writeError("Upsert", normalizeWriteSetupMessage(errorMessage(error)));
     }
     if (tx) {
-      const baseRow = this.baseRowForExclusiveWrite(tx, table, rowId, writeIdentity);
       this.txForWrite(tx, writeIdentity).upsertEncoded(table, rowId, cells, updatedAtMs);
       tx.writes.push({
         table,
         rowId,
-        baseRow,
         row: existing
           ? this.mergeRowState(table, rowId, values, tx, writeIdentity)
           : this.rowStateFromValues(table, rowId, values),
       });
-      return { transactionId: txIdFromContext(writeContext) ?? "" };
+      return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Upsert", () =>
       writeIdentity
@@ -602,10 +651,9 @@ export class NativeRuntimeAdapter implements Runtime {
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Delete");
     if (tx) {
-      const baseRow = this.baseRowForExclusiveWrite(tx, table, rowId, writeIdentity);
       this.txForWrite(tx, writeIdentity).delete(table, rowId, updatedAtMs);
-      tx.writes.push({ table, rowId, baseRow, deleted: true });
-      return { transactionId: txIdFromContext(writeContext) ?? "" };
+      tx.writes.push({ table, rowId, deleted: true });
+      return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Delete", () =>
       writeIdentity
@@ -670,33 +718,50 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.db.canDeleteForIdentity(table, rowId, identity);
   }
 
-  beginTransaction(kind: TransactionKind): string {
-    const id = `tx-${this.nextTransactionId++}`;
-    this.pendingTxs.set(id, { kind, writes: [] });
+  beginTransaction(
+    kind: TransactionKind,
+    id: OpenBatchId,
+    sessionJson?: string | null,
+  ): OpenBatchId {
+    if (this !== this.ownerRuntime) {
+      return this.ownerRuntime.beginTransaction(kind, id, sessionJson);
+    }
+    if (this.pendingTxs.has(id) || this.completedTxs.has(id)) {
+      throw new Error(`Begin transaction failed: batch ${id} has already been opened`);
+    }
+    const identity =
+      kind === "mergeable" ? sessionFromWriteContext(sessionJson)?.identity : undefined;
+    this.db.beginTransaction(id, kind, identity);
+    this.pendingTxs.set(id, { id, kind, identity, writes: [], txByView: new Map() });
     return id;
   }
 
-  commitTransaction(transactionId: string): void {
-    const pending = this.pendingTxs.get(transactionId);
+  commitTransaction(openBatchId: OpenBatchId): Promise<BatchId> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.commitTransaction(openBatchId);
+    const pending = this.pendingTxs.get(openBatchId);
     if (!pending) {
-      throw new Error(commitTransactionMessage(transactionId, this.completedTxs));
+      throw new Error(commitTransactionMessage(openBatchId, this.completedTxs));
     }
-    this.pendingTxs.delete(transactionId);
-    this.completedTxs.set(transactionId, { kind: pending.kind, state: "committed" });
-    if (!pending.tx) {
-      this.pumpSubscriptions();
-      return;
+    if (pending.writes.length === 0 && pending.kind === "mergeable") {
+      throw new Error(
+        "Commit transaction failed: empty mergeable batch has no committed unit; roll it back instead",
+      );
     }
-    this.rejectMovedExclusiveParents(pending);
-    const write = pending.tx.commit();
-    this.writes.set(transactionId, write);
+    const write = this.db.commitTransaction(openBatchId, pending.kind);
+    this.pendingTxs.delete(openBatchId);
+    this.completedTxs.set(openBatchId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
     this.observeWriteForBoundaryEffects(write);
+    return Promise.resolve(recordWrite(write, this.writes));
   }
 
-  async waitForTransaction(transactionId: string, tier: string): Promise<void> {
-    const write = this.writes.get(transactionId);
-    if (!write) return;
+  async waitForTransaction(batchId: BatchId | Promise<BatchId>, tier: string): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.waitForTransaction(batchId, tier);
+    batchId = await batchId;
+    const write = this.writes.get(batchId);
+    if (!write) {
+      throw new Error(`Wait for batch failed: unknown batch ${batchId}`);
+    }
     for (;;) {
       this.throwServerTransportErrorForTier(tier);
       try {
@@ -707,7 +772,7 @@ export class NativeRuntimeAdapter implements Runtime {
         this.refreshOpenedPlainSubscriptions();
         return;
       } catch (error) {
-        const rejected = rejectedWaitError(transactionId, error);
+        const rejected = rejectedWaitError(batchId, error);
         if (rejected) throw rejected;
         if (!isPendingWaitError(error)) throw error;
         this.pumpSubscriptions();
@@ -720,7 +785,7 @@ export class NativeRuntimeAdapter implements Runtime {
           this.refreshOpenedPlainSubscriptions();
           return;
         } catch (secondError) {
-          const secondRejected = rejectedWaitError(transactionId, secondError);
+          const secondRejected = rejectedWaitError(batchId, secondError);
           if (secondRejected) throw secondRejected;
           if (!isPendingWaitError(secondError)) throw secondError;
         }
@@ -734,15 +799,16 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  rollbackTransaction(transactionId: string): boolean {
-    const pending = this.pendingTxs.get(transactionId);
+  rollbackTransaction(openBatchId: OpenBatchId): Promise<boolean> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.rollbackTransaction(openBatchId);
+    const pending = this.pendingTxs.get(openBatchId);
     if (!pending) {
-      throw new Error(rollbackTransactionMessage(transactionId, this.completedTxs));
+      throw new Error(rollbackTransactionMessage(openBatchId, this.completedTxs));
     }
-    pending.tx?.rollback();
-    this.pendingTxs.delete(transactionId);
-    this.completedTxs.set(transactionId, { kind: pending.kind, state: "rolled_back" });
-    return true;
+    this.db.rollbackTransaction(openBatchId);
+    this.pendingTxs.delete(openBatchId);
+    this.completedTxs.set(openBatchId, { kind: pending.kind, state: "rolled_back" });
+    return Promise.resolve(true);
   }
 
   async query(
@@ -925,6 +991,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   connect(url: string, authJson: string): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.connect(url, authJson);
     // A new transport replaces the old one during a temporary reconnect. Server-tier
     // waits are still meaningful across that transition, so only an explicit runtime
     // shutdown is allowed to reject them.
@@ -962,6 +1029,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   disconnect(options: { rejectWaiters?: boolean } = {}): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
     this.serverCarrier?.close();
     this.serverCarrier = null;
     this.serverCarrierPromise = null;
@@ -982,11 +1050,13 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   updateAuth(authJson: string): Promise<void> | void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.updateAuth(authJson);
     if (!this.serverEndpointUrl) return;
     return this.connect(this.serverEndpointUrl, authJson);
   }
 
   onAuthFailure(callback: (reason: string) => void): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onAuthFailure(callback);
     this.authFailureCallback = callback;
   }
 
@@ -996,18 +1066,18 @@ export class NativeRuntimeAdapter implements Runtime {
     values: InsertValues,
     write: Write,
   ): InsertResult {
-    const transactionId = writeId(write, this.writes);
+    const batchId = recordWrite(write, this.writes);
     this.pumpSubscriptions();
     this.observeWriteForBoundaryEffects(write);
     const row = this.rowStateFromValues(table, rowId, values);
-    return { id: row.id, values: row.values, transactionId };
+    return { id: row.id, values: row.values, kind: "committed", batchId };
   }
 
   private finishMutation(write: Write): MutationResult {
-    const transactionId = writeId(write, this.writes);
+    const batchId = recordWrite(write, this.writes);
     this.pumpSubscriptions();
     this.observeWriteForBoundaryEffects(write);
-    return { transactionId };
+    return { kind: "committed", batchId };
   }
 
   private observeWriteForBoundaryEffects(write: Write): void {
@@ -1069,11 +1139,11 @@ export class NativeRuntimeAdapter implements Runtime {
   private resultForRow(
     table: string,
     rowId: Uint8Array,
-    transactionId: string,
+    receipt: { kind: "committed"; batchId: BatchId } | { kind: "staged"; openBatchId: OpenBatchId },
     identity?: Uint8Array,
   ): InsertResult {
     const row = this.readRow(table, rowId, identity);
-    return { id: formatUuid(rowId), values: row?.values ?? [], transactionId };
+    return { id: formatUuid(rowId), values: row?.values ?? [], ...receipt };
   }
 
   private readRow(table: string, rowId: Uint8Array, identity?: Uint8Array): RowState | undefined {
@@ -1151,7 +1221,7 @@ export class NativeRuntimeAdapter implements Runtime {
     session: RuntimeSession | undefined,
     pendingTx: PendingTx | undefined,
   ): Uint8Array {
-    if (!pendingTx?.tx) {
+    if (!pendingTx) {
       return session
         ? this.db.allForIdentity(query, session.identity, opts)
         : this.db.all(query, opts);
@@ -1160,12 +1230,17 @@ export class NativeRuntimeAdapter implements Runtime {
       if (!this.db.allInTransactionForIdentity) {
         throw new Error("Native runtime does not support session-scoped transaction reads");
       }
-      return this.db.allInTransactionForIdentity(query, pendingTx.tx, session.identity, opts);
+      return this.db.allInTransactionForIdentity(
+        query,
+        this.txForRead(pendingTx),
+        session.identity,
+        opts,
+      );
     }
     if (!this.db.allInTransaction) {
       throw new Error("Native runtime does not support transaction reads");
     }
-    return this.db.allInTransaction(query, pendingTx.tx, opts);
+    return this.db.allInTransaction(query, this.txForRead(pendingTx), opts);
   }
 
   private stagedRowForWriteMerge(
@@ -1434,75 +1509,47 @@ export class NativeRuntimeAdapter implements Runtime {
             "the native runtime exclusive transaction API has no identity-aware staging methods.",
         );
       }
-      if (!pending.tx) {
-        pending.tx = this.exclusiveTx();
-      }
-      return pending.tx;
+      return this.txForRead(pending);
     }
     if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
       throw new Error("Native runtime mergeable transaction cannot mix write identities");
     }
-    if (identity && pending.tx && !pending.identity) {
+    if (identity && !pending.identity) {
       throw new Error("Native runtime mergeable transaction cannot mix write identities");
     }
-    if (!pending.tx) {
-      pending.identity = identity;
-      pending.tx = identity ? this.mergeableTxForIdentity(identity) : this.db.mergeableTx();
-    }
-    return pending.tx;
+    return this.txForRead(pending);
   }
 
-  private baseRowForExclusiveWrite(
-    tx: PendingTx,
-    table: string,
-    rowId: Uint8Array,
-    identity: Uint8Array | undefined,
-  ): RowState | undefined {
-    if (tx.kind !== "exclusive") return undefined;
-    const id = formatUuid(rowId);
-    for (const write of tx.writes) {
-      if (write.table === table && formatUuid(write.rowId) === id) {
-        return write.baseRow;
-      }
-    }
-    return this.readRow(table, rowId, identity);
+  private txForRead(pending: PendingTx): Tx {
+    const existing = pending.txByView.get(this);
+    if (existing) return existing;
+    const tx =
+      pending.kind === "mergeable"
+        ? this.db.attachMergeableTx(pending.id)
+        : this.db.attachExclusiveTx?.(pending.id);
+    if (!tx) throw new Error("Native runtime does not support attached exclusive batches");
+    pending.txByView.set(this, tx);
+    return tx;
   }
 
-  private rejectMovedExclusiveParents(tx: PendingTx): void {
-    if (tx.kind !== "exclusive") return;
-    for (const write of tx.writes) {
-      const current = this.readRowForWriteMerge(write.table, write.rowId);
-      if (rowsMatchForExclusiveParent(this.schema, write.table, current, write.baseRow)) {
-        continue;
-      }
-      throw new Error(
-        "(transaction_conflict): row visible parent changed since transaction write was staged",
-      );
-    }
-  }
-
-  private txForKind(kind: TransactionKind): Tx {
-    return kind === "exclusive" ? this.exclusiveTx() : this.db.mergeableTx();
-  }
-
-  private exclusiveTx(): Tx {
+  private exclusiveTx(id: OpenBatchId): Tx {
     if (!this.db.exclusiveTx) {
       throw new Error(
         "Native runtime cannot perform exclusive transaction writes: " +
           "the native runtime exclusive transaction API is unavailable.",
       );
     }
-    return this.db.exclusiveTx();
+    return this.db.exclusiveTx(id);
   }
 
-  private mergeableTxForIdentity(identity: Uint8Array): Tx {
+  private mergeableTxForIdentity(id: OpenBatchId, identity: Uint8Array): Tx {
     if (!this.db.mergeableTxForIdentity) {
       throw new Error(
         "Native runtime cannot perform session-scoped transaction writes: " +
           "the native runtime mergeable transaction API has no identity-aware staging methods.",
       );
     }
-    return this.db.mergeableTxForIdentity(identity);
+    return this.db.mergeableTxForIdentity(id, identity);
   }
 
   private pumpSubscriptions(): void {
@@ -1980,17 +2027,17 @@ function normalizeTransportFrames(frames: unknown[]): Uint8Array[] {
   );
 }
 
-function writeId(write: Write, writes: Map<string, Write>): string {
-  const id = `tx-${writes.size + 1}`;
+function recordWrite(write: Write, writes: Map<string, Write>): BatchId {
+  const id = write.batchId as BatchId;
   writes.set(id, write);
-  return id;
+  return id as BatchId;
 }
 
-function txIdFromContext(writeContext?: string | null): string | undefined {
+function txIdFromContext(writeContext?: string | null): OpenBatchId | undefined {
   if (!writeContext) return undefined;
   try {
     const parsed = JSON.parse(writeContext) as { batch_id?: unknown };
-    return typeof parsed.batch_id === "string" ? parsed.batch_id : undefined;
+    return typeof parsed.batch_id === "string" ? (parsed.batch_id as OpenBatchId) : undefined;
   } catch {
     return undefined;
   }
@@ -2035,30 +2082,30 @@ function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
   return updatedAtMsFromWriteContext(writeContext) ?? Date.now();
 }
 
-function txStateMessage(transactionId: string, completedTxs: Map<string, CompletedTx>): string {
-  const completed = completedTxs.get(transactionId);
+function txStateMessage(openBatchId: string, completedBatches: Map<string, CompletedTx>): string {
+  const completed = completedBatches.get(openBatchId);
   if (completed?.state === "committed") {
-    return `transaction ${transactionId} is already committed`;
+    return `open batch ${openBatchId} is already committed`;
   }
-  return `transaction ${transactionId} has already been completed or was never opened`;
+  return `open batch ${openBatchId} has already been completed or was never opened`;
 }
 
 function commitTransactionMessage(
-  transactionId: string,
-  completedTxs: Map<string, CompletedTx>,
+  openBatchId: string,
+  completedBatches: Map<string, CompletedTx>,
 ): string {
-  const message = txStateMessage(transactionId, completedTxs);
-  return completedTxs.get(transactionId)?.state === "committed"
+  const message = txStateMessage(openBatchId, completedBatches);
+  return completedBatches.get(openBatchId)?.state === "committed"
     ? `Write error: ${message}`
     : `Commit transaction failed: Write error: ${message}`;
 }
 
 function rollbackTransactionMessage(
-  transactionId: string,
-  completedTxs: Map<string, CompletedTx>,
+  openBatchId: string,
+  completedBatches: Map<string, CompletedTx>,
 ): string {
-  const message = txStateMessage(transactionId, completedTxs);
-  return completedTxs.get(transactionId)?.state === "committed"
+  const message = txStateMessage(openBatchId, completedBatches);
+  return completedBatches.get(openBatchId)?.state === "committed"
     ? `Write error: ${message}`
     : `Rollback transaction failed: Write error: ${message}`;
 }
@@ -2068,27 +2115,25 @@ function assertTransactionReadOpen(
   pendingTxs: Map<string, PendingTx>,
   completedTxs: Map<string, CompletedTx>,
 ): void {
-  const transactionId = txIdFromOptions(optionsJson);
-  if (!transactionId || pendingTxs.has(transactionId)) return;
-  throw new Error(
-    `Query setup failed: Write error: ${txStateMessage(transactionId, completedTxs)}`,
-  );
+  const openBatchId = openBatchIdFromOptions(optionsJson);
+  if (!openBatchId || pendingTxs.has(openBatchId)) return;
+  throw new Error(`Query setup failed: Write error: ${txStateMessage(openBatchId, completedTxs)}`);
 }
 
 function pendingTxFromOptions(
   optionsJson: string | null | undefined,
   pendingTxs: Map<string, PendingTx>,
 ): PendingTx | undefined {
-  const transactionId = txIdFromOptions(optionsJson);
-  return transactionId ? pendingTxs.get(transactionId) : undefined;
+  const openBatchId = openBatchIdFromOptions(optionsJson);
+  return openBatchId ? pendingTxs.get(openBatchId) : undefined;
 }
 
-function txIdFromOptions(optionsJson?: string | null): string | undefined {
+function openBatchIdFromOptions(optionsJson?: string | null): OpenBatchId | undefined {
   if (!optionsJson) return undefined;
   try {
     const parsed = JSON.parse(optionsJson) as { transaction_batch_id?: unknown };
     return typeof parsed.transaction_batch_id === "string"
-      ? parsed.transaction_batch_id
+      ? (parsed.transaction_batch_id as OpenBatchId)
       : undefined;
   } catch {
     return undefined;
@@ -2495,14 +2540,14 @@ function isPendingCoverageError(error: unknown): boolean {
 }
 
 function rejectedWaitError(
-  transactionId: string,
+  batchId: BatchId,
   error: unknown,
-): { kind: "rejected"; transactionId: string; code: string; reason: string } | null {
+): { kind: "rejected"; batchId: BatchId; code: string; reason: string } | null {
   const message = errorMessage(error);
   if (!message.includes("WriteRejected")) return null;
   return {
     kind: "rejected",
-    transactionId,
+    batchId,
     code: rejectionCode(message),
     reason: rejectionReason(message),
   };
@@ -2555,29 +2600,6 @@ function errorMessage(error: unknown): string {
 
 function schemaHasPolicies(schema: WasmSchema): boolean {
   return Object.values(schema).some((table) => table.policies !== undefined);
-}
-
-function rowsMatchForExclusiveParent(
-  schema: WasmSchema,
-  table: string,
-  current: RowState | undefined,
-  base: RowState | undefined,
-): boolean {
-  if (!current || !base) return current === base;
-  if (current.id !== base.id || current.table !== base.table) return false;
-  const columns = schema[table]?.columns ?? [];
-  for (const column of columns) {
-    if (isInternalField(column.name) || isHiddenIncludeColumn(column.name)) continue;
-    if (
-      !valueEqual(
-        current.valuesByColumn?.get(column.name) ?? { type: "Null" },
-        base.valuesByColumn?.get(column.name) ?? { type: "Null" },
-      )
-    ) {
-      return false;
-    }
-  }
-  return true;
 }
 
 function rejectionCode(message: string): string {
