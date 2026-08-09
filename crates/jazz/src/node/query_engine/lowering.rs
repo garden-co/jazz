@@ -329,6 +329,11 @@ fn source_authorization_for_source(
     request: &QueryProgramRequest,
     source: &SourceId,
 ) -> CapabilityResult<SourceAuthorizationRequest> {
+    // Client-local results are scoped by the upstream emission boundary, not
+    // by a second, potentially stale/incomplete local policy evaluation.
+    if request.authorization_mode == QueryAuthorizationMode::ClientLocal {
+        return Ok(SourceAuthorizationRequest::System);
+    }
     match &request.policy {
         PolicyContext::System => Ok(SourceAuthorizationRequest::System),
         PolicyContext::AuthorizationSubplan {

@@ -793,6 +793,7 @@ fn run_collector_graph(graph: GraphBuilder) -> Vec<(Vec<Value>, i64)> {
 #[test]
 fn compiler_boundary_has_no_usage_or_lifecycle_mode() {
     let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(current_read_view()),
         policy: policy_context(),
         input: row_set_input(0x21),
@@ -820,6 +821,7 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
         DurabilityTier::Global,
     ] {
         let request = QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: QueryReadSet::primary(current_read_view_at(tier)),
             policy: system_policy_context(),
             input: row_set_input(tier as u8 + 0x30),
@@ -967,6 +969,7 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
 #[test]
 fn current_source_filter_order_slice_chain_lowers_to_groove_graph() {
     let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(current_read_view()),
         policy: system_policy_context(),
         input: chained_row_set_input(
@@ -1036,6 +1039,7 @@ fn current_source_select_projection_and_default_ordered_slice_lower() {
     let slice = RowSetNodeId("slice".to_owned());
     let root_source = source("todos", SourceRole::Root);
     let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(current_read_view()),
         policy: system_policy_context(),
         input: RowSetProgramInput {
@@ -1135,6 +1139,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
     let root_source = source("todos", SourceRole::Root);
     let join_source = source("todo_tags", SourceRole::Alias("join_via:0".to_owned()));
     let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(joined_current_read_view()),
         policy: system_policy_context(),
         input: RowSetProgramInput {
@@ -1278,6 +1283,7 @@ fn current_join_via_can_use_union_relation_input() {
     let direct_source = source("todo_tags", SourceRole::Policy("direct".to_owned()));
     let inherited_source = source("todo_tags", SourceRole::Policy("inherited".to_owned()));
     let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(ReadView {
             read_schema: schema(0x10),
             policy_schema: schema(0x11),
@@ -1435,6 +1441,7 @@ fn current_join_via_lowers_source_column_row_id_target_and_correlations() {
     let root_source = source("todos", SourceRole::Root);
     let join_source = source("todo_tags", SourceRole::Alias("join_via:0".to_owned()));
     let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(joined_current_read_view()),
         policy: system_policy_context(),
         input: RowSetProgramInput {
@@ -1576,6 +1583,7 @@ fn join_contribution_membership_can_use_projected_bridge_fields() {
     let root_source = source("todos", SourceRole::Root);
     let join_source = source("todo_tags", SourceRole::Alias("join_via:0".to_owned()));
     let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(joined_current_read_view()),
         policy: system_policy_context(),
         input: RowSetProgramInput {
@@ -1718,6 +1726,7 @@ fn correlated_path_projection_lowers_with_relation_fact_schemas() {
         child: child_source.clone(),
     };
     let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(path_current_read_view()),
         policy: system_policy_context(),
         input: RowSetProgramInput {
@@ -1917,6 +1926,7 @@ fn correlated_path_request(
         child: child_source.clone(),
     };
     QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(path_current_read_view()),
         policy: system_policy_context(),
         input: RowSetProgramInput {
@@ -2433,6 +2443,7 @@ fn production_output_profiles_lower_for_linear_and_correlated_shapes() {
         ProductionOutputProfile::MaintainedView,
     ] {
         let linear_request = QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: QueryReadSet::primary(current_read_view()),
             policy: system_policy_context(),
             input: row_set_input(0x79),
@@ -2516,6 +2527,7 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
         },
     ];
     let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(recursive_current_read_view()),
         policy: PolicyContext::Identity {
             mode: PolicyEnforcementMode::Enforcing,
@@ -2823,6 +2835,7 @@ fn recursive_relation_seed_claim_lowers_from_policy_context() {
         },
     ];
     let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(recursive_current_read_view()),
         policy: PolicyContext::Identity {
             mode: PolicyEnforcementMode::Enforcing,
@@ -3007,6 +3020,7 @@ fn recursive_relation_seed_claim_lowers_from_policy_context() {
 #[test]
 fn unbound_filter_param_reports_operator_gap() {
     let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(current_read_view()),
         policy: system_policy_context(),
         input: chained_row_set_input(0x72, BTreeMap::new()),
@@ -3024,6 +3038,7 @@ fn unbound_filter_param_reports_operator_gap() {
 #[test]
 fn aggregate_over_window_fails_closed_for_maintained_lowering() {
     let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(current_read_view()),
         policy: system_policy_context(),
         input: aggregate_over_window_row_set_input(0x73),
@@ -3047,6 +3062,7 @@ fn equality_filter_param_lowers_to_prepared_binding_join() {
     );
     input.binding.source_shape = Some("query-binding".to_owned());
     let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(current_read_view()),
         policy: system_policy_context(),
         input,
@@ -3068,6 +3084,7 @@ fn equality_filter_param_lowers_to_prepared_binding_join() {
 #[test]
 fn claim_filter_lowers_from_identity_policy_context() {
     let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(current_read_view()),
         policy: PolicyContext::Identity {
             mode: PolicyEnforcementMode::Enforcing,
@@ -3089,6 +3106,7 @@ fn claim_filter_lowers_from_identity_policy_context() {
 fn identity_policy_context_requests_policy_filtered_sources() {
     let subject = author(0xa6);
     let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(current_read_view()),
         policy: PolicyContext::Identity {
             mode: PolicyEnforcementMode::Enforcing,
@@ -3119,6 +3137,32 @@ fn identity_policy_context_requests_policy_filtered_sources() {
     );
 }
 
+// Internal compiler-boundary test: this is the only place a client-local read
+// can opt out, and the option is host configuration rather than query input.
+#[test]
+fn client_local_mode_elides_policy_filtering_even_for_identity_context() {
+    let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::ClientLocal,
+        reads: QueryReadSet::primary(current_read_view()),
+        policy: PolicyContext::Identity {
+            mode: PolicyEnforcementMode::Enforcing,
+            permission_subject: author(0xa6),
+            claims: BTreeMap::new(),
+            attribution: None,
+        },
+        input: row_set_input(0x77),
+        output: row_set_output(BTreeSet::new()),
+    };
+
+    let mut resolver = FakeSourceResolver::default();
+    lower_query_program(request, &mut resolver).expect("client-local source lowers");
+    assert_eq!(resolver.requests.len(), 1);
+    assert_eq!(
+        resolver.requests[0].authorization,
+        SourceAuthorizationRequest::System
+    );
+}
+
 // Internal compiler-boundary test: public query validation already enforces
 // parameter types, but this pins the lowering invariant that descriptor types
 // come from that validated shape, not from the current binding value.
@@ -3133,6 +3177,7 @@ fn binding_descriptor_types_do_not_depend_on_runtime_array_values() {
         )]);
         input.binding.values.insert("teams".to_owned(), teams);
         QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: QueryReadSet::primary(current_read_view()),
             policy: PolicyContext::Identity {
                 mode: PolicyEnforcementMode::Enforcing,
@@ -3187,6 +3232,7 @@ fn binding_descriptor_types_do_not_depend_on_runtime_array_values() {
 fn built_in_sub_claim_lowers_to_permission_subject() {
     let subject = author(0xa5);
     let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(current_read_view()),
         policy: PolicyContext::Identity {
             mode: PolicyEnforcementMode::Enforcing,
@@ -3207,6 +3253,7 @@ fn built_in_sub_claim_lowers_to_permission_subject() {
 #[test]
 fn missing_claim_lowers_to_deny_predicate() {
     let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(current_read_view()),
         policy: policy_context(),
         input: claim_filtered_row_set_input(0x75, "team"),
@@ -3457,6 +3504,7 @@ fn validation_comparison_reads_are_part_of_one_program_request() {
         .fact_reads
         .insert(FactReadRole::PredicateOutputNow, current_read_view());
     let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads,
         policy: policy_context(),
         input: row_set_input(0x61),

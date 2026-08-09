@@ -32,8 +32,8 @@ use super::query_engine::{
     PathCardinality, PathHolePolicy, PayloadProjection, PolicyContext, PolicyDecisionRole,
     PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr, ProgramBinding,
     ProgramClaimParam, ProgramFactKey, ProgramOutputSchemas, ProgramPathId, ProvenanceField,
-    QueryProgram, QueryProgramRequest, QueryReadSet, ReachableContribution, ReadView,
-    RequestedReadSet, RequestedSourceStage, ResolvedSource, ResultId,
+    QueryAuthorizationMode, QueryProgram, QueryProgramRequest, QueryReadSet, ReachableContribution,
+    ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource, ResultId,
     ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
     RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
     RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
@@ -5367,6 +5367,25 @@ where
         identity: AuthorId,
         output: CurrentQueryProgramOutput,
     ) -> Result<QueryProgram, Error> {
+        self.compile_current_query_program_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            output,
+            QueryAuthorizationMode::TrustedServing,
+        )
+    }
+
+    fn compile_current_query_program_in_authorization_mode(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        output: CurrentQueryProgramOutput,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<QueryProgram, Error> {
         self.compile_current_query_program_with_settled_view(
             shape,
             binding,
@@ -5375,6 +5394,7 @@ where
             output,
             &ReadViewSpec::default(),
             None,
+            authorization_mode,
         )
     }
 
@@ -5387,8 +5407,36 @@ where
         output: CurrentQueryProgramOutput,
         read_view: &ReadViewSpec,
     ) -> Result<QueryProgram, Error> {
+        self.compile_current_query_program_for_read_view_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            output,
+            read_view,
+            QueryAuthorizationMode::TrustedServing,
+        )
+    }
+
+    fn compile_current_query_program_for_read_view_in_authorization_mode(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        output: CurrentQueryProgramOutput,
+        read_view: &ReadViewSpec,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<QueryProgram, Error> {
         self.compile_current_query_program_with_settled_view(
-            shape, binding, tier, identity, output, read_view, None,
+            shape,
+            binding,
+            tier,
+            identity,
+            output,
+            read_view,
+            None,
+            authorization_mode,
         )
     }
 
@@ -5401,6 +5449,7 @@ where
         output: CurrentQueryProgramOutput,
         read_view: &ReadViewSpec,
         settled_binding_view: Option<BindingViewKey>,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
         let request = self.current_query_program_request(
             shape,
@@ -5410,6 +5459,7 @@ where
             output,
             read_view,
             settled_binding_view,
+            authorization_mode,
         )?;
         self.compile_query_program_request(request)
     }
@@ -5421,6 +5471,7 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
         settled_binding_view: Option<BindingViewKey>,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
         let access_paths = self.one_shot_access_paths(shape, binding, tier)?;
         let request = self.current_query_program_request(
@@ -5431,6 +5482,7 @@ where
             CurrentQueryProgramOutput::AppRows,
             &ReadViewSpec::default(),
             settled_binding_view,
+            authorization_mode,
         )?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
     }
@@ -5452,6 +5504,7 @@ where
             output,
             &ReadViewSpec::default(),
             None,
+            QueryAuthorizationMode::TrustedServing,
         )?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
     }
@@ -5651,6 +5704,7 @@ where
             shape: input_shape,
         };
         let request = QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: historical_query_read_set(&input.shape, shape.schema_version(), position),
             policy: self.query_program_policy_context(identity),
             input,
@@ -5665,6 +5719,23 @@ where
         binding: &Binding,
         tier: DurabilityTier,
         identity: AuthorId,
+    ) -> Result<QueryProgram, Error> {
+        self.compile_include_deleted_query_program_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            QueryAuthorizationMode::TrustedServing,
+        )
+    }
+
+    fn compile_include_deleted_query_program_in_authorization_mode(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
         let input_shape = self.normalized_include_deleted_row_set_shape(shape, binding)?;
         let input = RowSetProgramInput {
@@ -5681,6 +5752,7 @@ where
             shape: input_shape,
         };
         let request = QueryProgramRequest {
+            authorization_mode,
             reads: current_query_read_set(
                 &input.shape,
                 shape.schema_version(),
@@ -5731,6 +5803,7 @@ where
             shape: input_shape,
         };
         let request = QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: tx_query_read_set(
                 &input.shape,
                 lowered_shape.schema_version(),
@@ -5751,6 +5824,25 @@ where
         binding: &Binding,
         identity: AuthorId,
         output: CurrentQueryProgramOutput,
+    ) -> Result<QueryProgram, Error> {
+        self.compile_branch_query_program_in_authorization_mode(
+            branch_id,
+            shape,
+            binding,
+            identity,
+            output,
+            QueryAuthorizationMode::TrustedServing,
+        )
+    }
+
+    fn compile_branch_query_program_in_authorization_mode(
+        &mut self,
+        branch_id: BranchId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorId,
+        output: CurrentQueryProgramOutput,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
         let read_schema = self
             .catalogue
@@ -5775,6 +5867,7 @@ where
             shape: input_shape,
         };
         let request = QueryProgramRequest {
+            authorization_mode,
             reads: branch_query_read_set(
                 &input.shape,
                 lowered_shape.schema_version(),
@@ -5795,13 +5888,47 @@ where
         binding: &Binding,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.query_rows_on_branch_query_engine_in_authorization_mode(
+            branch_id,
+            shape,
+            binding,
+            identity,
+            QueryAuthorizationMode::TrustedServing,
+        )
+    }
+
+    pub(super) fn query_rows_on_branch_query_engine_for_client(
+        &mut self,
+        branch_id: BranchId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.query_rows_on_branch_query_engine_in_authorization_mode(
+            branch_id,
+            shape,
+            binding,
+            identity,
+            QueryAuthorizationMode::ClientLocal,
+        )
+    }
+
+    fn query_rows_on_branch_query_engine_in_authorization_mode(
+        &mut self,
+        branch_id: BranchId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<Vec<CurrentRow>, Error> {
         let table = self.query_output_table(shape.query(), shape.schema_version())?;
-        let program = self.compile_branch_query_program(
+        let program = self.compile_branch_query_program_in_authorization_mode(
             branch_id,
             shape,
             binding,
             identity,
             CurrentQueryProgramOutput::AppRows,
+            authorization_mode,
         )?;
         let deltas = self
             .database
@@ -5967,6 +6094,7 @@ where
             shape: input_shape,
         };
         let request = QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: current_query_read_set(
                 &input.shape,
                 policy_shape.schema_version(),
@@ -6024,6 +6152,7 @@ where
         output: CurrentQueryProgramOutput,
         read_view: &ReadViewSpec,
         settled_binding_view: Option<BindingViewKey>,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgramRequest, Error> {
         let lowered_shape;
         let lowered_binding;
@@ -6086,6 +6215,7 @@ where
             shape: input_shape,
         };
         Ok(QueryProgramRequest {
+            authorization_mode,
             reads: query_read_set_for_read_view(
                 &input.shape,
                 shape.schema_version(),
@@ -6746,6 +6876,7 @@ where
             other => other,
         };
         let request = QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: match branch_id {
                 Some(branch_id) => branch_query_read_set(
                     &input.shape,
@@ -6886,6 +7017,27 @@ where
             prepared_plan,
             identity,
             false,
+            QueryAuthorizationMode::TrustedServing,
+        )
+    }
+
+    /// Execute an ordinary local client read. The upstream serving edge is the
+    /// confidentiality boundary; this path must not re-evaluate row policy.
+    pub(crate) fn query_rows_for_client(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.query_rows_with_options_for_identity(
+            shape,
+            binding,
+            tier,
+            None,
+            identity,
+            false,
+            QueryAuthorizationMode::ClientLocal,
         )
     }
 
@@ -6921,6 +7073,25 @@ where
         prepared_plan: Option<&PreparedQueryPlanHandle>,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.query_rows_including_deleted_for_identity_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            prepared_plan,
+            identity,
+            QueryAuthorizationMode::TrustedServing,
+        )
+    }
+
+    fn query_rows_including_deleted_for_identity_in_authorization_mode(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        prepared_plan: Option<&PreparedQueryPlanHandle>,
+        identity: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<Vec<CurrentRow>, Error> {
         self.query_rows_with_options_for_identity(
             shape,
             binding,
@@ -6928,6 +7099,7 @@ where
             prepared_plan,
             identity,
             true,
+            authorization_mode,
         )
     }
 
@@ -6939,10 +7111,16 @@ where
         prepared_plan: Option<&PreparedQueryPlanHandle>,
         identity: AuthorId,
         include_deleted: bool,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         if include_deleted {
-            let mut rows = self
-                .query_rows_including_deleted_with_query_engine(shape, binding, tier, identity)?;
+            let mut rows = self.query_rows_including_deleted_with_query_engine(
+                shape,
+                binding,
+                tier,
+                identity,
+                authorization_mode,
+            )?;
             let query = shape.query();
             self.finish_engine_query_rows(query, &mut rows)?;
             self.apply_projection(query, &mut rows)?;
@@ -6986,6 +7164,7 @@ where
                 tier,
                 identity,
                 settled_binding_view,
+                authorization_mode,
             )?)
         };
         let needs_binding = || {
@@ -6999,21 +7178,27 @@ where
         let plan = match prepared_plan {
             Some(plan) if settled_binding_view.is_none() => Some(plan.clone()),
             Some(_) => None,
-            None if settled_binding_view.is_none()
+            None if authorization_mode == QueryAuthorizationMode::TrustedServing
+                && settled_binding_view.is_none()
                 && self.can_use_prepared_current_query_plan(shape)
                 && needs_binding() =>
             {
                 Some(self.prepared_query_plan(shape, binding, tier, identity)?)
             }
-            None if settled_binding_view.is_none() && needs_binding() => Some(std::sync::Arc::new(
-                self.prepared_query_plan_from_program(
-                    program
-                        .as_ref()
-                        .expect("program is compiled when no prepared plan is supplied"),
-                    shape,
-                    binding,
-                )?,
-            )),
+            None if authorization_mode == QueryAuthorizationMode::TrustedServing
+                && settled_binding_view.is_none()
+                && needs_binding() =>
+            {
+                Some(std::sync::Arc::new(
+                    self.prepared_query_plan_from_program(
+                        program
+                            .as_ref()
+                            .expect("program is compiled when no prepared plan is supplied"),
+                        shape,
+                        binding,
+                    )?,
+                ))
+            }
             None => None,
         };
         let policy = self.query_program_policy_context(identity);
@@ -7126,6 +7311,7 @@ where
                 tier,
                 identity,
                 settled_binding_view,
+                QueryAuthorizationMode::TrustedServing,
             )?)
         };
         profile.compile_program = phase_started.elapsed();
@@ -7440,6 +7626,7 @@ where
         binding: &Binding,
         tier: DurabilityTier,
         identity: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         let read_schema = self
             .catalogue
@@ -7456,8 +7643,13 @@ where
                 .clone()
         };
         let binding = lowered_shape.bind(BTreeMap::new())?;
-        let program =
-            self.compile_include_deleted_query_program(&lowered_shape, &binding, tier, identity)?;
+        let program = self.compile_include_deleted_query_program_in_authorization_mode(
+            &lowered_shape,
+            &binding,
+            tier,
+            identity,
+            authorization_mode,
+        )?;
         let deltas = self
             .database
             .query_graph(lowered_app_rows_graph(&program)?)
@@ -8936,6 +9128,7 @@ where
             CurrentQueryProgramOutput::AppRows,
             &ReadViewSpec::default(),
             None,
+            QueryAuthorizationMode::TrustedServing,
         )?;
         let program =
             self.compile_query_program_request_with_access_paths(request, BTreeMap::new())?;
@@ -8997,13 +9190,51 @@ where
         identity: AuthorId,
         read_view: &ReadViewSpec,
     ) -> Result<RelationSnapshot, Error> {
-        let program = self.compile_current_query_program_for_read_view(
+        self.query_relation_snapshot_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            read_view,
+            QueryAuthorizationMode::TrustedServing,
+        )
+    }
+
+    pub(crate) fn query_relation_snapshot_for_client(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        read_view: &ReadViewSpec,
+    ) -> Result<RelationSnapshot, Error> {
+        self.query_relation_snapshot_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            read_view,
+            QueryAuthorizationMode::ClientLocal,
+        )
+    }
+
+    fn query_relation_snapshot_in_authorization_mode(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        read_view: &ReadViewSpec,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<RelationSnapshot, Error> {
+        let program = self.compile_current_query_program_for_read_view_in_authorization_mode(
             shape,
             binding,
             tier,
             identity,
             CurrentQueryProgramOutput::RelationSnapshot,
             read_view,
+            authorization_mode,
         )?;
         let snapshots = self
             .database
@@ -9234,6 +9465,30 @@ where
         self.subscription_snapshot_for_link_with_prepared_plan(shape, binding, tier, identity, None)
     }
 
+    pub(crate) fn subscription_snapshot_for_client(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+    ) -> Result<RelationSnapshot, Error> {
+        if shape.query().array_subqueries.is_empty() {
+            let rows = self.query_rows_for_client(shape, binding, tier, identity)?;
+            return Ok(RelationSnapshot {
+                root_count: rows.len(),
+                rows,
+                edges: Vec::new(),
+            });
+        }
+        self.query_relation_snapshot_for_client(
+            shape,
+            binding,
+            tier,
+            identity,
+            &ReadViewSpec::default(),
+        )
+    }
+
     pub(crate) fn subscription_snapshot_for_link_with_prepared_plan(
         &mut self,
         shape: &ValidatedQuery,
@@ -9267,6 +9522,23 @@ where
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.query_rows_including_deleted_for_identity(shape, binding, tier, None, identity)
+    }
+
+    pub(crate) fn query_rows_for_client_including_deleted(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.query_rows_including_deleted_for_identity_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            None,
+            identity,
+            QueryAuthorizationMode::ClientLocal,
+        )
     }
 
     #[allow(dead_code)] // Slice 2 wires this into API-level routing.
@@ -9924,6 +10196,7 @@ where
             shape: input_shape,
         };
         Ok(QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: historical_query_read_set(&input.shape, policy_schema_version, position),
             policy,
             input,
@@ -10088,6 +10361,7 @@ where
             shape: input_shape,
         };
         let request = QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: current_query_read_set(
                 &input.shape,
                 policy_schema_version,
@@ -10178,6 +10452,7 @@ where
             shape: input_shape,
         };
         Ok(QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: branch_query_read_set(
                 &input.shape,
                 policy_shape.schema_version(),
@@ -12797,6 +13072,7 @@ mod tests {
                 CurrentQueryProgramOutput::MaintainedView,
                 &ReadViewSpec::default(),
                 None,
+                QueryAuthorizationMode::TrustedServing,
             )
             .unwrap();
         let read_view = query_request.reads.primary;
@@ -15254,6 +15530,7 @@ mod tests {
                 CurrentQueryProgramOutput::AppRows,
                 &ReadViewSpec::default(),
                 Some(settled_binding_view),
+                QueryAuthorizationMode::TrustedServing,
             )
             .unwrap();
         request
@@ -15330,6 +15607,7 @@ mod tests {
                 CurrentQueryProgramOutput::MaintainedView,
                 &ReadViewSpec::default(),
                 Some(settled_binding_view),
+                QueryAuthorizationMode::TrustedServing,
             )
             .unwrap();
         let mut request = request;

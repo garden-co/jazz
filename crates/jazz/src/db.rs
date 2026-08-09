@@ -896,7 +896,7 @@ where
             ReadViewSourceSpec::Current => {}
             ReadViewSourceSpec::Branch { branch } if !opts.include_deleted => {
                 return node
-                    .query_rows_on_branch_for_link(
+                    .query_rows_on_branch_for_client(
                         crate::ids::BranchId(*branch),
                         &prepared.shape,
                         &prepared.binding,
@@ -907,21 +907,16 @@ where
             _ => ensure_default_read_view(&opts)?,
         }
         if opts.include_deleted {
-            node.query_rows_for_link_including_deleted(
+            node.query_rows_for_client_including_deleted(
                 &prepared.shape,
                 &prepared.binding,
                 tier,
                 author,
             )
         } else {
-            let (shape, binding, _plan) = node
-                .prepare_query_binding_for_link_with_shared_claim_fragments(
-                    &prepared.shape,
-                    &prepared.binding,
-                    tier,
-                    author,
-                )?;
-            node.query_rows_for_link_with_prepared_plan(&shape, &binding, tier, author, None)
+            // A client consumes the identity-scoped rows emitted by its
+            // trusted upstream; local reads must not apply policy again.
+            node.query_rows_for_client(&prepared.shape, &prepared.binding, tier, author)
         }
         .map_err(Into::into)
     }
@@ -954,7 +949,7 @@ where
         self.node
             .node
             .borrow_mut()
-            .query_relation_snapshot_for_link_in_read_view(
+            .query_relation_snapshot_for_client(
                 &prepared.shape,
                 &prepared.binding,
                 tier,
@@ -1795,23 +1790,6 @@ where
         let (cells, parent, authored_columns) =
             self.merge_existing_cells_for_identity(table, row, patch, identity)?;
         let parents = parent.into_iter().collect::<Vec<_>>();
-        let dry_run = MergeableCommit::new(table, row, self.next_now_ms())
-            .made_by(identity)
-            .permission_subject(identity)
-            .cells(cells.clone())
-            .parents(parents.clone());
-        let allowed = self
-            .node
-            .node
-            .borrow_mut()
-            .dry_run_mergeable_write_allows(dry_run)
-            .map_err(Error::from)?;
-        if !allowed {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                format!("policy denied UPDATE on table {table}"),
-            ));
-        }
         self.write_mergeable_with_authored_columns(
             identity,
             Some(identity),
@@ -1839,23 +1817,6 @@ where
         let (cells, parent, authored_columns) =
             self.merge_existing_cells_for_identity(table, row, patch, identity)?;
         let parents = parent.into_iter().collect::<Vec<_>>();
-        let dry_run = MergeableCommit::new(table, row, now_ms)
-            .made_by(identity)
-            .permission_subject(identity)
-            .cells(cells.clone())
-            .parents(parents.clone());
-        let allowed = self
-            .node
-            .node
-            .borrow_mut()
-            .dry_run_mergeable_write_allows(dry_run)
-            .map_err(Error::from)?;
-        if !allowed {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                format!("policy denied UPDATE on table {table}"),
-            ));
-        }
         self.write_mergeable_at_ms_with_authorship(
             identity,
             Some(identity),
@@ -3023,18 +2984,8 @@ where
         if let Some(deletion) = deletion {
             commit = commit.deletion(deletion);
         }
-        let allowed = self
-            .node
-            .node
-            .borrow_mut()
-            .dry_run_mergeable_write_allows(commit.clone())
-            .map_err(Error::from)?;
-        if !allowed {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                format!("policy denied {operation} on table {table}"),
-            ));
-        }
+        // Db is an untrusted client: structurally valid writes are staged and
+        // sent optimistically. A serving authority assigns the policy fate.
         let tx_id = self.node.node.borrow_mut().commit_mergeable(commit)?;
         let local_tier = self.finalize_local_commit(tx_id)?;
         self.refresh_subscriptions()?;
@@ -3264,12 +3215,11 @@ where
             .node
             .node
             .borrow_mut()
-            .query_rows_for_link_with_prepared_plan(
+            .query_rows_for_client(
                 &query.shape,
                 &query.binding,
                 DurabilityTier::Local,
                 identity,
-                query.plan_for_tier(DurabilityTier::Local),
             )?
             .into_iter()
             .find(|candidate| candidate.row_uuid() == row))
@@ -4556,7 +4506,7 @@ where
                             } else {
                                 let fallback = {
                                     let mut node_ref = node.borrow_mut();
-                                    match node_ref.subscription_snapshot_for_link(
+                                    match node_ref.subscription_snapshot_for_client(
                                         &shape,
                                         &binding,
                                         snapshot_tier,
@@ -4684,7 +4634,7 @@ where
                                 } else {
                                     let fallback = {
                                         let mut node_ref = node.borrow_mut();
-                                        match node_ref.subscription_snapshot_for_link(
+                                        match node_ref.subscription_snapshot_for_client(
                                             &shape,
                                             &binding,
                                             snapshot_tier,
@@ -4709,7 +4659,7 @@ where
                             } else {
                                 let remote_snapshot = {
                                     let mut node_ref = node.borrow_mut();
-                                    match node_ref.subscription_snapshot_for_link(
+                                    match node_ref.subscription_snapshot_for_client(
                                         &shape,
                                         &binding,
                                         snapshot_tier,
@@ -4744,7 +4694,7 @@ where
                             (previous.clone(), previous_source)
                         } else {
                             (
-                                node.borrow_mut().subscription_snapshot_for_link(
+                                node.borrow_mut().subscription_snapshot_for_client(
                                     &shape, &binding, read_tier, author,
                                 )?,
                                 SubscriptionSnapshotSource::LinkSnapshot,

@@ -779,6 +779,24 @@ where
         Ok(rows)
     }
 
+    /// Client-local branch reads operate only on data already available to the
+    /// client and never re-evaluate branch or row policy.
+    pub fn query_rows_on_branch_for_client(
+        &mut self,
+        branch_id: BranchId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        if !self.branches.branches.contains_key(&branch_id) {
+            return Ok(Vec::new());
+        }
+        let mut rows =
+            self.query_rows_on_branch_query_engine_for_client(branch_id, shape, binding, identity)?;
+        sort_current_rows(&mut rows);
+        Ok(rows)
+    }
+
     fn branch_read_policy_allows(
         &mut self,
         branch: &BranchRecord,

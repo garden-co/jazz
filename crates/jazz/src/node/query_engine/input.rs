@@ -3,6 +3,10 @@ use super::*;
 /// One validated API request before semantic lowering.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct QueryProgramRequest {
+    /// Host-selected authorization behavior for ordinary query execution.
+    /// This is compiler configuration, not query or binding data, and must
+    /// never be derived from a wire request.
+    pub(crate) authorization_mode: QueryAuthorizationMode,
     /// Exact data views used for source resolution.
     pub(crate) reads: RequestedReadSet,
     /// Identity, claims, and policy mode used by policy augmentation.
@@ -13,6 +17,17 @@ pub(crate) struct QueryProgramRequest {
     pub(crate) input: RowSetProgramInput,
     /// App-facing rows and internal facts requested from the program.
     pub(crate) output: RowSetOutputRequest,
+}
+
+/// Trust boundary for ordinary query lowering.
+///
+/// Serving hosts compose read policy before they emit rows. Client-local
+/// execution consumes that already-authorized settled view (or its own local
+/// overlay) and deliberately never evaluates read policy again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QueryAuthorizationMode {
+    TrustedServing,
+    ClientLocal,
 }
 
 /// Normalizes every public query surface into the same row-set shape algebra.
