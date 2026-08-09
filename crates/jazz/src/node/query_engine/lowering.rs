@@ -5092,7 +5092,7 @@ fn lowered_terminals(
                         plan,
                         resolved_source,
                         resolved_sources,
-                        BTreeSet::new(),
+                        root_route_fields.clone(),
                     )?;
                     let graph = fact_terminal_graph(
                         fact,
@@ -5128,7 +5128,7 @@ fn lowered_terminals(
                         plan,
                         resolved_source,
                         resolved_sources,
-                        BTreeSet::new(),
+                        root_route_fields.clone(),
                     )?;
                     let contribution_graph = join_contribution_membership_graph(
                         closure.visible_root.clone(),
