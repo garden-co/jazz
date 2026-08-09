@@ -2460,9 +2460,6 @@ where
         patch: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
-        if patch.is_empty() {
-            return Ok(());
-        }
         self.node
             .node
             .borrow_mut()
