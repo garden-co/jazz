@@ -342,7 +342,12 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
                 initial
                     .added
                     .iter()
-                    .map(|change| change.id.root())
+                    .map(|change| {
+                        change
+                            .id
+                            .row_id()
+                            .expect("plain-table result key contains one row")
+                    })
                     .collect::<Vec<_>>(),
                 tied[..2],
                 "maintained tied rows use the same stable row-id tie-breaker"

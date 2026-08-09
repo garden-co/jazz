@@ -17,8 +17,8 @@ where
         tx_id: TxId,
     ) -> Result<Vec<RejectedVersion>, Error> {
         let mut versions = Vec::new();
-        for table in self.catalogue.schema.tables.clone() {
-            let storage_table = rejected_versions_table_name(&table.name);
+        for table_id in self.physical_table_ids() {
+            let storage_table = physical_rejected_versions_table_name(table_id);
             for raw in self.database.primary_key_scan_raw(
                 &storage_table,
                 &[Value::U64(tx_id.time.0), Value::U64(alias.0)],
@@ -29,9 +29,19 @@ where
                 if node_id != alias.0 || time != tx_id.time.0 {
                     continue;
                 }
+                let schema_alias = SchemaVersionAlias(raw.schema_version());
+                let schema_version = self.schema_version_for_alias(schema_alias).ok_or(
+                    Error::InvalidStoredValue("rejected row schema version alias missing"),
+                )?;
+                let logical_table =
+                    self.logical_table_for_physical_alias(table_id, schema_alias)?;
+                let logical_descriptor = self
+                    .table_in_schema(&logical_table, schema_version)?
+                    .rejected_versions_storage_table()
+                    .record_schema();
                 versions.push(RejectedVersion::new(
-                    table.name.clone(),
-                    OwnedRecord::new(raw.raw().to_vec(), record.descriptor()),
+                    logical_table,
+                    OwnedRecord::new(raw.raw().to_vec(), logical_descriptor),
                 ));
             }
         }
@@ -57,17 +67,6 @@ where
             let alias = record.get_u64(NodeAliasRowRecord::FIELD_ID_IDX)?;
             let uuid = NodeUuid(record.get_uuid(NodeAliasRowRecord::FIELD_UUID_IDX)?);
             self.node_aliases.insert(uuid, NodeAlias(alias));
-        }
-        for raw in self
-            .database
-            .primary_key_scan_raw("jazz_schema_versions", &[])?
-        {
-            let record = raw.record();
-            let alias =
-                SchemaVersionAlias(record.get_u64(SchemaVersionAliasRowRecord::FIELD_ID_IDX)?);
-            let uuid =
-                SchemaVersionId(record.get_uuid(SchemaVersionAliasRowRecord::FIELD_UUID_IDX)?);
-            self.catalogue.schema_version_aliases.insert(uuid, alias);
         }
         let branch_records = self
             .database
@@ -98,19 +97,27 @@ where
                 raw.record().get_u64(TransactionRowRecord::FIELD_TIME_IDX)?,
             ));
         }
-        for table in self.catalogue.schema.tables.clone() {
-            if let Some(raw) =
-                self.database
-                    .index_last_raw(&history_table_name(&table.name), "by_tx", &[])?
-            {
+        let physical_table_ids = self
+            .catalogue
+            .physical_mappings
+            .values()
+            .flat_map(|mapping| mapping.tables.values().map(|table| table.table_id))
+            .collect::<BTreeSet<_>>();
+        for table_id in physical_table_ids {
+            if let Some(raw) = self.database.index_last_raw(
+                &physical_history_table_name(table_id),
+                "by_tx",
+                &[],
+            )? {
                 self.merge_tx_time(TxTime(
                     raw.record().get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?,
                 ));
             }
-            if let Some(raw) =
-                self.database
-                    .index_last_raw(&register_table_name(&table.name), "by_tx", &[])?
-            {
+            if let Some(raw) = self.database.index_last_raw(
+                &physical_register_table_name(table_id),
+                "by_tx",
+                &[],
+            )? {
                 self.merge_tx_time(TxTime(
                     raw.record().get_u64(RegisterRowRecord::FIELD_TX_TIME_IDX)?,
                 ));

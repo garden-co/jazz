@@ -148,6 +148,16 @@ fn routed_doc_output_terminals() -> [RoutedMultisinkTerminal; 2] {
     ]
 }
 
+fn project_only_route_terminal() -> RoutedMultisinkTerminal {
+    RoutedMultisinkTerminal::new(
+        "docs",
+        docs_terminal_graph(),
+        ["__route_project_id"],
+        ["id", "title"],
+    )
+    .with_route_value_indices([1])
+}
+
 fn insert_doc(
     batch: &mut groove::db::DatabaseBatch,
     id: u64,
@@ -183,6 +193,37 @@ fn insert_comment(
             Value::U64(doc_id),
             Value::String(body.to_owned()),
         ],
+    );
+}
+
+#[test]
+fn routed_terminal_can_select_a_nonprefix_binding_value() {
+    let mut db = project_database();
+    let mut batch = db.open_batch();
+    insert_doc(&mut batch, 1, 10, 20, "Spec");
+    insert_doc(&mut batch, 2, 11, 21, "Roadmap");
+    db.commit_batch(batch).unwrap();
+
+    let shape = db
+        .prepare(
+            [project_only_route_terminal()],
+            "project_route",
+            route_descriptor(),
+        )
+        .unwrap();
+    let project_21 = db
+        .bind_shape(shape.id(), &[Value::U64(11), Value::U64(21)])
+        .unwrap();
+
+    assert_eq!(
+        project_21
+            .recv()
+            .unwrap()
+            .get("docs")
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        [(vec![Value::U64(2), Value::String("Roadmap".to_owned())], 1)]
     );
 }
 

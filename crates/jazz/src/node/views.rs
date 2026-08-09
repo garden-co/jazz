@@ -181,8 +181,10 @@ where
     /// Subscribe to the raw history storage table.
     pub fn subscribe_history(&mut self, table: &str) -> Result<Subscription, Error> {
         self.table(table)?;
+        let schema_version = self.catalogue.current_schema_version_id;
+        let source = self.physical_history_source_graph(schema_version, table)?;
         self.database
-            .subscribe_query(select_all(&history_table_name(table)))
+            .subscribe_one_sink(source)
             .map_err(Error::Groove)
     }
 
@@ -1214,7 +1216,8 @@ where
             permission_subject,
             base_snapshot,
             user_metadata_json,
-            source_branch,
+            target_lineage,
+            branch_merge,
             merge_strategy,
             ..
         } = stored_tx.tx.clone();
@@ -1229,19 +1232,71 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json,
-            source_branch,
+            target_lineage,
+            branch_merge,
             merge_strategy,
         };
+        let mut versions = Vec::with_capacity(tx_versions.len());
+        for version in tx_versions {
+            let canonical = self.canonical_maintained_view_witness(version)?;
+            versions.push(self.version_record_from_row(canonical.as_ref().unwrap_or(version))?);
+        }
         Ok(VersionBundle {
             tx: tx_payload,
-            versions: tx_versions
-                .iter()
-                .map(|version| self.version_record_from_row(version))
-                .collect::<Result<Vec<_>, Error>>()?,
+            versions,
             fate: stored_tx.fate.clone(),
             global_seq: stored_tx.global_seq,
             durability: stored_tx.durability,
         })
+    }
+
+    /// Maintained query evaluation uses rows projected into the subscription's
+    /// schema. Sync must still ship the immutable payload authored under the
+    /// row's stored schema alias, so recover that exact history row only when
+    /// the projected witness no longer has its authored logical layout.
+    pub(super) fn canonical_maintained_view_witness(
+        &mut self,
+        version: &VersionRow,
+    ) -> Result<Option<VersionRow>, Error> {
+        let authored_schema = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "maintained witness schema version alias must exist",
+            ))?;
+        let has_authored_layout = self
+            .table_in_schema(version.table(), authored_schema)
+            .is_ok_and(|table| {
+                let descriptor = if version.layer() == VersionLayer::Deletion {
+                    table.register_storage_table().record_schema()
+                } else {
+                    table.history_storage_table().record_schema()
+                };
+                version.record.descriptor() == &descriptor
+            });
+        if has_authored_layout {
+            return Ok(None);
+        }
+
+        for storage_table in
+            self.version_storage_sources_for_layer(version.table(), version.layer())?
+        {
+            let Some(canonical) = self.query_version_by_alias_with_storage(
+                version.table(),
+                &storage_table,
+                version.row_uuid(),
+                version.tx_time(),
+                version.tx_node_alias(),
+            )?
+            else {
+                continue;
+            };
+            if canonical.schema_version_alias() == version.schema_version_alias() {
+                return Ok(Some(canonical));
+            }
+        }
+        Err(Error::MaintainedViewMissingBundleWitness(
+            "projected maintained witness is missing its canonical history row",
+        ))
     }
 }
 

@@ -949,7 +949,15 @@ describe("db.subscribeAll browser integration", () => {
       () => {
         const latestAll = deltas[deltas.length - 1]?.all ?? [];
         const ids = latestAll.map((row) => row.id);
-        return ids.includes(rootId) && ids.includes(midId) && ids.includes(leafId);
+        const names = latestAll.map((row) => row.name);
+        return (
+          ids.includes(rootId) &&
+          ids.includes(midId) &&
+          ids.includes(leafId) &&
+          names.includes("root") &&
+          names.includes("mid") &&
+          names.includes("leaf")
+        );
       },
       4000,
       "expected gather query subscription result",

@@ -811,7 +811,6 @@ export class TypedTableQueryBuilder<
   private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
-  private _unbounded = false;
   private _offsetVal?: number;
   private _includeDeleted = false;
   private _hops: string[] = [];
@@ -874,19 +873,6 @@ export class TypedTableQueryBuilder<
   limit(n: number): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
     const clone = this._clone<TInclude, TSelection, TRequired>();
     clone._limitVal = n;
-    clone._unbounded = false;
-    return clone;
-  }
-
-  /**
-   * Declare that this query may return every matching row when it is used as
-   * an included relation. Array includes must choose this or `limit(...)` so
-   * an omitted bound cannot silently become unbounded.
-   */
-  unbounded(): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
-    const clone = this._clone<TInclude, TSelection, TRequired>();
-    clone._limitVal = undefined;
-    clone._unbounded = true;
     return clone;
   }
 
@@ -1023,7 +1009,6 @@ export class TypedTableQueryBuilder<
         select: this._selectColumns,
         orderBy: this._orderBys,
         limit: this._limitVal,
-        unbounded: this._unbounded || undefined,
         offset: this._offsetVal,
         includeDeleted: this._includeDeleted || undefined,
         hops: this._hops,
@@ -1054,7 +1039,6 @@ export class TypedTableQueryBuilder<
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
-    clone._unbounded = this._unbounded;
     clone._offsetVal = this._offsetVal;
     clone._includeDeleted = this._includeDeleted;
     clone._hops = [...this._hops];
@@ -1122,7 +1106,6 @@ export interface Query<
     direction?: "asc" | "desc",
   ): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
   limit(n: number): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
-  unbounded(): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
   offset(n: number): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
   includeDeleted(): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
   hopTo<TRelation extends RelationNameFromMeta<SchemaMeta<TTable, TSchema>>>(

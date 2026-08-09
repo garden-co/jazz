@@ -9,9 +9,21 @@
         "a1c3b207f6e5d480706050403020100000000000002940001111111111111111111111111111111101097ffffffffffffffd00007fffffef0000000000d6fffffffffffffff3ffffff00000080ffffffff00000000ffffff7f0000000000000080ffffffffffffffff0000000000000000ffffffffffffff7f01d6ffffffab000000ad000000b5000000c0000000cb000000d3000000e8000000e8000000ec00000073796e746865746963deadfdffffff05000000020000000900000078797a01000000000001f9ffffff04000000016f6e650200000010000000050000000174776f0600000000000000000000000000000080ffffffffffffffff0000000000000000ffffffffffffff7f"
       ],
       "fields": [
-        { "name": "u8_value", "encoded_hex": "a1", "decoded_hex": "a1" },
-        { "name": "u16_value", "encoded_hex": "c3b2", "decoded_hex": "c3b2" },
-        { "name": "u32_value", "encoded_hex": "07f6e5d4", "decoded_hex": "07f6e5d4" },
+        {
+          "name": "u8_value",
+          "encoded_hex": "a1",
+          "decoded_hex": "a1"
+        },
+        {
+          "name": "u16_value",
+          "encoded_hex": "c3b2",
+          "decoded_hex": "c3b2"
+        },
+        {
+          "name": "u32_value",
+          "encoded_hex": "07f6e5d4",
+          "decoded_hex": "07f6e5d4"
+        },
         {
           "name": "u64_value",
           "encoded_hex": "8070605040302010",
@@ -22,19 +34,31 @@
           "encoded_hex": "0000000000002940",
           "decoded_hex": "0000000000002940"
         },
-        { "name": "bool_value", "encoded_hex": "00", "decoded_hex": "00" },
+        {
+          "name": "bool_value",
+          "encoded_hex": "00",
+          "decoded_hex": "00"
+        },
         {
           "name": "string_value",
           "encoded_hex": "73796e746865746963",
           "decoded_hex": "73796e746865746963"
         },
-        { "name": "bytes_value", "encoded_hex": "dead", "decoded_hex": "dead" },
+        {
+          "name": "bytes_value",
+          "encoded_hex": "dead",
+          "decoded_hex": "dead"
+        },
         {
           "name": "uuid_value",
           "encoded_hex": "11111111111111111111111111111111",
           "decoded_hex": "11111111111111111111111111111111"
         },
-        { "name": "enum_value", "encoded_hex": "01", "decoded_hex": "01" },
+        {
+          "name": "enum_value",
+          "encoded_hex": "01",
+          "decoded_hex": "01"
+        },
         {
           "name": "mixed_tuple",
           "encoded_hex": "097ffffffffffffffd00007fffffef",
@@ -65,23 +89,51 @@
           "encoded_hex": "0200000010000000050000000174776f0600000000",
           "decoded_hex": "0200000010000000050000000174776f0600000000"
         },
-        { "name": "empty_fixed_array", "encoded_hex": "", "decoded_hex": "" },
-        { "name": "empty_variable_array", "encoded_hex": "00000000", "decoded_hex": "00000000" },
-        { "name": "null_fixed_i32", "encoded_hex": "0000000000", "decoded_hex": null },
+        {
+          "name": "empty_fixed_array",
+          "encoded_hex": "",
+          "decoded_hex": ""
+        },
+        {
+          "name": "empty_variable_array",
+          "encoded_hex": "00000000",
+          "decoded_hex": "00000000"
+        },
+        {
+          "name": "null_fixed_i32",
+          "encoded_hex": "0000000000",
+          "decoded_hex": null
+        },
         {
           "name": "i64_value",
           "encoded_hex": "d6ffffffffffffff",
           "decoded_hex": "d6ffffffffffffff"
         },
-        { "name": "i32_value", "encoded_hex": "f3ffffff", "decoded_hex": "f3ffffff" },
-        { "name": "i32_min", "encoded_hex": "00000080", "decoded_hex": "00000080" },
+        {
+          "name": "i32_value",
+          "encoded_hex": "f3ffffff",
+          "decoded_hex": "f3ffffff"
+        },
+        {
+          "name": "i32_min",
+          "encoded_hex": "00000080",
+          "decoded_hex": "00000080"
+        },
         {
           "name": "i32_negative_one",
           "encoded_hex": "ffffffff",
           "decoded_hex": "ffffffff"
         },
-        { "name": "i32_zero", "encoded_hex": "00000000", "decoded_hex": "00000000" },
-        { "name": "i32_max", "encoded_hex": "ffffff7f", "decoded_hex": "ffffff7f" },
+        {
+          "name": "i32_zero",
+          "encoded_hex": "00000000",
+          "decoded_hex": "00000000"
+        },
+        {
+          "name": "i32_max",
+          "encoded_hex": "ffffff7f",
+          "decoded_hex": "ffffff7f"
+        },
         {
           "name": "i64_min",
           "encoded_hex": "0000000000000080",

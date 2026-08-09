@@ -102,13 +102,11 @@ maintained-subscription semantics. `array_subqueries` are
 canonicalized into shape identity separately from includes; sibling ordering is
 not semantic, but duplicate sibling `column_name`s are rejected.
 
-Every binding layer MUST preserve the explicit boundedness choice across its
-builder, normalized JSON, worker, and native-codec boundaries. Absence is not
-an unbounded declaration and MUST remain invalid rather than being inferred as
-unbounded during lowering. In the TypeScript DSL, `include({ relation: true })`
-and nested object shorthand explicitly request the complete relation and are
-therefore sugar for an unbounded array subquery; an included query builder MUST
-instead call either `.limit(n)` or `.unbounded()`.
+Every binding layer MUST preserve a finite child `limit` across its builder,
+normalized JSON, worker, and native-codec boundaries. An omitted child limit
+means an unbounded ordered suffix. In the TypeScript DSL,
+`include({ relation: true })`, nested object shorthand, and an included query
+builder without `.limit(n)` all request the complete relation.
 
 `JoinVia` is an existential reference/junction traversal: it constrains root
 membership and supplies join witnesses; it is not a general relational join
@@ -211,11 +209,14 @@ emitted prepared graph MUST use that one shared declaration environment. A
 claim in a prepared graph MUST lower as a parameter reference and MUST NOT
 lower as a policy-context value literal.
 
-A policy dependency read is raw evidence under `INV-RLS-21`, so lowering does
-not recursively inspect that dependency table's separate policy declaration
-merely to compare claim types. Likewise, independently inline-evaluated policy
-branches do not share a prepared descriptor. Their claim declarations become
-comparable only if a future lowering actually places them in one descriptor.
+A policy dependency read is raw evidence under `INV-RLS-21`, available only to
+the trusted server-side policy evaluator while it decides the outer policy. It
+is not a client result, subscription payload, or transport capability. Lowering
+therefore does not recursively inspect that dependency table's separate policy
+declaration merely to compare claim types. Likewise, independently
+inline-evaluated policy branches do not share a prepared descriptor. Their
+claim declarations become comparable only if a future lowering actually places
+them in one descriptor.
 
 The prepared graph descriptor MUST encode that parameter set -- names and
 types, including claim-path identity where names alone do not establish it --
@@ -323,12 +324,13 @@ crossing without sending a renumbering delta. For example, a new eleventh child
 that sorts fifth in a limit-ten relation replaces the old ten-child parent with
 the newly ordered ten-child parent. It does not emit a child retract/add pair.
 
-Array subqueries MUST support `order_by`, `offset`, and a finite `limit` with
-the same semantics as those clauses at the root query. The bounded form is
-mandatory: for limit `L`, the rendered collection contribution is bounded by
-`R(L)`, rather than `R(group)`, and query validation/planning can keep a parent
-payload below `MAX_WIRE_FRAME_BYTES`. A finite zero limit yields an empty child
-array. Child filtering, selection, ordering, offset, and limit change only the
+Array subqueries MUST support `order_by`, `offset`, and an optional finite
+`limit` with the same semantics as those clauses at the root query. An omitted
+limit is unbounded; generic transport fragmentation carries a large atomic
+parent replacement across bounded physical frames. For a supplied limit `L`,
+the rendered collection contribution is bounded by `R(L)` rather than
+`R(group)`. A finite zero limit yields an empty child array. Child filtering,
+selection, ordering, offset, and limit change only the
 rendered child relation unless the array subquery has an explicit requirement;
 unreadable children are omitted while readable parents remain visible for an
 optional relation.
@@ -361,27 +363,17 @@ occur more than once within a single parent's array. Position therefore remains
 the occurrence discriminator, and consumers MUST NOT assume a child id is unique
 within one parent's array unless the query shape guarantees it.
 
-**Decision, Anselm 2026-08-04 — bounded arrays are enforced, with a runtime
-over-size error as backstop.** Two mechanisms, both required:
+**Decision, Anselm 2026-08-08 — transport framing does not constrain query
+semantics.** Two mechanisms apply:
 
-1. **Validation enforces an explicit boundedness choice.** An array subquery
-   MUST carry either a finite child limit or an explicit unbounded declaration;
-   query validation MUST reject an undeclared choice. This makes intentional
-   unboundedness (and the common finite bound) a property of the query rather
-   than an accidental consequence of omitted data.
-2. **A runtime over-size error backstops it.** A bounded array can still render
-   a parent larger than `MAX_WIRE_FRAME_BYTES` (2 MiB;
-   `crates/jazz/src/protocol_limits.rs:16`) when individual children are large.
-   The terminal MUST then fail with a structured, named error identifying the
-   parent row, the relation, the rendered byte size and the limit exceeded. It
-   MUST NOT silently truncate the array, drop children, or emit a partial
-   parent: a partial parent is a wrong answer, whereas a named error is a
-   diagnosable one.
-
-Fragmenting one logical parent replacement across chunks was considered and
-rejected for this revision: it preserves expressiveness at the cost of atomic
-receiver assembly and a recursive fragment format, and the mandatory child limit
-already makes the common case bounded. Nothing here forecloses adding it later.
+1. **An omitted limit is unbounded.** An array subquery MAY carry a finite child
+   limit; without one it selects the complete ordered suffix after `offset`.
+   Result size is a transport concern and MUST NOT require callers to invent a
+   semantic row bound.
+2. **Transport fragments oversized logical messages.** A result can exceed an
+   individual transport frame. The transport MUST decompose and reassemble it
+   atomically rather than rejecting, truncating, or partially delivering it.
+   A partial parent is a wrong answer.
 
 Alpha-style relation traversal has an output-changing query surface. A
 relation-query facade MUST normalize into the same row-set program vocabulary as

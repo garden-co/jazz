@@ -811,6 +811,10 @@ pub struct RecordStore<'a, S> {
     /// Interprets stored bytes without copying until a caller asks for values.
     descriptor: &'a RecordDescriptor,
     windowed: bool,
+    /// Table rows carry a schema-version envelope that may describe different
+    /// payload layouts. Window codecs therefore preserve the whole stored value
+    /// as one opaque bytes field instead of interpreting it as one layout.
+    window_values_opaque: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -830,6 +834,7 @@ where
             key_descriptor: None,
             descriptor,
             windowed: false,
+            window_values_opaque: false,
         }
     }
 
@@ -845,6 +850,23 @@ where
             key_descriptor: Some(key_descriptor),
             descriptor,
             windowed: true,
+            window_values_opaque: false,
+        }
+    }
+
+    pub(crate) fn new_windowed_versioned(
+        storage: &'a S,
+        column_family: &'a str,
+        key_descriptor: RecordDescriptor,
+        descriptor: &'a RecordDescriptor,
+    ) -> Self {
+        Self {
+            storage,
+            column_family,
+            key_descriptor: Some(key_descriptor),
+            descriptor,
+            windowed: true,
+            window_values_opaque: true,
         }
     }
 
@@ -1448,7 +1470,9 @@ where
                 .insert(cache_key, records);
             return Ok(value);
         }
-        Ok(lookup_window(&schema, window, &key_record)?.map(|record| record.value.into_raw()))
+        lookup_window(&schema, window, &key_record)?
+            .map(|record| self.decode_window_value_record(record.value))
+            .transpose()
     }
 
     fn decode_window_records(&self, window: &[u8]) -> Result<Vec<KeyValue>, Error> {
@@ -1457,7 +1481,7 @@ where
             .into_iter()
             .map(|record| {
                 let key = encode_key_record(record.key.borrowed().to_values()?)?;
-                Ok((key, record.value.into_raw()))
+                Ok((key, self.decode_window_value_record(record.value)?))
             })
             .collect()
     }
@@ -1495,7 +1519,7 @@ where
             .map(|(key, value)| {
                 Ok(WindowRecord::new(
                     self.key_record_from_bytes(key)?,
-                    OwnedRecord::new(value.clone(), *self.descriptor),
+                    self.encode_window_value_record(value)?,
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()?;
@@ -1506,7 +1530,30 @@ where
         let key = self
             .key_descriptor
             .ok_or_else(|| Error::InvalidWindowRecord("missing key descriptor".to_owned()))?;
-        Ok(WindowSchema::new(key, *self.descriptor))
+        let value = if self.window_values_opaque {
+            opaque_window_value_descriptor()
+        } else {
+            *self.descriptor
+        };
+        Ok(WindowSchema::new(key, value))
+    }
+
+    fn encode_window_value_record(&self, value: &[u8]) -> Result<OwnedRecord, Error> {
+        if !self.window_values_opaque {
+            return Ok(OwnedRecord::new(value.to_vec(), *self.descriptor));
+        }
+        let descriptor = opaque_window_value_descriptor();
+        Ok(OwnedRecord::new(
+            descriptor.create(&[RecordValue::Bytes(value.to_vec())])?,
+            descriptor,
+        ))
+    }
+
+    fn decode_window_value_record(&self, value: OwnedRecord) -> Result<Vec<u8>, Error> {
+        if !self.window_values_opaque {
+            return Ok(value.into_raw());
+        }
+        Ok(value.borrowed().get_bytes(0)?.to_vec())
     }
 
     fn key_record_from_bytes(&self, key: &Key) -> Result<OwnedRecord, Error> {
@@ -1516,6 +1563,11 @@ where
         let values = decode_key_record(key, &descriptor)?;
         Ok(OwnedRecord::new(descriptor.create(&values)?, descriptor))
     }
+}
+
+fn opaque_window_value_descriptor() -> RecordDescriptor {
+    static DESCRIPTOR: OnceLock<RecordDescriptor> = OnceLock::new();
+    *DESCRIPTOR.get_or_init(|| RecordDescriptor::new([("__groove_stored_value", ValueType::Bytes)]))
 }
 
 fn should_decode_full_window_for_probe(key: &DecodedWindowCacheKey) -> bool {

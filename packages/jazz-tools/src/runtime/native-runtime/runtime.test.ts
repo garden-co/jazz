@@ -1821,7 +1821,6 @@ describe("NativeRuntimeAdapter server transport", () => {
             table: "todos",
             inner_column: "owner_id",
             outer_column: "id",
-            unbounded: true,
           },
         ],
       }),
@@ -1979,7 +1978,6 @@ describe("NativeRuntimeAdapter server transport", () => {
             table: "todos",
             inner_column: "owner_id",
             outer_column: "users.id",
-            unbounded: true,
           },
         ],
       }),
@@ -3387,6 +3385,81 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.close();
   });
 
+  it("reconciles native relation subscription lifecycles without leaking projection records", () => {
+    const first = uuidBytes("00000000-0000-0000-0000-000000000401");
+    const second = uuidBytes("00000000-0000-0000-0000-000000000402");
+    const chunks = [
+      relationSubscriptionChunk({
+        reset: true,
+        rootAdded: [{ table: "todos", rowId: first, title: "first" }],
+        relationAdded: [{ table: "todos", rowId: first, title: "first" }],
+      }),
+      relationSubscriptionChunk({
+        // Relation snapshots carry the authoritative rendered row. The root
+        // delta can be stale/partial while that snapshot advances.
+        rootUpdated: [{ table: "todos", rowId: first, title: "stale root" }],
+        relationUpdated: [{ table: "todos", rowId: first, title: "first updated" }],
+      }),
+      relationSubscriptionChunk({
+        rootRemoved: [{ table: "todos", rowId: first }],
+        relationRemoved: [{ table: "todos", rowId: first }],
+      }),
+      relationSubscriptionChunk({
+        reset: true,
+        rootAdded: [{ table: "todos", rowId: second, title: "second" }],
+        relationAdded: [{ table: "todos", rowId: second, title: "second" }],
+      }),
+    ];
+    const runtime = runtimeWithNativeRelationSubscriptionChunks(chunks);
+    const deltas: NativeRowDelta[] = [];
+    const handle = runtime.createSubscription(
+      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      null,
+      null,
+      null,
+    );
+
+    runtime.executeSubscription(handle, (delta: NativeRowDelta) => deltas.push(delta));
+
+    expect(deltas).toHaveLength(4);
+    expect(decodeTestDeltas([deltas[0]!])[0]).toMatchObject([
+      { kind: 0, id: formatUuid(first), index: 0, row: { values: [{ value: "first" }] } },
+    ]);
+    expect(decodeTestDeltas([deltas[1]!])[0]).toMatchObject([
+      {
+        kind: 2,
+        id: formatUuid(first),
+        index: 0,
+        row: { values: [{ value: "first updated" }] },
+      },
+    ]);
+    expect(decodeTestDeltas([deltas[2]!])[0]).toEqual([
+      { kind: 1, id: formatUuid(first), index: 0 },
+    ]);
+    expect(decodeTestDeltas([deltas[3]!])[0]).toMatchObject([
+      { kind: 0, id: formatUuid(second), index: 0, row: { values: [{ value: "second" }] } },
+    ]);
+    expect(deltas[0]!.reset).toBe(true);
+    expect(deltas[3]!.reset).toBe(true);
+    runtime.close();
+
+    const ordinary = runtimeWithNativeSubscriptionChunk(
+      relationSubscriptionChunk({
+        reset: true,
+        rootAdded: [{ table: "todos", rowId: first, title: "ordinary" }],
+      }),
+    );
+    const ordinaryDeltas: NativeRowDelta[] = [];
+    const ordinaryHandle = ordinary.createSubscription(JSON.stringify({ table: "todos" }));
+    ordinary.executeSubscription(ordinaryHandle, (delta: NativeRowDelta) =>
+      ordinaryDeltas.push(delta),
+    );
+    expect(decodeTestDeltas(ordinaryDeltas)[0]).toMatchObject([
+      { kind: 0, id: formatUuid(first), row: { values: [{ value: "ordinary" }] } },
+    ]);
+    ordinary.close();
+  });
+
   it("rewraps user field option bytes when packed reset frames filter engine records", () => {
     const schema = {
       notes: {
@@ -4757,6 +4830,67 @@ function runtimeWithNativeSubscriptionChunk(
   );
 }
 
+function runtimeWithNativeRelationSubscriptionChunks(chunks: unknown[]): NativeRuntimeAdapter {
+  return new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          subscribeRelationQuery: () => ({
+            readAll: () => chunks,
+            close: () => true,
+          }),
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    new Uint8Array(16),
+    1,
+    true,
+  );
+}
+
+function relationSubscriptionChunk({
+  reset = false,
+  rootAdded = [],
+  rootUpdated = [],
+  rootRemoved = [],
+  relationAdded = [],
+  relationUpdated = [],
+  relationRemoved = [],
+}: {
+  reset?: boolean;
+  rootAdded?: EncodedTestRow[];
+  rootUpdated?: EncodedTestRow[];
+  rootRemoved?: Array<{ table: string; rowId: Uint8Array }>;
+  relationAdded?: EncodedTestRow[];
+  relationUpdated?: EncodedTestRow[];
+  relationRemoved?: Array<{ table: string; rowId: Uint8Array }>;
+}): unknown {
+  return {
+    type: "delta",
+    reset,
+    settled: true,
+    delta: encodeSubscriptionDelta({
+      added: rootAdded,
+      updated: rootUpdated,
+      removed: rootRemoved,
+    }),
+    relation_delta: encodeRelationSubscriptionDelta({
+      baseCursor: 0,
+      cursor: 1,
+      added: relationAdded,
+      updated: relationUpdated,
+      removed: relationRemoved,
+      addedEdges: [],
+      removedEdges: [],
+    }),
+  };
+}
+
 function indexedUuidBytes(index: number): Uint8Array {
   const bytes = new Uint8Array(16);
   new DataView(bytes.buffer).setUint32(12, index, false);
@@ -4982,6 +5116,7 @@ function readPreparedQueryTail(
 } {
   if (!opts.prefixAlreadySkipped) {
     reader.readVec(() => undefined); // joins
+    reader.option(() => undefined); // flat_join
     reader.readVec(() => undefined); // policy_branches
     reader.readVec(() => undefined); // reachable
     reader.readVec(() => undefined); // inherits
@@ -5012,6 +5147,7 @@ function readPreparedSelect(query: Uint8Array): string[] | undefined {
     reader.string();
   });
   reader.readVec(() => undefined);
+  reader.option(() => undefined);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
@@ -5225,6 +5361,7 @@ function readPolicyQueryForTest(reader: PostcardReader): {
   const table = reader.string();
   const filters = reader.readVec(readPolicyPredicateForTest);
   const joins = reader.readVec(readPolicyJoinForTest);
+  reader.option(() => undefined);
   const branches = reader.readVec(readPolicyBranchForTest);
   reader.readVec(skipPolicyReachableForTest);
   reader.readVec(readPolicyInheritsForTest);
@@ -5330,6 +5467,7 @@ function readPolicyQueryWithReachablesForTest(reader: PostcardReader): {
   reader.string();
   reader.readVec(readPolicyPredicateForTest);
   reader.readVec(readPolicyJoinForTest);
+  reader.option(() => undefined);
   reader.readVec(readPolicyBranchForTest);
   const reachables = reader.readVec(readPolicyReachableForTest);
   reader.readVec(() => undefined);
@@ -5350,6 +5488,7 @@ function readPolicyQueryWithInheritsForTest(reader: PostcardReader): {
   reader.string();
   reader.readVec(readPolicyPredicateForTest);
   const joinCount = reader.readVec(readPolicyJoinForTest).length;
+  reader.option(() => undefined);
   reader.readVec(readPolicyBranchForTest);
   reader.readVec(skipPolicyReachableForTest);
   const inherits = reader.readVec(readPolicyInheritsForTest);

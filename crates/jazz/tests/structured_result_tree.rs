@@ -7,7 +7,6 @@ use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid};
 use jazz::query::{ArraySubquery, OrderDirection, Query, col, eq, param};
-use jazz::result_tree::MAX_RESULT_TREE_PARENT_BYTES;
 use jazz::result_tree::ResultRelation;
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 
@@ -144,8 +143,7 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
     .array_subquery(
         ArraySubquery::new("ordered_children", "children", "parent_id", "id")
             .select(["label", "rank"])
-            .order_by("rank", OrderDirection::Asc)
-            .unbounded(),
+            .order_by("rank", OrderDirection::Asc),
     );
     let prepared = db.prepare_query(&query).expect("prepare finite tree");
     let tree = block_on(db.all_result_tree(&prepared, ReadOpts::default())).expect("read tree");
@@ -224,9 +222,7 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
     let query = Query::from("parents")
         .filter(eq(col("rank"), param("rank")))
         .array_subquery(
-            ArraySubquery::new("children", "children", "parent_id", "id")
-                .select(["label"])
-                .unbounded(),
+            ArraySubquery::new("children", "children", "parent_id", "id").select(["label"]),
         );
     let prepared = db
         .prepare_query_bound(&query, BTreeMap::from([("rank".to_owned(), Value::U32(7))]))
@@ -281,7 +277,7 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
 }
 
 #[test]
-fn array_bounds_must_be_declared_for_prepare_read_and_subscribe() {
+fn omitted_array_limit_is_unbounded_for_prepare_read_and_subscribe() {
     let db = open_db();
     let parent = db
         .insert(
@@ -303,22 +299,13 @@ fn array_bounds_must_be_declared_for_prepare_read_and_subscribe() {
     )
     .expect("insert child");
 
-    let undeclared = child_query(ArraySubquery::new(
+    let unbounded_query = child_query(ArraySubquery::new(
         "children",
         "children",
         "parent_id",
         "id",
     ));
-    for operation in ["prepare", "read", "subscribe"] {
-        let error = db.prepare_query(&undeclared).expect_err(operation);
-        assert!(
-            error
-                .to_string()
-                .contains("array subquery children must specify limit(...) or unbounded()"),
-            "{operation}: {error}"
-        );
-    }
-    let nested_undeclared = child_query(
+    let nested_unbounded = child_query(
         ArraySubquery::new("children", "children", "parent_id", "id")
             .limit(1)
             .nested(ArraySubquery::new(
@@ -328,7 +315,8 @@ fn array_bounds_must_be_declared_for_prepare_read_and_subscribe() {
                 "id",
             )),
     );
-    assert!(db.prepare_query(&nested_undeclared).is_err());
+    db.prepare_query(&nested_unbounded)
+        .expect("prepare nested omitted limit");
 
     let zero = db
         .prepare_query(&child_query(
@@ -340,9 +328,7 @@ fn array_bounds_must_be_declared_for_prepare_read_and_subscribe() {
     assert!(children(&zero_tree.roots[0], "children").is_empty());
 
     let unbounded = db
-        .prepare_query(&child_query(
-            ArraySubquery::new("children", "children", "parent_id", "id").unbounded(),
-        ))
+        .prepare_query(&unbounded_query)
         .expect("prepare unbounded");
     assert_eq!(
         children(
@@ -359,7 +345,7 @@ fn array_bounds_must_be_declared_for_prepare_read_and_subscribe() {
 }
 
 #[test]
-fn parent_too_large_is_atomic() {
+fn large_parent_is_materialized_atomically_without_a_frame_bound() {
     let db = open_db();
     let parent = db
         .insert(
@@ -371,7 +357,7 @@ fn parent_too_large_is_atomic() {
         )
         .expect("insert parent")
         .row_uuid();
-    let payload = "x".repeat(MAX_RESULT_TREE_PARENT_BYTES / 2 + 1024);
+    let payload = "x".repeat(jazz::protocol_limits::MAX_WIRE_FRAME_BYTES + 1024);
     for rank in 0..2 {
         db.insert(
             "children",
@@ -391,19 +377,10 @@ fn parent_too_large_is_atomic() {
         ))
         .expect("prepare finite children");
 
-    let read_error = block_on(db.all_result_tree(&prepared, ReadOpts::default()))
-        .expect_err("whole parent exceeds terminal byte limit");
-    let message = read_error.to_string();
-    assert!(message.contains("parent-too-large"), "{message}");
-    assert!(message.contains(&parent.0.to_string()), "{message}");
-    assert!(message.contains("relation=children"), "{message}");
-    assert!(
-        message.contains(&format!("limit={MAX_RESULT_TREE_PARENT_BYTES}")),
-        "{message}"
-    );
-
-    assert!(
-        block_on(db.subscribe(&prepared, ReadOpts::default())).is_err(),
-        "the oversized reset must be rejected before any replacement is admitted"
-    );
+    let tree = block_on(db.all_result_tree(&prepared, ReadOpts::default()))
+        .expect("large logical parent is not constrained by a physical frame");
+    assert_eq!(tree.roots.len(), 1);
+    assert_eq!(children(&tree.roots[0], "children").len(), 2);
+    block_on(db.subscribe(&prepared, ReadOpts::default()))
+        .expect("large reset remains one atomic logical result");
 }

@@ -8,7 +8,7 @@ pub mod identity;
 pub mod metadata;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod middleware;
-pub mod object;
+mod object;
 #[cfg(feature = "otel-core")]
 pub mod otel;
 pub(crate) mod public_api;
@@ -37,9 +37,9 @@ use thiserror::Error;
 pub use app_id::AppId;
 pub use public_schema::{
     AuthMode, BatchId, ColumnDescriptor, ColumnMergeStrategy, ColumnType, LargeValueHandle,
-    LargeValueKind, Operation, OrderedRowDelta, PolicyExpr, Query, QueryBuilder, Row, RowDelta,
-    RowDescriptor, Schema, SchemaBuilder, SchemaHash, Session, TableName, TablePolicies,
-    TableSchema, Value, WriteContext, permissions, policy_expr,
+    LargeValueKind, Operation, OrderedRowDelta, PolicyExpr, Query, QueryBuilder, QueryResult,
+    QueryResultField, Row, RowDelta, RowDescriptor, Schema, SchemaBuilder, SchemaHash, Session,
+    TableName, TablePolicies, TableSchema, Value, WriteContext, permissions, policy_expr,
 };
 pub use schema_lens::{Direction, Lens, LensOp, LensTransform};
 
@@ -48,7 +48,8 @@ pub use crate::db::TextEdit;
 #[cfg(feature = "client")]
 pub use client::{JazzClient, JazzTransaction};
 
-pub use object::{ObjectId, OutputOccurrenceId};
+pub(crate) use object::OutputOccurrenceId;
+pub use object::{BranchName, ObjectId, ResultKey};
 #[cfg(feature = "client")]
 pub use sync::ClientId;
 #[cfg(feature = "client")]

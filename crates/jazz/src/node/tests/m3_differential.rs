@@ -1042,7 +1042,7 @@ fn m3_differential_shapes(schema: &JazzSchema) -> Vec<DifferentialShape> {
             .array_subquery(
                 ArraySubquery::new("access", "doc_access", "doc", "id")
                     .select(["team"])
-                    .unbounded(),
+                    ,
             )
             .validate(schema)
             .unwrap(),
