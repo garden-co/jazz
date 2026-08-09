@@ -3030,6 +3030,7 @@ where
 
     /// Materialize the bytes referenced by a large-value handle returned in a row cell.
     pub fn hydrate_large_value_handle(&mut self, handle: &[u8]) -> Result<Vec<u8>, Error> {
+        let encoded_handle = handle;
         let handle = decode_large_value_handle(handle)?;
         if handle
             .refs
@@ -3067,6 +3068,13 @@ where
         if column_large_value_kind(&table, &handle.column)? != handle.kind {
             return Err(Error::InvalidStoredValue(
                 "large-value handle kind mismatch",
+            ));
+        }
+        let canonical =
+            self.large_value_handle_for_version(&table, &version, &handle.column, handle.kind)?;
+        if canonical != encoded_handle {
+            return Err(Error::InvalidStoredValue(
+                "large-value handle does not match canonical version content",
             ));
         }
         self.materialize_large_value_column(&table, &version, &handle.column)
