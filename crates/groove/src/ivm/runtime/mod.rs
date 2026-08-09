@@ -790,7 +790,10 @@ impl IvmRuntime {
                     sinks.insert(sink.clone(), records.as_ref().clone());
                 }
             }
-            let records = MultisinkDeltas { sinks };
+            let records = MultisinkDeltas {
+                sinks,
+                terminal_sinks: BTreeMap::new(),
+            };
             if !records.is_empty() {
                 evaluator.metrics.notifications_sent += 1;
                 evaluator.metrics.notification_records += multisink_deltas_record_count(&records);
@@ -1000,7 +1003,10 @@ impl IvmRuntime {
             }
             sinks.insert(sink.clone(), records);
         }
-        Ok(MultisinkDeltas { sinks })
+        Ok(MultisinkDeltas {
+            sinks,
+            terminal_sinks: BTreeMap::new(),
+        })
     }
 
     fn subscription_hydration_snapshot<S>(
@@ -1063,7 +1069,10 @@ impl IvmRuntime {
             }
             sinks.insert(sink.clone(), records);
         }
-        Ok(MultisinkDeltas { sinks })
+        Ok(MultisinkDeltas {
+            sinks,
+            terminal_sinks: BTreeMap::new(),
+        })
     }
 
     fn hydration_snapshots_for_subscription<S>(
@@ -3820,6 +3829,9 @@ impl Subscription {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MultisinkDeltas {
     pub sinks: BTreeMap<String, RecordDeltas>,
+    /// Structured terminal operations are a subscription-boundary output.
+    /// Relational operators never consume this map.
+    pub terminal_sinks: BTreeMap<String, TerminalDeltas>,
 }
 
 #[derive(Debug)]
@@ -3839,11 +3851,58 @@ impl QueuedMultisinkDeltas {
 impl MultisinkDeltas {
     pub fn is_empty(&self) -> bool {
         self.sinks.values().all(RecordDeltas::is_empty)
+            && self.terminal_sinks.values().all(TerminalDeltas::is_empty)
     }
 
     pub fn get(&self, sink: &str) -> Option<&RecordDeltas> {
         self.sinks.get(sink)
     }
+}
+
+/// Incremental edits to a materialized terminal tree. Paths alternate public
+/// collection fields and stable descendant keys, starting below `root_key`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalDeltas {
+    pub operations: Vec<TerminalOperation>,
+}
+
+impl TerminalDeltas {
+    pub fn is_empty(&self) -> bool {
+        self.operations.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalOperation {
+    pub root_key: Bytes,
+    pub path: Vec<TerminalPathSegment>,
+    pub edit: TerminalEdit,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalPathSegment {
+    Collection(String),
+    Key(Bytes),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalEdit {
+    Insert {
+        index: usize,
+        key: Bytes,
+        value: Bytes,
+    },
+    Update {
+        key: Bytes,
+        value: Bytes,
+    },
+    Remove {
+        key: Bytes,
+    },
+    Move {
+        key: Bytes,
+        index: usize,
+    },
 }
 
 /// Receiving end of a live multisink graph subscription.
