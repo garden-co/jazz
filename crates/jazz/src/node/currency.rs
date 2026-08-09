@@ -372,12 +372,17 @@ where
                 .get(&schema_version)
                 .and_then(|mapping| {
                     mapping.tables.iter().find_map(|(logical_table, mapping)| {
-                        let expected = if is_deletion {
+                        let root = if is_deletion {
                             physical_register_table_name(mapping.table_id)
                         } else {
                             physical_history_table_name(mapping.table_id)
                         };
-                        (expected == storage_table).then(|| logical_table.clone())
+                        let branch_prefix = format!("jazz_physical_{}_branch_", mapping.table_id.0);
+                        let branch_suffix = if is_deletion { "_register" } else { "_history" };
+                        (root == storage_table
+                            || (storage_table.starts_with(&branch_prefix)
+                                && storage_table.ends_with(branch_suffix)))
+                        .then(|| logical_table.clone())
                     })
                 })
                 .ok_or(Error::InvalidStoredValue(

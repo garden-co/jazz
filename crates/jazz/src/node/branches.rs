@@ -392,11 +392,13 @@ where
                     let winner = source_versions[winner_idx].clone();
                     through_frontier.insert(self.version_tx_id(&winner)?);
                     let parents = self.target_layer_heads(&table.name, row_uuid, layer, target)?;
+                    let (_, winner_cells, _) =
+                        self.project_branch_version(&winner, write_schema_version, &table.name)?;
                     let cells = table_schema
                         .columns
                         .iter()
-                        .map(|column| winner.cell(&table_schema, &column.name))
-                        .collect::<Result<Vec<_>, _>>()?;
+                        .map(|column| Ok(winner_cells.get(&column.name).cloned()))
+                        .collect::<Result<Vec<_>, Error>>()?;
                     let mut authored_columns = BTreeSet::new();
                     let mut layer_has_novel_contribution = false;
                     for source_version in &source_versions {
@@ -1267,6 +1269,51 @@ where
         Ok(columns)
     }
 
+    /// Decode a stored version with the schema that authored its descriptor,
+    /// then project both its values and contribution coordinates to the
+    /// requested schema. A `VersionRow`'s physical slots must never be indexed
+    /// with a newer logical table descriptor.
+    fn project_branch_version(
+        &mut self,
+        version: &VersionRow,
+        target_schema: SchemaVersionId,
+        target_table: &str,
+    ) -> Result<(String, BTreeMap<String, Value>, Option<BTreeSet<String>>), Error> {
+        let source_schema = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "branch row schema version alias missing",
+            ))?;
+        let source_table_name = version.table().to_owned();
+        let source_table = self
+            .table_in_schema(&source_table_name, source_schema)?
+            .clone();
+        let authored = version.authored_columns(&source_table)?;
+        let mut cells = version.cells(&source_table)?;
+        let projected_table = self
+            .translate_cells(source_schema, target_schema, &source_table_name, &mut cells)?
+            .ok_or(Error::BranchMergeCalculation(
+                "branch version has no lens path to target schema",
+            ))?;
+        if projected_table != target_table {
+            return Err(Error::BranchMergeCalculation(
+                "branch version projects to another target table",
+            ));
+        }
+        let authored = authored
+            .map(|columns| {
+                self.project_branch_authored_columns(
+                    source_schema,
+                    &source_table_name,
+                    target_schema,
+                    target_table,
+                    columns,
+                )
+            })
+            .transpose()?;
+        Ok((projected_table, cells, authored))
+    }
+
     fn branch_overlay_layer_winner_for_schema(
         &mut self,
         table: &str,
@@ -1406,7 +1453,6 @@ where
             .tables
             .clone();
         for table in write_tables {
-            let table_schema = self.table_in_schema(&table.name, write_schema_version)?;
             for row_uuid in self.lineage_row_ids(&table.name, target)? {
                 for layer in [VersionLayer::Content, VersionLayer::Deletion] {
                     for version in
@@ -1414,8 +1460,13 @@ where
                     {
                         let tx_id = self.version_tx_id(&version)?;
                         let coordinates = match layer {
-                            VersionLayer::Content => version
-                                .authored_columns(&table_schema)?
+                            VersionLayer::Content => self
+                                .project_branch_version(
+                                    &version,
+                                    write_schema_version,
+                                    &table.name,
+                                )?
+                                .2
                                 .unwrap_or_default()
                                 .into_iter()
                                 .map(|column| ContributionCoordinate {
@@ -1471,7 +1522,7 @@ where
             .iter()
             .copied()
             .collect::<BTreeSet<_>>();
-        let table = self.table(&target.table)?.clone();
+        let write_schema_version = self.catalogue.current_write_schema.schema;
         let mut expected = BTreeSet::new();
         let mut winning_source: Option<(TxId, VersionRow)> = None;
         for source_version in source_versions {
@@ -1481,14 +1532,15 @@ where
             }
             let authored = match &target.component {
                 ContributionComponent::Column(column) => {
-                    source_version.authored_columns(&table)?.map_or_else(
-                        || {
-                            source_version
-                                .cell(&table, column)
-                                .map(|value| value.is_some())
-                        },
-                        |columns| Ok(columns.contains(column)),
-                    )?
+                    let (_, source_cells, source_authored) = self.project_branch_version(
+                        &source_version,
+                        write_schema_version,
+                        &target.table,
+                    )?;
+                    source_authored.map_or_else(
+                        || source_cells.contains_key(column),
+                        |columns| columns.contains(column),
+                    )
                 }
                 ContributionComponent::Register => source_version.deletion().is_some(),
                 ContributionComponent::Operation(_) => return Ok(false),
@@ -1515,10 +1567,22 @@ where
             return Ok(false);
         };
         match &target.component {
-            ContributionComponent::Column(column) => Ok(emitted_version
-                .authored_columns(&table)?
-                .is_some_and(|columns| columns.contains(column))
-                && emitted_version.cell(&table, column)? == winning_source.cell(&table, column)?),
+            ContributionComponent::Column(column) => {
+                let (_, emitted_cells, emitted_authored) = self.project_branch_version(
+                    emitted_version,
+                    write_schema_version,
+                    &target.table,
+                )?;
+                let (_, winning_cells, _) = self.project_branch_version(
+                    &winning_source,
+                    write_schema_version,
+                    &target.table,
+                )?;
+                Ok(
+                    emitted_authored.is_some_and(|columns| columns.contains(column))
+                        && emitted_cells.get(column) == winning_cells.get(column),
+                )
+            }
             ContributionComponent::Register => {
                 Ok(emitted_version.deletion() == winning_source.deletion())
             }

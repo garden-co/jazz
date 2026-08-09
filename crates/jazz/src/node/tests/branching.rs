@@ -621,17 +621,29 @@ fn branch_overlay_partition_creation_rebuilds_live_database_without_storage_reop
 fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
     // Physical branch partition identity is internal storage topology; the
     // branch read and merge-back assertions cover its user-visible semantics.
-    let base = schema();
+    let base = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("obsolete", ColumnType::String),
+        ],
+    )]);
     let renamed = SchemaVersion::new(JazzSchema::new([TableSchema::new(
         "tasks",
-        [ColumnSchema::new("name", ColumnType::String)],
+        [
+            ColumnSchema::new("added", ColumnType::String),
+            ColumnSchema::new("name", ColumnType::String),
+        ],
     )]));
     let (dir, mut core) = open_history_complete_node_with_schema(node(0x23), base.clone());
     let branch_id = branch(0x23);
     core.create_root_branch(branch_id).unwrap();
     core.commit_mergeable_on_branch(
         branch_id,
-        MergeableCommit::new("todos", row(0x23), 10).cells(title_cells("before rename")),
+        MergeableCommit::new("todos", row(0x23), 10).cells(BTreeMap::from([
+            ("title".to_owned(), v("before rename")),
+            ("obsolete".to_owned(), v("must not become the title")),
+        ])),
     )
     .unwrap();
     core.commit_mergeable_on_branch(
@@ -662,6 +674,14 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
                         from: "title".to_owned(),
                         to: "name".to_owned(),
                     },
+                    LensOp::DropColumn {
+                        column: "obsolete".to_owned(),
+                        backwards_default: v("retired"),
+                    },
+                    LensOp::AddColumn {
+                        column: "added".to_owned(),
+                        default: v("default-added"),
+                    },
                 ],
             }],
         ),
@@ -678,7 +698,10 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
     core.commit_mergeable_on_branch(
         branch_id,
         MergeableCommit::new("tasks", row(0x24), 12)
-            .cells(BTreeMap::from([("name".to_owned(), v("after rename"))])),
+            .cells(BTreeMap::from([
+                ("added".to_owned(), v("new field")),
+                ("name".to_owned(), v("after rename")),
+            ])),
     )
     .unwrap();
     core.commit_mergeable_on_branch(
@@ -728,9 +751,21 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
 
     let shape = Query::from("todos").validate(&base).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let expected = BTreeMap::from([
-        (row(0x23), title_cells("before rename")),
-        (row(0x24), title_cells("after rename")),
+    let expected_overlay = BTreeMap::from([
+        (
+            row(0x23),
+            BTreeMap::from([
+                ("obsolete".to_owned(), v("must not become the title")),
+                ("title".to_owned(), v("before rename")),
+            ]),
+        ),
+        (
+            row(0x24),
+            BTreeMap::from([
+                ("obsolete".to_owned(), v("retired")),
+                ("title".to_owned(), v("after rename")),
+            ]),
+        ),
     ]);
     assert_eq!(
         core.query_rows_on_branch(branch_id, &shape, &binding)
@@ -738,7 +773,7 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
-        expected
+        expected_overlay
     );
 
     drop(core);
@@ -749,7 +784,7 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
-        expected
+        expected_overlay
     );
     let merge_back = reopened.merge_back_branch(branch_id).unwrap();
     assert_eq!(
@@ -759,7 +794,22 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
-        expected
+        BTreeMap::from([
+            (
+                row(0x23),
+                BTreeMap::from([
+                    ("obsolete".to_owned(), v("retired")),
+                    ("title".to_owned(), v("before rename")),
+                ]),
+            ),
+            (
+                row(0x24),
+                BTreeMap::from([
+                    ("obsolete".to_owned(), v("retired")),
+                    ("title".to_owned(), v("after rename")),
+                ]),
+            ),
+        ])
     );
     assert_eq!(
         reopened
@@ -770,6 +820,22 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
             .map(|provenance| provenance.source_lineage),
         Some(BranchLineage::Branch(branch_id))
     );
+    // A second merge validates the first merge's substitutions and rebuilds
+    // the known target-source dot set. Both paths must decode the old authored
+    // descriptor before projecting contribution columns to the write schema.
+    reopened
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("tasks", row(0x24), 14)
+                .cells(BTreeMap::from([("name".to_owned(), v("second merge"))])),
+        )
+        .unwrap();
+    let second_merge = reopened.merge_back_branch(branch_id).unwrap();
+    assert!(reopened
+        .transaction_record(second_merge)
+        .unwrap()
+        .branch_merge
+        .is_some());
 }
 
 #[test]
