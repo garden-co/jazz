@@ -757,16 +757,13 @@ describe("NativeRuntimeAdapter server transport", () => {
               return [
                 {
                   type: "snapshot",
-                  rows: encodeRelationSnapshot(
-                    [
-                      {
-                        table: "todos",
-                        rowId,
-                        title: "visible after scheduled tick",
-                      },
-                    ],
-                    [],
-                  ),
+                  rows: encodeRelationSnapshot([
+                    {
+                      table: "todos",
+                      rowId,
+                      title: "visible after scheduled tick",
+                    },
+                  ]),
                 },
               ];
             },
@@ -1335,21 +1332,18 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     controller!.enqueue({
       type: "snapshot",
-      rows: encodeRelationSnapshot(
-        [
-          {
-            table: "todos",
-            rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-            title: "keep",
-          },
-          {
-            table: "todos",
-            rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
-            title: "drop",
-          },
-        ],
-        [],
-      ),
+      rows: encodeRelationSnapshot([
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+          title: "keep",
+        },
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+          title: "drop",
+        },
+      ]),
     });
     await Promise.resolve();
 
@@ -2019,16 +2013,13 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     controller!.enqueue({
       type: "snapshot",
-      rows: encodeRelationSnapshot(
-        [
-          {
-            table: "todos",
-            rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-            title: "native",
-          },
-        ],
-        [],
-      ),
+      rows: encodeRelationSnapshot([
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+          title: "native",
+        },
+      ]),
     });
     await Promise.resolve();
 
@@ -2687,21 +2678,18 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     controller!.enqueue({
       type: "snapshot",
-      rows: encodeRelationSnapshot(
-        [
-          {
-            table: "todos",
-            rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-            title: "first",
-          },
-          {
-            table: "todos",
-            rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
-            title: "second",
-          },
-        ],
-        [],
-      ),
+      rows: encodeRelationSnapshot([
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+          title: "first",
+        },
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+          title: "second",
+        },
+      ]),
     });
     await Promise.resolve();
 
@@ -2734,7 +2722,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     controller!.enqueue({
       type: "snapshot",
-      rows: encodeRelationSnapshot([], []),
+      rows: encodeRelationSnapshot([]),
     });
     await Promise.resolve();
 
@@ -3256,21 +3244,18 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     controller!.enqueue({
       type: "snapshot",
-      rows: encodeRelationSnapshot(
-        [
-          {
-            table: "todos",
-            rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-            title: "requested",
-          },
-          {
-            table: "todos",
-            rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
-            title: "extra from native",
-          },
-        ],
-        [],
-      ),
+      rows: encodeRelationSnapshot([
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+          title: "requested",
+        },
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+          title: "extra from native",
+        },
+      ]),
     });
     await Promise.resolve();
 
@@ -5789,29 +5774,10 @@ function encodeRows(rows: EncodedTestRow[]): Uint8Array {
   return writer.finish();
 }
 
-function encodeRelationSnapshot(
-  rows: EncodedTestRow[],
-  edges: Array<{
-    sourceTable: string;
-    sourceRowId: Uint8Array;
-    relation: string;
-    targetTable: string;
-    targetRowId: Uint8Array;
-  }>,
-  rootCount = rows.length,
-): Uint8Array {
+function encodeRelationSnapshot(rows: EncodedTestRow[], rootCount = rows.length): Uint8Array {
   const writer = new PostcardWriter();
-  writer.u64(0);
   writer.u64(rootCount);
   writeRowBatches(writer, rows);
-  writer.vec((edge, index) => {
-    const source = edges[index]!;
-    edge.string(source.sourceTable);
-    edge.bytes(source.sourceRowId);
-    edge.string(source.relation);
-    edge.string(source.targetTable);
-    edge.bytes(source.targetRowId);
-  }, edges.length);
   return writer.finish();
 }
 
@@ -5844,7 +5810,6 @@ function encodeTerminalRelationSnapshot(schema: WasmSchema): Uint8Array {
   new DataView(nestedRowsHeader.buffer).setUint32(0, 1, true);
   const nestedRows = concatBytes([nestedRowsHeader, childRecord]);
   const writer = new PostcardWriter();
-  writer.u64(0);
   writer.u64(1);
   writer.vec((batch) => {
     batch.string("users");
@@ -5855,7 +5820,6 @@ function encodeTerminalRelationSnapshot(schema: WasmSchema): Uint8Array {
       row.bytes(createRecord(descriptor, [new TextEncoder().encode("Ada"), nestedRows]));
     }, 1);
   }, 1);
-  writer.vec(() => undefined, 0);
   return writer.finish();
 }
 
