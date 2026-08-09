@@ -231,17 +231,15 @@ and `cold_reset_bulk_ingest_matches_incremental_ingest`
 The remaining reset-specific bypass and the move to an `OrderedKvStorage`
 transaction are implementation work, not protocol invariants.
 
-**Target structured-output delivery (v4).** A structured reset carries an
+**Target structured-output delivery (v5).** A structured reset carries an
 ordered recursive snapshot. An incremental update carries whole-parent
 replacements addressed by stable output occurrence; its extensible envelope
-reserves distinct tags for future narrower delta shapes without changing the v4
-meaning. Both `SyncMessage::ViewUpdate` and `ViewUpdateChunk` MUST carry the
-same structured-output vocabulary, and chunk assembly MUST publish no partial
-logical replacement before its final chunk. Row/version payload references and
-dedup remain separate from the rendered tree so v4 does not duplicate row bodies
-already available through typed members and bundles. The current chunk merger
-only appends flat member/fact vectors (`crates/jazz/src/db.rs:6026-6078`,
-`:6120-6154`); it is not structured-output behavior yet.
+reserves distinct tags for future narrower delta shapes without changing the v5
+meaning. `SyncMessage::ViewUpdate` carries the structured-output vocabulary as
+one logical message; generic transport fragmentation publishes no partial
+logical replacement. Row/version payload references and dedup remain separate
+from the rendered tree so v5 does not duplicate row bodies already available
+through typed members and bundles.
 
 _Further invariants._ `INV-SYNC-17` — a result add carries enough
 deletion-register witness to reconstruct the row's visible presence/absence.
@@ -449,7 +447,7 @@ this reader's visibility for this canonical binding view (shape, binding, and
 read view). It is deliberately part of the declaration, rather than an
 out-of-band connection hint: it qualifies exactly the state the subscriber is
 claiming to have applied and persists with that state across reconnects.
-`ViewUpdate` and `ViewUpdateChunk` carry the server stamp beside their
+`ViewUpdate` carries the server stamp beside its
 peer-payload inventory, so the receiver persists it atomically with the
 corresponding settled fast fact before later echoing it in the declaration.
 

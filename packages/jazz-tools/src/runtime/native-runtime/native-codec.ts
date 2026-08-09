@@ -224,7 +224,6 @@ export type QueryArraySubquery = {
   select?: string[];
   orderBy?: QueryOrder[];
   limit?: number | null;
-  unbounded?: boolean;
   offset?: number;
   requirement?: QueryArraySubqueryRequirement;
   nestedArrays?: QueryArraySubquery[];
@@ -306,21 +305,10 @@ function writeArraySubquery(writer: PostcardWriter, subquery: QueryArraySubquery
     select,
     orderBy = [],
     limit = null,
-    unbounded = false,
     offset = 0,
     requirement = "Optional",
     nestedArrays = [],
   } = subquery;
-  if (limit == null && !unbounded) {
-    throw new Error(
-      `array subquery ${subquery.columnName} must specify limit or explicitly declare unbounded`,
-    );
-  }
-  if (limit != null && unbounded) {
-    throw new Error(
-      `array subquery ${subquery.columnName} cannot specify both limit and unbounded`,
-    );
-  }
   if (limit != null) validateQueryBound(`array subquery ${subquery.columnName} limit`, limit);
   validateQueryBound(`array subquery ${subquery.columnName} offset`, offset);
   writer.string(subquery.columnName);
@@ -349,7 +337,6 @@ function writeArraySubquery(writer: PostcardWriter, subquery: QueryArraySubquery
   } else {
     writer.some((valueWriter) => valueWriter.u64(limit));
   }
-  writer.bool(unbounded);
   writer.u64(offset);
   writer.u64(arraySubqueryRequirementTag(requirement));
   writer.vec((nested, index) => {

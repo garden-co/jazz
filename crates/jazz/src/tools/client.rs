@@ -2253,7 +2253,6 @@ fn core_array_subquery(
         select: subquery.select_columns.clone(),
         order_by,
         limit: subquery.limit,
-        unbounded: subquery.unbounded,
         offset: subquery.offset,
         requirement,
         nested_arrays: subquery

@@ -2916,7 +2916,6 @@ function readQueryArraySubquery(
     select_columns?: unknown;
     order_by?: unknown;
     limit?: unknown;
-    unbounded?: unknown;
     offset?: unknown;
     requirement?: unknown;
     nested_arrays?: unknown;
@@ -2945,7 +2944,6 @@ function readQueryArraySubquery(
     select,
     orderBy,
     limit: record.limit == null ? null : readLimit(record.limit),
-    unbounded: readArraySubqueryUnbounded(record.unbounded),
     offset: readOffset(record.offset),
     requirement: readArraySubqueryRequirement(record.requirement),
     nestedArrays,
@@ -3025,12 +3023,6 @@ function readArraySubqueryRequirement(value: unknown): QueryArraySubquery["requi
   if (value == null || value === "Optional") return "Optional";
   if (value === "AtLeastOne" || value === "MatchCorrelationCardinality") return value;
   throw unsupportedQueryEncodingError("array_subqueries.requirement");
-}
-
-function readArraySubqueryUnbounded(value: unknown): boolean {
-  if (value == null) return false;
-  if (typeof value === "boolean") return value;
-  throw unsupportedQueryEncodingError("array_subqueries.unbounded");
 }
 
 function stripParentQualifier(column: string, parentTable: string): string {

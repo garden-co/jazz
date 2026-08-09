@@ -37,14 +37,18 @@ export type BrowserWebSocket = {
   ): void;
 };
 
-export const WIRE_PROTOCOL_VERSION = 4;
+export const WIRE_PROTOCOL_VERSION = 5;
 export const MIN_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const MAX_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const FEATURE_SYNC_MESSAGE_PAYLOAD = 1 << 0;
 export const FEATURE_STRUCTURED_ERRORS = 1 << 2;
 export const FEATURE_PAYLOAD_ZSTD = 1 << 4;
+export const FEATURE_MESSAGE_FRAGMENTATION = 1 << 5;
 export const CLIENT_WIRE_FEATURES =
-  FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_PAYLOAD_ZSTD;
+  FEATURE_SYNC_MESSAGE_PAYLOAD |
+  FEATURE_STRUCTURED_ERRORS |
+  FEATURE_PAYLOAD_ZSTD |
+  FEATURE_MESSAGE_FRAGMENTATION;
 
 // The server route accepts WebSocket messages up to one MiB. Reserve enough
 // postcard framing bytes that a burst of otherwise-valid wire frames remains

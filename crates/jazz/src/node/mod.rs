@@ -4775,13 +4775,6 @@ where
                     version_bundles,
                     program_fact_adds,
                     ..
-                }
-                | SyncMessage::ViewUpdateChunk {
-                    result_member_adds,
-                    version_carriers,
-                    version_bundles,
-                    program_fact_adds,
-                    ..
                 } => (
                     result_member_adds,
                     version_carriers,

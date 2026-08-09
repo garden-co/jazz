@@ -71,7 +71,7 @@ function rootLimit(queryJson: string): number | undefined {
 }
 
 describe("Db.one", () => {
-  it("adds limit 1 before executing an unbounded query", async () => {
+  it("adds limit 1 before executing a query without a limit", async () => {
     const { client, query } = makeClient();
     const db = new TestDb(client);
 

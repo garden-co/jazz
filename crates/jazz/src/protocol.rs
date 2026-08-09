@@ -160,41 +160,6 @@ pub enum SyncMessage {
         /// Non-row program fact removals, such as relation edges.
         program_fact_removes: Vec<ProgramFactEntry>,
     },
-    /// Bounded chunk of a downstream current-row view update.
-    ///
-    /// Chunks carry the same record payload types as [`SyncMessage::ViewUpdate`]
-    /// but split an otherwise oversized snapshot across multiple sync messages.
-    /// Receivers may ingest non-final chunks immediately, but must not publish
-    /// subscription settlement until `final_chunk` is true.
-    ViewUpdateChunk {
-        /// Query binding result set addressed by this update.
-        subscription: SubscriptionKey,
-        /// Serving node's contiguous applied global watermark when the original
-        /// update was assembled.
-        settled_through: GlobalSeq,
-        /// Whether receiver result_set should be reset first.
-        reset_result_set: bool,
-        /// Whether this chunk completes the logical view update.
-        final_chunk: bool,
-        /// General carrier stream for singleton bundles and packed runs.
-        ///
-        /// Receivers validate this stream and apply packed runs directly.
-        /// Legacy/test paths may still expand carriers into `version_bundles`.
-        version_carriers: Vec<VersionCarrier>,
-        /// Version bundles not previously shipped on the peer.
-        version_bundles: Vec<VersionBundle>,
-        /// Peer-scoped payload coverage that may be referenced instead of
-        /// resending bytes.
-        peer_payload_inventory: PeerPayloadInventory,
-        /// Typed result membership additions for the subscription.
-        result_member_adds: Vec<ResultMemberEntry>,
-        /// Typed result membership removals for the subscription.
-        result_member_removes: Vec<ResultMemberEntry>,
-        /// Non-row program fact additions, such as relation edges.
-        program_fact_adds: Vec<ProgramFactEntry>,
-        /// Non-row program fact removals, such as relation edges.
-        program_fact_removes: Vec<ProgramFactEntry>,
-    },
     /// Bulk-lane request for bytes backing one content extent.
     FetchContentExtent {
         /// Owner/version/read-view context used for authorization and membership checks.
@@ -254,9 +219,6 @@ impl SyncMessage {
         match self {
             Self::ViewUpdate {
                 version_carriers, ..
-            }
-            | Self::ViewUpdateChunk {
-                version_carriers, ..
             } => {
                 for carrier in version_carriers {
                     if let VersionCarrier::Run(run) = carrier {
@@ -271,21 +233,14 @@ impl SyncMessage {
 
     /// Expand packed view-update carriers into `version_bundles` for legacy paths/tests.
     pub fn expand_version_carriers_for_receive(mut self) -> Result<Self, VersionBundleRunError> {
-        match &mut self {
-            Self::ViewUpdate {
-                version_carriers,
-                version_bundles,
-                ..
-            }
-            | Self::ViewUpdateChunk {
-                version_carriers,
-                version_bundles,
-                ..
-            } => {
-                version_bundles.extend(expand_version_carriers(version_carriers)?);
-                version_carriers.clear();
-            }
-            _ => {}
+        if let Self::ViewUpdate {
+            version_carriers,
+            version_bundles,
+            ..
+        } = &mut self
+        {
+            version_bundles.extend(expand_version_carriers(version_carriers)?);
+            version_carriers.clear();
         }
         Ok(self)
     }
