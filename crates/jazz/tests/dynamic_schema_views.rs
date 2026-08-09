@@ -3,6 +3,7 @@ use jazz::groove::records::Value;
 use jazz::groove::schema::ColumnType;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::query::{OrderDirection, col, gt, lit};
 use jazz::schema::{ColumnSchema, JazzSchema, Policy, TableSchema};
 use jazz::tools::OpenBatchId;
 
@@ -178,6 +179,20 @@ fn typed_view_reads_and_updates_preexisting_snapshot_rows() {
     );
     let prepared = view.prepare_query(&view.table("items")).unwrap();
     assert_eq!(tx.all_prepared(&prepared).unwrap().len(), 1);
+    let ordered = view
+        .prepare_query(&view.table("items").order_by("label", OrderDirection::Asc))
+        .unwrap();
+    assert_eq!(tx.all_prepared(&ordered).unwrap().len(), 1);
+    let windowed = view
+        .prepare_query(
+            &view
+                .table("items")
+                .filter(gt(col("label"), lit("a")))
+                .offset(0)
+                .limit(1),
+        )
+        .unwrap();
+    assert_eq!(tx.all_prepared(&windowed).unwrap().len(), 1);
     tx.update(
         "items",
         row,

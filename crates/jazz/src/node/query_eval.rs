@@ -9289,15 +9289,28 @@ where
         query: &crate::query::Query,
         rows: &mut Vec<CurrentRow>,
     ) -> Result<(), Error> {
+        self.finish_engine_query_rows_in_schema(
+            query,
+            self.catalogue.current_write_schema.schema,
+            rows,
+        )
+    }
+
+    fn finish_engine_query_rows_in_schema(
+        &self,
+        query: &crate::query::Query,
+        schema_version: SchemaVersionId,
+        rows: &mut Vec<CurrentRow>,
+    ) -> Result<(), Error> {
         if query.aggregate.is_some() {
-            self.apply_query_order(query, rows)?;
+            self.apply_query_order_in_schema(query, schema_version, rows)?;
             apply_query_window(query, rows);
             return Ok(());
         }
         // Groove lowering owns membership/windowing, but one-shot APIs still
         // return a deterministic Vec. Re-apply ordering to the selected rows
         // without re-applying pagination.
-        self.apply_query_order(query, rows)
+        self.apply_query_order_in_schema(query, schema_version, rows)
     }
 
     fn query_output_table(
@@ -9316,6 +9329,15 @@ where
     pub(crate) fn apply_query_order(
         &self,
         query: &crate::query::Query,
+        rows: &mut [CurrentRow],
+    ) -> Result<(), Error> {
+        self.apply_query_order_in_schema(query, self.catalogue.current_write_schema.schema, rows)
+    }
+
+    fn apply_query_order_in_schema(
+        &self,
+        query: &crate::query::Query,
+        schema_version: SchemaVersionId,
         rows: &mut [CurrentRow],
     ) -> Result<(), Error> {
         if query.order_by.is_empty() {
@@ -9342,7 +9364,7 @@ where
             });
             return Ok(());
         }
-        let table = self.table(&query.table)?.clone();
+        let table = self.table_in_schema(&query.table, schema_version)?;
         rows.sort_by(|left, right| {
             for order in &query.order_by {
                 let ordering = compare_optional_values(
@@ -9420,7 +9442,7 @@ where
         let open_tx = self.open_tx_mut(tx_id)?;
         open_tx.predicate_reads.truncate(predicate_len);
         open_tx.predicate_reads.push(predicate_read);
-        self.finish_engine_query_rows(query, &mut rows)?;
+        self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
         Ok(rows)
     }
 
