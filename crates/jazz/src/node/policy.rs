@@ -30,10 +30,11 @@ where
             let Some(policy) = table.write_policies.delete_using.clone() else {
                 return Ok(true);
             };
-            let current = match self.policy_delete_subject_row(&table, version)? {
-                Some(current) => current,
-                None => current_row_from_cells(&table, version.row_uuid(), &cells)?,
-            };
+            let current =
+                match self.policy_delete_subject_row(policy_schema_version, &table, version)? {
+                    Some(current) => current,
+                    None => current_row_from_cells(&table, version.row_uuid(), &cells)?,
+                };
             let current_cells = table
                 .columns
                 .iter()
@@ -55,10 +56,12 @@ where
             );
         }
         let is_update = self
-            .policy_previous_content_subject_row(&table, version)?
+            .policy_previous_content_subject_row(policy_schema_version, &table, version)?
             .is_some();
         if is_update {
-            let Some(previous) = self.policy_previous_content_subject_row(&table, version)? else {
+            let Some(previous) =
+                self.policy_previous_content_subject_row(policy_schema_version, &table, version)?
+            else {
                 return Ok(false);
             };
             let previous_cells = table
@@ -126,7 +129,17 @@ where
         &mut self,
         commit: MergeableCommit,
     ) -> Result<bool, Error> {
-        let write_schema_version = self.catalogue.current_write_schema.schema;
+        self.dry_run_mergeable_write_allows_in_schema(
+            self.catalogue.current_write_schema.schema,
+            commit,
+        )
+    }
+
+    pub(crate) fn dry_run_mergeable_write_allows_in_schema(
+        &mut self,
+        write_schema_version: SchemaVersionId,
+        commit: MergeableCommit,
+    ) -> Result<bool, Error> {
         let table = self.table_in_schema(&commit.table, write_schema_version)?;
         let version = VersionRecord::from_commit(&commit, &table, write_schema_version)?;
         self.write_policy_allows_version_record(&version, commit.effective_permission_subject())
@@ -329,8 +342,13 @@ where
         let write_schema = self.catalogue.current_write_schema.schema;
         if self.source_reaches_write_policy_table(source, write_schema, table)? {
             Ok(write_schema)
-        } else {
+        } else if self
+            .table_in_schema(table, self.catalogue.current_schema_version_id)
+            .is_ok()
+        {
             Ok(self.catalogue.current_schema_version_id)
+        } else {
+            Ok(source)
         }
     }
 
@@ -371,32 +389,18 @@ where
             .is_ok_and(|table| table.write_policies.any().is_some()))
     }
 
-    fn policy_current_row(
-        &mut self,
-        table: &TableSchema,
-        row_uuid: RowUuid,
-        tier: DurabilityTier,
-    ) -> Result<Option<CurrentRow>, Error> {
-        Ok(self
-            .current_rows_for_schema(
-                &table.name,
-                self.policy_schema_for_table_name(&table.name),
-                tier,
-            )?
-            .into_iter()
-            .find(|row| row.row_uuid() == row_uuid))
-    }
-
     fn policy_delete_subject_row(
         &mut self,
+        policy_schema_version: SchemaVersionId,
         table: &TableSchema,
         version: &VersionRecord,
     ) -> Result<Option<CurrentRow>, Error> {
-        self.policy_previous_content_subject_row(table, version)
+        self.policy_previous_content_subject_row(policy_schema_version, table, version)
     }
 
     fn policy_previous_content_subject_row(
         &mut self,
+        policy_schema_version: SchemaVersionId,
         table: &TableSchema,
         version: &VersionRecord,
     ) -> Result<Option<CurrentRow>, Error> {
@@ -446,8 +450,10 @@ where
             }
         }
 
-        if let Some(current) =
-            self.policy_current_row(table, version.row_uuid(), DurabilityTier::Global)?
+        if let Some(current) = self
+            .current_rows_for_schema(&table.name, policy_schema_version, DurabilityTier::Global)?
+            .into_iter()
+            .find(|row| row.row_uuid() == version.row_uuid())
         {
             return Ok(Some(current));
         }

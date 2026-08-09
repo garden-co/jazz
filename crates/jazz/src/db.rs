@@ -3243,7 +3243,7 @@ where
             .node
             .node
             .borrow_mut()
-            .dry_run_mergeable_write_allows(commit.clone())
+            .dry_run_mergeable_write_allows_in_schema(self.schema_version_id, commit.clone())
             .map_err(Error::from)?;
         if !allowed {
             return Err(Error::new(
