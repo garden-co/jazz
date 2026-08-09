@@ -781,18 +781,29 @@ impl IvmRuntime {
 
         for (subscription_id, subscription) in &self.multisink_subscriptions {
             let mut sinks = BTreeMap::new();
+            let mut terminal_sinks = BTreeMap::new();
             for (sink, output) in &subscription.outputs {
                 let records = evaluator.update_node(output.node)?;
                 if !records.deltas.is_empty() && records.descriptor != output.output {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
                 if !records.is_empty() {
-                    sinks.insert(sink.clone(), records.as_ref().clone());
+                    let records = records.as_ref().clone();
+                    if evaluator.output_is_structured_collect_by(output.node)? {
+                        let terminal = terminal_deltas_from_record_deltas(&records)?;
+                        if !terminal.is_empty() {
+                            terminal_sinks.insert(sink.clone(), terminal);
+                        }
+                    }
+                    // Keep the rendered terminal record available for legacy
+                    // single-sink consumers and hydration. Structured carriers
+                    // select `terminal_sinks` for incremental delivery.
+                    sinks.insert(sink.clone(), records);
                 }
             }
             let records = MultisinkDeltas {
                 sinks,
-                terminal_sinks: BTreeMap::new(),
+                terminal_sinks,
             };
             if !records.is_empty() {
                 evaluator.metrics.notifications_sent += 1;
@@ -3905,6 +3916,175 @@ pub enum TerminalEdit {
     },
 }
 
+fn terminal_deltas_from_record_deltas(
+    deltas: &RecordDeltas,
+) -> Result<TerminalDeltas, IvmRuntimeError> {
+    let mut before = BTreeMap::<Vec<u8>, OwnedRecord>::new();
+    let mut after = BTreeMap::<Vec<u8>, OwnedRecord>::new();
+    for delta in &deltas.deltas {
+        let key = encoded_record_key_part(deltas.descriptor, delta.raw(), &[0])?;
+        let record = OwnedRecord::new(delta.raw().to_vec(), deltas.descriptor);
+        if delta.weight < 0 {
+            before.insert(key, record);
+        } else if delta.weight > 0 {
+            after.insert(key, record);
+        }
+    }
+
+    let mut keys = BTreeSet::new();
+    keys.extend(before.keys().cloned());
+    keys.extend(after.keys().cloned());
+    let mut operations = Vec::new();
+    for key in keys {
+        match (before.get(&key), after.get(&key)) {
+            (None, Some(record)) => operations.push(TerminalOperation {
+                root_key: key.clone().into(),
+                path: Vec::new(),
+                edit: TerminalEdit::Insert {
+                    index: 0,
+                    key: key.clone().into(),
+                    value: record.raw().to_vec().into(),
+                },
+            }),
+            (Some(_), None) => operations.push(TerminalOperation {
+                root_key: key.clone().into(),
+                path: Vec::new(),
+                edit: TerminalEdit::Remove {
+                    key: key.clone().into(),
+                },
+            }),
+            (Some(before), Some(after)) => {
+                diff_terminal_record(&key, Vec::new(), before, after, &mut operations)?
+            }
+            (None, None) => unreachable!("terminal key came from before or after"),
+        }
+    }
+    Ok(TerminalDeltas { operations })
+}
+
+fn diff_terminal_record(
+    root_key: &[u8],
+    path: Vec<TerminalPathSegment>,
+    before: &OwnedRecord,
+    after: &OwnedRecord,
+    operations: &mut Vec<TerminalOperation>,
+) -> Result<(), IvmRuntimeError> {
+    let before_values = before
+        .to_values()
+        .map_err(IvmRuntimeError::RecordEncoding)?;
+    let after_values = after.to_values().map_err(IvmRuntimeError::RecordEncoding)?;
+    let mut scalar_changed = false;
+    for (index, (before_value, after_value)) in before_values.iter().zip(&after_values).enumerate()
+    {
+        match (before_value, after_value) {
+            (Value::Array(before_children), Value::Array(after_children)) => {
+                let field = after
+                    .descriptor()
+                    .fields()
+                    .get(index)
+                    .and_then(|field| field.name.clone())
+                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
+                let mut child_path = path.clone();
+                child_path.push(TerminalPathSegment::Collection(field));
+                diff_terminal_collection(
+                    root_key,
+                    child_path,
+                    before_children,
+                    after_children,
+                    operations,
+                )?;
+            }
+            _ if before_value != after_value => scalar_changed = true,
+            _ => {}
+        }
+    }
+    if scalar_changed {
+        let key = encoded_record_key_part(*after.descriptor(), after.raw(), &[0])?;
+        operations.push(TerminalOperation {
+            root_key: root_key.to_vec().into(),
+            path,
+            edit: TerminalEdit::Update {
+                key: key.into(),
+                value: after.raw().to_vec().into(),
+            },
+        });
+    }
+    Ok(())
+}
+
+fn diff_terminal_collection(
+    root_key: &[u8],
+    path: Vec<TerminalPathSegment>,
+    before_values: &[Value],
+    after_values: &[Value],
+    operations: &mut Vec<TerminalOperation>,
+) -> Result<(), IvmRuntimeError> {
+    let children =
+        |values: &[Value]| -> Result<BTreeMap<Vec<u8>, (usize, OwnedRecord)>, IvmRuntimeError> {
+            let mut children = BTreeMap::new();
+            for (index, value) in values.iter().enumerate() {
+                let Value::Record(record) = value else {
+                    return Err(IvmRuntimeError::InvalidCollectBy(
+                        "structured terminal arrays must contain records".to_owned(),
+                    ));
+                };
+                let key = encoded_record_key_part(*record.descriptor(), record.raw(), &[0])?;
+                if children.insert(key, (index, record.clone())).is_some() {
+                    return Err(IvmRuntimeError::DuplicateCollectByOccurrenceId);
+                }
+            }
+            Ok(children)
+        };
+    let before = children(before_values)?;
+    let after = children(after_values)?;
+    let mut keys = BTreeSet::new();
+    keys.extend(before.keys().cloned());
+    keys.extend(after.keys().cloned());
+    for key in keys {
+        match (before.get(&key), after.get(&key)) {
+            (None, Some((index, record))) => operations.push(TerminalOperation {
+                root_key: root_key.to_vec().into(),
+                path: path.clone(),
+                edit: TerminalEdit::Insert {
+                    index: *index,
+                    key: key.clone().into(),
+                    value: record.raw().to_vec().into(),
+                },
+            }),
+            (Some(_), None) => operations.push(TerminalOperation {
+                root_key: root_key.to_vec().into(),
+                path: path.clone(),
+                edit: TerminalEdit::Remove {
+                    key: key.clone().into(),
+                },
+            }),
+            (Some((before_index, before_record)), Some((after_index, after_record))) => {
+                if before_index != after_index {
+                    operations.push(TerminalOperation {
+                        root_key: root_key.to_vec().into(),
+                        path: path.clone(),
+                        edit: TerminalEdit::Move {
+                            key: key.clone().into(),
+                            index: *after_index,
+                        },
+                    });
+                }
+                let mut descendant_path = path.clone();
+                descendant_path.push(TerminalPathSegment::Key(key.into()));
+                diff_terminal_record(
+                    root_key,
+                    descendant_path,
+                    before_record,
+                    after_record,
+                    operations,
+                )?;
+            }
+            (None, None) => unreachable!("child key came from before or after"),
+        }
+    }
+    Ok(())
+}
+
 /// Receiving end of a live multisink graph subscription.
 #[derive(Debug)]
 pub struct MultisinkSubscription {
@@ -5915,6 +6095,27 @@ impl<S> TickEvaluator<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn output_is_structured_collect_by(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
+        let mut pending = vec![node];
+        let mut seen = HashSet::new();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let node = self
+                .graph
+                .node(node)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+            match &node.descriptor.operator {
+                OpType::CollectBy(collect_by) => {
+                    return Ok(collect_by.mode == CollectByMode::Collect);
+                }
+                _ => pending.extend(node.descriptor.inputs.iter().copied()),
+            }
+        }
+        Ok(false)
+    }
+
     fn node_depends_on_aggregate(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
         let mut ancestors = HashSet::new();
         self.graph.mark_ancestors(node, &mut ancestors);
