@@ -3054,8 +3054,8 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
     let renamed_schema = JazzSchema::new([TableSchema::new(
         "todos",
         [
-            ColumnSchema::new("summary", ColumnType::String),
             ColumnSchema::new("done", ColumnType::Bool),
+            ColumnSchema::new("summary", ColumnType::String),
         ],
     )]);
     let renamed = SchemaVersion::new(renamed_schema);
@@ -3088,9 +3088,54 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
         })
         .unwrap();
 
-    let prepared = view
-        .prepare_query(&view.table("todos").select(["title", "$updatedAt"]))
+    let overlay_open = OpenBatchId::new();
+    owner.begin_mergeable(overlay_open).unwrap();
+    let overlay_inserted = row(0x93);
+    let overlay_tx = view.mergeable_tx_ref(overlay_open);
+    overlay_tx
+        .insert_with_id_at_ms(
+            "todos",
+            overlay_inserted,
+            doctest_support::todo_cells("overlay", true),
+            1_704_067_200_456,
+        )
         .unwrap();
+    let prepared = view
+        .prepare_query(
+            &view
+                .table("todos")
+                .select(["done", "title", "$createdAt", "$updatedAt"]),
+        )
+        .unwrap();
+    let overlay_rows = overlay_tx.all_prepared(&prepared).unwrap();
+    let overlay_row = overlay_rows
+        .iter()
+        .find(|row| row.row_uuid() == overlay_inserted)
+        .expect("staged historical-view row is visible");
+    assert!(
+        overlay_row
+            .encoded_record()
+            .0
+            .field_index("user_title")
+            .is_some()
+    );
+    assert!(
+        overlay_row
+            .encoded_record()
+            .0
+            .field_index("user_done")
+            .is_some()
+    );
+    assert_eq!(
+        overlay_row.cell_at(0),
+        Some(Value::String("overlay".to_owned()))
+    );
+    assert_eq!(overlay_row.cell_at(1), Some(Value::Bool(true)));
+    let overlay_provenance = overlay_row.provenance().unwrap().unwrap();
+    assert_eq!(overlay_provenance.created_at, TxTime(1_704_067_200_456));
+    assert_eq!(overlay_provenance.updated_at, TxTime(1_704_067_200_456));
+    owner.abandon_transaction_handle(overlay_open).unwrap();
+
     let rows = block_on(view.all(&prepared, ReadOpts::default())).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), inserted);
