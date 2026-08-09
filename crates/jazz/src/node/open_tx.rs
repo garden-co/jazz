@@ -74,12 +74,45 @@ where
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
         self.table(table)?;
+        self.tx_read_unchecked(
+            tx_id,
+            self.catalogue.current_write_schema.schema,
+            table,
+            row_uuid,
+        )
+    }
+
+    /// Read a row through an explicit registered schema view.
+    pub fn tx_read_in_schema(
+        &mut self,
+        tx_id: OpenBatchId,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<BTreeMap<String, Value>>, Error> {
+        self.table_in_schema(table, schema_version)?;
+        self.tx_read_unchecked(tx_id, schema_version, table, row_uuid)
+    }
+
+    fn tx_read_unchecked(
+        &mut self,
+        tx_id: OpenBatchId,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<BTreeMap<String, Value>>, Error> {
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
         let snapshot_row = self.snapshot_row(table, row_uuid, &snapshot);
         self.open_tx_mut(tx_id)?
             .base_snapshot_rows
             .insert((table.to_owned(), row_uuid), snapshot_row.clone());
-        let result = self.overlay_pending_writes(tx_id, table, row_uuid, snapshot_row.clone())?;
+        let result = self.overlay_pending_writes_in_schema(
+            tx_id,
+            schema_version,
+            table,
+            row_uuid,
+            snapshot_row.clone(),
+        )?;
         if let Some(version) = snapshot_row.read_version {
             let open_tx = self.open_tx_mut(tx_id)?;
             if !open_tx.row_reads.iter().any(|read| {
@@ -113,7 +146,29 @@ where
         tx_id: OpenBatchId,
         table: &str,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.table(table)?;
+        let schema_version = self.catalogue.current_write_schema.schema;
+        let table_schema = self.table(table)?.clone();
+        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema)
+    }
+
+    /// Read current rows through an explicit registered schema view.
+    pub fn tx_current_rows_in_schema(
+        &mut self,
+        tx_id: OpenBatchId,
+        schema_version: SchemaVersionId,
+        table: &str,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let table_schema = self.table_in_schema(table, schema_version)?;
+        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema)
+    }
+
+    fn tx_current_rows_with_table(
+        &mut self,
+        tx_id: OpenBatchId,
+        schema_version: SchemaVersionId,
+        table: &str,
+        table_schema: TableSchema,
+    ) -> Result<Vec<CurrentRow>, Error> {
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
         let rows = self
             .query_table_versions(table)?
@@ -129,12 +184,15 @@ where
             )
             .collect::<BTreeSet<_>>();
         let mut current = Vec::new();
-        let table_schema = self.table(table)?.clone();
         for row_uuid in rows {
             let snapshot_row = self.snapshot_row(table, row_uuid, &snapshot);
-            if let Some(cells) =
-                self.overlay_pending_writes(tx_id, table, row_uuid, snapshot_row)?
-            {
+            if let Some(cells) = self.overlay_pending_writes_with_table(
+                tx_id,
+                &table_schema,
+                table,
+                row_uuid,
+                snapshot_row,
+            )? {
                 let cells = positional_cells_from_map(&table_schema, &cells)?;
                 current.push(current_row_from_positional_cells(
                     &table_schema,
@@ -144,7 +202,12 @@ where
             }
         }
         sort_current_rows(&mut current);
-        let shape = crate::query::Query::from(table).validate(&self.catalogue.schema)?;
+        let schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&schema_version)
+            .ok_or(Error::InvalidStoredValue("transaction schema is unknown"))?;
+        let shape = crate::query::Query::from(table).validate(&schema.schema)?;
         let binding = shape.bind(BTreeMap::new())?;
         self.open_tx_mut(tx_id)?
             .predicate_reads
@@ -647,17 +710,29 @@ where
             .map(|idx| versions[idx].clone())
     }
 
-    pub(super) fn overlay_pending_writes(
+    fn overlay_pending_writes_in_schema(
         &self,
         tx_id: OpenBatchId,
+        schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
         snapshot_row: SnapshotRow,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
-        let table_schema = self.table(table)?;
+        let table_schema = self.table_in_schema(table, schema_version)?;
+        self.overlay_pending_writes_with_table(tx_id, &table_schema, table, row_uuid, snapshot_row)
+    }
+
+    fn overlay_pending_writes_with_table(
+        &self,
+        tx_id: OpenBatchId,
+        table_schema: &TableSchema,
+        table: &str,
+        row_uuid: RowUuid,
+        snapshot_row: SnapshotRow,
+    ) -> Result<Option<BTreeMap<String, Value>>, Error> {
         let mut cells = snapshot_row
             .content_cells
-            .map(|cells| cells_from_positional(&table_schema, &cells));
+            .map(|cells| cells_from_positional(table_schema, &cells));
         let mut deleted = snapshot_row.deleted;
         for write in self
             .open_tx(tx_id)?

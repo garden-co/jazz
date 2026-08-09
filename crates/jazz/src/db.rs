@@ -2747,7 +2747,7 @@ where
         self.node
             .node
             .borrow_mut()
-            .tx_read(tx_id, table, row)
+            .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
             .map_err(Into::into)
     }
 
@@ -8153,8 +8153,23 @@ where
             .node
             .node
             .borrow_mut()
-            .tx_read(self.tx_id(), table, row)
+            .tx_read_in_schema(self.tx_id(), self.db().schema_version_id, table, row)
             .map_err(Into::into)
+    }
+
+    /// Read a prepared query with this transaction's pending writes overlaid.
+    fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
+        self.db().exclusive_all(self.tx_id(), prepared)
+    }
+
+    /// Read a prepared query inside this transaction as `author`.
+    fn all_prepared_for_identity(
+        &self,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.db()
+            .exclusive_all_for_identity(self.tx_id(), prepared, author)
     }
 
     /// Stage an insert with an optional explicit provenance time.
