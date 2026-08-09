@@ -1694,9 +1694,10 @@ fn analyze_union(
     let mut labels = BTreeSet::new();
     let mut branches = Vec::new();
     for input in inputs {
-        if input.label.is_empty() {
+        if input.label.is_empty() || input.label.contains('\0') {
             return Err(UnsupportedReason::Operator(
-                "union arm labels must be non-empty stable semantic identities".to_owned(),
+                "union arm labels must be non-empty, NUL-free stable semantic identities"
+                    .to_owned(),
             ));
         }
         if !labels.insert(input.label.as_str()) {

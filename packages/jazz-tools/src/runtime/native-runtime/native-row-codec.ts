@@ -19,6 +19,9 @@ export type NativeSubscriptionDelta = {
   added: NativeRowBatch[];
   updated: NativeRowBatch[];
   removed: NativeRemovedRow[];
+  addedOccurrenceKeys: Uint8Array[];
+  updatedOccurrenceKeys: Uint8Array[];
+  removedOccurrenceKeys: Uint8Array[];
 };
 export type NativeRelationSubscriptionSnapshot = {
   rootCount: number;
@@ -57,11 +60,73 @@ export function readNativeRowBatch(reader: PostcardReaderLike): NativeRowBatch {
 }
 
 export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeSubscriptionDelta {
-  return {
+  const delta = {
     added: reader.readVec(readNativeRowBatch),
     updated: reader.readVec(readNativeRowBatch),
     removed: reader.readVec(readNativeRemovedRow),
+    addedOccurrenceKeys: reader.readVec((keyReader) => readResultKey(keyReader)),
+    updatedOccurrenceKeys: reader.readVec((keyReader) => readResultKey(keyReader)),
+    removedOccurrenceKeys: reader.readVec((keyReader) => readResultKey(keyReader)),
   };
+  const rowCount = (batches: NativeRowBatch[]) =>
+    batches.reduce((count, batch) => count + batch.rows.length, 0);
+  if (
+    delta.addedOccurrenceKeys.length !== rowCount(delta.added) ||
+    delta.updatedOccurrenceKeys.length !== rowCount(delta.updated) ||
+    delta.removedOccurrenceKeys.length !== delta.removed.length
+  ) {
+    throw new Error("subscription occurrence sidecar length mismatch");
+  }
+  return delta;
+}
+
+function readResultKey(reader: PostcardReaderLike): Uint8Array {
+  const key = reader.bytes();
+  if (key[0] === 1) {
+    if (key.length <= 1 || (key.length - 1) % 16 !== 0) throw new Error("malformed v1 ResultKey");
+    return key;
+  }
+  if (key[0] !== 2 || !validTypedResultKey(key.subarray(1))) {
+    throw new Error("malformed v2 ResultKey");
+  }
+  return key;
+}
+
+function validTypedResultKey(bytes: Uint8Array): boolean {
+  const readU32 = (offset: number) =>
+    ((bytes[offset]! << 24) |
+      (bytes[offset + 1]! << 16) |
+      (bytes[offset + 2]! << 8) |
+      bytes[offset + 3]!) >>>
+    0;
+  if (bytes.length < 24) return false;
+  let cursor = 16;
+  const joined = readU32(cursor);
+  cursor += 4;
+  if (joined > 256 || cursor + joined * 16 + 4 > bytes.length) return false;
+  cursor += joined * 16;
+  const discriminators = readU32(cursor);
+  cursor += 4;
+  if (discriminators > joined) return false;
+  const positions = new Set<number>();
+  for (let index = 0; index < discriminators; index++) {
+    if (cursor + 8 > bytes.length) return false;
+    const position = readU32(cursor);
+    const length = readU32(cursor + 4);
+    cursor += 8;
+    if (
+      position >= joined ||
+      positions.has(position) ||
+      length === 0 ||
+      length > 4096 ||
+      cursor + length > bytes.length
+    ) {
+      return false;
+    }
+    positions.add(position);
+    cursor += length;
+  }
+  return cursor === bytes.length;
 }
 
 export function readNativeRelationSubscriptionSnapshot(

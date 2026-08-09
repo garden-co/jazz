@@ -88,6 +88,10 @@ pub struct OutputOccurrenceId {
 }
 
 impl OutputOccurrenceId {
+    pub(crate) fn has_typed_discriminators(&self) -> bool {
+        !self.union_arms.is_empty()
+    }
+
     /// Construct an occurrence from its root and joined source rows.
     ///
     /// `joined` must be in declared join order. The ordinary one- and two-hop
@@ -294,12 +298,20 @@ fn decode_typed_result_key(identity: &[u8]) -> Option<ResultKey> {
 }
 
 impl ResultKey {
-    #[cfg(feature = "client")]
-    pub(crate) fn from_occurrence(value: OutputOccurrenceId) -> Self {
+    /// Wrap a fully qualified output occurrence as its opaque transport key.
+    pub fn from_occurrence(value: OutputOccurrenceId) -> Self {
         Self(value)
     }
 
-    #[cfg(feature = "client")]
+    #[doc(hidden)]
+    pub fn from_union_occurrence(
+        root: ObjectId,
+        joined: impl IntoIterator<Item = ObjectId>,
+        union_arms: impl IntoIterator<Item = (usize, String)>,
+    ) -> Option<Self> {
+        OutputOccurrenceId::with_union_arms(root, joined, union_arms).map(Self)
+    }
+
     pub(crate) fn as_occurrence(&self) -> &OutputOccurrenceId {
         &self.0
     }

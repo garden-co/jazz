@@ -21,7 +21,7 @@ use crate::query::{BindingId, Query, RelationQuery, ShapeId};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
 use crate::time::TxTime;
-use crate::tools::{ObjectId, OutputOccurrenceId};
+use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, Snapshot, Transaction, TxId};
 
 /// Messages exchanged between Jazz nodes.
@@ -1656,6 +1656,10 @@ pub struct RealRowMemberEntry {
     /// a flat join. It deliberately does not include content-version fields,
     /// so replacements retain their output address.
     pub occurrence_id: Option<OutputOccurrenceId>,
+    /// Versioned typed occurrence sidecar. Present only when the legacy
+    /// row-vector identity cannot represent derivation discriminators.
+    #[serde(default)]
+    pub occurrence_key: Option<ResultKey>,
     /// Visible content transaction, when this member has a content row.
     #[serde(default)]
     pub content_tx: Option<TxId>,
@@ -1700,6 +1704,7 @@ impl RealRowMemberEntry {
             occurrence_id: Some(OutputOccurrenceId::single_source(ObjectId::from_uuid(
                 row_uuid.0,
             ))),
+            occurrence_key: None,
             content_tx: Some(content_tx),
             layer: ResultRowLayer::Content,
             deletion_tx: None,
@@ -1722,6 +1727,9 @@ impl RealRowMemberEntry {
     /// Attach the stable rendered-output address supplied by the maintained
     /// terminal. Join contributors remain in declared source order.
     pub fn with_occurrence_id(mut self, occurrence_id: OutputOccurrenceId) -> Self {
+        self.occurrence_key = occurrence_id
+            .has_typed_discriminators()
+            .then(|| ResultKey::from_occurrence(occurrence_id.clone()));
         self.occurrence_id = Some(occurrence_id);
         self
     }
@@ -1736,9 +1744,13 @@ impl RealRowMemberEntry {
     /// Stable output occurrence identity. Old persisted members without this
     /// field are normalized to their legacy single-source identity.
     pub fn output_occurrence_id(&self) -> OutputOccurrenceId {
-        self.occurrence_id.clone().unwrap_or_else(|| {
-            OutputOccurrenceId::single_source(ObjectId::from_uuid(self.row_uuid.0))
-        })
+        self.occurrence_key
+            .as_ref()
+            .map(|key| key.as_occurrence().clone())
+            .or_else(|| self.occurrence_id.clone())
+            .unwrap_or_else(|| {
+                OutputOccurrenceId::single_source(ObjectId::from_uuid(self.row_uuid.0))
+            })
     }
 
     /// Return the ordinary current-content projection when available.
@@ -2725,6 +2737,26 @@ mod tests {
 
     fn schema_id(byte: u8) -> SchemaVersionId {
         SchemaVersionId::from_bytes([byte; 16])
+    }
+
+    #[test]
+    fn result_member_transport_preserves_typed_union_occurrence() {
+        let root = ObjectId::from_uuid(uuid::Uuid::from_bytes([1; 16]));
+        let joined = ObjectId::from_uuid(uuid::Uuid::from_bytes([2; 16]));
+        let occurrence =
+            OutputOccurrenceId::with_union_arms(root, [joined], [(0, "direct".to_owned())])
+                .unwrap();
+        let member = ResultMemberEntry::Row(
+            RealRowMemberEntry::current_content((
+                groove::Intern::new("todos".to_owned()),
+                RowUuid(*root.uuid()),
+                TxId::new(TxTime(1), NodeUuid::from_bytes([3; 16])),
+            ))
+            .with_occurrence_id(occurrence.clone()),
+        );
+        let bytes = postcard::to_allocvec(&member).unwrap();
+        let decoded: ResultMemberEntry = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.output_occurrence_id(), Some(occurrence));
     }
 
     #[test]

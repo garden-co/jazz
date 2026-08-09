@@ -7,6 +7,7 @@ import {
   PostcardReader,
   PostcardWriter,
   queryWithPredicates,
+  readNativeSubscriptionDelta,
   writeDescriptor,
 } from "./native-codec.js";
 import {
@@ -6113,6 +6114,9 @@ function encodeSubscriptionDelta(delta: {
   added: EncodedTestRow[];
   updated: EncodedTestRow[];
   removed: Array<{ table: string; rowId: Uint8Array }>;
+  addedOccurrenceKeys?: Uint8Array[];
+  updatedOccurrenceKeys?: Uint8Array[];
+  removedOccurrenceKeys?: Uint8Array[];
 }): Uint8Array {
   const writer = new PostcardWriter();
   writeRowBatches(writer, delta.added);
@@ -6122,8 +6126,68 @@ function encodeSubscriptionDelta(delta: {
     removed.string(source.table);
     removed.bytes(source.rowId);
   }, delta.removed.length);
+  const rowKey = (rowId: Uint8Array) => Uint8Array.from([1, ...rowId]);
+  for (const keys of [
+    delta.addedOccurrenceKeys ?? delta.added.map((row) => rowKey(row.rowId)),
+    delta.updatedOccurrenceKeys ?? delta.updated.map((row) => rowKey(row.rowId)),
+    delta.removedOccurrenceKeys ?? delta.removed.map((row) => rowKey(row.rowId)),
+  ]) {
+    writer.vec((key, index) => key.bytes(keys[index]!), keys.length);
+  }
   return writer.finish();
 }
+
+it("preserves typed occurrence keys in the native subscription wire sidecar", () => {
+  const typedKey = (label: string) => {
+    const labelBytes = new TextEncoder().encode(label);
+    const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length);
+    key[0] = 2;
+    key.fill(1, 1, 17);
+    new DataView(key.buffer).setUint32(17, 1);
+    key.fill(2, 21, 37);
+    new DataView(key.buffer).setUint32(37, 1);
+    new DataView(key.buffer).setUint32(41, 0);
+    new DataView(key.buffer).setUint32(45, labelBytes.length);
+    key.set(labelBytes, 49);
+    return key;
+  };
+  const direct = typedKey("direct");
+  const inherited = typedKey("inherited");
+  const encoded = encodeSubscriptionDelta({
+    added: [],
+    updated: [],
+    removed: [
+      { table: "todos", rowId: new Uint8Array(16).fill(1) },
+      { table: "todos", rowId: new Uint8Array(16).fill(1) },
+    ],
+    removedOccurrenceKeys: [direct, inherited],
+  });
+  const decoded = readNativeSubscriptionDelta(new PostcardReader(encoded));
+  expect(decoded.removedOccurrenceKeys).toEqual([direct, inherited]);
+  expect(decoded.removedOccurrenceKeys[0]).not.toEqual(decoded.removedOccurrenceKeys[1]);
+});
+
+it("rejects malformed or misaligned subscription occurrence sidecars", () => {
+  const missing = encodeSubscriptionDelta({
+    added: [],
+    updated: [],
+    removed: [{ table: "todos", rowId: new Uint8Array(16) }],
+    removedOccurrenceKeys: [],
+  });
+  expect(() => readNativeSubscriptionDelta(new PostcardReader(missing))).toThrow(
+    "sidecar length mismatch",
+  );
+
+  const malformed = encodeSubscriptionDelta({
+    added: [],
+    updated: [],
+    removed: [{ table: "todos", rowId: new Uint8Array(16) }],
+    removedOccurrenceKeys: [Uint8Array.from([2, 0])],
+  });
+  expect(() => readNativeSubscriptionDelta(new PostcardReader(malformed))).toThrow(
+    "malformed v2 ResultKey",
+  );
+});
 
 function encodeUserWrappedSubscriptionDelta(row: {
   table: string;
@@ -6154,6 +6218,9 @@ function encodeUserWrappedSubscriptionDelta(row: {
       );
     }, 1);
   }, 1);
+  delta.vec(() => undefined, 0);
+  delta.vec(() => undefined, 0);
+  delta.vec((key) => key.bytes(Uint8Array.from([1, ...row.rowId])), 1);
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
   return delta.finish();

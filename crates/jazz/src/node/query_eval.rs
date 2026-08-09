@@ -4557,7 +4557,12 @@ fn normalize_policy_branch_authorization(
                 root_source,
                 RowSetNodeId(format!("{prefix}:base:row_id")),
             ),
-            label: "base".to_owned(),
+            label: policy_branch_semantic_label(
+                &policy.filters,
+                &policy.joins,
+                &policy.reachable,
+                &policy.inherits,
+            )?,
         });
     }
 
@@ -4597,7 +4602,12 @@ fn normalize_policy_branch_authorization(
                 root_source,
                 RowSetNodeId(format!("{prefix}:{index}:row_id")),
             ),
-            label: index.to_string(),
+            label: policy_branch_semantic_label(
+                &branch.filters,
+                &branch.joins,
+                &branch.reachable,
+                &branch.inherits,
+            )?,
         });
     }
 
@@ -4626,6 +4636,20 @@ fn normalize_policy_branch_authorization(
         },
     );
     Ok(join_node)
+}
+
+fn policy_branch_semantic_label(
+    filters: &[crate::query::Predicate],
+    joins: &[crate::query::JoinVia],
+    reachable: &[crate::query::ReachableVia],
+    inherits: &[crate::query::InheritsVia],
+) -> Result<String, Error> {
+    let bytes = postcard::to_allocvec(&(filters, joins, reachable, inherits)).map_err(|error| {
+        Error::QueryLowering(format!(
+            "policy branch fingerprint encoding failed: {error}"
+        ))
+    })?;
+    Ok(format!("policy:{}", blake3::hash(&bytes).to_hex()))
 }
 
 fn normalize_row_id_projection(
@@ -6359,7 +6383,12 @@ where
                         &root_source,
                         RowSetNodeId("policy_branch:base:row_id".to_owned()),
                     ),
-                    label: "base".to_owned(),
+                    label: policy_branch_semantic_label(
+                        &query.filters,
+                        &query.joins,
+                        &query.reachable,
+                        &query.inherits,
+                    )?,
                 });
             }
 
@@ -6399,7 +6428,12 @@ where
                         &root_source,
                         RowSetNodeId(format!("policy_branch:{index}:row_id")),
                     ),
-                    label: index.to_string(),
+                    label: policy_branch_semantic_label(
+                        &branch.filters,
+                        &branch.joins,
+                        &branch.reachable,
+                        &branch.inherits,
+                    )?,
                 });
             }
 
@@ -14887,6 +14921,45 @@ mod tests {
             normalized.nodes.get(&normalized.root),
             Some(RowSetExpr::Aggregate { .. })
         ));
+    }
+
+    #[test]
+    fn production_policy_union_labels_survive_reorder_and_unrelated_insertion() {
+        fn branch(state: &str) -> crate::query::PolicyBranch {
+            crate::query::PolicyBranch {
+                filters: vec![eq(col("state"), lit(state))],
+                joins: Vec::new(),
+                reachable: Vec::new(),
+                inherits: Vec::new(),
+            }
+        }
+        fn labels(node: &NodeState<RocksDbStorage>, branches: &[&str]) -> BTreeSet<String> {
+            let mut query = Query::from("issues");
+            query.policy_branches = branches.iter().map(|state| branch(state)).collect();
+            let shape = query.validate(&schema()).unwrap();
+            let binding = shape.bind(BTreeMap::new()).unwrap();
+            let normalized = node.normalized_row_set_shape(&shape, &binding).unwrap();
+            normalized
+                .nodes
+                .values()
+                .find_map(|node| match node {
+                    RowSetExpr::Union { inputs } => Some(
+                        inputs
+                            .iter()
+                            .map(|input| input.label.clone())
+                            .collect::<BTreeSet<_>>(),
+                    ),
+                    _ => None,
+                })
+                .expect("policy alternatives normalize through Union")
+        }
+
+        let (_dir, node) = open_node();
+        let original = labels(&node, &["open", "done"]);
+        let reordered_with_insert = labels(&node, &["done", "blocked", "open"]);
+        assert!(original.is_subset(&reordered_with_insert));
+        assert_eq!(reordered_with_insert.len(), original.len() + 1);
+        assert_ne!(labels(&node, &["open"]), labels(&node, &["changed"]));
     }
 
     #[test]

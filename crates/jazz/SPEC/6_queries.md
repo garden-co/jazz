@@ -448,6 +448,12 @@ both of which can churn occurrence keys after unrelated graph edits. Recursive
 bag inputs without a finite stable labeled source-row carrier MUST likewise fail
 lowering rather than collapse copies.
 
+Public subscription transports MUST carry the opaque versioned `ResultKey`
+sidecar aligned with added, updated, and removed rows. They MUST validate the
+alignment and key encoding before applying a delta. Serializing the legacy
+two-field `OutputOccurrenceId` alone is insufficient because its byte-compatible
+form intentionally does not carry typed union-arm discriminators.
+
 Maintained flat-join additions, removals, updates, reset snapshots, and the
 subscriber cache MUST be keyed by `OutputOccurrenceId`; the root `ObjectId`
 MUST NOT be used as that key. The local public adapter still rejects any

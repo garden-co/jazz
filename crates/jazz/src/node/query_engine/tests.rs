@@ -1640,6 +1640,27 @@ fn union_occurrence_rejects_duplicate_semantic_labels() {
 }
 
 #[test]
+fn union_occurrence_rejects_nul_delimited_label_collision() {
+    let node = RowSetNodeId("source".to_owned());
+    let nodes = BTreeMap::from([(
+        node.clone(),
+        RowSetExpr::Source {
+            source: source("source", SourceRole::Policy("source".to_owned())),
+            visibility: RowVisibility::Visible,
+        },
+    )]);
+    let error = analyzed_union_labels(
+        &[UnionInput {
+            node,
+            label: "outer\0inner".to_owned(),
+        }],
+        &nodes,
+    )
+    .expect_err("nested path delimiter must not occur inside a semantic label");
+    assert!(format!("{error:?}").contains("NUL-free"));
+}
+
+#[test]
 fn current_join_via_lowers_source_column_row_id_target_and_correlations() {
     let root = RowSetNodeId("root".to_owned());
     let join_source_node = RowSetNodeId("join-source".to_owned());

@@ -70,7 +70,7 @@ pub use crate::result_tree::{ResultNode, ResultRelation, ResultTree, ResultTreeR
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
 use crate::tools::OpenBatchId;
-use crate::tools::{ObjectId, OutputOccurrenceId};
+use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
 use crate::wire::{
     FEATURE_MESSAGE_FRAGMENTATION, TransportError, WIRE_PROTOCOL_VERSION, WireEnvelope, WireError,
@@ -9204,6 +9204,17 @@ pub struct RemovedRow {
     pub row_uuid: RowUuid,
     /// Stable identity of the removed output occurrence.
     pub occurrence_id: OutputOccurrenceId,
+}
+
+impl RemovedRow {
+    #[doc(hidden)]
+    pub fn from_result_key(table: String, row_uuid: RowUuid, key: ResultKey) -> Self {
+        Self {
+            table,
+            row_uuid,
+            occurrence_id: key.as_occurrence().clone(),
+        }
+    }
 }
 
 /// One row addressed by its maintained output occurrence identity.

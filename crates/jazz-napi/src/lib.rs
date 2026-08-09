@@ -122,6 +122,9 @@ struct CoreSubscriptionDelta<'a> {
     added: Vec<CoreRowBatch<'a>>,
     updated: Vec<CoreRowBatch<'a>>,
     removed: Vec<CoreRemovedRow>,
+    added_occurrence_keys: Vec<jazz::tools::ResultKey>,
+    updated_occurrence_keys: Vec<jazz::tools::ResultKey>,
+    removed_occurrence_keys: Vec<jazz::tools::ResultKey>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -2154,19 +2157,36 @@ fn encode_core_relation_snapshot(
 }
 
 fn encode_core_subscription_delta<'a>(
-    added: &'a [jazz::node::CurrentRow],
-    updated: &'a [jazz::node::CurrentRow],
+    added: &'a [jazz::db::SubscriptionOutputRow],
+    updated: &'a [jazz::db::SubscriptionOutputRow],
     removed: &[jazz::db::RemovedRow],
 ) -> std::result::Result<Vec<u8>, postcard::Error> {
+    let added_rows = added.iter().map(|row| row.row.clone()).collect::<Vec<_>>();
+    let updated_rows = updated
+        .iter()
+        .map(|row| row.row.clone())
+        .collect::<Vec<_>>();
     postcard::to_allocvec(&CoreSubscriptionDelta {
-        added: core_row_batches(added),
-        updated: core_row_batches(updated),
+        added: core_row_batches(&added_rows),
+        updated: core_row_batches(&updated_rows),
         removed: removed
             .iter()
             .map(|row| CoreRemovedRow {
                 table: row.table.clone(),
                 row_id: row.row_uuid,
             })
+            .collect(),
+        added_occurrence_keys: added
+            .iter()
+            .map(|row| jazz::tools::ResultKey::from_occurrence(row.occurrence_id.clone()))
+            .collect(),
+        updated_occurrence_keys: updated
+            .iter()
+            .map(|row| jazz::tools::ResultKey::from_occurrence(row.occurrence_id.clone()))
+            .collect(),
+        removed_occurrence_keys: removed
+            .iter()
+            .map(|row| jazz::tools::ResultKey::from_occurrence(row.occurrence_id.clone()))
             .collect(),
     })
 }
@@ -2209,24 +2229,12 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
             tier,
             ..
         } => {
-            // Keep the current native wire source-row addressed until a later
-            // revision carries occurrence identity explicitly.
-            let added = terminal_operations.is_empty().then(|| {
-                added
-                    .iter()
-                    .map(|output| output.row.clone())
-                    .collect::<Vec<_>>()
-            });
-            let updated = terminal_operations.is_empty().then(|| {
-                updated
-                    .iter()
-                    .map(|output| output.row.clone())
-                    .collect::<Vec<_>>()
-            });
+            let added = terminal_operations.is_empty().then_some(added.as_slice());
+            let updated = terminal_operations.is_empty().then_some(updated.as_slice());
             let empty_removed = Vec::new();
             let delta = encode_core_subscription_delta(
-                added.as_deref().unwrap_or_default(),
-                updated.as_deref().unwrap_or_default(),
+                added.unwrap_or_default(),
+                updated.unwrap_or_default(),
                 if terminal_operations.is_empty() {
                     removed
                 } else {
@@ -2661,7 +2669,7 @@ mod tests {
 
     use crate::{
         NapiDbInnerStorage, NapiTxKind, Tx, core_block_on, core_read_opts_from_json,
-        core_subscription_event_to_json,
+        core_subscription_event_to_json, encode_core_subscription_delta,
     };
     use jazz::db::{
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
@@ -2678,6 +2686,49 @@ mod tests {
     use jazz::tools::{ColumnType, Schema, SchemaBuilder, TableName, TableSchema, Value};
     use jazz::tx::DurabilityTier;
     use serde_json::json;
+
+    #[test]
+    fn native_delta_preserves_typed_union_occurrence_keys() {
+        #[derive(serde::Deserialize)]
+        struct DecodedRemoved {
+            #[allow(dead_code)]
+            table: String,
+            #[allow(dead_code)]
+            row_id: CoreRowUuid,
+        }
+        #[derive(serde::Deserialize)]
+        struct DecodedDelta {
+            added: Vec<serde::de::IgnoredAny>,
+            updated: Vec<serde::de::IgnoredAny>,
+            removed: Vec<DecodedRemoved>,
+            added_occurrence_keys: Vec<jazz::tools::ResultKey>,
+            updated_occurrence_keys: Vec<jazz::tools::ResultKey>,
+            removed_occurrence_keys: Vec<jazz::tools::ResultKey>,
+        }
+        let root = jazz::tools::ObjectId::from_uuid(uuid::Uuid::from_bytes([1; 16]));
+        let joined = jazz::tools::ObjectId::from_uuid(uuid::Uuid::from_bytes([2; 16]));
+        let occurrence = |label: &str| {
+            jazz::tools::ResultKey::from_union_occurrence(root, [joined], [(0, label.to_owned())])
+                .unwrap()
+        };
+        let removed = ["direct", "inherited"].map(|label| {
+            jazz::db::RemovedRow::from_result_key(
+                "todos".to_owned(),
+                CoreRowUuid::from_bytes([1; 16]),
+                occurrence(label),
+            )
+        });
+        let bytes = encode_core_subscription_delta(&[], &[], &removed).unwrap();
+        let decoded: DecodedDelta = postcard::from_bytes(&bytes).unwrap();
+        assert!(decoded.added.is_empty() && decoded.updated.is_empty());
+        assert_eq!(decoded.removed.len(), 2);
+        assert!(decoded.added_occurrence_keys.is_empty());
+        assert!(decoded.updated_occurrence_keys.is_empty());
+        assert_ne!(
+            decoded.removed_occurrence_keys[0],
+            decoded.removed_occurrence_keys[1]
+        );
+    }
 
     #[test]
     fn schema_json_roundtrip_preserves_enum_fk_and_defaults() {
