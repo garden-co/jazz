@@ -1769,7 +1769,7 @@ export class NativeRuntimeAdapter implements Runtime {
           chunk.delta,
           this.schema,
           chunk.reset === true,
-          chunk.terminalRows ? subscription.outputColumns?.rootColumns : undefined,
+          chunk.terminalRows ? subscription.outputColumns : null,
         );
         subscription.rows = applied.rows;
         subscription.rowIndexByKey = applied.rowIndexByKey;
@@ -3883,7 +3883,7 @@ function applySubscriptionDeltaWithWireDelta(
   delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] },
   schema: WasmSchema,
   reset = false,
-  projectedColumns?: readonly ColumnDescriptor[],
+  outputColumns: SubscriptionOutputColumns | null = null,
 ): { rows: RowState[]; rowIndexByKey: Map<string, number>; wireDelta: NativeRowDelta } {
   const rowsByKey = reset
     ? new Map<string, RowState>()
@@ -3897,6 +3897,7 @@ function applySubscriptionDeltaWithWireDelta(
     rowsByKey.delete(key);
   }
 
+  const projectedColumns = outputColumns?.rootColumns;
   const addedRows = rowsFromBatches(delta.added, schema, projectedColumns);
   const updatedRows = rowsFromBatches(delta.updated, schema, projectedColumns);
   for (const row of addedRows.concat(updatedRows)) {
@@ -3909,7 +3910,14 @@ function applySubscriptionDeltaWithWireDelta(
     rows,
     rowIndexByKey,
     wireDelta: {
-      ...nativeDeltaFromChanges(addedRows, updatedRows, removedEntries, rowIndexByKey, schema),
+      ...nativeDeltaFromChanges(
+        addedRows,
+        updatedRows,
+        removedEntries,
+        rowIndexByKey,
+        schema,
+        outputColumns,
+      ),
       ...(reset ? { reset: true } : {}),
     },
   };

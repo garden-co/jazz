@@ -5635,14 +5635,11 @@ fn collect_slot_layouts(
                         .map(|field| user_column_field(field)),
                 ),
             }
-            let fields = source
-                .row_shape
-                .descriptor
-                .fields()
-                .iter()
-                .filter_map(|field| field.name.as_ref())
-                .filter(|source_field| selected.contains(*source_field))
-                .cloned()
+            let fields = std::iter::once(source.row_shape.row_uuid_field.clone())
+                .chain(source.table_schema.columns.iter().filter_map(|column| {
+                    let source_field = user_column_field(&column.name);
+                    selected.contains(&source_field).then_some(source_field)
+                }))
                 .map(|source_field| {
                     let value_type = source_field_type(source, &source_field).cloned().ok_or_else(|| {
                         single_gap_report(UnsupportedReason::Operator(format!(
@@ -5840,7 +5837,17 @@ fn collect_flat_projection(
                     // fields are nullable. Preserve that descriptor on actual
                     // child rows as well, rather than making the union depend
                     // on whether this particular source column is nullable.
-                    ProjectField::nullable_flat(source, &field.input)
+                    if field.value_type == field.output_value_type {
+                        // A nullable application field needs a distinct outer
+                        // anchor wrapper when the current-row source does not
+                        // already carry one. CollectBy removes only that
+                        // wrapper, preserving an inner application NULL.
+                        ProjectField::nullable(source, &field.input)
+                    } else {
+                        // Current-row storage already carries the exact outer
+                        // wrapper required around the logical output type.
+                        ProjectField::nullable_flat(source, &field.input)
+                    }
                 }
             } else if inherited_flat_fields.contains(&field.input) {
                 ProjectField::renamed(left_field(&field.input), &field.input)
@@ -5918,7 +5925,7 @@ fn collect_slot_builder(slot: &CollectSlotLayout, parent_row_id: &str) -> Collec
     CollectBySlotBuilder::new(
         [parent_row_id],
         slot.fields.iter().map(|field| {
-            if field.is_row_id || field.value_type == field.output_value_type {
+            if field.is_row_id {
                 CollectByField::renamed(&field.input, &field.output)
             } else {
                 CollectByField::renamed_unwrap_nullable(&field.input, &field.output)
