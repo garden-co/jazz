@@ -3878,16 +3878,10 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
             == table_id.0
     }));
 
-    let (_exclusive_tx, unit) = core
-        .commit_exclusive(exclusive, AuthorId::SYSTEM, 12)
-        .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } = unit else {
-        panic!("exclusive commit unit expected");
-    };
-    assert_eq!(
-        core.finalize_local_exclusive_commit(tx, versions).unwrap(),
-        Fate::Rejected(RejectionReason::ExclusiveConflict)
-    );
+    assert!(matches!(
+        core.commit_exclusive(exclusive, AuthorId::SYSTEM, 12),
+        Err(Error::TransactionConflict)
+    ));
 
     let shape = Query::from("todos").validate(&base).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
