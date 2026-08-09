@@ -119,6 +119,7 @@ pub(crate) struct LocalMaintainedViewSubscription {
     result_set: BTreeSet<ResultMemberEntry>,
     result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     program_facts: BTreeSet<ProgramFactEntry>,
+    root_occurrence_ids: Vec<OutputOccurrenceId>,
 }
 
 #[derive(Default)]
@@ -142,6 +143,10 @@ pub(crate) struct LocalMaintainedViewSubscriptionFootprint {
 impl LocalMaintainedViewSubscription {
     pub(crate) fn subscription_id(&self) -> groove::ivm::SubscriptionId {
         self.subscription.id()
+    }
+
+    pub(crate) fn root_occurrence_ids(&self) -> &[OutputOccurrenceId] {
+        &self.root_occurrence_ids
     }
 
     #[cfg(feature = "testing")]
@@ -612,11 +617,16 @@ fn version_identity_fields(schema: &VersionIdentityFields) -> Vec<String> {
 }
 
 pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
-    pub(crate) added: Vec<CurrentRow>,
+    pub(crate) added: Vec<(OutputOccurrenceId, CurrentRow)>,
     pub(crate) removed: Vec<OutputOccurrenceId>,
     pub(crate) added_edges: Vec<(RelationEdge, Option<CurrentRow>)>,
     pub(crate) removed_edges: Vec<RelationEdge>,
     pub(crate) terminal_operations: Vec<groove::ivm::TerminalOperation>,
+}
+
+pub(crate) struct LocalMaintainedRelationSnapshot {
+    pub(crate) snapshot: RelationSnapshot,
+    pub(crate) root_occurrence_ids: Vec<OutputOccurrenceId>,
 }
 
 enum CurrentQueryProgramOutput {
@@ -7803,11 +7813,14 @@ where
             result_set: BTreeSet::new(),
             result_payloads: BTreeMap::new(),
             program_facts: BTreeSet::new(),
+            root_occurrence_ids: Vec::new(),
         };
         let _initial_delta =
             self.apply_local_maintained_view_transitions(&mut local, transitions)?;
-        let initial = self.materialize_local_maintained_relation_snapshot(&local)?;
-        Ok((local, initial))
+        let initial =
+            self.materialize_local_maintained_relation_snapshot_with_occurrences(&local)?;
+        local.root_occurrence_ids = initial.root_occurrence_ids;
+        Ok((local, initial.snapshot))
     }
 
     pub(crate) fn drain_local_maintained_view_subscription(
@@ -8144,8 +8157,9 @@ where
             if local.result_set.insert(member.clone()) && materialize_update && !structured_output {
                 if let Some(row) =
                     self.materialize_local_maintained_view_result_member(local, &member)?
+                    && let Some(occurrence_id) = member.output_occurrence_id()
                 {
-                    added.push(row);
+                    added.push((occurrence_id, row));
                 }
             }
         }
@@ -8233,7 +8247,10 @@ where
         if materialize_update && structured_output {
             for root in structured_app_row_changes {
                 match local.maintained.structured_app_row(root) {
-                    Some(record) => added.push(CurrentRow::new(local.result_table.clone(), record)),
+                    Some(record) => added.push((
+                        OutputOccurrenceId::single_source(ObjectId::from_uuid(root.0)),
+                        CurrentRow::new(local.result_table.clone(), record),
+                    )),
                     None => removed.push(OutputOccurrenceId::single_source(ObjectId::from_uuid(
                         root.0,
                     ))),
@@ -8253,6 +8270,15 @@ where
         &mut self,
         local: &LocalMaintainedViewSubscription,
     ) -> Result<RelationSnapshot, Error> {
+        Ok(self
+            .materialize_local_maintained_relation_snapshot_with_occurrences(local)?
+            .snapshot)
+    }
+
+    fn materialize_local_maintained_relation_snapshot_with_occurrences(
+        &mut self,
+        local: &LocalMaintainedViewSubscription,
+    ) -> Result<LocalMaintainedRelationSnapshot, Error> {
         if !local.result_query.array_subqueries.is_empty() {
             let mut rows = local
                 .maintained
@@ -8261,21 +8287,36 @@ where
                 .map(|(_, record)| CurrentRow::new(local.result_table.clone(), record))
                 .collect::<Vec<_>>();
             self.apply_query_order(&local.result_query, &mut rows)?;
-            return Ok(RelationSnapshot {
-                root_count: rows.len(),
-                rows,
-                edges: Vec::new(),
+            let root_occurrence_ids = rows
+                .iter()
+                .map(|row| OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0)))
+                .collect();
+            return Ok(LocalMaintainedRelationSnapshot {
+                snapshot: RelationSnapshot {
+                    root_count: rows.len(),
+                    rows,
+                    edges: Vec::new(),
+                },
+                root_occurrence_ids,
             });
         }
         let mut cache = self.preload_local_maintained_materialization_cache(local)?;
         let mut rows = Vec::with_capacity(local.result_set.len());
+        let mut root_occurrence_ids = Vec::with_capacity(local.result_set.len());
         let mut row_keys = BTreeSet::new();
         for member in &local.result_set {
             if let Some(row) = self.materialize_local_maintained_view_result_member_with_cache(
                 local, member, &mut cache,
             )? {
+                let occurrence_id =
+                    member
+                        .output_occurrence_id()
+                        .ok_or(Error::InvalidStoredValue(
+                            "maintained root member has no occurrence identity",
+                        ))?;
                 row_keys.insert((row.table().to_owned(), row.row_uuid()));
                 rows.push(row);
+                root_occurrence_ids.push(occurrence_id);
             }
         }
         // `result_set` is keyed by member identity, so its BTreeSet iteration
@@ -8311,10 +8352,13 @@ where
                 rows.push(row);
             }
         }
-        Ok(RelationSnapshot {
-            root_count,
-            rows,
-            edges,
+        Ok(LocalMaintainedRelationSnapshot {
+            snapshot: RelationSnapshot {
+                root_count,
+                rows,
+                edges,
+            },
+            root_occurrence_ids,
         })
     }
 

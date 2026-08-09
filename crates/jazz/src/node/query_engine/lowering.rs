@@ -3184,12 +3184,28 @@ fn lower_linear_plan_steps(
                                     "inner join occurrence source {right_source_id:?} was not resolved"
                                 ))
                             })?;
-                            let output = format!("__root_join_row_{step_index}");
-                            projection.push(ProjectField::renamed(
-                                right_field(&right_source.row_shape.row_uuid_field),
-                                output.clone(),
+                            let app_join_source = matches!(
+                                right_source_id.path.components.last(),
+                                Some(SourceRole::Alias(_))
+                            );
+                            let right_row = &right_source.row_shape.row_uuid_field;
+                            if app_join_source
+                                && last_join_right
+                                    .as_ref()
+                                    .is_some_and(|(_, _, _, fields)| fields.contains(right_row))
+                            {
+                                let output = format!("__root_join_row_{step_index}");
+                                projection.push(ProjectField::renamed(
+                                    right_field(right_row),
+                                    output.clone(),
+                                ));
+                                occurrence_fields.insert(output);
+                            }
+                        } else if matches!(right.as_ref(), RelationInputPlan::Union(_)) {
+                            return Err(UnsupportedReason::Operator(
+                                "UNION ALL join output requires a typed arm-and-row occurrence identity"
+                                    .to_owned(),
                             ));
-                            occurrence_fields.insert(output);
                         }
                     }
                     graph = graph.project_fields(projection);
@@ -5046,6 +5062,15 @@ fn lowered_terminals(
         .filter(|field| root_route_fields.contains(*field))
         .cloned()
         .collect::<BTreeSet<_>>();
+    let root_occurrence_fields = root_join_occurrence_fields(plan, resolved_sources)?
+        .into_iter()
+        .map(|(name, _)| name)
+        .filter(|name| available_fields.contains(name))
+        .collect::<BTreeSet<_>>();
+    let closure_root_carrier_fields = root_route_fields
+        .union(&root_occurrence_fields)
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let mut terminals = Vec::new();
     let closure = lower_closure_membership(
         graph.clone(),
@@ -5053,6 +5078,7 @@ fn lowered_terminals(
         source,
         resolved_sources,
         &root_route_fields,
+        &closure_root_carrier_fields,
     )?;
     let visible_root_with_routes = if root_route_fields.is_empty() {
         closure.visible_root.clone()
@@ -5087,6 +5113,7 @@ fn lowered_terminals(
                     resolved_sources,
                     request,
                     &root_route_fields,
+                    available_fields,
                 )?;
                 (
                     collected.graph,
@@ -5140,6 +5167,7 @@ fn lowered_terminals(
                     resolved_sources,
                     request,
                     &root_route_fields,
+                    available_fields,
                 )?;
                 (
                     collected.graph,
@@ -5174,11 +5202,17 @@ fn lowered_terminals(
             // occurrence address. This matters when a joined source resolves
             // through a lens (for example a renamed table on an old branch),
             // where that projection otherwise loses `__flat_join_row_N`.
-            let result_membership_input = if flat_join_payload_fields(plan).is_empty() {
-                visible_root_with_routes.clone()
-            } else {
-                graph.clone()
-            };
+            let occurrence_addressed = matches!(
+                &output.schema,
+                ProgramFactSchema::ResultMembership(schema)
+                    if schema.occurrence_id_fields.len() > 1
+            );
+            let result_membership_input =
+                if flat_join_payload_fields(plan).is_empty() && !occurrence_addressed {
+                    visible_root_with_routes.clone()
+                } else {
+                    graph.clone()
+                };
             let result_graph = fact_terminal_graph(
                 fact,
                 result_membership_input,
@@ -5438,6 +5472,7 @@ fn lower_collect_by_app_rows(
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
     route_fields: &BTreeSet<String>,
+    available_fields: &BTreeSet<String>,
 ) -> CapabilityResult<LoweredCollectByAppRows> {
     let mut parameter_domain = parameter_domain_for_request(request).map_err(single_gap_report)?;
     collect_binding_source_params(&visible_root, &mut parameter_domain);
@@ -5449,6 +5484,7 @@ fn lower_collect_by_app_rows(
         request,
         route_fields,
         &parameter_domain,
+        available_fields,
     )?;
     align_collect_root_window(&mut layout, plan)?;
     align_collect_join_key_types(&mut layout.slots, plan, resolved_sources, request)?;
@@ -5821,6 +5857,22 @@ fn root_join_occurrence_fields(
                 "inner join occurrence source {source_id:?} was not resolved"
             )))
         })?;
+        if !matches!(source_id.path.components.last(), Some(SourceRole::Alias(_))) {
+            continue;
+        }
+        let exposes_row_id = match right.as_ref() {
+            RelationInputPlan::Linear(linear) => !matches!(
+                linear.steps.last(),
+                Some(LinearStep::Project(columns))
+                    if !columns.iter().any(|column| {
+                        column.output.name == source.row_shape.row_uuid_field
+                    })
+            ),
+            RelationInputPlan::Union(_) | RelationInputPlan::Recursive(_) => false,
+        };
+        if !exposes_row_id {
+            continue;
+        }
         let name = if matches!(steps.get(step_index + 1), Some(LinearStep::Join { .. })) {
             format!(
                 "__flat_join_source_{step_index}_{}",
@@ -5842,6 +5894,7 @@ fn collect_layout(
     request: &QueryProgramRequest,
     routing_param_fields: &BTreeSet<String>,
     parameter_domain: &ParameterDomain,
+    available_fields: &BTreeSet<String>,
 ) -> CapabilityResult<CollectLayout> {
     let mut selected_root = BTreeSet::from([root_source.row_shape.row_uuid_field.clone()]);
     match &projection.fields {
@@ -5886,6 +5939,7 @@ fn collect_layout(
         .collect::<Vec<_>>();
     let root_occurrence_inputs = root_join_occurrence_fields(plan, resolved_sources)?
         .into_iter()
+        .filter(|(name, _)| available_fields.contains(name))
         .map(|(name, value_type)| {
             let input = format!("__collect_root_{name}");
             root_fields.push(CollectFlatField {
@@ -6522,6 +6576,7 @@ fn lower_closure_membership(
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     route_fields: &BTreeSet<String>,
+    root_carrier_fields: &BTreeSet<String>,
 ) -> CapabilityResult<ClosureLowering> {
     let mut visible_root = root_graph;
     for path in &request.input.shape.closure_paths {
@@ -6537,7 +6592,7 @@ fn lower_closure_membership(
                 *root_gate,
                 root_source,
                 resolved_sources,
-                route_fields,
+                root_carrier_fields,
             )?;
         }
     }
@@ -7015,7 +7070,7 @@ fn fact_output_with_terminal(
                 });
             }
             let version = version_witness_fields(&source.row_shape)?;
-            let occurrence_id_fields = flat_join_occurrence_id_fields(plan, source);
+            let occurrence_id_fields = result_occurrence_id_fields(plan, source, resolved_sources)?;
             let payload_fields = flat_join_payload_fields(plan);
             let settle_position_field = payload_fields
                 .is_empty()
@@ -7087,23 +7142,33 @@ fn fact_output_with_terminal(
     })
 }
 
-fn flat_join_occurrence_id_fields(
+fn result_occurrence_id_fields(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
-) -> Vec<String> {
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+) -> CapabilityResult<Vec<String>> {
     let mut fields = vec![source.row_shape.row_uuid_field.clone()];
-    let Some(LinearStep::Project(columns)) = root_linear_steps(plan).and_then(|steps| steps.last())
-    else {
-        return fields;
-    };
-    fields.extend(columns.iter().filter_map(|column| {
-        column
-            .output
-            .name
-            .strip_prefix("__flat_join_row_")
-            .map(|_| column.output.name.clone())
-    }));
-    fields
+    if &source.row_shape.source != plan.root_source() {
+        return Ok(fields);
+    }
+    if let Some(LinearStep::Project(columns)) =
+        root_linear_steps(plan).and_then(|steps| steps.last())
+    {
+        fields.extend(columns.iter().filter_map(|column| {
+            column
+                .output
+                .name
+                .strip_prefix("__flat_join_row_")
+                .map(|_| column.output.name.clone())
+        }));
+    } else {
+        fields.extend(
+            root_join_occurrence_fields(plan, resolved_sources)?
+                .into_iter()
+                .map(|(name, _)| name),
+        );
+    }
+    Ok(fields)
 }
 
 fn flat_join_payload_fields(plan: &AnalyzedQueryPlan) -> Vec<TypedOutputField> {
@@ -7264,7 +7329,7 @@ fn fact_terminal_graph(
                 source,
                 routing_param_fields,
                 &flat_join_payload_fields(plan),
-                &flat_join_occurrence_id_fields(plan, source),
+                &result_occurrence_id_fields(plan, source, resolved_sources)?,
                 flat_join_payload_fields(plan).is_empty(),
             )?))
         }

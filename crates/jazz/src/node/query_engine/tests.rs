@@ -1501,24 +1501,12 @@ fn current_join_via_can_use_union_relation_input() {
         output: row_set_output(BTreeSet::new()),
     };
 
-    let program = lower_query_program(request, &mut FakeSourceResolver::default())
-        .expect("union relation input should lower");
-    let app_rows = &program
-        .lowered
-        .terminals
-        .first()
-        .expect("lowered terminal")
-        .graph;
-    assert_public_root_terminal(app_rows);
-    assert!(graph_any(app_rows, &|graph| matches!(
-        graph,
-        GraphBuilder::Project { input, .. }
-            if matches!(
-                input.as_ref(),
-                GraphBuilder::Join { right, right_on, .. }
-                    if matches!(right.as_ref(), GraphBuilder::Union { inputs } if inputs.len() == 2)
-                        && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "todo")
-            )
+    let error = lower_query_program(request, &mut FakeSourceResolver::default())
+        .expect_err("UNION ALL output must not silently collapse equal arm occurrences");
+    assert!(error.gaps.iter().any(|gap| matches!(
+        gap,
+        UnsupportedReason::Operator(reason)
+            if reason.contains("typed arm-and-row occurrence identity")
     )));
 }
 

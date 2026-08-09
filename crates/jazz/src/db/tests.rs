@@ -2650,7 +2650,68 @@ fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() 
         &Query::from("users").join_via_column("todos", "ownerId", "id", []),
     );
     assert_eq!(row_ids(&joined_before_delete), vec![row(0xa1), row(0xa1)]);
+    let occurrence = |joined| {
+        OutputOccurrenceId::new(
+            ObjectId::from_uuid(row(0xa1).0),
+            [ObjectId::from_uuid(row(joined).0)],
+        )
+    };
+    let joined_snapshot = RelationSnapshot {
+        root_count: joined_before_delete.len(),
+        rows: joined_before_delete.clone(),
+        edges: Vec::new(),
+    };
+    assert!(subscription_outputs_with_occurrence_sidecar(&joined_snapshot, &[]).is_err());
+    assert!(
+        subscription_outputs_with_occurrence_sidecar(
+            &joined_snapshot,
+            &[occurrence(0x11), occurrence(0x11)],
+        )
+        .is_err()
+    );
+    assert!(
+        subscription_outputs_with_occurrence_sidecar(
+            &joined_snapshot,
+            &[
+                OutputOccurrenceId::single_source(ObjectId::from_uuid(row(0xbb).0)),
+                occurrence(0x22),
+            ],
+        )
+        .is_err()
+    );
+    let joined_query = Query::from("users").join_via_column("todos", "ownerId", "id", []);
+    let prepared_join = prepared(&db, &joined_query);
+    let mut subscription = block_on(db.subscribe(&prepared_join, ReadOpts::default())).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_event()).unwrap()
+    else {
+        panic!("joined subscription must start with a delta");
+    };
+    assert_eq!(added.len(), 2);
+    let occurrence_ids = added
+        .iter()
+        .map(|output| output.occurrence_id.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(occurrence_ids.len(), 2);
+    assert_eq!(
+        added
+            .iter()
+            .map(|output| output.occurrence_id.clone())
+            .collect::<Vec<_>>(),
+        vec![occurrence(0x11), occurrence(0x22)]
+    );
+    assert!(
+        added
+            .iter()
+            .all(|output| output.occurrence_id.canonical_bytes().len() == 32)
+    );
     db.delete("todos", row(0x11)).unwrap();
+    db.tick().unwrap();
+    let SubscriptionEvent::Delta { removed, .. } = block_on(subscription.next_event()).unwrap()
+    else {
+        panic!("joined occurrence removal must emit a delta");
+    };
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].occurrence_id, occurrence(0x11));
 
     let joined = prepared_read(
         &db,
