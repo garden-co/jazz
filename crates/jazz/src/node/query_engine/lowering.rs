@@ -4045,7 +4045,7 @@ fn lower_equality_param_filter_joins(
                 [(join.param.clone(), join.value_type.clone())],
             )?
         };
-        let binding =
+        let mut binding =
             GraphBuilder::binding_source(binding_source_shape.clone(), binding_descriptor);
         let route_field = if is_claim_param {
             join.param.clone()
@@ -4068,6 +4068,7 @@ fn lower_equality_param_filter_joins(
         ));
         if join.nullable {
             graph = graph.unwrap_nullable(join.field.clone());
+            binding = binding.unwrap_nullable(join.param.clone());
         }
         graph = policy_join_if_needed(graph, binding, [join.field], [join.param], request)
             .project_fields(projection);
