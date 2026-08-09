@@ -579,9 +579,14 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   private async awaitBegin(openBatchId: OpenBatchId): Promise<void> {
     const failed = this.failedBegins.get(openBatchId);
     if (failed !== undefined) throw failed;
+    if (this.completedTxs.has(openBatchId)) {
+      throw new Error(
+        `Query setup failed: Write error: ${txStateMessage(openBatchId, this.completedTxs)}`,
+      );
+    }
     const begun = this.beginResults.get(openBatchId);
     if (!begun) {
-      throw new Error(`Batch ${openBatchId} was never opened`);
+      throw new Error(`open batch ${openBatchId} was never opened`);
     }
     await begun;
   }
@@ -596,7 +601,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     const failed = this.failedBegins.get(openBatchId);
     if (failed !== undefined) throw failed;
     if (this.completedTxs.has(openBatchId)) return;
-    throw new Error(`${operation} failed: batch ${openBatchId} was never opened`);
+    throw new Error(`${operation} failed: open batch ${openBatchId} was never opened`);
   }
 
   private async settleReadFence(fence: readonly Promise<unknown>[]): Promise<void> {
