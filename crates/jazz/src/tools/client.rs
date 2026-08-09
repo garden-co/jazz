@@ -3504,7 +3504,10 @@ mod tests {
             )
             .expect("insert offline persistent row");
         client
-            .wait_for_batch(batch_id, DurabilityTier::Local)
+            .wait_for_batch(
+                batch_id.expect("ordinary insert commits immediately"),
+                DurabilityTier::Local,
+            )
             .await
             .expect("wait for local durability");
         drop(client);
@@ -3548,7 +3551,10 @@ mod tests {
             )
             .expect("insert offline memory row");
         client
-            .wait_for_batch(batch_id, DurabilityTier::Local)
+            .wait_for_batch(
+                batch_id.expect("ordinary insert commits immediately"),
+                DurabilityTier::Local,
+            )
             .await
             .expect("wait for local durability");
         drop(client);
