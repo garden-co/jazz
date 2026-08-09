@@ -82,7 +82,7 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
       }
       case "commitTransaction": {
         const [openBatchId] = message.args;
-        const result = getRuntime().commitTransaction(openBatchId);
+        const result = await getRuntime().commitTransaction(openBatchId);
         postResult(message.id, result);
         return;
       }
