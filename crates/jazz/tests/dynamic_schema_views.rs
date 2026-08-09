@@ -1,4 +1,4 @@
-use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, SeededRowIdSource};
+use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, MergeableTxOps, SeededRowIdSource};
 use jazz::groove::records::Value;
 use jazz::groove::schema::ColumnType;
 use jazz::groove::storage::MemoryStorage;
@@ -204,4 +204,27 @@ fn typed_view_reads_and_updates_preexisting_snapshot_rows() {
         Value::String("updated".to_owned())
     );
     owner.commit_mergeable_handle(batch).unwrap();
+}
+
+/// An owner-wide snapshot and an ordinary typed-view write are independent:
+/// the direct write commits, while the already-open snapshot remains stable.
+#[test]
+fn ordinary_view_write_does_not_enter_open_owner_snapshot() {
+    let owner = open_owner(JazzSchema::new([]));
+    let batch = OpenBatchId::new();
+    owner.begin_exclusive(batch).unwrap();
+    let view = owner.register_schema_view(schema("direct")).unwrap();
+    let row = RowUuid::from_bytes([7; 16]);
+    view.insert_with_id("items", row, Default::default())
+        .unwrap();
+
+    let prepared = view.prepare_query(&view.table("items")).unwrap();
+    assert!(
+        view.exclusive_tx_ref(batch)
+            .all_prepared(&prepared)
+            .unwrap()
+            .is_empty()
+    );
+    owner.abandon_exclusive_handle(batch).unwrap();
+    assert_eq!(view.read(&prepared).unwrap().len(), 1);
 }
