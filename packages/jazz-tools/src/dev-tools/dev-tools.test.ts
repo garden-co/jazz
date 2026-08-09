@@ -11,6 +11,7 @@ import type { ActiveQuerySubscriptionTrace } from "../runtime/db.js";
 import { WriteResult, WriteHandle, type BatchId } from "../runtime/client.js";
 
 type MessageListener = (event: { source: FakeWindow; data: unknown }) => void;
+type WaitForTransaction = (batchId: BatchId | Promise<BatchId>, tier: string) => Promise<void>;
 
 class FakeWindow {
   private readonly listeners = new Set<MessageListener>();
@@ -211,9 +212,7 @@ describe("attachDevTools mutation bridge", () => {
       id: "row-1",
       values: [{ type: "Text", value: "hello" }],
     };
-    const waitForTransaction = vi.fn(
-      async (_batchId: BatchId | Promise<BatchId>, _tier: "local" | "edge" | "global") => undefined,
-    );
+    const waitForTransaction = vi.fn<WaitForTransaction>(async () => undefined);
     const insert = vi.fn(
       () =>
         new WriteResult(
@@ -274,9 +273,7 @@ describe("attachDevTools mutation bridge", () => {
     const fakeWindow = new FakeWindow();
     (globalThis as { window?: unknown }).window = fakeWindow as unknown;
 
-    const waitForTransaction = vi.fn(
-      async (_batchId: BatchId | Promise<BatchId>, _tier: "local" | "edge" | "global") => undefined,
-    );
+    const waitForTransaction = vi.fn<WaitForTransaction>(async () => undefined);
     const update = vi.fn(
       () =>
         new WriteHandle("transaction-update-devtools" as BatchId, { waitForTransaction } as any),
@@ -340,9 +337,7 @@ describe("attachDevTools mutation bridge", () => {
     const fakeWindow = new FakeWindow();
     (globalThis as { window?: unknown }).window = fakeWindow as unknown;
 
-    const waitForTransaction = vi.fn(
-      async (_batchId: BatchId | Promise<BatchId>, _tier: "local" | "edge" | "global") => undefined,
-    );
+    const waitForTransaction = vi.fn<WaitForTransaction>(async () => undefined);
     const deleteMutation = vi.fn(
       () =>
         new WriteHandle("transaction-delete-devtools" as BatchId, { waitForTransaction } as any),

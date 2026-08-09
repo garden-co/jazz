@@ -12,6 +12,8 @@ import {
 import type { Session } from "./context.js";
 import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
 
+type WaitForTransaction = (batchId: BatchId | Promise<BatchId>, tier: string) => Promise<void>;
+
 class TestRuntimeSource extends RuntimeSource<DbConfig> {
   constructor(private readonly client: JazzClient) {
     super();
@@ -77,9 +79,7 @@ function makeLocalTransactionRecord(transactionId: string): LocalTransactionReco
 
 function makeHandleClient(localTransactionRecord: LocalTransactionRecord) {
   return {
-    waitForTransaction: vi.fn(
-      async (_batchId: BatchId | Promise<BatchId>, _tier: "local" | "edge" | "global") => undefined,
-    ),
+    waitForTransaction: vi.fn<WaitForTransaction>(async () => undefined),
     localTransactionRecord: vi.fn(() => localTransactionRecord),
   };
 }

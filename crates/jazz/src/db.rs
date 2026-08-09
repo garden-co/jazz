@@ -998,11 +998,13 @@ where
         } else {
             (None, None)
         };
+        let groove_runtime_token = self.node.node.borrow().groove_runtime_token();
         Ok(PreparedQuery {
             shape,
             binding,
             local_plan,
             global_plan,
+            groove_runtime_token,
         })
     }
 
@@ -1012,15 +1014,24 @@ where
     /// coverage is tracked separately by query attachments and durability-aware
     /// subscription reads.
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
+        let mut node = self.node.node.borrow_mut();
+        let groove_runtime_token = node.groove_runtime_token();
+        node.query_rows_local_preview(
+            &prepared.shape,
+            &prepared.binding,
+            prepared.plan_for_tier(DurabilityTier::Local, groove_runtime_token),
+        )
+        .map_err(Into::into)
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    /// Test-only count of live Groove maintained subscriptions.
+    pub fn active_groove_subscriptions_for_test(&self) -> usize {
         self.node
             .node
-            .borrow_mut()
-            .query_rows_local_preview(
-                &prepared.shape,
-                &prepared.binding,
-                prepared.plan_for_tier(DurabilityTier::Local),
-            )
-            .map_err(Into::into)
+            .borrow()
+            .runtime_stats_for_test()
+            .active_subscriptions
     }
 
     /// Synchronously read rows and attribute work inside the node query path.
@@ -1032,15 +1043,14 @@ where
         &self,
         prepared: &PreparedQuery,
     ) -> Result<(Vec<CurrentRow>, QueryReadProfile), Error> {
-        self.node
-            .node
-            .borrow_mut()
-            .query_rows_local_preview_profiled(
-                &prepared.shape,
-                &prepared.binding,
-                prepared.plan_for_tier(DurabilityTier::Local),
-            )
-            .map_err(Into::into)
+        let mut node = self.node.node.borrow_mut();
+        let groove_runtime_token = node.groove_runtime_token();
+        node.query_rows_local_preview_profiled(
+            &prepared.shape,
+            &prepared.binding,
+            prepared.plan_for_tier(DurabilityTier::Local, groove_runtime_token),
+        )
+        .map_err(Into::into)
     }
 
     /// Synchronously read exactly one local row if present.
@@ -1518,10 +1528,19 @@ where
         let root_occurrence_ids = subscription.root_occurrence_ids().to_vec();
         let local_subscription_id = subscription.subscription_id();
         let local_node = Rc::clone(&self.node.node);
+        let local_runtime_token = local_node.borrow().groove_runtime_token();
+        let local_subscription_cleanup = Rc::new(Cell::new(Some((
+            local_runtime_token,
+            local_subscription_id,
+        ))));
+        let local_cleanup_handle = Rc::clone(&local_subscription_cleanup);
         let mut local_cleanup = CleanupGuard::new(Box::new(move || {
-            local_node
-                .borrow_mut()
-                .unsubscribe_groove_subscription(local_subscription_id);
+            let mut node = local_node.borrow_mut();
+            if let Some((runtime_token, subscription_id)) = local_cleanup_handle.get()
+                && node.groove_runtime_token() == runtime_token
+            {
+                node.unsubscribe_groove_subscription(subscription_id);
+            }
         }));
         let maintained_subscription = Some(subscription);
         let terminal_rows = !local_shape.query().array_subqueries.is_empty();
@@ -1582,6 +1601,7 @@ where
                 maintained_subscription,
             },
             groove_runtime_token: self.node.node.borrow().groove_runtime_token(),
+            local_subscription_cleanup,
             propagates_upstream,
             author,
             read_tier,
@@ -3619,16 +3639,15 @@ where
         identity: AuthorId,
     ) -> Result<Option<CurrentRow>, Error> {
         let query = self.prepare_query(&Query::from(table))?;
-        Ok(self
-            .node
-            .node
-            .borrow_mut()
+        let mut node = self.node.node.borrow_mut();
+        let groove_runtime_token = node.groove_runtime_token();
+        Ok(node
             .query_rows_for_link_with_prepared_plan(
                 &query.shape,
                 &query.binding,
                 DurabilityTier::Local,
                 identity,
-                query.plan_for_tier(DurabilityTier::Local),
+                query.plan_for_tier(DurabilityTier::Local, groove_runtime_token),
             )?
             .into_iter()
             .find(|candidate| candidate.row_uuid() == row))
@@ -4760,7 +4779,7 @@ where
                     }
                 }
             };
-            let (mut maintained, mut snapshot) =
+            let (maintained, mut snapshot) =
                 node.borrow_mut().open_local_maintained_view_subscription(
                     &shape, &binding, author, read_tier, &read_view, None,
                 )?;
@@ -4773,6 +4792,21 @@ where
                 }
                 .read_view_key(),
             };
+            // From this point, cleanup must target the replacement runtime
+            // subscription even if a later fallible refresh step aborts.
+            {
+                let mut state_ref = state.borrow_mut();
+                let subscription_id = maintained.subscription_id();
+                match &mut state_ref.kind {
+                    SubscriptionKind::Prepared {
+                        maintained_subscription,
+                        ..
+                    } => *maintained_subscription = Some(maintained),
+                }
+                state_ref
+                    .local_subscription_cleanup
+                    .set(Some((groove_runtime_token, subscription_id)));
+            }
             let settled_tier = remote_read_tier.unwrap_or(read_tier);
             let settled_binding_view = BindingViewKey {
                 shape_id: shape.shape_id(),
@@ -4796,9 +4830,17 @@ where
                     .borrow_mut()
                     .authoritative_reset_snapshot_for_binding_view(&shape, binding_view)?;
                 if let Some(authoritative) = authoritative {
+                    let mut state_ref = state.borrow_mut();
+                    let SubscriptionKind::Prepared {
+                        maintained_subscription,
+                        ..
+                    } = &mut state_ref.kind;
+                    let maintained = maintained_subscription
+                        .as_mut()
+                        .expect("replacement maintained subscription installed");
                     node.borrow_mut()
                         .reset_local_maintained_view_subscription_from_binding_view(
-                            &mut maintained,
+                            maintained,
                             binding_view,
                         );
                     snapshot = authoritative;
@@ -4816,7 +4858,16 @@ where
                     })
                     .collect()
             } else {
-                maintained.root_occurrence_ids().to_vec()
+                let state_ref = state.borrow();
+                let SubscriptionKind::Prepared {
+                    maintained_subscription,
+                    ..
+                } = &state_ref.kind;
+                maintained_subscription
+                    .as_ref()
+                    .expect("replacement maintained subscription installed")
+                    .root_occurrence_ids()
+                    .to_vec()
             };
             let reset_outputs =
                 subscription_outputs_with_occurrence_sidecar(&snapshot, &root_occurrence_ids)?;
@@ -4828,12 +4879,6 @@ where
                 read_view.clone(),
             );
             let mut state_ref = state.borrow_mut();
-            match &mut state_ref.kind {
-                SubscriptionKind::Prepared {
-                    maintained_subscription,
-                    ..
-                } => *maintained_subscription = Some(maintained),
-            }
             let removed = reset_removed_roots(
                 &state_ref.snapshot,
                 &state_ref.snapshot_index,
@@ -9143,6 +9188,9 @@ struct SubscriptionState {
     terminal_rows: bool,
     kind: SubscriptionKind,
     groove_runtime_token: u64,
+    /// The maintained subscription currently owned by this public stream.
+    /// Rehydration replaces the Groove ID, and drop must clean up that new ID.
+    local_subscription_cleanup: Rc<Cell<Option<(u64, groove::ivm::SubscriptionId)>>>,
     propagates_upstream: bool,
     author: AuthorId,
     read_tier: DurabilityTier,
@@ -9334,6 +9382,9 @@ pub struct PreparedQuery {
     binding: Binding,
     local_plan: Option<PreparedQueryPlanHandle>,
     global_plan: Option<PreparedQueryPlanHandle>,
+    /// Plans contain IDs from one live Groove graph registry. A catalogue
+    /// change can replace that registry while this public handle survives.
+    groove_runtime_token: u64,
 }
 
 impl PreparedQuery {
@@ -9347,7 +9398,14 @@ impl PreparedQuery {
         &self.binding
     }
 
-    fn plan_for_tier(&self, tier: DurabilityTier) -> Option<&PreparedQueryPlanHandle> {
+    fn plan_for_tier(
+        &self,
+        tier: DurabilityTier,
+        groove_runtime_token: u64,
+    ) -> Option<&PreparedQueryPlanHandle> {
+        if self.groove_runtime_token != groove_runtime_token {
+            return None;
+        }
         match tier {
             DurabilityTier::Local => self.local_plan.as_ref(),
             DurabilityTier::Global => self.global_plan.as_ref(),
@@ -9357,7 +9415,8 @@ impl PreparedQuery {
 
     #[cfg(test)]
     fn has_plan_for_tier(&self, tier: DurabilityTier) -> bool {
-        self.plan_for_tier(tier).is_some()
+        self.plan_for_tier(tier, self.groove_runtime_token)
+            .is_some()
     }
 }
 

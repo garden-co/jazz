@@ -2804,7 +2804,6 @@ mod tests {
         assert!(payload.get("relation_delta").is_none());
         assert!(payload.get("output_mode").is_none());
     }
-
     /// A short-lived NAPI schema attachment must not own or abandon the
     /// owner-wide OpenBatch lifetime when its JS wrapper is collected.
     #[test]

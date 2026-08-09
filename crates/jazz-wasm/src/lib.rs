@@ -2836,7 +2836,6 @@ mod dynamic_schema_view_tests {
             decoded.removed_occurrence_keys[1]
         );
     }
-
     /// A short-lived WASM schema attachment must not abandon its owner's open
     /// batch when the JavaScript wrapper is collected.
     #[test]

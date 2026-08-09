@@ -1867,7 +1867,7 @@ mod tests {
                 &aliases(),
             )
             .unwrap();
-        assert_eq!(rehydrated.adds, [inherited.clone()]);
+        assert_eq!(rehydrated.adds, std::slice::from_ref(&inherited));
         assert_eq!(reopened.result_weights.get(&inherited), Some(&1));
     }
 
