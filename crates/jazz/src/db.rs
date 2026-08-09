@@ -4135,7 +4135,6 @@ fn encode_subscription_reset_frame_for_size(
         added: size_row_batches(&snapshot.rows),
         updated: Vec::new(),
         removed: Vec::new(),
-        terminal_operations: Vec::new(),
     })
 }
 
