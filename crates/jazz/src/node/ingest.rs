@@ -2839,11 +2839,18 @@ where
             if record.deletion().is_some() {
                 continue;
             }
-            let (_, table) = self.translate_cells_to_current_write_schema(
+            let (projected_schema, table) = self.translate_cells_to_current_write_schema(
                 record.schema_version(),
                 record.table(),
                 &mut BTreeMap::new(),
             )?;
+            // Synthetic merge versions are authored in the current write
+            // schema. An otherwise valid version in an unreconciled schema
+            // has its own physical lineage and merge-head set, but cannot be
+            // semantically merged into the write schema until a lens exists.
+            if projected_schema != self.catalogue.current_write_schema.schema {
+                continue;
+            }
             rows.push((table, record.row_uuid()));
         }
         rows.sort_unstable();

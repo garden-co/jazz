@@ -995,7 +995,7 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
     let evolved = catalogue_evolved_schema();
     let evolved_id = evolved.version_id();
     let (_writer_dir, mut writer) = open_node_with_schema(node(0x36), base.clone());
-    let (_core_dir, mut core) = open_node_with_schema(node(0x37), base.clone());
+    let (core_dir, mut core) = open_node_with_schema(node(0x37), base.clone());
     let (_tx_id, unit) = writer
         .commit_mergeable_unit(
             MergeableCommit::new("todos", row(0x55), 1_000).cells(title_cells("parked")),
@@ -1036,7 +1036,7 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
     let updates = core
         .apply_sync_message(SyncMessage::PublishSchema {
             author: AuthorId::SYSTEM,
-            schema: Box::new(SchemaVersion::new(evolved)),
+            schema: Box::new(SchemaVersion::new(evolved.clone())),
         })
         .unwrap();
     assert_eq!(core.sync_metrics().parked_catalogue_orphans_resolved, 1);
@@ -1048,6 +1048,33 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
             ..
         } if *tx_id == tx.tx_id
     )));
+    let shape = Query::from("todos").validate(&evolved).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    assert_eq!(
+        core.query_rows(&shape, &binding, DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>()
+            .get(&row(0x55)),
+        Some(&title_cells("parked"))
+    );
+    drop(core);
+    let mut reopened = reopen_node_at(&core_dir, node(0x37), base);
+    assert!(reopened
+        .query_transaction(tx.tx_id)
+        .unwrap()
+        .is_some_and(|stored| stored.fate == Fate::Accepted));
+    assert_eq!(
+        reopened
+            .query_rows(&shape, &binding, DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>()
+            .get(&row(0x55)),
+        Some(&title_cells("parked"))
+    );
 }
 
 #[test]
