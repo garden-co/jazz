@@ -3572,7 +3572,13 @@ function decodePlannedField(
   const bytes = decodeRecord(raw, field.index);
   if (bytes == null) return { type: "Null" };
   if (!field.type) return { type: "Bytea", value: bytes };
-  return decodeBytes(field.type, bytes, field.name, field.storageType);
+  try {
+    return decodeBytes(field.type, bytes, field.name, field.storageType);
+  } catch (error) {
+    throw new Error(
+      `${String(error)} while decoding ${field.name} as ${field.type.type} from storage tag ${field.storageType.tag} (${bytes.byteLength} bytes)`,
+    );
+  }
 }
 
 function decodeBytes(
@@ -3609,14 +3615,30 @@ function decodeBytes(
     case "Array":
       return {
         type: "Array",
-        value: decodeArrayBytes(type.element, bytes, storageType?.inner),
+        value: decodeArrayBytes(type.element, bytes, arrayElementStorageType(storageType)),
       };
     case "Row":
       return {
         type: "Row",
-        value: decodeNestedRowBytes(type.columns, bytes, storageType?.record),
+        value: decodeNestedRowBytes(type.columns, bytes, recordStorageDescriptor(storageType)),
       };
   }
+}
+
+function nonNullableStorageType(storageType?: ValueType): ValueType | undefined {
+  let current = storageType;
+  while (current?.tag === 14) current = current.inner;
+  return current;
+}
+
+function arrayElementStorageType(storageType?: ValueType): ValueType | undefined {
+  const array = nonNullableStorageType(storageType);
+  return array?.tag === 13 ? array.inner : undefined;
+}
+
+function recordStorageDescriptor(storageType?: ValueType): DescriptorField[] | undefined {
+  const record = nonNullableStorageType(storageType);
+  return record?.tag === 15 ? record.record : undefined;
 }
 
 function decodeNestedRowBytes(

@@ -3024,6 +3024,62 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
+  it("decodes a present nullable empty fixed-width array using its storage element type", async () => {
+    const schema = {
+      todos: {
+        columns: [
+          {
+            name: "assigneesIds",
+            column_type: { type: "Array", element: { type: "Uuid" } },
+            nullable: true,
+          },
+        ],
+      },
+    } satisfies WasmSchema;
+    const descriptor = [
+      {
+        name: "assigneesIds",
+        valueType: { tag: 14, inner: { tag: 13, inner: { tag: 10 } } },
+      },
+    ];
+    const writer = new PostcardWriter();
+    writer.vec((batch) => {
+      batch.string("todos");
+      writeDescriptor(batch, descriptor);
+      batch.vec((row) => {
+        row.bytes(uuidBytes("00000000-0000-0000-0000-000000000001"));
+        row.bool(false);
+        row.bytes(createRecord(descriptor, [presentBytes(new Uint8Array())]));
+      }, 1);
+    }, 1);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => writer.finish(),
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      schema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000001",
+        values: [{ type: "Array", value: [] }],
+      },
+    ]);
+  });
+
   it("encodes public id in conditions into prepared native queries", async () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new NativeRuntimeAdapter(
