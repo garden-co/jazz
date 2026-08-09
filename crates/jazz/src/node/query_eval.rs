@@ -5091,7 +5091,7 @@ where
         // selected roots to their advertised order before sending a reset.
         self.apply_query_order(shape.query(), &mut rows)?;
         if shape.query().flat_join.is_none() {
-            self.apply_projection(shape.query(), &mut rows)?;
+            self.apply_projection_in_schema(shape.query(), shape.schema_version(), &mut rows)?;
         }
         let root_count = rows.len();
         let mut edges = Vec::new();
@@ -6969,7 +6969,7 @@ where
                 .query_rows_including_deleted_with_query_engine(shape, binding, tier, identity)?;
             let query = shape.query();
             self.finish_engine_query_rows(query, &mut rows)?;
-            self.apply_projection(query, &mut rows)?;
+            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
             return Ok(rows);
         }
         let settled_binding_view = (tier == DurabilityTier::Global)
@@ -7091,7 +7091,7 @@ where
         let query = shape.query();
         self.finish_engine_query_rows(query, &mut rows)?;
         if query.flat_join.is_none() {
-            self.apply_projection(query, &mut rows)?;
+            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
         }
         Ok(rows)
     }
@@ -7234,7 +7234,7 @@ where
         profile.finish_rows = phase_started.elapsed();
 
         let phase_started = Instant::now();
-        self.apply_projection(query, &mut rows)?;
+        self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
         profile.apply_projection = phase_started.elapsed();
         profile.total = total_started.elapsed();
         Ok((rows, profile))
@@ -7422,7 +7422,7 @@ where
         let mut rows = self.query_rows_at_with_query_engine(shape, binding, position, identity)?;
         let query = shape.query();
         self.finish_engine_query_rows(query, &mut rows)?;
-        self.apply_projection(query, &mut rows)?;
+        self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
         Ok(rows)
     }
 
@@ -8974,7 +8974,7 @@ where
         };
         let query = shape.query();
         self.finish_engine_query_rows(query, &mut rows)?;
-        self.apply_projection(query, &mut rows)?;
+        self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
         Ok(rows)
     }
 
@@ -9413,10 +9413,19 @@ where
         query: &crate::query::Query,
         rows: &mut [CurrentRow],
     ) -> Result<(), Error> {
+        self.apply_projection_in_schema(query, self.catalogue.current_write_schema.schema, rows)
+    }
+
+    fn apply_projection_in_schema(
+        &self,
+        query: &crate::query::Query,
+        schema_version: SchemaVersionId,
+        rows: &mut [CurrentRow],
+    ) -> Result<(), Error> {
         let Some(columns) = &query.select else {
             return Ok(());
         };
-        let table = self.table(&query.table)?.clone();
+        let table = self.table_in_schema(&query.table, schema_version)?;
         for row in rows {
             *row = row.project(&table, columns)?;
         }
