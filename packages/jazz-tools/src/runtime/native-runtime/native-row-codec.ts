@@ -673,6 +673,31 @@ export function storageColumnValueType(column: ColumnDescriptor): ValueType {
   return column.sparse ? { tag: 14, inner: valueType } : valueType;
 }
 
+/** Strip physical sparse-carrier metadata for public packed row transport. */
+export function logicalStorageColumns(
+  columns: readonly ColumnDescriptor[],
+): readonly ColumnDescriptor[] {
+  return columns.map((column) => ({
+    ...column,
+    sparse: undefined,
+    column_type:
+      column.column_type.type === "Row"
+        ? {
+            ...column.column_type,
+            columns: [...logicalStorageColumns(column.column_type.columns)],
+          }
+        : column.column_type.type === "Array" && column.column_type.element.type === "Row"
+          ? {
+              ...column.column_type,
+              element: {
+                ...column.column_type.element,
+                columns: [...logicalStorageColumns(column.column_type.element.columns)],
+              },
+            }
+          : column.column_type,
+  }));
+}
+
 export function storageColumnTypeToValueType(type: ColumnType): ValueType {
   switch (type.type) {
     case "Boolean":

@@ -45,6 +45,7 @@ import {
   createRecord,
   createRecordValueDecoder,
   decodeNativeRowValues,
+  logicalStorageColumns,
   storageColumnTypeToValueType,
   storageColumnValueType,
   writeDescriptor,
@@ -2245,6 +2246,7 @@ function outputColumnsForTable(
   schema: WasmSchema,
   select: string[] | undefined,
   arraySubqueries: readonly QueryArraySubquery[],
+  rootTerminal = true,
 ): ColumnDescriptor[] {
   const tableSchema = schema[table];
   if (!tableSchema) throw new Error(`missing schema for subscription table ${table}`);
@@ -2253,7 +2255,7 @@ function outputColumnsForTable(
   const columns = selected
     .map((columnName) => {
       const declared = tableSchema.columns.find((column) => column.name === columnName);
-      if (declared) return wildcard ? { ...declared, sparse: true } : declared;
+      if (declared) return wildcard && rootTerminal ? { ...declared, sparse: true } : declared;
       const magicType = magicColumnType(columnName);
       return magicType
         ? ({ name: columnName, column_type: magicType, nullable: false } satisfies ColumnDescriptor)
@@ -2267,6 +2269,7 @@ function outputColumnsForTable(
       schema,
       subquery.select,
       subquery.nestedArrays ?? [],
+      false,
     );
     columns.push({
       name: subquery.columnName,
@@ -4005,7 +4008,9 @@ function nativeResetDeltaFromBatches(
   const chunks: Uint8Array[] = [];
   for (const batch of batches) {
     const frameColumns =
-      outputColumns && batch.table === outputColumns.rootTable ? outputColumns.rootColumns : null;
+      outputColumns && batch.table === outputColumns.rootTable
+        ? logicalStorageColumns(outputColumns.rootColumns)
+        : null;
     const encodeFrameRow = frameColumns
       ? createRawNativeFrameRowEncoder(batch.descriptor, frameColumns)
       : (raw: Uint8Array) => raw;
@@ -4167,10 +4172,11 @@ function encodeNativeRows(
     (values: readonly Value[]) => Uint8Array
   >();
   for (const row of rows) {
-    const columns =
+    const physicalColumns =
       outputColumns && row.table === outputColumns.rootTable
         ? outputColumns.rootColumns
         : schema?.[row.table]?.columns;
+    const columns = physicalColumns ? logicalStorageColumns(physicalColumns) : undefined;
     if (!columns) {
       throw new Error(`missing schema for subscription row table ${row.table}`);
     }

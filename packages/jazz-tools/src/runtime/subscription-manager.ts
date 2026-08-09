@@ -15,7 +15,11 @@ import type {
   RowDelta as WireRowDelta,
 } from "../drivers/types.js";
 import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "./select-projection.js";
-import { decodeNativeRow, decodeNativeTerminalRow } from "./native-runtime/native-row-codec.js";
+import {
+  decodeNativeRow,
+  decodeNativeTerminalRow,
+  logicalStorageColumns,
+} from "./native-runtime/native-row-codec.js";
 
 export const RowChangeKind = {
   Added: 0 as const,
@@ -274,7 +278,7 @@ export class SubscriptionManager<T extends { id: string }> {
         // Packed row deltas have already been normalized to the public logical
         // record layout. Only Groove terminal edit payloads retain the outer
         // sparse current-row carrier described by `sparse`.
-        const decoded = decodeNativeDelta(delta, logicalTransportColumns(nativeColumns));
+        const decoded = decodeNativeDelta(delta, logicalStorageColumns(nativeColumns));
         for (const change of decoded) {
           if (change.kind === RowChangeKind.Removed) {
             this.terminalRows.delete(change.id);
@@ -610,30 +614,6 @@ export class SubscriptionManager<T extends { id: string }> {
   get size(): number {
     return this.currentResults.size;
   }
-}
-
-function logicalTransportColumns(
-  columns: readonly ColumnDescriptor[],
-): readonly ColumnDescriptor[] {
-  return columns.map((column) => ({
-    ...column,
-    sparse: undefined,
-    column_type:
-      column.column_type.type === "Row"
-        ? {
-            ...column.column_type,
-            columns: [...logicalTransportColumns(column.column_type.columns)],
-          }
-        : column.column_type.type === "Array" && column.column_type.element.type === "Row"
-          ? {
-              ...column.column_type,
-              element: {
-                ...column.column_type.element,
-                columns: [...logicalTransportColumns(column.column_type.element.columns)],
-              },
-            }
-          : column.column_type,
-  }));
 }
 
 export function isNativeRowDelta(delta: SubscriptionWireDelta): delta is NativeRowDelta {

@@ -430,12 +430,13 @@ function resolveNativeSubscriptionColumns(
   schema: WasmSchema,
   includes: NormalizedIncludeSpec,
   projection?: readonly string[],
+  rootTerminal = true,
 ): ColumnDescriptor[] {
   const wildcard = projection === undefined || projection.length === 0;
   const columns = resolveSelectedColumns(tableName, schema, projection)
     .map((columnName) => {
       const column = resolveOutputColumnDescriptor(tableName, schema, columnName);
-      return column && wildcard ? { ...column, sparse: true } : column;
+      return column && wildcard && rootTerminal ? { ...column, sparse: true } : column;
     })
     .filter((column): column is ColumnDescriptor => column !== undefined);
 
@@ -457,6 +458,7 @@ function resolveNativeSubscriptionColumns(
       schema,
       include.includes,
       include.select.length > 0 ? include.select : undefined,
+      false,
     );
     const columnType: ColumnType = {
       type: "Array",
