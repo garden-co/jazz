@@ -20,38 +20,6 @@ describe("native query codec", () => {
     }
   });
 
-  it("rejects an array subquery whose bound intent was lost", () => {
-    expect(() =>
-      queryWithPredicates("teams", [], {
-        arraySubqueries: [
-          {
-            columnName: "participants",
-            table: "participants",
-            innerColumn: "team_id",
-            outerColumn: "id",
-          },
-        ],
-      }),
-    ).toThrow("array subquery participants must specify limit or explicitly declare unbounded");
-  });
-
-  it("rejects an array subquery declaring finite and unbounded together", () => {
-    expect(() =>
-      queryWithPredicates("teams", [], {
-        arraySubqueries: [
-          {
-            columnName: "participants",
-            table: "participants",
-            innerColumn: "team_id",
-            outerColumn: "id",
-            limit: 2,
-            unbounded: true,
-          },
-        ],
-      }),
-    ).toThrow("array subquery participants cannot specify both limit and unbounded");
-  });
-
   it.each([
     ["limit", -1],
     ["limit", Number.NaN],
@@ -139,7 +107,6 @@ function queryCases(): Array<
           table: "participants",
           innerColumn: "team_id",
           outerColumn: "id",
-          unbounded: true,
           offset: 2,
         },
       ],

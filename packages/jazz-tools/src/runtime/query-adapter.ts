@@ -237,16 +237,6 @@ function validateIncludeBuilderSpec(
   if (spec.gather) {
     throw new Error(`Include builder for relation "${relationName}" does not support gather(...).`);
   }
-  if (spec.limit === undefined && !spec.unbounded) {
-    throw new Error(
-      `Include builder for relation "${relationName}" must specify limit(...) or unbounded().`,
-    );
-  }
-  if (spec.limit !== undefined && spec.unbounded) {
-    throw new Error(
-      `Include builder for relation "${relationName}" cannot specify both limit(...) and unbounded().`,
-    );
-  }
 }
 
 function conditionToArraySubqueryFilter(
@@ -359,7 +349,6 @@ function toArraySubqueries(
         select_columns: selectColumns,
         order_by: orderBy,
         limit: spec.limit ?? null,
-        unbounded: spec.unbounded,
         ...(requirement ? { requirement } : {}),
         nested_arrays: nestedArrays,
       });
@@ -376,7 +365,6 @@ function toArraySubqueries(
         select_columns: selectColumns,
         order_by: orderBy,
         limit: spec.limit ?? null,
-        unbounded: spec.unbounded,
         nested_arrays: nestedArrays,
       });
     }

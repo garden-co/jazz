@@ -11,8 +11,6 @@ pub enum QueryBuildError {
     UnsupportedShape,
     NullBetweenBound { column: String },
     AggregateColumnRequired { function: AggregateFunction },
-    UndeclaredArrayBound { relation_path: String },
-    ConflictingArrayBound { relation_path: String },
 }
 
 impl fmt::Display for QueryBuildError {
@@ -33,14 +31,6 @@ impl fmt::Display for QueryBuildError {
             QueryBuildError::AggregateColumnRequired { function } => {
                 write!(f, "{function:?} aggregate requires an input column")
             }
-            QueryBuildError::UndeclaredArrayBound { relation_path } => write!(
-                f,
-                "array subquery {relation_path} must specify limit(...) or unbounded()"
-            ),
-            QueryBuildError::ConflictingArrayBound { relation_path } => write!(
-                f,
-                "array subquery {relation_path} cannot specify both limit(...) and unbounded()"
-            ),
         }
     }
 }
@@ -527,9 +517,6 @@ pub struct ArraySubquerySpec {
     pub order_by: Vec<(String, SortDirection)>,
     /// Limit on inner query results.
     pub limit: Option<usize>,
-    /// Whether the inner query is explicitly unbounded.
-    #[serde(default)]
-    pub unbounded: bool,
     /// Number of inner rows to skip after filtering and ordering.
     #[serde(default)]
     pub offset: usize,
@@ -553,7 +540,6 @@ impl ArraySubquerySpec {
             select_columns: None,
             order_by: Vec::new(),
             limit: None,
-            unbounded: false,
             offset: 0,
             requirement: ArraySubqueryRequirement::Optional,
             nested_arrays: Vec::new(),
@@ -710,12 +696,6 @@ impl Query {
             } else {
                 format!("{parent_path}.{}", spec.column_name)
             };
-            if spec.limit.is_none() && !spec.unbounded {
-                return Err(QueryBuildError::UndeclaredArrayBound { relation_path });
-            }
-            if spec.limit.is_some() && spec.unbounded {
-                return Err(QueryBuildError::ConflictingArrayBound { relation_path });
-            }
             Self::validate_conditions(&spec.filters)?;
             Self::validate_array_subqueries(&spec.nested_arrays, &relation_path)?;
         }
@@ -1273,7 +1253,6 @@ pub struct ArraySubqueryBuilder {
     select_columns: Option<Vec<String>>,
     order_by: Vec<(String, SortDirection)>,
     limit: Option<usize>,
-    unbounded: bool,
     offset: usize,
     requirement: ArraySubqueryRequirement,
     nested_arrays: Vec<ArraySubquerySpec>,
@@ -1292,7 +1271,6 @@ impl ArraySubqueryBuilder {
             select_columns: None,
             order_by: Vec::new(),
             limit: None,
-            unbounded: false,
             offset: 0,
             requirement: ArraySubqueryRequirement::Optional,
             nested_arrays: Vec::new(),
@@ -1370,14 +1348,6 @@ impl ArraySubqueryBuilder {
     /// Limit the number of results from the inner query.
     pub fn limit(mut self, n: usize) -> Self {
         self.limit = Some(n);
-        self.unbounded = false;
-        self
-    }
-
-    /// Explicitly retain every matching child after ordering and offset.
-    pub fn unbounded(mut self) -> Self {
-        self.limit = None;
-        self.unbounded = true;
         self
     }
 
@@ -1411,7 +1381,6 @@ impl ArraySubqueryBuilder {
     ///    .with_array("comments", |sub2| {
     ///        sub2.from("comments")
     ///            .correlate("post_id", "posts.id")
-    ///            .unbounded()
     ///    })
     /// ```
     pub fn with_array<F>(mut self, column_name: impl Into<String>, builder_fn: F) -> Self
@@ -1436,7 +1405,6 @@ impl ArraySubqueryBuilder {
             select_columns: self.select_columns,
             order_by: self.order_by,
             limit: self.limit,
-            unbounded: self.unbounded,
             offset: self.offset,
             requirement: self.requirement,
             nested_arrays: self.nested_arrays,
@@ -1931,7 +1899,6 @@ mod tests {
                 sub.from("posts")
                     .correlate("author_id", "users.id")
                     .select(&["id", "title"])
-                    .unbounded()
             })
             .build();
 
@@ -1969,7 +1936,6 @@ mod tests {
                 sub.from("posts")
                     .correlate("author_id", "users.id")
                     .require_result()
-                    .unbounded()
             })
             .build();
 
@@ -1986,7 +1952,6 @@ mod tests {
                 sub.from("users")
                     .correlate("id", "todos.assignee_ids")
                     .require_match_correlation_cardinality()
-                    .unbounded()
             })
             .build();
 
@@ -2003,11 +1968,8 @@ mod tests {
                 sub.from("posts")
                     .correlate("author_id", "users.id")
                     .with_array("comments", |sub2| {
-                        sub2.from("comments")
-                            .correlate("post_id", "posts.id")
-                            .unbounded()
+                        sub2.from("comments").correlate("post_id", "posts.id")
                     })
-                    .unbounded()
             })
             .build();
 
@@ -2030,14 +1992,10 @@ mod tests {
     fn query_multiple_array_subqueries() {
         let query = QueryBuilder::new("users")
             .with_array("posts", |sub| {
-                sub.from("posts")
-                    .correlate("author_id", "users.id")
-                    .unbounded()
+                sub.from("posts").correlate("author_id", "users.id")
             })
             .with_array("comments", |sub| {
-                sub.from("comments")
-                    .correlate("user_id", "users.id")
-                    .unbounded()
+                sub.from("comments").correlate("user_id", "users.id")
             })
             .build();
 
@@ -2224,9 +2182,7 @@ mod tests {
     fn query_with_array_subquery_json_serialization() {
         let query = QueryBuilder::new("orgs")
             .branch("main")
-            .with_array("users", |b| {
-                b.from("users").correlate("id", "org_id").unbounded()
-            })
+            .with_array("users", |b| b.from("users").correlate("id", "org_id"))
             .build();
 
         let json = serde_json::to_string(&query).expect("serialize");
@@ -2239,9 +2195,7 @@ mod tests {
     fn query_with_array_subquery_binary_serialization() {
         let query = QueryBuilder::new("orgs")
             .branch("main")
-            .with_array("users", |b| {
-                b.from("users").correlate("id", "org_id").unbounded()
-            })
+            .with_array("users", |b| b.from("users").correlate("id", "org_id"))
             .build();
 
         let bytes = postcard::to_allocvec(&query).expect("serialize query postcard");
@@ -2255,10 +2209,7 @@ mod tests {
         let query = QueryBuilder::new("orgs")
             .branch("main")
             .with_array("users", |b| {
-                b.from("users")
-                    .correlate("id", "org_id")
-                    .require_result()
-                    .unbounded()
+                b.from("users").correlate("id", "org_id").require_result()
             })
             .build();
 

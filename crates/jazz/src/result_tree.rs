@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 
-use crate::ids::RowUuid;
 use crate::node::CurrentRow;
 use crate::tools::OutputOccurrenceId;
 
@@ -12,12 +11,6 @@ pub struct ResultTree {
     /// Root output occurrences in query order.
     pub roots: Vec<ResultNode>,
 }
-
-/// Maximum rendered size of one complete parent replacement in the structured
-/// result boundary. This is deliberately larger than one wire frame: PR 3
-/// materializes locally while the existing v3 delivery carrier remains in
-/// place.
-pub const MAX_RESULT_TREE_PARENT_BYTES: usize = 8 * crate::protocol_limits::MAX_WIRE_FRAME_BYTES;
 
 /// One rendered output occurrence.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,31 +49,6 @@ pub struct ResultTreeReplacement {
     /// The complete replacement value.
     pub parent: ResultNode,
 }
-
-/// Error emitted when a complete parent cannot fit the configured frame budget.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ParentTooLargeError {
-    /// Source parent row.
-    pub parent: RowUuid,
-    /// Named relation path which made the rendered parent too large.
-    pub relation_path: String,
-    /// Rendered byte count.
-    pub rendered_bytes: usize,
-    /// Configured byte limit.
-    pub limit: usize,
-}
-
-impl std::fmt::Display for ParentTooLargeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "parent-too-large parent={} relation={} rendered_bytes={} limit={}",
-            self.parent.0, self.relation_path, self.rendered_bytes, self.limit
-        )
-    }
-}
-
-impl std::error::Error for ParentTooLargeError {}
 
 impl ResultTree {
     /// Reduce a reset snapshot, replacing all roots.

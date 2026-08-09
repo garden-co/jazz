@@ -51,25 +51,22 @@ describe("translateQuery", () => {
     expect(translated.conditions).toBeUndefined();
   });
 
-  it("preserves explicit unbounded intent for query-builder includes", () => {
+  it("treats an omitted include limit as unbounded", () => {
     const translated = JSON.parse(
-      translateQuery(
-        app.users.include({ todosViaOwner: app.todos.unbounded() })._build(),
-        app.wasmSchema,
-      ),
+      translateQuery(app.users.include({ todosViaOwner: app.todos })._build(), app.wasmSchema),
     );
 
     expect(translated.array_subqueries).toMatchObject([
-      { column_name: "todosViaOwner", limit: null, unbounded: true },
+      { column_name: "todosViaOwner", limit: null },
     ]);
   });
 
-  it("preserves unbounded intent across subsequent query-builder clones", () => {
+  it("preserves an omitted limit across subsequent query-builder clones", () => {
     const translated = JSON.parse(
       translateQuery(
         app.users
           .include({
-            todosViaOwner: app.todos.unbounded().select("title").orderBy("title"),
+            todosViaOwner: app.todos.select("title").orderBy("title"),
           })
           ._build(),
         app.wasmSchema,
@@ -77,18 +74,16 @@ describe("translateQuery", () => {
     );
 
     expect(translated.array_subqueries).toMatchObject([
-      { column_name: "todosViaOwner", limit: null, unbounded: true },
+      { column_name: "todosViaOwner", limit: null },
     ]);
   });
 
-  it("preserves explicit unbounded intent for forward relations", () => {
+  it("treats an omitted forward-relation limit as unbounded", () => {
     const translated = JSON.parse(
-      translateQuery(app.todos.include({ owner: app.users.unbounded() })._build(), app.wasmSchema),
+      translateQuery(app.todos.include({ owner: app.users })._build(), app.wasmSchema),
     );
 
-    expect(translated.array_subqueries).toMatchObject([
-      { column_name: "owner", limit: null, unbounded: true },
-    ]);
+    expect(translated.array_subqueries).toMatchObject([{ column_name: "owner", limit: null }]);
   });
 
   it("treats include shorthand as an explicit whole-relation request", () => {
@@ -97,24 +92,7 @@ describe("translateQuery", () => {
     );
 
     expect(translated.array_subqueries).toMatchObject([
-      { column_name: "todosViaOwner", limit: null, unbounded: true },
+      { column_name: "todosViaOwner", limit: null },
     ]);
-  });
-
-  it("rejects query-builder includes without an explicit bound", () => {
-    expect(() =>
-      translateQuery(app.users.include({ todosViaOwner: app.todos })._build(), app.wasmSchema),
-    ).toThrow('relation "todosViaOwner" must specify limit(...) or unbounded()');
-  });
-
-  it("rejects malformed query JSON declaring finite and unbounded together", () => {
-    const built = JSON.parse(
-      app.users.include({ todosViaOwner: app.todos.limit(2) })._build(),
-    ) as Record<string, any>;
-    built.includes.todosViaOwner.unbounded = true;
-
-    expect(() => translateQuery(JSON.stringify(built), app.wasmSchema)).toThrow(
-      'relation "todosViaOwner" cannot specify both limit(...) and unbounded()',
-    );
   });
 });

@@ -102,13 +102,11 @@ maintained-subscription semantics. `array_subqueries` are
 canonicalized into shape identity separately from includes; sibling ordering is
 not semantic, but duplicate sibling `column_name`s are rejected.
 
-Every binding layer MUST preserve the explicit boundedness choice across its
-builder, normalized JSON, worker, and native-codec boundaries. Absence is not
-an unbounded declaration and MUST remain invalid rather than being inferred as
-unbounded during lowering. In the TypeScript DSL, `include({ relation: true })`
-and nested object shorthand explicitly request the complete relation and are
-therefore sugar for an unbounded array subquery; an included query builder MUST
-instead call either `.limit(n)` or `.unbounded()`.
+Every binding layer MUST preserve a finite child `limit` across its builder,
+normalized JSON, worker, and native-codec boundaries. An omitted child limit
+means an unbounded ordered suffix. In the TypeScript DSL,
+`include({ relation: true })`, nested object shorthand, and an included query
+builder without `.limit(n)` all request the complete relation.
 
 `JoinVia` is an existential reference/junction traversal: it constrains root
 membership and supplies join witnesses; it is not a general relational join
@@ -354,27 +352,17 @@ occur more than once within a single parent's array. Position therefore remains
 the occurrence discriminator, and consumers MUST NOT assume a child id is unique
 within one parent's array unless the query shape guarantees it.
 
-**Decision, Anselm 2026-08-04 — bounded arrays are enforced, with a runtime
-over-size error as backstop.** Two mechanisms, both required:
+**Decision, Anselm 2026-08-08 — transport framing does not constrain query
+semantics.** Two mechanisms apply:
 
-1. **Validation enforces an explicit boundedness choice.** An array subquery
-   MUST carry either a finite child limit or an explicit unbounded declaration;
-   query validation MUST reject an undeclared choice. This makes intentional
-   unboundedness (and the common finite bound) a property of the query rather
-   than an accidental consequence of omitted data.
-2. **A runtime over-size error backstops it.** A bounded array can still render
-   a parent larger than `MAX_WIRE_FRAME_BYTES` (2 MiB;
-   `crates/jazz/src/protocol_limits.rs:16`) when individual children are large.
-   The terminal MUST then fail with a structured, named error identifying the
-   parent row, the relation, the rendered byte size and the limit exceeded. It
-   MUST NOT silently truncate the array, drop children, or emit a partial
-   parent: a partial parent is a wrong answer, whereas a named error is a
-   diagnosable one.
-
-Fragmenting one logical parent replacement across chunks was considered and
-rejected for this revision: it preserves expressiveness at the cost of atomic
-receiver assembly and a recursive fragment format, and the mandatory child limit
-already makes the common case bounded. Nothing here forecloses adding it later.
+1. **An omitted limit is unbounded.** An array subquery MAY carry a finite child
+   limit; without one it selects the complete ordered suffix after `offset`.
+   Result size is a transport concern and MUST NOT require callers to invent a
+   semantic row bound.
+2. **Transport fragments oversized logical messages.** A result can exceed an
+   individual transport frame. The transport MUST decompose and reassemble it
+   atomically rather than rejecting, truncating, or partially delivering it.
+   A partial parent is a wrong answer.
 
 Alpha-style relation traversal has an output-changing query surface. A
 relation-query facade MUST normalize into the same row-set program vocabulary as

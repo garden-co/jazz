@@ -49,9 +49,9 @@ use crate::protocol::{
     BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry, ReadViewKey,
     ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry,
     ResultMemberPayloadEntry, RowVersionRef, ShapeAst, ShapeBody, Subscribe, SubscriptionKey,
-    SyncMessage, SyntheticReplacementToken,
+    SyntheticReplacementToken,
 };
-use crate::protocol_limits::{MAX_KNOWN_STATE_EXACT_REFS, MAX_SYNC_MESSAGE_BYTES};
+use crate::protocol_limits::MAX_KNOWN_STATE_EXACT_REFS;
 use crate::query::{
     Aggregate, AggregateFunction, AggregateQuery, ArraySubquery, ArraySubqueryRequirement, Binding,
     Include, JoinTarget, JoinVia, Operand, OrderDirection, Predicate, Query as JazzQuery,
@@ -10781,25 +10781,15 @@ fn query_binding_value_signature(binding: &Binding) -> String {
 }
 
 fn exact_known_state_declaration_if_within_limits(
-    shape_id: ShapeId,
-    subscription: SubscriptionKey,
-    values: &[Value],
+    _shape_id: ShapeId,
+    _subscription: SubscriptionKey,
+    _values: &[Value],
     refs: Vec<RowVersionRef>,
 ) -> Option<KnownStateDeclaration> {
     if refs.len() > MAX_KNOWN_STATE_EXACT_REFS {
         return None;
     }
-    let declaration = KnownStateDeclaration::ExactVersionSet { versions: refs };
-    let subscribe = SyncMessage::Subscribe(Subscribe {
-        shape_id,
-        subscription,
-        values: values.to_vec(),
-        known_state: Some(declaration.clone()),
-    });
-    let Ok(bytes) = postcard::to_allocvec(&subscribe) else {
-        return None;
-    };
-    (bytes.len() <= MAX_SYNC_MESSAGE_BYTES).then_some(declaration)
+    Some(KnownStateDeclaration::ExactVersionSet { versions: refs })
 }
 
 #[cfg(test)]
