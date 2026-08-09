@@ -28,6 +28,11 @@ pub struct Query {
     pub filters: Vec<Predicate>,
     /// Junction traversals.
     pub joins: Vec<JoinVia>,
+    /// Flat relational output. This is deliberately distinct from `joins`:
+    /// `JoinVia` is an existential traversal, while a flat join emits every
+    /// matching source tuple.
+    #[serde(default)]
+    pub flat_join: Option<FlatJoin>,
     /// Policy-only disjunctive branches.
     #[serde(default)]
     pub policy_branches: Vec<PolicyBranch>,
@@ -58,6 +63,38 @@ pub struct Query {
     /// Number of rows to skip after filtering.
     #[serde(default)]
     pub offset: usize,
+}
+
+/// Output-changing relational join syntax.
+///
+/// Sources are ordered: the query root is position zero and every `sources`
+/// entry contributes one later position to the output occurrence identity.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct FlatJoin {
+    /// Optional public name for the root source.
+    pub root_alias: Option<String>,
+    /// Joined sources in declared order.
+    pub sources: Vec<FlatJoinSource>,
+}
+
+/// One source introduced by a [`FlatJoin`].
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct FlatJoinSource {
+    /// Source table.
+    pub table: String,
+    /// Effective source name used by qualified fields.
+    pub alias: Option<String>,
+    /// Equality from the accumulated left tuple to this source.
+    pub on: FlatJoinOn,
+}
+
+/// Qualified equality predicate for one flat-join source.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct FlatJoinOn {
+    /// Qualified field in the accumulated left tuple.
+    pub left: String,
+    /// Qualified field in the right source.
+    pub right: String,
 }
 
 /// Output-changing relation query used by alpha-compatible `hopTo`/`gather`.
@@ -1205,6 +1242,7 @@ impl Query {
             table: table.into(),
             filters: Vec::new(),
             joins: Vec::new(),
+            flat_join: None,
             policy_branches: Vec::new(),
             reachable: Vec::new(),
             inherits: Vec::new(),
@@ -2562,6 +2600,12 @@ pub(crate) fn binding_id_for_values(values: &BTreeMap<String, Value>) -> Binding
 /// Query validation error.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum QueryError {
+    /// Flat tuple output currently has a deliberately narrow executable envelope.
+    #[error("flat join cannot be combined with {feature}")]
+    UnsupportedFlatJoinCombination {
+        /// Unsupported feature present on the same query.
+        feature: String,
+    },
     /// Structured array results must declare whether they are bounded.
     #[error("array subquery {relation_path} must specify limit(...) or unbounded()")]
     UnboundedArraySubquery {
@@ -2708,6 +2752,30 @@ fn validate_query_canonical_parts(
     for join in &query.joins {
         validate_join(schema, &root, &query.table, join, &mut params)?;
     }
+    if let Some(flat_join) = &query.flat_join {
+        let unsupported = [
+            (flat_join.sources.is_empty(), "zero joined sources"),
+            (!query.joins.is_empty(), "existential joins"),
+            (!query.policy_branches.is_empty(), "policy branches"),
+            (!query.reachable.is_empty(), "reachability"),
+            (!query.inherits.is_empty(), "inherited-policy traversals"),
+            (!query.includes.is_empty(), "includes"),
+            (!query.array_subqueries.is_empty(), "array subqueries"),
+            (query.select.is_some(), "select projections"),
+            (!query.order_by.is_empty(), "ordering"),
+            (query.aggregate.is_some(), "aggregates"),
+            (query.limit.is_some(), "limits"),
+            (query.offset != 0, "offsets"),
+        ]
+        .into_iter()
+        .find_map(|(present, feature)| present.then_some(feature));
+        if let Some(feature) = unsupported {
+            return Err(QueryError::UnsupportedFlatJoinCombination {
+                feature: feature.to_owned(),
+            });
+        }
+        validate_flat_join(schema, &query.table, flat_join)?;
+    }
     for reachable in &query.reachable {
         validate_reachable(schema, &root, reachable, &mut params)?;
     }
@@ -2748,6 +2816,63 @@ fn validate_query_canonical_parts(
     let normalized = normalize_query(query);
     let canonical = canonical_query_bytes_for_schema(&normalized, schema)?;
     Ok((normalized, params, canonical))
+}
+
+fn flat_join_source_name(table: &str, alias: &Option<String>) -> String {
+    alias.clone().unwrap_or_else(|| table.to_owned())
+}
+
+fn flat_join_qualified_field(field: &str) -> Result<(&str, &str), QueryError> {
+    field
+        .rsplit_once('.')
+        .ok_or_else(|| QueryError::UnknownColumn {
+            table: "flat join qualified source".to_owned(),
+            column: field.to_owned(),
+        })
+}
+
+fn validate_flat_join(
+    schema: &JazzSchema,
+    root_table: &str,
+    flat_join: &FlatJoin,
+) -> Result<(), QueryError> {
+    let mut sources = BTreeMap::new();
+    let root_name = flat_join_source_name(root_table, &flat_join.root_alias);
+    sources.insert(root_name, root_table.to_owned());
+
+    for source in &flat_join.sources {
+        let name = flat_join_source_name(&source.table, &source.alias);
+        if sources.contains_key(&name) {
+            return Err(QueryError::UnknownColumn {
+                table: "flat join duplicate source".to_owned(),
+                column: name,
+            });
+        }
+        table(schema, &source.table)?;
+        let (left_source, left_column) = flat_join_qualified_field(&source.on.left)?;
+        let (right_source, right_column) = flat_join_qualified_field(&source.on.right)?;
+        let left_table = sources
+            .get(left_source)
+            .ok_or_else(|| QueryError::UnknownColumn {
+                table: "flat join accumulated source".to_owned(),
+                column: left_source.to_owned(),
+            })?;
+        if right_source != name {
+            return Err(QueryError::UnknownColumn {
+                table: "flat join source".to_owned(),
+                column: right_source.to_owned(),
+            });
+        }
+        let left_schema = table(schema, left_table)?;
+        let right_schema = table(schema, &source.table)?;
+        if planner_column_type(&left_schema, left_column)?
+            != planner_column_type(&right_schema, right_column)?
+        {
+            return Err(QueryError::OperandTypeMismatch);
+        }
+        sources.insert(name, source.table.clone());
+    }
+    Ok(())
 }
 
 fn validate_join(
@@ -3572,6 +3697,31 @@ fn normalize_array_subquery(subquery: &mut ArraySubquery) {
     subquery.nested_arrays.dedup();
 }
 
+fn canonical_flat_join_key(flat_join: &FlatJoin) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    match flat_join.root_alias.as_deref() {
+        Some(alias) => {
+            bytes.push(1);
+            put_str(&mut bytes, alias);
+        }
+        None => bytes.push(0),
+    }
+    put_len(&mut bytes, flat_join.sources.len());
+    for source in &flat_join.sources {
+        put_str(&mut bytes, &source.table);
+        match source.alias.as_deref() {
+            Some(alias) => {
+                bytes.push(1);
+                put_str(&mut bytes, alias);
+            }
+            None => bytes.push(0),
+        }
+        put_str(&mut bytes, &source.on.left);
+        put_str(&mut bytes, &source.on.right);
+    }
+    bytes
+}
+
 fn normalize_join(join: &mut JoinVia) {
     join.correlated_filters
         .sort_by_key(canonical_join_correlation_key);
@@ -3963,6 +4113,10 @@ fn canonical_query_bytes_for_schema(
     put_len(&mut bytes, query.joins.len());
     for join in &query.joins {
         put_bytes(&mut bytes, &canonical_join_key(join));
+    }
+    if let Some(flat_join) = &query.flat_join {
+        bytes.push(b'j');
+        put_bytes(&mut bytes, &canonical_flat_join_key(flat_join));
     }
     if !query.policy_branches.is_empty() {
         bytes.push(b'b');
@@ -4583,6 +4737,69 @@ mod tests {
             .unwrap();
 
         assert_eq!(left.shape_id(), right.shape_id());
+    }
+
+    #[test]
+    fn flat_join_rejects_combinations_outside_its_executable_envelope() {
+        fn flat() -> Query {
+            let mut query = Query::from("issues");
+            query.flat_join = Some(FlatJoin {
+                root_alias: None,
+                sources: vec![FlatJoinSource {
+                    table: "issue_tags".to_owned(),
+                    alias: None,
+                    on: FlatJoinOn {
+                        left: "issues.id".to_owned(),
+                        right: "issue_tags.issue".to_owned(),
+                    },
+                }],
+            });
+            query
+        }
+
+        let mut cases = Vec::new();
+        let mut query = flat();
+        query.flat_join.as_mut().unwrap().sources.clear();
+        cases.push(query);
+        let mut query = flat();
+        query.select = Some(vec!["title".to_owned()]);
+        cases.push(query);
+        let mut query = flat();
+        query.order_by.push(OrderBy {
+            column: "title".to_owned(),
+            direction: OrderDirection::Asc,
+        });
+        cases.push(query);
+        let mut query = flat();
+        query.limit = Some(1);
+        cases.push(query);
+        let mut query = flat();
+        query.offset = 1;
+        cases.push(query);
+        let mut query = flat();
+        query
+            .array_subqueries
+            .push(ArraySubquery::new("tags", "issue_tags", "issue", "id").unbounded());
+        cases.push(query);
+        cases.push(flat().join_via("issue_tags", "issue", []));
+        cases.push(flat().aggregate([Aggregate::count()]));
+        cases.push(flat().include("project"));
+        cases.push(flat().inherits("project"));
+        let mut query = flat();
+        query.policy_branches.push(PolicyBranch {
+            filters: Vec::new(),
+            joins: Vec::new(),
+            reachable: Vec::new(),
+            inherits: Vec::new(),
+        });
+        cases.push(query);
+
+        for query in cases {
+            assert!(matches!(
+                query.validate(&schema()),
+                Err(QueryError::UnsupportedFlatJoinCombination { .. })
+            ));
+        }
     }
 
     #[test]
