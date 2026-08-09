@@ -2197,7 +2197,6 @@ impl JazzClient {
             propagation: CorePropagation::Full,
             include_deleted: false,
             read_view,
-            ..CoreReadOpts::default()
         })
     }
     fn core_query(&self, query: &Query) -> Result<crate::query::Query> {

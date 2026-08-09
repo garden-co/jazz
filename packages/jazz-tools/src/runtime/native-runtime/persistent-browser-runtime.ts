@@ -30,6 +30,12 @@ type WorkerResponse =
 
 type CompletedTxState = "committed" | "rolled_back";
 
+type ConnectionGate = {
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+};
+
 export type { PersistentBrowserOpfsOwnerRequest } from "./persistent-browser-protocol.js";
 
 export class PersistentBrowserOpfsRuntime implements Runtime {
@@ -53,7 +59,10 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   // and become invisible to its maintained view.
   private subscriptionRegistration: Promise<void> = Promise.resolve();
   private authFailureCallback: ((reason: string) => void) | undefined;
-  private connectionReady: Promise<unknown> | null = null;
+  // Server-tier operations capture this gate while intentionally disconnected.
+  // Reconnect resolves that same gate, so outstanding operations survive instead
+  // of observing a replacement promise that can never settle.
+  private connectionReady = connectionGate();
   private pagehideAbort: AbortController | null = null;
   private nextCallId = 1;
   private nextSubscriptionId = 1;
@@ -180,7 +189,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   async waitForTransaction(transactionId: string, tier: string): Promise<void> {
     await this.opened;
     if (tier === "edge" || tier === "global") {
-      await this.connectionReady;
+      await this.connectionReady.promise;
     }
     const pendingWrite = this.writes.get(transactionId);
     const workerTransactionId = pendingWrite ? await pendingWrite : transactionId;
@@ -272,7 +281,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     await this.settleReadFence(readFence);
     const translatedOptionsJson = await this.prepareReadOptions(optionsJson);
     if (requiresServerPropagation(tier, optionsJson)) {
-      await this.connectionReady;
+      await this.connectionReady.promise;
       await this.settleServerWaitsForRead(tier);
     }
     return this.send("query", [queryJson, sessionJson, tier, translatedOptionsJson]);
@@ -291,7 +300,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       await this.settleReadFence(readFence);
       const translatedOptionsJson = await this.prepareReadOptions(optionsJson);
       if (requiresServerPropagation(tier, optionsJson)) {
-        await this.connectionReady;
+        await this.connectionReady.promise;
         await this.settleServerWaitsForRead(tier);
       }
       return this.send(
@@ -365,24 +374,34 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   connect(url: string, authJson: string): void {
-    this.connectionReady = this.opened.then(() => {
+    const gate = this.connectionReady;
+    const connected = this.opened.then(() => {
       if (this.closed) return undefined;
       return this.send("connect", [url, authJson]);
     });
-    void this.connectionReady.catch(ignoreExpectedShutdown);
+    void connected.then(gate.resolve, gate.reject);
+    void connected.catch(ignoreExpectedShutdown);
   }
 
-  disconnect(): void {
-    this.connectionReady = null;
-    this.fireAndForget("disconnect");
+  disconnect(options?: { rejectWaiters?: boolean }): Promise<void> {
+    this.connectionReady = connectionGate();
+    if (this.closed) return Promise.resolve();
+    return this.opened
+      .then(() => {
+        if (this.closed) return undefined;
+        return this.send("disconnect", [options]);
+      })
+      .then(() => undefined);
   }
 
   updateAuth(authJson: string): void {
-    this.connectionReady = this.opened.then(() => {
+    const gate = this.connectionReady;
+    const updated = this.opened.then(() => {
       if (this.closed) return undefined;
       return this.send("updateAuth", [authJson]);
     });
-    void this.connectionReady.catch(ignoreExpectedShutdown);
+    void updated.then(gate.resolve, gate.reject);
+    void updated.catch(ignoreExpectedShutdown);
   }
 
   onAuthFailure(callback: (reason: string) => void): void {
@@ -696,15 +715,18 @@ function destroyBrowserStorage(
   });
 }
 
-function requiresServerPropagation(tier?: string | null, optionsJson?: string | null): boolean {
-  if (tier === "edge" || tier === "global") return true;
-  if (optionsJson == null) return false;
-  try {
-    const options = JSON.parse(optionsJson) as { propagation?: unknown };
-    return options.propagation === "full";
-  } catch {
-    return false;
-  }
+function connectionGate(): ConnectionGate {
+  let resolve!: () => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function requiresServerPropagation(tier?: string | null, _optionsJson?: string | null): boolean {
+  return tier === "edge" || tier === "global";
 }
 
 function transactionIdFromReadOptions(optionsJson: string | null | undefined): string | undefined {

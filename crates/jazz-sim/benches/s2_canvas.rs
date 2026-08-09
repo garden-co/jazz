@@ -2565,9 +2565,9 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
         SyncMessage::ContentExtents { extents } => {
             extents.iter().map(|extent| extent.bytes.len() as u64).sum()
         }
-        SyncMessage::RegisterShape { .. }
-        | SyncMessage::BranchMetadata(_)
+        SyncMessage::BranchMetadata(_)
         | SyncMessage::FetchBranchMetadata { .. }
+        | SyncMessage::RegisterShape { .. }
         | SyncMessage::Subscribe(_)
         | SyncMessage::PublishSchema { .. }
         | SyncMessage::PublishLens { .. }

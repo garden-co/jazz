@@ -925,7 +925,10 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   connect(url: string, authJson: string): void {
-    this.disconnect();
+    // A new transport replaces the old one during a temporary reconnect. Server-tier
+    // waits are still meaningful across that transition, so only an explicit runtime
+    // shutdown is allowed to reject them.
+    void this.disconnect({ rejectWaiters: false });
     this.serverTransportError = null;
     this.serverEndpointUrl = url;
     const transport = this.db.connectUpstream();
@@ -948,6 +951,8 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverCarrierPromise = carrier.ready().then(() => {
       this.flushQueuedServerFrames(carrier);
       this.pumpServerTransport();
+      this.pumpSubscriptions();
+      this.refreshOpenedPlainSubscriptions();
       return carrier;
     });
     this.serverCarrierPromise.catch((error) => {
@@ -956,7 +961,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.scheduleServerPump();
   }
 
-  disconnect(options: { rejectWaiters?: boolean } = {}): void {
+  disconnect(options: { rejectWaiters?: boolean } = {}): Promise<void> {
     this.serverCarrier?.close();
     this.serverCarrier = null;
     this.serverCarrierPromise = null;
@@ -973,6 +978,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.pendingInboundServerFrames.length = 0;
     this.serverPumpScheduled = false;
     this.serverPumpAgain = false;
+    return Promise.resolve();
   }
 
   updateAuth(authJson: string): Promise<void> | void {

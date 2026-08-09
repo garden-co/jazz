@@ -120,7 +120,11 @@ export type PersistentBrowserOpfsOwnerRequest =
   | { id: number; method: "close"; args: [] }
   | { id: number; method: "closeForStorageClear"; args: [] }
   | { id: number; method: "connect"; args: [url: string, authJson: string] }
-  | { id: number; method: "disconnect"; args: [] }
+  | {
+      id: number;
+      method: "disconnect";
+      args: [options: { rejectWaiters?: boolean } | undefined];
+    }
   | { id: number; method: "updateAuth"; args: [authJson: string] };
 
 export type PersistentBrowserWorkerMethod = PersistentBrowserOpfsOwnerRequest["method"];
