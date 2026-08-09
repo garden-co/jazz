@@ -223,11 +223,30 @@ where
                 continue;
             };
             if projected_table == table {
-                let deleted = deletions
-                    .get(&row_uuid)
+                let deletion = deletions.get(&row_uuid);
+                let deleted = deletion
                     .is_some_and(|deletion| deletion.deletion() == Some(DeletionEvent::Deleted));
+                let updated = deletion
+                    .filter(|deletion| {
+                        deletion.tx_time().sort_key(
+                            self.version_tx_id(deletion)
+                                .expect("valid deletion version tx id")
+                                .node,
+                        ) > version.tx_time().sort_key(
+                            self.version_tx_id(&version)
+                                .expect("valid content version tx id")
+                                .node,
+                        )
+                    })
+                    .unwrap_or(&version);
                 rows.push((
-                    current_row_from_cells(&read_table, row_uuid, &cells)?,
+                    current_row_from_materialized_cells_with_layer_provenance(
+                        &read_table,
+                        &version,
+                        &version,
+                        updated,
+                        &cells,
+                    )?,
                     deleted,
                 ));
             }

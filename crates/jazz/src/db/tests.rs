@@ -8462,6 +8462,55 @@ fn one_shot_edge_query_attaches_fresh_usage_subscription_for_covered_binding() {
 }
 
 #[test]
+fn missing_permissions_head_gates_sessions_but_not_trusted_backend_query_coverage() {
+    // This stays at the transport boundary because the behavior under test is
+    // the authenticated link's trust discriminator, which the public query API
+    // deliberately does not expose.
+    let schema = schema();
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    server.server.set_permissions_ready(false).unwrap();
+
+    let backend_author = AuthorId::from_bytes([0xb0; 16]);
+    let backend = open_db(0xb0, backend_author, &schema);
+    let (backend_transport, server_backend_transport) = duplex();
+    let _backend_upstream = backend.connect_upstream(backend_transport);
+    let _backend_subscriber = server.accept_subscriber_with_trust(
+        server_backend_transport,
+        backend_author,
+        CommitUnitTrust::TrustedBackend,
+    );
+
+    let session_author = AuthorId::from_bytes([0xc1; 16]);
+    let session = open_db(0xc1, session_author, &schema);
+    let (session_transport, server_session_transport) = duplex();
+    let _session_upstream = session.connect_upstream(session_transport);
+    let _session_subscriber = server.accept_subscriber(server_session_transport, session_author);
+
+    let backend_query = prepared(&backend, &Query::from("todos"));
+    let backend_attachment = backend
+        .attach_query_with_opts(&backend_query, edge_subscribe_opts())
+        .unwrap();
+    let session_query = prepared(&session, &Query::from("todos"));
+    let session_attachment = session
+        .attach_query_with_opts(&session_query, edge_subscribe_opts())
+        .unwrap();
+
+    backend.tick().unwrap();
+    session.tick().unwrap();
+    server.tick().unwrap();
+    backend.tick().unwrap();
+    session.tick().unwrap();
+
+    assert!(backend.query_attachment_is_covered(&backend_attachment));
+    assert!(!session.query_attachment_is_covered(&session_attachment));
+
+    server.server.set_permissions_ready(true).unwrap();
+    server.tick().unwrap();
+    session.tick().unwrap();
+    assert!(session.query_attachment_is_covered(&session_attachment));
+}
+
+#[test]
 fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered_binding() {
     let schema = JazzSchema::new([TableSchema::new(
         "chats",

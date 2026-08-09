@@ -2000,6 +2000,9 @@ where
         row: RowUuid,
         patch: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
+        if patch.is_empty() {
+            return self.no_op_update_handle(table, row, self.identity.author);
+        }
         let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
         self.write_mergeable_with_authored_columns(
             self.identity.author,
@@ -2021,8 +2024,11 @@ where
         patch: RowCells,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
+        if patch.is_empty() {
+            return self.no_op_update_handle(table, row, self.identity.author);
+        }
         let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
-        self.write_mergeable_at_ms_with_authored_columns(
+        self.write_mergeable_at_ms_with_authorship(
             self.identity.author,
             None,
             table,
@@ -2030,7 +2036,7 @@ where
             cells,
             parent.into_iter().collect(),
             None,
-            authored_columns,
+            Some(authored_columns),
             now_ms,
         )
     }
@@ -2045,6 +2051,10 @@ where
         row: RowUuid,
         patch: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
+        self.check_attribution_allowed(made_by)?;
+        if patch.is_empty() {
+            return self.no_op_update_handle(table, row, self.identity.author);
+        }
         let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
         self.write_mergeable_as_session_subject_with_authored_columns(
             made_by,
@@ -2065,6 +2075,9 @@ where
         row: RowUuid,
         patch: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
+        if patch.is_empty() {
+            return self.no_op_update_handle(table, row, identity);
+        }
         let (cells, parent, authored_columns) =
             self.merge_existing_cells_for_identity(table, row, patch, identity)?;
         let parents = parent.into_iter().collect::<Vec<_>>();
@@ -2106,6 +2119,9 @@ where
         patch: RowCells,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
+        if patch.is_empty() {
+            return self.no_op_update_handle(table, row, identity);
+        }
         let (cells, parent, authored_columns) =
             self.merge_existing_cells_for_identity(table, row, patch, identity)?;
         let parents = parent.into_iter().collect::<Vec<_>>();
@@ -2126,7 +2142,7 @@ where
                 format!("policy denied UPDATE on table {table}"),
             ));
         }
-        self.write_mergeable_at_ms_with_authored_columns(
+        self.write_mergeable_at_ms_with_authorship(
             identity,
             Some(identity),
             table,
@@ -2134,7 +2150,7 @@ where
             cells,
             parents,
             None,
-            authored_columns,
+            Some(authored_columns),
             now_ms,
         )
     }
@@ -2206,7 +2222,7 @@ where
         } else {
             (cells, Vec::new(), None)
         };
-        self.write_mergeable_with_authored_columns(
+        self.write_mergeable_at_ms_with_authorship(
             self.identity.author,
             None,
             table,
@@ -2214,7 +2230,8 @@ where
             cells,
             parents,
             None,
-            authored_columns.unwrap_or_default(),
+            authored_columns,
+            self.next_now_ms(),
         )
     }
 
@@ -2236,7 +2253,7 @@ where
         } else {
             (cells, Vec::new(), None)
         };
-        self.write_mergeable_at_ms_with_authored_columns(
+        self.write_mergeable_at_ms_with_authorship(
             self.identity.author,
             None,
             table,
@@ -2244,7 +2261,7 @@ where
             cells,
             parents,
             None,
-            authored_columns.unwrap_or_default(),
+            authored_columns,
             now_ms,
         )
     }
@@ -2268,7 +2285,7 @@ where
         } else {
             (cells, Vec::new(), None)
         };
-        self.write_mergeable_with_authored_columns(
+        self.write_mergeable_at_ms_with_authorship(
             identity,
             Some(identity),
             table,
@@ -2276,7 +2293,8 @@ where
             cells,
             parents,
             None,
-            authored_columns.unwrap_or_default(),
+            authored_columns,
+            self.next_now_ms(),
         )
     }
 
@@ -2300,7 +2318,7 @@ where
         } else {
             (cells, Vec::new(), None)
         };
-        self.write_mergeable_at_ms_with_authored_columns(
+        self.write_mergeable_at_ms_with_authorship(
             identity,
             Some(identity),
             table,
@@ -2308,7 +2326,7 @@ where
             cells,
             parents,
             None,
-            authored_columns.unwrap_or_default(),
+            authored_columns,
             now_ms,
         )
     }
@@ -3241,7 +3259,7 @@ where
         deletion: Option<DeletionEvent>,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
-        self.write_mergeable_at_ms_with_authored_columns(
+        self.write_mergeable_at_ms_with_authorship(
             made_by,
             permission_subject,
             table,
@@ -3249,7 +3267,7 @@ where
             cells,
             parents,
             deletion,
-            BTreeSet::new(),
+            None,
             now_ms,
         )
     }
@@ -3265,7 +3283,7 @@ where
         deletion: Option<DeletionEvent>,
         authored_columns: BTreeSet<String>,
     ) -> Result<WriteHandle<S>, Error> {
-        self.write_mergeable_at_ms_with_authored_columns(
+        self.write_mergeable_at_ms_with_authorship(
             made_by,
             permission_subject,
             table,
@@ -3273,12 +3291,12 @@ where
             cells,
             parents,
             deletion,
-            authored_columns,
+            Some(authored_columns),
             self.next_now_ms(),
         )
     }
 
-    fn write_mergeable_at_ms_with_authored_columns(
+    fn write_mergeable_at_ms_with_authorship(
         &self,
         made_by: AuthorId,
         permission_subject: Option<AuthorId>,
@@ -3287,7 +3305,7 @@ where
         cells: RowCells,
         parents: Vec<TxId>,
         deletion: Option<DeletionEvent>,
-        authored_columns: BTreeSet<String>,
+        authored_columns: Option<BTreeSet<String>>,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
         let operation = if deletion == Some(DeletionEvent::Deleted) {
@@ -3306,7 +3324,7 @@ where
             .made_by(made_by)
             .parents(parents)
             .cells(cells);
-        if !authored_columns.is_empty() {
+        if let Some(authored_columns) = authored_columns {
             commit = commit.authored_columns(authored_columns);
         }
         if let Some(subject) = permission_subject {
@@ -3437,11 +3455,19 @@ where
         identity: AuthorId,
     ) -> Result<Option<CurrentRow>, Error> {
         let target = self.local_row_for_identity(table, row, identity)?;
-        if target.is_some()
-            || identity == AuthorId::SYSTEM
-            || self.table_schema(table)?.read_policy.is_none()
-        {
+        if target.is_some() {
             return Ok(target);
+        }
+        // A policy-filtered point read cannot by itself distinguish an absent
+        // row from an existing row hidden from this identity. Upsert needs
+        // exactly that distinction: a genuinely absent target follows INSERT
+        // policy and does not require read permission, while merging into an
+        // existing target must not expose or copy hidden cells.
+        if self.local_current_row(table, row)?.is_none() {
+            return Ok(None);
+        }
+        if identity == AuthorId::SYSTEM || self.table_schema(table)?.read_policy.is_none() {
+            return Ok(None);
         }
         Err(read_for_write_denied("UPSERT", table))
     }
@@ -3562,6 +3588,31 @@ where
             .find(|candidate| candidate.row_uuid() == row))
     }
 
+    fn no_op_update_handle(
+        &self,
+        table: &str,
+        row: RowUuid,
+        identity: AuthorId,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_row_not_deleted(table, row)?;
+        let existing = self
+            .local_row_for_identity(table, row, identity)?
+            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+        let tx_id = self
+            .node
+            .node
+            .borrow_mut()
+            .current_row_tx_id(&existing)
+            .ok_or_else(|| Error::new(ErrorCode::NotObserved, "current row has no transaction"))?;
+        let local_tier = self.write_state(tx_id)?.durability;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier,
+        })
+    }
+
     fn merge_existing_cells(
         &self,
         table: &str,
@@ -3578,12 +3629,6 @@ where
         patch: RowCells,
         identity: AuthorId,
     ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
-        if patch.is_empty() {
-            return Err(crate::node::Error::InvalidMergeableCommit(
-                "partial UPDATE requires at least one cell",
-            )
-            .into());
-        }
         let table_schema = self.table_schema(table)?;
         self.ensure_row_not_deleted(table, row)?;
         if table_schema
@@ -6543,7 +6588,7 @@ where
                                             shape,
                                             &binding,
                                             opts.tier,
-                                            ingest_context.identity,
+                                            subscriber_permission_subject(*ingest_context),
                                             &opts.read_view,
                                         );
                                     if let Err(crate::node::Error::QueryCapability(detail)) =
@@ -6717,7 +6762,7 @@ where
                                     &shape,
                                     &binding,
                                     opts.tier,
-                                    ingest_context.identity,
+                                    subscriber_permission_subject(*ingest_context),
                                     &opts.read_view,
                                 );
                             if let Err(crate::node::Error::QueryCapability(detail)) = supported {
@@ -6746,7 +6791,10 @@ where
                             let first_subscriber = coverage_groups
                                 .get(&coverage)
                                 .is_none_or(|group| group.subscribers.is_empty());
-                            let permissions_ready = self.node.borrow().permissions_ready();
+                            let permissions_ready = subscriber_permissions_ready(
+                                self.node.borrow().permissions_ready(),
+                                ingest_context.trust,
+                            );
                             let update = if !permissions_ready {
                                 None
                             } else if first_subscriber {
@@ -7020,7 +7068,10 @@ where
                                 _ => None,
                             };
                             if let Some((tx_id, _)) = &relay_upload
-                                && !self.node.borrow().permissions_ready()
+                                && !subscriber_permissions_ready(
+                                    self.node.borrow().permissions_ready(),
+                                    ingest_context.trust,
+                                )
                             {
                                 let response = SyncMessage::FateUpdate {
                                     tx_id: *tx_id,
@@ -7119,7 +7170,12 @@ where
                     self.observed_subscriber_dirty_epoch.set(next);
                     *serve_dirty = true;
                 }
-                if *serve_dirty && self.node.borrow().permissions_ready() {
+                if *serve_dirty
+                    && subscriber_permissions_ready(
+                        self.node.borrow().permissions_ready(),
+                        ingest_context.trust,
+                    )
+                {
                     // A coverage-group refresh drains every maintained view below.
                     // Tick the shared runtime once before that drain rather than once
                     // per group.
@@ -8110,6 +8166,17 @@ fn coverage_key(
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
         opts,
+    }
+}
+
+fn subscriber_permissions_ready(permissions_ready: bool, trust: CommitUnitTrust) -> bool {
+    trust == CommitUnitTrust::TrustedBackend || permissions_ready
+}
+
+fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> AuthorId {
+    match ingest.trust {
+        CommitUnitTrust::Session => ingest.identity,
+        CommitUnitTrust::TrustedBackend => AuthorId::SYSTEM,
     }
 }
 

@@ -1754,6 +1754,23 @@ pub(super) fn current_row_from_materialized_cells_with_provenance(
     provenance: &VersionRow,
     cells: &BTreeMap<String, Value>,
 ) -> Result<CurrentRow, Error> {
+    current_row_from_materialized_cells_with_layer_provenance(
+        table, content, provenance, provenance, cells,
+    )
+}
+
+/// Build a current row whose application cells and creation provenance come
+/// from the content winner while its update provenance comes from the winner
+/// of the layer that most recently changed the logical row. Deletion and
+/// restoration records carry no user cells, but they still update the row's
+/// public `$updatedBy`/`$updatedAt` identity.
+pub(super) fn current_row_from_materialized_cells_with_layer_provenance(
+    table: &TableSchema,
+    content: &VersionRow,
+    created: &VersionRow,
+    updated: &VersionRow,
+    cells: &BTreeMap<String, Value>,
+) -> Result<CurrentRow, Error> {
     let descriptor = current_row_descriptor(table);
     let mut values = Vec::with_capacity(table.columns.len() + 7);
     values.push(Value::Uuid(content.row_uuid().0));
@@ -1762,7 +1779,12 @@ pub(super) fn current_row_from_materialized_cells_with_provenance(
             cells.get(&column.name).cloned().map(Box::new),
         ));
     }
-    append_current_row_provenance(&mut values, provenance);
+    values.push(Value::Uuid(created.created_by().0));
+    values.push(Value::U64(created.created_at().0));
+    values.push(Value::Uuid(updated.updated_by().0));
+    values.push(Value::U64(updated.updated_at().0));
+    values.push(Value::U64(updated.tx_time().0));
+    values.push(Value::U64(updated.tx_node_alias().0));
     let raw = descriptor.create(&values)?;
     Ok(CurrentRow::new(
         table.name.clone(),
