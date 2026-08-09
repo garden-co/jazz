@@ -62,7 +62,11 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   // Server-tier operations capture this gate while intentionally disconnected.
   // Reconnect resolves that same gate, so outstanding operations survive instead
   // of observing a replacement promise that can never settle.
-  private connectionReady = connectionGate();
+  // Before an explicit disconnect there is no reconnect barrier. This preserves
+  // local-only runtimes, which never call connect(), while disconnect() below
+  // installs the unresolved gate that server-tier work must await.
+  private connectionReady = connectionGate(true);
+  private waitingForReconnect = false;
   private pagehideAbort: AbortController | null = null;
   private nextCallId = 1;
   private nextSubscriptionId = 1;
@@ -374,17 +378,28 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   connect(url: string, authJson: string): void {
-    const gate = this.connectionReady;
+    const gate = this.waitingForReconnect ? this.connectionReady : connectionGate();
+    this.connectionReady = gate;
     const connected = this.opened.then(() => {
       if (this.closed) return undefined;
       return this.send("connect", [url, authJson]);
     });
-    void connected.then(gate.resolve, gate.reject);
+    void connected.then(
+      () => {
+        if (this.connectionReady === gate) this.waitingForReconnect = false;
+        gate.resolve();
+      },
+      (error) => {
+        if (this.connectionReady === gate) this.waitingForReconnect = false;
+        gate.reject(error);
+      },
+    );
     void connected.catch(ignoreExpectedShutdown);
   }
 
   disconnect(options?: { rejectWaiters?: boolean }): Promise<void> {
     this.connectionReady = connectionGate();
+    this.waitingForReconnect = true;
     if (this.closed) return Promise.resolve();
     return this.opened
       .then(() => {
@@ -395,12 +410,22 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   updateAuth(authJson: string): void {
-    const gate = this.connectionReady;
+    const gate = this.waitingForReconnect ? this.connectionReady : connectionGate();
+    this.connectionReady = gate;
     const updated = this.opened.then(() => {
       if (this.closed) return undefined;
       return this.send("updateAuth", [authJson]);
     });
-    void updated.then(gate.resolve, gate.reject);
+    void updated.then(
+      () => {
+        if (this.connectionReady === gate) this.waitingForReconnect = false;
+        gate.resolve();
+      },
+      (error) => {
+        if (this.connectionReady === gate) this.waitingForReconnect = false;
+        gate.reject(error);
+      },
+    );
     void updated.catch(ignoreExpectedShutdown);
   }
 
@@ -715,13 +740,14 @@ function destroyBrowserStorage(
   });
 }
 
-function connectionGate(): ConnectionGate {
+function connectionGate(resolved = false): ConnectionGate {
   let resolve!: () => void;
   let reject!: (error: unknown) => void;
   const promise = new Promise<void>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
     reject = rejectPromise;
   });
+  if (resolved) resolve();
   return { promise, resolve, reject };
 }
 
