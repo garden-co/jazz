@@ -640,8 +640,8 @@ mod tests {
             serde_json::to_value(frame).unwrap(),
             json!({
                 "Hello": {
-                "min_protocol_version": 5,
-                "max_protocol_version": 5,
+                    "min_protocol_version": 6,
+                    "max_protocol_version": 6,
                     "features": 5,
                     "role": "client"
                 }
