@@ -674,7 +674,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   ) {
     dbTxHandleBindings.set(this, {
       ownerClient,
-      openBatchId: ownerClient.beginTransaction(kind, session),
+      openBatchId: ownerClient.beginTransaction(kind, session, attribution),
       session,
       attribution,
     });
