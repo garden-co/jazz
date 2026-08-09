@@ -2544,7 +2544,6 @@ fn app_row_payload_projection(query: &JazzQuery, collect_relations: bool) -> Pay
             let mut fields = select
                 .iter()
                 .filter(|field| field.as_str() != "id")
-                .filter(|field| !field.starts_with('$'))
                 .cloned()
                 .collect::<BTreeSet<_>>();
             for include in &query.includes {
@@ -2578,7 +2577,6 @@ fn app_row_path_projections(
                         select
                             .iter()
                             .filter(|field| field.as_str() != "id")
-                            .filter(|field| !field.starts_with('$'))
                             .cloned()
                             .collect(),
                     )
@@ -7792,8 +7790,10 @@ where
         {
             return Ok(None);
         }
-        let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
-        transitions.structured_app_row_changes = structured_app_row_changes;
+        let mut transitions = super::maintained_subscription_view::ResultTransitions {
+            structured_app_row_changes,
+            ..Default::default()
+        };
         for (entry, (before, after)) in states {
             match (before, after) {
                 (false, true) => transitions.adds.push(entry),

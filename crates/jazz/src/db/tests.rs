@@ -201,6 +201,39 @@ fn terminal_nested_text_values(
         .collect()
 }
 
+fn terminal_nested_values(
+    snapshot: &RelationSnapshot,
+    root: RowUuid,
+    relation: &str,
+    column: &str,
+) -> Vec<Value> {
+    let row = snapshot
+        .rows
+        .iter()
+        .take(snapshot.root_count)
+        .find(|row| row.row_uuid() == root)
+        .expect("terminal root row");
+    let (descriptor, raw) = row.encoded_record();
+    let record = groove::records::BorrowedRecord::new(raw, descriptor);
+    let Value::Array(children) = record.get(relation).expect("nested terminal field") else {
+        panic!("nested terminal field must be an array")
+    };
+    children
+        .into_iter()
+        .map(|child| {
+            let Value::Record(child) = child else {
+                panic!("nested terminal array must contain records")
+            };
+            child.get(column).unwrap_or_else(|error| {
+                panic!(
+                    "nested field {column:?} missing from {:?}: {error}",
+                    child.descriptor()
+                )
+            })
+        })
+        .collect()
+}
+
 fn terminal_sorted_limited_text_values(
     snapshot: &RelationSnapshot,
     root: RowUuid,
@@ -1775,26 +1808,11 @@ fn branch_read_view_relation_snapshot_uses_query_engine_relation_edges() {
         doctest_support::block_on(db.all_relation_snapshot(&prepared_query, branch_read_opts()))
             .unwrap();
 
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1)]);
+    assert!(snapshot.edges.is_empty());
     assert_eq!(
-        snapshot
-            .rows
-            .iter()
-            .map(|row| (row.table().to_owned(), row.row_uuid()))
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            ("todos".to_owned(), row(0x11)),
-            ("users".to_owned(), row(0xa1)),
-        ])
-    );
-    assert_eq!(
-        snapshot.edges.into_iter().collect::<BTreeSet<_>>(),
-        BTreeSet::from([RelationEdge {
-            source_table: "users".to_owned(),
-            source_row: row(0xa1),
-            relation: "todosViaOwner".to_owned(),
-            target_table: "todos".to_owned(),
-            target_row: row(0x11),
-        }])
+        terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
+        vec!["branch todo".to_owned()]
     );
 }
 
@@ -2474,9 +2492,12 @@ fn relation_snapshot_reverse_array_skips_deleted_children() {
         .limit(1);
     let prepared = db.prepare_query(&query).unwrap();
     let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
-    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1), row(0x22)]);
-    assert_eq!(snapshot.edges.len(), 1);
-    assert_eq!(snapshot.edges[0].target_row, row(0x22));
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1)]);
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
+        vec!["visible todo".to_owned()]
+    );
 }
 
 #[test]
@@ -2660,9 +2681,12 @@ fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() 
         .limit(1);
     let prepared = db.prepare_query(&query).unwrap();
     let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
-    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1), row(0x22)]);
-    assert_eq!(snapshot.edges.len(), 1);
-    assert_eq!(snapshot.edges[0].target_row, row(0x22));
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1)]);
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(
+        terminal_nested_values(&snapshot, row(0xa1), "todosViaOwner", "row_uuid"),
+        vec![Value::Uuid(row(0x22).0)]
+    );
 }
 
 #[test]
@@ -2713,10 +2737,12 @@ fn relation_snapshot_reverse_array_reads_local_nullable_ref_child() {
     let prepared = db.prepare_query(&query).unwrap();
     let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
 
-    assert_eq!(row_ids(&snapshot.rows), vec![user, todo]);
-    assert_eq!(snapshot.edges.len(), 1);
-    assert_eq!(snapshot.edges[0].source_row, user);
-    assert_eq!(snapshot.edges[0].target_row, todo);
+    assert_eq!(row_ids(&snapshot.rows), vec![user]);
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(
+        terminal_nested_values(&snapshot, user, "todosViaOwner", "row_uuid"),
+        vec![Value::Uuid(todo.0)]
+    );
 }
 
 #[test]
@@ -2744,7 +2770,7 @@ fn relation_snapshot_reverse_array_limit_reads_local_child() {
         )
         .unwrap()
         .row_uuid();
-    let todo = db
+    let _todo = db
         .insert(
             "todos",
             BTreeMap::from([
@@ -2766,10 +2792,12 @@ fn relation_snapshot_reverse_array_limit_reads_local_child() {
     let prepared = db.prepare_query(&query).unwrap();
     let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
 
-    assert_eq!(row_ids(&snapshot.rows), vec![project, todo]);
-    assert_eq!(snapshot.edges.len(), 1);
-    assert_eq!(snapshot.edges[0].source_row, project);
-    assert_eq!(snapshot.edges[0].target_row, todo);
+    assert_eq!(row_ids(&snapshot.rows), vec![project]);
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, project, "todosViaProject", "title"),
+        vec!["visible todo".to_owned()]
+    );
 }
 
 #[test]
@@ -2806,9 +2834,11 @@ fn relation_snapshot_unordered_array_offset_uses_child_row_id_order() {
     let prepared = db.prepare_query(&query).unwrap();
     let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
 
-    assert_eq!(snapshot.edges.len(), 1);
-    assert_eq!(snapshot.edges[0].source_row, parent);
-    assert_eq!(snapshot.edges[0].target_row, row(0xb2));
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(
+        terminal_nested_values(&snapshot, parent, "comments", "row_uuid"),
+        vec![Value::Uuid(row(0xb2).0)]
+    );
 }
 
 #[test]
@@ -2883,17 +2913,20 @@ fn relation_snapshot_reverse_array_projects_provenance_magic_columns() {
         .limit(1);
     let prepared = db.prepare_query(&query).unwrap();
     let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
-    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1), row(0x22)]);
-    assert_eq!(snapshot.edges.len(), 1);
-    assert_eq!(snapshot.edges[0].target_row, row(0x22));
-    let child = snapshot
-        .rows
-        .iter()
-        .find(|candidate| candidate.row_uuid() == row(0x22))
-        .expect("child row is materialized");
-    let (descriptor, _) = child.encoded_record();
-    assert!(descriptor.field_index("$createdAt").is_some());
-    assert!(descriptor.field_index("$updatedAt").is_some());
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1)]);
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(
+        terminal_nested_values(&snapshot, row(0xa1), "todosViaProject", "row_uuid"),
+        vec![Value::Uuid(row(0x22).0)]
+    );
+    assert!(matches!(
+        terminal_nested_values(&snapshot, row(0xa1), "todosViaProject", "$createdAt").as_slice(),
+        [Value::U64(_)]
+    ));
+    assert!(matches!(
+        terminal_nested_values(&snapshot, row(0xa1), "todosViaProject", "$updatedAt").as_slice(),
+        [Value::U64(_)]
+    ));
 }
 
 #[test]

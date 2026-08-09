@@ -1030,7 +1030,6 @@ describe("NativeRuntimeAdapter server transport", () => {
 
   it("routes session-scoped transaction reads through the identity-aware native method", async () => {
     const alice = uuidBytes("00000000-0000-0000-0000-0000000000a1");
-    const bob = uuidBytes("00000000-0000-0000-0000-0000000000b2");
     const tx = fakeTx();
     const seenAuthors: string[] = [];
     const runtime = new NativeRuntimeAdapter(

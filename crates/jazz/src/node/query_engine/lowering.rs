@@ -5529,7 +5529,7 @@ fn collect_layout(
             fields
                 .iter()
                 .filter(|field| field.as_str() != "id")
-                .map(|field| user_column_field(field)),
+                .map(|field| collect_projection_source_field(field)),
         ),
     }
     let mut root_fields = root_source
@@ -5540,7 +5540,11 @@ fn collect_layout(
         .filter_map(|field| {
             field.name.as_ref().map(|name| CollectFlatField {
                 input: format!("__collect_root_{name}"),
-                output: name.clone(),
+                output: if name == &root_source.row_shape.row_uuid_field {
+                    name.clone()
+                } else {
+                    collect_projection_output_field(name)
+                },
                 value_type: field.value_type.clone(),
                 output_value_type: collect_logical_output_type(
                     root_source,
@@ -5643,50 +5647,41 @@ fn collect_slot_layouts(
                     fields
                         .iter()
                         .filter(|field| field.as_str() != "id")
-                        .map(|field| user_column_field(field)),
+                        .map(|field| {
+                            collect_projection_source_field(field)
+                        }),
                 ),
             }
-            let fields = std::iter::once(source.row_shape.row_uuid_field.clone())
-                .chain(source.table_schema.columns.iter().filter_map(|column| {
-                    let source_field = user_column_field(&column.name);
-                    selected.contains(&source_field).then_some(source_field)
-                }))
+            let fields = source
+                .row_shape
+                .descriptor
+                .fields()
+                .iter()
+                .filter_map(|field| field.name.clone())
+                .filter(|source_field| selected.contains(source_field))
                 .map(|source_field| {
-                    let value_type = source_field_type(source, &source_field).cloned().ok_or_else(|| {
+                    let source_value_type = source_field_type(source, &source_field).cloned().ok_or_else(|| {
                         single_gap_report(UnsupportedReason::Operator(format!(
                             "association projection source {:?} does not provide field {source_field:?}",
                             source.row_shape.source
                         )))
                     })?;
                     let is_row_id = source_field == source.row_shape.row_uuid_field;
-                    if !is_row_id && !matches!(value_type, ValueType::Nullable(_)) {
-                        return Err(single_gap_report(UnsupportedReason::Operator(format!(
-                            "association projection field {source_field:?} must be nullable to retain parent anchors"
-                        ))));
-                    }
-                    let output_value_type = if is_row_id {
-                        value_type.clone()
+                    let output_value_type =
+                        collect_logical_output_type(source, &source_field, &source_value_type);
+                    let value_type = if !is_row_id
+                        && !matches!(source_value_type, ValueType::Nullable(_))
+                    {
+                        ValueType::Nullable(Box::new(source_value_type))
                     } else {
-                        let logical = logical_user_column(&source_field);
-                        source
-                            .table_schema
-                            .columns
-                            .iter()
-                            .find(|column| column.name == logical)
-                            .map(|column| column.column_type.clone())
-                            .ok_or_else(|| {
-                                single_gap_report(UnsupportedReason::Runtime(format!(
-                                    "collector field {source_field:?} is absent from logical table {:?}",
-                                    source.table_schema.name
-                                )))
-                            })?
+                        source_value_type
                     };
                     Ok(CollectFlatField {
                         input: format!("{prefix}_{source_field}"),
                         output: if is_row_id {
                             source_field.clone()
                         } else {
-                            logical_user_column(&source_field).to_owned()
+                            collect_projection_output_field(&source_field)
                         },
                         value_type,
                         output_value_type,
@@ -5719,6 +5714,26 @@ fn collect_slot_layouts(
             })
         })
         .collect()
+}
+
+fn collect_projection_source_field(field: &str) -> String {
+    match field {
+        "$createdAt" => "created_at".to_owned(),
+        "$createdBy" => "created_by".to_owned(),
+        "$updatedAt" => "updated_at".to_owned(),
+        "$updatedBy" => "updated_by".to_owned(),
+        _ => user_column_field(field),
+    }
+}
+
+fn collect_projection_output_field(field: &str) -> String {
+    match field {
+        "created_at" => "$createdAt".to_owned(),
+        "created_by" => "$createdBy".to_owned(),
+        "updated_at" => "$updatedAt".to_owned(),
+        "updated_by" => "$updatedBy".to_owned(),
+        _ => logical_user_column(field).to_owned(),
+    }
 }
 
 fn root_collect_context_graph(

@@ -2048,7 +2048,7 @@ fn collector_tree_projects_authorized_child_rows_and_keeps_empty_optional_slots(
     };
     assert_eq!(
         tag.to_values().expect("child values")[1],
-        Value::Nullable(Some(Box::new(Value::String("allowed".to_owned()))))
+        Value::String("allowed".to_owned())
     );
 
     let empty_request = collector_request(policy_context());

@@ -19,7 +19,6 @@ import {
   readNativeRowBatch,
   readNativeRelationSubscriptionSnapshot,
   readNativeSubscriptionDelta,
-  type NativeSubscriptionDelta,
   type NativeRelationSubscriptionSnapshot,
   type NativeRowBatch,
   type NativeRemovedRow,
@@ -42,7 +41,7 @@ import {
   storageColumnValueType,
   writeDescriptor,
 } from "./native-row-codec.js";
-import { HIDDEN_INCLUDE_COLUMN_PREFIX, hiddenIncludeColumnName } from "../select-projection.js";
+import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "../select-projection.js";
 import {
   isPermissionIntrospectionColumn,
   isProvenanceMagicColumn,
@@ -4006,10 +4005,6 @@ function nativeDeltaFromChanges(
     removedCount: removed.length,
     updatedCount: updated.length,
   };
-}
-
-function nativeDeltaHasChanges(delta: NativeRowDelta): boolean {
-  return delta.addedCount > 0 || delta.updatedCount > 0 || delta.removedCount > 0;
 }
 
 function encodeNativeRows(

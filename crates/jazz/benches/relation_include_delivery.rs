@@ -92,9 +92,6 @@ struct DeliveryShape {
     added: usize,
     updated: usize,
     removed: usize,
-    added_related: usize,
-    added_edges: usize,
-    removed_edges: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -167,18 +164,6 @@ fn emit_rung(scale: usize, samples: usize, summary: RungSummary, all: &[Measurem
     fields.insert(
         "delivered_removed".to_owned(),
         json!(summary.delivery.removed),
-    );
-    fields.insert(
-        "delivered_added_related".to_owned(),
-        json!(summary.delivery.added_related),
-    );
-    fields.insert(
-        "delivered_added_edges".to_owned(),
-        json!(summary.delivery.added_edges),
-    );
-    fields.insert(
-        "delivered_removed_edges".to_owned(),
-        json!(summary.delivery.removed_edges),
     );
     emit_json_line("relation_include_delivery", fields);
 }
@@ -384,18 +369,9 @@ fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
 
 fn expect_initial_snapshot(event: SubscriptionEvent, parent: RowUuid) {
     match event {
-        SubscriptionEvent::Delta {
-            reset,
-            added,
-            added_related,
-            added_edges,
-            ..
-        } => assert!(
-            reset
-                && (added.iter().any(|row| row.row_uuid() == parent)
-                    || added_related.iter().any(|row| row.row_uuid() == parent)
-                    || !added_edges.is_empty()),
-            "initial relation hydration did not contain the parent"
+        SubscriptionEvent::Delta { reset, added, .. } => assert!(
+            reset && added.iter().any(|row| row.row_uuid() == parent),
+            "initial terminal hydration did not contain the parent"
         ),
         other => panic!("expected initial relation delta, got {other:?}"),
     }
@@ -408,29 +384,21 @@ fn expect_single_child_delta(event: SubscriptionEvent, parent: RowUuid) -> Deliv
             added,
             updated,
             removed,
-            added_related,
-            added_edges,
-            removed_edges,
             ..
         } => {
             assert!(
-                !reset,
-                "one-row update unexpectedly reset the relation view"
+                reset,
+                "structured child changes replace the ordered terminal"
             );
             assert!(
                 added.iter().any(|row| row.row_uuid() == parent)
-                    || updated.iter().any(|row| row.row_uuid() == parent)
-                    || added_related.iter().any(|row| row.row_uuid() == parent)
-                    || !added_edges.is_empty(),
-                "one child insert did not deliver a relation delta"
+                    || updated.iter().any(|row| row.row_uuid() == parent),
+                "one child insert did not deliver a terminal root"
             );
             DeliveryShape {
                 added: added.len(),
                 updated: updated.len(),
                 removed: removed.len(),
-                added_related: added_related.len(),
-                added_edges: added_edges.len(),
-                removed_edges: removed_edges.len(),
             }
         }
         other => panic!("expected measured relation delta, got {other:?}"),
