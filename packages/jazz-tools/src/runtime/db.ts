@@ -511,7 +511,7 @@ export type ColumnTransformMap = Record<string, ColumnTransform>;
 
 type DbTransactionHandleBinding = {
   client: JazzClient;
-  transactionId: OpenBatchId;
+  openBatchId: OpenBatchId;
   session?: Session;
   attribution?: string;
 };
@@ -612,17 +612,17 @@ function createTransactionScope<TTransaction extends object>(
 function createTransactionWriteResult<TResult, TKind extends TransactionKind>(
   transaction: Transaction<TKind>,
   value: TResult,
-  transactionId: BatchId,
+  batchId: BatchId,
   client: JazzClient,
 ): TransactionWriteResult<TResult, TKind> {
   if (transaction.kind === "exclusive") {
-    return new ExclusiveWriteResult(value, transactionId, client) as TransactionWriteResult<
+    return new ExclusiveWriteResult(value, batchId, client) as TransactionWriteResult<
       TResult,
       TKind
     >;
   }
 
-  return new WriteResult(value, transactionId, client) as TransactionWriteResult<TResult, TKind>;
+  return new WriteResult(value, batchId, client) as TransactionWriteResult<TResult, TKind>;
 }
 
 export async function runInTransaction<TResult, TKind extends TransactionKind>(
@@ -636,7 +636,7 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
     value = callback(scope);
   } catch (error) {
     try {
-      transaction.rollback();
+      await transaction.rollback();
     } catch {
       // Preserve the original callback error.
     }
@@ -648,7 +648,7 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
     resolvedValue = await value;
   } catch (error) {
     try {
-      transaction.rollback();
+      await transaction.rollback();
     } catch {
       // Preserve the original callback error.
     }
@@ -658,7 +658,7 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
   return createTransactionWriteResult(
     transaction,
     resolvedValue,
-    committed.transactionId,
+    await committed.batchId,
     resultClient(),
   );
 }
@@ -682,10 +682,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     }
 
     const client = this.resolveClient(table._schema);
-    const transactionId = client.beginTransaction(this.kind);
+    const openBatchId = client.beginTransaction(this.kind);
     const binding = {
       client,
-      transactionId,
+      openBatchId,
       session: this.session,
       attribution: this.attribution,
     };
@@ -701,19 +701,19 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     return getDbTxHandleBinding(this, operation);
   }
 
-  transactionId(): OpenBatchId {
-    return this.requireBinding("transactionId").transactionId;
+  openBatchId(): OpenBatchId {
+    return this.requireBinding("openBatchId").openBatchId;
   }
 
   /**
    * Commit this transaction.
    */
   commit(): Promise<TransactionCommitHandle<TKind>> {
-    const { client, transactionId } = this.requireBinding("commit");
-    return client.commitTransaction(transactionId).then((committed) => {
+    const { client, openBatchId } = this.requireBinding("commit");
+    return client.commitTransaction(openBatchId).then((committed) => {
       if (this.kind === "exclusive") {
         return new ExclusiveWriteHandle(
-          committed.transactionId,
+          committed.batchId,
           client,
         ) as TransactionCommitHandle<TKind>;
       }
@@ -729,9 +729,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * Only available on transactions created with {@link Db.beginTransaction}.
    * When using {@link Db.transaction}, throw an error inside the callback to roll back.
    */
-  rollback(): void {
-    const { client, transactionId } = this.requireBinding("rollback");
-    client.rollbackTransaction(transactionId);
+  rollback(): Promise<boolean> {
+    const { client, openBatchId } = this.requireBinding("rollback");
+    return client.rollbackTransaction(openBatchId);
   }
 
   /**
@@ -749,14 +749,14 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       table._schema,
       table._table,
     );
-    const { client, transactionId, session, attribution } = this.requireBinding("insert");
+    const { client, openBatchId, session, attribution } = this.requireBinding("insert");
     const row = client.insertInternal(
       table._table,
       values,
       options,
       session,
       attribution,
-      transactionId,
+      openBatchId,
     );
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
   }
@@ -781,7 +781,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       table._schema,
       table._table,
     );
-    const { client, transactionId, session, attribution } = this.requireBinding("restore");
+    const { client, openBatchId, session, attribution } = this.requireBinding("restore");
     const row = client.restoreInternal(
       table._table,
       id,
@@ -789,7 +789,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       options,
       session,
       attribution,
-      transactionId,
+      openBatchId,
     );
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
   }
@@ -809,8 +809,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       table._schema,
       table._table,
     );
-    const { client, transactionId, session, attribution } = this.requireBinding("upsert");
-    client.upsertInternal(table._table, values, options, session, attribution, transactionId);
+    const { client, openBatchId, session, attribution } = this.requireBinding("upsert");
+    client.upsertInternal(table._table, values, options, session, attribution, openBatchId);
   }
 
   /**
@@ -828,16 +828,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       table._schema,
       table._table,
     );
-    const { client, transactionId, session, attribution } = this.requireBinding("update");
-    client.updateInternal(
-      table._table,
-      id,
-      updates,
-      undefined,
-      session,
-      attribution,
-      transactionId,
-    );
+    const { client, openBatchId, session, attribution } = this.requireBinding("update");
+    client.updateInternal(table._table, id, updates, undefined, session, attribution, openBatchId);
   }
 
   /**
@@ -847,8 +839,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * once it's committed.
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
-    const { client, transactionId, session, attribution } = this.bindTable(table);
-    client.deleteInternal(table._table, id, undefined, session, attribution, transactionId);
+    const { client, openBatchId, session, attribution } = this.bindTable(table);
+    client.deleteInternal(table._table, id, undefined, session, attribution, openBatchId);
   }
 
   /**
@@ -857,7 +849,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * Read data is scoped to this transaction.
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    const { client, transactionId, session } = this.bindQuery(query);
+    const { client, openBatchId, session } = this.bindQuery(query);
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
@@ -868,7 +860,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       {
         ...options,
         localUpdates: "deferred",
-        transactionId,
+        transactionId: openBatchId,
       },
       session,
     );

@@ -1,5 +1,5 @@
 import { loadWasmModule } from "../client.js";
-import type { BatchId } from "../client.js";
+import type { MutationResult } from "../client.js";
 import { openConfig } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
 import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
@@ -18,7 +18,6 @@ type WriteMessage = Extract<
 
 let runtime: NativeRuntimeAdapter | null = null;
 let runtimeNamespace: string | null = null;
-const pendingWriteTransactionIds = new Set<string>();
 
 const workerScope = self as unknown as {
   onmessage: ((event: MessageEvent<PersistentBrowserOpfsOwnerRequest>) => void) | null;
@@ -56,8 +55,13 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
       case "upsert":
       case "delete": {
         const result = dispatchWrite(message);
-        await getRuntime().waitForTransaction(result.transactionId as BatchId, "local");
-        postResult(message.id, result);
+        if (result.kind === "staged") {
+          postResult(message.id, result);
+          return;
+        }
+        const batchId = await result.batchId;
+        await getRuntime().waitForTransaction(batchId, "local");
+        postResult(message.id, { kind: "committed", batchId } satisfies MutationResult);
         return;
       }
       case "waitForTransaction": {
@@ -80,7 +84,7 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
       }
       case "rollbackTransaction": {
         const [transactionId] = message.args;
-        const result = getRuntime().rollbackTransaction(transactionId);
+        const result = await getRuntime().rollbackTransaction(transactionId);
         postResult(message.id, result);
         return;
       }
@@ -152,9 +156,9 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
   }
 }
 
-function dispatchWrite(message: WriteMessage): { transactionId: string } {
+function dispatchWrite(message: WriteMessage): MutationResult {
   const runtime = getRuntime();
-  let result: { transactionId: string };
+  let result: MutationResult;
   switch (message.method) {
     case "insert": {
       const [table, values, writeContext, objectId] = message.args;
@@ -182,7 +186,6 @@ function dispatchWrite(message: WriteMessage): { transactionId: string } {
       break;
     }
   }
-  pendingWriteTransactionIds.add(result.transactionId);
   return result;
 }
 
@@ -213,19 +216,9 @@ async function closeForStorageClear(): Promise<string> {
 }
 
 async function closeRuntime(): Promise<void> {
-  await settlePendingWrites();
   await runtime?.close?.();
   runtime = null;
   runtimeNamespace = null;
-  pendingWriteTransactionIds.clear();
-}
-
-async function settlePendingWrites(): Promise<void> {
-  if (!runtime) return;
-  for (const transactionId of pendingWriteTransactionIds) {
-    await runtime.waitForTransaction(transactionId as BatchId, "local");
-    pendingWriteTransactionIds.delete(transactionId);
-  }
 }
 
 function getRuntime(): NativeRuntimeAdapter {

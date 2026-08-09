@@ -51,13 +51,12 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   // Runtime writes are synchronous, but the worker owns the NativeRuntimeAdapter that can
   // produce the real core transaction id. These ids are pending handles
   // that are only valid for waitForTransaction translation below.
-  private readonly writes = new Map<string, Promise<string>>();
+  private readonly pendingWrites = new Set<Promise<unknown>>();
   private readonly settledWrites = new Map<string, Map<string, Promise<void>>>();
-  private readonly transactionWrites = new Map<string, Promise<string>[]>();
+  private readonly transactionWrites = new Map<string, Promise<unknown>[]>();
   private readonly completedTxs = new Map<string, CompletedTxState>();
   private readonly committingTxs = new Set<OpenBatchId>();
-  private readonly readOnlyCommittedTxs = new Set<string>();
-  private readonly commitErrors = new Map<string, Error>();
+  private readonly rollingBackTxs = new Set<OpenBatchId>();
   private readonly subscriptions = new Map<number, Function>();
   private readonly remoteSubscriptions = new Map<number, Promise<number>>();
   // A public subscription is synchronous at this boundary, while the worker
@@ -143,12 +142,11 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     objectId?: string | null,
   ): InsertResult {
     const rowId = objectId ? parseUuid(objectId) : crypto.getRandomValues(new Uint8Array(16));
-    const transactionId = this.writeId();
-    this.queueWrite(transactionId, "insert", table, values, writeContext, formatUuid(rowId));
+    const receipt = this.queueWrite("insert", table, values, writeContext, formatUuid(rowId));
     return {
       id: formatUuid(rowId),
       values: valuesForRow(this.schema, table, values),
-      transactionId,
+      ...receipt,
     };
   }
 
@@ -158,9 +156,8 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     values: InsertValues,
     writeContext?: string | null,
   ): InsertResult {
-    const transactionId = this.writeId();
-    this.queueWrite(transactionId, "restore", table, objectId, values, writeContext);
-    return { id: objectId, values: valuesForRow(this.schema, table, values), transactionId };
+    const receipt = this.queueWrite("restore", table, objectId, values, writeContext);
+    return { id: objectId, values: valuesForRow(this.schema, table, values), ...receipt };
   }
 
   update(
@@ -170,9 +167,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     writeContext?: string | null,
   ): MutationResult {
     encodeCellsForPatch(tableDefinition(this.schema, table), values);
-    const transactionId = this.writeId();
-    this.queueWrite(transactionId, "update", table, objectId, values, writeContext);
-    return { transactionId };
+    return this.queueWrite("update", table, objectId, values, writeContext);
   }
 
   upsert(
@@ -186,40 +181,27 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     } catch (error) {
       throw new Error(normalizeWriteSetupMessage(errorMessage(error)));
     }
-    const transactionId = this.writeId();
-    this.queueWrite(transactionId, "upsert", table, objectId, values, writeContext);
-    return { transactionId };
+    return this.queueWrite("upsert", table, objectId, values, writeContext);
   }
 
   delete(table: string, objectId: string, writeContext?: string | null): MutationResult {
     tableDefinition(this.schema, table);
-    const transactionId = this.writeId();
-    this.queueWrite(transactionId, "delete", table, objectId, writeContext);
-    return { transactionId };
+    return this.queueWrite("delete", table, objectId, writeContext);
   }
 
-  async waitForTransaction(transactionId: BatchId, tier: string): Promise<void> {
-    await this.opened;
-    if (tier === "edge" || tier === "global") {
-      await this.connectionReady.promise;
-    }
-    const pendingWrite = this.writes.get(transactionId);
-    const workerTransactionId = (pendingWrite ? await pendingWrite : transactionId) as BatchId;
-    const commitError = this.commitErrors.get(transactionId);
-    if (commitError) {
-      throw commitError;
-    }
-    if (this.readOnlyCommittedTxs.has(transactionId)) {
-      return;
-    }
-    const wait = this.send("waitForTransaction", [workerTransactionId, tier]).then(() => undefined);
+  waitForTransaction(transactionId: BatchId, tier: string): Promise<void> {
+    const wait = this.enqueueCommand(async () => {
+      await this.opened;
+      if (tier === "edge" || tier === "global") await this.connectionReady.promise;
+      await this.send("waitForTransaction", [transactionId, tier]);
+    });
     let waits = this.settledWrites.get(transactionId);
     if (!waits) {
       waits = new Map();
       this.settledWrites.set(transactionId, waits);
     }
     waits.set(tier, wait);
-    await wait;
+    return wait;
   }
 
   beginTransaction(kind: TransactionKind, id: OpenBatchId): OpenBatchId {
@@ -231,63 +213,80 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   commitTransaction(transactionId: OpenBatchId): Promise<BatchId> {
-    if (this.completedTxs.has(transactionId) || this.committingTxs.has(transactionId)) {
+    if (this.rollingBackTxs.has(transactionId)) {
+      throw new Error(`Commit transaction failed: batch ${transactionId} is already rolling back`);
+    }
+    if (this.committingTxs.has(transactionId)) {
+      throw new Error(`Commit transaction failed: batch ${transactionId} is already committing`);
+    }
+    if (this.completedTxs.has(transactionId)) {
       throw new Error(commitTransactionMessage(transactionId, this.completedTxs));
     }
     const transactionWrites = this.transactionWrites.get(transactionId) ?? [];
-    if (transactionWrites.length === 0) {
-      this.readOnlyCommittedTxs.add(transactionId);
-    }
     this.committingTxs.add(transactionId);
-    return Promise.all(transactionWrites)
-      .then(() => {
-        return this.enqueueCommand(
-          () => this.send("commitTransaction", [transactionId]) as Promise<BatchId>,
-        );
-      })
-      .then(
-        (batchId) => {
-          this.committingTxs.delete(transactionId);
-          this.transactionWrites.delete(transactionId);
-          this.completedTxs.set(transactionId, "committed");
-          return batchId;
-        },
-        (error) => {
-          this.committingTxs.delete(transactionId);
-          throw error;
-        },
-      );
+    return this.enqueueCommand(async () => {
+      await Promise.all(transactionWrites);
+      return this.send("commitTransaction", [transactionId]) as Promise<BatchId>;
+    }).then(
+      (batchId) => {
+        this.committingTxs.delete(transactionId);
+        this.transactionWrites.delete(transactionId);
+        this.completedTxs.set(transactionId, "committed");
+        return batchId;
+      },
+      (error) => {
+        this.committingTxs.delete(transactionId);
+        throw error;
+      },
+    );
   }
 
-  rollbackTransaction(transactionId: OpenBatchId): boolean {
+  rollbackTransaction(transactionId: OpenBatchId): Promise<boolean> {
+    if (this.committingTxs.has(transactionId)) {
+      throw new Error(`Rollback transaction failed: batch ${transactionId} is already committing`);
+    }
+    if (this.rollingBackTxs.has(transactionId)) {
+      throw new Error(
+        `Rollback transaction failed: batch ${transactionId} is already rolling back`,
+      );
+    }
     if (this.completedTxs.has(transactionId)) {
       throw new Error(rollbackTransactionMessage(transactionId, this.completedTxs));
     }
-    this.transactionWrites.delete(transactionId);
-    void this.enqueueCommand(() => this.send("rollbackTransaction", [transactionId])).catch(
-      ignoreExpectedShutdown,
+    this.rollingBackTxs.add(transactionId);
+    return this.enqueueCommand(
+      () => this.send("rollbackTransaction", [transactionId]) as Promise<boolean>,
+    ).then(
+      (rolledBack) => {
+        this.rollingBackTxs.delete(transactionId);
+        this.transactionWrites.delete(transactionId);
+        this.completedTxs.set(transactionId, "rolled_back");
+        return rolledBack;
+      },
+      (error) => {
+        this.rollingBackTxs.delete(transactionId);
+        throw error;
+      },
     );
-    this.completedTxs.set(transactionId, "rolled_back");
-    return true;
   }
 
-  async query(
+  query(
     queryJson: string,
     sessionJson?: string | null,
     tier?: string | null,
     optionsJson?: string | null,
   ): Promise<unknown> {
     const readFence = this.captureReadFence(optionsJson);
-    await this.opened;
-    this.assertReadTransactionOpen(optionsJson);
-    await this.settleReadFence(readFence);
-    if (requiresServerPropagation(tier, optionsJson)) {
-      await this.connectionReady.promise;
-      await this.settleServerWaitsForRead(tier);
-    }
-    return this.enqueueCommand(() =>
-      this.send("query", [queryJson, sessionJson, tier, optionsJson]),
-    );
+    return this.enqueueCommand(async () => {
+      await this.opened;
+      this.assertReadTransactionOpen(optionsJson);
+      await this.settleReadFence(readFence);
+      if (requiresServerPropagation(tier, optionsJson)) {
+        await this.connectionReady.promise;
+        await this.settleServerWaitsForRead(tier);
+      }
+      return this.send("query", [queryJson, sessionJson, tier, optionsJson]);
+    });
   }
 
   createSubscription(
@@ -331,9 +330,10 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     const remoteHandle = this.remoteSubscriptions.get(handle);
     this.remoteSubscriptions.delete(handle);
     if (remoteHandle) {
-      void remoteHandle
-        .then((remote) => this.send("unsubscribe", [remote]))
-        .catch(ignoreExpectedShutdown);
+      void this.enqueueCommand(async () => {
+        const remote = await remoteHandle;
+        await this.send("unsubscribe", [remote]);
+      }).catch(ignoreExpectedShutdown);
     }
   }
 
@@ -342,9 +342,11 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     this.closing = true;
     this.rejectConnectionWaiters();
     try {
-      await this.opened;
-      await Promise.allSettled(this.writes.values());
-      await this.send("close", []);
+      await this.enqueueCommand(async () => {
+        await this.opened;
+        await Promise.allSettled(this.pendingWrites);
+        await this.send("close", []);
+      });
     } finally {
       this.closed = true;
       this.closing = false;
@@ -361,9 +363,11 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     this.rejectConnectionWaiters();
     let namespace = this.dbName;
     try {
-      await this.opened;
-      await Promise.allSettled(this.writes.values());
-      namespace = (await this.send("closeForStorageClear", [])) as string;
+      namespace = await this.enqueueCommand(async () => {
+        await this.opened;
+        await Promise.allSettled(this.pendingWrites);
+        return this.send("closeForStorageClear", []) as Promise<string>;
+      });
     } catch (error) {
       if (!isExpectedShutdownError(error)) throw error;
     } finally {
@@ -445,10 +449,6 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     this.connectionReady.reject(new Error("Persistent browser native runtime is closed"));
   }
 
-  private writeId(): BatchId {
-    return `pending-worker-write-${this.nextCallId++}` as BatchId;
-  }
-
   private send<Method extends PersistentBrowserWorkerMethod>(
     method: Method,
     args: PersistentBrowserRequestArgs<Method>,
@@ -483,48 +483,59 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     ...args: PersistentBrowserRequestArgs<Method>
   ): void {
     if (this.closed) return;
-    void this.opened
-      .then(() => {
+    void this.enqueueCommand(() =>
+      this.opened.then(() => {
         if (!this.closed) return this.send(method, args);
-      })
-      .catch(() => undefined);
+      }),
+    ).catch(() => undefined);
   }
 
   private queueWrite<Method extends PersistentBrowserWriteRequest["method"]>(
-    transactionId: string,
     method: Method,
     ...args: PersistentBrowserRequestArgs<Method>
-  ): void {
+  ): MutationResult {
     // Capture the registration frontier at the public call boundary. A
     // subscription created after this write must not retroactively delay it.
     const registrationBeforeWrite = this.subscriptionRegistration;
     const batchId = this.batchIdFromWriteArgs(method, args);
+    if (
+      batchId &&
+      (this.committingTxs.has(batchId as OpenBatchId) ||
+        this.rollingBackTxs.has(batchId as OpenBatchId))
+    ) {
+      throw new Error(`${writeOperationName(method)} failed: batch ${batchId} is completing`);
+    }
     if (batchId && this.completedTxs.has(batchId)) {
       throw new Error(
         `${writeOperationName(method)} failed: WriteError("${txStateMessage(batchId, this.completedTxs)}")`,
       );
     }
-    // The worker owns the real NativeRuntimeAdapter, so durability waits must use the
-    // worker's transaction id. The public Runtime API is synchronous, so the
-    // result returned from insert/update/etc. is only a pending handle.
     const write = this.enqueueCommand(async () => {
       await registrationBeforeWrite;
       if (batchId && this.completedTxs.get(batchId) === "rolled_back") {
-        return batchId;
+        return { kind: "staged", openBatchId: batchId as OpenBatchId } satisfies MutationResult;
       }
-      const result = (await this.send(method, args)) as { transactionId: string };
-      if (!result || typeof result.transactionId !== "string") {
-        throw new Error("Persistent browser worker write did not return a transaction id");
-      }
-      return result.transactionId;
+      return (await this.send(method, args)) as MutationResult;
     });
-    this.writes.set(transactionId, write);
+    this.pendingWrites.add(write);
+    void write.finally(() => this.pendingWrites.delete(write)).catch(() => undefined);
     if (batchId) {
       const writes = this.transactionWrites.get(batchId) ?? [];
       writes.push(write);
       this.transactionWrites.set(batchId, writes);
+      void write.catch(() => undefined);
+      return { kind: "staged", openBatchId: batchId as OpenBatchId };
     }
     void write.catch(() => undefined);
+    return {
+      kind: "committed",
+      batchId: write.then((result) => {
+        if (result.kind !== "committed") {
+          throw new Error(`Worker returned staged batch ${result.openBatchId} for ordinary write`);
+        }
+        return result.batchId;
+      }),
+    };
   }
 
   private batchIdFromWriteArgs<Method extends PersistentBrowserWriteRequest["method"]>(
@@ -547,7 +558,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     if (transactionId) {
       return [...(this.transactionWrites.get(transactionId) ?? [])];
     }
-    return [...this.writes.values()];
+    return [...this.pendingWrites];
   }
 
   private async settleReadFence(fence: readonly Promise<unknown>[]): Promise<void> {

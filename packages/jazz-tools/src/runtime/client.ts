@@ -102,7 +102,7 @@ export interface Runtime {
 export interface TransactionalRuntime extends Runtime {
   beginTransaction(transactionKind: TransactionKind, id: OpenBatchId): OpenBatchId;
   commitTransaction(id: OpenBatchId): Promise<BatchId>;
-  rollbackTransaction(id: OpenBatchId): boolean;
+  rollbackTransaction(id: OpenBatchId): Promise<boolean>;
 }
 
 declare const openBatchIdBrand: unique symbol;
@@ -228,22 +228,22 @@ export type TransactionKind = "mergeable" | "exclusive";
 export type TransactionFate =
   | {
       kind: "missing";
-      transactionId: TransactionId;
+      batchId: BatchId;
     }
   | {
       kind: "rejected";
-      transactionId: TransactionId;
+      batchId: BatchId;
       code: string;
       reason: string;
     }
   | {
       kind: "accepted";
-      transactionId: TransactionId;
+      batchId: BatchId;
       confirmedTier: DurabilityTier;
     };
 
 export interface LocalTransactionRecord {
-  transactionId: TransactionId;
+  batchId: BatchId;
   kind: TransactionKind;
   sealed: boolean;
   latestSettlement: TransactionFate | null;
@@ -272,13 +272,12 @@ export interface Row {
   values: Value[];
 }
 
-export interface InsertResult extends Row {
-  transactionId: BatchId | OpenBatchId;
-}
+export type WriteReceipt =
+  | { readonly kind: "committed"; readonly batchId: BatchId | Promise<BatchId> }
+  | { readonly kind: "staged"; readonly openBatchId: OpenBatchId };
 
-export interface MutationResult {
-  transactionId: BatchId | OpenBatchId;
-}
+export type InsertResult = Row & WriteReceipt;
+export type MutationResult = WriteReceipt;
 
 interface WriteContextPayload {
   session?: Session;
@@ -390,8 +389,6 @@ function normalizeSubscriptionCallbackArgs(
   return undefined;
 }
 
-type TransactionId = BatchId;
-
 function requireTransactionalRuntime(runtime: Runtime): TransactionalRuntime {
   if (
     typeof (runtime as Partial<TransactionalRuntime>).beginTransaction === "function" &&
@@ -402,6 +399,13 @@ function requireTransactionalRuntime(runtime: Runtime): TransactionalRuntime {
   }
 
   throw new Error("This Jazz runtime does not support transactions");
+}
+
+function committedBatchId(result: WriteReceipt): BatchId | Promise<BatchId> {
+  if (result.kind !== "committed") {
+    throw new Error(`Runtime returned staged batch ${result.openBatchId} for an ordinary write`);
+  }
+  return result.batchId;
 }
 
 function normalizeUpdatedAt(updatedAt?: number): number | undefined {
@@ -448,11 +452,11 @@ export class PersistedWriteRejectedError extends Error {
   readonly name = "PersistedWriteRejectedError";
 
   constructor(
-    readonly transactionId: TransactionId,
+    readonly batchId: BatchId,
     readonly code: string,
     readonly reason: string,
   ) {
-    super(`Persisted transaction ${transactionId} was rejected (${code}): ${reason}`);
+    super(`Persisted batch ${batchId} was rejected (${code}): ${reason}`);
   }
 }
 
@@ -462,11 +466,10 @@ export class PersistedWriteRejectedError extends Error {
  */
 export class WriteHandle<T = void> {
   readonly #client: JazzClient;
+  readonly batchId: Promise<BatchId>;
 
-  constructor(
-    readonly transactionId: TransactionId,
-    client: JazzClient,
-  ) {
+  constructor(batchId: BatchId | Promise<BatchId>, client: JazzClient) {
+    this.batchId = Promise.resolve(batchId);
     this.#client = client;
   }
 
@@ -476,7 +479,7 @@ export class WriteHandle<T = void> {
    * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    */
   async wait(options: { tier: DurabilityTier }): Promise<T> {
-    return this.#client.waitForTransaction(this.transactionId, options.tier) as Promise<T>;
+    return this.#client.waitForTransaction(await this.batchId, options.tier) as Promise<T>;
   }
 
   protected client(): JazzClient {
@@ -492,10 +495,10 @@ export class WriteHandle<T = void> {
 export class WriteResult<T> extends WriteHandle<T> {
   constructor(
     readonly value: T,
-    transactionId: TransactionId,
+    batchId: BatchId | Promise<BatchId>,
     client: JazzClient,
   ) {
-    super(transactionId, client);
+    super(batchId, client);
   }
 
   /**
@@ -510,7 +513,7 @@ export class WriteResult<T> extends WriteHandle<T> {
   }
 
   mapValue<U>(transformValue: (value: T) => U): WriteResult<U> {
-    return new WriteResult(transformValue(this.value), this.transactionId, this.client());
+    return new WriteResult(transformValue(this.value), this.batchId, this.client());
   }
 }
 
@@ -527,7 +530,7 @@ export class ExclusiveWriteHandle extends WriteHandle<void> {
    * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected.
    */
   override async wait(): Promise<void> {
-    await this.client().waitForExclusiveTransaction(this.transactionId);
+    await this.client().waitForExclusiveTransaction(await this.batchId);
   }
 }
 
@@ -542,12 +545,12 @@ export class ExclusiveWriteResult<T> extends WriteResult<T> {
    * @returns the callback result.
    */
   override async wait(): Promise<T> {
-    await this.client().waitForExclusiveTransaction(this.transactionId);
+    await this.client().waitForExclusiveTransaction(await this.batchId);
     return this.value;
   }
 
   override mapValue<U>(transformValue: (value: T) => U): ExclusiveWriteResult<U> {
-    return new ExclusiveWriteResult(transformValue(this.value), this.transactionId, this.client());
+    return new ExclusiveWriteResult(transformValue(this.value), this.batchId, this.client());
   }
 }
 
@@ -639,11 +642,11 @@ export class JazzClient {
   commitTransaction(id: OpenBatchId): Promise<WriteHandle> {
     return requireTransactionalRuntime(this.runtime)
       .commitTransaction(id)
-      .then((transactionId) => new WriteHandle(transactionId, this));
+      .then((batchId) => new WriteHandle(batchId, this));
   }
 
-  rollbackTransaction(id: OpenBatchId): void {
-    requireTransactionalRuntime(this.runtime).rollbackTransaction(id);
+  rollbackTransaction(id: OpenBatchId): Promise<boolean> {
+    return requireTransactionalRuntime(this.runtime).rollbackTransaction(id);
   }
 
   /**
@@ -744,7 +747,7 @@ export class JazzClient {
     attribution?: string,
   ): WriteResult<Row> {
     const row = this.insertInternal(table, values, options, session, attribution);
-    return new WriteResult(row, row.transactionId as BatchId, this);
+    return new WriteResult(row, committedBatchId(row), this);
   }
 
   /**
@@ -784,7 +787,7 @@ export class JazzClient {
     attribution?: string,
   ): WriteResult<Row> {
     const row = this.restoreInternal(table, objectId, values, options, session, attribution);
-    return new WriteResult(row, row.transactionId as BatchId, this);
+    return new WriteResult(row, committedBatchId(row), this);
   }
 
   /**
@@ -824,7 +827,7 @@ export class JazzClient {
     attribution?: string,
   ): WriteHandle {
     const result = this.upsertInternal(table, values, options, session, attribution);
-    return new WriteHandle(result.transactionId as BatchId, this);
+    return new WriteHandle(committedBatchId(result), this);
   }
 
   /**
@@ -895,7 +898,7 @@ export class JazzClient {
       attribution,
       undefined,
     );
-    return new WriteHandle(result.transactionId as BatchId, this);
+    return new WriteHandle(committedBatchId(result), this);
   }
 
   /**
@@ -931,7 +934,7 @@ export class JazzClient {
     attribution?: string,
   ): WriteHandle {
     const result = this.deleteInternal(table, objectId, options?.updatedAt, session, attribution);
-    return new WriteHandle(result.transactionId as BatchId, this);
+    return new WriteHandle(committedBatchId(result), this);
   }
 
   canInsert(table: string, values: InsertValues, session?: Session): boolean {
@@ -1074,17 +1077,17 @@ export class JazzClient {
     return normalizeRuntimeSchema(this.context.schema);
   }
 
-  async waitForTransaction(transactionId: TransactionId, tier: DurabilityTier): Promise<void> {
+  async waitForTransaction(batchId: BatchId, tier: DurabilityTier): Promise<void> {
     try {
-      await this.runtime.waitForTransaction(transactionId, tier);
+      await this.runtime.waitForTransaction(batchId, tier);
     } catch (error) {
       throw this.normalizeTransactionWaitError(error);
     }
   }
 
   /** @internal */
-  async waitForExclusiveTransaction(transactionId: TransactionId): Promise<void> {
-    await this.waitForTransaction(transactionId, this.context.serverUrl ? "global" : "local");
+  async waitForExclusiveTransaction(batchId: BatchId): Promise<void> {
+    await this.waitForTransaction(batchId, this.context.serverUrl ? "global" : "local");
   }
 
   private normalizeTransactionWaitError(error: unknown): Error {
