@@ -46,7 +46,7 @@ mod join;
 mod persist;
 mod recursion;
 
-use join::{AntiJoinState, ArrangementState, JoinState};
+use join::{AntiJoinState, ArrangementState, JoinState, touched_join_keys};
 use persist::apply_persist_delta;
 use recursion::{
     RecursiveState, hydrate_recursive_arrangements, recompute_recursive, recursive_delta,
@@ -7087,8 +7087,32 @@ where
             .unwrap_or_default();
         // Pull arrangements out while applying so both sides can be mutated
         // without aliasing the arrangement map.
-        let mut right_arrangement = if left_key == right_key {
-            left_arrangement.clone()
+        let shared_arrangement_keys = if left_key == right_key {
+            let mut keys = touched_join_keys(
+                &join.left_descriptor,
+                &left_key.fields,
+                left_delta,
+                join.comparison,
+            )?;
+            keys.extend(touched_join_keys(
+                &join.right_descriptor,
+                &right_key.fields,
+                right_delta,
+                join.comparison,
+            )?);
+            // `replace_keys` consumes each replacement bucket. A key can be
+            // present in both sides' deltas, so pass every touched key once.
+            keys.sort_unstable();
+            keys.dedup();
+            Some(keys)
+        } else {
+            None
+        };
+        let mut right_arrangement = if let Some(keys) = &shared_arrangement_keys {
+            AsOf {
+                value: left_arrangement.value().clone_keys(keys.iter()),
+                as_of: left_arrangement.as_of(),
+            }
         } else {
             self.arrangement_states
                 .remove(&right_key)
@@ -7110,8 +7134,10 @@ where
             self.arrangement_sub_tick(&right_key),
             self.context.arrangement_update_mode,
         )?;
-        if left_key == right_key {
-            left_arrangement = right_arrangement;
+        if let Some(keys) = shared_arrangement_keys {
+            left_arrangement
+                .value_mut()
+                .replace_keys(keys.iter(), right_arrangement.value().clone());
         } else {
             self.arrangement_states.insert(right_key, right_arrangement);
         }
