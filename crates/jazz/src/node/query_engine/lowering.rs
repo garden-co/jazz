@@ -5312,7 +5312,8 @@ fn lower_collect_by_app_rows(
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
 ) -> CapabilityResult<LoweredCollectByAppRows> {
-    let layout = collect_layout(projection, root_source, resolved_sources)?;
+    let mut layout = collect_layout(projection, root_source, resolved_sources)?;
+    align_collect_join_key_types(&mut layout.slots, plan, resolved_sources, request)?;
     let root_context = root_collect_context_graph(visible_root.clone(), &layout)?;
     let mut association_graphs = Vec::new();
     for slot in &layout.slots {
@@ -5365,6 +5366,64 @@ fn lower_collect_by_app_rows(
         descriptor,
         hidden_fields: hidden_source_fields(&root_source.row_shape),
     })
+}
+
+fn align_collect_join_key_types(
+    slots: &mut [CollectSlotLayout],
+    plan: &AnalyzedQueryPlan,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> CapabilityResult<()> {
+    for slot in slots {
+        let path = find_correlated_path(plan, &slot.path).ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Operator(format!(
+                "app projection path {:?} is not a correlated path in the query shape",
+                slot.path
+            )))
+        })?;
+        let parent_id = path.parent.root.source().ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Operator(
+                "collector path parent must be a source".to_owned(),
+            ))
+        })?;
+        let child_id = path.child.root.source().ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Operator(
+                "collector path child must be a source".to_owned(),
+            ))
+        })?;
+        let parent = resolved_sources.get(parent_id).ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Runtime(format!(
+                "collector parent source {parent_id:?} was not resolved"
+            )))
+        })?;
+        let child = resolved_sources.get(child_id).ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Runtime(format!(
+                "collector child source {child_id:?} was not resolved"
+            )))
+        })?;
+        let (_, child_key) = lower_path_key_pair(
+            &path.correlation,
+            parent_id,
+            parent,
+            child_id,
+            child,
+            request,
+        )
+        .map_err(single_gap_report)?;
+        if let Some(field) = slot
+            .fields
+            .iter_mut()
+            .find(|field| field.source_field.as_deref() == Some(child_key.as_str()))
+        {
+            let mut payload = &field.value_type;
+            while let ValueType::Nullable(inner) = payload {
+                payload = inner.as_ref();
+            }
+            field.value_type = ValueType::Nullable(Box::new(payload.clone()));
+        }
+        align_collect_join_key_types(&mut slot.children, plan, resolved_sources, request)?;
+    }
+    Ok(())
 }
 
 fn collect_layout(
