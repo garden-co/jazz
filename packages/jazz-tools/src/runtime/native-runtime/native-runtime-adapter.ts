@@ -689,25 +689,25 @@ export class NativeRuntimeAdapter implements Runtime {
     return id;
   }
 
-  commitTransaction(transactionId: OpenBatchId): Promise<BatchId> {
-    const pending = this.pendingTxs.get(transactionId);
+  commitTransaction(openBatchId: OpenBatchId): Promise<BatchId> {
+    const pending = this.pendingTxs.get(openBatchId);
     if (!pending) {
-      throw new Error(commitTransactionMessage(transactionId, this.completedTxs));
+      throw new Error(commitTransactionMessage(openBatchId, this.completedTxs));
     }
     if (!pending.tx) {
       throw new Error("Commit transaction failed: empty transaction has no committed batch");
     }
     this.rejectMovedExclusiveParents(pending);
     const write = pending.tx.commit();
-    this.pendingTxs.delete(transactionId);
-    this.completedTxs.set(transactionId, { kind: pending.kind, state: "committed" });
+    this.pendingTxs.delete(openBatchId);
+    this.completedTxs.set(openBatchId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
     this.observeWriteForBoundaryEffects(write);
     return Promise.resolve(recordWrite(write, this.writes));
   }
 
-  async waitForTransaction(transactionId: BatchId, tier: string): Promise<void> {
-    const write = this.writes.get(transactionId);
+  async waitForTransaction(batchId: BatchId, tier: string): Promise<void> {
+    const write = this.writes.get(batchId);
     if (!write) return;
     for (;;) {
       this.throwServerTransportErrorForTier(tier);
@@ -719,7 +719,7 @@ export class NativeRuntimeAdapter implements Runtime {
         this.refreshOpenedPlainSubscriptions();
         return;
       } catch (error) {
-        const rejected = rejectedWaitError(transactionId, error);
+        const rejected = rejectedWaitError(batchId, error);
         if (rejected) throw rejected;
         if (!isPendingWaitError(error)) throw error;
         this.pumpSubscriptions();
@@ -732,7 +732,7 @@ export class NativeRuntimeAdapter implements Runtime {
           this.refreshOpenedPlainSubscriptions();
           return;
         } catch (secondError) {
-          const secondRejected = rejectedWaitError(transactionId, secondError);
+          const secondRejected = rejectedWaitError(batchId, secondError);
           if (secondRejected) throw secondRejected;
           if (!isPendingWaitError(secondError)) throw secondError;
         }
@@ -746,14 +746,14 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  rollbackTransaction(transactionId: OpenBatchId): Promise<boolean> {
-    const pending = this.pendingTxs.get(transactionId);
+  rollbackTransaction(openBatchId: OpenBatchId): Promise<boolean> {
+    const pending = this.pendingTxs.get(openBatchId);
     if (!pending) {
-      throw new Error(rollbackTransactionMessage(transactionId, this.completedTxs));
+      throw new Error(rollbackTransactionMessage(openBatchId, this.completedTxs));
     }
     pending.tx?.rollback();
-    this.pendingTxs.delete(transactionId);
-    this.completedTxs.set(transactionId, { kind: pending.kind, state: "rolled_back" });
+    this.pendingTxs.delete(openBatchId);
+    this.completedTxs.set(openBatchId, { kind: pending.kind, state: "rolled_back" });
     return Promise.resolve(true);
   }
 

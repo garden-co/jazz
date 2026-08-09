@@ -66,7 +66,7 @@ export interface Runtime {
     session?: Session,
   ): boolean;
   canDelete?(table: string, objectId: string, session?: Session): boolean;
-  waitForTransaction(transactionId: BatchId, tier: string): Promise<void>;
+  waitForTransaction(batchId: BatchId, tier: string): Promise<void>;
   query(
     query_json: string,
     session_json?: string | null,
@@ -198,7 +198,7 @@ export interface QueryExecutionOptions {
 }
 
 type InternalQueryExecutionOptions = QueryExecutionOptions & {
-  transactionId?: OpenBatchId;
+  openBatchId?: OpenBatchId;
   runtimeSettledTier?: DurabilityTier | null;
 };
 
@@ -210,7 +210,7 @@ export interface ResolvedQueryExecutionOptions {
 }
 
 type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
-  transactionId?: OpenBatchId;
+  openBatchId?: OpenBatchId;
 };
 
 interface TimestampOverrideOptions {
@@ -359,8 +359,8 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
   if ((options.localUpdates ?? "immediate") !== "immediate") {
     payload.local_updates = options.localUpdates;
   }
-  if (options.transactionId) {
-    payload.transaction_batch_id = options.transactionId;
+  if (options.openBatchId) {
+    payload.transaction_batch_id = options.openBatchId;
   }
 
   if (!payload.propagation && !payload.local_updates && !payload.transaction_batch_id) {
@@ -688,25 +688,25 @@ export class JazzClient {
       { ...this.context, defaultDurabilityTier: this.defaultDurabilityTier },
       options,
     );
-    if (!options?.transactionId) {
+    if (!options?.openBatchId) {
       return resolved;
     }
     return {
       ...resolved,
-      transactionId: options.transactionId,
+      openBatchId: options.openBatchId,
     };
   }
 
   private encodeWriteContext(
     session?: Session,
     attribution?: string,
-    transactionId?: OpenBatchId,
+    openBatchId?: OpenBatchId,
     updatedAt?: number,
   ): string | undefined {
-    if (!session && attribution === undefined && !transactionId && updatedAt === undefined) {
+    if (!session && attribution === undefined && !openBatchId && updatedAt === undefined) {
       return undefined;
     }
-    if (attribution === undefined && session && !transactionId && updatedAt === undefined) {
+    if (attribution === undefined && session && !openBatchId && updatedAt === undefined) {
       return JSON.stringify(session);
     }
 
@@ -720,8 +720,8 @@ export class JazzClient {
     if (updatedAt !== undefined) {
       payload.updated_at = normalizeUpdatedAt(updatedAt);
     }
-    if (transactionId) {
-      payload.batch_id = transactionId;
+    if (openBatchId) {
+      payload.batch_id = openBatchId;
     }
     return JSON.stringify(payload);
   }
@@ -759,13 +759,13 @@ export class JazzClient {
     options?: CreateOptions,
     session?: Session,
     attribution?: string,
-    transactionId?: OpenBatchId,
+    openBatchId?: OpenBatchId,
   ): InsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
       attribution,
-      transactionId,
+      openBatchId,
       options?.updatedAt,
     );
     const row = this.runtime.insert(table, values, writeContext, options?.id);
@@ -800,13 +800,13 @@ export class JazzClient {
     options?: RestoreOptions,
     session?: Session,
     attribution?: string,
-    transactionId?: OpenBatchId,
+    openBatchId?: OpenBatchId,
   ): InsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
       attribution,
-      transactionId,
+      openBatchId,
       options?.updatedAt,
     );
     const row = this.runtime.restore(table, objectId, values, writeContext);
@@ -839,13 +839,13 @@ export class JazzClient {
     options: UpsertOptions,
     session?: Session,
     attribution?: string,
-    transactionId?: OpenBatchId,
+    openBatchId?: OpenBatchId,
   ): MutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
       attribution,
-      transactionId,
+      openBatchId,
       options.updatedAt,
     );
     return this.runtime.upsert(table, options.id, values, writeContext);
@@ -911,13 +911,13 @@ export class JazzClient {
     updatedAt?: number,
     session?: Session,
     attribution?: string,
-    transactionId?: OpenBatchId,
+    openBatchId?: OpenBatchId,
   ): MutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
       attribution,
-      transactionId,
+      openBatchId,
       updatedAt,
     );
     return this.runtime.update(table, objectId, updates, writeContext);
@@ -984,13 +984,13 @@ export class JazzClient {
     updatedAt?: number,
     session?: Session,
     attribution?: string,
-    transactionId?: OpenBatchId,
+    openBatchId?: OpenBatchId,
   ): MutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
       attribution,
-      transactionId,
+      openBatchId,
       updatedAt,
     );
     return this.runtime.delete(table, objectId, writeContext);

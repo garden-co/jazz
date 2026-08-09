@@ -77,7 +77,7 @@ export type PersistentBrowserOpfsOwnerRequest =
   | {
       id: number;
       method: "waitForTransaction";
-      args: [transactionId: BatchId, tier: string];
+      args: [batchId: BatchId, tier: string];
     }
   | {
       id: number;

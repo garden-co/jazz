@@ -189,16 +189,16 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     return this.queueWrite("delete", table, objectId, writeContext);
   }
 
-  waitForTransaction(transactionId: BatchId, tier: string): Promise<void> {
+  waitForTransaction(batchId: BatchId, tier: string): Promise<void> {
     const wait = this.enqueueCommand(async () => {
       await this.opened;
       if (tier === "edge" || tier === "global") await this.connectionReady.promise;
-      await this.send("waitForTransaction", [transactionId, tier]);
+      await this.send("waitForTransaction", [batchId, tier]);
     });
-    let waits = this.settledWrites.get(transactionId);
+    let waits = this.settledWrites.get(batchId);
     if (!waits) {
       waits = new Map();
-      this.settledWrites.set(transactionId, waits);
+      this.settledWrites.set(batchId, waits);
     }
     waits.set(tier, wait);
     return wait;
@@ -212,59 +212,57 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     return id;
   }
 
-  commitTransaction(transactionId: OpenBatchId): Promise<BatchId> {
-    if (this.rollingBackTxs.has(transactionId)) {
-      throw new Error(`Commit transaction failed: batch ${transactionId} is already rolling back`);
+  commitTransaction(openBatchId: OpenBatchId): Promise<BatchId> {
+    if (this.rollingBackTxs.has(openBatchId)) {
+      throw new Error(`Commit transaction failed: batch ${openBatchId} is already rolling back`);
     }
-    if (this.committingTxs.has(transactionId)) {
-      throw new Error(`Commit transaction failed: batch ${transactionId} is already committing`);
+    if (this.committingTxs.has(openBatchId)) {
+      throw new Error(`Commit transaction failed: batch ${openBatchId} is already committing`);
     }
-    if (this.completedTxs.has(transactionId)) {
-      throw new Error(commitTransactionMessage(transactionId, this.completedTxs));
+    if (this.completedTxs.has(openBatchId)) {
+      throw new Error(commitTransactionMessage(openBatchId, this.completedTxs));
     }
-    const transactionWrites = this.transactionWrites.get(transactionId) ?? [];
-    this.committingTxs.add(transactionId);
+    const transactionWrites = this.transactionWrites.get(openBatchId) ?? [];
+    this.committingTxs.add(openBatchId);
     return this.enqueueCommand(async () => {
       await Promise.all(transactionWrites);
-      return this.send("commitTransaction", [transactionId]) as Promise<BatchId>;
+      return this.send("commitTransaction", [openBatchId]) as Promise<BatchId>;
     }).then(
       (batchId) => {
-        this.committingTxs.delete(transactionId);
-        this.transactionWrites.delete(transactionId);
-        this.completedTxs.set(transactionId, "committed");
+        this.committingTxs.delete(openBatchId);
+        this.transactionWrites.delete(openBatchId);
+        this.completedTxs.set(openBatchId, "committed");
         return batchId;
       },
       (error) => {
-        this.committingTxs.delete(transactionId);
+        this.committingTxs.delete(openBatchId);
         throw error;
       },
     );
   }
 
-  rollbackTransaction(transactionId: OpenBatchId): Promise<boolean> {
-    if (this.committingTxs.has(transactionId)) {
-      throw new Error(`Rollback transaction failed: batch ${transactionId} is already committing`);
+  rollbackTransaction(openBatchId: OpenBatchId): Promise<boolean> {
+    if (this.committingTxs.has(openBatchId)) {
+      throw new Error(`Rollback transaction failed: batch ${openBatchId} is already committing`);
     }
-    if (this.rollingBackTxs.has(transactionId)) {
-      throw new Error(
-        `Rollback transaction failed: batch ${transactionId} is already rolling back`,
-      );
+    if (this.rollingBackTxs.has(openBatchId)) {
+      throw new Error(`Rollback transaction failed: batch ${openBatchId} is already rolling back`);
     }
-    if (this.completedTxs.has(transactionId)) {
-      throw new Error(rollbackTransactionMessage(transactionId, this.completedTxs));
+    if (this.completedTxs.has(openBatchId)) {
+      throw new Error(rollbackTransactionMessage(openBatchId, this.completedTxs));
     }
-    this.rollingBackTxs.add(transactionId);
+    this.rollingBackTxs.add(openBatchId);
     return this.enqueueCommand(
-      () => this.send("rollbackTransaction", [transactionId]) as Promise<boolean>,
+      () => this.send("rollbackTransaction", [openBatchId]) as Promise<boolean>,
     ).then(
       (rolledBack) => {
-        this.rollingBackTxs.delete(transactionId);
-        this.transactionWrites.delete(transactionId);
-        this.completedTxs.set(transactionId, "rolled_back");
+        this.rollingBackTxs.delete(openBatchId);
+        this.transactionWrites.delete(openBatchId);
+        this.completedTxs.set(openBatchId, "rolled_back");
         return rolledBack;
       },
       (error) => {
-        this.rollingBackTxs.delete(transactionId);
+        this.rollingBackTxs.delete(openBatchId);
         throw error;
       },
     );
@@ -554,9 +552,9 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   private captureReadFence(optionsJson: string | null | undefined): Promise<unknown>[] {
-    const transactionId = transactionIdFromReadOptions(optionsJson);
-    if (transactionId) {
-      return [...(this.transactionWrites.get(transactionId) ?? [])];
+    const openBatchId = openBatchIdFromReadOptions(optionsJson);
+    if (openBatchId) {
+      return [...(this.transactionWrites.get(openBatchId) ?? [])];
     }
     return [...this.pendingWrites];
   }
@@ -581,10 +579,10 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   private assertReadTransactionOpen(optionsJson: string | null | undefined): void {
-    const transactionId = transactionIdFromReadOptions(optionsJson);
-    if (!transactionId || !this.completedTxs.has(transactionId)) return;
+    const openBatchId = openBatchIdFromReadOptions(optionsJson);
+    if (!openBatchId || !this.completedTxs.has(openBatchId)) return;
     throw new Error(
-      `Query setup failed: Write error: ${txStateMessage(transactionId, this.completedTxs)}`,
+      `Query setup failed: Write error: ${txStateMessage(openBatchId, this.completedTxs)}`,
     );
   }
 
@@ -742,12 +740,14 @@ function requiresServerPropagation(tier?: string | null, _optionsJson?: string |
   return tier === "edge" || tier === "global";
 }
 
-function transactionIdFromReadOptions(optionsJson: string | null | undefined): string | undefined {
+function openBatchIdFromReadOptions(
+  optionsJson: string | null | undefined,
+): OpenBatchId | undefined {
   if (!optionsJson) return undefined;
   try {
     const parsed = JSON.parse(optionsJson) as { transaction_batch_id?: unknown };
     return typeof parsed.transaction_batch_id === "string"
-      ? parsed.transaction_batch_id
+      ? (parsed.transaction_batch_id as OpenBatchId)
       : undefined;
   } catch {
     return undefined;
