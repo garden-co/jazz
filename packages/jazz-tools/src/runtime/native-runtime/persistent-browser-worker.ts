@@ -1,4 +1,5 @@
 import { loadWasmModule } from "../client.js";
+import type { BatchId } from "../client.js";
 import { openConfig } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
 import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
@@ -24,8 +25,14 @@ const workerScope = self as unknown as {
   postMessage(message: unknown, transfer?: Transferable[]): void;
 };
 
+let commandQueue: Promise<void> = Promise.resolve();
+
 workerScope.onmessage = (event: MessageEvent<PersistentBrowserOpfsOwnerRequest>) => {
-  void handleMessage(event.data);
+  const message = event.data;
+  commandQueue = commandQueue.then(
+    () => handleMessage(message),
+    () => handleMessage(message),
+  );
 };
 
 async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promise<void> {
@@ -49,7 +56,7 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
       case "upsert":
       case "delete": {
         const result = dispatchWrite(message);
-        await getRuntime().waitForTransaction(result.transactionId, "local");
+        await getRuntime().waitForTransaction(result.transactionId as BatchId, "local");
         postResult(message.id, result);
         return;
       }
@@ -60,8 +67,8 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
         return;
       }
       case "beginTransaction": {
-        const [kind] = message.args;
-        const result = getRuntime().beginTransaction(kind);
+        const [kind, id] = message.args;
+        const result = getRuntime().beginTransaction(kind, id);
         postResult(message.id, result);
         return;
       }
@@ -216,7 +223,7 @@ async function closeRuntime(): Promise<void> {
 async function settlePendingWrites(): Promise<void> {
   if (!runtime) return;
   for (const transactionId of pendingWriteTransactionIds) {
-    await runtime.waitForTransaction(transactionId, "local");
+    await runtime.waitForTransaction(transactionId as BatchId, "local");
     pendingWriteTransactionIds.delete(transactionId);
   }
 }
