@@ -77,7 +77,9 @@ function makeLocalTransactionRecord(transactionId: string): LocalTransactionReco
 
 function makeHandleClient(localTransactionRecord: LocalTransactionRecord) {
   return {
-    waitForTransaction: vi.fn(async () => undefined),
+    waitForTransaction: vi.fn(
+      async (_batchId: BatchId | Promise<BatchId>, _tier: "local" | "edge" | "global") => undefined,
+    ),
     localTransactionRecord: vi.fn(() => localTransactionRecord),
   };
 }
