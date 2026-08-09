@@ -3137,14 +3137,44 @@ fn lower_linear_plan_steps(
                         .filter(|field| lowered_right.fields.contains(*field))
                         .cloned()
                         .collect::<BTreeSet<_>>();
-                    graph = graph.project_fields(project_left_source_fields_with_join_routes(
+                    let mut projection = project_left_source_fields_with_join_routes(
                         root_source,
                         &available_route_fields,
                         &introduced_route_fields,
-                    ));
+                    );
+                    let mut occurrence_fields = BTreeSet::new();
+                    if *mode == JoinMode::Inner {
+                        for ((source_id, field), (output, _)) in &accumulated_join_fields {
+                            let is_row_id = resolved_sources
+                                .get(source_id)
+                                .is_some_and(|source| source.row_shape.row_uuid_field == *field);
+                            if is_row_id {
+                                projection.push(ProjectField::renamed(
+                                    left_field(output),
+                                    output.clone(),
+                                ));
+                                occurrence_fields.insert(output.clone());
+                            }
+                        }
+                        if let Some(right_source_id) = right.root_source() {
+                            let right_source = resolved_sources.get(right_source_id).ok_or_else(|| {
+                                UnsupportedReason::Operator(format!(
+                                    "inner join occurrence source {right_source_id:?} was not resolved"
+                                ))
+                            })?;
+                            let output = format!("__root_join_row_{step_index}");
+                            projection.push(ProjectField::renamed(
+                                right_field(&right_source.row_shape.row_uuid_field),
+                                output.clone(),
+                            ));
+                            occurrence_fields.insert(output);
+                        }
+                    }
+                    graph = graph.project_fields(projection);
                     fields = source_fields(root_source).collect();
                     fields.extend(available_route_fields.iter().cloned());
                     fields.extend(introduced_route_fields.iter().cloned());
+                    fields.extend(occurrence_fields);
                     nullable_fields = source_nullable_fields(root_source);
                     nullable_field_depths = source_nullable_field_depths(root_source);
                     available_route_fields.extend(introduced_route_fields);
@@ -5363,6 +5393,7 @@ struct CollectSlotLayout {
 #[derive(Clone, Debug)]
 struct CollectLayout {
     root_fields: Vec<CollectFlatField>,
+    root_occurrence_inputs: Vec<String>,
     root_order_cols: Vec<TopByOrder>,
     root_tie_cols: Vec<String>,
     root_offset: u64,
@@ -5390,6 +5421,7 @@ fn lower_collect_by_app_rows(
     collect_binding_source_params(&visible_root, &mut parameter_domain);
     let mut layout = collect_layout(
         projection,
+        plan,
         root_source,
         resolved_sources,
         request,
@@ -5431,7 +5463,9 @@ fn lower_collect_by_app_rows(
             .clone();
         let graph = GraphBuilder::collect_root_ordered(
             anchor,
-            std::iter::once(root_group).chain(route_fields.iter().cloned()),
+            std::iter::once(root_group)
+                .chain(layout.root_occurrence_inputs.iter().cloned())
+                .chain(route_fields.iter().cloned()),
             layout
                 .root_fields
                 .iter()
@@ -5486,7 +5520,9 @@ fn lower_collect_by_app_rows(
         .clone();
     let graph = GraphBuilder::collect_by_tree_ordered(
         input,
-        std::iter::once(root_group.clone()).chain(route_fields.iter().cloned()),
+        std::iter::once(root_group.clone())
+            .chain(layout.root_occurrence_inputs.iter().cloned())
+            .chain(route_fields.iter().cloned()),
         layout
             .root_fields
             .iter()
@@ -5671,6 +5707,11 @@ fn align_collect_root_window(
     if layout.root_tie_cols.is_empty() {
         layout.root_tie_cols = vec![row_id];
     }
+    for occurrence in &layout.root_occurrence_inputs {
+        if !layout.root_tie_cols.contains(occurrence) {
+            layout.root_tie_cols.push(occurrence.clone());
+        }
+    }
     Ok(())
 }
 
@@ -5730,8 +5771,50 @@ fn collect_slot_input_for_value(
     })
 }
 
+fn root_join_occurrence_fields(
+    plan: &AnalyzedQueryPlan,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+) -> CapabilityResult<Vec<(String, ValueType)>> {
+    let Some(steps) = root_linear_steps(plan) else {
+        return Ok(Vec::new());
+    };
+    let mut fields = Vec::new();
+    for (step_index, step) in steps.iter().enumerate() {
+        let LinearStep::Join {
+            right,
+            mode: JoinMode::Inner,
+            ..
+        } = step
+        else {
+            continue;
+        };
+        if matches!(steps.get(step_index + 1), Some(LinearStep::Project(_))) {
+            continue;
+        }
+        let Some(source_id) = right.root_source() else {
+            continue;
+        };
+        let source = resolved_sources.get(source_id).ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Runtime(format!(
+                "inner join occurrence source {source_id:?} was not resolved"
+            )))
+        })?;
+        let name = if matches!(steps.get(step_index + 1), Some(LinearStep::Join { .. })) {
+            format!(
+                "__flat_join_source_{step_index}_{}",
+                source.row_shape.row_uuid_field
+            )
+        } else {
+            format!("__root_join_row_{step_index}")
+        };
+        fields.push((name, ValueType::Uuid));
+    }
+    Ok(fields)
+}
+
 fn collect_layout(
     projection: &AppProjectionTree,
+    plan: &AnalyzedQueryPlan,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
@@ -5768,16 +5851,32 @@ fn collect_layout(
                     collect_projection_output_field(name)
                 },
                 value_type: field.value_type.clone(),
-                output_value_type: collect_logical_output_type(
-                    root_source,
-                    name,
-                    &field.value_type,
-                ),
+                // Root current-row carriers are sparse. Retain their nullable
+                // physical wrapper so an absent non-nullable field does not
+                // filter the whole row during terminal rendering.
+                output_value_type: field.value_type.clone(),
                 source_field: Some(name.clone()),
                 is_row_id: name == &root_source.row_shape.row_uuid_field,
                 is_presence: false,
                 is_output: selected_root.contains(name),
             })
+        })
+        .collect::<Vec<_>>();
+    let root_occurrence_inputs = root_join_occurrence_fields(plan, resolved_sources)?
+        .into_iter()
+        .map(|(name, value_type)| {
+            let input = format!("__collect_root_{name}");
+            root_fields.push(CollectFlatField {
+                input: input.clone(),
+                output: name.clone(),
+                value_type: value_type.clone(),
+                output_value_type: value_type,
+                source_field: Some(name),
+                is_row_id: false,
+                is_presence: false,
+                is_output: false,
+            });
+            input
         })
         .collect::<Vec<_>>();
     for route_field in routing_param_fields {
@@ -5813,6 +5912,7 @@ fn collect_layout(
     let slots = collect_slot_layouts(&projection.paths, resolved_sources, 1, &mut next_slot)?;
     Ok(CollectLayout {
         root_fields,
+        root_occurrence_inputs,
         root_order_cols: Vec::new(),
         root_tie_cols: Vec::new(),
         root_offset: 0,

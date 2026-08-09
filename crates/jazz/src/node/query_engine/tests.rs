@@ -1303,6 +1303,19 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
         .expect("lowered terminal")
         .graph;
     assert_public_root_terminal(app_rows);
+    assert!(matches!(
+        app_rows,
+        GraphBuilder::CollectBy { collect, .. }
+            if collect.group_cols.iter().any(|field| matches!(
+                field,
+                groove::ivm::FieldRef::Name(name)
+                    if name == "__collect_root___root_join_row_0"
+            )) && collect.tie_cols.iter().any(|field| matches!(
+                field,
+                groove::ivm::FieldRef::Name(name)
+                    if name == "__collect_root___root_join_row_0"
+            ))
+    ));
     assert!(graph_any(app_rows, &|graph| matches!(
         graph,
         GraphBuilder::Project { input, fields }
