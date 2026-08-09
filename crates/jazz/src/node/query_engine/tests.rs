@@ -2224,6 +2224,8 @@ fn collector_layout_retains_public_magic_timestamp_fields_on_child_rows() {
     };
     assert!(row.field_index("$createdAt").is_some());
     assert!(row.field_index("$updatedAt").is_some());
+    assert!(row.field_index("$createdBy").is_none());
+    assert!(row.field_index("$updatedBy").is_none());
 }
 
 #[test]

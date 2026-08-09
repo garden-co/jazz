@@ -5371,15 +5371,20 @@ impl CurrentRow {
             .enumerate()
             .skip(CurrentRowRecord::USER_CELLS)
             .filter_map(|(idx, field)| {
-                if !matches!(field.value_type, records::ValueType::Nullable(_)) {
-                    return None;
-                }
                 let name = field.name.as_ref()?.as_str();
-                if name == "authored_columns" {
+                let name = if name.starts_with("user_") {
+                    self::query_engine::logical_user_column(name).to_owned()
+                } else if matches!(field.value_type, records::ValueType::Nullable(_))
+                    && !matches!(name, "authored_columns" | "settle_position")
+                {
+                    name.to_owned()
+                } else {
                     return None;
-                }
-                let name = self::query_engine::logical_user_column(name).to_owned();
-                let value = nullable_value(self.record.borrowed().get_idx(idx).ok()?).ok()??;
+                };
+                let value = match self.record.borrowed().get_idx(idx).ok()? {
+                    Value::Nullable(value) => value.map(|value| *value)?,
+                    value => value,
+                };
                 Some((name, value))
             })
             .collect()

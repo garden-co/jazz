@@ -1844,6 +1844,28 @@ fn source_requirements(
         let root_requirements = requirements
             .get_mut(plan.root_source())
             .expect("root source requirements were initialized");
+        // The same lowered program also owns the storage-shaped graph used by
+        // synchronous Rust materialization. Keep its provenance tuple complete
+        // while the public Root collector below still publishes only the
+        // explicitly selected magic fields.
+        let projects_provenance = matches!(
+            &app_rows.projection,
+            PayloadProjection::Tree(AppProjectionTree {
+                fields: FieldProjection::Fields(fields),
+                ..
+            }) if fields.iter().any(|field| matches!(
+                field.as_str(),
+                "$createdAt" | "$createdBy" | "$updatedAt" | "$updatedBy"
+            ))
+        );
+        if app_rows.public_terminal && projects_provenance {
+            root_requirements.metadata.extend([
+                SourceMetadataRequirement::Provenance(ProvenanceField::CreatedAt),
+                SourceMetadataRequirement::Provenance(ProvenanceField::CreatedBy),
+                SourceMetadataRequirement::Provenance(ProvenanceField::UpdatedAt),
+                SourceMetadataRequirement::Provenance(ProvenanceField::UpdatedBy),
+            ]);
+        }
         root_requirements.app_fields = match &app_rows.projection {
             PayloadProjection::ShapeDefault => FieldRequirement::All,
             PayloadProjection::Tree(tree) => tree.fields.clone().into(),

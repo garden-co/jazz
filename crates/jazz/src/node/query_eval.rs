@@ -272,6 +272,12 @@ fn lowered_app_rows_graph(program: &QueryProgram) -> Result<GraphBuilder, Error>
 }
 
 fn lowered_materialization_app_rows_graph(program: &QueryProgram) -> Result<GraphBuilder, Error> {
+    if matches!(
+        program.request.output.app_rows.as_ref().map(|rows| &rows.projection),
+        Some(PayloadProjection::Tree(tree)) if !tree.paths.is_empty()
+    ) {
+        return lowered_app_rows_graph(program);
+    }
     program
         .lowered
         .internal_app_rows_graph
@@ -1404,7 +1410,11 @@ where
             self.projected_content_current_source_graph(request, table, tier, true, true)?;
         let witnesses = self
             .node
-            .maintained_view_content_current_with_version(table, tier)
+            .maintained_view_content_current_with_version_in_schema(
+                table,
+                tier,
+                self.read_view.read_schema,
+            )
             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
         let mut fields = vec![ProjectField::renamed(left_field("row_uuid"), "row_uuid")];
         fields.extend(table.columns.iter().map(|column| {
@@ -5894,13 +5904,18 @@ where
         )?;
         let deltas = self
             .database
-            .query_graph(lowered_app_rows_graph(&program)?)
+            .query_graph(lowered_materialization_app_rows_graph(&program)?)
             .map_err(Error::Groove)?;
-        if shape.query().aggregate.is_some() {
+        let mut rows = if shape.query().aggregate.is_some() {
             self.materialize_aggregate_query_rows(shape.query(), &table, deltas)
         } else {
             self.materialize_inline_current_query_rows(&table, deltas)
+        }?;
+        self.finish_engine_query_rows_in_schema(shape.query(), shape.schema_version(), &mut rows)?;
+        if shape.query().array_subqueries.is_empty() {
+            self.apply_projection_in_schema(shape.query(), shape.schema_version(), &mut rows)?;
         }
+        Ok(rows)
     }
 
     fn compile_query_program_request(
@@ -7110,7 +7125,7 @@ where
         let deltas_result = match plan {
             None => self
                 .database
-                .query_graph(lowered_app_rows_graph(
+                .query_graph(lowered_materialization_app_rows_graph(
                     &program.expect("program is compiled when no prepared plan is supplied"),
                 )?)
                 .map_err(Error::Groove),
@@ -7155,9 +7170,9 @@ where
         };
         let query = shape.query();
         self.finish_engine_query_rows(query, &mut rows)?;
-        // `CurrentQueryProgramOutput::AppRows` is an exact public Root
-        // terminal. Re-projecting it here would reintroduce a higher-level
-        // assembler and can erase independently selected provenance fields.
+        if query.flat_join.is_none() && query.array_subqueries.is_empty() {
+            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
+        }
         Ok(rows)
     }
 
@@ -7256,7 +7271,7 @@ where
         let deltas_result = match plan {
             None => self
                 .database
-                .query_graph(lowered_app_rows_graph(
+                .query_graph(lowered_materialization_app_rows_graph(
                     &program.expect("program is compiled when no prepared plan is supplied"),
                 )?)
                 .map_err(Error::Groove),
@@ -7298,7 +7313,11 @@ where
         self.finish_engine_query_rows(query, &mut rows)?;
         profile.finish_rows = phase_started.elapsed();
 
-        profile.apply_projection = Default::default();
+        let phase_started = Instant::now();
+        if query.array_subqueries.is_empty() {
+            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
+        }
+        profile.apply_projection = phase_started.elapsed();
         profile.total = total_started.elapsed();
         Ok((rows, profile))
     }
@@ -7485,6 +7504,9 @@ where
         let mut rows = self.query_rows_at_with_query_engine(shape, binding, position, identity)?;
         let query = shape.query();
         self.finish_engine_query_rows(query, &mut rows)?;
+        if query.array_subqueries.is_empty() {
+            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
+        }
         Ok(rows)
     }
 
@@ -7512,7 +7534,7 @@ where
         )?;
         let deltas = self
             .database
-            .query_graph(lowered_app_rows_graph(&program)?)
+            .query_graph(lowered_materialization_app_rows_graph(&program)?)
             .map_err(Error::Groove)?;
         let table = self
             .table_in_schema(&lowered_shape.query().table, lowered_shape.schema_version())?
@@ -9071,7 +9093,7 @@ where
             self.compile_query_program_request_with_access_paths(request, BTreeMap::new())?;
         let deltas = self
             .database
-            .query_graph(lowered_app_rows_graph(&program)?)
+            .query_graph(lowered_materialization_app_rows_graph(&program)?)
             .map_err(Error::Groove)?;
         let mut rows = if shape.query().aggregate.is_some() {
             self.materialize_aggregate_query_rows(shape.query(), &table, deltas)?
@@ -9080,6 +9102,9 @@ where
         };
         let query = shape.query();
         self.finish_engine_query_rows(query, &mut rows)?;
+        if query.array_subqueries.is_empty() {
+            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
+        }
         Ok(rows)
     }
 
@@ -9591,7 +9616,7 @@ where
         )?;
         let deltas = self
             .database
-            .query_graph(lowered_app_rows_graph(&program)?)
+            .query_graph(lowered_materialization_app_rows_graph(&program)?)
             .map_err(Error::Groove)?;
         let mut rows = self.materialize_inline_current_query_rows(&table, deltas)?;
         let predicate_read = PredicateRead {
@@ -9605,6 +9630,9 @@ where
         open_tx.predicate_reads.truncate(predicate_len);
         open_tx.predicate_reads.push(predicate_read);
         self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
+        if query.array_subqueries.is_empty() {
+            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
+        }
         Ok(rows)
     }
 
@@ -9687,7 +9715,7 @@ where
         _binding: &Binding,
     ) -> Result<PreparedQueryPlan, Error> {
         let app_row_fields = app_row_terminal_fields(&program.lowered.output)?;
-        let graph = lowered_app_rows_graph(&program)?;
+        let graph = lowered_materialization_app_rows_graph(&program)?;
         let params = prepared_params_from_domain(&program.lowered.parameters);
         let route_eligible_fields =
             app_row_terminal_route_eligible_fields(&program.lowered.output)?;
@@ -10383,6 +10411,15 @@ where
         tier: DurabilityTier,
     ) -> Result<GraphBuilder, Error> {
         let schema_version = self.catalogue.current_schema_version_id;
+        self.maintained_view_content_current_with_version_in_schema(table, tier, schema_version)
+    }
+
+    fn maintained_view_content_current_with_version_in_schema(
+        &self,
+        table: &TableSchema,
+        tier: DurabilityTier,
+        schema_version: SchemaVersionId,
+    ) -> Result<GraphBuilder, Error> {
         let table_id = self.physical_table_id_for_schema(schema_version, &table.name)?;
         let content_fields = global_current_storage_fields(table, true, true);
         let global_content = self
