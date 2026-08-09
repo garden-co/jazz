@@ -111,17 +111,17 @@ acceptance/rejection, auth expiry, and unsupported-feature diagnostics through
 
 The message variants and their payloads are:
 
-| message                                                                    | direction      | payload                                                                                                                              |
-| -------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `CommitUnit`                                                               | up             | `{ tx: Transaction, versions: Vec<VersionRecord> }`                                                                                  |
-| `FateUpdate`                                                               | down           | `{ tx_id, fate, global_seq: Option<GlobalSeq>, durability: Option<DurabilityTier> }`                                                 |
-| `RegisterShape`                                                            | up             | `{ shape_id, ast: ShapeAst, opts: RegisterShapeOptions }`                                                                            |
-| `Subscribe`                                                                | up             | `{ shape_id, subscription: SubscriptionKey, values: Vec<Value> }`                                                                    |
-| `SubscribeRejected`                                                        | down           | `{ subscription: SubscriptionKey, reason: SubscribeRejectReason }`                                                                   |
-| `Unsubscribe`                                                              | up             | `{ subscription: SubscriptionKey }`                                                                                                  |
-| `ViewUpdate`                                                               | down           | `{ subscription, reset_result_set, version_bundles, peer_payload_inventory, result_member_adds/removes, program_fact_adds/removes }` |
-| `FetchContentExtent` / `ContentExtents`                                    | bulk lane      | `{ owner: LargeValueOwnerRef, extent }` / `{ extents: Vec<ContentExtent> }`                                                          |
-| `PublishSchema` / `PublishLens` / `SetCurrentWriteSchema` / `CatalogueAck` | catalogue lane | ch. 10                                                                                                                               |
+| message                                                                            | direction      | payload                                                                                                                              |
+| ---------------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `CommitUnit`                                                                       | up             | `{ tx: Transaction, versions: Vec<VersionRecord> }`                                                                                  |
+| `FateUpdate`                                                                       | down           | `{ tx_id, fate, global_seq: Option<GlobalSeq>, durability: Option<DurabilityTier> }`                                                 |
+| `RegisterShape`                                                                    | up             | `{ shape_id, ast: ShapeAst, opts: RegisterShapeOptions }`                                                                            |
+| `Subscribe`                                                                        | up             | `{ shape_id, subscription: SubscriptionKey, values: Vec<Value> }`                                                                    |
+| `SubscribeRejected`                                                                | down           | `{ subscription: SubscriptionKey, reason: SubscribeRejectReason }`                                                                   |
+| `Unsubscribe`                                                                      | up             | `{ subscription: SubscriptionKey }`                                                                                                  |
+| `ViewUpdate`                                                                       | down           | `{ subscription, reset_result_set, version_bundles, peer_payload_inventory, result_member_adds/removes, program_fact_adds/removes }` |
+| `FetchContentExtent` / `ContentExtents`                                            | bulk lane      | `{ owner: LargeValueOwnerRef, extent }` / `{ extents: Vec<ContentExtent> }`                                                          |
+| `PublishSchemaWithLens` / `PublishLens` / `SetCurrentWriteSchema` / `CatalogueAck` | catalogue lane | ch. 10                                                                                                                               |
 
 A `VersionBundle`, carried in `ViewUpdate.version_bundles`, is `{ tx, versions,
 fate, global_seq, durability }`: a settled **view payload bundle** with the fate
@@ -231,17 +231,15 @@ and `cold_reset_bulk_ingest_matches_incremental_ingest`
 The remaining reset-specific bypass and the move to an `OrderedKvStorage`
 transaction are implementation work, not protocol invariants.
 
-**Target structured-output delivery (v4).** A structured reset carries an
+**Target structured-output delivery (v5).** A structured reset carries an
 ordered recursive snapshot. An incremental update carries whole-parent
 replacements addressed by stable output occurrence; its extensible envelope
-reserves distinct tags for future narrower delta shapes without changing the v4
-meaning. Both `SyncMessage::ViewUpdate` and `ViewUpdateChunk` MUST carry the
-same structured-output vocabulary, and chunk assembly MUST publish no partial
-logical replacement before its final chunk. Row/version payload references and
-dedup remain separate from the rendered tree so v4 does not duplicate row bodies
-already available through typed members and bundles. The current chunk merger
-only appends flat member/fact vectors (`crates/jazz/src/db.rs:6026-6078`,
-`:6120-6154`); it is not structured-output behavior yet.
+reserves distinct tags for future narrower delta shapes without changing the v5
+meaning. `SyncMessage::ViewUpdate` carries the structured-output vocabulary as
+one logical message; generic transport fragmentation publishes no partial
+logical replacement. Row/version payload references and dedup remain separate
+from the rendered tree so v5 does not duplicate row bodies already available
+through typed members and bundles.
 
 _Further invariants._ `INV-SYNC-17` — a result add carries enough
 deletion-register witness to reconstruct the row's visible presence/absence.
@@ -313,19 +311,21 @@ do not change when future inventory fields are added.
 
 Protocol size limits are enforced at the layer that can recover correctly:
 
-- An encoded `WireFrame` is capped at 2 MiB and an encoded
-  `WireEnvelope.payload` / `SyncMessage` is capped at 2 MiB. These are
-  wire-admission limits: an over-limit frame or payload is rejected before
-  postcard decodes the bytes and produces a structured
-  `WireError { code: MalformedFrame, retry: Never, ... }`. The connection-level
-  admission failure closes or resumes according to the binding's normal
-  structured-error handling; no semantic message is applied.
+- An encoded `WireFrame` is capped at 2 MiB before postcard frame decode.
+  `WireEnvelope.payload` is one physical fragment, not a semantic-message
+  ceiling. Generic fragmentation/reassembly carries an encoded `SyncMessage`
+  of any ordinary database size atomically across bounded frames. Receivers
+  enforce fixed advertised-length, decompressed-output, concurrent-assembly,
+  and aggregate staged-byte limits as adversarial resource
+  defenses; those budgets are transport policy, not query, catalogue, or
+  transaction semantics.
 - A `RegisterShape` AST is capped at 64 KiB encoded. This is a semantic
   admission limit for the shape-registration request; the connection may
   continue after the rejected request. Server shells may expose this as
   configuration later for unusually large generated query shapes.
-- A `CommitUnit` is capped at 4096 row-version records and 2 MiB encoded. These
-  are transaction semantic limits: an over-limit commit unit is rejected as
+- A `CommitUnit` is capped at 4096 row-version records, independently of its
+  encoded byte size. This CPU/fan-out limit is transaction semantics: an
+  over-limit commit unit is rejected as
   `Fate::Rejected(MalformedCommit(_))`, the connection remains live, and later
   well-formed commit units may still settle.
 - A `ContentExtent` response is capped at 1 MiB of bytes per extent. This is a
@@ -342,11 +342,10 @@ Protocol size limits are enforced at the layer that can recover correctly:
   level and are protocol-admission limits: over-limit input is rejected before
   semantic application (`INV-SYNC-28`).
 
-Outbound websocket batching is byte-budgeted by the same 2 MiB encoded-frame
-limit: senders split batches across multiple binary messages instead of relying
-on the historical count-only batch limit. If a single encoded `WireFrame` cannot
-fit the budget, the sender must fail loudly rather than truncate or silently
-drop it.
+Outbound websocket batching is byte-budgeted at the physical layer: senders
+split batches across binary messages rather than relying on a count-only batch
+limit. A logical `SyncMessage` is fragmented first, so each encoded `WireFrame`
+fits the wire-frame budget without truncation or semantic-layer chunking.
 
 **Wire encoding posture (target optimization guidance).** High-rate serial
 transactions (keystroke-grade chains: same author, same row, near-monotone
@@ -398,7 +397,7 @@ Large-value content uses a bulk lane rather than being forced through ordinary
 view payloads. A `FetchContentExtent` request is authorized against row context
 and read policy: an extent whose row mismatches the request or is not visible to
 the peer is refused (`INV-SYNC-19`, ch. 12). Catalogue messages
-(`PublishSchema`, `PublishLens`, `SetCurrentWriteSchema`, `CatalogueAck`) share
+(`PublishSchemaWithLens`, `PublishLens`, `SetCurrentWriteSchema`, `CatalogueAck`) share
 this protocol lane; their semantics are chapter 10.
 
 _Further invariants._ `INV-SYNC-21` — wire `TxId` and row-version payloads use
@@ -442,7 +441,7 @@ this reader's visibility for this canonical binding view (shape, binding, and
 read view). It is deliberately part of the declaration, rather than an
 out-of-band connection hint: it qualifies exactly the state the subscriber is
 claiming to have applied and persists with that state across reconnects.
-`ViewUpdate` and `ViewUpdateChunk` carry the server stamp beside their
+`ViewUpdate` carries the server stamp beside its
 peer-payload inventory, so the receiver persists it atomically with the
 corresponding settled fast fact before later echoing it in the declaration.
 

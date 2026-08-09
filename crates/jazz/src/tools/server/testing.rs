@@ -405,6 +405,26 @@ impl JazzServer {
         self.state.clone()
     }
 
+    /// Seed finalized branch-local history through the server shell for an
+    /// integration test. Client reads still use the ordinary WebSocket and
+    /// query-engine path.
+    pub async fn seed_branch_row_for_test(
+        &self,
+        branch: crate::ids::BranchId,
+        table: impl Into<String>,
+        row_id: crate::ids::RowUuid,
+        cells: crate::db::RowCells,
+    ) {
+        let shell = self
+            .state
+            .core_server_shell()
+            .expect("test server starts a core server shell");
+        shell
+            .seed_branch_row_for_test(branch, table.into(), row_id, cells)
+            .await
+            .expect("seed branch row through server shell");
+    }
+
     fn require_built_in_jwt_helpers(&self) {
         if self.embedded_jwks_server.is_none() {
             panic!(

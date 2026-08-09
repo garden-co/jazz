@@ -9,7 +9,9 @@ use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::protocol::{CurrentWriteSchema, LensOp, MigrationLens, SchemaVersion, TableLens};
+use jazz::protocol::{
+    CurrentWriteSchema, LensOp, MigrationLens, SchemaLineagePublication, SchemaVersion, TableLens,
+};
 use jazz::query::{OrderDirection, Query, claim, col, eq, lit, param};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
@@ -530,13 +532,7 @@ fn policy_dependency_reads_do_not_expose_dependency_rows() {
     seed(&db, team_a, team_b, "region-a", "region-b");
     db.set_identity_claims(
         USER_A,
-        BTreeMap::from([
-            ("region".to_owned(), Value::String("region-a".to_owned())),
-            (
-                "membership_region".to_owned(),
-                Value::String("not-region-a".to_owned()),
-            ),
-        ]),
+        BTreeMap::from([("region".to_owned(), Value::String("region-a".to_owned()))]),
     );
     db.set_identity_claims(
         USER_B,
@@ -725,8 +721,7 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
     );
 
     let v2 = SchemaVersion::new(evolved_schema());
-    db.publish_schema(v2.clone()).expect("publish v2 schema");
-    db.publish_lens(MigrationLens::new(
+    let lens = MigrationLens::new(
         schema().version_id(),
         v2.id,
         vec![
@@ -749,8 +744,12 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
                 ops: Vec::new(),
             },
         ],
-    ))
-    .expect("publish v1-to-v2 lens");
+    );
+    db.publish_schema_with_lens(
+        1,
+        SchemaLineagePublication::new(v2.clone(), lens, Vec::<String>::new(), Vec::<String>::new()),
+    )
+    .expect("publish v1-to-v2 lineage");
     db.set_current_write_schema(CurrentWriteSchema {
         revision: 1,
         schema: v2.id,
@@ -898,6 +897,16 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
 }
 
 #[test]
+/// A prepared join owned by Alice survives a catalogue-driven Groove rebuild.
+///
+/// Alice publishes a compatible schema lineage after preparing the v1 join;
+/// the test then occupies the rebuilt runtime with a distinct v2 handle before
+/// reading Alice's old handle.
+///
+/// ```text
+/// alice ──prepare v1 join──► runtime v1
+/// alice ──publish lineage──► runtime v2 ──prepare conflicting v2 join──► read v1 handle
+/// ```
 fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
     let v1 = public_join_schema();
     let db = open_db_with_schema_as(v1.clone(), AuthorId::SYSTEM);
@@ -918,8 +927,12 @@ fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
         ]),
     )
     .expect("seed document");
-    let join = Query::from(DOCUMENTS)
-        .join_via_column(TEAMS, "id", "team", [eq(col("name"), param("name"))]);
+    let join = Query::from(DOCUMENTS).join_via_column(
+        TEAMS,
+        "id",
+        "team",
+        [eq(col("name"), param("name"))],
+    );
     let prepared_v1 = db
         .prepare_query_bound(
             &join,
@@ -936,8 +949,7 @@ fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
     );
 
     let v2 = SchemaVersion::new(evolved_public_join_schema());
-    db.publish_schema(v2.clone()).expect("publish v2");
-    db.publish_lens(MigrationLens::new(
+    let lens = MigrationLens::new(
         v1.version_id(),
         v2.id,
         vec![
@@ -955,8 +967,12 @@ fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
                 }],
             },
         ],
-    ))
-    .expect("publish lens");
+    );
+    db.publish_schema_with_lens(
+        1,
+        SchemaLineagePublication::new(v2.clone(), lens, Vec::<String>::new(), Vec::<String>::new()),
+    )
+    .expect("publish v2 with lineage lens");
     db.set_current_write_schema(CurrentWriteSchema {
         revision: 1,
         schema: v2.id,
@@ -974,10 +990,7 @@ fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
                 "team",
                 [eq(col("name"), param("other_name"))],
             ),
-            BTreeMap::from([(
-                "other_name".to_owned(),
-                Value::String("missing".to_owned()),
-            )]),
+            BTreeMap::from([("other_name".to_owned(), Value::String("missing".to_owned()))]),
         )
         .expect("prepare conflicting v2 join shape");
     assert!(

@@ -194,6 +194,88 @@ fn merge_heads_match_history_across_restart_between_concurrent_units() {
 }
 
 #[test]
+fn merge_heads_share_physical_identity_across_table_rename_and_restart() {
+    // Merge-head rows are node-local derived metadata, so the physical-key
+    // assertion is intentionally internal. The history oracle verifies that
+    // the shared row keeps the merge behavior correct across the rename.
+    let base = schema();
+    let renamed = SchemaVersion::new(JazzSchema::new([TableSchema::new(
+        "tasks",
+        [ColumnSchema::new("name", ColumnType::String)],
+    )]));
+    let (dir, mut core) = open_node_with_schema(node(0xcb), base.clone());
+    let row_uuid = row(0xcb);
+    let before = core
+        .commit_mergeable(
+            MergeableCommit::new("todos", row_uuid, 10)
+                .cells(BTreeMap::from([("title".to_owned(), v("before"))])),
+        )
+        .unwrap();
+
+    publish_schema_lineage(
+        &mut core,
+        renamed.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            renamed.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "tasks".to_owned(),
+                ops: vec![
+                    LensOp::RenameTable {
+                        from: "todos".to_owned(),
+                        to: "tasks".to_owned(),
+                    },
+                    LensOp::RenameColumn {
+                        from: "title".to_owned(),
+                        to: "name".to_owned(),
+                    },
+                ],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: renamed.id,
+        },
+    })
+    .unwrap();
+    core.commit_mergeable(
+        MergeableCommit::new("tasks", row_uuid, 11)
+            .parents(vec![before])
+            .cells(BTreeMap::from([("name".to_owned(), v("after"))])),
+    )
+    .unwrap();
+
+    let table_id = core.catalogue.physical_mappings[&renamed.id].tables["tasks"].table_id;
+    core.assert_merge_heads_match_history_for_test("tasks", row_uuid)
+        .unwrap();
+    let stored = core
+        .database
+        .primary_key_scan_raw("jazz_merge_heads", &[])
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].record().get_u64(0).unwrap(), table_id.0);
+
+    drop(core);
+    let mut reopened = reopen_node_at(&dir, node(0xcb), base);
+    reopened
+        .assert_merge_heads_match_history_for_test("tasks", row_uuid)
+        .unwrap();
+    let stored = reopened
+        .database
+        .primary_key_scan_raw("jazz_merge_heads", &[])
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].record().get_u64(0).unwrap(), table_id.0);
+}
+
+#[test]
 fn merge_heads_match_history_after_merge_version_application() {
     let schema = two_column_schema();
     let (_writer_a_dir, mut writer_a) = open_node_with_schema(node(0xd1), schema.clone());

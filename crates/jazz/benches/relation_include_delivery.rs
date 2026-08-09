@@ -311,9 +311,7 @@ fn open_db(scale: usize, sample: usize) -> Db<MemoryStorage> {
 
 fn relation_query() -> Query {
     Query::from("parents").array_subquery(
-        ArraySubquery::new("children", "children", "parent_id", "id")
-            .select(["label", "ordinal"])
-            .unbounded(),
+        ArraySubquery::new("children", "children", "parent_id", "id").select(["label", "ordinal"]),
     )
 }
 

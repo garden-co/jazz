@@ -222,16 +222,9 @@ where
             }
             report.row_versions_evictable += 1;
             evicted_tx_ids.insert(candidate.tx_id);
-            let schema_version = self
-                .schema_version_for_alias(candidate.version.schema_version_alias())
-                .ok_or(Error::InvalidStoredValue("version schema alias must exist"))?;
+            let history_table = self.version_storage_table_for_row(&candidate.version)?;
             batch.delete(
-                version_storage_table_name_for_schema(
-                    candidate.version.table(),
-                    candidate.version.layer(),
-                    schema_version,
-                    self.catalogue.current_schema_version_id,
-                ),
+                history_table.as_ref(),
                 history_primary_key(&candidate.version),
             );
             batch_deletes += 1;
@@ -271,15 +264,7 @@ where
         ]);
         for table in self.catalogue.schema.tables.clone() {
             for version in self.query_table_versions(&table.name)? {
-                let schema_version = self
-                    .schema_version_for_alias(version.schema_version_alias())
-                    .ok_or(Error::InvalidStoredValue("version schema alias must exist"))?;
-                families.insert(version_storage_table_name_for_schema(
-                    version.table(),
-                    version.layer(),
-                    schema_version,
-                    self.catalogue.current_schema_version_id,
-                ));
+                families.insert(self.version_storage_table_for_row(&version)?.to_string());
             }
         }
         Ok(families.into_iter().collect())

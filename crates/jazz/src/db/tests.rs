@@ -9,13 +9,14 @@ use groove::storage::{OrderedKvStorage, ReopenableStorage, RocksDbStorage};
 use super::*;
 use crate::ids::{AuthorId, BranchId, NodeUuid};
 use crate::protocol::{
-    BindingViewKey, CatalogueAck, KnownStateCompleteness, KnownStateDeclaration, LensOp,
-    ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef,
-    ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, TableLens,
+    BindingViewKey, BranchMetadata, CatalogueAck, KnownStateCompleteness, KnownStateDeclaration,
+    LensOp, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry,
+    RowVersionRef, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
+    TableLens,
 };
 use crate::protocol_limits::{
     MAX_CONTENT_EXTENT_BYTES, MAX_FETCH_ROW_VERSIONS, MAX_KNOWN_STATE_EXACT_REFS,
-    MAX_SHAPE_AST_BYTES, MAX_SYNC_MESSAGE_BYTES, MAX_WIRE_FRAME_BYTES,
+    MAX_LOGICAL_MESSAGE_BYTES, MAX_SHAPE_AST_BYTES, MAX_WIRE_FRAME_BYTES,
 };
 use crate::query::{
     ArraySubquery, BindingId, Include, JoinMode, OrderDirection, PolicyBranch, Predicate,
@@ -27,8 +28,8 @@ use crate::time::{GlobalSeq, TxTime};
 use crate::tx::TxId;
 use crate::wire::decode_sync_message;
 use crate::wire::{
-    FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WireStreamDecoder,
-    current_wire_features,
+    FEATURE_MESSAGE_FRAGMENTATION, FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD,
+    WireStreamDecoder, current_wire_features,
 };
 
 fn block_on<F: Future>(future: F) -> F::Output {
@@ -549,6 +550,10 @@ fn owner_read_schema() -> JazzSchema {
 }
 
 fn created_by_read_schema() -> JazzSchema {
+    created_by_read_schema_for_claim("sub")
+}
+
+fn created_by_read_schema_for_claim(claim_name: &str) -> JazzSchema {
     JazzSchema::new([TableSchema::new(
         "todos",
         [
@@ -557,7 +562,7 @@ fn created_by_read_schema() -> JazzSchema {
         ],
     )
     .with_read_policy(Policy::shape(
-        Query::from("todos").filter(eq(col("$createdBy"), claim("sub"))),
+        Query::from("todos").filter(eq(col("$createdBy"), claim(claim_name))),
     ))
     .with_write_policy(Policy::public())])
 }
@@ -1795,6 +1800,8 @@ fn oversized_content_extent_is_rejected_at_admission() {
     let schema = schema();
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let extent = crate::node::content_store::Extent {
+        schema: schema.version_id(),
+        table: "todos".to_owned(),
         writer: AuthorId::from_bytes([0xa1; 16]),
         row: row(0x42),
         column: "body".to_owned(),
@@ -1851,8 +1858,12 @@ fn branch_read_view_relation_snapshot_uses_query_engine_relation_edges() {
         )
         .expect("commit branch todo");
 
-    let query = Query::from("users")
-        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").unbounded());
+    let query = Query::from("users").array_subquery(ArraySubquery::new(
+        "todosViaOwner",
+        "todos",
+        "owner_id",
+        "id",
+    ));
     let prepared_query = prepared(&db, &query);
     let snapshot =
         doctest_support::block_on(db.all_relation_snapshot(&prepared_query, branch_read_opts()))
@@ -2245,22 +2256,9 @@ fn users_to_orgs_relation_query() -> RelationQuery {
         rel: RelationExpr::Project {
             input: Box::new(RelationExpr::Join {
                 left: Box::new(RelationExpr::Join {
-                    left: Box::new(RelationExpr::Filter {
-                        input: Box::new(RelationExpr::TableScan {
-                            table: "users".to_owned(),
-                            alias: None,
-                        }),
-                        predicate: RelationPredicate::Cmp {
-                            left: RelationColumnRef {
-                                scope: Some("users".to_owned()),
-                                column: "id".to_owned(),
-                            },
-                            op: RelationCmpOp::Eq,
-                            right: RelationValueRef::Literal(serde_json::json!({
-                                "type": "Uuid",
-                                "value": row(0x21).0.to_string(),
-                            })),
-                        },
+                    left: Box::new(RelationExpr::TableScan {
+                        table: "users".to_owned(),
+                        alias: None,
                     }),
                     right: Box::new(RelationExpr::TableScan {
                         table: "teams".to_owned(),
@@ -2561,7 +2559,12 @@ fn relation_snapshot_reverse_array_skips_deleted_children() {
 
     let query = Query::from("users")
         .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
-        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").unbounded())
+        .array_subquery(ArraySubquery::new(
+            "todosViaOwner",
+            "todos",
+            "owner_id",
+            "id",
+        ))
         .limit(1);
     let prepared = db.prepare_query(&query).unwrap();
     let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
@@ -2630,8 +2633,7 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
         .unwrap();
 
     subscriber.borrow_mut().tick().unwrap();
-    let message = client_transport
-        .try_recv()
+    let message = try_recv_subscriber_payload(client_transport.as_mut())
         .expect("expected include subscription view update");
     let SyncMessage::ViewUpdate {
         subscription: served,
@@ -2662,8 +2664,7 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
         .unwrap();
 
     subscriber.borrow_mut().tick().unwrap();
-    let message = client_transport
-        .try_recv()
+    let message = try_recv_subscriber_payload(client_transport.as_mut())
         .expect("expected reopened include subscription view update");
     let SyncMessage::ViewUpdate {
         subscription: served,
@@ -2748,9 +2749,7 @@ fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() 
     let query = Query::from("users")
         .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
         .array_subquery(
-            ArraySubquery::new("todosViaOwner", "todos", "ownerId", "id")
-                .select(["id"])
-                .unbounded(),
+            ArraySubquery::new("todosViaOwner", "todos", "ownerId", "id").select(["id"]),
         )
         .limit(1);
     let prepared = db.prepare_query(&query).unwrap();
@@ -2802,9 +2801,7 @@ fn relation_snapshot_reverse_array_reads_local_nullable_ref_child() {
     let query = Query::from("users")
         .filter(eq(col("id"), lit(Value::Uuid(user.0))))
         .array_subquery(
-            ArraySubquery::new("todosViaOwner", "todos", "ownerId", "id")
-                .select(["id"])
-                .unbounded(),
+            ArraySubquery::new("todosViaOwner", "todos", "ownerId", "id").select(["id"]),
         )
         .limit(1);
     let prepared = db.prepare_query(&query).unwrap();
@@ -3033,7 +3030,12 @@ fn array_subquery_live_subscription_tracks_child_edges() {
 
     let query = Query::from("users")
         .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
-        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").unbounded());
+        .array_subquery(ArraySubquery::new(
+            "todosViaOwner",
+            "todos",
+            "owner_id",
+            "id",
+        ));
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
@@ -3109,7 +3111,7 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
     )
     .unwrap();
     let query = Query::from("todos")
-        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id").unbounded());
+        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id"));
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
@@ -3231,7 +3233,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     let query = Query::from("todos")
-        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id").unbounded());
+        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id"));
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
@@ -3379,7 +3381,7 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
         .unwrap();
     }
     let query = Query::from("todos")
-        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id").unbounded());
+        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id"));
     let prepared_query = prepared(&db, &query);
 
     let admin = block_on(db.all_relation_snapshot_for_identity(
@@ -3463,8 +3465,7 @@ fn array_subquery_one_shot_and_maintained_subscription_are_equivalent() {
     }
     let query = Query::from("todos").array_subquery(
         ArraySubquery::new("comments", "comments", "todo_id", "id")
-            .order_by("body", OrderDirection::Asc)
-            .unbounded(),
+            .order_by("body", OrderDirection::Asc),
     );
     let prepared_query = prepared(&db, &query);
     let one_shot =
@@ -3504,11 +3505,9 @@ fn array_subquery_subscription_projects_late_root_and_existing_forward_target() 
         BTreeMap::from([("name".to_owned(), Value::String("owner".to_owned()))]),
     )
     .unwrap();
-    let query = Query::from("todos").select(["title"]).array_subquery(
-        ArraySubquery::new("owner", "users", "id", "owner_id")
-            .select(["name"])
-            .unbounded(),
-    );
+    let query = Query::from("todos")
+        .select(["title"])
+        .array_subquery(ArraySubquery::new("owner", "users", "id", "owner_id").select(["name"]));
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
     let opened = snapshot_from_event(block_on(subscription.next_event()).unwrap());
@@ -3560,9 +3559,7 @@ fn array_subquery_subscription_projects_late_camel_case_root_and_existing_forwar
     )
     .unwrap();
     let query = Query::from("issues").select(["title"]).array_subquery(
-        ArraySubquery::new("project", "projects", "id", "project")
-            .select(["name"])
-            .unbounded(),
+        ArraySubquery::new("project", "projects", "id", "project").select(["name"]),
     );
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
@@ -3605,12 +3602,16 @@ fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let client_author = AuthorId::from_bytes([0xc6; 16]);
     let client = open_db(0xc6, client_author, &schema);
-    let (client_transport, server_transport) = duplex();
+    let (client_transport, server_transport) = byte_duplex();
     let _upstream = client.connect_upstream(client_transport);
     let _subscriber = server.accept_subscriber(server_transport, client_author);
 
-    let query = Query::from("users")
-        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").unbounded());
+    let query = Query::from("users").array_subquery(ArraySubquery::new(
+        "todosViaOwner",
+        "todos",
+        "owner_id",
+        "id",
+    ));
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     let opened = snapshot_from_event(block_on(subscription.next_event()).unwrap());
     assert!(opened.rows.is_empty());
@@ -4754,6 +4755,19 @@ fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
     )
 }
 
+/// Receive the next subscriber payload relevant to direct protocol assertions.
+/// A subscriber begins by publishing its trusted catalogue prerequisite; tests
+/// that do not model a receiving `Db` still need to consume that control-plane
+/// message before asserting the requested registration/subscription response.
+fn try_recv_subscriber_payload(transport: &mut dyn Transport) -> Option<SyncMessage> {
+    loop {
+        match transport.try_recv()? {
+            SyncMessage::CatalogueSnapshot(_) => continue,
+            message => return Some(message),
+        }
+    }
+}
+
 struct BackpressureOnceTransport {
     outbound: Rc<RefCell<std::collections::VecDeque<SyncMessage>>>,
     failed: bool,
@@ -4779,6 +4793,29 @@ impl Transport for BackpressureOnceTransport {
 struct ByteDuplexTransport {
     outbound: Rc<RefCell<std::collections::VecDeque<Vec<u8>>>>,
     inbound: Rc<RefCell<std::collections::VecDeque<Vec<u8>>>>,
+}
+
+struct OneShotBackpressureTransport {
+    outbound: Rc<RefCell<std::collections::VecDeque<Vec<u8>>>>,
+    calls: usize,
+    fail_on_call: usize,
+    failed: bool,
+}
+
+impl WireTransport for OneShotBackpressureTransport {
+    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+        self.calls += 1;
+        if self.calls == self.fail_on_call && !self.failed {
+            self.failed = true;
+            return Err(TransportError::Backpressure);
+        }
+        self.outbound.borrow_mut().push_back(frame);
+        Ok(())
+    }
+
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 impl WireTransport for ByteDuplexTransport {
@@ -4816,6 +4853,339 @@ fn byte_duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
     )
 }
 
+fn byte_duplex_uncompressed() -> (Box<dyn Transport>, Box<dyn Transport>) {
+    let (left, right) = byte_duplex_raw();
+    let features =
+        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
+    (
+        Box::new(WireTransportAdapter::new(
+            left,
+            WIRE_PROTOCOL_VERSION,
+            features,
+            None,
+        )),
+        Box::new(WireTransportAdapter::new(
+            right,
+            WIRE_PROTOCOL_VERSION,
+            features,
+            None,
+        )),
+    )
+}
+
+#[test]
+fn logical_message_larger_than_frame_round_trips_reordered_and_duplicated() {
+    let (left, right) = byte_duplex_raw();
+    let staged = Rc::clone(&right.inbound);
+    let features =
+        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
+    let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
+    let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
+    let body = (0..(MAX_WIRE_FRAME_BYTES + 700_000))
+        .map(|index| ((index.wrapping_mul(31) % 251) as u8) as char)
+        .collect::<String>();
+    let message = SyncMessage::SessionClaims {
+        identity: AuthorId::from_bytes([0x71; 16]),
+        claims: BTreeMap::from([("large".to_owned(), Value::String(body))]),
+    };
+
+    sender.send(message.clone()).unwrap();
+    let mut frames = staged.borrow_mut().drain(..).collect::<Vec<_>>();
+    assert!(frames.len() > 1);
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame.len() <= MAX_WIRE_FRAME_BYTES)
+    );
+    frames.push(frames[0].clone());
+    frames.reverse();
+    staged.borrow_mut().extend(frames);
+
+    let repeated = message.clone();
+    assert_eq!(receiver.try_recv(), Some(message));
+    assert!(receiver.try_recv().is_none());
+
+    sender.send(repeated.clone()).unwrap();
+    assert_eq!(receiver.try_recv(), Some(repeated));
+}
+
+#[test]
+fn schema_lineage_publication_fragments_before_atomic_admission() {
+    let base = schema();
+    let mut evolved_schema = base.clone();
+    let large_default = Value::String("x".repeat(MAX_WIRE_FRAME_BYTES + 1024));
+    evolved_schema.tables[0].columns.push(
+        crate::schema::ColumnSchema::new("large_default", ColumnType::String)
+            .with_default(large_default.clone()),
+    );
+    let evolved = crate::protocol::SchemaVersion::new(evolved_schema);
+    let publication = crate::protocol::SchemaLineagePublication::new(
+        evolved.clone(),
+        crate::protocol::MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "large_default".to_owned(),
+                    default: large_default,
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    let message = SyncMessage::PublishSchemaWithLens {
+        author: AuthorId::SYSTEM,
+        catalogue_seq: 1,
+        publication: Box::new(publication),
+    };
+    assert!(postcard::to_allocvec(&message).unwrap().len() > MAX_WIRE_FRAME_BYTES);
+
+    let (left, right) = byte_duplex_raw();
+    let staged = Rc::clone(&right.inbound);
+    let features =
+        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
+    let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
+    let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
+    sender.send(message.clone()).unwrap();
+    let frames = staged.borrow_mut().drain(..).collect::<Vec<_>>();
+    assert!(frames.len() > 1);
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame.len() <= MAX_WIRE_FRAME_BYTES)
+    );
+
+    let authority = open_core(0x38, AuthorId::SYSTEM, &base);
+    for frame in &frames[..frames.len() - 1] {
+        staged.borrow_mut().push_back(frame.clone());
+        assert!(receiver.try_recv().is_none());
+        assert!(
+            !authority
+                .node()
+                .borrow()
+                .catalogue_schemas()
+                .contains_key(&evolved.id)
+        );
+    }
+    staged
+        .borrow_mut()
+        .push_back(frames.last().unwrap().clone());
+    let reassembled = receiver
+        .try_recv()
+        .expect("final fragment completes message");
+    assert_eq!(reassembled, message);
+    authority
+        .node()
+        .borrow_mut()
+        .apply_trusted_catalogue_message(reassembled)
+        .unwrap();
+    assert!(
+        authority
+            .node()
+            .borrow()
+            .catalogue_schemas()
+            .contains_key(&evolved.id)
+    );
+}
+
+#[test]
+fn corrupt_fragment_never_admits_a_partial_logical_message() {
+    let (left, right) = byte_duplex_raw();
+    let staged = Rc::clone(&right.inbound);
+    let features =
+        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
+    let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
+    let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
+    let message = SyncMessage::SessionClaims {
+        identity: AuthorId::from_bytes([0x72; 16]),
+        claims: BTreeMap::from([(
+            "large".to_owned(),
+            Value::String("q".repeat(MAX_WIRE_FRAME_BYTES + 64)),
+        )]),
+    };
+
+    sender.send(message).unwrap();
+    {
+        let mut staged = staged.borrow_mut();
+        let encoded = staged
+            .iter_mut()
+            .find(|encoded| {
+                matches!(
+                    decode_frame(encoded),
+                    Ok(WireFrame::MessageFragment(fragment))
+                        if fragment.payload.contains(&b'q')
+                )
+            })
+            .expect("encoded string body byte exists in a fragment");
+        let mut frame = decode_frame(encoded).unwrap();
+        let WireFrame::MessageFragment(fragment) = &mut frame else {
+            unreachable!("selected a fragment frame")
+        };
+        let byte = fragment
+            .payload
+            .iter_mut()
+            .find(|byte| **byte == b'q')
+            .expect("string body byte exists");
+        *byte = b'r';
+        *encoded = encode_frame(&frame).unwrap();
+    }
+    assert!(receiver.try_recv().is_none());
+}
+
+#[test]
+fn fragment_admission_bounds_peer_state_and_rejects_conflicting_duplicates() {
+    let features = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_MESSAGE_FRAGMENTATION;
+    let fragment = |message_id, payload: u8| WireMessageFragment {
+        protocol_version: WIRE_PROTOCOL_VERSION,
+        features,
+        session: None,
+        message_id,
+        message_digest: [payload; 32],
+        total_len: 2,
+        offset: 0,
+        payload: vec![payload],
+    };
+    let mut reassembler = LogicalMessageReassembler::default();
+    assert_eq!(reassembler.push(fragment(1, 1)).unwrap(), None);
+    assert!(
+        reassembler
+            .push(fragment(1, 2))
+            .unwrap_err()
+            .contains("disagree")
+    );
+    reassembler.discard(1);
+    for message_id in 0..MAX_INFLIGHT_LOGICAL_MESSAGES as u64 {
+        assert_eq!(
+            reassembler
+                .push(fragment(message_id, message_id as u8))
+                .unwrap(),
+            None
+        );
+    }
+    assert!(
+        reassembler
+            .push(fragment(MAX_INFLIGHT_LOGICAL_MESSAGES as u64, 9))
+            .unwrap_err()
+            .contains("too many incomplete")
+    );
+}
+
+#[test]
+fn fragmented_message_survives_mid_send_backpressure_without_semantic_retry() {
+    let staged = Rc::new(RefCell::new(std::collections::VecDeque::new()));
+    let receiver_inbound = Rc::clone(&staged);
+    let features =
+        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
+    let mut sender = WireTransportAdapter::new(
+        OneShotBackpressureTransport {
+            outbound: staged,
+            calls: 0,
+            fail_on_call: 2,
+            failed: false,
+        },
+        WIRE_PROTOCOL_VERSION,
+        features,
+        None,
+    );
+    let mut receiver = WireTransportAdapter::new(
+        ByteDuplexTransport {
+            outbound: Rc::new(RefCell::new(std::collections::VecDeque::new())),
+            inbound: receiver_inbound,
+        },
+        WIRE_PROTOCOL_VERSION,
+        features,
+        None,
+    );
+    let message = SyncMessage::SessionClaims {
+        identity: AuthorId::from_bytes([0x73; 16]),
+        claims: BTreeMap::from([(
+            "large".to_owned(),
+            Value::String("b".repeat(MAX_WIRE_FRAME_BYTES + 700_000)),
+        )]),
+    };
+
+    sender.send(message.clone()).unwrap();
+    assert!(receiver.try_recv().is_none());
+    assert!(
+        sender.try_recv().is_none(),
+        "poll flushes the accepted logical message"
+    );
+    assert_eq!(receiver.try_recv(), Some(message));
+}
+
+#[test]
+fn first_frame_backpressure_queues_compressed_logical_message_without_retry() {
+    let staged = Rc::new(RefCell::new(std::collections::VecDeque::new()));
+    let receiver_inbound = Rc::clone(&staged);
+    let features = current_wire_features();
+    let mut sender = WireTransportAdapter::new(
+        OneShotBackpressureTransport {
+            outbound: staged,
+            calls: 0,
+            fail_on_call: 1,
+            failed: false,
+        },
+        WIRE_PROTOCOL_VERSION,
+        features,
+        None,
+    );
+    let mut receiver = WireTransportAdapter::new(
+        ByteDuplexTransport {
+            outbound: Rc::new(RefCell::new(std::collections::VecDeque::new())),
+            inbound: receiver_inbound,
+        },
+        WIRE_PROTOCOL_VERSION,
+        features,
+        None,
+    );
+    let message = SyncMessage::SessionClaims {
+        identity: AuthorId::from_bytes([0x75; 16]),
+        claims: BTreeMap::from([(
+            "large".to_owned(),
+            Value::String("compressible".repeat(300_000)),
+        )]),
+    };
+
+    assert_eq!(sender.send(message.clone()), Ok(()));
+    assert!(receiver.try_recv().is_none());
+    assert!(
+        sender.try_recv().is_none(),
+        "poll flushes the accepted message"
+    );
+    assert_eq!(receiver.try_recv(), Some(message));
+}
+
+#[test]
+fn reconnect_discards_missing_fragments_and_replays_the_logical_message() {
+    let features =
+        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
+    let message = SyncMessage::SessionClaims {
+        identity: AuthorId::from_bytes([0x74; 16]),
+        claims: BTreeMap::from([(
+            "large".to_owned(),
+            Value::String("c".repeat(MAX_WIRE_FRAME_BYTES + 700_000)),
+        )]),
+    };
+
+    let (left, right) = byte_duplex_raw();
+    let staged = Rc::clone(&right.inbound);
+    let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
+    let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
+    sender.send(message.clone()).unwrap();
+    staged.borrow_mut().truncate(1);
+    assert!(receiver.try_recv().is_none());
+    drop(receiver);
+
+    let (left, right) = byte_duplex_raw();
+    let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
+    let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
+    sender.send(message.clone()).unwrap();
+    assert_eq!(receiver.try_recv(), Some(message));
+}
+
 fn byte_duplex_with_session(
     identity: AuthorId,
     epoch: u64,
@@ -4832,7 +5202,8 @@ fn byte_duplex_with_session(
             WIRE_PROTOCOL_VERSION,
             FEATURE_SYNC_MESSAGE_PAYLOAD
                 | crate::wire::FEATURE_SESSION_FRAME
-                | FEATURE_STRUCTURED_ERRORS,
+                | FEATURE_STRUCTURED_ERRORS
+                | FEATURE_MESSAGE_FRAGMENTATION,
             Some(session.clone()),
         )),
         Box::new(WireTransportAdapter::new(
@@ -4840,7 +5211,8 @@ fn byte_duplex_with_session(
             WIRE_PROTOCOL_VERSION,
             FEATURE_SYNC_MESSAGE_PAYLOAD
                 | crate::wire::FEATURE_SESSION_FRAME
-                | FEATURE_STRUCTURED_ERRORS,
+                | FEATURE_STRUCTURED_ERRORS
+                | FEATURE_MESSAGE_FRAGMENTATION,
             Some(session),
         )),
     )
@@ -4980,6 +5352,72 @@ fn wire_transport_adapter_rejects_missing_session_without_emitting_sync_message(
 
     assert!(adapter.try_recv().is_none());
     expect_auth_failed_frame(&mut right, WireRetry::AfterAuth, "missing");
+}
+
+#[test]
+fn fragment_authentication_precedes_reassembly_allocation() {
+    let (left, mut right) = byte_duplex_raw();
+    let expected_identity = AuthorId::from_bytes([0xa5; 16]);
+    let features = FEATURE_SYNC_MESSAGE_PAYLOAD
+        | crate::wire::FEATURE_SESSION_FRAME
+        | FEATURE_STRUCTURED_ERRORS
+        | FEATURE_MESSAGE_FRAGMENTATION;
+    let fragment = WireMessageFragment {
+        protocol_version: WIRE_PROTOCOL_VERSION,
+        features,
+        session: Some(test_wire_session(AuthorId::from_bytes([0xb5; 16]), 3)),
+        message_id: 41,
+        message_digest: [7; 32],
+        total_len: MAX_LOGICAL_MESSAGE_BYTES as u64,
+        offset: 0,
+        payload: vec![7],
+    };
+    left.inbound
+        .borrow_mut()
+        .push_back(encode_frame(&WireFrame::MessageFragment(fragment)).unwrap());
+    let mut adapter = WireTransportAdapter::new(
+        left,
+        WIRE_PROTOCOL_VERSION,
+        features,
+        Some(test_wire_session(expected_identity, 3)),
+    );
+
+    assert!(adapter.try_recv().is_none());
+    assert!(adapter.reassembler.incomplete.is_empty());
+    assert_eq!(adapter.reassembler.staged_bytes, 0);
+    expect_auth_failed_frame(&mut right, WireRetry::AfterAuth, "identity");
+}
+
+#[test]
+fn fragment_negotiation_validation_precedes_reassembly_allocation() {
+    let (left, mut right) = byte_duplex_raw();
+    let features = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_MESSAGE_FRAGMENTATION;
+    let fragment = WireMessageFragment {
+        protocol_version: WIRE_PROTOCOL_VERSION + 1,
+        features: features | crate::wire::FEATURE_PAYLOAD_LZ4,
+        session: None,
+        message_id: 42,
+        message_digest: [8; 32],
+        total_len: MAX_LOGICAL_MESSAGE_BYTES as u64,
+        offset: 0,
+        payload: vec![8],
+    };
+    left.inbound
+        .borrow_mut()
+        .push_back(encode_frame(&WireFrame::MessageFragment(fragment)).unwrap());
+    let mut adapter = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
+
+    assert!(adapter.try_recv().is_none());
+    assert!(adapter.reassembler.incomplete.is_empty());
+    assert_eq!(adapter.reassembler.staged_bytes, 0);
+    let error = right.try_recv_frame().expect("structured wire error");
+    assert!(matches!(
+        decode_frame(&error).unwrap(),
+        WireFrame::Error(WireError {
+            code: WireErrorCode::UnsupportedProtocolVersion,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -5179,6 +5617,128 @@ fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<RocksDbStorage
         large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap()
+}
+
+#[test]
+fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let structural = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+            ColumnSchema::new("editor", ColumnType::Uuid),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public())]);
+    let v2_table = TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+            ColumnSchema::new("editor", ColumnType::Uuid),
+            ColumnSchema::new("body", ColumnType::String),
+        ],
+    )
+    .with_write_policy(Policy::public());
+    let owner_head = JazzSchema::new([v2_table
+        .clone()
+        .with_read_policy(Policy::owner_only("todos", "owner"))]);
+    let editor_head =
+        JazzSchema::new([v2_table.with_read_policy(Policy::owner_only("todos", "editor"))]);
+    let owner_payload = SchemaVersion::new(owner_head.clone());
+    assert_eq!(owner_payload.id, editor_head.version_id());
+
+    let db = open_db(0xa0, AuthorId::SYSTEM, &structural);
+    db.publish_schema_with_lens(
+        1,
+        SchemaLineagePublication::new(
+            owner_payload.clone(),
+            MigrationLens::new(
+                structural.version_id(),
+                owner_payload.id,
+                vec![TableLens {
+                    source_table: "todos".to_owned(),
+                    target_table: "todos".to_owned(),
+                    ops: vec![LensOp::AddColumn {
+                        column: "body".to_owned(),
+                        default: Value::String(String::new()),
+                    }],
+                }],
+            ),
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        ),
+    )
+    .unwrap();
+    db.set_current_write_schema(CurrentWriteSchema {
+        revision: 1,
+        schema: owner_payload.id,
+    })
+    .unwrap();
+    let first = row(0xa1);
+    db.seed_settled_mergeable_for_bootstrap(
+        "todos",
+        first,
+        AuthorId::SYSTEM,
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("first".to_owned())),
+            ("owner".to_owned(), Value::Uuid(alice.0)),
+            ("editor".to_owned(), Value::Uuid(bob.0)),
+            ("body".to_owned(), Value::String(String::new())),
+        ]),
+    )
+    .unwrap();
+
+    let prepared = db.prepare_query(&Query::from("todos")).unwrap();
+    let mut subscription = block_on(db.subscribe_for_identity(
+        &prepared,
+        ReadOpts {
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        alice,
+    ))
+    .unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(block_on(subscription.next_event()).unwrap())),
+        vec![first]
+    );
+
+    db.publish_schema(SchemaVersion::new(editor_head)).unwrap();
+    db.seed_settled_mergeable_for_bootstrap(
+        "todos",
+        row(0xb2),
+        AuthorId::SYSTEM,
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("second".to_owned())),
+            ("owner".to_owned(), Value::Uuid(bob.0)),
+            ("editor".to_owned(), Value::Uuid(bob.0)),
+            ("body".to_owned(), Value::String(String::new())),
+        ]),
+    )
+    .unwrap();
+
+    let event = subscription
+        .try_next_event()
+        .expect("permissions-head change must refresh the live subscription");
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        updated,
+        removed,
+        ..
+    } = event
+    else {
+        panic!("permissions-head refresh must emit a delta reset");
+    };
+    assert!(reset);
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].row_uuid, first);
 }
 
 fn joined_issue_query() -> Query {
@@ -5597,20 +6157,25 @@ impl CoreDb {
         self.server
             .node()
             .borrow_mut()
-            .apply_sync_message(SyncMessage::PublishSchema {
+            .apply_trusted_catalogue_message(SyncMessage::PublishSchema {
                 author: self.author,
                 schema: Box::new(schema),
             })
             .map_err(Into::into)
     }
 
-    fn publish_lens(&self, lens: MigrationLens) -> Result<Vec<SyncMessage>, Error> {
+    fn publish_schema_with_lens(
+        &self,
+        catalogue_seq: u64,
+        publication: SchemaLineagePublication,
+    ) -> Result<Vec<SyncMessage>, Error> {
         self.server
             .node()
             .borrow_mut()
-            .apply_sync_message(SyncMessage::PublishLens {
+            .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
                 author: self.author,
-                lens,
+                catalogue_seq,
+                publication: Box::new(publication),
             })
             .map_err(Into::into)
     }
@@ -5622,7 +6187,7 @@ impl CoreDb {
         self.server
             .node()
             .borrow_mut()
-            .apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+            .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
                 author: self.author,
                 pointer,
             })
@@ -5743,12 +6308,6 @@ fn db_catalogue_facade_publishes_schema_lens_and_current_write_schema() {
     let client = open_db(0xc1, owner, &base);
     let schema_version = SchemaVersion::new(evolved.clone());
 
-    let schema_ack = core.publish_schema(schema_version.clone()).unwrap();
-    assert!(matches!(
-        schema_ack.as_slice(),
-        [SyncMessage::CatalogueAck(ack)] if ack.schema == Some(schema_version.id) && ack.applied
-    ));
-
     let lens = MigrationLens::new(
         base.version_id(),
         schema_version.id,
@@ -5761,10 +6320,23 @@ fn db_catalogue_facade_publishes_schema_lens_and_current_write_schema() {
             }],
         }],
     );
-    let lens_ack = core.publish_lens(lens.clone()).unwrap();
+    let lens_ack = core
+        .publish_schema_with_lens(
+            1,
+            SchemaLineagePublication::new(
+                schema_version.clone(),
+                lens.clone(),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            ),
+        )
+        .unwrap();
     assert!(matches!(
         lens_ack.as_slice(),
-        [SyncMessage::CatalogueAck(ack)] if ack.lens == Some(lens.id) && ack.applied
+        [SyncMessage::CatalogueAck(ack)]
+            if ack.schema == Some(schema_version.id)
+                && ack.lens == Some(lens.id)
+                && ack.applied
     ));
 
     let pointer = CurrentWriteSchema {
@@ -5856,268 +6428,7 @@ fn db_sync_surface_round_trips_subscription_to_client() {
 }
 
 #[test]
-fn oversized_view_update_splits_into_bounded_final_settling_chunks() {
-    let subscription = SubscriptionKey {
-        shape_id: ShapeId(uuid::Uuid::from_bytes([0x22; 16])),
-        binding_id: BindingId(uuid::Uuid::from_bytes([0x33; 16])),
-        read_view: RegisterShapeOptions::default().read_view_key(),
-    };
-    let facts = (0..700)
-        .map(|idx| {
-            crate::protocol::ProgramFactEntry::SourceCoverage(
-                crate::protocol::SourceCoverageEntry {
-                    source: format!("source-{idx}"),
-                    table: "todos".to_owned().into(),
-                    row: None,
-                    coverage: vec![idx as u8; 4096],
-                },
-            )
-        })
-        .collect::<Vec<_>>();
-    let update = SyncMessage::ViewUpdate {
-        subscription,
-        settled_through: GlobalSeq(42),
-        reset_result_set: true,
-        version_carriers: Vec::new(),
-        version_bundles: Vec::new(),
-        peer_payload_inventory: Default::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        program_fact_adds: facts,
-        program_fact_removes: Vec::new(),
-    };
-    assert!(serialized_sync_message_len(&update) > MAX_SYNC_MESSAGE_BYTES);
-
-    let chunks = split_oversized_view_update(update).unwrap();
-    assert!(chunks.len() > 1);
-    for (idx, chunk) in chunks.iter().enumerate() {
-        assert!(serialized_sync_message_len(chunk) <= MAX_SYNC_MESSAGE_BYTES);
-        assert!(serialized_uncompressed_wire_message_len(chunk) <= MAX_WIRE_FRAME_BYTES);
-        let SyncMessage::ViewUpdateChunk {
-            reset_result_set,
-            final_chunk,
-            ..
-        } = chunk
-        else {
-            panic!("expected chunked view update");
-        };
-        assert_eq!(*reset_result_set, idx == 0);
-        assert_eq!(*final_chunk, idx + 1 == chunks.len());
-    }
-}
-
-#[test]
-fn view_update_chunking_budgets_full_wire_frame_boundary() {
-    let subscription = SubscriptionKey {
-        shape_id: ShapeId(uuid::Uuid::from_bytes([0x24; 16])),
-        binding_id: BindingId(uuid::Uuid::from_bytes([0x35; 16])),
-        read_view: RegisterShapeOptions::default().read_view_key(),
-    };
-
-    let mut low = 0usize;
-    let mut high = 800usize;
-    let mut prefix_count = 0usize;
-    while low <= high {
-        let mid = low + (high - low) / 2;
-        let candidate = view_update_with_facts(subscription, source_coverage_facts(mid, 4096));
-        if serialized_sync_message_len(&candidate) < MAX_SYNC_MESSAGE_BYTES - 20_000 {
-            prefix_count = mid;
-            low = mid + 1;
-        } else {
-            high = mid.saturating_sub(1);
-        }
-    }
-    let prefix = source_coverage_facts(prefix_count, 4096);
-
-    let mut low = 0usize;
-    let mut high = 50_000usize;
-    let mut tail_len = None;
-    while low <= high {
-        let mid = low + (high - low) / 2;
-        let mut candidate_facts = prefix.clone();
-        candidate_facts.push(source_coverage_fact(candidate_facts.len(), mid));
-        let candidate = view_update_with_facts(subscription, candidate_facts);
-        if serialized_sync_message_len(&candidate) <= MAX_SYNC_MESSAGE_BYTES {
-            tail_len = Some(mid);
-            low = mid + 1;
-        } else {
-            high = mid.saturating_sub(1);
-        }
-    }
-    let mut facts = prefix;
-    facts.push(source_coverage_fact(
-        facts.len(),
-        tail_len.expect("test fixture should find a semantic-fit tail"),
-    ));
-    let update = view_update_with_facts(subscription, facts);
-    assert!(serialized_sync_message_len(&update) <= MAX_SYNC_MESSAGE_BYTES);
-    assert!(serialized_uncompressed_wire_message_len(&update) > MAX_WIRE_FRAME_BYTES);
-
-    let chunks = split_oversized_view_update(update).unwrap();
-    assert!(chunks.len() > 1);
-    for chunk in &chunks {
-        assert!(
-            serialized_uncompressed_wire_message_len(chunk) <= MAX_WIRE_FRAME_BYTES,
-            "chunk framed length {} exceeds cap {}",
-            serialized_uncompressed_wire_message_len(chunk),
-            MAX_WIRE_FRAME_BYTES
-        );
-    }
-}
-
-#[test]
-fn view_update_chunking_keeps_result_adds_with_referenced_versions() {
-    // Internal protocol test: the public API only exposes eventual subscription
-    // rows, while this pins the chunk composition invariant that prevents
-    // per-chunk missing-ref repair from seeing false misses.
-    let schema = schema();
-    let table = &schema.tables[0];
-    let subscription = SubscriptionKey {
-        shape_id: ShapeId(uuid::Uuid::from_bytes([0x25; 16])),
-        binding_id: BindingId(uuid::Uuid::from_bytes([0x36; 16])),
-        read_view: RegisterShapeOptions::default().read_view_key(),
-    };
-    let tx_node = NodeUuid::from_bytes([0x51; 16]);
-    let mut version_bundles = Vec::new();
-    let mut result_member_adds = Vec::new();
-    for idx in 0..900u16 {
-        let tx_id = TxId::new(TxTime::from(idx as u64 + 1), tx_node);
-        let row_uuid = RowUuid::from_bytes([
-            (idx >> 8) as u8,
-            idx as u8,
-            0xaa,
-            0xaa,
-            0xaa,
-            0xaa,
-            0xaa,
-            0xaa,
-            0xaa,
-            0xaa,
-            0xaa,
-            0xaa,
-            0xaa,
-            0xaa,
-            0xaa,
-            0xaa,
-        ]);
-        let tx = crate::tx::Transaction {
-            tx_id,
-            kind: crate::tx::TxKind::Mergeable,
-            n_total_writes: 1,
-            made_by: AuthorId::SYSTEM,
-            permission_subject: None,
-            base_snapshot: None,
-            row_read_set: None,
-            absent_read_set: None,
-            predicate_read_set: None,
-            user_metadata_json: None,
-            source_branch: None,
-            merge_strategy: None,
-        };
-        let version = crate::protocol::VersionRecord::from_cells(
-            table,
-            schema.version_id(),
-            row_uuid,
-            Vec::new(),
-            AuthorId::SYSTEM,
-            TxTime(1),
-            AuthorId::SYSTEM,
-            TxTime(1),
-            &BTreeMap::from([
-                (
-                    "title".to_owned(),
-                    Value::String(format!("row-{idx}-{}", "x".repeat(4096))),
-                ),
-                ("done".to_owned(), Value::Bool(false)),
-                ("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
-            ]),
-            None,
-        )
-        .unwrap();
-        version_bundles.push(VersionBundle {
-            tx,
-            versions: vec![version],
-            fate: Fate::Accepted,
-            global_seq: Some(GlobalSeq(idx as u64 + 1)),
-            durability: DurabilityTier::Global,
-        });
-        result_member_adds.push(ResultMemberEntry::row((
-            "todos".to_owned().into(),
-            row_uuid,
-            tx_id,
-        )));
-    }
-
-    let update = SyncMessage::ViewUpdate {
-        subscription,
-        settled_through: GlobalSeq(900),
-        reset_result_set: true,
-        version_carriers: Vec::new(),
-        version_bundles,
-        peer_payload_inventory: Default::default(),
-        result_member_adds,
-        result_member_removes: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
-    };
-    assert!(serialized_sync_message_len(&update) > MAX_SYNC_MESSAGE_BYTES);
-
-    let chunks = split_oversized_view_update(update).unwrap();
-    assert!(chunks.len() > 1);
-    let mut total_adds = 0;
-    let mut saw_version_carrier = false;
-    let mut saw_run_carrier = false;
-    for chunk in chunks {
-        assert!(serialized_uncompressed_wire_message_len(&chunk) <= MAX_WIRE_FRAME_BYTES);
-        let SyncMessage::ViewUpdateChunk {
-            version_carriers,
-            version_bundles,
-            result_member_adds,
-            ..
-        } = chunk
-        else {
-            panic!("expected chunked view update");
-        };
-        assert!(
-            version_bundles.is_empty(),
-            "chunked version payloads should be emitted as carriers"
-        );
-        saw_version_carrier |= !version_carriers.is_empty();
-        saw_run_carrier |= version_carriers
-            .iter()
-            .any(|carrier| matches!(carrier, crate::protocol::VersionCarrier::Run(_)));
-        let expanded_bundles = crate::protocol::expand_version_carriers(&version_carriers)
-            .expect("chunk carriers should expand");
-        let incoming = expanded_bundles
-            .iter()
-            .flat_map(|bundle| {
-                bundle.versions.iter().map(|version| {
-                    RowVersionRef::new(
-                        version.table().to_owned(),
-                        version.row_uuid(),
-                        bundle.tx.tx_id,
-                    )
-                })
-            })
-            .collect::<BTreeSet<_>>();
-        for (table, row_uuid, tx_id) in result_member_adds
-            .iter()
-            .filter_map(ResultMemberEntry::as_row)
-        {
-            total_adds += 1;
-            assert!(
-                incoming.contains(&RowVersionRef::new(table.to_string(), row_uuid, tx_id)),
-                "result add must be accompanied by its referenced version in the same chunk"
-            );
-        }
-    }
-    assert!(saw_version_carrier);
-    assert!(saw_run_carrier);
-    assert_eq!(total_adds, 900);
-}
-
-#[test]
-fn oversized_snapshot_subscription_delivers_full_settled_count() {
+fn large_logical_snapshot_crosses_byte_peer_transport_and_settles() {
     let schema = schema();
     let owner = AuthorId::from_bytes([0x71; 16]);
     let client_author = AuthorId::from_bytes([0x72; 16]);
@@ -6133,7 +6444,7 @@ fn oversized_snapshot_subscription_delivers_full_settled_count() {
         );
     }
 
-    let (client_transport, server_transport) = duplex();
+    let (client_transport, server_transport) = byte_duplex_uncompressed();
     let _upstream = client.connect_upstream(client_transport);
     let _subscriber = server.accept_subscriber(server_transport, client_author);
 
@@ -6160,45 +6471,771 @@ fn oversized_snapshot_subscription_delivers_full_settled_count() {
 
     let rows = prepared_read(&client, &query);
     panic!(
-        "oversized snapshot subscription did not settle; currently visible rows={}",
+        "large logical snapshot subscription did not settle; currently visible rows={}",
         rows.len()
     );
 }
 
-fn view_update_with_facts(
-    subscription: SubscriptionKey,
-    facts: Vec<crate::protocol::ProgramFactEntry>,
-) -> SyncMessage {
-    SyncMessage::ViewUpdate {
-        subscription,
-        settled_through: GlobalSeq(42),
-        reset_result_set: true,
-        version_carriers: Vec::new(),
-        version_bundles: Vec::new(),
-        peer_payload_inventory: Default::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        program_fact_adds: facts,
-        program_fact_removes: Vec::new(),
+#[test]
+fn offline_branch_creation_and_commit_sync_metadata_before_data() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, identity, &schema);
+    let branch = BranchId::from_bytes([0x42; 16]);
+    client.create_branch_with_id(branch).unwrap();
+    let write = client
+        .insert_on_branch(branch, "todos", cells("offline branch", false, identity))
+        .unwrap();
+    let branch_row = write.row_uuid();
+    assert!(server.node().borrow().branch_record(branch).is_none());
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, identity);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    let record = client
+        .node
+        .node
+        .borrow()
+        .branch_record(branch)
+        .cloned()
+        .unwrap();
+    assert_eq!(record.created_by, identity);
+    let received = server
+        .node()
+        .borrow()
+        .branch_record(branch)
+        .cloned()
+        .unwrap();
+    assert_eq!(received.branch_id, record.branch_id);
+    assert_eq!(received.created_by, record.created_by);
+    assert_eq!(received.parent, record.parent);
+    assert_eq!(
+        received.base.as_ref().map(|base| base.global_base),
+        record.base.as_ref().map(|base| base.global_base)
+    );
+    assert_eq!(
+        server
+            .node()
+            .borrow_mut()
+            .transaction_record(write.mergeable_tx_id())
+            .unwrap()
+            .target_lineage,
+        crate::tx::BranchLineage::Branch(branch)
+    );
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let rows = server
+        .node()
+        .borrow_mut()
+        .query_rows_on_branch(branch, &shape, &binding)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), branch_row);
+}
+
+#[test]
+fn session_branch_metadata_rejects_creator_mismatch() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let branch = BranchId::from_bytes([0x42; 16]);
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, identity);
+
+    client_transport
+        .send(SyncMessage::BranchMetadata(BranchMetadata {
+            branch_id: branch,
+            created_by: AuthorId::from_bytes([0xee; 16]),
+            parent: Some(BranchId::from_bytes([0xdd; 16])),
+            base: None,
+            open: false,
+        }))
+        .unwrap();
+    assert!(subscriber.borrow_mut().tick().is_err());
+    assert!(server.node().borrow().branch_record(branch).is_none());
+}
+
+#[test]
+fn session_branch_metadata_rejects_malformed_initial_shapes() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let source = open_core(0xc1, identity, &schema);
+    let branch = BranchId::from_bytes([0x49; 16]);
+    let record = source
+        .node()
+        .borrow_mut()
+        .create_branch_as(branch, identity)
+        .unwrap();
+    let canonical = BranchMetadata::from(&record);
+    let mut discarded = canonical.clone();
+    discarded.open = false;
+    let mut parented = canonical.clone();
+    parented.parent = Some(BranchId::from_bytes([0xdd; 16]));
+    let mut arbitrary_owner = canonical.clone();
+    arbitrary_owner.base.as_mut().unwrap().owner = NodeUuid::from_bytes([0xee; 16]);
+    let mut local_tail = canonical.clone();
+    local_tail.base.as_mut().unwrap().local_base = TxTime(1);
+    let mut dotted = canonical;
+    dotted
+        .base
+        .as_mut()
+        .unwrap()
+        .dots
+        .push(TxId::new(TxTime(1), NodeUuid(uuid::Uuid::nil())));
+
+    for metadata in [discarded, parented, arbitrary_owner, local_tail, dotted] {
+        let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+        let (mut client_transport, server_transport) = duplex();
+        let subscriber = server.accept_subscriber(server_transport, identity);
+        client_transport
+            .send(SyncMessage::BranchMetadata(metadata))
+            .unwrap();
+        assert!(subscriber.borrow_mut().tick().is_err());
+        assert!(server.node().borrow().branch_record(branch).is_none());
     }
 }
 
-fn source_coverage_fact(idx: usize, coverage_len: usize) -> crate::protocol::ProgramFactEntry {
-    crate::protocol::ProgramFactEntry::SourceCoverage(crate::protocol::SourceCoverageEntry {
-        source: format!("boundary-source-{idx}"),
-        table: "todos".to_owned().into(),
-        row: None,
-        coverage: vec![idx as u8; coverage_len],
-    })
+#[test]
+fn empty_branch_metadata_retries_after_unacked_reopen() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let node_uuid = NodeUuid::from_bytes([0xc1; 16]);
+    let branch = BranchId::from_bytes([0x4a; 16]);
+    let dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let client = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity: DbIdentity {
+            node: node_uuid,
+            author: identity,
+        },
+        id_source: None,
+        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    }))
+    .unwrap();
+    client.create_branch_with_id(branch).unwrap();
+    let first_server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let (client_transport, server_transport) = duplex();
+    let upstream = client.connect_upstream(client_transport);
+    let _subscriber = first_server.accept_subscriber(server_transport, identity);
+    upstream.borrow_mut().tick().unwrap();
+    first_server.tick().unwrap();
+    assert!(first_server.node().borrow().branch_record(branch).is_some());
+    drop(upstream);
+    client.close().unwrap();
+    drop(client);
+
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let reopened = block_on(Db::open(DbConfig {
+        schema,
+        storage,
+        identity: DbIdentity {
+            node: node_uuid,
+            author: identity,
+        },
+        id_source: None,
+        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    }))
+    .unwrap();
+    assert_eq!(
+        reopened
+            .node
+            .node
+            .borrow()
+            .pending_branch_metadata_uploads()
+            .len(),
+        1
+    );
+    let replay_server = open_core(0x6e, AuthorId::SYSTEM, &reopened.schema);
+    let (client_transport, server_transport) = duplex();
+    let upstream = reopened.connect_upstream(client_transport);
+    let _subscriber = replay_server.accept_subscriber(server_transport, identity);
+    upstream.borrow_mut().tick().unwrap();
+    replay_server.tick().unwrap();
+    upstream.borrow_mut().tick().unwrap();
+    assert!(
+        replay_server
+            .node()
+            .borrow()
+            .branch_record(branch)
+            .is_some()
+    );
+    assert!(
+        reopened
+            .node
+            .node
+            .borrow()
+            .pending_branch_metadata_uploads()
+            .is_empty()
+    );
 }
 
-fn source_coverage_facts(
-    count: usize,
-    coverage_len: usize,
-) -> Vec<crate::protocol::ProgramFactEntry> {
-    (0..count)
-        .map(|idx| source_coverage_fact(idx, coverage_len))
-        .collect()
+#[test]
+fn acknowledged_open_accepts_remote_discard_and_recovers_it() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let node_uuid = NodeUuid::from_bytes([0xc2; 16]);
+    let branch = BranchId::from_bytes([0x4d; 16]);
+    let dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let client = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity: DbIdentity {
+            node: node_uuid,
+            author: identity,
+        },
+        id_source: None,
+        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    }))
+    .unwrap();
+    let authority = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    client.create_branch_with_id(branch).unwrap();
+    let (client_transport, authority_transport) = duplex();
+    let upstream = client.connect_upstream(client_transport);
+    let subscriber = authority.accept_subscriber(authority_transport, identity);
+    client.tick().unwrap();
+    authority.tick().unwrap();
+    client.tick().unwrap();
+    assert!(
+        client
+            .node
+            .node
+            .borrow()
+            .pending_branch_metadata_uploads()
+            .is_empty()
+    );
+    drop(upstream);
+    drop(subscriber);
+
+    authority
+        .node()
+        .borrow_mut()
+        .discard_branch(branch)
+        .unwrap();
+    let discarded = BranchMetadata::from(authority.node().borrow().branch_record(branch).unwrap());
+    assert!(!discarded.open);
+    let (client_transport, mut trusted_remote) = duplex();
+    let upstream = client.connect_upstream(client_transport);
+    trusted_remote
+        .send(SyncMessage::BranchMetadata(discarded.clone()))
+        .unwrap();
+    upstream.borrow_mut().tick().unwrap();
+    assert_eq!(
+        BranchMetadata::from(client.node.node.borrow().branch_record(branch).unwrap()),
+        discarded
+    );
+    drop(upstream);
+    client.close().unwrap();
+    drop(client);
+
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let reopened = block_on(Db::open(DbConfig {
+        schema,
+        storage,
+        identity: DbIdentity {
+            node: node_uuid,
+            author: identity,
+        },
+        id_source: None,
+        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    }))
+    .unwrap();
+    assert_eq!(
+        BranchMetadata::from(reopened.node.node.borrow().branch_record(branch).unwrap()),
+        discarded
+    );
+}
+
+#[test]
+fn edge_durably_relays_empty_branch_creation_and_discard_after_reopen() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let edge_uuid = NodeUuid::from_bytes([0xe1; 16]);
+    let branch = BranchId::from_bytes([0x4c; 16]);
+    let client = open_db(0xc1, identity, &schema);
+    let authority = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let edge_dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+
+    let edge_storage = RocksDbStorage::open(edge_dir.path(), &refs).unwrap();
+    let edge = Node::new(
+        NodeState::new_history_complete(edge_uuid, schema.clone(), edge_storage).unwrap(),
+    );
+    client.create_branch_with_id(branch).unwrap();
+    let (client_transport, edge_transport) = duplex();
+    let client_link = client.connect_upstream(client_transport);
+    let edge_downstream = edge.accept_subscriber(edge_transport, identity);
+    client.tick().unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(
+        edge.node().borrow().pending_branch_metadata_uploads().len(),
+        1
+    );
+    assert!(authority.node().borrow().branch_record(branch).is_none());
+    drop(client_link);
+    drop(edge_downstream);
+    drop(edge);
+
+    // The edge acknowledged the client hop, but its independent authority hop
+    // remains durable across restart.
+    let edge_storage = RocksDbStorage::open(edge_dir.path(), &refs).unwrap();
+    let edge = Node::new(
+        NodeState::new_history_complete(edge_uuid, schema.clone(), edge_storage).unwrap(),
+    );
+    assert_eq!(
+        edge.node().borrow().pending_branch_metadata_uploads().len(),
+        1
+    );
+    let (edge_transport, authority_transport) = duplex();
+    let edge_upstream = edge.connect_upstream(edge_transport);
+    let authority_downstream = authority.accept_subscriber_with_trust(
+        authority_transport,
+        identity,
+        CommitUnitTrust::TrustedBackend,
+    );
+    edge.tick().unwrap();
+    authority.tick().unwrap();
+    edge.tick().unwrap();
+    assert!(authority.node().borrow().branch_record(branch).is_some());
+    assert!(
+        edge.node()
+            .borrow()
+            .pending_branch_metadata_uploads()
+            .is_empty()
+    );
+    drop(edge_upstream);
+    drop(authority_downstream);
+
+    // A delayed exact retry from the downstream author is acknowledged but
+    // does not reopen an already-acknowledged upstream relay.
+    let open_metadata =
+        BranchMetadata::from(client.node.node.borrow().branch_record(branch).unwrap());
+    let (mut retry_transport, edge_transport) = duplex();
+    let retry_downstream = edge.accept_subscriber(edge_transport, identity);
+    retry_transport
+        .send(SyncMessage::BranchMetadata(open_metadata))
+        .unwrap();
+    retry_downstream.borrow_mut().tick().unwrap();
+    assert!(
+        edge.node()
+            .borrow()
+            .pending_branch_metadata_uploads()
+            .is_empty()
+    );
+    drop(retry_downstream);
+
+    client
+        .node
+        .node
+        .borrow_mut()
+        .discard_branch(branch)
+        .unwrap();
+    let (client_transport, edge_transport) = duplex();
+    let client_link = client.connect_upstream(client_transport);
+    let edge_downstream = edge.accept_subscriber(edge_transport, identity);
+    client.tick().unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(
+        edge.node().borrow().pending_branch_metadata_uploads().len(),
+        1
+    );
+    assert!(BranchMetadata::from(authority.node().borrow().branch_record(branch).unwrap()).open);
+    drop(client_link);
+    drop(edge_downstream);
+    drop(edge);
+
+    let edge_storage = RocksDbStorage::open(edge_dir.path(), &refs).unwrap();
+    let edge = Node::new(
+        NodeState::new_history_complete(edge_uuid, schema.clone(), edge_storage).unwrap(),
+    );
+    assert_eq!(
+        edge.node().borrow().pending_branch_metadata_uploads().len(),
+        1
+    );
+    let (edge_transport, authority_transport) = duplex();
+    let _edge_upstream = edge.connect_upstream(edge_transport);
+    let _authority_downstream = authority.accept_subscriber_with_trust(
+        authority_transport,
+        identity,
+        CommitUnitTrust::TrustedBackend,
+    );
+    edge.tick().unwrap();
+    authority.tick().unwrap();
+    edge.tick().unwrap();
+    assert!(!BranchMetadata::from(authority.node().borrow().branch_record(branch).unwrap()).open);
+    assert!(
+        edge.node()
+            .borrow()
+            .pending_branch_metadata_uploads()
+            .is_empty()
+    );
+}
+
+#[test]
+fn session_branch_data_parks_until_authenticated_metadata_arrives() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let writer = open_core(0xc1, identity, &schema);
+    let branch = BranchId::from_bytes([0x47; 16]);
+    let record = writer
+        .node()
+        .borrow_mut()
+        .create_branch_as(branch, identity)
+        .unwrap();
+    let tx_id = writer
+        .node()
+        .borrow_mut()
+        .commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new("todos", row(0x47), 1)
+                .made_by(identity)
+                .cells(cells("data first", false, identity)),
+        )
+        .unwrap();
+    let unit = writer.node().borrow_mut().commit_unit_for(tx_id).unwrap();
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, identity);
+
+    client_transport.send(unit).unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(
+        server
+            .node()
+            .borrow_mut()
+            .transaction_record(tx_id)
+            .is_none()
+    );
+    assert!(matches!(
+        try_recv_subscriber_payload(client_transport.as_mut()),
+        Some(SyncMessage::FetchBranchMetadata { branches }) if branches == vec![branch]
+    ));
+
+    client_transport
+        .send(SyncMessage::BranchMetadata((&record).into()))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert_eq!(
+        server
+            .node()
+            .borrow_mut()
+            .transaction_record(tx_id)
+            .unwrap()
+            .target_lineage,
+        crate::tx::BranchLineage::Branch(branch)
+    );
+}
+
+#[test]
+fn session_branch_metadata_parks_until_snapshot_base_arrives() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let source = open_core(0xc1, identity, &schema);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let base_write = source
+        .insert("todos", cells("base first", false, identity))
+        .unwrap();
+    let base_unit = source
+        .node()
+        .borrow_mut()
+        .commit_unit_for(base_write.mergeable_tx_id())
+        .unwrap();
+    let branch = BranchId::from_bytes([0x48; 16]);
+    let record = source
+        .node()
+        .borrow_mut()
+        .create_branch_as(branch, identity)
+        .unwrap();
+    assert_eq!(record.base.as_ref().unwrap().global_base, GlobalSeq(1));
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, identity);
+
+    client_transport
+        .send(SyncMessage::BranchMetadata((&record).into()))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(server.node().borrow().branch_record(branch).is_none());
+
+    client_transport.send(base_unit).unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(server.node().borrow().branch_record(branch).is_some());
+}
+
+#[test]
+fn locally_created_branch_and_commit_survive_rocks_reopen() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let node_uuid = NodeUuid::from_bytes([0xc1; 16]);
+    let branch = BranchId::from_bytes([0x43; 16]);
+    let dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let client = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity: DbIdentity {
+            node: node_uuid,
+            author: identity,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xc1))),
+        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    }))
+    .unwrap();
+    client.create_branch_with_id(branch).unwrap();
+    let write = client
+        .insert_on_branch(branch, "todos", cells("durable offline", false, identity))
+        .unwrap();
+    let tx_id = write.mergeable_tx_id();
+    let expected = client
+        .node
+        .node
+        .borrow()
+        .branch_record(branch)
+        .cloned()
+        .unwrap();
+    client.close().unwrap();
+    drop(client);
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let reopened = block_on(Db::open(DbConfig {
+        schema,
+        storage,
+        identity: DbIdentity {
+            node: node_uuid,
+            author: identity,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xc2))),
+        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    }))
+    .unwrap();
+    assert_eq!(
+        reopened.node.node.borrow().branch_record(branch),
+        Some(&expected)
+    );
+    assert!(reopened.write_state(tx_id).is_ok());
+
+    // Recovery restores both independent durable outboxes: metadata must be
+    // replayed and admitted before the branch-target transaction can land.
+    let server = open_core(0x5e, AuthorId::SYSTEM, &reopened.schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = reopened.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, identity);
+    reopened.tick().unwrap();
+    server.tick().unwrap();
+    reopened.tick().unwrap();
+    server.tick().unwrap();
+    assert_eq!(
+        server.node().borrow().branch_record(branch),
+        Some(&expected)
+    );
+    assert_eq!(
+        server
+            .node()
+            .borrow_mut()
+            .transaction_record(tx_id)
+            .unwrap()
+            .target_lineage,
+        crate::tx::BranchLineage::Branch(branch)
+    );
+}
+
+#[test]
+fn trusted_branch_snapshot_round_trips_without_receiver_reauthoring() {
+    let schema = schema();
+    let backend_identity = AuthorId::from_bytes([0xb0; 16]);
+    let receiver_uuid = NodeUuid::from_bytes([0x5e; 16]);
+    let snapshot_owner = NodeUuid::from_bytes([0xa7; 16]);
+    let branch = BranchId::from_bytes([0x4b; 16]);
+    let snapshot = crate::tx::Snapshot::exclusive_base(
+        snapshot_owner,
+        GlobalSeq(0),
+        TxTime(7),
+        vec![TxId::new(TxTime(8), snapshot_owner)],
+    )
+    .unwrap();
+    let metadata = BranchMetadata {
+        branch_id: branch,
+        created_by: backend_identity,
+        parent: None,
+        base: Some(snapshot.clone()),
+        open: true,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let target =
+        Node::new(NodeState::new_history_complete(receiver_uuid, schema.clone(), storage).unwrap());
+    let (mut backend_transport, server_transport) = duplex();
+    let subscriber = target.accept_subscriber_with_trust(
+        server_transport,
+        backend_identity,
+        CommitUnitTrust::TrustedBackend,
+    );
+    backend_transport
+        .send(SyncMessage::BranchMetadata(metadata.clone()))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert_eq!(
+        target.node().borrow().branch_record(branch).unwrap().base,
+        Some(snapshot.clone())
+    );
+
+    drop(subscriber);
+    drop(target);
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let reopened = NodeState::new_history_complete(receiver_uuid, schema, storage).unwrap();
+    assert_eq!(
+        BranchMetadata::from(reopened.branch_record(branch).unwrap()),
+        metadata
+    );
+}
+
+#[test]
+fn trusted_backend_replays_branch_metadata_over_transport() {
+    // Internal trust-boundary test: raw routing metadata is intentionally only
+    // accepted on a trusted backend transport and has no public client facade.
+    let schema = schema();
+    let backend_identity = AuthorId::from_bytes([0xb0; 16]);
+    let source = open_core(0xb0, AuthorId::SYSTEM, &schema);
+    let target = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let branch = BranchId::from_bytes([0x44; 16]);
+    let record = source
+        .node()
+        .borrow_mut()
+        .create_branch_as(branch, backend_identity)
+        .unwrap();
+    let metadata = BranchMetadata::from(&record);
+    let (mut backend_transport, server_transport) = duplex();
+    let subscriber = target.accept_subscriber_with_trust(
+        server_transport,
+        backend_identity,
+        CommitUnitTrust::TrustedBackend,
+    );
+
+    backend_transport
+        .send(SyncMessage::BranchMetadata(metadata.clone()))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert_eq!(target.node().borrow().branch_record(branch), Some(&record));
+
+    backend_transport
+        .send(SyncMessage::BranchMetadata(metadata))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert_eq!(target.node().borrow().branch_record(branch), Some(&record));
+}
+
+#[test]
+fn trusted_backend_discards_branch_metadata_once_and_recovers_it() {
+    // Internal trust/storage boundary test: lifecycle metadata is carried only
+    // by trusted backend links and must be durable before branch data is routed.
+    let schema = schema();
+    let backend_identity = AuthorId::from_bytes([0xb0; 16]);
+    let node_uuid = NodeUuid::from_bytes([0x5e; 16]);
+    let branch = BranchId::from_bytes([0x46; 16]);
+    let source = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let open_record = source
+        .node()
+        .borrow_mut()
+        .create_branch_as(branch, backend_identity)
+        .unwrap();
+    let open_metadata = BranchMetadata::from(&open_record);
+    let mut discarded_metadata = open_metadata.clone();
+    discarded_metadata.open = false;
+    let dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let target =
+        Node::new(NodeState::new_history_complete(node_uuid, schema.clone(), storage).unwrap());
+    let (mut backend_transport, server_transport) = duplex();
+    let subscriber = target.accept_subscriber_with_trust(
+        server_transport,
+        backend_identity,
+        CommitUnitTrust::TrustedBackend,
+    );
+
+    backend_transport
+        .send(SyncMessage::BranchMetadata(open_metadata.clone()))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    backend_transport
+        .send(SyncMessage::BranchMetadata(discarded_metadata.clone()))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    backend_transport
+        .send(SyncMessage::BranchMetadata(discarded_metadata.clone()))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    let discarded_record = target
+        .node()
+        .borrow()
+        .branch_record(branch)
+        .cloned()
+        .unwrap();
+    assert_eq!(discarded_record.created_by, open_record.created_by);
+    assert_eq!(discarded_record.parent, open_record.parent);
+    assert_eq!(discarded_record.base, open_record.base);
+    assert!(!BranchMetadata::from(&discarded_record).open);
+
+    drop(subscriber);
+    drop(target);
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let reopened = Node::new(NodeState::new_history_complete(node_uuid, schema, storage).unwrap());
+    assert_eq!(
+        reopened.node().borrow().branch_record(branch),
+        Some(&discarded_record)
+    );
+
+    let (mut reverse_transport, server_transport) = duplex();
+    let reverse = reopened.accept_subscriber_with_trust(
+        server_transport,
+        backend_identity,
+        CommitUnitTrust::TrustedBackend,
+    );
+    reverse_transport
+        .send(SyncMessage::BranchMetadata(open_metadata))
+        .unwrap();
+    assert!(reverse.borrow_mut().tick().is_err());
+
+    let mut changed_creator = discarded_metadata.clone();
+    changed_creator.created_by = AuthorId::from_bytes([0xee; 16]);
+    let mut changed_parent = discarded_metadata.clone();
+    changed_parent.parent = Some(BranchId::from_bytes([0xdd; 16]));
+    let mut changed_base = discarded_metadata;
+    changed_base.base = None;
+    for mutation in [changed_creator, changed_parent, changed_base] {
+        let (mut mutation_transport, server_transport) = duplex();
+        let mutation_connection = reopened.accept_subscriber_with_trust(
+            server_transport,
+            backend_identity,
+            CommitUnitTrust::TrustedBackend,
+        );
+        mutation_transport
+            .send(SyncMessage::BranchMetadata(mutation))
+            .unwrap();
+        assert!(mutation_connection.borrow_mut().tick().is_err());
+    }
+    assert_eq!(
+        reopened.node().borrow().branch_record(branch),
+        Some(&discarded_record)
+    );
 }
 
 #[test]
@@ -6258,8 +7295,7 @@ fn subscriber_connection_serves_single_branch_read_view_subscription() {
 
     subscriber.borrow_mut().tick().unwrap();
     assert_subscribe_rejected_branch_overlay(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("expected subscription rejection"),
         subscription,
     );
@@ -6320,8 +7356,7 @@ fn subscriber_connection_rejects_one_gapped_subscription_and_keeps_serving_other
         .unwrap();
     subscriber.borrow_mut().tick().unwrap();
     assert_view_update_for_subscription(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("expected initial supported view update"),
         supported_subscription,
     );
@@ -6343,8 +7378,7 @@ fn subscriber_connection_rejects_one_gapped_subscription_and_keeps_serving_other
         .unwrap();
     subscriber.borrow_mut().tick().unwrap();
     assert_subscribe_rejected_branch_overlay(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("expected branch subscription rejection"),
         branch_subscription,
     );
@@ -6353,8 +7387,7 @@ fn subscriber_connection_rejects_one_gapped_subscription_and_keeps_serving_other
     seed(&server, "todos", cells("second", false, owner));
     subscriber.borrow_mut().tick().unwrap();
     assert_view_update_for_subscription(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("expected supported update after rejection"),
         supported_subscription,
     );
@@ -6404,6 +7437,55 @@ fn db_subscription_stream_surfaces_upstream_rejection_after_open() {
 }
 
 #[test]
+fn upstream_transport_rejects_forged_system_catalogue_publication() {
+    let base = schema();
+    let client_author = AuthorId::from_bytes([0x51; 16]);
+    let client = open_db(0x51, client_author, &base);
+    let (client_transport, mut upstream_transport) = duplex();
+    let upstream = client.connect_upstream(client_transport);
+    let target = SchemaVersion::new(JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("done", ColumnType::Bool),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+            ColumnSchema::new("body", ColumnType::String),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public())]));
+    let lens = MigrationLens::new(
+        base.version_id(),
+        target.id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "body".to_owned(),
+                default: Value::String(String::new()),
+            }],
+        }],
+    );
+    upstream_transport
+        .send(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                target.clone(),
+                lens,
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .unwrap();
+
+    let error = upstream.borrow_mut().tick().unwrap_err();
+    assert_eq!(error.code, ErrorCode::Protocol);
+    assert!(error.message.contains("unauthorized catalogue update"));
+    assert!(client.catalogue_schema(target.id).is_none());
+}
+
+#[test]
 fn subscriber_connection_surfaces_server_table_not_found_without_silence() {
     let server_schema = schema();
     let owner = AuthorId::from_bytes([0xa1; 16]);
@@ -6439,7 +7521,7 @@ fn subscriber_connection_surfaces_server_table_not_found_without_silence() {
 
     subscriber.borrow_mut().tick().unwrap();
 
-    match client_transport.try_recv() {
+    match try_recv_subscriber_payload(client_transport.as_mut()) {
         Some(SyncMessage::SubscribeRejected {
             subscription: rejected_subscription,
             reason:
@@ -6508,8 +7590,7 @@ fn subscriber_connection_serves_default_ordered_window_alongside_unbounded_shape
 
     subscriber.borrow_mut().tick().unwrap();
     assert_view_update_for_subscription(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("expected unbounded subscription update"),
         supported_subscription,
     );
@@ -6524,11 +7605,9 @@ fn subscriber_connection_serves_default_ordered_window_alongside_unbounded_shape
         .unwrap();
     seed(&server, "todos", cells("third", false, owner));
     subscriber.borrow_mut().tick().unwrap();
-    let first = client_transport
-        .try_recv()
+    let first = try_recv_subscriber_payload(client_transport.as_mut())
         .expect("expected maintained subscription update");
-    let second = client_transport
-        .try_recv()
+    let second = try_recv_subscriber_payload(client_transport.as_mut())
         .expect("expected maintained window update");
     let subscriptions = [first, second]
         .into_iter()
@@ -6574,8 +7653,7 @@ fn subscriber_connection_rejects_local_tier_register_shape() {
 
     subscriber.borrow_mut().tick().unwrap();
     assert_subscribe_rejected_unsupported_shape_capability_detail(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("expected local-tier registration rejection"),
         SubscriptionKey {
             shape_id: shape.shape_id(),
@@ -6609,8 +7687,7 @@ fn subscriber_connection_rejects_local_tier_register_shape() {
 
     subscriber.borrow_mut().tick().unwrap();
     assert_view_update_for_subscription(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("valid subscription should still be served after malformed register"),
         subscription,
     );
@@ -6709,7 +7786,7 @@ fn subscriber_connection_drops_oversized_known_state_and_keeps_serving() {
         1
     );
     assert!(
-        client_transport.try_recv().is_none(),
+        try_recv_subscriber_payload(client_transport.as_mut()).is_none(),
         "oversized known-state request should not receive a view update"
     );
 
@@ -6727,8 +7804,7 @@ fn subscriber_connection_drops_oversized_known_state_and_keeps_serving() {
 
     subscriber.borrow_mut().tick().unwrap();
     assert_view_update_for_subscription(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("valid resubscribe should be served after malformed known-state"),
         subscription,
     );
@@ -6785,8 +7861,7 @@ fn subscriber_connection_drops_oversized_fetch_row_versions_and_keeps_serving() 
 
     subscriber.borrow_mut().tick().unwrap();
     assert_view_update_for_subscription(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("valid subscription should still be served after malformed repair request"),
         subscription,
     );
@@ -6849,8 +7924,7 @@ fn subscriber_connection_drops_mismatched_shape_id_and_keeps_serving() {
 
     subscriber.borrow_mut().tick().unwrap();
     assert_view_update_for_subscription(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("valid subscription should still be served after mismatched shape id"),
         subscription,
     );
@@ -6954,8 +8028,7 @@ fn subscriber_connection_rejects_non_global_register_shape_options() {
 
     subscriber.borrow_mut().tick().unwrap();
     assert_subscribe_rejected_unsupported_shape_capability_detail(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("expected edge-tier registration rejection"),
         SubscriptionKey {
             shape_id: shape.shape_id(),
@@ -6977,7 +8050,7 @@ fn subscriber_connection_accepts_array_subquery_register_shape_for_serving_subsc
     let (mut client_transport, server_transport) = duplex();
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let shape = Query::from("users")
-        .array_subquery(ArraySubquery::new("todos", "todos", "owner_id", "id").unbounded())
+        .array_subquery(ArraySubquery::new("todos", "todos", "owner_id", "id"))
         .validate(&schema)
         .unwrap();
 
@@ -6991,7 +8064,7 @@ fn subscriber_connection_accepts_array_subquery_register_shape_for_serving_subsc
 
     subscriber.borrow_mut().tick().unwrap();
     assert!(
-        client_transport.try_recv().is_none(),
+        try_recv_subscriber_payload(client_transport.as_mut()).is_none(),
         "registering a supported array-subquery shape should not emit a rejection"
     );
 }
@@ -7098,7 +8171,7 @@ fn subscriber_connection_accepts_relation_register_shape_for_serving_subscriptio
         subscription: served,
         result_member_adds,
         ..
-    }) = client_transport.try_recv()
+    }) = try_recv_subscriber_payload(client_transport.as_mut())
     else {
         panic!("expected relation facade subscription view update");
     };
@@ -7401,6 +8474,55 @@ fn one_shot_edge_query_attaches_fresh_usage_subscription_for_covered_binding() {
     assert_eq!(prepared_read(&client, &query).len(), 2);
     client.detach_query(first_attachment);
     client.detach_query(second_attachment);
+}
+
+#[test]
+fn missing_permissions_head_gates_sessions_but_not_trusted_backend_query_coverage() {
+    // This stays at the transport boundary because the behavior under test is
+    // the authenticated link's trust discriminator, which the public query API
+    // deliberately does not expose.
+    let schema = schema();
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    server.server.set_permissions_ready(false).unwrap();
+
+    let backend_author = AuthorId::from_bytes([0xb0; 16]);
+    let backend = open_db(0xb0, backend_author, &schema);
+    let (backend_transport, server_backend_transport) = duplex();
+    let _backend_upstream = backend.connect_upstream(backend_transport);
+    let _backend_subscriber = server.accept_subscriber_with_trust(
+        server_backend_transport,
+        backend_author,
+        CommitUnitTrust::TrustedBackend,
+    );
+
+    let session_author = AuthorId::from_bytes([0xc1; 16]);
+    let session = open_db(0xc1, session_author, &schema);
+    let (session_transport, server_session_transport) = duplex();
+    let _session_upstream = session.connect_upstream(session_transport);
+    let _session_subscriber = server.accept_subscriber(server_session_transport, session_author);
+
+    let backend_query = prepared(&backend, &Query::from("todos"));
+    let backend_attachment = backend
+        .attach_query_with_opts(&backend_query, edge_subscribe_opts())
+        .unwrap();
+    let session_query = prepared(&session, &Query::from("todos"));
+    let session_attachment = session
+        .attach_query_with_opts(&session_query, edge_subscribe_opts())
+        .unwrap();
+
+    backend.tick().unwrap();
+    session.tick().unwrap();
+    server.tick().unwrap();
+    backend.tick().unwrap();
+    session.tick().unwrap();
+
+    assert!(backend.query_attachment_is_covered(&backend_attachment));
+    assert!(!session.query_attachment_is_covered(&session_attachment));
+
+    server.server.set_permissions_ready(true).unwrap();
+    server.tick().unwrap();
+    session.tick().unwrap();
+    assert!(session.query_attachment_is_covered(&session_attachment));
 }
 
 #[test]
@@ -8178,7 +9300,7 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
         .server
         .node()
         .borrow_mut()
-        .apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
@@ -8638,8 +9760,7 @@ fn global_subscription_registers_array_subquery_upstream_coverage() {
 
     let query = Query::from("users").array_subquery(
         ArraySubquery::new("todos", "todos", "owner_id", "id")
-            .unbounded()
-            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id").unbounded()),
+            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id")),
     );
     let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
 
@@ -8664,8 +9785,7 @@ fn array_subquery_attachment_registers_upstream_coverage() {
 
     let query = Query::from("users").array_subquery(
         ArraySubquery::new("todos", "todos", "owner_id", "id")
-            .unbounded()
-            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id").unbounded()),
+            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id")),
     );
     let prepared = prepared(&client, &query);
     let attachment = client
@@ -9056,6 +10176,44 @@ fn local_propagating_subscription_emits_created_by_scoped_insert_after_empty_see
     let one_shot = prepared_all(&client, &query, ReadOpts::default());
     assert_eq!(row_ids(&one_shot), vec![write.row_uuid()]);
 
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert_eq!(row_ids(&added), vec![write.row_uuid()]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+}
+
+#[test]
+fn local_propagating_subscription_coerces_user_id_claim_for_created_by() {
+    let schema = created_by_read_schema_for_claim("user_id");
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xa1, alice, &schema);
+    let claims = BTreeMap::from([("user_id".to_owned(), Value::String(alice.0.to_string()))]);
+    client.set_identity_claims(alice, claims.clone());
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber_with_claims(server_transport, alice, claims);
+    let query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
+
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    while let Some(event) = subscription.try_next_event() {
+        assert!(opened_rows(event).is_empty());
+    }
+
+    let write = client
+        .insert(
+            "todos",
+            doctest_support::todo_cells("created by alice", false),
+        )
+        .unwrap();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+
+    let one_shot = prepared_all(&client, &query, ReadOpts::default());
+    assert_eq!(row_ids(&one_shot), vec![write.row_uuid()]);
     let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
     assert_eq!(row_ids(&added), vec![write.row_uuid()]);
     assert!(updated.is_empty());

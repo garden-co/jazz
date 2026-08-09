@@ -8,7 +8,9 @@
 
 use super::*;
 use crate::merge_strategy::{MergeSide, MergeStrategyInput, materialize_strategy_output};
-use crate::protocol::{CatalogueAck, ContentExtent, LensOp, VersionBundleRef};
+use crate::protocol::{
+    CatalogueAck, ContentExtent, LensOp, SchemaLineagePublication, VersionBundleRef,
+};
 use crate::protocol_limits::{
     commit_unit_limit_violation, validate_content_extents, validate_known_state_declaration,
     validate_shape_ast_size,
@@ -21,11 +23,23 @@ use crate::text_merge::{
 use crate::time::TxTimeSortKey;
 use groove::records::ValueType;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+const MAX_SCHEMA_LINEAGE_DECLARATIONS: usize = 4096;
+const MAX_SCHEMA_LINEAGE_NAME_BYTES: usize = 1024;
+const MAX_SCHEMA_LINEAGE_OPS: usize = 16_384;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct CommitUnitParkMode {
     ingest_context: Option<CommitUnitIngestContext>,
-    edge_authority_mergeable: bool,
-    edge_accepted_mergeable: bool,
+    ingress_role: ParkedIngressRole,
+}
+
+impl Default for CommitUnitParkMode {
+    fn default() -> Self {
+        Self {
+            ingest_context: None,
+            ingress_role: ParkedIngressRole::Authority,
+        }
+    }
 }
 
 struct LargeValueMergeCell {
@@ -33,10 +47,288 @@ struct LargeValueMergeCell {
     strategy: RecordedMergeStrategy,
 }
 
+struct PlannedCatalogueSnapshot {
+    catalogue: SchemaCatalogue,
+    activated_lineages: Vec<StagedSchemaLineage>,
+}
+
+fn next_schema_version_alias_in_catalogue(
+    catalogue: &SchemaCatalogue,
+) -> Result<SchemaVersionAlias, Error> {
+    Ok(SchemaVersionAlias(
+        catalogue
+            .schema_version_aliases
+            .values()
+            .map(|alias| alias.0)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(Error::InvalidStoredValue("schema version alias exhausted"))?,
+    ))
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    pub(crate) fn apply_trusted_catalogue_snapshot(
+        &mut self,
+        snapshot: crate::protocol::CatalogueSnapshot,
+    ) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
+        let plan = self.plan_trusted_catalogue_snapshot(snapshot)?;
+        let runtime_semantics_changed = self.catalogue.schema != plan.catalogue.schema
+            || self.catalogue.catalogue_schemas != plan.catalogue.catalogue_schemas
+            || self.catalogue.catalogue_lenses != plan.catalogue.catalogue_lenses
+            || self.catalogue.physical_mappings != plan.catalogue.physical_mappings
+            || self.catalogue.current_write_schema != plan.catalogue.current_write_schema;
+        let previous_catalogue = std::mem::replace(&mut self.catalogue, plan.catalogue.clone());
+        if self.synchronize_physical_version_tables().is_err() {
+            self.catalogue = previous_catalogue;
+            self.catalogue_activation_failed = true;
+            return Err(Error::CatalogueActivationFailed);
+        }
+
+        #[cfg(test)]
+        if self.catalogue_activation_failpoint
+            == Some(CatalogueActivationFailpoint::BeforeSnapshotActivationCommit)
+        {
+            self.catalogue_activation_failpoint = None;
+            self.catalogue = previous_catalogue;
+            self.catalogue_activation_failed = true;
+            return Err(Error::CatalogueActivationFailed);
+        }
+
+        let mut batch = self.database.open_batch();
+        for schema in plan.catalogue.catalogue_schemas.values() {
+            batch.update(
+                "jazz_catalogue",
+                vec![
+                    Value::Bytes(b"schema".to_vec()),
+                    Value::Uuid(schema.id.0),
+                    Value::Bytes(serde_json::to_vec(schema)?),
+                ],
+            );
+        }
+        for staged in &plan.activated_lineages {
+            Self::write_active_schema_lineage_to_batch(&mut batch, staged)?;
+        }
+        for (schema_version, mapping) in &plan.catalogue.physical_mappings {
+            let alias = plan.catalogue.schema_version_aliases[schema_version];
+            Self::write_schema_version_mapping_to_batch(
+                &mut batch,
+                alias,
+                *schema_version,
+                mapping,
+            )?;
+        }
+        if plan.catalogue.current_write_schema != previous_catalogue.current_write_schema {
+            batch.update(
+                "jazz_catalogue_pointer",
+                vec![
+                    Value::U64(plan.catalogue.current_write_schema.revision),
+                    Value::Uuid(plan.catalogue.current_write_schema.schema.0),
+                ],
+            );
+        }
+        if self.database.commit_batch(batch).is_err() {
+            self.catalogue = previous_catalogue;
+            self.catalogue_activation_failed = true;
+            return Err(Error::CatalogueActivationFailed);
+        }
+
+        self.catalogue.staged_lineages.clear();
+        self.catalogue.pending_lineages.clear();
+        self.catalogue.pending_write_pointers.clear();
+        self.catalogue.lens_path_cache.clear();
+        self.catalogue.compiled_lens_cache.clear();
+        self.query.version_storage_sources_cache.clear();
+        self.query.query_shape_cache.clear();
+        self.query.read_policy_authorization_request_cache.clear();
+        self.query.policy_authorization_graph_cache.clear();
+        if runtime_semantics_changed {
+            self.groove_runtime_token = next_groove_runtime_token();
+        }
+        self.drain_parked_commit_units()?;
+        self.drain_parked_relay_commit_units()?;
+        self.drain_parked_shape_registrations()?;
+        Ok(())
+    }
+
+    fn plan_trusted_catalogue_snapshot(
+        &self,
+        snapshot: crate::protocol::CatalogueSnapshot,
+    ) -> Result<PlannedCatalogueSnapshot, Error> {
+        if !self.catalogue.pending_lineages.is_empty()
+            || !self.catalogue.staged_lineages.is_empty()
+            || !self.catalogue.pending_write_pointers.is_empty()
+        {
+            return Err(Error::InvalidCatalogueUpdate(
+                "trusted catalogue snapshot conflicts with pending catalogue work",
+            ));
+        }
+
+        let mut schemas = BTreeMap::new();
+        for schema in snapshot.schemas {
+            if schema.id != schema.schema.version_id() {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "trusted catalogue snapshot schema id mismatch",
+                ));
+            }
+            if schemas.insert(schema.id, schema).is_some() {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "trusted catalogue snapshot repeats a schema id",
+                ));
+            }
+        }
+
+        let mut lineages = snapshot.lineages;
+        lineages.sort_by_key(|(catalogue_seq, _)| *catalogue_seq);
+        let lineage_targets = lineages
+            .iter()
+            .map(|(_, publication)| publication.schema.id)
+            .collect::<BTreeSet<_>>();
+
+        let mut planned = self.catalogue.clone();
+        let mut activated_lineages = Vec::new();
+        for schema in schemas.values() {
+            if lineage_targets.contains(&schema.id)
+                || planned.catalogue_schemas.contains_key(&schema.id)
+            {
+                continue;
+            }
+            let mapping = allocate_provisional_physical_mapping(
+                &schema.schema,
+                &mut planned.next_physical_table_id,
+                &mut planned.next_physical_column_id,
+            )?;
+            let alias = next_schema_version_alias_in_catalogue(&planned)?;
+            planned.catalogue_schemas.insert(schema.id, schema.clone());
+            planned.physical_mappings.insert(schema.id, mapping);
+            planned.schema_version_aliases.insert(schema.id, alias);
+        }
+
+        for (catalogue_seq, publication) in lineages {
+            self.validate_schema_lineage_publication_bounds(&publication)?;
+            if publication.id != publication.content_id()
+                || publication.schema.id != publication.schema.schema.version_id()
+                || publication.lens.id != publication.lens.content_id()
+                || publication.lens.target != publication.schema.id
+            {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "trusted catalogue snapshot contains invalid lineage identity",
+                ));
+            }
+            if let Some(existing) = planned
+                .active_lineages_by_target
+                .get(&publication.schema.id)
+            {
+                if existing.catalogue_seq != catalogue_seq || existing.publication != publication {
+                    return Err(Error::InvalidCatalogueUpdate(
+                        "trusted catalogue snapshot lineage conflicts with catalogue",
+                    ));
+                }
+                continue;
+            }
+            if catalogue_seq != planned.active_catalogue_seq.saturating_add(1) {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "trusted catalogue snapshot lineage sequence is not contiguous",
+                ));
+            }
+            let source = planned
+                .catalogue_schemas
+                .get(&publication.lens.source)
+                .ok_or(Error::InvalidCatalogueUpdate(
+                    "trusted catalogue snapshot lineage source is missing",
+                ))?;
+            self.validate_migration_lens_between(&publication.lens, source, &publication.schema)?;
+            self.validate_lineage_table_partition(
+                &source.schema,
+                &publication.schema.schema,
+                &publication.lens,
+                &publication.new_tables,
+                &publication.dropped_tables,
+            )?;
+            let fresh = allocate_provisional_physical_mapping(
+                &publication.schema.schema,
+                &mut planned.next_physical_table_id,
+                &mut planned.next_physical_column_id,
+            )?;
+            let mapping = Self::reconcile_physical_mapping_for_lens_payload_in_catalogue(
+                &planned,
+                &publication.lens,
+                &publication.schema,
+                &fresh,
+            )?;
+            let staged = StagedSchemaLineage {
+                catalogue_seq,
+                publication: publication.clone(),
+                alias: next_schema_version_alias_in_catalogue(&planned)?,
+                mapping,
+            };
+            planned
+                .catalogue_schemas
+                .insert(publication.schema.id, publication.schema.clone());
+            planned
+                .catalogue_lenses
+                .insert(publication.lens.id, publication.lens.clone());
+            planned
+                .schema_version_aliases
+                .insert(publication.schema.id, staged.alias);
+            planned
+                .physical_mappings
+                .insert(publication.schema.id, staged.mapping.clone());
+            planned
+                .active_lineages_by_target
+                .insert(publication.schema.id, staged.clone());
+            planned.active_catalogue_seq = catalogue_seq;
+            activated_lineages.push(staged);
+        }
+
+        // Schema identity deliberately excludes policy and physical-index
+        // declarations. Apply the sender's final payloads after lineage so
+        // agreeing same-id metadata updates use the ordinary trusted path.
+        for schema in schemas.into_values() {
+            if !planned.catalogue_schemas.contains_key(&schema.id) {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "trusted catalogue snapshot schema has no lineage",
+                ));
+            }
+            planned.catalogue_schemas.insert(schema.id, schema);
+        }
+
+        if snapshot.current_write_schema.revision < planned.current_write_schema.revision
+            || (snapshot.current_write_schema.revision == planned.current_write_schema.revision
+                && snapshot.current_write_schema != planned.current_write_schema)
+            || !planned
+                .catalogue_schemas
+                .contains_key(&snapshot.current_write_schema.schema)
+        {
+            return Err(Error::InvalidCatalogueUpdate(
+                "trusted catalogue snapshot conflicts at write-schema revision",
+            ));
+        }
+        planned.current_write_schema = snapshot.current_write_schema;
+        // `schema` is the active read-schema payload supplied when this node
+        // was opened. Its policy metadata is intentionally outside the
+        // structural schema id and may therefore be refreshed by a snapshot
+        // even while the current write pointer names another schema.
+        planned.schema = planned
+            .catalogue_schemas
+            .get(&planned.current_schema_version_id)
+            .ok_or(Error::InvalidCatalogueUpdate(
+                "trusted catalogue snapshot omits the active read schema",
+            ))?
+            .schema
+            .clone();
+        Ok(PlannedCatalogueSnapshot {
+            catalogue: planned,
+            activated_lineages,
+        })
+    }
+
     /// Apply bulk-lane content extent payloads and drain any parked units whose
     /// text-op refs are now locally readable.
     pub fn apply_content_extents(
@@ -112,6 +404,24 @@ where
         self.apply_sync_message_with_ingest_context(message, None)
     }
 
+    /// Apply a catalogue mutation from the trusted local administrative lane.
+    pub fn apply_trusted_catalogue_message(
+        &mut self,
+        message: SyncMessage,
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        self.apply_sync_message_with_ingest_context(
+            message,
+            Some(CommitUnitIngestContext {
+                identity: AuthorId::SYSTEM,
+                trust: CommitUnitTrust::TrustedBackend,
+                edge_authority: false,
+            }),
+        )
+    }
+
     /// Apply one sync message from a connection-authenticated upload path.
     pub fn apply_sync_message_with_ingest_context(
         &mut self,
@@ -121,22 +431,20 @@ where
     where
         S: ReopenableStorage,
     {
-        self.apply_sync_message_with_ingest_context_and_encoded_len(message, ingest_context, None)
-    }
-
-    pub(crate) fn apply_sync_message_with_ingest_context_and_encoded_len(
-        &mut self,
-        message: SyncMessage,
-        ingest_context: Option<CommitUnitIngestContext>,
-        encoded_len: Option<usize>,
-    ) -> Result<Vec<SyncMessage>, Error>
-    where
-        S: ReopenableStorage,
-    {
+        if self.catalogue_activation_failed {
+            return Err(Error::CatalogueActivationFailed);
+        }
         let message = message
             .expand_version_carriers_for_receive()
             .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
         match message {
+            SyncMessage::BranchMetadata(metadata) => {
+                self.admit_branch_metadata(metadata)?;
+                self.drain_parked_commit_units()
+            }
+            SyncMessage::FetchBranchMetadata { .. } => Err(Error::UnsupportedSyncMessage(
+                "branch metadata repair must be served by peer state",
+            )),
             SyncMessage::SessionClaims { identity, claims } => {
                 if let Some(context) = ingest_context
                     && context.trust == CommitUnitTrust::TrustedBackend
@@ -150,7 +458,6 @@ where
                 versions,
                 u64::MAX - SKEW_TOLERANCE_MS,
                 ingest_context,
-                encoded_len,
             ),
             SyncMessage::FateUpdate {
                 tx_id,
@@ -190,35 +497,6 @@ where
                 })?;
                 Ok(Vec::new())
             }
-            SyncMessage::ViewUpdateChunk {
-                subscription,
-                settled_through,
-                reset_result_set,
-                final_chunk,
-                version_carriers,
-                version_bundles,
-                peer_payload_inventory,
-                result_member_adds,
-                result_member_removes,
-                program_fact_adds,
-                program_fact_removes,
-            } => {
-                self.apply_view_update(ViewUpdateParts {
-                    subscription,
-                    settled_through,
-                    defer_settlement: !final_chunk,
-                    reset_result_set,
-                    version_carriers,
-                    version_bundles,
-                    peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
-                    authorization_progress: peer_payload_inventory.authorization_progress,
-                    result_member_adds,
-                    result_member_removes,
-                    program_fact_adds,
-                    program_fact_removes,
-                })?;
-                Ok(Vec::new())
-            }
             SyncMessage::RegisterShape {
                 shape_id,
                 ast,
@@ -235,6 +513,9 @@ where
             SyncMessage::RowVersionPayloads { .. } => Err(Error::UnsupportedSyncMessage(
                 "row-version repair payload requires outstanding request context",
             )),
+            SyncMessage::CatalogueSnapshot(_) => Err(Error::UnsupportedSyncMessage(
+                "catalogue snapshot requires a trusted upstream link",
+            )),
             SyncMessage::Subscribe(subscribe) => {
                 validate_known_state_declaration(&subscribe.known_state).map_err(|_| {
                     Error::UnsupportedSyncMessage("known-state declaration exceeds limit")
@@ -250,11 +531,23 @@ where
                 Ok(Vec::new())
             }
             SyncMessage::PublishSchema { author, schema } => {
-                self.apply_publish_schema(author, *schema)
+                self.apply_publish_schema(author, ingest_context, *schema)
             }
-            SyncMessage::PublishLens { author, lens } => self.apply_publish_lens(author, lens),
+            SyncMessage::PublishSchemaWithLens {
+                author,
+                catalogue_seq,
+                publication,
+            } => self.apply_publish_schema_with_lens(
+                author,
+                ingest_context,
+                catalogue_seq,
+                *publication,
+            ),
+            SyncMessage::PublishLens { author, lens } => {
+                self.apply_publish_lens(author, ingest_context, lens)
+            }
             SyncMessage::SetCurrentWriteSchema { author, pointer } => {
-                self.apply_set_current_write_schema(author, pointer)
+                self.apply_set_current_write_schema(author, ingest_context, pointer)
             }
             SyncMessage::CatalogueAck(_) => Ok(Vec::new()),
             SyncMessage::FetchContentExtent { .. } => {
@@ -272,19 +565,29 @@ where
     fn apply_publish_schema(
         &mut self,
         author: AuthorId,
+        ingest_context: Option<CommitUnitIngestContext>,
         schema: SchemaVersion,
     ) -> Result<Vec<SyncMessage>, Error>
     where
         S: ReopenableStorage,
     {
-        self.require_catalogue_admin(author)?;
+        self.require_catalogue_admin(author, ingest_context)?;
         if schema.id != schema.schema.version_id() {
             return Err(Error::InvalidCatalogueUpdate(
                 "schema id does not match schema payload",
             ));
         }
-        let active_schema_changed = schema.id == self.catalogue.current_schema_version_id
-            && self.catalogue.schema != schema.schema;
+        if !self.catalogue.catalogue_schemas.contains_key(&schema.id) {
+            return Err(Error::InvalidCatalogueUpdate(
+                "non-genesis schema requires lineage publication",
+            ));
+        }
+        let active_schema_changed = schema.id == self.catalogue.current_write_schema.schema
+            && self
+                .catalogue
+                .catalogue_schemas
+                .get(&schema.id)
+                .is_some_and(|current| current.schema != schema.schema);
         self.catalogue
             .catalogue_schemas
             .insert(schema.id, schema.clone());
@@ -293,10 +596,11 @@ where
         self.query.policy_authorization_graph_cache.clear();
         if schema.id == self.catalogue.current_schema_version_id {
             self.catalogue.schema = schema.schema.clone();
-            self.query.current_row_graphs = current_row_graphs(&self.catalogue.schema);
         }
         self.persist_catalogue_schema(&schema)?;
+        self.ensure_provisional_physical_mapping(schema.id)?;
         self.ensure_schema_version_alias(schema.id)?;
+        self.synchronize_physical_version_tables()?;
         if active_schema_changed {
             // Policy declarations are intentionally outside the schema version
             // identity. Invalidate maintained handles when that same-version
@@ -304,23 +608,8 @@ where
             // graph without reopening storage through the old catalogue row.
             self.groove_runtime_token = next_groove_runtime_token();
         }
-        if schema.id != self.catalogue.current_schema_version_id
-            && self.parking.parked_commit_units.values().any(|parked| {
-                parked
-                    .versions
-                    .iter()
-                    .any(|version| version.schema_version() == schema.id)
-            })
-        {
-            let mut added_partition = false;
-            for table in &schema.schema.tables {
-                added_partition |= self.persist_partition(table.name.clone(), schema.id)?;
-            }
-            if added_partition {
-                self.rebuild_database_slot()?;
-            }
-        }
         let updates = self.drain_parked_commit_units()?;
+        self.drain_parked_relay_commit_units()?;
         self.drain_parked_shape_registrations()?;
         let mut out = vec![SyncMessage::CatalogueAck(CatalogueAck {
             revision: None,
@@ -332,15 +621,284 @@ where
         Ok(out)
     }
 
+    fn apply_publish_schema_with_lens(
+        &mut self,
+        author: AuthorId,
+        ingest_context: Option<CommitUnitIngestContext>,
+        catalogue_seq: u64,
+        publication: SchemaLineagePublication,
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        self.require_catalogue_admin(author, ingest_context)?;
+        self.validate_schema_lineage_publication_bounds(&publication)?;
+        if publication.id != publication.content_id() {
+            return Err(Error::InvalidCatalogueUpdate(
+                "schema lineage publication id mismatch",
+            ));
+        }
+        if catalogue_seq == 0 {
+            return Err(Error::InvalidCatalogueUpdate(
+                "schema lineage catalogue sequence must be nonzero",
+            ));
+        }
+        let schema = &publication.schema;
+        let lens = &publication.lens;
+        if schema.id != schema.schema.version_id() {
+            return Err(Error::InvalidCatalogueUpdate(
+                "schema id does not match schema payload",
+            ));
+        }
+        if lens.id != lens.content_id() {
+            return Err(Error::InvalidCatalogueUpdate(
+                "lens id does not match lens payload",
+            ));
+        }
+        if lens.target != schema.id {
+            return Err(Error::InvalidCatalogueUpdate(
+                "lineage lens target does not match schema",
+            ));
+        }
+        if let Some(existing) = self.catalogue.active_lineages_by_target.get(&schema.id) {
+            if existing.publication != publication || existing.catalogue_seq != catalogue_seq {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "schema lineage publication conflicts with catalogue",
+                ));
+            }
+            return Ok(vec![SyncMessage::CatalogueAck(CatalogueAck {
+                revision: None,
+                schema: Some(schema.id),
+                lens: Some(lens.id),
+                applied: true,
+            })]);
+        }
+
+        if catalogue_seq <= self.catalogue.active_catalogue_seq {
+            return Err(Error::InvalidCatalogueUpdate(
+                "schema lineage catalogue sequence conflicts with active catalogue",
+            ));
+        }
+        if let Some(existing) = self.catalogue.pending_lineages.get(&catalogue_seq) {
+            if existing.publication != publication {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "schema lineage catalogue sequence conflict",
+                ));
+            }
+        } else {
+            if let Some(source) = self.catalogue.catalogue_schemas.get(&lens.source) {
+                self.validate_migration_lens_between(lens, source, schema)?;
+                self.validate_lineage_table_partition(
+                    &source.schema,
+                    &schema.schema,
+                    lens,
+                    &publication.new_tables,
+                    &publication.dropped_tables,
+                )?;
+            }
+            if self
+                .catalogue
+                .pending_lineages
+                .values()
+                .any(|pending| pending.publication.schema.id == schema.id)
+                || self
+                    .catalogue
+                    .staged_lineages
+                    .values()
+                    .any(|staged| staged.publication.schema.id == schema.id)
+            {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "schema lineage target is already reserved",
+                ));
+            }
+            let pending = PendingSchemaLineage {
+                catalogue_seq,
+                publication,
+            };
+            self.persist_pending_schema_lineage(&pending)?;
+            self.catalogue
+                .pending_lineages
+                .insert(catalogue_seq, pending);
+        }
+        self.drain_pending_schema_lineages()
+    }
+
+    pub(super) fn drain_pending_schema_lineages(&mut self) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        let mut out = Vec::new();
+        loop {
+            let next = self.catalogue.active_catalogue_seq.saturating_add(1);
+            let Some(pending) = self.catalogue.pending_lineages.get(&next).cloned() else {
+                break;
+            };
+            let publication = pending.publication;
+            let Some(source) = self
+                .catalogue
+                .catalogue_schemas
+                .get(&publication.lens.source)
+                .cloned()
+            else {
+                break;
+            };
+            let validation = self
+                .validate_migration_lens_between(&publication.lens, &source, &publication.schema)
+                .and_then(|()| {
+                    self.validate_lineage_table_partition(
+                        &source.schema,
+                        &publication.schema.schema,
+                        &publication.lens,
+                        &publication.new_tables,
+                        &publication.dropped_tables,
+                    )
+                });
+            if validation.is_err() {
+                self.remove_pending_schema_lineage(next, publication.id)?;
+                break;
+            }
+            if self
+                .catalogue
+                .active_lineages_by_target
+                .contains_key(&publication.schema.id)
+            {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "schema lineage target already has an active bundle",
+                ));
+            }
+            let staged = if let Some(staged) = self.catalogue.staged_lineages.get(&next) {
+                if staged.publication != publication {
+                    return Err(Error::InvalidCatalogueUpdate(
+                        "staged schema lineage conflicts with pending bundle",
+                    ));
+                }
+                staged.clone()
+            } else {
+                let fresh = allocate_provisional_physical_mapping(
+                    &publication.schema.schema,
+                    &mut self.catalogue.next_physical_table_id,
+                    &mut self.catalogue.next_physical_column_id,
+                )?;
+                let mapping = self.reconcile_physical_mapping_for_lens_payload(
+                    &publication.lens,
+                    &publication.schema,
+                    &fresh,
+                )?;
+                let staged = StagedSchemaLineage {
+                    catalogue_seq: next,
+                    publication: publication.clone(),
+                    alias: self.next_schema_version_alias()?,
+                    mapping,
+                };
+                self.persist_catalogue_schema_lineage(&staged)?;
+                self.catalogue.staged_lineages.insert(next, staged.clone());
+                staged
+            };
+
+            #[cfg(test)]
+            if self.catalogue_activation_failpoint
+                == Some(CatalogueActivationFailpoint::AfterStaged)
+            {
+                self.catalogue_activation_failpoint = None;
+                self.catalogue_activation_failed = true;
+                return Err(Error::CatalogueActivationFailed);
+            }
+
+            self.install_staged_schema_lineage_in_memory(&staged);
+            if self.synchronize_physical_version_tables().is_err() {
+                self.remove_staged_schema_lineage_from_memory(&staged);
+                self.catalogue_activation_failed = true;
+                return Err(Error::CatalogueActivationFailed);
+            }
+            #[cfg(test)]
+            if self.catalogue_activation_failpoint
+                == Some(CatalogueActivationFailpoint::AfterRegistration)
+            {
+                self.catalogue_activation_failpoint = None;
+                self.remove_staged_schema_lineage_from_memory(&staged);
+                self.catalogue_activation_failed = true;
+                return Err(Error::CatalogueActivationFailed);
+            }
+            let mut batch = self.database.open_batch();
+            Self::write_active_schema_lineage_to_batch(&mut batch, &staged)?;
+            if self.database.commit_batch(batch).is_err() {
+                self.remove_staged_schema_lineage_from_memory(&staged);
+                self.catalogue_activation_failed = true;
+                return Err(Error::CatalogueActivationFailed);
+            }
+            self.catalogue.staged_lineages.remove(&next);
+            self.catalogue.pending_lineages.remove(&next);
+            self.catalogue
+                .active_lineages_by_target
+                .insert(staged.publication.schema.id, staged.clone());
+            self.catalogue.active_catalogue_seq = next;
+            out.push(SyncMessage::CatalogueAck(CatalogueAck {
+                revision: Some(next),
+                schema: Some(staged.publication.schema.id),
+                lens: Some(staged.publication.lens.id),
+                applied: true,
+            }));
+            out.extend(self.drain_parked_commit_units()?);
+            self.drain_parked_relay_commit_units()?;
+            self.drain_parked_shape_registrations()?;
+            out.extend(self.drain_pending_catalogue_pointers()?);
+        }
+        Ok(out)
+    }
+
+    fn install_staged_schema_lineage_in_memory(&mut self, staged: &StagedSchemaLineage) {
+        self.catalogue.catalogue_schemas.insert(
+            staged.publication.schema.id,
+            staged.publication.schema.clone(),
+        );
+        self.catalogue
+            .catalogue_lenses
+            .insert(staged.publication.lens.id, staged.publication.lens.clone());
+        self.catalogue
+            .schema_version_aliases
+            .insert(staged.publication.schema.id, staged.alias);
+        self.catalogue
+            .physical_mappings
+            .insert(staged.publication.schema.id, staged.mapping.clone());
+        self.catalogue.lens_path_cache.clear();
+        self.catalogue.compiled_lens_cache.clear();
+        self.query.version_storage_sources_cache.clear();
+        self.query.query_shape_cache.clear();
+        self.query.read_policy_authorization_request_cache.clear();
+        self.query.policy_authorization_graph_cache.clear();
+    }
+
+    fn remove_staged_schema_lineage_from_memory(&mut self, staged: &StagedSchemaLineage) {
+        self.catalogue
+            .catalogue_schemas
+            .remove(&staged.publication.schema.id);
+        self.catalogue
+            .catalogue_lenses
+            .remove(&staged.publication.lens.id);
+        self.catalogue
+            .schema_version_aliases
+            .remove(&staged.publication.schema.id);
+        self.catalogue
+            .physical_mappings
+            .remove(&staged.publication.schema.id);
+        self.catalogue.lens_path_cache.clear();
+        self.catalogue.compiled_lens_cache.clear();
+        self.query.version_storage_sources_cache.clear();
+        self.query.query_shape_cache.clear();
+        self.query.read_policy_authorization_request_cache.clear();
+        self.query.policy_authorization_graph_cache.clear();
+    }
+
     fn apply_publish_lens(
         &mut self,
         author: AuthorId,
+        ingest_context: Option<CommitUnitIngestContext>,
         lens: MigrationLens,
     ) -> Result<Vec<SyncMessage>, Error>
     where
         S: ReopenableStorage,
     {
-        self.require_catalogue_admin(author)?;
+        self.require_catalogue_admin(author, ingest_context)?;
         if lens.id != lens.content_id() {
             return Err(Error::InvalidCatalogueUpdate(
                 "lens id does not match lens payload",
@@ -352,20 +910,34 @@ where
             return Err(Error::InvalidCatalogueUpdate("lens endpoint is unknown"));
         }
         self.validate_migration_lens(&lens)?;
-        let installed = if let std::collections::btree_map::Entry::Vacant(entry) =
-            self.catalogue.catalogue_lenses.entry(lens.id)
-        {
-            entry.insert(lens.clone());
-            true
-        } else {
-            false
-        };
+        let installed = !self.catalogue.catalogue_lenses.contains_key(&lens.id);
+        if installed {
+            let candidate = self.reconcile_physical_mapping_for_lens(&lens)?;
+            let authoritative = self.catalogue.physical_mappings.get(&lens.target).ok_or(
+                Error::InvalidStoredValue("authoritative physical mapping missing"),
+            )?;
+            if candidate != *authoritative {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "cross-lens conflicts with authoritative physical mapping",
+                ));
+            }
+        }
+        self.persist_catalogue_lens_with_physical_metadata(&lens, None)?;
+        if installed {
+            self.catalogue
+                .catalogue_lenses
+                .insert(lens.id, lens.clone());
+        }
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
-        self.persist_catalogue_lens(&lens)?;
-        if installed {
-            self.rebuild_database_slot()?;
-        }
+        self.query.version_storage_sources_cache.clear();
+        self.query.query_shape_cache.clear();
+        self.query.read_policy_authorization_request_cache.clear();
+        self.query.policy_authorization_graph_cache.clear();
+        // Both endpoint schemas are already Active and their agreeing physical
+        // projection cases were registered during activation. A cross-lens adds
+        // a catalogue path only; re-registering those cases is unnecessary and
+        // Groove rejects it as a duplicate variant projection.
         Ok(vec![SyncMessage::CatalogueAck(CatalogueAck {
             revision: None,
             schema: None,
@@ -377,21 +949,31 @@ where
     fn apply_set_current_write_schema(
         &mut self,
         author: AuthorId,
+        ingest_context: Option<CommitUnitIngestContext>,
         pointer: CurrentWriteSchema,
     ) -> Result<Vec<SyncMessage>, Error>
     where
         S: ReopenableStorage,
     {
-        self.require_catalogue_admin(author)?;
+        self.require_catalogue_admin(author, ingest_context)?;
         if !self
             .catalogue
             .catalogue_schemas
             .contains_key(&pointer.schema)
         {
-            return Err(Error::InvalidCatalogueUpdate(
-                "current write schema is unknown",
-            ));
+            self.persist_pending_catalogue_pointer(pointer)?;
+            self.catalogue
+                .pending_write_pointers
+                .insert(pointer.revision, pointer);
+            return Ok(Vec::new());
         }
+        Ok(vec![self.apply_active_catalogue_pointer(pointer)?])
+    }
+
+    fn apply_active_catalogue_pointer(
+        &mut self,
+        pointer: CurrentWriteSchema,
+    ) -> Result<SyncMessage, Error> {
         let applied = pointer.revision > self.catalogue.current_write_schema.revision;
         if applied {
             self.catalogue.current_write_schema = pointer;
@@ -408,32 +990,47 @@ where
                 ))?;
             if pointer.schema == self.catalogue.current_schema_version_id {
                 self.catalogue.schema = active_schema.schema.clone();
-                self.query.current_row_graphs = current_row_graphs(&self.catalogue.schema);
-            }
-            let tables = active_schema
-                .schema
-                .tables
-                .iter()
-                .map(|table| table.name.clone())
-                .collect::<Vec<_>>();
-            let mut added_partition = false;
-            for table in tables {
-                added_partition |= self.persist_partition(table, pointer.schema)?;
-            }
-            if added_partition {
-                self.rebuild_database_slot()?;
             }
         }
-        Ok(vec![SyncMessage::CatalogueAck(CatalogueAck {
+        Ok(SyncMessage::CatalogueAck(CatalogueAck {
             revision: Some(pointer.revision),
             schema: Some(pointer.schema),
             lens: None,
             applied,
-        })])
+        }))
     }
 
-    fn require_catalogue_admin(&self, author: AuthorId) -> Result<(), Error> {
-        if author == AuthorId::SYSTEM {
+    pub(super) fn drain_pending_catalogue_pointers(&mut self) -> Result<Vec<SyncMessage>, Error> {
+        let ready = self
+            .catalogue
+            .pending_write_pointers
+            .iter()
+            .filter(|(_, pointer)| {
+                self.catalogue
+                    .catalogue_schemas
+                    .contains_key(&pointer.schema)
+            })
+            .map(|(revision, pointer)| (*revision, *pointer))
+            .collect::<Vec<_>>();
+        let mut out = Vec::new();
+        for (revision, pointer) in ready {
+            out.push(self.apply_active_catalogue_pointer(pointer)?);
+            self.catalogue.pending_write_pointers.remove(&revision);
+        }
+        Ok(out)
+    }
+
+    fn require_catalogue_admin(
+        &self,
+        _claimed_author: AuthorId,
+        ingest_context: Option<CommitUnitIngestContext>,
+    ) -> Result<(), Error> {
+        if matches!(
+            ingest_context,
+            Some(context)
+                if context.identity == AuthorId::SYSTEM
+                    && context.trust == CommitUnitTrust::TrustedBackend
+        ) {
             Ok(())
         } else {
             Err(Error::UnauthorizedCatalogueUpdate)
@@ -451,6 +1048,15 @@ where
             .catalogue_schemas
             .get(&lens.target)
             .ok_or(Error::InvalidCatalogueUpdate("lens endpoint is unknown"))?;
+        self.validate_migration_lens_between(lens, source, target)
+    }
+
+    fn validate_migration_lens_between(
+        &self,
+        lens: &MigrationLens,
+        source: &SchemaVersion,
+        target: &SchemaVersion,
+    ) -> Result<(), Error> {
         for table_lens in &lens.table_lenses {
             let source_table = source
                 .schema
@@ -470,33 +1076,70 @@ where
                 .cloned()
                 .map(|column| (column.name.clone(), column))
                 .collect::<BTreeMap<_, _>>();
+            let mut saw_table_rename = source_table.name == target_table.name;
             for op in &table_lens.ops {
                 match op {
-                    LensOp::RenameTable { .. } => {}
-                    LensOp::RenameColumn { from, to } => {
-                        if let Some(mut column) = columns.remove(from) {
-                            column.name = to.clone();
-                            columns.insert(to.clone(), column);
+                    LensOp::RenameTable { from, to } => {
+                        if saw_table_rename
+                            || from != &source_table.name
+                            || to != &target_table.name
+                        {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "table rename does not match lens endpoints",
+                            ));
                         }
+                        saw_table_rename = true;
+                    }
+                    LensOp::RenameColumn { from, to } => {
+                        if columns.contains_key(to) {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "column rename collides with existing column",
+                            ));
+                        }
+                        let mut column = columns.remove(from).ok_or(
+                            Error::InvalidCatalogueUpdate("column rename source is unknown"),
+                        )?;
+                        column.name = to.clone();
+                        columns.insert(to.clone(), column);
                     }
                     LensOp::CopyColumn { from, to } => {
-                        if let Some(mut column) = columns.get(from).cloned() {
-                            column.name = to.clone();
-                            columns.insert(to.clone(), column);
+                        if columns.contains_key(to) {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "column copy collides with existing column",
+                            ));
                         }
+                        let mut column =
+                            columns
+                                .get(from)
+                                .cloned()
+                                .ok_or(Error::InvalidCatalogueUpdate(
+                                    "column copy source is unknown",
+                                ))?;
+                        column.name = to.clone();
+                        columns.insert(to.clone(), column);
                     }
                     LensOp::AddColumn { column, .. } => {
-                        if let Some(target_column) = target_table
+                        if columns.contains_key(column) {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "added column already exists",
+                            ));
+                        }
+                        let target_column = target_table
                             .columns
                             .iter()
                             .find(|candidate| candidate.name == *column)
                             .cloned()
-                        {
-                            columns.insert(column.clone(), target_column);
-                        }
+                            .ok_or(Error::InvalidCatalogueUpdate(
+                                "added column is absent from target",
+                            ))?;
+                        columns.insert(column.clone(), target_column);
                     }
                     LensOp::DropColumn { column, .. } => {
-                        columns.remove(column);
+                        if columns.remove(column).is_none() {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "dropped column is absent from source",
+                            ));
+                        }
                     }
                     LensOp::TransformColumn { column, transform } => {
                         validate_transform_column(columns.get(column), transform)?;
@@ -504,8 +1147,141 @@ where
                     LensOp::RejectSourceDelta { .. } => {}
                 }
             }
+            if !saw_table_rename {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "renamed table requires an explicit RenameTable operation",
+                ));
+            }
+            let target_columns = target_table
+                .columns
+                .iter()
+                .cloned()
+                .map(|column| (column.name.clone(), column))
+                .collect::<BTreeMap<_, _>>();
+            if columns != target_columns {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "lens operations do not reproduce target columns",
+                ));
+            }
         }
         Ok(())
+    }
+
+    fn validate_lineage_table_partition(
+        &self,
+        source: &JazzSchema,
+        target: &JazzSchema,
+        lens: &MigrationLens,
+        new_tables: &[String],
+        dropped_tables: &[String],
+    ) -> Result<(), Error> {
+        let source_tables = source
+            .tables
+            .iter()
+            .map(|table| table.name.clone())
+            .collect::<BTreeSet<_>>();
+        let target_tables = target
+            .tables
+            .iter()
+            .map(|table| table.name.clone())
+            .collect::<BTreeSet<_>>();
+        let related_source = lens
+            .table_lenses
+            .iter()
+            .map(|table| table.source_table.clone())
+            .collect::<BTreeSet<_>>();
+        let related_target = lens
+            .table_lenses
+            .iter()
+            .map(|table| table.target_table.clone())
+            .collect::<BTreeSet<_>>();
+        let new = new_tables.iter().cloned().collect::<BTreeSet<_>>();
+        let dropped = dropped_tables.iter().cloned().collect::<BTreeSet<_>>();
+        if related_source.len() != lens.table_lenses.len()
+            || related_target.len() != lens.table_lenses.len()
+            || new.len() != new_tables.len()
+            || dropped.len() != dropped_tables.len()
+            || !related_source.is_disjoint(&dropped)
+            || !related_target.is_disjoint(&new)
+            || related_source
+                .union(&dropped)
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                != source_tables
+            || related_target.union(&new).cloned().collect::<BTreeSet<_>>() != target_tables
+        {
+            return Err(Error::InvalidCatalogueUpdate(
+                "lineage table declarations do not partition schemas",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_schema_lineage_publication_bounds(
+        &self,
+        publication: &SchemaLineagePublication,
+    ) -> Result<(), Error> {
+        let declaration_count = publication
+            .lens
+            .table_lenses
+            .len()
+            .saturating_add(publication.new_tables.len())
+            .saturating_add(publication.dropped_tables.len());
+        let operation_count = publication
+            .lens
+            .table_lenses
+            .iter()
+            .map(|table| table.ops.len())
+            .sum::<usize>();
+        let names_in_bounds = publication
+            .new_tables
+            .iter()
+            .chain(&publication.dropped_tables)
+            .chain(
+                publication
+                    .lens
+                    .table_lenses
+                    .iter()
+                    .flat_map(|table| [&table.source_table, &table.target_table]),
+            )
+            .all(|name| !name.is_empty() && name.len() <= MAX_SCHEMA_LINEAGE_NAME_BYTES);
+        if declaration_count > MAX_SCHEMA_LINEAGE_DECLARATIONS
+            || operation_count > MAX_SCHEMA_LINEAGE_OPS
+            || !names_in_bounds
+        {
+            return Err(Error::InvalidCatalogueUpdate(
+                "schema lineage publication exceeds structural limits",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Prepare physical branch storage only after bounded structural checks and
+    /// catalogue dependencies are known to be satisfiable. Missing catalogue
+    /// schemas are left for the ordinary parking path.
+    fn prepare_branch_target_partitions_if_ready(
+        &mut self,
+        tx: &Transaction,
+        versions: &[VersionRecord],
+    ) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
+        let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage else {
+            return Ok(());
+        };
+        if !self.branches.branches.contains_key(&branch_id)
+            || !commit_unit_write_count_matches(tx, versions.len())
+            || versions.iter().any(|version| {
+                !self
+                    .catalogue
+                    .catalogue_schemas
+                    .contains_key(&version.schema_version())
+            })
+        {
+            return Ok(());
+        }
+        self.ensure_branch_target_partitions(branch_id, versions)
     }
 
     /// Ingest a commit unit as fate authority.
@@ -514,8 +1290,11 @@ where
         tx: Transaction,
         versions: Vec<VersionRecord>,
         now_ms: u64,
-    ) -> Result<Vec<SyncMessage>, Error> {
-        self.ingest_commit_unit_with_context(tx, versions, now_ms, None, None)
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        self.ingest_commit_unit_with_context(tx, versions, now_ms, None)
     }
 
     /// Ingest a commit unit as fate authority with an optional authenticated
@@ -527,9 +1306,11 @@ where
         versions: Vec<VersionRecord>,
         now_ms: u64,
         ingest_context: Option<CommitUnitIngestContext>,
-        encoded_len: Option<usize>,
-    ) -> Result<Vec<SyncMessage>, Error> {
-        if let Some(reason) = commit_unit_limit_violation(&tx, &versions, encoded_len) {
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        if let Some(reason) = commit_unit_limit_violation(&versions) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
             self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
             let mut updates = vec![SyncMessage::FateUpdate {
@@ -541,6 +1322,7 @@ where
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
             return Ok(updates);
         }
+        self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
         let mut updates = self.ingest_commit_unit_once(tx, versions, now_ms, ingest_context)?;
         updates.extend(self.drain_parked_commit_units()?);
         Ok(updates)
@@ -556,7 +1338,15 @@ where
         tx: Transaction,
         versions: Vec<VersionRecord>,
         now_ms: u64,
-    ) -> Result<Vec<SyncMessage>, Error> {
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        if commit_unit_limit_violation(&versions).is_none()
+            && commit_unit_write_count_matches(&tx, versions.len())
+        {
+            self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
+        }
         let mut updates =
             self.ingest_edge_authority_mergeable_commit_unit_once(tx, versions, now_ms, None)?;
         updates.extend(self.drain_parked_commit_units()?);
@@ -571,7 +1361,15 @@ where
         versions: Vec<VersionRecord>,
         now_ms: u64,
         identity: AuthorId,
-    ) -> Result<Vec<SyncMessage>, Error> {
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        if commit_unit_limit_violation(&versions).is_none()
+            && commit_unit_write_count_matches(&tx, versions.len())
+        {
+            self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
+        }
         let ingest_context = Some(CommitUnitIngestContext {
             identity,
             trust: CommitUnitTrust::TrustedBackend,
@@ -619,12 +1417,17 @@ where
             .get(&tx_id)
             .copied()
             .unwrap_or(stored.tx.made_by);
-        for version in &records {
-            if !self.version_satisfies_write_policy(version, permission_subject)? {
-                let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
-                self.ingest_rejected_transaction(stored.tx, fate)?;
-                return Ok(());
-            }
+        if !self.commit_unit_satisfies_write_policies(
+            &Transaction {
+                permission_subject: Some(permission_subject),
+                ..stored.tx.clone()
+            },
+            &records,
+            None,
+        )? {
+            let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
+            self.ingest_rejected_transaction(stored.tx, fate)?;
+            return Ok(());
         }
         let global_seq = self.clock.next_global_seq;
         self.clock.next_global_seq = self.clock.next_global_seq.next();
@@ -634,7 +1437,9 @@ where
             Some(global_seq),
             Some(DurabilityTier::Global),
         )?;
-        self.create_merge_versions_for(&records)?;
+        if stored.tx.target_lineage == crate::tx::BranchLineage::Root {
+            self.create_merge_versions_for(&records)?;
+        }
         self.checkpoint_large_values_for_tx(tx_id)
     }
 
@@ -680,7 +1485,9 @@ where
             Some(global_seq),
             Some(DurabilityTier::Global),
         )?;
-        self.create_merge_versions_for(&versions)?;
+        if tx.target_lineage == crate::tx::BranchLineage::Root {
+            self.create_merge_versions_for(&versions)?;
+        }
         self.checkpoint_large_values_for_tx(tx_id)?;
         Ok(Fate::Accepted)
     }
@@ -698,7 +1505,7 @@ where
                 "edge-accepted finalization is mergeable-only",
             ));
         }
-        if let Some(reason) = commit_unit_limit_violation(&tx, &versions, None) {
+        if let Some(reason) = commit_unit_limit_violation(&versions) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
             self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
             let mut updates = vec![SyncMessage::FateUpdate {
@@ -756,12 +1563,23 @@ where
                 }]);
             }
         }
+        if self.park_commit_unit_if_missing_branch_metadata_with_mode(
+            &tx,
+            &versions,
+            now_ms,
+            CommitUnitParkMode {
+                ingress_role: ParkedIngressRole::EdgeAccepted,
+                ..CommitUnitParkMode::default()
+            },
+        )? {
+            return Ok(Vec::new());
+        }
         if self.park_commit_unit_if_missing_schema_versions_with_mode(
             &tx,
             &versions,
             now_ms,
             CommitUnitParkMode {
-                edge_accepted_mergeable: true,
+                ingress_role: ParkedIngressRole::EdgeAccepted,
                 ..CommitUnitParkMode::default()
             },
         )? {
@@ -773,7 +1591,7 @@ where
             now_ms,
             &mut memo,
             CommitUnitParkMode {
-                edge_accepted_mergeable: true,
+                ingress_role: ParkedIngressRole::EdgeAccepted,
                 ..CommitUnitParkMode::default()
             },
         )? {
@@ -784,7 +1602,7 @@ where
             &versions,
             now_ms,
             CommitUnitParkMode {
-                edge_accepted_mergeable: true,
+                ingress_role: ParkedIngressRole::EdgeAccepted,
                 ..CommitUnitParkMode::default()
             },
         )? {
@@ -841,7 +1659,12 @@ where
         self.clock.next_global_seq = self.clock.next_global_seq.next();
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
-        let merge_rows = self.merge_rows_for_versions(&versions)?;
+        let root_target = tx.target_lineage == crate::tx::BranchLineage::Root;
+        let merge_rows = if root_target {
+            self.merge_rows_for_versions(&versions)?
+        } else {
+            Vec::new()
+        };
         self.ingest_known_transaction(
             tx.clone(),
             versions,
@@ -850,7 +1673,9 @@ where
             durability,
         )?;
         debug_assert_eq!(self.clock.applied_global_watermark, global_seq);
-        self.create_merge_versions_for_rows(merge_rows)?;
+        if root_target {
+            self.create_merge_versions_for_rows(merge_rows)?;
+        }
         self.checkpoint_large_values_for_tx(tx.tx_id)?;
         Ok(vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
@@ -865,7 +1690,16 @@ where
         &mut self,
         tx: Transaction,
         versions: Vec<VersionRecord>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
+        if commit_unit_limit_violation(&versions).is_some()
+            || !commit_unit_write_count_matches(&tx, versions.len())
+        {
+            return Err(Error::UnsupportedCommitUnit("malformed relay commit unit"));
+        }
+        self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
         self.ingest_relay_commit_unit_once(tx, versions)?;
         self.drain_parked_relay_commit_units()?;
         Ok(())
@@ -900,24 +1734,43 @@ where
                 "commit unit version count does not match transaction n_total_writes",
             ));
         }
-        if self.park_commit_unit_if_missing_schema_versions(
+        let relay_mode = CommitUnitParkMode {
+            ingress_role: ParkedIngressRole::Relay,
+            ..CommitUnitParkMode::default()
+        };
+        if self.park_commit_unit_if_missing_branch_metadata_with_mode(
             &tx,
             &versions,
             u64::MAX - SKEW_TOLERANCE_MS,
+            relay_mode,
+        )? {
+            return Ok(());
+        }
+        if self.park_commit_unit_if_missing_schema_versions_with_mode(
+            &tx,
+            &versions,
+            u64::MAX - SKEW_TOLERANCE_MS,
+            relay_mode,
         )? {
             return Ok(());
         }
 
         let mut memo = IngestMemo::default();
-        if self.park_commit_unit_if_missing_parents(
+        if self.park_commit_unit_if_missing_parents_with_mode(
             &tx,
             &versions,
             u64::MAX - SKEW_TOLERANCE_MS,
             &mut memo,
+            relay_mode,
         )? {
             return Ok(());
         }
-        if self.park_commit_unit_if_missing_content(&tx, &versions, u64::MAX - SKEW_TOLERANCE_MS)? {
+        if self.park_commit_unit_if_missing_content_with_mode(
+            &tx,
+            &versions,
+            u64::MAX - SKEW_TOLERANCE_MS,
+            relay_mode,
+        )? {
             return Ok(());
         }
 
@@ -988,6 +1841,17 @@ where
                     durability: fate_update_durability_claim(&existing.fate, existing.durability),
                 }]);
             }
+        }
+        if self.park_commit_unit_if_missing_branch_metadata_with_mode(
+            &tx,
+            &versions,
+            now_ms,
+            CommitUnitParkMode {
+                ingest_context,
+                ..CommitUnitParkMode::default()
+            },
+        )? {
+            return Ok(Vec::new());
         }
         if self.park_commit_unit_if_missing_schema_versions_with_mode(
             &tx,
@@ -1104,7 +1968,12 @@ where
         self.clock.next_global_seq = self.clock.next_global_seq.next();
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
-        let merge_rows = self.merge_rows_for_versions(&versions)?;
+        let root_target = tx.target_lineage == crate::tx::BranchLineage::Root;
+        let merge_rows = if root_target {
+            self.merge_rows_for_versions(&versions)?
+        } else {
+            Vec::new()
+        };
         self.ingest_known_transaction(
             tx.clone(),
             versions,
@@ -1113,7 +1982,9 @@ where
             durability,
         )?;
         debug_assert_eq!(self.clock.applied_global_watermark, global_seq);
-        self.create_merge_versions_for_rows(merge_rows)?;
+        if root_target {
+            self.create_merge_versions_for_rows(merge_rows)?;
+        }
         self.checkpoint_large_values_for_tx(tx.tx_id)?;
         Ok(vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
@@ -1137,7 +2008,7 @@ where
                 "edge authority only supports mergeable commit units",
             ));
         }
-        if let Some(reason) = commit_unit_limit_violation(&tx, &versions, None) {
+        if let Some(reason) = commit_unit_limit_violation(&versions) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
             self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
             let mut updates = vec![SyncMessage::FateUpdate {
@@ -1184,14 +2055,24 @@ where
                 }]);
             }
         }
+        if self.park_commit_unit_if_missing_branch_metadata_with_mode(
+            &tx,
+            &versions,
+            now_ms,
+            CommitUnitParkMode {
+                ingest_context,
+                ingress_role: ParkedIngressRole::EdgeAuthority,
+            },
+        )? {
+            return Ok(Vec::new());
+        }
         if self.park_commit_unit_if_missing_schema_versions_with_mode(
             &tx,
             &versions,
             now_ms,
             CommitUnitParkMode {
                 ingest_context,
-                edge_authority_mergeable: true,
-                ..CommitUnitParkMode::default()
+                ingress_role: ParkedIngressRole::EdgeAuthority,
             },
         )? {
             return Ok(Vec::new());
@@ -1203,8 +2084,7 @@ where
             &mut memo,
             CommitUnitParkMode {
                 ingest_context,
-                edge_authority_mergeable: true,
-                ..CommitUnitParkMode::default()
+                ingress_role: ParkedIngressRole::EdgeAuthority,
             },
         )? {
             return Ok(Vec::new());
@@ -1215,8 +2095,7 @@ where
             now_ms,
             CommitUnitParkMode {
                 ingest_context,
-                edge_authority_mergeable: true,
-                ..CommitUnitParkMode::default()
+                ingress_role: ParkedIngressRole::EdgeAuthority,
             },
         )? {
             return Ok(Vec::new());
@@ -1530,9 +2409,7 @@ where
             for version in versions {
                 let author_schema = version.schema_version();
                 let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
-                let (table_schema, target_schema, stored) = if author_schema
-                    != self.catalogue.current_write_schema.schema
-                {
+                let stored = if author_schema != self.catalogue.current_write_schema.schema {
                     let mut target_table = version.table().to_owned();
                     let mut target_cells = source_table_schema
                         .columns
@@ -1553,7 +2430,7 @@ where
                     target_table = translated_table;
                     let table_schema = self.table_in_schema(&target_table, target_schema)?;
                     let schema_version_alias = self.ensure_schema_version_alias(target_schema)?;
-                    let stored = VersionRow::from_parts_with_schema_version(
+                    VersionRow::from_parts_with_schema_version(
                         &table_schema,
                         VersionRowParts {
                             table: target_table,
@@ -1567,15 +2444,16 @@ where
                             updated_by: version.updated_by(),
                             updated_at: version.updated_at(),
                             cells: target_cells,
+                            // Lens translation lacks authored-presence semantics.
+                            authored_columns: None,
                             deletion: version.deletion(),
                         },
                         (target_schema != self.catalogue.current_schema_version_id)
                             .then_some(target_schema),
-                    )?;
-                    (table_schema, target_schema, stored)
+                    )?
                 } else {
                     let schema_version_alias = self.ensure_schema_version_alias(author_schema)?;
-                    let stored = VersionRow::from_wire_with_schema_version(
+                    VersionRow::from_wire_with_schema_version(
                         &source_table_schema,
                         version,
                         tx_node_alias,
@@ -1583,19 +2461,13 @@ where
                         tx.tx_id.time,
                         (author_schema != self.catalogue.current_schema_version_id)
                             .then_some(author_schema),
-                    )?;
-                    (source_table_schema, author_schema, stored)
+                    )?
                 };
-                let history_table = self.cached_version_storage_table_name_for_schema(
-                    &table_schema.name,
-                    stored.layer(),
-                    target_schema,
-                    self.catalogue.current_schema_version_id,
-                );
+                let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
                 batch.insert_raw(
                     history_table.as_ref(),
                     history_primary_key(&stored),
-                    stored.record.raw().to_vec(),
+                    groove_record,
                 );
                 if stored.layer() == VersionLayer::Content {
                     content_versions.push(stored.clone());
@@ -1705,6 +2577,7 @@ where
             Vec::new()
         };
 
+        let root_target = stored.tx.target_lineage == crate::tx::BranchLineage::Root;
         let mut batch = self.database.open_batch();
         let mut global_current_updates = Vec::new();
         let cleanup_rejected_versions = matches!(stored.fate, Fate::Rejected(_));
@@ -1714,7 +2587,7 @@ where
             .filter(|version| version.layer() == VersionLayer::Content)
             .cloned()
             .collect::<Vec<_>>();
-        if matches!(stored.fate, Fate::Accepted) && stored.global_seq.is_some() {
+        if root_target && matches!(stored.fate, Fate::Accepted) && stored.global_seq.is_some() {
             global_current_updates =
                 self.global_current_updates_for_versions(tx_id, &tx_versions)?;
         }
@@ -1749,7 +2622,7 @@ where
                 stored.durability,
             ),
         );
-        if !matches!(stored.fate, Fate::Rejected(_)) {
+        if root_target && !matches!(stored.fate, Fate::Rejected(_)) {
             for version in &content_versions {
                 self.update_merge_heads_for_content_version(&mut batch, version)?;
             }
@@ -1770,7 +2643,8 @@ where
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if matches!(stored.fate, Fate::Rejected(_)) || stored.global_seq.is_some() {
+        if root_target && (matches!(stored.fate, Fate::Rejected(_)) || stored.global_seq.is_some())
+        {
             self.cleanup_fated_ahead_current_for_versions(&mut batch, &tx_versions)?;
         }
         for global_seq in advanced_global_seqs
@@ -1780,7 +2654,7 @@ where
         {
             self.prune_ahead_current_for_global_seq(&mut batch, global_seq)?;
         }
-        let rejected_payload = if cleanup_rejected_versions {
+        let rejected_payload = if root_target && cleanup_rejected_versions {
             self.remove_rejected_local_versions(tx_id, &stored, &mut batch)?
         } else {
             None
@@ -1792,14 +2666,16 @@ where
         }
         #[cfg(test)]
         {
-            let rows = content_versions
-                .iter()
-                .map(|version| (version.table().to_owned(), version.row_uuid()))
-                .collect::<BTreeSet<_>>();
-            self.assert_merge_head_rows_match_history_for_test(&rows)?;
-            self.assert_global_current_updates_match_history_for_test(
-                &global_current_update_versions,
-            )?;
+            if root_target {
+                let rows = content_versions
+                    .iter()
+                    .map(|version| (version.table().to_owned(), version.row_uuid()))
+                    .collect::<BTreeSet<_>>();
+                self.assert_merge_head_rows_match_history_for_test(&rows)?;
+                self.assert_global_current_updates_match_history_for_test(
+                    &global_current_update_versions,
+                )?;
+            }
         }
         if let Some(rejected_payload) = rejected_payload {
             let tx_id = rejected_payload.tx_id();
@@ -1997,6 +2873,32 @@ where
             }
             None => tx.permission_subject.unwrap_or(tx.made_by),
         };
+        if let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage {
+            let branch = self
+                .branches
+                .branches
+                .get(&branch_id)
+                .cloned()
+                .ok_or(Error::BranchNotFound(branch_id))?;
+            if branch.state != codec::BranchState::Open {
+                return Ok(false);
+            }
+            if !self.branch_write_policy_allows(branch_id, permission_subject)? {
+                return Ok(false);
+            }
+            for version in versions {
+                let table = self.table_in_schema(version.table(), version.schema_version())?;
+                if !self.branch_table_write_policy_allows_version_record(
+                    &branch,
+                    &table,
+                    version,
+                    permission_subject,
+                )? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
         for version in versions {
             if !self.version_satisfies_write_policy(version, permission_subject)? {
                 return Ok(false);
@@ -2022,22 +2924,6 @@ where
         None
     }
 
-    pub(super) fn park_commit_unit_if_missing_parents(
-        &mut self,
-        tx: &Transaction,
-        versions: &[VersionRecord],
-        now_ms: u64,
-        memo: &mut IngestMemo,
-    ) -> Result<bool, Error> {
-        self.park_commit_unit_if_missing_parents_with_mode(
-            tx,
-            versions,
-            now_ms,
-            memo,
-            CommitUnitParkMode::default(),
-        )
-    }
-
     pub(super) fn park_commit_unit_if_missing_parents_with_mode(
         &mut self,
         tx: &Transaction,
@@ -2056,8 +2942,7 @@ where
             if existing.ingest_context != mode.ingest_context {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
-            existing.edge_authority_mergeable |= mode.edge_authority_mergeable;
-            existing.edge_accepted_mergeable |= mode.edge_accepted_mergeable;
+            existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
             return Ok(true);
         }
         self.sync_metrics.parked_orphans += 1;
@@ -2068,25 +2953,10 @@ where
                 versions: versions.to_vec(),
                 now_ms,
                 ingest_context: mode.ingest_context,
-                edge_authority_mergeable: mode.edge_authority_mergeable,
-                edge_accepted_mergeable: mode.edge_accepted_mergeable,
+                ingress_role: mode.ingress_role,
             },
         );
         Ok(true)
-    }
-
-    pub(super) fn park_commit_unit_if_missing_schema_versions(
-        &mut self,
-        tx: &Transaction,
-        versions: &[VersionRecord],
-        now_ms: u64,
-    ) -> Result<bool, Error> {
-        self.park_commit_unit_if_missing_schema_versions_with_mode(
-            tx,
-            versions,
-            now_ms,
-            CommitUnitParkMode::default(),
-        )
     }
 
     pub(super) fn park_commit_unit_if_missing_schema_versions_with_mode(
@@ -2110,8 +2980,7 @@ where
             if existing.ingest_context != mode.ingest_context {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
-            existing.edge_authority_mergeable |= mode.edge_authority_mergeable;
-            existing.edge_accepted_mergeable |= mode.edge_accepted_mergeable;
+            existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
             return Ok(true);
         }
         self.sync_metrics.parked_orphans += 1;
@@ -2124,25 +2993,51 @@ where
                 versions: versions.to_vec(),
                 now_ms,
                 ingest_context: mode.ingest_context,
-                edge_authority_mergeable: mode.edge_authority_mergeable,
-                edge_accepted_mergeable: mode.edge_accepted_mergeable,
+                ingress_role: mode.ingress_role,
             },
         );
         Ok(true)
     }
 
-    pub(super) fn park_commit_unit_if_missing_content(
+    /// Park a branch-targeted unit until the authenticated routing record has
+    /// arrived.  Branch metadata is a transport prerequisite, not a synthetic
+    /// transaction parent, so this deliberately shares the ordinary bounded
+    /// orphan queue and its idempotence/conflict checks.
+    pub(super) fn park_commit_unit_if_missing_branch_metadata_with_mode(
         &mut self,
         tx: &Transaction,
         versions: &[VersionRecord],
         now_ms: u64,
+        mode: CommitUnitParkMode,
     ) -> Result<bool, Error> {
-        self.park_commit_unit_if_missing_content_with_mode(
-            tx,
-            versions,
-            now_ms,
-            CommitUnitParkMode::default(),
-        )
+        let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage else {
+            return Ok(false);
+        };
+        if self.branches.branches.contains_key(&branch_id) {
+            return Ok(false);
+        }
+        if let Some(existing) = self.parking.parked_commit_units.get_mut(&tx.tx_id) {
+            if existing.tx != *tx
+                || existing.versions != versions
+                || existing.ingest_context != mode.ingest_context
+            {
+                return Err(Error::ConflictingCommitUnit(tx.tx_id));
+            }
+            existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
+            return Ok(true);
+        }
+        self.sync_metrics.parked_orphans += 1;
+        self.parking.parked_commit_units.insert(
+            tx.tx_id,
+            ParkedCommitUnit {
+                tx: tx.clone(),
+                versions: versions.to_vec(),
+                now_ms,
+                ingest_context: mode.ingest_context,
+                ingress_role: mode.ingress_role,
+            },
+        );
+        Ok(true)
     }
 
     pub(super) fn park_commit_unit_if_missing_content_with_mode(
@@ -2162,8 +3057,7 @@ where
             if existing.ingest_context != mode.ingest_context {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
-            existing.edge_authority_mergeable |= mode.edge_authority_mergeable;
-            existing.edge_accepted_mergeable |= mode.edge_accepted_mergeable;
+            existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
             return Ok(true);
         }
         self.sync_metrics.parked_orphans += 1;
@@ -2174,8 +3068,7 @@ where
                 versions: versions.to_vec(),
                 now_ms,
                 ingest_context: mode.ingest_context,
-                edge_authority_mergeable: mode.edge_authority_mergeable,
-                edge_accepted_mergeable: mode.edge_accepted_mergeable,
+                ingress_role: mode.ingress_role,
             },
         );
         Ok(true)
@@ -2235,13 +3128,17 @@ where
         Ok(true)
     }
 
-    pub(super) fn drain_parked_commit_units(&mut self) -> Result<Vec<SyncMessage>, Error> {
+    pub(super) fn drain_parked_commit_units(&mut self) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
         let mut updates = Vec::new();
         loop {
             let parked = self
                 .parking
                 .parked_commit_units
                 .iter()
+                .filter(|(_, unit)| unit.ingress_role != ParkedIngressRole::Relay)
                 .map(|(tx_id, unit)| (*tx_id, unit.versions.clone()))
                 .collect::<Vec<_>>();
             let mut ready = Vec::new();
@@ -2250,7 +3147,10 @@ where
                     self.catalogue
                         .catalogue_schemas
                         .contains_key(&version.schema_version())
-                }) && self.missing_parent_refs(&versions)?.is_empty()
+                }) && branch_metadata_available(
+                    self,
+                    &self.parking.parked_commit_units[&tx_id].tx,
+                ) && self.missing_parent_refs(&versions)?.is_empty()
                     && self.missing_content_refs(&versions)?.is_empty()
                 {
                     ready.push(tx_id);
@@ -2260,6 +3160,9 @@ where
                 break;
             }
             for tx_id in ready {
+                if let Some(unit) = self.parking.parked_commit_units.get(&tx_id).cloned() {
+                    self.prepare_branch_target_partitions_if_ready(&unit.tx, &unit.versions)?;
+                }
                 let Some(unit) = self.parking.parked_commit_units.remove(&tx_id) else {
                     continue;
                 };
@@ -2267,13 +3170,13 @@ where
                 if self.parking.parked_catalogue_commit_units.remove(&tx_id) {
                     self.sync_metrics.parked_catalogue_orphans_resolved += 1;
                 }
-                if unit.edge_accepted_mergeable {
+                if unit.ingress_role == ParkedIngressRole::EdgeAccepted {
                     updates.extend(self.finalize_edge_accepted_mergeable_commit_unit_once(
                         unit.tx,
                         unit.versions,
                         unit.now_ms,
                     )?);
-                } else if unit.edge_authority_mergeable {
+                } else if unit.ingress_role == ParkedIngressRole::EdgeAuthority {
                     updates.extend(self.ingest_edge_authority_mergeable_commit_unit_once(
                         unit.tx,
                         unit.versions,
@@ -2293,12 +3196,16 @@ where
         Ok(updates)
     }
 
-    pub(super) fn drain_parked_relay_commit_units(&mut self) -> Result<(), Error> {
+    pub(super) fn drain_parked_relay_commit_units(&mut self) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
         loop {
             let parked = self
                 .parking
                 .parked_commit_units
                 .iter()
+                .filter(|(_, unit)| unit.ingress_role == ParkedIngressRole::Relay)
                 .map(|(tx_id, unit)| (*tx_id, unit.versions.clone()))
                 .collect::<Vec<_>>();
             let mut ready = Vec::new();
@@ -2307,7 +3214,10 @@ where
                     self.catalogue
                         .catalogue_schemas
                         .contains_key(&version.schema_version())
-                }) && self.missing_parent_refs(&versions)?.is_empty()
+                }) && branch_metadata_available(
+                    self,
+                    &self.parking.parked_commit_units[&tx_id].tx,
+                ) && self.missing_parent_refs(&versions)?.is_empty()
                     && self.missing_content_refs(&versions)?.is_empty()
                 {
                     ready.push(tx_id);
@@ -2317,6 +3227,9 @@ where
                 break;
             }
             for tx_id in ready {
+                if let Some(unit) = self.parking.parked_commit_units.get(&tx_id).cloned() {
+                    self.prepare_branch_target_partitions_if_ready(&unit.tx, &unit.versions)?;
+                }
                 let Some(unit) = self.parking.parked_commit_units.remove(&tx_id) else {
                     continue;
                 };
@@ -2459,11 +3372,6 @@ where
                 version_carriers,
                 version_bundles,
                 ..
-            }
-            | SyncMessage::ViewUpdateChunk {
-                version_carriers,
-                version_bundles,
-                ..
             } => {
                 let mut refs = BTreeSet::new();
                 for bundle in version_bundles {
@@ -2557,8 +3465,14 @@ where
         let affected_content_rows = rejected
             .iter()
             .filter(|version| version.layer() == VersionLayer::Content)
-            .map(|version| (version.table().to_owned(), version.row_uuid()))
-            .collect::<BTreeSet<_>>();
+            .map(|version| {
+                Ok((
+                    self.physical_table_id_for_version(version)?,
+                    version.table().to_owned(),
+                    version.row_uuid(),
+                ))
+            })
+            .collect::<Result<BTreeSet<_>, Error>>()?;
         let mut rejected_payload = None;
         if tx_id.node == self.node_uuid
             && let Fate::Rejected(reason) = &tx.fate
@@ -2585,16 +3499,16 @@ where
                 let table_schema = self.table_in_schema(version.table(), schema_version)?;
                 let rejected_version_table = table_schema.rejected_versions_storage_table();
                 let rejected_version_values = rejected_version_values(&table_schema, version)?;
-                batch.insert(
-                    rejected_versions_table_name(version.table()),
-                    rejected_version_values.clone(),
-                );
+                let rejected_version_record = owned_record_from_storage_values(
+                    &rejected_version_table,
+                    rejected_version_values,
+                )?;
+                let (storage_table, storage_record) =
+                    self.rejected_version_storage_write_binding(version, &rejected_version_record)?;
+                batch.insert(storage_table.as_ref(), storage_record);
                 rejected_versions.push(RejectedVersion::new(
                     version.table().to_owned(),
-                    owned_record_from_storage_values(
-                        &rejected_version_table,
-                        rejected_version_values,
-                    )?,
+                    rejected_version_record,
                 ));
             }
             rejected_versions.sort_by_key(|version| {
@@ -2612,13 +3526,11 @@ where
         }
         for version in &rejected {
             self.write_ahead_current_delete(batch, version)?;
-            batch.delete(
-                version_storage_table_name(&version.table, version.layer()),
-                history_primary_key(version),
-            );
+            let history_table = self.version_storage_table_for_row(version)?;
+            batch.delete(history_table.as_ref(), history_primary_key(version));
         }
-        for (table, row_uuid) in affected_content_rows {
-            self.rewrite_merge_heads_excluding_tx(batch, &table, row_uuid, tx_id)?;
+        for (table_id, table, row_uuid) in affected_content_rows {
+            self.rewrite_merge_heads_excluding_tx(batch, table_id, &table, row_uuid, tx_id)?;
         }
         self.invalidate_tx_version_tables_cache(tx_id);
         let _ = affected;
@@ -2642,11 +3554,18 @@ where
             if record.deletion().is_some() {
                 continue;
             }
-            let (_, table) = self.translate_cells_to_current_write_schema(
+            let (projected_schema, table) = self.translate_cells_to_current_write_schema(
                 record.schema_version(),
                 record.table(),
                 &mut BTreeMap::new(),
             )?;
+            // Synthetic merge versions are authored in the current write
+            // schema. An otherwise valid version in an unreconciled schema
+            // has its own physical lineage and merge-head set, but cannot be
+            // semantically merged into the write schema until a lens exists.
+            if projected_schema != self.catalogue.current_write_schema.schema {
+                continue;
+            }
             rows.push((table, record.row_uuid()));
         }
         rows.sort_unstable();
@@ -2669,15 +3588,11 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
-        let head_tx_ids = self.merge_head_tx_ids(table, row_uuid)?;
-        // Schema migrations can leave a single historical head under a table
-        // name that no longer exists. Preserve the old one-head fast path for
-        // that case; only a live table can need GSet materialization.
-        let table_schema = match self.table(table) {
-            Ok(table_schema) => table_schema.clone(),
-            Err(Error::TableNotFound(_)) if head_tx_ids.len() < 2 => return Ok(()),
-            Err(error) => return Err(error),
-        };
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_write_schema.schema, table)?;
+        let head_tx_ids = self.merge_head_tx_ids(table_id, row_uuid)?;
+        let table_schema =
+            self.table_in_schema(table, self.catalogue.current_write_schema.schema)?;
         let has_gset_column = table_schema
             .columns
             .iter()
@@ -2685,7 +3600,7 @@ where
         if head_tx_ids.len() < 2 && !has_gset_column {
             return Ok(());
         }
-        let row_versions = self.query_row_versions(table, row_uuid)?;
+        let row_versions = self.query_physical_content_row_versions(table_id, table, row_uuid)?;
         let mut row_versions_by_tx = BTreeMap::new();
         for version in row_versions {
             row_versions_by_tx.insert(self.version_tx_id(&version)?, version);
@@ -2784,6 +3699,12 @@ where
                     }
                     let mut best: Option<(crate::time::TxTimeSortKey, Value)> = None;
                     for version in heads {
+                        if version
+                            .authored_columns(table_schema)?
+                            .is_some_and(|columns| !columns.contains(&column.name))
+                        {
+                            continue;
+                        }
                         let Some(value) = version.cell(table_schema, &column.name)? else {
                             continue;
                         };
@@ -2924,6 +3845,11 @@ where
             self.materialize_large_value_column(table_schema, primary_version, column)?;
         let ops = text_oplog::diff(&primary_value, &merged);
         let ops = self.extent_back_text_ops(
+            self.schema_version_for_alias(primary_version.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "large-value schema alias is unknown",
+                ))?,
+            &table_schema.name,
             AuthorId(self.node_uuid.0),
             primary_version.row_uuid(),
             column,
@@ -3066,15 +3992,22 @@ where
                 content: TextContent::Inline(merged),
             });
         } else {
-            merge_ops.extend(self.extent_back_text_ops(
-                AuthorId(self.node_uuid.0),
-                primary_version.row_uuid(),
-                column,
-                vec![TextOp::Insert {
-                    pos: 0,
-                    content: TextContent::Inline(merged),
-                }],
-            )?);
+            merge_ops.extend(
+                self.extent_back_text_ops(
+                    self.schema_version_for_alias(primary_version.schema_version_alias())
+                        .ok_or(Error::InvalidStoredValue(
+                            "large-value schema alias is unknown",
+                        ))?,
+                    &table_schema.name,
+                    AuthorId(self.node_uuid.0),
+                    primary_version.row_uuid(),
+                    column,
+                    vec![TextOp::Insert {
+                        pos: 0,
+                        content: TextContent::Inline(merged),
+                    }],
+                )?,
+            );
         }
         Ok(Some(LargeValueMergeCell {
             value: Value::Bytes(encode_extent_text_ops(&merge_ops)),
@@ -3366,15 +4299,12 @@ where
 
     fn read_merge_heads(
         &mut self,
-        table: &str,
+        table_id: PhysicalTableId,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeSet<TxId>>, Error> {
         let row = self.database.primary_key_get_raw(
             MERGE_HEADS_TABLE,
-            &[
-                Value::Bytes(table.as_bytes().to_vec()),
-                Value::Uuid(row_uuid.0),
-            ],
+            &[Value::U64(table_id.0), Value::Uuid(row_uuid.0)],
         )?;
         let Some(row) = row else {
             return Ok(None);
@@ -3386,16 +4316,13 @@ where
     fn read_merge_heads_in_batch(
         &mut self,
         batch: &DatabaseBatch,
-        table: &str,
+        table_id: PhysicalTableId,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeSet<TxId>>, Error> {
         let row = self.database.primary_key_get_raw_in_batch(
             batch,
             MERGE_HEADS_TABLE,
-            &[
-                Value::Bytes(table.as_bytes().to_vec()),
-                Value::Uuid(row_uuid.0),
-            ],
+            &[Value::U64(table_id.0), Value::Uuid(row_uuid.0)],
         )?;
         let Some(row) = row else {
             return Ok(None);
@@ -3406,10 +4333,10 @@ where
 
     fn require_merge_heads(
         &mut self,
-        table: &str,
+        table_id: PhysicalTableId,
         row_uuid: RowUuid,
     ) -> Result<BTreeSet<TxId>, Error> {
-        self.read_merge_heads(table, row_uuid)?
+        self.read_merge_heads(table_id, row_uuid)?
             .ok_or(Error::InvalidStoredValue(
                 "merge head set missing for existing global current row",
             ))
@@ -3417,19 +4344,66 @@ where
 
     fn write_merge_heads(
         batch: &mut DatabaseBatch,
-        table: &str,
+        table_id: PhysicalTableId,
         row_uuid: RowUuid,
         heads: &BTreeSet<TxId>,
     ) -> Result<(), Error> {
         batch.update(
             MERGE_HEADS_TABLE,
             vec![
-                Value::Bytes(table.as_bytes().to_vec()),
+                Value::U64(table_id.0),
                 Value::Uuid(row_uuid.0),
                 Value::Bytes(Self::encode_merge_heads(heads)?),
             ],
         );
         Ok(())
+    }
+
+    fn query_physical_content_row_versions(
+        &mut self,
+        table_id: PhysicalTableId,
+        requested_table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Vec<VersionRow>, Error> {
+        let storage_table = physical_history_table_name(table_id);
+        let raws = self
+            .database
+            .primary_key_scan_raw(&storage_table, &[Value::Uuid(row_uuid.0)])?
+            .into_iter()
+            .map(|raw| raw.owned_record())
+            .collect::<Vec<_>>();
+        let mut versions = raws
+            .into_iter()
+            .map(|record| self.decode_history_owned_record(requested_table, &storage_table, record))
+            .collect::<Result<Vec<_>, Error>>()?;
+        let aliases = self.node_aliases.clone();
+        versions.sort_by_key(|version| {
+            version_tx_id_from_aliases(version, &aliases).expect("valid version tx id")
+        });
+        Ok(versions)
+    }
+
+    fn query_physical_content_layer_winner(
+        &mut self,
+        table_id: PhysicalTableId,
+        requested_table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<VersionRow>, Error> {
+        let mut winner = None;
+        for version in
+            self.query_physical_content_row_versions(table_id, requested_table, row_uuid)?
+        {
+            let candidate_tx = self.version_tx_id(&version)?;
+            let replaces_winner = winner.as_ref().is_none_or(|existing: &VersionRow| {
+                let existing_tx = self.version_tx_id(existing).expect("valid version tx id");
+                candidate_tx.time.sort_key(candidate_tx.node)
+                    > existing_tx.time.sort_key(existing_tx.node)
+            });
+            if replaces_winner {
+                winner = Some(version);
+            }
+        }
+        Ok(winner)
     }
 
     pub(super) fn update_merge_heads_for_content_version(
@@ -3440,14 +4414,15 @@ where
         if version.layer() != VersionLayer::Content {
             return Ok(());
         }
+        let table_id = self.physical_table_id_for_version(version)?;
         let new_tx = self.version_tx_id(version)?;
-        let mut heads = match self.read_merge_heads(version.table(), version.row_uuid())? {
+        let mut heads = match self.read_merge_heads(table_id, version.row_uuid())? {
             Some(existing) => existing,
             None => {
-                if let Some(previous) = self.query_local_layer_winner(
+                if let Some(previous) = self.query_physical_content_layer_winner(
+                    table_id,
                     version.table(),
                     version.row_uuid(),
-                    VersionLayer::Content,
                 )? {
                     let previous_tx = self.version_tx_id(&previous)?;
                     if previous_tx != new_tx {
@@ -3468,6 +4443,7 @@ where
             .map(|head| {
                 self.content_version_reaches_tx_in_batch(
                     batch,
+                    table_id,
                     version.table(),
                     version.row_uuid(),
                     head,
@@ -3480,7 +4456,7 @@ where
         if !dominated_by_existing_head {
             heads.insert(new_tx);
         }
-        Self::write_merge_heads(batch, version.table(), version.row_uuid(), &heads)
+        Self::write_merge_heads(batch, table_id, version.row_uuid(), &heads)
     }
 
     fn update_merge_heads_for_content_version_in_batch(
@@ -3491,42 +4467,40 @@ where
         if version.layer() != VersionLayer::Content {
             return Ok(());
         }
+        let table_id = self.physical_table_id_for_version(version)?;
         let new_tx = self.version_tx_id(version)?;
-        let mut heads =
-            match self.read_merge_heads_in_batch(batch, version.table(), version.row_uuid())? {
-                Some(existing) => existing,
-                None => {
-                    if let Some(previous) = self.query_local_layer_winner(
-                        version.table(),
-                        version.row_uuid(),
-                        VersionLayer::Content,
-                    )? {
-                        let previous_tx = self.version_tx_id(&previous)?;
-                        if previous_tx != new_tx {
-                            return Err(Error::InvalidStoredValue(
-                                "merge head set missing for existing content row",
-                            ));
-                        }
+        let mut heads = match self.read_merge_heads_in_batch(batch, table_id, version.row_uuid())? {
+            Some(existing) => existing,
+            None => {
+                if let Some(previous) = self.query_physical_content_layer_winner(
+                    table_id,
+                    version.table(),
+                    version.row_uuid(),
+                )? {
+                    let previous_tx = self.version_tx_id(&previous)?;
+                    if previous_tx != new_tx {
+                        return Err(Error::InvalidStoredValue(
+                            "merge head set missing for existing content row",
+                        ));
                     }
-                    BTreeSet::new()
                 }
-            };
+                BTreeSet::new()
+            }
+        };
         for parent in version.parents() {
             heads.remove(&parent);
         }
         let dominated_by_existing_head = heads
             .iter()
             .copied()
-            .map(|head| {
-                self.content_version_reaches_tx(version.table(), version.row_uuid(), head, new_tx)
-            })
+            .map(|head| self.content_version_reaches_tx(table_id, version.row_uuid(), head, new_tx))
             .collect::<Result<Vec<_>, Error>>()?
             .into_iter()
             .any(|reaches| reaches);
         if !dominated_by_existing_head {
             heads.insert(new_tx);
         }
-        Self::write_merge_heads(batch, version.table(), version.row_uuid(), &heads)
+        Self::write_merge_heads(batch, table_id, version.row_uuid(), &heads)
     }
 
     fn query_global_layer_winner_in_batch(
@@ -3536,30 +4510,24 @@ where
         row_uuid: RowUuid,
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
-        let (schema_version, base_for_current_names) = if self
+        let schema_version = if self
             .table_in_schema(table, self.catalogue.current_schema_version_id)
             .is_ok()
         {
-            (
-                self.catalogue.current_schema_version_id,
-                self.catalogue.current_schema_version_id,
-            )
+            self.catalogue.current_schema_version_id
         } else {
             self.table_in_schema(table, self.catalogue.current_write_schema.schema)?;
-            (
-                self.catalogue.current_write_schema.schema,
-                self.catalogue.current_write_schema.schema,
-            )
+            self.catalogue.current_write_schema.schema
         };
-        let current_table = self.cached_global_current_table_name_for_schema(
+        let current_table = self.physical_current_table_for_schema(
+            schema_version,
             table,
             layer,
-            schema_version,
-            base_for_current_names,
-        );
+            PhysicalCurrentClass::Global,
+        )?;
         let raw = self.database.primary_key_get_raw_in_batch(
             batch,
-            current_table.as_ref(),
+            &current_table,
             &[Value::Uuid(row_uuid.0)],
         )?;
         let Some(raw) = raw else {
@@ -3581,7 +4549,7 @@ where
         tx_time: TxTime,
         tx_node_alias: NodeAlias,
     ) -> Result<Option<VersionRow>, Error> {
-        for (storage_table, descriptor) in self.version_storage_sources_for_layer(table, layer)? {
+        for storage_table in self.version_storage_sources_for_layer(table, layer)? {
             let raw = self.database.primary_key_get_raw_in_batch(
                 batch,
                 &storage_table,
@@ -3591,12 +4559,12 @@ where
                     Value::U64(tx_node_alias.0),
                 ],
             )?;
-            let raw = raw.map(|raw| raw.raw().to_vec());
-            let Some(raw) = raw else {
+            let record = raw.map(|raw| raw.owned_record());
+            let Some(record) = record else {
                 continue;
             };
             return self
-                .decode_history_record(table, BorrowedRecord::new(&raw, &descriptor))
+                .decode_history_owned_record(table, &storage_table, record)
                 .map(Some);
         }
         Ok(None)
@@ -3607,23 +4575,26 @@ where
         batch: &mut DatabaseBatch,
         versions: &[VersionRow],
     ) -> Result<(), Error> {
-        let mut by_row = BTreeMap::<(String, RowUuid), Vec<&VersionRow>>::new();
+        let mut by_row = BTreeMap::<(PhysicalTableId, RowUuid), Vec<&VersionRow>>::new();
         for version in versions {
             if version.layer() == VersionLayer::Content {
+                let table_id = self.physical_table_id_for_version(version)?;
                 by_row
-                    .entry((version.table().to_owned(), version.row_uuid()))
+                    .entry((table_id, version.row_uuid()))
                     .or_default()
                     .push(version);
             }
         }
-        for ((table, row_uuid), mut row_versions) in by_row {
+        for ((table_id, row_uuid), mut row_versions) in by_row {
             row_versions.sort_by_key(|version| {
                 let tx_id = self
                     .version_tx_id(version)
                     .expect("bulk content version must have node alias");
                 tx_id.time.sort_key(tx_id.node)
             });
-            let mut heads = self.read_merge_heads(&table, row_uuid)?.unwrap_or_default();
+            let mut heads = self
+                .read_merge_heads(table_id, row_uuid)?
+                .unwrap_or_default();
             let mut staged_parents = BTreeMap::<TxId, Vec<TxId>>::new();
             for version in &row_versions {
                 staged_parents.insert(self.version_tx_id(version)?, version.parents());
@@ -3639,7 +4610,11 @@ where
                     .map(|head| {
                         content_version_reaches_tx_in_staged_parents(head, new_tx, &staged_parents)
                             .map_or_else(
-                                || self.content_version_reaches_tx(&table, row_uuid, head, new_tx),
+                                || {
+                                    self.content_version_reaches_tx(
+                                        table_id, row_uuid, head, new_tx,
+                                    )
+                                },
                                 Ok,
                             )
                     })
@@ -3650,14 +4625,14 @@ where
                     heads.insert(new_tx);
                 }
             }
-            Self::write_merge_heads(batch, &table, row_uuid, &heads)?;
+            Self::write_merge_heads(batch, table_id, row_uuid, &heads)?;
         }
         Ok(())
     }
 
     fn content_version_reaches_tx(
         &mut self,
-        table: &str,
+        table_id: PhysicalTableId,
         row_uuid: RowUuid,
         start: TxId,
         target: TxId,
@@ -3672,7 +4647,7 @@ where
                 continue;
             }
             for version in self.query_versions_for_tx(tx_id)? {
-                if version.table() == table
+                if self.physical_table_id_for_version(&version)? == table_id
                     && version.row_uuid() == row_uuid
                     && version.layer() == VersionLayer::Content
                 {
@@ -3686,6 +4661,7 @@ where
     fn content_version_reaches_tx_in_batch(
         &mut self,
         batch: &DatabaseBatch,
+        table_id: PhysicalTableId,
         table: &str,
         row_uuid: RowUuid,
         start: TxId,
@@ -3700,10 +4676,13 @@ where
             if !seen.insert(tx_id) {
                 continue;
             }
-            for version in
-                self.query_versions_for_tx_in_batch_for_row(batch, tx_id, table, row_uuid)?
+            for version in self
+                .query_versions_for_tx_in_batch_for_row(batch, tx_id, table_id, table, row_uuid)?
             {
-                if version.row_uuid() == row_uuid && version.layer() == VersionLayer::Content {
+                if self.physical_table_id_for_version(&version)? == table_id
+                    && version.row_uuid() == row_uuid
+                    && version.layer() == VersionLayer::Content
+                {
                     stack.extend(version.parents());
                 }
             }
@@ -3715,6 +4694,7 @@ where
         &mut self,
         batch: &DatabaseBatch,
         tx_id: TxId,
+        table_id: PhysicalTableId,
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Vec<VersionRow>, Error> {
@@ -3722,24 +4702,21 @@ where
         let Some(tx_node_alias) = self.node_aliases.get(&tx_id.node).copied() else {
             return Ok(versions);
         };
-        for (storage_table, descriptor) in
-            self.version_storage_sources_for_layer(table, VersionLayer::Content)?
-        {
-            let Some(raw) = self.database.primary_key_get_raw_in_batch(
-                batch,
+        let storage_table = physical_history_table_name(table_id);
+        if let Some(raw) = self.database.primary_key_get_raw_in_batch(
+            batch,
+            &storage_table,
+            &[
+                Value::Uuid(row_uuid.0),
+                Value::U64(tx_id.time.0),
+                Value::U64(tx_node_alias.0),
+            ],
+        )? {
+            versions.push(self.decode_history_owned_record(
+                table,
                 &storage_table,
-                &[
-                    Value::Uuid(row_uuid.0),
-                    Value::U64(tx_id.time.0),
-                    Value::U64(tx_node_alias.0),
-                ],
-            )?
-            else {
-                continue;
-            };
-            let raw = raw.raw().to_vec();
-            versions
-                .push(self.decode_history_record(table, BorrowedRecord::new(&raw, &descriptor))?);
+                raw.owned_record(),
+            )?);
         }
         Ok(versions)
     }
@@ -3747,11 +4724,12 @@ where
     fn rewrite_merge_heads_excluding_tx(
         &mut self,
         batch: &mut DatabaseBatch,
+        table_id: PhysicalTableId,
         table: &str,
         row_uuid: RowUuid,
         excluded_tx: TxId,
     ) -> Result<(), Error> {
-        let versions = self.query_row_versions(table, row_uuid)?;
+        let versions = self.query_physical_content_row_versions(table_id, table, row_uuid)?;
         let candidate_indices = versions
             .iter()
             .enumerate()
@@ -3766,15 +4744,15 @@ where
         for idx in head_indices {
             heads.insert(self.version_tx_id(&versions[idx])?);
         }
-        Self::write_merge_heads(batch, table, row_uuid, &heads)
+        Self::write_merge_heads(batch, table_id, row_uuid, &heads)
     }
 
     fn merge_head_tx_ids(
         &mut self,
-        table: &str,
+        table_id: PhysicalTableId,
         row_uuid: RowUuid,
     ) -> Result<BTreeSet<TxId>, Error> {
-        self.require_merge_heads(table, row_uuid)
+        self.require_merge_heads(table_id, row_uuid)
     }
 
     #[cfg(test)]
@@ -3783,7 +4761,9 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<BTreeSet<TxId>, Error> {
-        let versions = self.query_row_versions(table, row_uuid)?;
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_write_schema.schema, table)?;
+        let versions = self.query_physical_content_row_versions(table_id, table, row_uuid)?;
         let mut candidate_indices = Vec::new();
         for (idx, version) in versions.iter().enumerate() {
             if version.layer() != VersionLayer::Content {
@@ -3812,8 +4792,10 @@ where
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
         let heads = self.recomputed_merge_heads_from_history_for_test(table, row_uuid)?;
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_write_schema.schema, table)?;
         let mut batch = self.database.open_batch();
-        Self::write_merge_heads(&mut batch, table, row_uuid, &heads)?;
+        Self::write_merge_heads(&mut batch, table_id, row_uuid, &heads)?;
         self.database.commit_batch(batch)?;
         Ok(())
     }
@@ -3825,7 +4807,9 @@ where
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
         let expected = self.recomputed_merge_heads_from_history_for_test(table, row_uuid)?;
-        let actual = self.require_merge_heads(table, row_uuid)?;
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_write_schema.schema, table)?;
+        let actual = self.require_merge_heads(table_id, row_uuid)?;
         if actual != expected {
             let versions = self
                 .query_row_versions(table, row_uuid)?
@@ -3938,34 +4922,26 @@ where
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
-        let base_for_current_names = if self
-            .table_in_schema(version.table(), self.catalogue.current_schema_version_id)
-            .is_ok()
-        {
-            self.catalogue.current_schema_version_id
-        } else {
-            schema_version
-        };
         let table = self.table_in_schema(version.table(), schema_version)?;
         let storage_tables = table.global_current_storage_tables();
         let (current_table, current_schema, expected_values) = match version.layer() {
             VersionLayer::Content => (
-                self.cached_global_current_table_name_for_schema(
+                groove::Intern::new(self.physical_current_table_for_schema(
+                    schema_version,
                     version.table(),
                     VersionLayer::Content,
-                    schema_version,
-                    base_for_current_names,
-                ),
+                    PhysicalCurrentClass::Global,
+                )?),
                 &storage_tables[0],
                 global_current_values(&table, version, Some(global_seq))?,
             ),
             VersionLayer::Deletion => (
-                self.cached_global_current_table_name_for_schema(
+                groove::Intern::new(self.physical_current_table_for_schema(
+                    schema_version,
                     version.table(),
                     VersionLayer::Deletion,
-                    schema_version,
-                    base_for_current_names,
-                ),
+                    PhysicalCurrentClass::Global,
+                )?),
                 &storage_tables[1],
                 register_global_current_values(version, Some(global_seq)),
             ),
@@ -3996,10 +4972,14 @@ where
         version: &VersionRow,
         global_seq: GlobalSeq,
     ) -> Result<(), Error> {
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+        let table_id = self.physical_table_id_for_schema(schema_version, version.table())?;
         let rows = self.database.primary_key_scan_raw(
             "jazz_global_changes",
             &[
-                Value::Bytes(version.table().as_bytes().to_vec()),
+                Value::U64(table_id.0),
                 Value::Uuid(version.row_uuid().0),
                 Value::Bytes(version_layer_string(version.layer()).into_bytes()),
                 Value::U64(global_seq.0),
@@ -4055,56 +5035,57 @@ where
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
-        let base_for_current_names = if self
-            .table_in_schema(version.table(), self.catalogue.current_schema_version_id)
-            .is_ok()
-        {
-            self.catalogue.current_schema_version_id
-        } else {
-            schema_version
-        };
         match version.layer() {
             VersionLayer::Content => {
                 let table = self.table_in_schema(version.table(), schema_version)?;
-                let current_table = global_current_table_name_for_schema(
-                    version.table(),
+                let binding = physical_current_binding(
+                    &self.catalogue.catalogue_schemas,
+                    &self.catalogue.physical_mappings,
                     schema_version,
-                    base_for_current_names,
-                );
+                    version.table(),
+                    PhysicalCurrentClass::Global,
+                )?;
+                let logical = owned_record_from_storage_values(
+                    &table.global_current_storage_tables()[0],
+                    global_current_values(&table, version, Some(global_seq))
+                        .expect("valid global current values"),
+                )
+                .expect("valid global current row");
                 batch.update_raw(
-                    current_table,
+                    binding.storage_table,
                     global_current_primary_key(version.row_uuid()),
-                    owned_record_from_storage_values(
-                        &table.global_current_storage_tables()[0],
-                        global_current_values(&table, version, Some(global_seq))
-                            .expect("valid global current values"),
-                    )
-                    .expect("valid global current row")
-                    .raw()
-                    .to_vec(),
+                    groove::records::VersionedRecord::new(
+                        version.schema_version_alias().0,
+                        OwnedRecord::new(logical.raw().to_vec(), binding.descriptor),
+                    ),
                 );
             }
             VersionLayer::Deletion => batch.update_raw(
-                register_global_current_table_name_for_schema(
-                    version.table(),
+                self.physical_current_table_for_schema(
                     schema_version,
-                    base_for_current_names,
-                ),
+                    version.table(),
+                    VersionLayer::Deletion,
+                    PhysicalCurrentClass::Global,
+                )?,
                 global_current_primary_key(version.row_uuid()),
-                owned_record_from_storage_values(
-                    &self
-                        .table_in_schema(version.table(), schema_version)?
-                        .global_current_storage_tables()[1],
-                    register_global_current_values(version, Some(global_seq)),
-                )
-                .expect("valid register global current row")
-                .raw()
-                .to_vec(),
+                version.bind_groove_record(
+                    owned_record_from_storage_values(
+                        &self
+                            .table_in_schema(version.table(), schema_version)?
+                            .global_current_storage_tables()[1],
+                        register_global_current_values(version, Some(global_seq)),
+                    )
+                    .expect("valid register global current row"),
+                ),
             ),
         }
         batch.update(
             "jazz_global_changes",
-            global_change_values(version, global_seq),
+            global_change_values(
+                self.physical_table_id_for_schema(schema_version, version.table())?,
+                version,
+                global_seq,
+            ),
         );
         Ok(())
     }
@@ -4117,54 +5098,48 @@ where
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
-        let base_for_current_names = if self
-            .table_in_schema(version.table(), self.catalogue.current_schema_version_id)
-            .is_ok()
-        {
-            self.catalogue.current_schema_version_id
-        } else {
-            schema_version
-        };
         match version.layer() {
             VersionLayer::Content => {
                 let table = self.table_in_schema(version.table(), schema_version)?;
+                let binding = physical_current_binding(
+                    &self.catalogue.catalogue_schemas,
+                    &self.catalogue.physical_mappings,
+                    schema_version,
+                    version.table(),
+                    PhysicalCurrentClass::Ahead,
+                )?;
+                let logical = owned_record_from_storage_values(
+                    &table.ahead_current_storage_tables()[0],
+                    global_current_values(&table, version, None)
+                        .expect("valid ahead current values"),
+                )
+                .expect("valid ahead current row");
                 batch.insert_raw(
-                    self.cached_ahead_current_table_name_for_schema(
-                        version.table(),
-                        VersionLayer::Content,
-                        schema_version,
-                        base_for_current_names,
-                    )
-                    .as_ref(),
+                    binding.storage_table,
                     history_primary_key(version),
-                    owned_record_from_storage_values(
-                        &table.ahead_current_storage_tables()[0],
-                        global_current_values(&table, version, None)
-                            .expect("valid ahead current values"),
-                    )
-                    .expect("valid ahead current row")
-                    .raw()
-                    .to_vec(),
+                    groove::records::VersionedRecord::new(
+                        version.schema_version_alias().0,
+                        OwnedRecord::new(logical.raw().to_vec(), binding.descriptor),
+                    ),
                 );
             }
             VersionLayer::Deletion => batch.insert_raw(
-                self.cached_ahead_current_table_name_for_schema(
+                self.physical_current_table_for_schema(
+                    schema_version,
                     version.table(),
                     VersionLayer::Deletion,
-                    schema_version,
-                    base_for_current_names,
-                )
-                .as_ref(),
+                    PhysicalCurrentClass::Ahead,
+                )?,
                 history_primary_key(version),
-                owned_record_from_storage_values(
-                    &self
-                        .table_in_schema(version.table(), schema_version)?
-                        .ahead_current_storage_tables()[1],
-                    register_global_current_values(version, None),
-                )
-                .expect("valid register ahead current row")
-                .raw()
-                .to_vec(),
+                version.bind_groove_record(
+                    owned_record_from_storage_values(
+                        &self
+                            .table_in_schema(version.table(), schema_version)?
+                            .ahead_current_storage_tables()[1],
+                        register_global_current_values(version, None),
+                    )
+                    .expect("valid register ahead current row"),
+                ),
             ),
         }
         self.insert_ahead_current_key(
@@ -4185,21 +5160,13 @@ where
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
-        let base_for_current_names = if self
-            .table_in_schema(version.table(), self.catalogue.current_schema_version_id)
-            .is_ok()
-        {
-            self.catalogue.current_schema_version_id
-        } else {
-            schema_version
-        };
-        let table = self.cached_ahead_current_table_name_for_schema(
+        let table = self.physical_current_table_for_schema(
+            schema_version,
             version.table(),
             version.layer(),
-            schema_version,
-            base_for_current_names,
-        );
-        batch.delete(table.as_ref(), history_primary_key(version));
+            PhysicalCurrentClass::Ahead,
+        )?;
+        batch.delete(table, history_primary_key(version));
         self.remove_ahead_current_key(
             version.table(),
             version.layer(),
@@ -4381,6 +5348,8 @@ where
         update_current_indexes: bool,
     ) -> Result<(), Error> {
         self.merge_tx_time(tx.tx_id.time);
+        let update_current_indexes =
+            update_current_indexes && tx.target_lineage == crate::tx::BranchLineage::Root;
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node)?;
         let tx_already_known = self.query_transaction(tx.tx_id)?.is_some();
         let tx_values =
@@ -4415,47 +5384,66 @@ where
         for version in versions {
             let author_schema = version.schema_version();
             let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
-            let mut target_table = version.table().to_owned();
-            let mut target_cells = source_table_schema
-                .columns
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, column)| {
-                    version
-                        .optional_cell_at(idx)
-                        .map(|value| (column.name.clone(), value))
-                })
-                .collect::<BTreeMap<_, _>>();
-            let (target_schema, translated_table) = self.translate_cells_to_current_write_schema(
-                author_schema,
-                &target_table,
-                &mut target_cells,
-            )?;
-            target_table = translated_table;
-            let table_schema = self.table_in_schema(&target_table, target_schema)?;
-            let schema_version_alias = self.ensure_schema_version_alias(target_schema)?;
+            let (table_schema, _target_schema, stored) =
+                if author_schema != self.catalogue.current_write_schema.schema {
+                    let mut target_table = version.table().to_owned();
+                    let mut target_cells = source_table_schema
+                        .columns
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(idx, column)| {
+                            version
+                                .optional_cell_at(idx)
+                                .map(|value| (column.name.clone(), value))
+                        })
+                        .collect::<BTreeMap<_, _>>();
+                    let (target_schema, translated_table) = self
+                        .translate_cells_to_current_write_schema(
+                            author_schema,
+                            &target_table,
+                            &mut target_cells,
+                        )?;
+                    target_table = translated_table;
+                    let table_schema = self.table_in_schema(&target_table, target_schema)?;
+                    let schema_version_alias = self.ensure_schema_version_alias(target_schema)?;
+                    let stored = VersionRow::from_parts_with_schema_version(
+                        &table_schema,
+                        VersionRowParts {
+                            table: target_table,
+                            row_uuid: version.row_uuid(),
+                            tx_node_alias,
+                            schema_version_alias,
+                            tx_time: tx.tx_id.time,
+                            parents: version.parents(),
+                            created_by: version.created_by(),
+                            created_at: version.created_at(),
+                            updated_by: version.updated_by(),
+                            updated_at: version.updated_at(),
+                            cells: target_cells,
+                            // Lens translation lacks authored-presence semantics.
+                            authored_columns: None,
+                            deletion: version.deletion(),
+                        },
+                        (target_schema != self.catalogue.current_schema_version_id)
+                            .then_some(target_schema),
+                    )?;
+                    (table_schema, target_schema, stored)
+                } else {
+                    let schema_version_alias = self.ensure_schema_version_alias(author_schema)?;
+                    let stored = VersionRow::from_wire_with_schema_version(
+                        &source_table_schema,
+                        &version,
+                        tx_node_alias,
+                        schema_version_alias,
+                        tx.tx_id.time,
+                        (author_schema != self.catalogue.current_schema_version_id)
+                            .then_some(author_schema),
+                    )?;
+                    (source_table_schema, author_schema, stored)
+                };
             let layer = VersionLayer::for_record(&version);
             let previous_current =
                 self.query_local_layer_winner(&table_schema.name, version.row_uuid(), layer)?;
-            let stored = VersionRow::from_parts_with_schema_version(
-                &table_schema,
-                VersionRowParts {
-                    table: target_table,
-                    row_uuid: version.row_uuid(),
-                    tx_node_alias,
-                    schema_version_alias,
-                    tx_time: tx.tx_id.time,
-                    parents: version.parents(),
-                    created_by: version.created_by(),
-                    created_at: version.created_at(),
-                    updated_by: version.updated_by(),
-                    updated_at: version.updated_at(),
-                    cells: target_cells,
-                    deletion: version.deletion(),
-                },
-                (target_schema != self.catalogue.current_schema_version_id)
-                    .then_some(target_schema),
-            )?;
             let previous_winner = if let Some(previous) = previous_current.as_ref() {
                 let previous_tx_id = self.version_tx_id(previous)?;
                 let previous_made_at = if previous_tx_id == tx.tx_id {
@@ -4510,12 +5498,12 @@ where
                     }
                 }
             }
-            let history_table = self.cached_version_storage_table_name_for_schema(
-                &table_schema.name,
-                stored.layer(),
-                target_schema,
-                self.catalogue.current_schema_version_id,
-            );
+            let (history_table, groove_record) = match tx.target_lineage {
+                crate::tx::BranchLineage::Root => self.version_storage_write_binding(&stored)?,
+                crate::tx::BranchLineage::Branch(branch_id) => {
+                    self.branch_version_storage_write_binding(&stored, branch_id)?
+                }
+            };
             if tx_already_known {
                 let existing = self.database.primary_key_get_raw_in_batch(
                     batch,
@@ -4534,14 +5522,14 @@ where
                     batch.insert_raw(
                         history_table.as_ref(),
                         history_primary_key(&stored),
-                        stored.record.raw().to_vec(),
+                        groove_record,
                     );
                 }
             } else {
                 batch.insert_raw_fresh(
                     history_table.as_ref(),
                     history_primary_key(&stored),
-                    stored.record.raw().to_vec(),
+                    groove_record,
                 );
             }
             if update_current_indexes && !matches!(fate, Fate::Rejected(_)) && global_seq.is_none()
@@ -4549,7 +5537,7 @@ where
                 self.write_ahead_current_insert(batch, &stored)?;
             }
         }
-        if !matches!(fate, Fate::Rejected(_)) {
+        if update_current_indexes && !matches!(fate, Fate::Rejected(_)) {
             for stored in &content_versions {
                 self.update_merge_heads_for_content_version_in_batch(batch, stored)?;
             }
@@ -5042,6 +6030,13 @@ fn counter_value_from_i128(
         _ => Err(Error::InvalidStoredValue(
             "counter strategy requires integer column",
         )),
+    }
+}
+
+fn branch_metadata_available<S: OrderedKvStorage>(node: &NodeState<S>, tx: &Transaction) -> bool {
+    match tx.target_lineage {
+        crate::tx::BranchLineage::Root => true,
+        crate::tx::BranchLineage::Branch(branch) => node.branches.branches.contains_key(&branch),
     }
 }
 

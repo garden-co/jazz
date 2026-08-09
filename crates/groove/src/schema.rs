@@ -208,13 +208,19 @@ fn descriptor_fields(descriptor: &RecordDescriptor) -> Vec<(String, ValueType)> 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct TableSchema {
     pub name: String,
-    /// Public write APIs accept values in this declaration order.
-    /// [`TableSchema::record_schema`] may reorder fields for compact storage.
+    /// Stable table-wide field catalogue. Schema versions select ordered row
+    /// layouts from these fields without redefining their types.
     pub columns: Vec<ColumnSchema>,
     pub primary_key: Option<PrimaryKey>,
     /// Explicit secondary indices to maintain as durable IVM nodes.
     pub indices: Vec<IndexSchema>,
     pub foreign_keys: Vec<ForeignKey>,
+    /// Row layouts selected by the leading `u64` stored in each versioned row.
+    /// An empty registry denotes one homogeneous layout in catalogue order.
+    /// Value-based writes use the reserved discriminator `0`; callers may bind
+    /// the same layout to another discriminator when it is useful metadata.
+    #[serde(default)]
+    pub schema_versions: Vec<TableSchemaVersion>,
 }
 
 impl TableSchema {
@@ -225,6 +231,7 @@ impl TableSchema {
             primary_key: None,
             indices: Vec::new(),
             foreign_keys: Vec::new(),
+            schema_versions: Vec::new(),
         }
     }
 
@@ -243,12 +250,72 @@ impl TableSchema {
         self
     }
 
+    /// Register one row layout for a schema-variant table.
+    ///
+    /// Field names select an ordered subset of the stable [`Self::columns`]
+    /// catalogue. The database validates the completed registry when opened.
+    pub fn with_schema_version(
+        mut self,
+        version: u64,
+        fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.schema_versions
+            .push(TableSchemaVersion::new(version, fields));
+        self
+    }
+
+    pub fn has_schema_variants(&self) -> bool {
+        !self.schema_versions.is_empty()
+    }
+
+    pub fn schema_version(&self, version: u64) -> Option<&TableSchemaVersion> {
+        self.schema_versions
+            .iter()
+            .find(|schema_version| schema_version.version == version)
+    }
+
+    /// Build the descriptor registered for one row schema version.
+    pub fn record_schema_for_version(&self, version: u64) -> Option<RecordDescriptor> {
+        if self.schema_versions.is_empty() {
+            return Some(self.record_schema());
+        }
+        let schema_version = self.schema_version(version)?;
+        let fields = schema_version
+            .fields
+            .iter()
+            .map(|field_name| {
+                let column = self
+                    .columns
+                    .iter()
+                    .find(|column| column.name == *field_name)?;
+                Some((column.name.clone(), column.column_type.clone()))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(RecordDescriptor::new(fields))
+    }
+
     pub fn record_schema(&self) -> RecordDescriptor {
         RecordDescriptor::new(
             self.columns
                 .iter()
                 .map(|column| (column.name.clone(), column.column_type.clone())),
         )
+    }
+}
+
+/// One ordered row layout in a schema-variant table's stable field catalogue.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub struct TableSchemaVersion {
+    pub version: u64,
+    pub fields: Vec<String>,
+}
+
+impl TableSchemaVersion {
+    pub fn new(version: u64, fields: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            version,
+            fields: fields.into_iter().map(Into::into).collect(),
+        }
     }
 }
 

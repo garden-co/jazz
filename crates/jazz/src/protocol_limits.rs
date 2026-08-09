@@ -5,7 +5,7 @@
 //! configuration, but the core owns the default contract.
 
 use crate::protocol::{
-    ContentExtent, KnownStateDeclaration, RowVersionRef, ShapeAst, SyncMessage, VersionRecord,
+    ContentExtent, KnownStateDeclaration, RowVersionRef, ShapeAst, VersionRecord,
 };
 
 /// Maximum encoded `WireFrame` bytes accepted before postcard decode.
@@ -15,11 +15,15 @@ use crate::protocol::{
 /// envelope overhead while forcing large batches to split by bytes.
 pub const MAX_WIRE_FRAME_BYTES: usize = 2 * 1024 * 1024;
 
-/// Maximum encoded `SyncMessage` bytes accepted inside a `WireEnvelope`.
+/// Resource ceiling for one decoded logical message, independent of framing.
 ///
-/// Source: same budget as `MAX_WIRE_FRAME_BYTES`; semantic payloads must fit
-/// the negotiated frame budget, while batching happens outside `SyncMessage`.
-pub const MAX_SYNC_MESSAGE_BYTES: usize = MAX_WIRE_FRAME_BYTES;
+/// This prevents allocation bombs while allowing normal database payloads to
+/// span many physical frames. Deployments may make it configurable later.
+pub const MAX_LOGICAL_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
+/// Per-peer aggregate memory budget for incomplete logical messages.
+pub const MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES: usize = MAX_LOGICAL_MESSAGE_BYTES;
+/// Per-peer fairness bound for concurrently incomplete logical messages.
+pub const MAX_INFLIGHT_LOGICAL_MESSAGES: usize = 4;
 
 /// Maximum postcard-encoded query shape registration payload.
 ///
@@ -31,22 +35,18 @@ pub const MAX_SHAPE_AST_BYTES: usize = 64 * 1024;
 
 /// Maximum number of row-version records in one commit unit.
 ///
-/// Source: matches the node's existing tx-version table cache order of
-/// magnitude and is far above current fixture/bench commit arity. Byte limits
-/// remain the primary memory guard.
+/// This bounds one atomic validation/storage critical section and the number of
+/// authorization decisions charged to one peer turn. It is independent of
+/// encoded byte size and physical framing.
 pub const MAX_COMMIT_UNIT_VERSIONS: usize = 4096;
-
-/// Maximum encoded bytes for one commit unit.
-///
-/// Source: same 2 MiB semantic payload budget. A larger transaction must be
-/// split into multiple mergeable commits or rejected as malformed.
-pub const MAX_COMMIT_UNIT_BYTES: usize = MAX_SYNC_MESSAGE_BYTES;
 
 /// Maximum row-version repair refs in one `FetchRowVersions` request.
 ///
 /// Source: matches the first known-state repair tier; large reconnect holes
 /// should batch exact requests instead of creating unbounded semantic vectors.
 pub const MAX_FETCH_ROW_VERSIONS: usize = 1024;
+/// Maximum branch-routing records requested in one repair message.
+pub const MAX_FETCH_BRANCH_METADATA: usize = 1024;
 
 /// Maximum exact row-version refs in one slow known-state declaration.
 ///
@@ -68,8 +68,8 @@ pub fn validate_wire_frame_len(len: usize) -> Result<(), String> {
 }
 
 /// Validate raw encoded sync payload bytes before decoding the semantic message.
-pub fn validate_sync_message_len(len: usize) -> Result<(), String> {
-    validate_len("sync message payload", len, MAX_SYNC_MESSAGE_BYTES)
+pub fn validate_logical_message_len(len: usize) -> Result<(), String> {
+    validate_len("logical message payload", len, MAX_LOGICAL_MESSAGE_BYTES)
 }
 
 /// Validate a shape registration after sync-message decode but before storing it.
@@ -103,6 +103,18 @@ pub fn validate_fetch_row_versions(requests: &[RowVersionRef]) -> Result<(), Str
     Ok(())
 }
 
+/// Validate bounded branch-routing metadata repair requests.
+pub fn validate_fetch_branch_metadata(branches: &[crate::ids::BranchId]) -> Result<(), String> {
+    if branches.len() > MAX_FETCH_BRANCH_METADATA {
+        return Err(format!(
+            "branch metadata repair request count {} exceeds max {}",
+            branches.len(),
+            MAX_FETCH_BRANCH_METADATA
+        ));
+    }
+    Ok(())
+}
+
 /// Validate an optional known-state declaration after sync-message decode.
 pub fn validate_known_state_declaration(
     declaration: &Option<KnownStateDeclaration>,
@@ -121,11 +133,7 @@ pub fn validate_known_state_declaration(
 }
 
 /// Return a malformed-commit reason when the commit unit exceeds protocol limits.
-pub fn commit_unit_limit_violation(
-    tx: &crate::tx::Transaction,
-    versions: &[VersionRecord],
-    encoded_len: Option<usize>,
-) -> Option<String> {
+pub fn commit_unit_limit_violation(versions: &[VersionRecord]) -> Option<String> {
     if versions.len() > MAX_COMMIT_UNIT_VERSIONS {
         return Some(format!(
             "commit unit version count {} exceeds max {}",
@@ -133,27 +141,7 @@ pub fn commit_unit_limit_violation(
             MAX_COMMIT_UNIT_VERSIONS
         ));
     }
-    if let Some(len) = encoded_len {
-        return (len > MAX_COMMIT_UNIT_BYTES).then(|| {
-            format!(
-                "commit unit encoded size {} exceeds max {}",
-                len, MAX_COMMIT_UNIT_BYTES
-            )
-        });
-    }
-    let message = SyncMessage::CommitUnit {
-        tx: tx.clone(),
-        versions: versions.to_vec(),
-    };
-    match postcard::to_allocvec(&message) {
-        Ok(bytes) if bytes.len() > MAX_COMMIT_UNIT_BYTES => Some(format!(
-            "commit unit encoded size {} exceeds max {}",
-            bytes.len(),
-            MAX_COMMIT_UNIT_BYTES
-        )),
-        Ok(_) => None,
-        Err(err) => Some(format!("failed to measure commit unit payload: {err}")),
-    }
+    None
 }
 
 fn validate_len(label: &str, len: usize, max: usize) -> Result<(), String> {

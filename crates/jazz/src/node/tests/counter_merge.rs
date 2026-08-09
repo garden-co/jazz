@@ -401,7 +401,8 @@ fn ingest_direct_version(
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json: None,
-            source_branch: None,
+            target_lineage: crate::tx::BranchLineage::Root,
+            branch_merge: None,
             merge_strategy: None,
         },
         vec![VersionRecord::from_cells(

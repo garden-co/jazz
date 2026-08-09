@@ -5,7 +5,7 @@
 //! [`crate::peer`]. In the layer map this is the top `Db` facade over the node.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::{Pin, pin};
@@ -43,16 +43,18 @@ use crate::node::{
     RowProvenance, ViewUpdateParts,
 };
 use crate::peer::{PeerRole, PeerState};
+#[cfg(feature = "sync-autopsy")]
+use crate::protocol::expand_version_carriers;
 use crate::protocol::{
     BindingViewKey, ContentExtent, CoverageKey, CurrentWriteSchema, LargeValueOwnerRef,
-    MigrationLens, PeerPayloadInventory, ProgramFactEntry, ReadViewKey, ReadViewSourceSpec,
-    ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef, SchemaVersion, ShapeAst,
-    Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey, SyncMessage,
-    VersionBundle, build_version_carriers_from_singletons, expand_version_carriers,
+    MigrationLens, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
+    SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
+    SubscribeServerFailureCode, SubscriptionKey, SyncMessage,
 };
 use crate::protocol_limits::{
-    MAX_WIRE_FRAME_BYTES, validate_content_extents, validate_fetch_row_versions,
-    validate_known_state_declaration, validate_shape_ast_size, validate_sync_message_len,
+    MAX_FETCH_BRANCH_METADATA, MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES, MAX_INFLIGHT_LOGICAL_MESSAGES,
+    validate_content_extents, validate_fetch_branch_metadata, validate_fetch_row_versions,
+    validate_known_state_declaration, validate_logical_message_len, validate_shape_ast_size,
     validate_wire_frame_len,
 };
 use crate::query::{
@@ -64,20 +66,20 @@ use crate::query::{
     RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinKind, RelationPredicate,
     RelationProjectExpr, RelationRowIdRef, RelationValueRef,
 };
-pub use crate::result_tree::{
-    MAX_RESULT_TREE_PARENT_BYTES, ParentTooLargeError, ResultNode, ResultRelation, ResultTree,
-    ResultTreeReplacement,
-};
+pub use crate::result_tree::{ResultNode, ResultRelation, ResultTree, ResultTreeReplacement};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
 use crate::tools::{ObjectId, OutputOccurrenceId};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
 use crate::wire::{
-    FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION,
-    WireEnvelope, WireError, WireErrorCode, WireFeatures, WireFrame, WireRetry, WireSession,
+    FEATURE_MESSAGE_FRAGMENTATION, TransportError, WIRE_PROTOCOL_VERSION, WireEnvelope, WireError,
+    WireErrorCode, WireFeatures, WireFrame, WireMessageFragment, WireRetry, WireSession,
     WireStreamDecoder, WireStreamEncoder, WireTransport, current_wire_features, decode_frame,
     decode_sync_message_for_receive, encode_frame, encode_sync_message,
 };
+
+const WIRE_FRAGMENT_PAYLOAD_BYTES: usize = 512 * 1024;
+const RECENT_COMPLETED_LOGICAL_MESSAGES: usize = 64;
 
 /// How urgently a runtime should service pending peer-connection work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -468,6 +470,50 @@ where
             .set_initial_sync_flush_cadence(cadence.writes())?)
     }
 
+    /// Create a snapshot-base branch immediately in local durable storage.
+    ///
+    /// Branch creation is local-first: no serving node round trip is required.
+    /// The authenticated database identity is recorded as the immutable creator.
+    pub fn create_branch(&self) -> Result<crate::ids::BranchId, Error> {
+        let branch = crate::ids::BranchId(uuid::Uuid::now_v7());
+        self.create_branch_with_id(branch)?;
+        Ok(branch)
+    }
+
+    /// Create a local snapshot-base branch with a caller-supplied stable id.
+    pub fn create_branch_with_id(&self, branch: crate::ids::BranchId) -> Result<(), Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .create_branch_as(branch, self.identity.author)?;
+        Ok(())
+    }
+
+    /// Insert a row into a locally-created branch and queue it for ordinary sync.
+    pub fn insert_on_branch(
+        &self,
+        branch: crate::ids::BranchId,
+        table: &str,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        let row = self.row_id_source.borrow_mut().next_row_id();
+        let cells = self.apply_insert_defaults(table, cells)?;
+        let tx_id = self.node.node.borrow_mut().commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new(table, row, self.next_now_ms())
+                .made_by(self.identity.author)
+                .cells(cells),
+        )?;
+        let local_tier = self.finalize_local_commit(tx_id)?;
+        self.refresh_subscriptions()?;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier,
+        })
+    }
+
     /// Seed a settled mergeable row for server bootstrap/import flows.
     ///
     /// This bypasses the client pending-upload path and immediately finalizes
@@ -491,6 +537,37 @@ where
             .node
             .borrow_mut()
             .finalize_local_mergeable_commit(tx_id)?;
+        self.refresh_subscriptions()?;
+        self.node.mark_subscriber_connections_dirty();
+        Ok(tx_id)
+    }
+
+    /// Seed a branch-local mergeable row for history-complete server bootstrap
+    /// or import flows.
+    ///
+    /// The resulting row is evaluated through the ordinary branch read-view
+    /// lowering path; this does not provide an application-facing branch write
+    /// facade.
+    pub fn seed_branch_mergeable_for_bootstrap(
+        &self,
+        branch: crate::ids::BranchId,
+        table: &str,
+        row: RowUuid,
+        made_by: AuthorId,
+        cells: RowCells,
+    ) -> Result<TxId, Error> {
+        let cells = self.apply_insert_defaults(table, cells)?;
+        let mut node = self.node.node.borrow_mut();
+        if node.branch_record(branch).is_none() {
+            node.create_branch(branch)?;
+        }
+        let tx_id = node.commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new(table, row, self.next_now_ms())
+                .made_by(made_by)
+                .cells(cells),
+        )?;
+        drop(node);
         self.refresh_subscriptions()?;
         self.node.mark_subscriber_connections_dirty();
         Ok(tx_id)
@@ -588,14 +665,37 @@ where
         params: BTreeMap<String, Value>,
     ) -> Result<PreparedQuery, Error> {
         let (schema, schema_version) = self.current_write_schema_for_query()?;
-        let shape = query.validate_with_schema_version(&schema, schema_version)?;
+        self.prepare_query_bound_for_schema(query, params, &schema, schema_version)
+    }
+
+    /// Prepare a query against the schema this database handle was opened with.
+    ///
+    /// Typed client facades are pinned to that schema even when a catalogue
+    /// snapshot advances or rolls back the separate current-write pointer.
+    #[cfg(feature = "client")]
+    pub(crate) fn prepare_query_for_open_schema(
+        &self,
+        query: &Query,
+    ) -> Result<PreparedQuery, Error> {
+        self.prepare_query_bound_for_schema(
+            query,
+            BTreeMap::new(),
+            &self.schema,
+            self.schema_version_id,
+        )
+    }
+
+    fn prepare_query_bound_for_schema(
+        &self,
+        query: &Query,
+        params: BTreeMap<String, Value>,
+        schema: &JazzSchema,
+        schema_version: SchemaVersionId,
+    ) -> Result<PreparedQuery, Error> {
+        let shape = query.validate_with_schema_version(schema, schema_version)?;
         let binding = shape.bind(params)?;
         let (local_plan, global_plan) = if should_install_prepared_plan(&shape)
-            && !self
-                .node
-                .node
-                .borrow()
-                .uses_partitioned_or_schema_projected_read(&shape)
+            && !self.node.node.borrow().uses_schema_projected_read(&shape)
         {
             let mut node = self.node.node.borrow_mut();
             (
@@ -1634,8 +1734,11 @@ where
         row: RowUuid,
         patch: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        let (cells, parent) = self.merge_existing_cells(table, row, patch)?;
-        self.write_mergeable(
+        if patch.is_empty() {
+            return self.no_op_update_handle(table, row, self.identity.author);
+        }
+        let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
+        self.write_mergeable_with_authored_columns(
             self.identity.author,
             None,
             table,
@@ -1643,6 +1746,7 @@ where
             cells,
             parent.into_iter().collect(),
             None,
+            authored_columns,
         )
     }
 
@@ -1654,8 +1758,11 @@ where
         patch: RowCells,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
-        let (cells, parent) = self.merge_existing_cells(table, row, patch)?;
-        self.write_mergeable_at_ms(
+        if patch.is_empty() {
+            return self.no_op_update_handle(table, row, self.identity.author);
+        }
+        let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
+        self.write_mergeable_at_ms_with_authorship(
             self.identity.author,
             None,
             table,
@@ -1663,6 +1770,7 @@ where
             cells,
             parent.into_iter().collect(),
             None,
+            Some(authored_columns),
             now_ms,
         )
     }
@@ -1677,14 +1785,19 @@ where
         row: RowUuid,
         patch: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        let (cells, parent) = self.merge_existing_cells(table, row, patch)?;
-        self.write_mergeable_as_session_subject(
+        self.check_attribution_allowed(made_by)?;
+        if patch.is_empty() {
+            return self.no_op_update_handle(table, row, self.identity.author);
+        }
+        let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
+        self.write_mergeable_as_session_subject_with_authored_columns(
             made_by,
             table,
             row,
             cells,
             parent.into_iter().collect(),
             None,
+            authored_columns,
         )
     }
 
@@ -1696,7 +1809,10 @@ where
         row: RowUuid,
         patch: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        let (cells, parent) =
+        if patch.is_empty() {
+            return self.no_op_update_handle(table, row, identity);
+        }
+        let (cells, parent, authored_columns) =
             self.merge_existing_cells_for_identity(table, row, patch, identity)?;
         let parents = parent.into_iter().collect::<Vec<_>>();
         let dry_run = MergeableCommit::new(table, row, self.next_now_ms())
@@ -1716,7 +1832,16 @@ where
                 format!("policy denied UPDATE on table {table}"),
             ));
         }
-        self.write_mergeable(identity, Some(identity), table, row, cells, parents, None)
+        self.write_mergeable_with_authored_columns(
+            identity,
+            Some(identity),
+            table,
+            row,
+            cells,
+            parents,
+            None,
+            authored_columns,
+        )
     }
 
     /// Update a row for `identity` with an explicit millisecond provenance time.
@@ -1728,7 +1853,10 @@ where
         patch: RowCells,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
-        let (cells, parent) =
+        if patch.is_empty() {
+            return self.no_op_update_handle(table, row, identity);
+        }
+        let (cells, parent, authored_columns) =
             self.merge_existing_cells_for_identity(table, row, patch, identity)?;
         let parents = parent.into_iter().collect::<Vec<_>>();
         let dry_run = MergeableCommit::new(table, row, now_ms)
@@ -1748,7 +1876,7 @@ where
                 format!("policy denied UPDATE on table {table}"),
             ));
         }
-        self.write_mergeable_at_ms(
+        self.write_mergeable_at_ms_with_authorship(
             identity,
             Some(identity),
             table,
@@ -1756,6 +1884,7 @@ where
             cells,
             parents,
             None,
+            Some(authored_columns),
             now_ms,
         )
     }
@@ -1818,16 +1947,26 @@ where
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents) = if self
+        let (cells, parents, authored_columns) = if self
             .upsert_target_for_identity(table, row, self.identity.author)?
             .is_some()
         {
-            let (cells, parent) = self.merge_existing_cells(table, row, cells)?;
-            (cells, parent.into_iter().collect())
+            let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, cells)?;
+            (cells, parent.into_iter().collect(), Some(authored_columns))
         } else {
-            (cells, Vec::new())
+            (cells, Vec::new(), None)
         };
-        self.write_mergeable(self.identity.author, None, table, row, cells, parents, None)
+        self.write_mergeable_at_ms_with_authorship(
+            self.identity.author,
+            None,
+            table,
+            row,
+            cells,
+            parents,
+            None,
+            authored_columns,
+            self.next_now_ms(),
+        )
     }
 
     /// Upsert a row with an explicit millisecond provenance time.
@@ -1839,16 +1978,16 @@ where
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents) = if self
+        let (cells, parents, authored_columns) = if self
             .upsert_target_for_identity(table, row, self.identity.author)?
             .is_some()
         {
-            let (cells, parent) = self.merge_existing_cells(table, row, cells)?;
-            (cells, parent.into_iter().collect())
+            let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, cells)?;
+            (cells, parent.into_iter().collect(), Some(authored_columns))
         } else {
-            (cells, Vec::new())
+            (cells, Vec::new(), None)
         };
-        self.write_mergeable_at_ms(
+        self.write_mergeable_at_ms_with_authorship(
             self.identity.author,
             None,
             table,
@@ -1856,6 +1995,7 @@ where
             cells,
             parents,
             None,
+            authored_columns,
             now_ms,
         )
     }
@@ -1869,17 +2009,27 @@ where
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents) = if self
+        let (cells, parents, authored_columns) = if self
             .upsert_target_for_identity(table, row, identity)?
             .is_some()
         {
-            let (cells, parent) =
+            let (cells, parent, authored_columns) =
                 self.merge_existing_cells_for_identity(table, row, cells, identity)?;
-            (cells, parent.into_iter().collect())
+            (cells, parent.into_iter().collect(), Some(authored_columns))
         } else {
-            (cells, Vec::new())
+            (cells, Vec::new(), None)
         };
-        self.write_mergeable(identity, Some(identity), table, row, cells, parents, None)
+        self.write_mergeable_at_ms_with_authorship(
+            identity,
+            Some(identity),
+            table,
+            row,
+            cells,
+            parents,
+            None,
+            authored_columns,
+            self.next_now_ms(),
+        )
     }
 
     /// Upsert a row for `identity` with an explicit millisecond provenance time.
@@ -1892,17 +2042,17 @@ where
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents) = if self
+        let (cells, parents, authored_columns) = if self
             .upsert_target_for_identity(table, row, identity)?
             .is_some()
         {
-            let (cells, parent) =
+            let (cells, parent, authored_columns) =
                 self.merge_existing_cells_for_identity(table, row, cells, identity)?;
-            (cells, parent.into_iter().collect())
+            (cells, parent.into_iter().collect(), Some(authored_columns))
         } else {
-            (cells, Vec::new())
+            (cells, Vec::new(), None)
         };
-        self.write_mergeable_at_ms(
+        self.write_mergeable_at_ms_with_authorship(
             identity,
             Some(identity),
             table,
@@ -1910,6 +2060,7 @@ where
             cells,
             parents,
             None,
+            authored_columns,
             now_ms,
         )
     }
@@ -2178,9 +2329,27 @@ where
         self.node
             .node
             .borrow_mut()
-            .apply_sync_message(SyncMessage::PublishSchema {
+            .apply_trusted_catalogue_message(SyncMessage::PublishSchema {
                 author: self.identity.author,
                 schema: Box::new(schema),
+            })
+            .map_err(Into::into)
+    }
+
+    /// Atomically publish a non-genesis schema and its lineage-defining lens.
+    pub fn publish_schema_with_lens(
+        &self,
+        catalogue_seq: u64,
+        publication: SchemaLineagePublication,
+    ) -> Result<Vec<SyncMessage>, Error> {
+        self.check_catalogue_admin()?;
+        self.node
+            .node
+            .borrow_mut()
+            .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+                author: self.identity.author,
+                catalogue_seq,
+                publication: Box::new(publication),
             })
             .map_err(Into::into)
     }
@@ -2191,7 +2360,7 @@ where
         self.node
             .node
             .borrow_mut()
-            .apply_sync_message(SyncMessage::PublishLens {
+            .apply_trusted_catalogue_message(SyncMessage::PublishLens {
                 author: self.identity.author,
                 lens,
             })
@@ -2207,7 +2376,7 @@ where
         self.node
             .node
             .borrow_mut()
-            .apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+            .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
                 author: self.identity.author,
                 pointer,
             })
@@ -2233,6 +2402,21 @@ where
             .catalogue_schemas()
             .get(&schema)
             .map(|schema| schema.schema.clone())
+    }
+
+    /// Highest contiguously activated authoritative catalogue position.
+    pub fn active_catalogue_seq(&self) -> u64 {
+        self.node.node.borrow().active_catalogue_seq()
+    }
+
+    /// Return a published migration lens known to this database.
+    pub fn catalogue_lens(&self, lens: crate::ids::MigrationLensId) -> Option<MigrationLens> {
+        self.node
+            .node
+            .borrow()
+            .catalogue_lenses()
+            .get(&lens)
+            .cloned()
     }
 
     /// Open a mergeable transaction and return its id.
@@ -2444,7 +2628,7 @@ where
         self.exclusive_all_for_identity(tx_id, prepared, self.identity.author)
     }
 
-    fn exclusive_all_for_identity(
+    pub(crate) fn exclusive_all_for_identity(
         &self,
         tx_id: OpenTxId,
         prepared: &PreparedQuery,
@@ -2662,6 +2846,29 @@ where
         )
     }
 
+    fn write_mergeable_as_session_subject_with_authored_columns(
+        &self,
+        made_by: AuthorId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        parents: Vec<TxId>,
+        deletion: Option<DeletionEvent>,
+        authored_columns: BTreeSet<String>,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.check_attribution_allowed(made_by)?;
+        self.write_mergeable_with_authored_columns(
+            made_by,
+            Some(self.identity.author),
+            table,
+            row,
+            cells,
+            parents,
+            deletion,
+            authored_columns,
+        )
+    }
+
     /// Restore a row with an explicit millisecond provenance time.
     pub fn restore_at_ms(
         &self,
@@ -2762,6 +2969,55 @@ where
         deletion: Option<DeletionEvent>,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
+        self.write_mergeable_at_ms_with_authorship(
+            made_by,
+            permission_subject,
+            table,
+            row,
+            cells,
+            parents,
+            deletion,
+            None,
+            now_ms,
+        )
+    }
+
+    fn write_mergeable_with_authored_columns(
+        &self,
+        made_by: AuthorId,
+        permission_subject: Option<AuthorId>,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        parents: Vec<TxId>,
+        deletion: Option<DeletionEvent>,
+        authored_columns: BTreeSet<String>,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.write_mergeable_at_ms_with_authorship(
+            made_by,
+            permission_subject,
+            table,
+            row,
+            cells,
+            parents,
+            deletion,
+            Some(authored_columns),
+            self.next_now_ms(),
+        )
+    }
+
+    fn write_mergeable_at_ms_with_authorship(
+        &self,
+        made_by: AuthorId,
+        permission_subject: Option<AuthorId>,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        parents: Vec<TxId>,
+        deletion: Option<DeletionEvent>,
+        authored_columns: Option<BTreeSet<String>>,
+        now_ms: u64,
+    ) -> Result<WriteHandle<S>, Error> {
         let operation = if deletion == Some(DeletionEvent::Deleted) {
             "DELETE"
         } else if parents.is_empty() {
@@ -2778,6 +3034,9 @@ where
             .made_by(made_by)
             .parents(parents)
             .cells(cells);
+        if let Some(authored_columns) = authored_columns {
+            commit = commit.authored_columns(authored_columns);
+        }
         if let Some(subject) = permission_subject {
             commit = commit.permission_subject(subject);
         }
@@ -2903,11 +3162,19 @@ where
         identity: AuthorId,
     ) -> Result<Option<CurrentRow>, Error> {
         let target = self.local_row_for_identity(table, row, identity)?;
-        if target.is_some()
-            || identity == AuthorId::SYSTEM
-            || self.table_schema(table)?.read_policy.is_none()
-        {
+        if target.is_some() {
             return Ok(target);
+        }
+        // A policy-filtered point read cannot by itself distinguish an absent
+        // row from an existing row hidden from this identity. Upsert needs
+        // exactly that distinction: a genuinely absent target follows INSERT
+        // policy and does not require read permission, while merging into an
+        // existing target must not expose or copy hidden cells.
+        if self.local_current_row(table, row)?.is_none() {
+            return Ok(None);
+        }
+        if identity == AuthorId::SYSTEM || self.table_schema(table)?.read_policy.is_none() {
+            return Ok(None);
         }
         Err(read_for_write_denied("UPSERT", table))
     }
@@ -3027,12 +3294,37 @@ where
             .find(|candidate| candidate.row_uuid() == row))
     }
 
+    fn no_op_update_handle(
+        &self,
+        table: &str,
+        row: RowUuid,
+        identity: AuthorId,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_row_not_deleted(table, row)?;
+        let existing = self
+            .local_row_for_identity(table, row, identity)?
+            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+        let tx_id = self
+            .node
+            .node
+            .borrow_mut()
+            .current_row_tx_id(&existing)
+            .ok_or_else(|| Error::new(ErrorCode::NotObserved, "current row has no transaction"))?;
+        let local_tier = self.write_state(tx_id)?.durability;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier,
+        })
+    }
+
     fn merge_existing_cells(
         &self,
         table: &str,
         row: RowUuid,
         patch: RowCells,
-    ) -> Result<(RowCells, Option<TxId>), Error> {
+    ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
         self.merge_existing_cells_for_identity(table, row, patch, self.identity.author)
     }
 
@@ -3042,7 +3334,7 @@ where
         row: RowUuid,
         patch: RowCells,
         identity: AuthorId,
-    ) -> Result<(RowCells, Option<TxId>), Error> {
+    ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
         let table_schema = self.table_schema(table)?;
         self.ensure_row_not_deleted(table, row)?;
         if table_schema
@@ -3057,7 +3349,8 @@ where
                 .local_current_row(table, row)?
                 .as_ref()
                 .and_then(|existing| self.node.node.borrow_mut().current_row_tx_id(existing));
-            return Ok((patch, parent));
+            let authored_columns = patch.keys().cloned().collect();
+            return Ok((patch, parent, authored_columns));
         }
         if !self.can_read_for_identity(table, row, identity)? {
             return Err(read_for_write_denied("partial UPDATE", table));
@@ -3075,8 +3368,9 @@ where
             }
         }
         let parent = self.node.node.borrow_mut().current_row_tx_id(&existing);
+        let authored_columns = patch.keys().cloned().collect();
         cells.extend(patch);
-        Ok((cells, parent))
+        Ok((cells, parent, authored_columns))
     }
 
     /// Attach this `Db` to an upstream peer over a binding-supplied transport.
@@ -3833,7 +4127,10 @@ where
                 outbox: Rc::clone(&self.outbox),
                 uploaded: BTreeSet::new(),
                 pending_row_version_repairs: VecDeque::new(),
-                pending_view_update_chunks: BTreeMap::new(),
+                branch_views: BTreeMap::new(),
+                pending_branch_view_updates: BTreeMap::new(),
+                pending_branch_metadata_repairs: BTreeMap::new(),
+                branch_metadata_repair_cursor: None,
             },
             last_resume_bytes: None,
         }));
@@ -3991,6 +4288,9 @@ where
                 shape_registrations: BTreeMap::new(),
                 deferred_subscribe_rejections: VecDeque::new(),
                 served_current_rows: BTreeMap::new(),
+                pending_branch_metadata_repairs: BTreeMap::new(),
+                pending_session_branch_metadata: BTreeMap::new(),
+                branch_metadata_repair_cursor: None,
                 serve_dirty: true,
             },
             last_resume_bytes: None,
@@ -4610,35 +4910,161 @@ pub trait Transport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError>;
     /// Pull the next inbound message the binding has staged, if any.
     fn try_recv(&mut self) -> Option<SyncMessage>;
-    /// Pull the next inbound message with transport-local metadata when available.
-    fn try_recv_received(&mut self) -> Option<ReceivedSyncMessage> {
-        self.try_recv().map(ReceivedSyncMessage::without_metadata)
-    }
-}
-
-/// Sync message plus metadata known by the transport before semantic ingest.
-pub struct ReceivedSyncMessage {
-    message: SyncMessage,
-    encoded_len: Option<usize>,
-}
-
-impl ReceivedSyncMessage {
-    fn without_metadata(message: SyncMessage) -> Self {
-        Self {
-            message,
-            encoded_len: None,
-        }
-    }
-
-    fn with_encoded_len(message: SyncMessage, encoded_len: usize) -> Self {
-        Self {
-            message,
-            encoded_len: Some(encoded_len),
-        }
-    }
 }
 
 /// Adapter from postcard wire frames to the internal sync-message transport.
+struct IncompleteLogicalMessage {
+    protocol_version: u16,
+    features: WireFeatures,
+    session: Option<WireSession>,
+    message_digest: [u8; 32],
+    total_len: usize,
+    received_len: usize,
+    extents: BTreeMap<usize, Vec<u8>>,
+}
+
+#[derive(Default)]
+struct LogicalMessageReassembler {
+    incomplete: HashMap<u64, IncompleteLogicalMessage>,
+    staged_bytes: usize,
+    recently_completed: VecDeque<(u64, [u8; 32])>,
+    highest_completed_message_id: Option<u64>,
+}
+
+impl LogicalMessageReassembler {
+    fn discard(&mut self, message_id: u64) {
+        if let Some(state) = self.incomplete.remove(&message_id) {
+            self.staged_bytes = self.staged_bytes.saturating_sub(state.received_len);
+        }
+    }
+
+    fn push(&mut self, fragment: WireMessageFragment) -> Result<Option<WireEnvelope>, String> {
+        if let Some((_, digest)) = self
+            .recently_completed
+            .iter()
+            .find(|(message_id, _)| *message_id == fragment.message_id)
+        {
+            return if digest == &fragment.message_digest {
+                Ok(None)
+            } else {
+                Err("completed logical message id was reused with another digest".to_owned())
+            };
+        }
+        if self
+            .highest_completed_message_id
+            .is_some_and(|completed| fragment.message_id <= completed)
+        {
+            return Ok(None);
+        }
+        let total_len = usize::try_from(fragment.total_len)
+            .map_err(|_| "logical message length does not fit this receiver".to_owned())?;
+        validate_logical_message_len(total_len)?;
+        let offset = usize::try_from(fragment.offset)
+            .map_err(|_| "logical message fragment offset does not fit this receiver".to_owned())?;
+        let end = offset
+            .checked_add(fragment.payload.len())
+            .ok_or_else(|| "logical message fragment range overflow".to_owned())?;
+        if fragment.payload.is_empty() || end > total_len {
+            return Err("logical message fragment has an empty or out-of-range extent".to_owned());
+        }
+        if !self.incomplete.contains_key(&fragment.message_id) {
+            if self.incomplete.len() >= MAX_INFLIGHT_LOGICAL_MESSAGES {
+                return Err("too many incomplete logical messages for peer".to_owned());
+            }
+            self.incomplete.insert(
+                fragment.message_id,
+                IncompleteLogicalMessage {
+                    protocol_version: fragment.protocol_version,
+                    features: fragment.features,
+                    session: fragment.session.clone(),
+                    message_digest: fragment.message_digest,
+                    total_len,
+                    received_len: 0,
+                    extents: BTreeMap::new(),
+                },
+            );
+        }
+        let state = self
+            .incomplete
+            .get_mut(&fragment.message_id)
+            .expect("logical message state inserted");
+        if state.total_len != total_len
+            || state.protocol_version != fragment.protocol_version
+            || state.features != fragment.features
+            || state.session != fragment.session
+            || state.message_digest != fragment.message_digest
+        {
+            return Err("logical message fragments disagree on metadata".to_owned());
+        }
+        if let Some(existing) = state.extents.get(&offset) {
+            return if existing == &fragment.payload {
+                Ok(None)
+            } else {
+                Err("conflicting duplicate logical message fragment".to_owned())
+            };
+        }
+        if state
+            .extents
+            .range(..=offset)
+            .next_back()
+            .is_some_and(|(start, bytes)| *start + bytes.len() > offset)
+            || state
+                .extents
+                .range(offset..)
+                .next()
+                .is_some_and(|(start, _)| *start < end)
+        {
+            return Err("overlapping logical message fragments".to_owned());
+        }
+        let next_staged = self
+            .staged_bytes
+            .checked_add(fragment.payload.len())
+            .ok_or_else(|| "logical message staging byte count overflow".to_owned())?;
+        if next_staged > MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES {
+            return Err("incomplete logical messages exceed peer staging budget".to_owned());
+        }
+        self.staged_bytes = next_staged;
+        state.received_len += fragment.payload.len();
+        state.extents.insert(offset, fragment.payload);
+        if state.received_len != state.total_len {
+            return Ok(None);
+        }
+
+        let state = self
+            .incomplete
+            .remove(&fragment.message_id)
+            .expect("completed logical message state exists");
+        self.staged_bytes -= state.received_len;
+        let mut cursor = 0;
+        let mut payload = Vec::with_capacity(state.total_len);
+        for (offset, extent) in state.extents {
+            if offset != cursor {
+                return Err(
+                    "logical message fragments do not provide contiguous coverage".to_owned(),
+                );
+            }
+            cursor += extent.len();
+            payload.extend_from_slice(&extent);
+        }
+        if cursor != state.total_len || *blake3::hash(&payload).as_bytes() != state.message_digest {
+            return Err("logical message digest mismatch".to_owned());
+        }
+        self.recently_completed
+            .push_back((fragment.message_id, state.message_digest));
+        self.highest_completed_message_id = Some(fragment.message_id);
+        if self.recently_completed.len() > RECENT_COMPLETED_LOGICAL_MESSAGES {
+            self.recently_completed.pop_front();
+        }
+        Ok(Some(WireEnvelope {
+            protocol_version: state.protocol_version,
+            features: state.features,
+            session: state.session,
+            payload,
+        }))
+    }
+}
+
+/// Converts logical sync messages to negotiated bounded wire frames and back.
 pub struct WireTransportAdapter<T> {
     inner: T,
     protocol_version: u16,
@@ -4646,6 +5072,9 @@ pub struct WireTransportAdapter<T> {
     session: Option<WireSession>,
     outbound_stream: WireStreamEncoder,
     inbound_stream: WireStreamDecoder,
+    reassembler: LogicalMessageReassembler,
+    pending_outbound_frames: VecDeque<Vec<u8>>,
+    next_outbound_message_id: u64,
 }
 
 impl<T> WireTransportAdapter<T>
@@ -4675,6 +5104,9 @@ where
             session,
             outbound_stream,
             inbound_stream,
+            reassembler: LogicalMessageReassembler::default(),
+            pending_outbound_frames: VecDeque::new(),
+            next_outbound_message_id: 0,
         }
     }
 
@@ -4687,6 +5119,34 @@ where
         if let Ok(frame) = encode_frame(&WireFrame::Error(error)) {
             let _ = self.inner.send_frame(frame);
         }
+    }
+
+    fn flush_pending_outbound(&mut self) -> Result<(), TransportError> {
+        while let Some(frame) = self.pending_outbound_frames.pop_front() {
+            if let Err(error) = self.inner.send_frame(frame.clone()) {
+                self.pending_outbound_frames.push_front(frame);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn send_encoded_frames(&mut self, frames: Vec<Vec<u8>>) -> Result<(), TransportError> {
+        for (index, frame) in frames.iter().enumerate() {
+            match self.inner.send_frame(frame.clone()) {
+                Ok(()) => {}
+                Err(TransportError::Backpressure) => {
+                    // Encoding may have advanced a connection-stream compressor. Accept the
+                    // logical message once encoded and retain every unaccepted frame so the
+                    // semantic caller must never retry it against advanced codec state.
+                    self.pending_outbound_frames
+                        .extend(frames[index..].iter().cloned());
+                    return Ok(());
+                }
+                Err(error @ TransportError::Failed(_)) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     fn validate_inbound_session(&self, envelope: &WireEnvelope) -> Result<(), WireError> {
@@ -4730,6 +5190,57 @@ where
         }
         Ok(())
     }
+
+    fn validate_inbound_metadata(&self, envelope: &WireEnvelope) -> Result<(), WireError> {
+        if envelope.protocol_version != self.protocol_version {
+            return Err(WireError::new(
+                WireErrorCode::UnsupportedProtocolVersion,
+                WireRetry::AfterResume,
+                format!(
+                    "wire message protocol version {} does not match negotiated {}",
+                    envelope.protocol_version, self.protocol_version
+                ),
+            ));
+        }
+        let unnegotiated = envelope.features & !self.features;
+        if unnegotiated != 0 {
+            return Err(WireError::new(
+                WireErrorCode::UnsupportedFeature,
+                WireRetry::AfterResume,
+                format!("wire message declares unnegotiated features {unnegotiated:#x}"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn decode_inbound_envelope(
+        &mut self,
+        envelope: WireEnvelope,
+    ) -> Result<SyncMessage, WireError> {
+        self.validate_inbound_metadata(&envelope)?;
+        self.validate_inbound_session(&envelope)?;
+        let payload = self
+            .inbound_stream
+            .decode_message(&envelope.payload, envelope.features)
+            .map_err(|message| {
+                WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, message)
+            })?;
+        validate_logical_message_len(payload.len()).map_err(|message| {
+            WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, message)
+        })?;
+        let message = decode_sync_message_for_receive(&payload).map_err(|error| {
+            WireError::new(
+                WireErrorCode::MalformedFrame,
+                WireRetry::Never,
+                format!(
+                    "failed to decode sync message payload: {error}; payload_bytes={}; payload_hex={}",
+                    payload.len(),
+                    hex_diagnostic(&payload)
+                ),
+            )
+        })?;
+        Ok(message)
+    }
 }
 
 impl<T> Transport for WireTransportAdapter<T>
@@ -4737,6 +5248,7 @@ where
     T: WireTransport,
 {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.flush_pending_outbound()?;
         let payload = match encode_sync_message(&message) {
             Ok(payload) => payload,
             Err(err) => {
@@ -4748,7 +5260,7 @@ where
                 return Ok(());
             }
         };
-        if let Err(message) = validate_sync_message_len(payload.len()) {
+        if let Err(message) = validate_logical_message_len(payload.len()) {
             return Err(TransportError::Failed(message));
         }
         let payload = match self.outbound_stream.encode_message(&payload) {
@@ -4762,12 +5274,55 @@ where
         if let Some(session) = self.session.clone() {
             envelope = envelope.with_session(session);
         }
-        match encode_frame(&WireFrame::Message(envelope)) {
-            Ok(frame) => {
-                if let Err(message) = validate_wire_frame_len(frame.len()) {
-                    return Err(TransportError::Failed(message));
+        match encode_frame(&WireFrame::Message(envelope.clone())) {
+            Ok(frame) if frame.len() <= WIRE_FRAGMENT_PAYLOAD_BYTES => {
+                self.send_encoded_frames(vec![frame])
+            }
+            Ok(_) if self.features & FEATURE_MESSAGE_FRAGMENTATION == 0 => {
+                Err(TransportError::Failed(
+                    "peer did not negotiate logical-message fragmentation".to_owned(),
+                ))
+            }
+            Ok(_) => {
+                let message_digest = *blake3::hash(&envelope.payload).as_bytes();
+                let message_id = self.next_outbound_message_id;
+                self.next_outbound_message_id = self
+                    .next_outbound_message_id
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        TransportError::Failed("logical message id space exhausted".to_owned())
+                    })?;
+                let total_len = u64::try_from(envelope.payload.len()).map_err(|_| {
+                    TransportError::Failed("logical message is too large".to_owned())
+                })?;
+                let mut frames = Vec::new();
+                for (index, payload) in envelope
+                    .payload
+                    .chunks(WIRE_FRAGMENT_PAYLOAD_BYTES)
+                    .enumerate()
+                {
+                    let offset = u64::try_from(index * WIRE_FRAGMENT_PAYLOAD_BYTES)
+                        .expect("fragment offset is bounded by logical message size");
+                    let fragment = WireMessageFragment {
+                        protocol_version: envelope.protocol_version,
+                        features: envelope.features,
+                        session: envelope.session.clone(),
+                        message_id,
+                        message_digest,
+                        total_len,
+                        offset,
+                        payload: payload.to_vec(),
+                    };
+                    let frame =
+                        encode_frame(&WireFrame::MessageFragment(fragment)).map_err(|error| {
+                            TransportError::Failed(format!(
+                                "failed to encode logical message fragment: {error}"
+                            ))
+                        })?;
+                    validate_wire_frame_len(frame.len()).map_err(TransportError::Failed)?;
+                    frames.push(frame);
                 }
-                self.inner.send_frame(frame)
+                self.send_encoded_frames(frames)
             }
             Err(err) => {
                 self.send_wire_error(WireError::new(
@@ -4781,10 +5336,7 @@ where
     }
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
-        self.try_recv_received().map(|received| received.message)
-    }
-
-    fn try_recv_received(&mut self) -> Option<ReceivedSyncMessage> {
+        let _ = self.flush_pending_outbound();
         while let Some(bytes) = self.inner.try_recv_frame() {
             if let Err(message) = validate_wire_frame_len(bytes.len()) {
                 self.send_wire_error(WireError::new(
@@ -4806,52 +5358,50 @@ where
                 }
             };
             match frame {
-                WireFrame::Message(envelope) => {
-                    if let Err(error) = self.validate_inbound_session(&envelope) {
+                WireFrame::Message(envelope) => match self.decode_inbound_envelope(envelope) {
+                    Ok(message) => return Some(message),
+                    Err(error) => self.send_wire_error(error),
+                },
+                WireFrame::MessageFragment(fragment) => {
+                    let fragment_message_id = fragment.message_id;
+                    let metadata = WireEnvelope {
+                        protocol_version: fragment.protocol_version,
+                        features: fragment.features,
+                        session: fragment.session.clone(),
+                        payload: Vec::new(),
+                    };
+                    if let Err(error) = self.validate_inbound_metadata(&metadata) {
                         self.send_wire_error(error);
                         continue;
                     }
-                    let payload = match self
-                        .inbound_stream
-                        .decode_message(&envelope.payload, envelope.features)
+                    if let Err(error) = self.validate_inbound_session(&metadata) {
+                        self.send_wire_error(error);
+                        continue;
+                    }
+                    if self.features & FEATURE_MESSAGE_FRAGMENTATION == 0
+                        || fragment.features & FEATURE_MESSAGE_FRAGMENTATION == 0
                     {
-                        Ok(payload) => payload,
-                        Err(message) => {
-                            self.send_wire_error(WireError::new(
-                                WireErrorCode::MalformedFrame,
-                                WireRetry::Never,
-                                message,
-                            ));
-                            continue;
-                        }
-                    };
-                    if let Err(message) = validate_sync_message_len(payload.len()) {
                         self.send_wire_error(WireError::new(
-                            WireErrorCode::MalformedFrame,
+                            WireErrorCode::UnsupportedFeature,
                             WireRetry::Never,
-                            message,
+                            "fragment does not declare logical-message fragmentation",
                         ));
                         continue;
                     }
-                    let payload_len = payload.len();
-                    match decode_sync_message_for_receive(&payload) {
-                        Ok(message) => {
-                            return Some(ReceivedSyncMessage::with_encoded_len(
+                    match self.reassembler.push(fragment) {
+                        Ok(Some(envelope)) => match self.decode_inbound_envelope(envelope) {
+                            Ok(message) => return Some(message),
+                            Err(error) => self.send_wire_error(error),
+                        },
+                        Ok(None) => {}
+                        Err(message) => {
+                            self.reassembler.discard(fragment_message_id);
+                            self.send_wire_error(WireError::new(
+                                WireErrorCode::MalformedFrame,
+                                WireRetry::AfterResume,
                                 message,
-                                payload_len,
                             ));
                         }
-                        Err(err) => self.send_wire_error(WireError::new(
-                            WireErrorCode::MalformedFrame,
-                            WireRetry::Never,
-                            format!(
-                                "failed to decode sync message payload: {err}; frame_bytes={}; payload_bytes={}; frame_hex={}; payload_hex={}",
-                                bytes.len(),
-                                payload.len(),
-                                hex_diagnostic(&bytes),
-                                hex_diagnostic(&payload),
-                            ),
-                        )),
                     }
                 }
                 WireFrame::Hello(_) => self.send_wire_error(WireError::new(
@@ -4926,10 +5476,14 @@ enum ConnectionLink {
         uploaded: BTreeSet<TxId>,
         /// Declared known-state ViewUpdates parked until missing row bodies arrive.
         pending_row_version_repairs: VecDeque<PendingRowVersionRepair>,
-        /// Oversized ViewUpdates arrive as FIFO chunk sequences. Partial
-        /// sequences stay here across transport ticks so the receiver stages
-        /// each logical ViewUpdate once, at the final chunk boundary.
-        pending_view_update_chunks: BTreeMap<SubscriptionKey, ViewUpdateParts>,
+        /// Branch selected by each upstream usage-site subscription.
+        branch_views: BTreeMap<SubscriptionKey, crate::ids::BranchId>,
+        /// View updates held until their branch routing record arrives.
+        pending_branch_view_updates: BTreeMap<crate::ids::BranchId, Vec<SyncMessage>>,
+        /// Deduplicated outstanding metadata repairs on this link.
+        pending_branch_metadata_repairs: BTreeMap<crate::ids::BranchId, ()>,
+        /// Round-robin cursor so a saturated repair set cannot starve later ids.
+        branch_metadata_repair_cursor: Option<crate::ids::BranchId>,
     },
     /// Serving one subscriber: apply their subscribe requests, ship view
     /// updates under their identity.
@@ -4952,6 +5506,13 @@ enum ConnectionLink {
         deferred_subscribe_rejections: VecDeque<(SubscriptionKey, String)>,
         /// Whole-table current-row views explicitly served through the facade.
         served_current_rows: BTreeMap<SubscriptionKey, String>,
+        /// Deduplicated branch-routing repairs for data-first commit relays.
+        pending_branch_metadata_repairs: BTreeMap<crate::ids::BranchId, ()>,
+        /// Authenticated session metadata waiting for its parent/base dependency.
+        pending_session_branch_metadata:
+            BTreeMap<crate::ids::BranchId, crate::protocol::BranchMetadata>,
+        /// Round-robin cursor so a saturated repair set cannot starve later ids.
+        branch_metadata_repair_cursor: Option<crate::ids::BranchId>,
         /// True when this subscriber's maintained views may have queued deltas
         /// to serve. Idle transport ticks must not poll every view.
         serve_dirty: bool,
@@ -4961,6 +5522,28 @@ enum ConnectionLink {
 struct PendingRowVersionRepair {
     requests: Vec<crate::protocol::RowVersionRef>,
     update: SyncMessage,
+}
+
+/// Return one fair bounded repair page, advancing the cursor after the page.
+fn next_branch_metadata_repairs(
+    repairs: &BTreeMap<crate::ids::BranchId, ()>,
+    cursor: &mut Option<crate::ids::BranchId>,
+) -> Vec<crate::ids::BranchId> {
+    let mut page = repairs
+        .keys()
+        .copied()
+        .filter(|branch| cursor.is_none_or(|after| *branch > after))
+        .take(MAX_FETCH_BRANCH_METADATA)
+        .collect::<Vec<_>>();
+    if page.is_empty() && !repairs.is_empty() {
+        page = repairs
+            .keys()
+            .copied()
+            .take(MAX_FETCH_BRANCH_METADATA)
+            .collect();
+    }
+    *cursor = page.last().copied();
+    page
 }
 
 /// Per-connection resume state for a served subscriber.
@@ -5013,6 +5596,19 @@ where
             })
             .collect::<Vec<_>>();
         for (coverage, shape, binding, subscribers) in groups {
+            let branch_metadata = match coverage.opts.read_view.source {
+                ReadViewSourceSpec::Branch { branch } => {
+                    let branch = crate::ids::BranchId(branch);
+                    let mut node = self.node.borrow_mut();
+                    node.branch_metadata_visible_to(branch, identity)?
+                        .then(|| {
+                            node.branch_record(branch)
+                                .map(crate::protocol::BranchMetadata::from)
+                        })
+                        .flatten()
+                }
+                _ => None,
+            };
             let maintained_subscription = SubscriptionKey {
                 shape_id: coverage.shape_id,
                 binding_id: coverage.binding_id,
@@ -5028,6 +5624,14 @@ where
                     coverage.opts,
                 )?
             };
+            // Route metadata is an explicit prerequisite for branch-target
+            // bundles. Send it before the first view update so a receiver can
+            // create the partition instead of parking the payload forever.
+            if let Some(metadata) = branch_metadata {
+                self.transport
+                    .send(SyncMessage::BranchMetadata(metadata))
+                    .map_err(transport_error)?;
+            }
             for subscription in subscribers {
                 send_with_content_extents(
                     &self.node,
@@ -5162,8 +5766,28 @@ where
                 outbox,
                 uploaded,
                 pending_row_version_repairs,
-                pending_view_update_chunks,
+                branch_views,
+                pending_branch_view_updates,
+                pending_branch_metadata_repairs,
+                branch_metadata_repair_cursor,
             } => {
+                // Repair is deliberately retried on each non-blocked tick. The
+                // request set is bounded and deduplicated; a dropped request or
+                // response therefore cannot permanently strand a parked unit.
+                let repairs = next_branch_metadata_repairs(
+                    pending_branch_metadata_repairs,
+                    branch_metadata_repair_cursor,
+                );
+                if !repairs.is_empty() {
+                    self.transport
+                        .send(SyncMessage::FetchBranchMetadata { branches: repairs })
+                        .map_err(transport_error)?;
+                }
+                for metadata in self.node.borrow().pending_branch_metadata_uploads() {
+                    self.transport
+                        .send(SyncMessage::BranchMetadata(metadata))
+                        .map_err(transport_error)?;
+                }
                 pending.extend(upstream_subscriptions.borrow_mut().drain(..));
                 let claims = self.node.borrow().session_claims_with_revisions();
                 for (identity, claims, revision) in claims {
@@ -5235,6 +5859,14 @@ where
                                 values,
                                 known_state,
                             };
+                            if let ReadViewSourceSpec::Branch { branch } =
+                                &pending_subscription.opts.read_view.source
+                            {
+                                branch_views.insert(
+                                    pending_subscription.subscription,
+                                    crate::ids::BranchId(*branch),
+                                );
+                            }
                             #[cfg(feature = "sync-autopsy")]
                             sync_autopsy::record(format!(
                                 "upstream send subscribe {}",
@@ -5306,6 +5938,14 @@ where
                         .and_then(|pending| pending.unit.clone())
                         .map(Ok)
                         .unwrap_or_else(|| self.node.borrow_mut().commit_unit_for(tx_id))?;
+                    if let SyncMessage::CommitUnit { tx, .. } = &unit
+                        && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage
+                        && let Some(metadata) = self.node.borrow().branch_record(branch).cloned()
+                    {
+                        self.transport
+                            .send(SyncMessage::BranchMetadata((&metadata).into()))
+                            .map_err(transport_error)?;
+                    }
                     if let Err(error) =
                         send_with_local_content_extents(&self.node, self.transport.as_mut(), unit)
                     {
@@ -5318,15 +5958,24 @@ where
                 }
                 let mut applied = false;
                 let mut pending_view_updates = Vec::<ViewUpdateParts>::new();
-                while let Some(received) = self.transport.try_recv_received() {
-                    let write_state_tx_id = write_state_update_tx_id(&received.message);
+                while let Some(message) = self.transport.try_recv() {
+                    let write_state_tx_id = write_state_update_tx_id(&message);
                     #[cfg(feature = "sync-autopsy")]
                     sync_autopsy::record(format!(
-                        "upstream recv {} encoded_len={:?}",
-                        summarize_sync_message(&received.message),
-                        received.encoded_len
+                        "upstream recv {}",
+                        summarize_sync_message(&message)
                     ));
-                    match received.message {
+                    match message {
+                        SyncMessage::CatalogueSnapshot(snapshot) => {
+                            if !pending_view_updates.is_empty() {
+                                self.node.borrow_mut().apply_view_updates_in_batch(
+                                    std::mem::take(&mut pending_view_updates),
+                                )?;
+                            }
+                            self.node
+                                .borrow_mut()
+                                .apply_trusted_catalogue_snapshot(*snapshot)?;
+                        }
                         SyncMessage::RowVersionPayloads { version_bundles } => {
                             if !pending_view_updates.is_empty() {
                                 self.node.borrow_mut().apply_view_updates_in_batch(
@@ -5345,13 +5994,30 @@ where
                                 )?;
                             }
                             push_view_update_message_for_receiver(
-                                pending_view_update_chunks,
                                 &mut pending_view_updates,
                                 repair.update,
                             )?;
                         }
-                        message @ (SyncMessage::ViewUpdate { subscription, .. }
-                        | SyncMessage::ViewUpdateChunk { subscription, .. }) => {
+                        message @ SyncMessage::ViewUpdate { subscription, .. } => {
+                            if let Some(branch) = branch_views.get(&subscription).copied()
+                                && self.node.borrow().branch_record(branch).is_none()
+                            {
+                                pending_branch_view_updates
+                                    .entry(branch)
+                                    .or_default()
+                                    .push(message);
+                                if let std::collections::btree_map::Entry::Vacant(entry) =
+                                    pending_branch_metadata_repairs.entry(branch)
+                                {
+                                    entry.insert(());
+                                    self.transport
+                                        .send(SyncMessage::FetchBranchMetadata {
+                                            branches: vec![branch],
+                                        })
+                                        .map_err(transport_error)?;
+                                }
+                                continue;
+                            }
                             #[cfg(not(feature = "sync-autopsy"))]
                             let _ = subscription;
                             let missing = {
@@ -5360,7 +6026,6 @@ where
                             };
                             if missing.is_empty() {
                                 push_view_update_message_for_receiver(
-                                    pending_view_update_chunks,
                                     &mut pending_view_updates,
                                     message,
                                 )?;
@@ -5398,7 +6063,40 @@ where
                                 reason,
                             );
                         }
+                        SyncMessage::BranchMetadata(metadata) => {
+                            let branch = metadata.branch_id;
+                            self.node
+                                .borrow_mut()
+                                .acknowledge_branch_metadata(&metadata)?;
+                            self.node
+                                .borrow_mut()
+                                .apply_sync_message(SyncMessage::BranchMetadata(metadata))?;
+                            pending_branch_metadata_repairs.remove(&branch);
+                            if let Some(updates) = pending_branch_view_updates.remove(&branch) {
+                                for update in updates {
+                                    push_view_update_message_for_receiver(
+                                        &mut pending_view_updates,
+                                        update,
+                                    )?;
+                                }
+                            }
+                        }
                         message => {
+                            if let SyncMessage::CommitUnit { tx, .. } = &message
+                                && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage
+                                && self.node.borrow().branch_record(branch).is_none()
+                            {
+                                if let std::collections::btree_map::Entry::Vacant(entry) =
+                                    pending_branch_metadata_repairs.entry(branch)
+                                {
+                                    entry.insert(());
+                                    self.transport
+                                        .send(SyncMessage::FetchBranchMetadata {
+                                            branches: vec![branch],
+                                        })
+                                        .map_err(transport_error)?;
+                                }
+                            }
                             if !pending_view_updates.is_empty() {
                                 self.node.borrow_mut().apply_view_updates_in_batch(
                                     std::mem::take(&mut pending_view_updates),
@@ -5406,11 +6104,7 @@ where
                             }
                             self.node
                                 .borrow_mut()
-                                .apply_sync_message_with_ingest_context_and_encoded_len(
-                                    message,
-                                    None,
-                                    received.encoded_len,
-                                )?;
+                                .apply_sync_message_with_ingest_context(message, None)?;
                         }
                     }
                     if let Some(tx_id) = write_state_tx_id {
@@ -5442,20 +6136,67 @@ where
                 shape_registrations,
                 deferred_subscribe_rejections,
                 served_current_rows,
+                pending_branch_metadata_repairs,
+                pending_session_branch_metadata,
+                branch_metadata_repair_cursor,
                 serve_dirty,
             } => {
+                let repairs = next_branch_metadata_repairs(
+                    pending_branch_metadata_repairs,
+                    branch_metadata_repair_cursor,
+                );
+                if !repairs.is_empty() {
+                    self.transport
+                        .send(SyncMessage::FetchBranchMetadata { branches: repairs })
+                        .map_err(transport_error)?;
+                }
+                if ingest_context.trust == CommitUnitTrust::Session {
+                    let pending_ids = pending_session_branch_metadata
+                        .keys()
+                        .copied()
+                        .collect::<Vec<_>>();
+                    for branch in pending_ids {
+                        let metadata = pending_session_branch_metadata
+                            .get(&branch)
+                            .cloned()
+                            .expect("pending branch metadata id remains present");
+                        if self.node.borrow_mut().admit_session_branch_metadata(
+                            metadata.clone(),
+                            ingest_context.identity,
+                        )? {
+                            pending_session_branch_metadata.remove(&branch);
+                            let responses = self.node.borrow_mut().apply_sync_message(
+                                SyncMessage::BranchMetadata(metadata.clone()),
+                            )?;
+                            for response in responses {
+                                send_with_content_extents(
+                                    &self.node,
+                                    peer,
+                                    self.transport.as_mut(),
+                                    response,
+                                )?;
+                            }
+                            self.transport
+                                .send(SyncMessage::BranchMetadata(metadata))
+                                .map_err(transport_error)?;
+                        }
+                    }
+                }
                 let mut applied_inbound = false;
                 let mut scheduled_immediate = false;
                 let mut sent_view_update = false;
-                while let Some(received) = self.transport.try_recv_received() {
+                while let Some(message) = self.transport.try_recv() {
                     applied_inbound = true;
+                    let admitted_metadata = match &message {
+                        SyncMessage::BranchMetadata(metadata) => Some(metadata.branch_id),
+                        _ => None,
+                    };
                     #[cfg(feature = "sync-autopsy")]
                     sync_autopsy::record(format!(
-                        "subscriber recv {} encoded_len={:?}",
-                        summarize_sync_message(&received.message),
-                        received.encoded_len
+                        "subscriber recv {}",
+                        summarize_sync_message(&message)
                     ));
-                    match received.message {
+                    match message {
                         SyncMessage::RegisterShape {
                             shape_id,
                             opts,
@@ -5539,7 +6280,7 @@ where
                                             shape,
                                             &binding,
                                             opts.tier,
-                                            ingest_context.identity,
+                                            subscriber_permission_subject(*ingest_context),
                                             &opts.read_view,
                                         );
                                     if let Err(crate::node::Error::QueryCapability(detail)) =
@@ -5713,7 +6454,7 @@ where
                                     &shape,
                                     &binding,
                                     opts.tier,
-                                    ingest_context.identity,
+                                    subscriber_permission_subject(*ingest_context),
                                     &opts.read_view,
                                 );
                             if let Err(crate::node::Error::QueryCapability(detail)) = supported {
@@ -5742,7 +6483,10 @@ where
                             let first_subscriber = coverage_groups
                                 .get(&coverage)
                                 .is_none_or(|group| group.subscribers.is_empty());
-                            let permissions_ready = self.node.borrow().permissions_ready();
+                            let permissions_ready = subscriber_permissions_ready(
+                                self.node.borrow().permissions_ready(),
+                                ingest_context.trust,
+                            );
                             let update = if !permissions_ready {
                                 None
                             } else if first_subscriber {
@@ -5836,6 +6580,26 @@ where
                                     summarize_sync_message(&update)
                                 ));
                                 self.last_resume_bytes = Some(serialized_sync_message_len(&update));
+                                if let ReadViewSourceSpec::Branch { branch } =
+                                    &opts.read_view.source
+                                {
+                                    let metadata =
+                                        self.node.borrow_mut().branch_metadata_visible_to(
+                                            crate::ids::BranchId(*branch),
+                                            peer.link_identity(),
+                                        )?;
+                                    if metadata {
+                                        let metadata = self
+                                            .node
+                                            .borrow()
+                                            .branch_record(crate::ids::BranchId(*branch))
+                                            .cloned()
+                                            .expect("visible branch metadata remains present");
+                                        self.transport
+                                            .send(SyncMessage::BranchMetadata((&metadata).into()))
+                                            .map_err(transport_error)?;
+                                    }
+                                }
                                 send_with_content_extents(
                                     &self.node,
                                     peer,
@@ -5899,6 +6663,39 @@ where
                                 )?;
                             }
                         }
+                        SyncMessage::FetchBranchMetadata { branches } => {
+                            if let Err(message) = validate_fetch_branch_metadata(&branches) {
+                                let _ = message;
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
+                            // A repair request is not a branch-discovery API.  Only
+                            // serve a branch this authenticated link has already
+                            // been admitted to read through one of its views.
+                            for branch in branches {
+                                let admitted = served.values().any(|coverage| {
+                                    matches!(
+                                        coverage.opts.read_view.source,
+                                        ReadViewSourceSpec::Branch { branch: view_branch }
+                                            if crate::ids::BranchId(view_branch) == branch
+                                    )
+                                });
+                                let visible = admitted
+                                    && self
+                                        .node
+                                        .borrow_mut()
+                                        .branch_metadata_visible_to(branch, peer.link_identity())?;
+                                if visible {
+                                    let metadata =
+                                        self.node.borrow().branch_record(branch).cloned();
+                                    if let Some(metadata) = metadata {
+                                        self.transport
+                                            .send(SyncMessage::BranchMetadata((&metadata).into()))
+                                            .map_err(transport_error)?;
+                                    }
+                                }
+                            }
+                        }
                         SyncMessage::FetchContentExtent { owner, extent } => {
                             let response = {
                                 let mut node = self.node.borrow_mut();
@@ -5906,7 +6703,49 @@ where
                             };
                             self.transport.send(response).map_err(transport_error)?;
                         }
+                        // Branch routing records select persistent partitions.
+                        // Sessions may introduce their own locally-authored
+                        // record only when its creator matches the authenticated
+                        // link and its declared dependencies are available.
                         other => {
+                            if let SyncMessage::BranchMetadata(metadata) = &other
+                                && ingest_context.trust == CommitUnitTrust::Session
+                            {
+                                let admitted =
+                                    self.node.borrow_mut().admit_session_branch_metadata(
+                                        metadata.clone(),
+                                        ingest_context.identity,
+                                    )?;
+                                if !admitted {
+                                    if let Some(existing) =
+                                        pending_session_branch_metadata.get(&metadata.branch_id)
+                                        && existing != metadata
+                                    {
+                                        return Err(Error::new(
+                                            ErrorCode::Protocol,
+                                            "conflicting pending branch metadata",
+                                        ));
+                                    }
+                                    pending_session_branch_metadata
+                                        .insert(metadata.branch_id, metadata.clone());
+                                    continue;
+                                }
+                            }
+                            if let SyncMessage::CommitUnit { tx, .. } = &other
+                                && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage
+                                && self.node.borrow().branch_record(branch).is_none()
+                            {
+                                if let std::collections::btree_map::Entry::Vacant(entry) =
+                                    pending_branch_metadata_repairs.entry(branch)
+                                {
+                                    entry.insert(());
+                                    self.transport
+                                        .send(SyncMessage::FetchBranchMetadata {
+                                            branches: vec![branch],
+                                        })
+                                        .map_err(transport_error)?;
+                                }
+                            }
                             if let SyncMessage::ContentExtents { extents } = &other
                                 && let Err(message) = validate_content_extents(extents)
                             {
@@ -5921,7 +6760,10 @@ where
                                 _ => None,
                             };
                             if let Some((tx_id, _)) = &relay_upload
-                                && !self.node.borrow().permissions_ready()
+                                && !subscriber_permissions_ready(
+                                    self.node.borrow().permissions_ready(),
+                                    ingest_context.trust,
+                                )
                             {
                                 let response = SyncMessage::FateUpdate {
                                     tx_id: *tx_id,
@@ -5967,10 +6809,9 @@ where
                                 other => self
                                     .node
                                     .borrow_mut()
-                                    .apply_sync_message_with_ingest_context_and_encoded_len(
+                                    .apply_sync_message_with_ingest_context(
                                         other,
                                         Some(*ingest_context),
-                                        received.encoded_len,
                                     )?,
                             };
                             if let Some(tx_id) = write_state_tx_id {
@@ -5983,6 +6824,21 @@ where
                                     self.transport.as_mut(),
                                     response,
                                 )?;
+                            }
+                            if let Some(branch) = admitted_metadata {
+                                pending_branch_metadata_repairs.remove(&branch);
+                                let metadata = self
+                                    .node
+                                    .borrow()
+                                    .branch_record(branch)
+                                    .map(Into::into)
+                                    .expect("admitted branch metadata remains present");
+                                // This exact echo acknowledges only the
+                                // downstream hop. Session admission may have
+                                // independently persisted an upstream relay.
+                                self.transport
+                                    .send(SyncMessage::BranchMetadata(metadata))
+                                    .map_err(transport_error)?;
                             }
                             if let Some((tx_id, unit)) = relay_upload {
                                 let mut outbox = outbox.borrow_mut();
@@ -6006,7 +6862,12 @@ where
                     self.observed_subscriber_dirty_epoch.set(next);
                     *serve_dirty = true;
                 }
-                if *serve_dirty && self.node.borrow().permissions_ready() {
+                if *serve_dirty
+                    && subscriber_permissions_ready(
+                        self.node.borrow().permissions_ready(),
+                        ingest_context.trust,
+                    )
+                {
                     // A coverage-group refresh drains every maintained view below.
                     // Tick the shared runtime once before that drain rather than once
                     // per group.
@@ -6167,34 +7028,6 @@ fn serialized_sync_message_len(message: &SyncMessage) -> usize {
     encoded.map_or(0, |bytes| bytes.len())
 }
 
-fn serialized_uncompressed_wire_message_len(message: &SyncMessage) -> usize {
-    #[cfg(feature = "cold-settle-attribution")]
-    let payload_started = Instant::now();
-    let payload = encode_sync_message(message);
-    #[cfg(feature = "cold-settle-attribution")]
-    crate::cold_settle_attribution::record_preflight_payload(
-        payload_started.elapsed().as_nanos() as u64,
-        payload.as_ref().map_or(0, Vec::len),
-    );
-    let Ok(payload) = payload else {
-        return usize::MAX;
-    };
-    let envelope = WireEnvelope::new(
-        WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-        payload,
-    );
-    #[cfg(feature = "cold-settle-attribution")]
-    let frame_started = Instant::now();
-    let frame = encode_frame(&WireFrame::Message(envelope));
-    #[cfg(feature = "cold-settle-attribution")]
-    crate::cold_settle_attribution::record_preflight_frame(
-        frame_started.elapsed().as_nanos() as u64,
-        frame.as_ref().map_or(0, Vec::len),
-    );
-    frame.map_or(usize::MAX, |bytes| bytes.len())
-}
-
 fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
     match message {
         SyncMessage::ViewUpdate {
@@ -6222,109 +7055,15 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             program_fact_adds,
             program_fact_removes,
         },
-        SyncMessage::ViewUpdateChunk {
-            subscription,
-            settled_through,
-            reset_result_set,
-            final_chunk,
-            version_carriers,
-            version_bundles,
-            peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
-        } => ViewUpdateParts {
-            subscription,
-            settled_through,
-            defer_settlement: !final_chunk,
-            reset_result_set,
-            version_carriers,
-            version_bundles,
-            peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
-            authorization_progress: peer_payload_inventory.authorization_progress,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
-        },
         _ => unreachable!("expected view update message"),
     }
 }
 
 fn push_view_update_message_for_receiver(
-    pending_chunks: &mut BTreeMap<SubscriptionKey, ViewUpdateParts>,
     ready: &mut Vec<ViewUpdateParts>,
     message: SyncMessage,
 ) -> Result<(), Error> {
-    let (subscription, final_chunk) = match &message {
-        SyncMessage::ViewUpdateChunk {
-            subscription,
-            final_chunk,
-            ..
-        } => (*subscription, *final_chunk),
-        SyncMessage::ViewUpdate { .. } => {
-            ready.push(view_update_parts_from_message(message));
-            return Ok(());
-        }
-        _ => unreachable!("expected view update message"),
-    };
-
-    let parts = view_update_parts_from_message(message);
-    if let Some(accumulated) = pending_chunks.get_mut(&subscription) {
-        merge_view_update_chunk_parts(accumulated, parts)?;
-        if final_chunk {
-            let mut complete = pending_chunks.remove(&subscription).ok_or_else(|| {
-                Error::new(ErrorCode::Protocol, "completed chunk sequence disappeared")
-            })?;
-            complete.defer_settlement = false;
-            ready.push(complete);
-        }
-        return Ok(());
-    }
-
-    if final_chunk {
-        ready.push(parts);
-    } else {
-        pending_chunks.insert(subscription, parts);
-    }
-    Ok(())
-}
-
-fn merge_view_update_chunk_parts(
-    accumulated: &mut ViewUpdateParts,
-    mut next: ViewUpdateParts,
-) -> Result<(), Error> {
-    if accumulated.subscription != next.subscription {
-        return Err(Error::new(
-            ErrorCode::Protocol,
-            "view update chunks changed subscription mid-sequence",
-        ));
-    }
-    accumulated.settled_through = accumulated.settled_through.max(next.settled_through);
-    accumulated.defer_settlement = next.defer_settlement;
-    accumulated.reset_result_set |= next.reset_result_set;
-    accumulated
-        .version_carriers
-        .append(&mut next.version_carriers);
-    accumulated
-        .version_bundles
-        .append(&mut next.version_bundles);
-    accumulated
-        .peer_complete_tx_payload_refs
-        .append(&mut next.peer_complete_tx_payload_refs);
-    accumulated
-        .result_member_adds
-        .append(&mut next.result_member_adds);
-    accumulated
-        .result_member_removes
-        .append(&mut next.result_member_removes);
-    accumulated
-        .program_fact_adds
-        .append(&mut next.program_fact_adds);
-    accumulated
-        .program_fact_removes
-        .append(&mut next.program_fact_removes);
+    ready.push(view_update_parts_from_message(message));
     Ok(())
 }
 
@@ -6441,34 +7180,6 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             program_fact_adds.len(),
             program_fact_removes.len()
         ),
-        SyncMessage::ViewUpdateChunk {
-            subscription,
-            settled_through,
-            reset_result_set,
-            final_chunk,
-            version_carriers,
-            version_bundles,
-            peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
-        } => format!(
-            "ViewUpdateChunk {} settled={} reset={} final={} bundles={} inventory={} adds={} removes={} fact_adds={} fact_removes={}",
-            summarize_subscription_key(*subscription),
-            settled_through.0,
-            reset_result_set,
-            final_chunk,
-            version_bundles.len()
-                + expand_version_carriers(version_carriers)
-                    .map(|bundles| bundles.len())
-                    .unwrap_or_default(),
-            peer_payload_inventory.complete_tx_payloads.len(),
-            result_member_adds.len(),
-            result_member_removes.len(),
-            program_fact_adds.len(),
-            program_fact_removes.len()
-        ),
         SyncMessage::CommitUnit { tx, .. } => format!("CommitUnit tx={:?}", tx.tx_id),
         SyncMessage::FateUpdate { tx_id, fate, .. } => {
             format!("FateUpdate tx={tx_id:?} fate={fate:?}")
@@ -6495,25 +7206,29 @@ fn send_with_content_extents<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    let snapshot = node.borrow().catalogue_snapshot();
+    let catalogue_fingerprint = *blake3::hash(
+        &serde_json::to_vec(&snapshot).expect("catalogue snapshot serialization is infallible"),
+    )
+    .as_bytes();
+    if peer.needs_catalogue_snapshot(catalogue_fingerprint) {
+        transport
+            .send(SyncMessage::CatalogueSnapshot(Box::new(snapshot)))
+            .map_err(transport_error)?;
+        peer.mark_catalogue_snapshot_announced(catalogue_fingerprint);
+    }
     let mut message = message;
-    match &mut message {
-        SyncMessage::ViewUpdate {
-            subscription,
-            peer_payload_inventory,
-            ..
-        }
-        | SyncMessage::ViewUpdateChunk {
-            subscription,
-            peer_payload_inventory,
-            ..
-        } => {
-            peer_payload_inventory.authorization_progress =
-                Some(peer.authorization_progress_for_subscription(*subscription));
-        }
-        _ => {}
+    if let SyncMessage::ViewUpdate {
+        subscription,
+        peer_payload_inventory,
+        ..
+    } = &mut message
+    {
+        peer_payload_inventory.authorization_progress =
+            Some(peer.authorization_progress_for_subscription(*subscription));
     }
     let extents = match &message {
-        SyncMessage::ViewUpdate { .. } | SyncMessage::ViewUpdateChunk { .. } => BTreeSet::new(),
+        SyncMessage::ViewUpdate { .. } => BTreeSet::new(),
         _ => node.borrow().content_refs_in_sync_message(&message)?,
     };
     let mut extents_by_row = BTreeMap::new();
@@ -6547,289 +7262,7 @@ fn send_sync_message_chunked(
     transport: &mut dyn Transport,
     message: SyncMessage,
 ) -> Result<(), Error> {
-    for message in split_oversized_view_update(message)? {
-        #[cfg(feature = "sync-autopsy")]
-        sync_autopsy::record(format!(
-            "transport send chunk {}",
-            summarize_sync_message(&message)
-        ));
-        transport.send(message).map_err(transport_error)?;
-    }
-    Ok(())
-}
-
-#[derive(Clone)]
-enum ViewUpdateChunkItem {
-    VersionBundle(VersionBundle),
-    CompleteTxPayload(TxId),
-    ResultMemberAdd(ResultMemberEntry),
-    ResultMemberRemove(ResultMemberEntry),
-    ProgramFactAdd(ProgramFactEntry),
-    ProgramFactRemove(ProgramFactEntry),
-}
-
-#[derive(Clone)]
-struct ViewUpdateChunkUnit {
-    items: Vec<ViewUpdateChunkItem>,
-}
-
-fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>, Error> {
-    let initial_encoded_bytes = serialized_uncompressed_wire_message_len(&message);
-    if validate_wire_frame_len(initial_encoded_bytes).is_ok() {
-        #[cfg(feature = "cold-settle-attribution")]
-        if matches!(&message, SyncMessage::ViewUpdate { .. }) {
-            crate::cold_settle_attribution::record_view_update_fit(initial_encoded_bytes);
-        }
-        return Ok(vec![message]);
-    }
-    let SyncMessage::ViewUpdate {
-        subscription,
-        settled_through,
-        reset_result_set,
-        version_carriers,
-        mut version_bundles,
-        peer_payload_inventory,
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
-    } = message
-    else {
-        return Ok(vec![message]);
-    };
-    #[cfg(feature = "cold-settle-attribution")]
-    crate::cold_settle_attribution::record_view_update_split();
-    version_bundles.extend(
-        expand_version_carriers(&version_carriers)
-            .map_err(|_| Error::new(ErrorCode::Protocol, "malformed version-bundle run"))?,
-    );
-
-    let units = view_update_chunk_units(
-        version_bundles,
-        peer_payload_inventory,
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
-    );
-
-    let mut chunks = Vec::new();
-    let mut start = 0;
-    while start < units.len() {
-        let reset_chunk = chunks.is_empty() && reset_result_set;
-        let remaining = units.len() - start;
-        let mut low = 1;
-        let mut high = remaining;
-        let mut best = 0;
-        #[cfg(feature = "cold-settle-attribution")]
-        let mut best_encoded_bytes = 0;
-        while low <= high {
-            let mid = low + (high - low) / 2;
-            #[cfg(feature = "cold-settle-attribution")]
-            let candidate_started = Instant::now();
-            let candidate = view_update_chunk_from_units(
-                subscription,
-                settled_through,
-                reset_chunk,
-                &units[start..start + mid],
-            );
-            let encoded_bytes = serialized_uncompressed_wire_message_len(&candidate);
-            #[cfg(feature = "cold-settle-attribution")]
-            crate::cold_settle_attribution::record_candidate(
-                encoded_bytes,
-                candidate_started.elapsed().as_nanos() as u64,
-            );
-            if encoded_bytes <= MAX_WIRE_FRAME_BYTES {
-                best = mid;
-                #[cfg(feature = "cold-settle-attribution")]
-                {
-                    best_encoded_bytes = encoded_bytes;
-                }
-                low = mid + 1;
-            } else {
-                high = mid.saturating_sub(1);
-            }
-        }
-        if best == 0 {
-            return Err(Error::new(
-                ErrorCode::Protocol,
-                "single view update chunk unit exceeds wire frame limit",
-            ));
-        }
-        chunks.push(view_update_chunk_from_units(
-            subscription,
-            settled_through,
-            reset_chunk,
-            &units[start..start + best],
-        ));
-        #[cfg(feature = "cold-settle-attribution")]
-        crate::cold_settle_attribution::record_selected_payload(best_encoded_bytes);
-        start += best;
-    }
-    if let Some(SyncMessage::ViewUpdateChunk { final_chunk, .. }) = chunks.last_mut() {
-        *final_chunk = true;
-    }
-    Ok(chunks)
-}
-
-fn view_update_chunk_units(
-    version_bundles: Vec<VersionBundle>,
-    peer_payload_inventory: PeerPayloadInventory,
-    result_member_adds: Vec<ResultMemberEntry>,
-    result_member_removes: Vec<ResultMemberEntry>,
-    program_fact_adds: Vec<ProgramFactEntry>,
-    program_fact_removes: Vec<ProgramFactEntry>,
-) -> Vec<ViewUpdateChunkUnit> {
-    let mut bundle_by_version_ref = BTreeMap::new();
-    for (bundle_idx, bundle) in version_bundles.iter().enumerate() {
-        for version in &bundle.versions {
-            bundle_by_version_ref.insert(
-                RowVersionRef::new(
-                    version.table().to_owned(),
-                    version.row_uuid(),
-                    bundle.tx.tx_id,
-                ),
-                bundle_idx,
-            );
-        }
-    }
-
-    let mut adds_by_bundle = BTreeMap::<usize, Vec<ResultMemberEntry>>::new();
-    let mut standalone_adds = Vec::new();
-    for add in result_member_adds {
-        let Some((table, row_uuid, tx_id)) = add.as_row() else {
-            standalone_adds.push(add);
-            continue;
-        };
-        let version_ref = RowVersionRef::new(table.to_string(), row_uuid, tx_id);
-        if let Some(bundle_idx) = bundle_by_version_ref.get(&version_ref).copied() {
-            adds_by_bundle.entry(bundle_idx).or_default().push(add);
-        } else {
-            standalone_adds.push(add);
-        }
-    }
-
-    let mut units = Vec::new();
-    for (idx, bundle) in version_bundles.into_iter().enumerate() {
-        let mut items = vec![ViewUpdateChunkItem::VersionBundle(bundle)];
-        if let Some(adds) = adds_by_bundle.remove(&idx) {
-            items.extend(adds.into_iter().map(ViewUpdateChunkItem::ResultMemberAdd));
-        }
-        units.push(ViewUpdateChunkUnit { items });
-    }
-
-    units.extend(
-        peer_payload_inventory
-            .complete_tx_payloads
-            .into_iter()
-            .map(|item| ViewUpdateChunkUnit {
-                items: vec![ViewUpdateChunkItem::CompleteTxPayload(item)],
-            }),
-    );
-    units.extend(standalone_adds.into_iter().map(|item| ViewUpdateChunkUnit {
-        items: vec![ViewUpdateChunkItem::ResultMemberAdd(item)],
-    }));
-    units.extend(
-        result_member_removes
-            .into_iter()
-            .map(|item| ViewUpdateChunkUnit {
-                items: vec![ViewUpdateChunkItem::ResultMemberRemove(item)],
-            }),
-    );
-    units.extend(
-        program_fact_adds
-            .into_iter()
-            .map(|item| ViewUpdateChunkUnit {
-                items: vec![ViewUpdateChunkItem::ProgramFactAdd(item)],
-            }),
-    );
-    units.extend(
-        program_fact_removes
-            .into_iter()
-            .map(|item| ViewUpdateChunkUnit {
-                items: vec![ViewUpdateChunkItem::ProgramFactRemove(item)],
-            }),
-    );
-    units
-}
-
-fn empty_view_update_chunk(
-    subscription: SubscriptionKey,
-    settled_through: GlobalSeq,
-    reset_result_set: bool,
-) -> SyncMessage {
-    SyncMessage::ViewUpdateChunk {
-        subscription,
-        settled_through,
-        reset_result_set,
-        final_chunk: false,
-        version_carriers: Vec::new(),
-        version_bundles: Vec::new(),
-        peer_payload_inventory: PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
-    }
-}
-
-fn view_update_chunk_from_units(
-    subscription: SubscriptionKey,
-    settled_through: GlobalSeq,
-    reset_result_set: bool,
-    units: &[ViewUpdateChunkUnit],
-) -> SyncMessage {
-    let mut chunk = empty_view_update_chunk(subscription, settled_through, reset_result_set);
-    for unit in units {
-        for item in &unit.items {
-            chunk = push_view_update_chunk_item(chunk, item.clone());
-        }
-    }
-    pack_view_update_chunk_version_bundles(chunk)
-}
-
-fn push_view_update_chunk_item(mut message: SyncMessage, item: ViewUpdateChunkItem) -> SyncMessage {
-    let SyncMessage::ViewUpdateChunk {
-        version_bundles,
-        peer_payload_inventory,
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
-        ..
-    } = &mut message
-    else {
-        unreachable!("view update chunk item can only be pushed to chunk messages")
-    };
-    match item {
-        ViewUpdateChunkItem::VersionBundle(item) => version_bundles.push(item),
-        ViewUpdateChunkItem::CompleteTxPayload(item) => {
-            peer_payload_inventory.complete_tx_payloads.push(item)
-        }
-        ViewUpdateChunkItem::ResultMemberAdd(item) => result_member_adds.push(item),
-        ViewUpdateChunkItem::ResultMemberRemove(item) => result_member_removes.push(item),
-        ViewUpdateChunkItem::ProgramFactAdd(item) => program_fact_adds.push(item),
-        ViewUpdateChunkItem::ProgramFactRemove(item) => program_fact_removes.push(item),
-    }
-    message
-}
-
-fn pack_view_update_chunk_version_bundles(mut message: SyncMessage) -> SyncMessage {
-    let SyncMessage::ViewUpdateChunk {
-        version_carriers,
-        version_bundles,
-        ..
-    } = &mut message
-    else {
-        unreachable!("view update chunk packing only applies to chunk messages")
-    };
-    if version_bundles.is_empty() {
-        return message;
-    }
-    if let Ok(carriers) = build_version_carriers_from_singletons(std::mem::take(version_bundles)) {
-        *version_carriers = carriers;
-    }
-    message
+    transport.send(message).map_err(transport_error)
 }
 
 fn send_with_local_content_extents<S>(
@@ -6871,17 +7304,14 @@ where
 
 fn view_update_subscription(message: &SyncMessage) -> Option<SubscriptionKey> {
     match message {
-        SyncMessage::ViewUpdate { subscription, .. }
-        | SyncMessage::ViewUpdateChunk { subscription, .. } => Some(*subscription),
+        SyncMessage::ViewUpdate { subscription, .. } => Some(*subscription),
         _ => None,
     }
 }
 
 fn retarget_view_update(mut message: SyncMessage, target: SubscriptionKey) -> SyncMessage {
-    match &mut message {
-        SyncMessage::ViewUpdate { subscription, .. }
-        | SyncMessage::ViewUpdateChunk { subscription, .. } => *subscription = target,
-        _ => {}
+    if let SyncMessage::ViewUpdate { subscription, .. } = &mut message {
+        *subscription = target;
     }
     message
 }
@@ -6927,17 +7357,6 @@ fn binding_values_in_param_order(shape: &ValidatedQuery, binding: &Binding) -> V
 fn view_update_is_empty(message: &SyncMessage) -> bool {
     match message {
         SyncMessage::ViewUpdate {
-            reset_result_set,
-            version_carriers,
-            version_bundles,
-            peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
-            ..
-        }
-        | SyncMessage::ViewUpdateChunk {
             reset_result_set,
             version_carriers,
             version_bundles,
@@ -7424,6 +7843,17 @@ fn coverage_key(
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
         opts,
+    }
+}
+
+fn subscriber_permissions_ready(permissions_ready: bool, trust: CommitUnitTrust) -> bool {
+    trust == CommitUnitTrust::TrustedBackend || permissions_ready
+}
+
+fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> AuthorId {
+    match ingest.trust {
+        CommitUnitTrust::Session => ingest.identity,
+        CommitUnitTrust::TrustedBackend => AuthorId::SYSTEM,
     }
 }
 
@@ -8031,23 +8461,6 @@ fn materialize_result_tree(query: &Query, snapshot: RelationSnapshot) -> Result<
             relations.insert(array.column_name.clone(), ResultRelation::Array(children));
         }
         let occurrence = OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0));
-        let rendered_bytes = rendered_node_bytes(row, &relations);
-        if rendered_bytes > MAX_RESULT_TREE_PARENT_BYTES {
-            let relation_path = arrays
-                .first()
-                .map(|array| array.column_name.clone())
-                .unwrap_or_default();
-            return Err(Error::new(
-                ErrorCode::Query,
-                ParentTooLargeError {
-                    parent: row.row_uuid(),
-                    relation_path,
-                    rendered_bytes,
-                    limit: MAX_RESULT_TREE_PARENT_BYTES,
-                }
-                .to_string(),
-            ));
-        }
         let _ = root;
         Ok(ResultNode {
             occurrence,
@@ -8062,20 +8475,6 @@ fn materialize_result_tree(query: &Query, snapshot: RelationSnapshot) -> Result<
         .map(|(key, row)| node(&key, row, &query.array_subqueries, &rows, &edges, true))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ResultTree { roots })
-}
-
-fn rendered_node_bytes(row: &CurrentRow, relations: &BTreeMap<String, ResultRelation>) -> usize {
-    let mut bytes = row.encoded_record().1.len();
-    for (name, relation) in relations {
-        bytes += name.len();
-        if let ResultRelation::Array(children) = relation {
-            bytes += children
-                .iter()
-                .map(|child| rendered_node_bytes(&child.row, &child.relations))
-                .sum::<usize>();
-        }
-    }
-    bytes
 }
 
 struct SubscriptionState {
@@ -8109,7 +8508,7 @@ impl RelationSnapshotIndex {
         for (position, row) in snapshot.rows.iter().take(snapshot.root_count).enumerate() {
             index
                 .roots
-                .insert(single_source_occurrence_id(row), position);
+                .insert(subscription_row_occurrence_id(row), position);
         }
         for (offset, row) in snapshot.rows.iter().skip(snapshot.root_count).enumerate() {
             index.related.insert(
@@ -8392,10 +8791,11 @@ fn subscription_delta_event_with_reset(
 
     for (key, _) in &previous_by_id {
         if !current_by_id.contains_key(key) {
+            let row = previous_by_id[key];
             removed.push(RemovedRow {
-                table: key.0.clone(),
-                row_uuid: key.1,
-                occurrence_id: OutputOccurrenceId::single_source(ObjectId::from_uuid(key.1.0)),
+                table: row.table().to_owned(),
+                row_uuid: row.row_uuid(),
+                occurrence_id: key.clone(),
             });
         }
     }
@@ -8509,7 +8909,7 @@ fn apply_maintained_update_to_snapshot(
     let mut added_related = Vec::new();
 
     for row in &update_added {
-        let key = single_source_occurrence_id(row);
+        let key = subscription_row_occurrence_id(row);
         if let Some(position) = snapshot_index.roots.get(&key).copied() {
             if snapshot.rows[position] != *row {
                 snapshot.rows[position] = row.clone();
@@ -8522,7 +8922,7 @@ fn apply_maintained_update_to_snapshot(
             }
             snapshot_index
                 .roots
-                .insert(single_source_occurrence_id(row), snapshot.root_count);
+                .insert(subscription_row_occurrence_id(row), snapshot.root_count);
             snapshot.root_count += 1;
             added.push(subscription_output_row(row.clone()));
         }
@@ -8530,23 +8930,21 @@ fn apply_maintained_update_to_snapshot(
 
     let mut index = 0;
     while index < snapshot.root_count {
-        let row_key = (
-            snapshot.rows[index].table().to_owned(),
-            snapshot.rows[index].row_uuid(),
-        );
-        if update_removed
-            .iter()
-            .any(|(table, row_uuid)| row_key.0 == *table && row_key.1 == *row_uuid)
+        let occurrence_id = subscription_row_occurrence_id(&snapshot.rows[index]);
+        if update_removed.contains(&occurrence_id)
+            && !update_added
+                .iter()
+                .any(|added| subscription_row_occurrence_id(added) == occurrence_id)
         {
             let row = snapshot.rows.remove(index);
             snapshot.root_count -= 1;
             snapshot_index
                 .roots
-                .remove(&single_source_occurrence_id(&row));
+                .remove(&subscription_row_occurrence_id(&row));
             removed.push(RemovedRow {
                 table: row.table().to_owned(),
                 row_uuid: row.row_uuid(),
-                occurrence_id: single_source_occurrence_id(&row),
+                occurrence_id,
             });
         } else {
             index += 1;
@@ -8573,7 +8971,7 @@ fn apply_maintained_update_to_snapshot(
         let Some(row) = row else {
             continue;
         };
-        let root_key = single_source_occurrence_id(row);
+        let root_key = subscription_row_occurrence_id(row);
         if snapshot_index.roots.contains_key(&root_key) {
             continue;
         }
@@ -8661,19 +9059,28 @@ where
     })
 }
 
-fn single_source_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
-    OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0))
+pub(crate) fn subscription_row_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
+    let root = ObjectId::from_uuid(row.row_uuid().0);
+    let mut joined = Vec::new();
+    for position in 1.. {
+        let Some(Value::Uuid(row_id)) = row.raw_field(&format!("__flat_join_row_{position}"))
+        else {
+            break;
+        };
+        joined.push(ObjectId::from_uuid(row_id));
+    }
+    OutputOccurrenceId::new(root, joined)
 }
 
 fn subscription_output_row(row: CurrentRow) -> SubscriptionOutputRow {
     SubscriptionOutputRow {
-        occurrence_id: single_source_occurrence_id(&row),
+        occurrence_id: subscription_row_occurrence_id(&row),
         row,
     }
 }
 
-fn subscription_row_key(row: &CurrentRow) -> (String, RowUuid) {
-    (row.table().to_owned(), row.row_uuid())
+fn subscription_row_key(row: &CurrentRow) -> OutputOccurrenceId {
+    subscription_row_occurrence_id(row)
 }
 
 #[cfg(test)]

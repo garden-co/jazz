@@ -135,6 +135,151 @@ fn parameterized_one_shot_index_read_does_not_fall_back_to_cached_full_scan() {
 }
 
 #[test]
+fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_count() {
+    // This is intentionally an internal receipt: schema evolution and query
+    // results use the public protocol/query APIs, while physical read counts
+    // and index names are implementation details with no public equivalent.
+    let base = JazzSchema::new([TableSchema::new(
+        "todos",
+        [ColumnSchema::new("title", ColumnType::String)],
+    )]);
+    let indexed = SchemaVersion::new(JazzSchema::new([
+        TableSchema::new(
+            "todos",
+            [ColumnSchema::new("title", ColumnType::String)],
+        )
+        .with_indexed_column("title"),
+    ]));
+    let extended = SchemaVersion::new(JazzSchema::new([
+        TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("body", ColumnType::String),
+            ],
+        )
+        .with_indexed_column("title"),
+    ]));
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0xb1), base.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0xb2), base.clone());
+    let existing = row(0xb3);
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", existing, 10).cells(title_cells("before-index")),
+    );
+
+    assert_eq!(
+        indexed.id,
+        base.version_id(),
+        "physical indexes are deliberately outside content-addressed schema identity"
+    );
+    core.apply_trusted_catalogue_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(indexed.clone()),
+    })
+    .unwrap();
+
+    let indexed_mapping = core.catalogue.physical_mappings[&indexed.id].tables["todos"].clone();
+    let physical_table = physical_global_current_table_name(indexed_mapping.table_id);
+    let physical_index = physical_current_index_name(indexed_mapping.columns["title"]);
+    assert!(
+        core.database
+            .table_schema(&physical_table)
+            .unwrap()
+            .indices
+            .iter()
+            .any(|index| index.name == physical_index),
+        "publishing the indexed variant must register its physical index"
+    );
+
+    let query = Query::from("todos").filter(eq(col("title"), lit("before-index")));
+    let shape = query.validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    core.reset_storage_read_metrics();
+    let rows = core
+        .query_rows_for_link(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorId::SYSTEM,
+        )
+        .unwrap();
+    let indexed_reads = core.take_storage_read_metrics();
+    assert_eq!(
+        rows.into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![existing],
+        "the live index must backfill the row written before it existed"
+    );
+    assert_eq!(indexed_reads.global_current_indexes.reads, 1);
+    assert_eq!(indexed_reads.global_current_rows.reads, 1);
+
+    publish_schema_lineage(
+        &mut core,
+        extended.clone(),
+        MigrationLens::new(
+            indexed.id,
+            extended.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String(String::new()),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 2,
+            schema: extended.id,
+        },
+    })
+    .unwrap();
+
+    assert_eq!(
+        core.catalogue.physical_mappings[&extended.id].tables["todos"].table_id,
+        indexed_mapping.table_id
+    );
+    let shape = query.validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    core.reset_storage_read_metrics();
+    let rows = core
+        .query_rows_for_link(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorId::SYSTEM,
+        )
+        .unwrap();
+    let three_variant_reads = core.take_storage_read_metrics();
+
+    assert_eq!(
+        rows.into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![existing]
+    );
+    assert_eq!(
+        three_variant_reads.global_current_indexes,
+        indexed_reads.global_current_indexes,
+        "adding a schema variant must not add an index source"
+    );
+    assert_eq!(
+        three_variant_reads.global_current_rows,
+        indexed_reads.global_current_rows,
+        "adding a schema variant must not add a current-row source"
+    );
+}
+
+#[test]
 fn one_shot_filtered_read_keeps_residual_filters_after_pushdown() {
     let schema = access_path_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
@@ -996,7 +1141,7 @@ fn array_subquery_match_correlation_cardinality_requires_every_referenced_member
         .array_subquery(
             ArraySubquery::new("memberRows", "profiles", "id", "members")
                 .requirement(crate::query::ArraySubqueryRequirement::MatchCorrelationCardinality)
-                .unbounded(),
+                ,
         )
         .validate(&schema)
         .unwrap();
@@ -1077,7 +1222,7 @@ fn rows_skipped_by_require_includes_affect_limit_offset_pagination() {
         .array_subquery(
             ArraySubquery::new("memberRows", "profiles", "id", "members")
                 .requirement(crate::query::ArraySubqueryRequirement::MatchCorrelationCardinality)
-                .unbounded(),
+                ,
         )
         .order_by("name", crate::query::OrderDirection::Asc)
         .offset(1)
@@ -1137,7 +1282,7 @@ fn relation_snapshot_single_level_array_uses_query_engine_edges() {
 
     let shape = Query::from("users")
         .filter(eq(col("id"), lit(Value::Uuid(alice.0))))
-        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").unbounded())
+        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id"))
         .validate(&schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
@@ -1216,8 +1361,7 @@ fn relation_snapshot_materializes_reverse_array_edges() {
         .filter(eq(col("id"), lit(Value::Uuid(alice.0))))
         .array_subquery(
             ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id")
-                .unbounded()
-                .nested(ArraySubquery::new("commentsViaTodo", "comments", "todo_id", "id").unbounded()),
+                .nested(ArraySubquery::new("commentsViaTodo", "comments", "todo_id", "id")),
         )
         .validate(&schema)
         .unwrap();
@@ -1303,7 +1447,7 @@ fn relation_snapshot_array_subquery_filters_use_parent_binding_params() {
             ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id")
                 .filter(eq(col("title"), param("wanted")))
                 .requirement(crate::query::ArraySubqueryRequirement::AtLeastOne)
-                .unbounded(),
+                ,
         )
         .validate(&schema)
         .unwrap();
@@ -1366,7 +1510,7 @@ fn relation_snapshot_filters_unreadable_children_and_required_parents() {
     .unwrap();
 
     let optional_shape = Query::from("users")
-        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").unbounded())
+        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id"))
         .validate(&schema)
         .unwrap();
     let optional_binding = optional_shape.bind(BTreeMap::new()).unwrap();
@@ -1393,7 +1537,7 @@ fn relation_snapshot_filters_unreadable_children_and_required_parents() {
         .array_subquery(
             ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id")
                 .requirement(crate::query::ArraySubqueryRequirement::AtLeastOne)
-                .unbounded(),
+                ,
         )
         .validate(&schema)
         .unwrap();
@@ -1458,11 +1602,10 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
         .array_subquery(
             ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id")
                 .select(["title"])
-                .unbounded()
                 .nested(
                     ArraySubquery::new("commentsViaTodo", "comments", "todo_id", "id")
                         .select(["body"])
-                        .unbounded(),
+                        ,
                 ),
         )
         .validate(&schema)

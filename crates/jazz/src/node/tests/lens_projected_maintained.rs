@@ -24,14 +24,10 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
             base.version_id(),
             evolved_payload.id,
             vec![TableLens {
@@ -49,9 +45,11 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
                 ],
             }],
         ),
-    })
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -95,6 +93,7 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
 
     let mut peer = PeerState::new();
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
+    let bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
         result_member_adds,
         result_member_removes,
@@ -112,4 +111,11 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
         .expect("current-row result should be real row");
     assert_eq!(member.row_uuid, shared_row);
     assert_eq!(member.content_tx, Some(new_tx));
+    assert_eq!(bundles.len(), 1);
+    assert_eq!(bundles[0].versions.len(), 1);
+    let shipped = &bundles[0].versions[0];
+    assert_eq!(shipped.schema_version(), evolved_payload.id);
+    assert_eq!(shipped.table(), "todos");
+    assert_eq!(shipped.cell_at(0), Some(v("new-name")));
+    assert_eq!(shipped.cell_at(1), Some(v("new-body")));
 }

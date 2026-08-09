@@ -213,6 +213,7 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
         MergeableCommit::new("todos", updated, 103)
             .made_by(author)
             .permission_subject(author)
+            .authored_columns(BTreeSet::from(["title".to_owned()]))
             .cells(mergeable_open_cells("pending", "external-note")),
         MergeableCommit::new("todos", deleted, 104)
             .made_by(author)
