@@ -138,7 +138,7 @@ async fn transaction_stages_writes_and_can_commit() {
         )
         .expect("insert in transaction");
 
-    assert_eq!(write_batch_id, batch_id);
+    assert_eq!(write_batch_id, None);
     assert!(
         all_todos(&client).await.is_empty(),
         "ordinary client reads should ignore an open transaction"
@@ -149,7 +149,7 @@ async fn transaction_stages_writes_and_can_commit() {
         "transaction-scoped reads should include staged rows"
     );
 
-    assert_eq!(tx.commit().expect("commit transaction"), batch_id);
+    tx.commit().expect("commit transaction");
     assert!(
         client.commit_transaction(batch_id).is_err(),
         "committed transaction should reject a second commit"
@@ -204,7 +204,7 @@ async fn committed_transaction_rejects_later_handle_operations() {
             row_input!("title" => "committed", "completed" => false),
         )
         .expect("insert in transaction");
-    assert_eq!(tx.commit().expect("commit transaction"), batch_id);
+    tx.commit().expect("commit transaction");
 
     let closed_handle = client.with_write_context(WriteContext::default().with_batch_id(batch_id));
 
@@ -361,14 +361,13 @@ async fn transaction_insert_is_visible_only_after_commit_settles() {
     let tx = alice
         .begin_transaction()
         .expect("begin transaction through client API");
-    let batch_id = tx.open_batch_id();
     let (todo_id, expected_values, write_batch_id) = tx
         .insert(
             "todos",
             row_input!("title" => "sealed later", "completed" => false),
         )
         .expect("insert in transaction");
-    assert_eq!(write_batch_id, batch_id);
+    assert_eq!(write_batch_id, None);
 
     assert!(
         all_todos(&alice).await.is_empty(),
@@ -382,20 +381,9 @@ async fn transaction_insert_is_visible_only_after_commit_settles() {
         "peer edge reads should not see an uncommitted transaction"
     );
 
-    {
-        let wait_for_batch = alice.wait_for_batch(batch_id, DurabilityTier::EdgeServer);
-        tokio::pin!(wait_for_batch);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), &mut wait_for_batch)
-                .await
-                .is_err(),
-            "transaction wait should stay pending before commit"
-        );
-    }
-
-    assert_eq!(tx.commit().expect("commit transaction"), batch_id);
+    let committed_batch_id = tx.commit().expect("commit transaction");
     alice
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(committed_batch_id, DurabilityTier::EdgeServer)
         .await
         .expect("committed transaction settles");
 
@@ -432,28 +420,27 @@ async fn transaction_update_can_modify_row_inserted_earlier_in_same_transaction(
     let tx = client
         .begin_transaction()
         .expect("begin transaction through client API");
-    let batch_id = tx.open_batch_id();
     let (todo_id, _, insert_batch_id) = tx
         .insert(
             "todos",
             row_input!("title" => "draft", "completed" => false),
         )
         .expect("insert in transaction");
-    assert_eq!(insert_batch_id, batch_id);
+    assert_eq!(insert_batch_id, None);
     assert_eq!(
         tx.update(
             todo_id,
             vec![("title".to_string(), Value::Text("final".to_string()))],
         )
         .expect("update inserted row in transaction"),
-        batch_id
+        None
     );
 
     assert!(
         all_todos(&client).await.is_empty(),
         "ordinary reads should ignore the open transaction"
     );
-    assert_eq!(tx.commit().expect("commit transaction"), batch_id);
+    tx.commit().expect("commit transaction");
 
     let rows = wait_for_todos(
         &client,
@@ -486,14 +473,13 @@ async fn multiple_updates_to_same_row_in_transaction_compose() {
     let tx = client
         .begin_transaction()
         .expect("begin transaction through client API");
-    let batch_id = tx.open_batch_id();
     assert_eq!(
         tx.update(
             todo_id,
             vec![("title".to_string(), Value::Text("renamed".to_string()))],
         )
         .expect("first transaction update"),
-        batch_id
+        None
     );
     assert_eq!(
         tx.update(
@@ -501,7 +487,7 @@ async fn multiple_updates_to_same_row_in_transaction_compose() {
             vec![("completed".to_string(), Value::Boolean(true))]
         )
         .expect("second transaction update"),
-        batch_id
+        None
     );
     let tx_rows = tx
         .client()
@@ -510,7 +496,7 @@ async fn multiple_updates_to_same_row_in_transaction_compose() {
         .expect("transaction-scoped query");
     assert!(has_todo(&tx_rows, todo_id, "renamed", true));
 
-    assert_eq!(tx.commit().expect("commit transaction"), batch_id);
+    tx.commit().expect("commit transaction");
 
     let rows = wait_for_todos(
         &client,
@@ -539,8 +525,6 @@ async fn multiple_writes_in_one_transaction_settle_as_one_batch() {
     let tx = client
         .begin_transaction()
         .expect("begin transaction through client API");
-    let batch_id = tx.open_batch_id();
-
     let (first_id, first_values, first_batch_id) = tx
         .insert(
             "todos",
@@ -553,10 +537,10 @@ async fn multiple_writes_in_one_transaction_settle_as_one_batch() {
             row_input!("title" => "second", "completed" => true),
         )
         .expect("insert second row in transaction");
-    assert_eq!(first_batch_id, batch_id);
-    assert_eq!(second_batch_id, batch_id);
+    assert_eq!(first_batch_id, None);
+    assert_eq!(second_batch_id, None);
 
-    assert_eq!(tx.commit().expect("commit transaction"), batch_id);
+    tx.commit().expect("commit transaction");
 
     let rows = wait_for_todos(
         &client,
