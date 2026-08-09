@@ -14514,7 +14514,8 @@ mod tests {
             .bind(BTreeMap::from([("user".to_owned(), Value::Uuid(alice.0))]))
             .unwrap();
 
-        let open = client.open_exclusive().unwrap();
+        let open = OpenBatchId::new();
+        client.open_exclusive(open).unwrap();
         let rows = client
             .tx_query(open, &shape, &binding)
             .unwrap()
@@ -14556,7 +14557,8 @@ mod tests {
             .validate(&schema())
             .unwrap();
         let binding = shape.bind(BTreeMap::new()).unwrap();
-        let tx = node.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        node.open_exclusive(tx).unwrap();
         assert_eq!(node.tx_query(tx, &shape, &binding).unwrap().len(), 1);
         commit_issue(&mut node, 2, "open", author(1));
         assert_eq!(node.tx_query(tx, &shape, &binding).unwrap().len(), 1);
@@ -14630,7 +14632,8 @@ mod tests {
         let binding = shape
             .bind(BTreeMap::from([("team".to_owned(), Value::Uuid(team1.0))]))
             .unwrap();
-        let tx = node.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        node.open_exclusive(tx).unwrap();
         let rows = node
             .tx_query(tx, &shape, &binding)
             .unwrap()

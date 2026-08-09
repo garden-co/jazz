@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn test_write_context_batch_id_override() {
-        let batch_id = BatchId::new();
+        let batch_id = OpenBatchId::new();
         let context =
             WriteContext::from_session(Session::new("session-user")).with_batch_id(batch_id);
 

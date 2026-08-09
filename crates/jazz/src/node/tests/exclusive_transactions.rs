@@ -28,7 +28,8 @@ fn exclusive_tx_snapshot_read_ignores_newer_commits_after_open() {
     let base = node
         .commit_mergeable(MergeableCommit::new("todos", row, 10).cells(title_cells("base")))
         .unwrap();
-    let tx_id = node.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    node.open_exclusive(tx_id).unwrap();
 
     node.commit_mergeable(MergeableCommit::new("todos", row, 11).cells(title_cells("newer")))
         .unwrap();
@@ -53,7 +54,8 @@ fn exclusive_tx_reads_own_pending_writes() {
     let created = row(8);
     node.commit_mergeable(MergeableCommit::new("todos", existing, 10).cells(title_cells("base")))
         .unwrap();
-    let tx_id = node.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    node.open_exclusive(tx_id).unwrap();
 
     node.tx_write(tx_id, "todos", existing, title_cells("pending"), None)
         .unwrap();
@@ -96,7 +98,8 @@ fn exclusive_tx_pending_writes_overlay_snapshot_for_point_and_table_reads() {
     let created = row(8);
     node.commit_mergeable(MergeableCommit::new("todos", existing, 10).cells(title_cells("base")))
         .unwrap();
-    let tx_id = node.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    node.open_exclusive(tx_id).unwrap();
 
     node.tx_write(tx_id, "todos", existing, title_cells("pending"), None)
         .unwrap();
@@ -124,7 +127,8 @@ fn tx_read_records_present_and_absent_snapshot_reads() {
     let version = node
         .commit_mergeable(MergeableCommit::new("todos", present, 10).cells(title_cells("base")))
         .unwrap();
-    let tx_id = node.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    node.open_exclusive(tx_id).unwrap();
 
     assert_eq!(
         node.tx_read(tx_id, "todos", present).unwrap(),
@@ -157,7 +161,8 @@ fn tx_read_parent_cache_is_invalidated_by_same_row_write_without_changing_read_s
     let base = node
         .commit_mergeable(MergeableCommit::new("todos", row, 10).cells(title_cells("base")))
         .unwrap();
-    let tx_id = node.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    node.open_exclusive(tx_id).unwrap();
 
     assert_eq!(
         node.tx_read(tx_id, "todos", row).unwrap(),
@@ -210,7 +215,8 @@ fn exclusive_tx_snapshot_applies_deletion_register() {
     let deleted = node
         .commit_mergeable(MergeableCommit::new("todos", row, 11).deletion(DeletionEvent::Deleted))
         .unwrap();
-    let tx_id = node.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    node.open_exclusive(tx_id).unwrap();
 
     node.commit_mergeable(MergeableCommit::new("todos", row, 12).deletion(DeletionEvent::Restored))
         .unwrap();
@@ -242,7 +248,8 @@ fn exclusive_tx_snapshot_applies_deletion_register() {
 fn exclusive_tx_open_state_is_invisible_outside_transaction() {
     let (_temp_dir, mut node) = open_node();
     let row = row(7);
-    let tx_id = node.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    node.open_exclusive(tx_id).unwrap();
     node.tx_write(tx_id, "todos", row, title_cells("buffered"), None)
         .unwrap();
 
@@ -293,7 +300,8 @@ fn exclusive_snapshot_global_base_uses_contiguous_global_watermark() {
             .unwrap();
     }
 
-    let gapped = reader.open_exclusive().unwrap();
+    let gapped = OpenBatchId::new();
+    reader.open_exclusive(gapped).unwrap();
     assert_eq!(
         reader.open_tx(gapped).unwrap().base_snapshot.global_base,
         GlobalSeq(1)
@@ -329,7 +337,8 @@ fn exclusive_snapshot_global_base_uses_contiguous_global_watermark() {
         )
         .unwrap();
 
-    let contiguous = reader.open_exclusive().unwrap();
+    let contiguous = OpenBatchId::new();
+    reader.open_exclusive(contiguous).unwrap();
     assert_eq!(
         reader
             .open_tx(contiguous)
@@ -349,7 +358,8 @@ fn exclusive_commit_accepts_clean_end_to_end() {
         &mut core,
         MergeableCommit::new("todos", row, 10).cells(title_cells("base")),
     );
-    let tx_id = client.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    client.open_exclusive(tx_id).unwrap();
     client
         .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
         .unwrap();
@@ -402,7 +412,8 @@ fn exclusive_row_read_conflict_rejects_and_client_restores_old_value() {
         &mut core,
         MergeableCommit::new("todos", row, 10).cells(title_cells("base")),
     );
-    let tx_id = client.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    client.open_exclusive(tx_id).unwrap();
     assert_eq!(
         client.tx_read(tx_id, "todos", row).unwrap(),
         Some(title_cells("base"))
@@ -442,7 +453,8 @@ fn exclusive_predicate_phantom_conflict_rejects() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (_other_dir, mut other) = open_node_with_uuid(node(2));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
-    let tx_id = client.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    client.open_exclusive(tx_id).unwrap();
     assert!(client.tx_current_rows(tx_id, "todos").unwrap().is_empty());
     commit_mergeable_global(
         &mut other,
@@ -472,7 +484,8 @@ fn exclusive_whole_table_predicate_ignores_other_table_changes() {
     let (_other_dir, mut other) = open_node_with_schema(node(2), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
 
-    let tx_id = client.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    client.open_exclusive(tx_id).unwrap();
     assert!(client.tx_current_rows(tx_id, "todos").unwrap().is_empty());
     commit_mergeable_global(
         &mut other,
@@ -507,7 +520,8 @@ fn exclusive_filtered_shape_phantom_conflict_rejects() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     register_shape_binding(&mut core, &shape, &binding);
 
-    let tx_id = client.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    client.open_exclusive(tx_id).unwrap();
     assert!(client.tx_query(tx_id, &shape, &binding).unwrap().is_empty());
     commit_mergeable_global(
         &mut other,
@@ -541,7 +555,8 @@ fn exclusive_filtered_shape_ignores_irrelevant_changes() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     register_shape_binding(&mut core, &shape, &binding);
 
-    let tx_id = client.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    client.open_exclusive(tx_id).unwrap();
     assert!(client.tx_query(tx_id, &shape, &binding).unwrap().is_empty());
     commit_mergeable_global(
         &mut other,
@@ -591,7 +606,8 @@ fn exclusive_shape_predicate_is_binding_sensitive() {
             .unwrap();
         register_shape_binding(&mut core, &shape, &binding_a);
 
-        let tx_id = client.open_exclusive().unwrap();
+        let tx_id = OpenBatchId::new();
+        client.open_exclusive(tx_id).unwrap();
         assert!(client
             .tx_query(tx_id, &shape, &binding_a)
             .unwrap()
@@ -641,7 +657,8 @@ fn exclusive_shape_predicate_validation_uses_inline_shape_without_registration()
         )]))
         .unwrap();
 
-    let tx_id = client.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    client.open_exclusive(tx_id).unwrap();
     assert!(client
         .tx_query(tx_id, &shape, &binding_a)
         .unwrap()
@@ -713,7 +730,8 @@ fn district_scoped_predicate_rejects_same_district_phantom_only() {
             )]))
             .unwrap();
 
-        let tx_id = client.open_exclusive().unwrap();
+        let tx_id = OpenBatchId::new();
+        client.open_exclusive(tx_id).unwrap();
         assert!(client.tx_query(tx_id, &shape, &binding).unwrap().is_empty());
         commit_mergeable_global(
             &mut other,
@@ -755,8 +773,10 @@ fn exclusive_write_write_first_committer_wins() {
         MergeableCommit::new("todos", row, 10).cells(title_cells("base")),
     );
     sync_current_rows_to(&mut core, &mut client_b, 42);
-    let tx_a = client_a.open_exclusive().unwrap();
-    let tx_b = client_b.open_exclusive().unwrap();
+    let tx_a = OpenBatchId::new();
+    client_a.open_exclusive(tx_a).unwrap();
+    let tx_b = OpenBatchId::new();
+    client_b.open_exclusive(tx_b).unwrap();
     client_a
         .tx_write(tx_a, "todos", row, title_cells("a"), None)
         .unwrap();
@@ -786,7 +806,8 @@ fn exclusive_absent_read_conflict_rejects() {
     let (_other_dir, mut other) = open_node_with_uuid(node(2));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let row = row(7);
-    let tx_id = client.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    client.open_exclusive(tx_id).unwrap();
     assert_eq!(client.tx_read(tx_id, "todos", row).unwrap(), None);
     commit_mergeable_global(
         &mut other,
@@ -862,7 +883,8 @@ fn authority_parks_child_until_unknown_exclusive_parent_rejects() {
         &mut core,
         MergeableCommit::new("todos", row, 1).cells(title_cells("old")),
     );
-    let tx_id = client.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    client.open_exclusive(tx_id).unwrap();
     client
         .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
         .unwrap();
@@ -970,7 +992,8 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
-    let tx = writer.open_exclusive().unwrap();
+    let tx = OpenBatchId::new();
+    writer.open_exclusive(tx).unwrap();
     writer
         .tx_write(tx, "todos", row(1), title_cells("one"), None)
         .unwrap();
@@ -1050,7 +1073,8 @@ fn malformed_exclusive_partial_result_row_add_is_rejected() {
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
-    let tx = writer.open_exclusive().unwrap();
+    let tx = OpenBatchId::new();
+    writer.open_exclusive(tx).unwrap();
     writer
         .tx_write(tx, "todos", row(1), title_cells("one"), None)
         .unwrap();
@@ -1126,7 +1150,8 @@ fn partial_exclusive_payload_does_not_establish_tx_level_complete_tx_ref() {
         .unwrap();
     let second_binding = second_shape.bind(BTreeMap::new()).unwrap();
 
-    let tx = writer.open_exclusive().unwrap();
+    let tx = OpenBatchId::new();
+    writer.open_exclusive(tx).unwrap();
     writer
         .tx_write(tx, "todos", row(1), title_cells("one"), None)
         .unwrap();
@@ -1188,7 +1213,8 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     let author_a = user(0xa1);
     let author_b = user(0xb2);
 
-    let tx = writer.open_exclusive().unwrap();
+    let tx = OpenBatchId::new();
+    writer.open_exclusive(tx).unwrap();
     writer
         .tx_write(tx, "todos", row(1), owner_cells(author_a, "a row"), None)
         .unwrap();
@@ -1269,7 +1295,8 @@ fn exclusive_set_serializes_counter_base_before_mergeable_deltas() {
         .apply_sync_message(peer.current_rows_update(&mut core, "counters").unwrap())
         .unwrap();
 
-    let tx = client.open_exclusive().unwrap();
+    let tx = OpenBatchId::new();
+    client.open_exclusive(tx).unwrap();
     client
         .tx_write(
             tx,
@@ -1338,7 +1365,8 @@ fn originating_rejected_exclusive_moves_payload_to_retry_store() {
         MergeableCommit::new("todos", row, 10).cells(title_cells("base")),
     );
     sync_current_rows_to(&mut core, &mut writer_b, 77);
-    let tx_id = writer_b.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    writer_b.open_exclusive(tx_id).unwrap();
     writer_b.tx_read(tx_id, "todos", row).unwrap();
     commit_mergeable_global(
         &mut writer_a,

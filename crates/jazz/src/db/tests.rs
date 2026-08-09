@@ -4058,7 +4058,8 @@ fn mergeable_tx_and_ref_have_identical_restore_and_reinsert_results() {
         .unwrap();
     builder_tx.commit().unwrap();
 
-    let open_tx = handle.begin_mergeable().unwrap();
+    let open_tx = OpenBatchId::new();
+    handle.begin_mergeable(open_tx).unwrap();
     {
         let tx = handle.mergeable_tx_ref(open_tx);
         tx.restore(
@@ -4162,7 +4163,8 @@ fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
     db.insert_with_id("todos", row, doctest_support::todo_cells("base", false))
         .unwrap();
 
-    let open_tx = db.begin_exclusive().unwrap();
+    let open_tx = OpenBatchId::new();
+    db.begin_exclusive(open_tx).unwrap();
     {
         let tx = db.exclusive_tx_ref(open_tx);
         assert_eq!(
@@ -6041,7 +6043,8 @@ impl CoreDb {
     }
 
     fn exclusive_tx(&self) -> Result<CoreExclusiveTx<'_>, Error> {
-        let tx_id = self.server.node().borrow_mut().open_exclusive()?;
+        let tx_id = OpenBatchId::new();
+        self.server.node().borrow_mut().open_exclusive(tx_id)?;
         Ok(CoreExclusiveTx {
             core: self,
             tx_id,
