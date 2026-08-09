@@ -4781,11 +4781,16 @@ where
                     ..
                 } => *maintained_subscription = Some(maintained),
             }
+            let removed = reset_removed_roots(
+                &state_ref.snapshot,
+                &state_ref.snapshot_index,
+                &root_occurrence_ids,
+            );
             let event = SubscriptionEvent::Delta {
                 reset: true,
                 added: reset_outputs,
                 updated: Vec::new(),
-                removed: Vec::new(),
+                removed,
                 terminal_operations: Vec::new(),
                 settled,
                 tier: read_tier,
@@ -9713,6 +9718,27 @@ fn subscription_outputs_with_occurrence_sidecar(
                 occurrence_id: occurrence_id.clone(),
                 row: row.clone(),
             })
+        })
+        .collect()
+}
+
+fn reset_removed_roots(
+    previous: &RelationSnapshot,
+    previous_index: &RelationSnapshotIndex,
+    current_occurrences: &[OutputOccurrenceId],
+) -> Vec<RemovedRow> {
+    let current = current_occurrences.iter().collect::<BTreeSet<_>>();
+    previous_index
+        .roots
+        .iter()
+        .filter(|(occurrence, _)| !current.contains(occurrence))
+        .map(|(occurrence_id, position)| {
+            let row = &previous.rows[*position];
+            RemovedRow {
+                table: row.table().to_owned(),
+                row_uuid: row.row_uuid(),
+                occurrence_id: occurrence_id.clone(),
+            }
         })
         .collect()
 }
