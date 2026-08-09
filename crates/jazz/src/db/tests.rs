@@ -6093,7 +6093,7 @@ impl CoreDb {
 
 struct CoreExclusiveTx<'a> {
     core: &'a CoreDb,
-    tx_id: OpenTxId,
+    tx_id: OpenBatchId,
     has_reads: Cell<bool>,
 }
 

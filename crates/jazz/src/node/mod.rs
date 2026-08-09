@@ -46,6 +46,7 @@ use crate::schema::{
 };
 use crate::text_merge::{Run as PlainTextRun, TextOp as PlainTextOp};
 use crate::time::{GlobalSeq, TxTime};
+use crate::tools::OpenBatchId;
 use crate::tx::{
     AbsentRead, BranchMergeProvenance, DeletionEvent, DurabilityTier, Fate, HistoryEntry,
     PredicateRead, RecordedMergeStrategy, RejectedTransaction, RejectedVersion, RejectionReason,
@@ -414,10 +415,8 @@ struct RegisteredBinding {
 
 /// Locally open transactions and local-only permission attribution.
 struct OpenTxState {
-    /// Open transaction handles keyed by local handle ID.
-    open_transactions: BTreeMap<OpenTxId, OpenTransaction>,
-    /// Next local transaction handle ID to allocate.
-    next_open_tx_id: u64,
+    /// Open transaction handles keyed by caller-generated identity.
+    open_transactions: BTreeMap<OpenBatchId, OpenTransaction>,
     /// Local-only permission subjects for transactions whose `made_by` keeps provenance.
     local_permission_subjects: BTreeMap<TxId, AuthorId>,
 }
@@ -677,7 +676,6 @@ where
             },
             open_tx: OpenTxState {
                 open_transactions: BTreeMap::new(),
-                next_open_tx_id: 1,
                 local_permission_subjects: BTreeMap::new(),
             },
             rejections: RejectionTracking::default(),
@@ -5447,10 +5445,6 @@ pub struct LargeValueMetrics {
     pub checkpoint_writes: u64,
 }
 
-/// Handle for an open transaction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct OpenTxId(u64);
-
 /// Explicit edit operation for one text/blob column.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LargeValueEditOp {
@@ -6256,7 +6250,10 @@ pub enum Error {
     MaintainedViewMissingBundleWitness(&'static str),
     /// Open transaction handle was not known.
     #[error("missing open transaction: {0:?}")]
-    MissingOpenTx(OpenTxId),
+    MissingOpenTx(OpenBatchId),
+    /// A caller attempted to reuse an identity that still names live mutable work.
+    #[error("duplicate open batch id: {0}")]
+    DuplicateOpenBatch(OpenBatchId),
     /// Fate or global-current update was non-monotone.
     #[error("non-monotone state update: {0}")]
     NonMonotoneState(&'static str),

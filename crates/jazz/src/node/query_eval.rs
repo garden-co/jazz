@@ -1220,7 +1220,7 @@ where
         table: &TableSchema,
         graph_tier: Option<DurabilityTier>,
         history_position: Option<GlobalSeq>,
-        open_tx_overlay: Option<OpenTxId>,
+        open_tx_overlay: Option<OpenBatchId>,
         branch_data: Option<BranchId>,
     ) -> Result<Option<DeletionRegisterSource>, SourceResolutionError> {
         if !request
@@ -1268,7 +1268,7 @@ where
         table: &TableSchema,
         graph_tier: Option<DurabilityTier>,
         history_position: Option<GlobalSeq>,
-        open_tx_overlay: Option<OpenTxId>,
+        open_tx_overlay: Option<OpenBatchId>,
         branch_data: Option<BranchId>,
     ) -> Result<Option<ContentVersionSource>, SourceResolutionError> {
         if !request
@@ -2326,7 +2326,7 @@ fn historical_query_read_set(
 fn tx_query_read_set(
     shape: &NormalizedRowSetShape,
     schema_version: SchemaVersionId,
-    tx_id: OpenTxId,
+    tx_id: OpenBatchId,
     snapshot: Snapshot,
 ) -> RequestedReadSet {
     let projection = SchemaProjection {
@@ -5670,7 +5670,7 @@ where
 
     fn compile_open_tx_query_program(
         &mut self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         shape: &ValidatedQuery,
         binding: &Binding,
         identity: AuthorId,
@@ -9266,7 +9266,7 @@ where
     /// Evaluate a validated query inside an open exclusive transaction.
     pub fn tx_query(
         &mut self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<Vec<CurrentRow>, Error> {
@@ -9276,7 +9276,7 @@ where
     /// Evaluate a validated query inside an open exclusive transaction as `identity`.
     pub fn tx_query_for_identity(
         &mut self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         shape: &ValidatedQuery,
         binding: &Binding,
         identity: AuthorId,

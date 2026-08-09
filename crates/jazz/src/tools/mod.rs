@@ -41,6 +41,7 @@ pub use public_schema::{
     QueryResultField, Row, RowDelta, RowDescriptor, Schema, SchemaBuilder, SchemaHash, Session,
     TableName, TablePolicies, TableSchema, Value, WriteContext, permissions, policy_expr,
 };
+pub use transaction::OpenBatchId;
 pub use schema_lens::{Direction, Lens, LensOp, LensTransform};
 
 #[cfg(feature = "client")]

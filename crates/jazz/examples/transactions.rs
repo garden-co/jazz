@@ -9,7 +9,7 @@ use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::node::{MergeableCommit, NodeState, OpenTxId};
+use jazz::node::{MergeableCommit, NodeState, OpenBatchId};
 use jazz::protocol::SyncMessage;
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, Policy, TableSchema};
@@ -130,7 +130,7 @@ impl CoreDb {
 
 struct CoreExclusiveTx<'a> {
     core: &'a CoreDb,
-    tx_id: OpenTxId,
+    tx_id: OpenBatchId,
     has_reads: Cell<bool>,
 }
 
