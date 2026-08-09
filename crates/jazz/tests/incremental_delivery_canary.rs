@@ -285,16 +285,13 @@ fn drain_until_idle(server: &Db<MemoryStorage>, client: &Db<MemoryStorage>) {
         let server_stats = server.tick_stats().expect("drain server");
         let client_after = client.tick_stats().expect("drain client after server");
         if client_before.remote_sync_applied == 0
-            && client_before.consolidated_windows == 0
             && server_stats.remote_sync_applied == 0
-            && server_stats.consolidated_windows == 0
             && client_after.remote_sync_applied == 0
-            && client_after.consolidated_windows == 0
         {
             return;
         }
     }
-    panic!("timed out draining reset-batch sync and consolidation work");
+    panic!("timed out draining reset-batch sync work");
 }
 
 fn expect_parent_snapshot(event: SubscriptionEvent, parent: RowUuid, label: &str) {

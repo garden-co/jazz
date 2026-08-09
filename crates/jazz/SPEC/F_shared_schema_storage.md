@@ -418,7 +418,7 @@ remain compatible with databases written by the former per-schema history layout
 2. Add schema-versioned Groove storage and IVM support.
    **Status: complete (2026-08-07).** Groove's stable field catalogue,
    per-version ordered layouts, common batch insert/update/get/scan paths, mixed-version
-   replacement, reopen coverage, window preservation, and Jazz
+   replacement, reopen coverage, row-only storage coverage, and Jazz
    `SchemaVersionAlias` binding are implemented. Groove's descriptor-correct
    heterogeneous IVM deltas and live-extensible, fixed-output variant projection
    are also implemented. Variant-aware durable indexes use explicit `Ignore`

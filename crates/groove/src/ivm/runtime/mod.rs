@@ -36,10 +36,9 @@ use crate::records::{
     self, BorrowedRecord, OwnedRecord, RawProjectionField, RawProjectionScratch, RecordDescriptor,
     Value, ValueType,
 };
-use crate::schema::{DatabaseSchema, IndexSchema, PrimaryKey, TableSchema};
+use crate::schema::{DatabaseSchema, IndexSchema, TableSchema};
 use crate::storage::{
     OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay, StagedWriteState,
-    is_windowed_history_table,
 };
 use thiserror::Error;
 
@@ -4588,27 +4587,7 @@ pub(super) fn record_store_for_table<'a, S>(
 where
     S: OrderedKvStorage,
 {
-    if is_windowed_history_table(&table.name)
-        && let Some(primary_key) = &table.primary_key
-    {
-        RecordStore::new_windowed_versioned(
-            storage,
-            &table.name,
-            primary_key_descriptor(primary_key),
-            descriptor,
-        )
-    } else {
-        RecordStore::new(storage, &table.name, descriptor)
-    }
-}
-
-fn primary_key_descriptor(primary_key: &PrimaryKey) -> RecordDescriptor {
-    RecordDescriptor::new(
-        primary_key
-            .columns
-            .iter()
-            .map(|column| (column.column.clone(), column.key_type.column_type().clone())),
-    )
+    RecordStore::new(storage, &table.name, descriptor)
 }
 
 fn validate_public_output_fields(

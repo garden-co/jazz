@@ -20,9 +20,7 @@ use groove::ivm::ProjectField;
 #[cfg(test)]
 use groove::queries::{Query, Select, SelectItem, TableRef};
 use groove::records::{self, BorrowedRecord, OwnedRecord, Value};
-use groove::storage::{
-    self, OrderedKvStorage, ReopenableStorage, StorageLayout, WindowConsolidation,
-};
+use groove::storage::{self, OrderedKvStorage, ReopenableStorage, StorageLayout};
 use thiserror::Error;
 
 use self::query_engine::user_column_field;
@@ -3903,31 +3901,6 @@ where
         self.initial_sync_flush_active = false;
         self.initial_sync_flush_completed = true;
         Ok(())
-    }
-
-    pub(crate) fn post_tick_consolidate_history_windows(
-        &mut self,
-        max_windows: usize,
-    ) -> Result<WindowConsolidation, Error> {
-        let report = self.database.consolidate_history_windows(
-            groove::window_codec::TARGET_RECORDS_PER_WINDOW,
-            max_windows,
-        )?;
-        if report.windows > 0 {
-            self.query.tx_version_tables_cache.clear();
-        }
-        Ok(report)
-    }
-
-    #[cfg(feature = "testing")]
-    /// Test/bench-only hook for receipt runs that need to drive bounded
-    /// post-tick maintenance to a fixed point without changing production tick
-    /// cadence.
-    pub fn consolidate_history_windows_for_test(
-        &mut self,
-        max_windows: usize,
-    ) -> Result<WindowConsolidation, Error> {
-        self.post_tick_consolidate_history_windows(max_windows)
     }
 
     #[cfg(feature = "testing")]
