@@ -39,7 +39,7 @@ Invariant digest:
 - `INV-TX-20`: Exclusive write validation MUST be first-committer-wins: each written row's current global content tx id MUST equal the single recorded parent, or absence when no parent is recorded.
 - `INV-TX-21`: Accepted global transactions MUST maintain per-layer global-current tables/change stream.
 - `INV-TX-22`: Downstream incomplete exclusive bundles MUST be stored but remain invisible for subscription views whose required exclusive payload is incomplete; they MAY become visible for a maintained subscription view once that view's required exclusive versions are present, even before all `n_total_writes` versions are known.
-- `INV-TX-23`: A caller-generated `OpenBatchId` MUST name mutable work unchanged across local and worker runtimes, MUST be terminal after commit or rollback, and MUST never be accepted by an API requiring the post-commit `BatchId`; only successful commit transitions `OpenBatchId` to `BatchId`.
+- `INV-TX-24`: A caller-generated `OpenBatchId` MUST name mutable work unchanged across local and worker runtimes, MUST be terminal after commit or rollback, and MUST never be accepted by an API requiring the post-commit `BatchId`; only successful commit transitions `OpenBatchId` to `BatchId`.
 
 ## Details
 

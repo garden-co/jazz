@@ -657,7 +657,6 @@ impl Backend {
 }
 
 struct ExclusiveTransactionState {
-    tx_id: OpenBatchId,
     writes: Vec<ExclusiveTransactionWrite>,
 }
 
@@ -847,11 +846,7 @@ impl ClientDb {
         let mut inner = self.inner.borrow_mut();
         let row_id = ObjectId::from_uuid(row_id.unwrap_or_else(Uuid::now_v7));
         inner.ensure_transaction_open(batch_id)?;
-        let tx_id = inner
-            .transactions
-            .get(&batch_id)
-            .expect("transaction open checked above")
-            .tx_id;
+        let tx_id = batch_id;
         inner
             .db
             .exclusive_write(tx_id, &table, CoreRowUuid(*row_id.uuid()), cells.clone())
@@ -902,11 +897,7 @@ impl ClientDb {
         let mut inner = self.inner.borrow_mut();
         let object_id = ObjectId::from_uuid(row_id);
         inner.ensure_transaction_open(batch_id)?;
-        let tx_id = inner
-            .transactions
-            .get(&batch_id)
-            .expect("transaction open checked above")
-            .tx_id;
+        let tx_id = batch_id;
         inner
             .db
             .exclusive_write(tx_id, &table, CoreRowUuid(row_id), cells.clone())
@@ -974,11 +965,7 @@ impl ClientDb {
             JazzError::Write("update requires a row created or observed by this client".to_string())
         })?;
         inner.ensure_transaction_open(batch_id)?;
-        let tx_id = inner
-            .transactions
-            .get(&batch_id)
-            .expect("transaction open checked above")
-            .tx_id;
+        let tx_id = batch_id;
         inner
             .db
             .exclusive_update(tx_id, &table, CoreRowUuid(*row_id.uuid()), cells.clone())
@@ -1017,11 +1004,7 @@ impl ClientDb {
             JazzError::Write("delete requires a row created or observed by this client".to_string())
         })?;
         inner.ensure_transaction_open(batch_id)?;
-        let tx_id = inner
-            .transactions
-            .get(&batch_id)
-            .expect("transaction open checked above")
-            .tx_id;
+        let tx_id = batch_id;
         inner
             .db
             .exclusive_delete(tx_id, &table, CoreRowUuid(*row_id.uuid()))
@@ -1046,13 +1029,9 @@ impl ClientDb {
             .db
             .begin_exclusive(batch_id)
             .map_err(|error| JazzError::Write(error.to_string()))?;
-        inner.transactions.insert(
-            batch_id,
-            ExclusiveTransactionState {
-                tx_id: batch_id,
-                writes: Vec::new(),
-            },
-        );
+        inner
+            .transactions
+            .insert(batch_id, ExclusiveTransactionState { writes: Vec::new() });
         Ok(batch_id)
     }
 
@@ -1084,7 +1063,7 @@ impl ClientDb {
             .expect("transaction open checked above");
         let tx_id = inner
             .db
-            .commit_exclusive_handle(state.tx_id)
+            .commit_exclusive_handle(batch_id)
             .map_err(|error| JazzError::Write(error.to_string()))?;
         let committed_id = core_batch_id(tx_id);
         inner.write_map.insert(committed_id, tx_id);
