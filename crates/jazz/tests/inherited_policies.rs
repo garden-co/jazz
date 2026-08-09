@@ -279,7 +279,10 @@ async fn inherited_select_policy_exposes_child_row_through_parent() {
                 )
                 .expect("alice inserts folder");
             alice
-                .wait_for_batch(folder_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    folder_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("folder reaches edge");
 
@@ -294,7 +297,10 @@ async fn inherited_select_policy_exposes_child_row_through_parent() {
                 )
                 .expect("alice inserts document");
             alice
-                .wait_for_batch(document_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    document_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("document reaches edge");
 
@@ -360,7 +366,7 @@ async fn reverse_inherited_select_retains_nested_source_inheritance() {
                 .insert("organizations", row_input!("owner_id" => alice_owner_id))
                 .expect("alice inserts organization");
             alice
-                .wait_for_batch(organization_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(organization_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
                 .await
                 .expect("organization reaches edge");
 
@@ -368,7 +374,7 @@ async fn reverse_inherited_select_retains_nested_source_inheritance() {
                 .insert("teams", row_input!("organization_id" => organization_id))
                 .expect("alice inserts team");
             alice
-                .wait_for_batch(team_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(team_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
                 .await
                 .expect("team reaches edge");
 
@@ -376,7 +382,7 @@ async fn reverse_inherited_select_retains_nested_source_inheritance() {
                 .insert("files", row_input!("name" => "team file"))
                 .expect("alice inserts file");
             alice
-                .wait_for_batch(file_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(file_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
                 .await
                 .expect("file reaches edge");
 
@@ -387,7 +393,7 @@ async fn reverse_inherited_select_retains_nested_source_inheritance() {
                 )
                 .expect("alice attaches file to team");
             alice
-                .wait_for_batch(attachment_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(attachment_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
                 .await
                 .expect("attachment reaches edge");
 
@@ -450,7 +456,10 @@ async fn inherited_select_policy_exposes_child_row_through_multi_hop_parent_chai
                 )
                 .expect("alice inserts organization");
             alice
-                .wait_for_batch(organization_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    organization_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("organization reaches edge");
 
@@ -465,7 +474,10 @@ async fn inherited_select_policy_exposes_child_row_through_multi_hop_parent_chai
                 )
                 .expect("alice inserts folder");
             alice
-                .wait_for_batch(folder_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    folder_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("folder reaches edge");
 
@@ -480,7 +492,10 @@ async fn inherited_select_policy_exposes_child_row_through_multi_hop_parent_chai
                 )
                 .expect("alice inserts document");
             alice
-                .wait_for_batch(document_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    document_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("document reaches edge");
 
@@ -539,7 +554,10 @@ async fn inherited_select_policy_exposes_child_row_through_any_forward_parent() 
                 )
                 .expect("insert bob-owned folder");
             alice
-                .wait_for_batch(bob_folder_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    bob_folder_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("bob folder reaches edge");
 
@@ -554,7 +572,10 @@ async fn inherited_select_policy_exposes_child_row_through_any_forward_parent() 
                 )
                 .expect("insert alice-owned folder");
             alice
-                .wait_for_batch(alice_folder_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    alice_folder_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("alice folder reaches edge");
 
@@ -569,7 +590,10 @@ async fn inherited_select_policy_exposes_child_row_through_any_forward_parent() 
                 )
                 .expect("insert shared document");
             alice
-                .wait_for_batch(document_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    document_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("shared document reaches edge");
 
@@ -617,7 +641,10 @@ async fn inherited_select_policy_expands_both_forward_parent_branches() {
                 )
                 .expect("insert alice-owned organization");
             alice
-                .wait_for_batch(organization_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    organization_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("organization reaches edge");
 
@@ -632,7 +659,10 @@ async fn inherited_select_policy_expands_both_forward_parent_branches() {
                 )
                 .expect("insert primary inherited folder");
             alice
-                .wait_for_batch(primary_folder_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    primary_folder_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("primary folder reaches edge");
 
@@ -647,7 +677,10 @@ async fn inherited_select_policy_expands_both_forward_parent_branches() {
                 )
                 .expect("insert alternate inherited folder");
             alice
-                .wait_for_batch(alternate_folder_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    alternate_folder_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("alternate folder reaches edge");
 
@@ -662,7 +695,10 @@ async fn inherited_select_policy_expands_both_forward_parent_branches() {
                 )
                 .expect("insert shared document");
             alice
-                .wait_for_batch(document_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    document_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("shared document reaches edge");
 
@@ -740,7 +776,10 @@ async fn inherited_update_policy_allows_update_through_parent() {
                 )
                 .expect("alice inserts organization");
             alice
-                .wait_for_batch(organization_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    organization_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("organization reaches edge");
 
@@ -755,7 +794,10 @@ async fn inherited_update_policy_allows_update_through_parent() {
                 )
                 .expect("alice inserts parent");
             alice
-                .wait_for_batch(parent_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    parent_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("parent reaches edge");
 
@@ -766,7 +808,10 @@ async fn inherited_update_policy_allows_update_through_parent() {
                 )
                 .expect("alice inserts child");
             alice
-                .wait_for_batch(child_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    child_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("child reaches edge");
 
@@ -777,7 +822,10 @@ async fn inherited_update_policy_allows_update_through_parent() {
                 )
                 .expect("alice update should be admitted by inherited UPDATE policy");
             alice
-                .wait_for_batch(update_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    update_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("inherited child update reaches edge");
 
@@ -861,7 +909,10 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
                 )
                 .expect("alice inserts organization");
             alice
-                .wait_for_batch(organization_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    organization_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("organization reaches edge");
 
@@ -876,7 +927,10 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
                 )
                 .expect("alice inserts parent");
             alice
-                .wait_for_batch(parent_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    parent_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("parent reaches edge");
 
@@ -887,7 +941,10 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
                 )
                 .expect("alice inserts child");
             alice
-                .wait_for_batch(child_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    child_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("child reaches edge");
 
@@ -898,7 +955,10 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
                 )
                 .expect("alice update should be admitted by multi-hop inherited UPDATE policy");
             alice
-                .wait_for_batch(update_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    update_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("multi-hop inherited child update reaches edge");
 
@@ -967,7 +1027,10 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
                 )
                 .expect("alice inserts organization");
             alice
-                .wait_for_batch(organization_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    organization_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("organization reaches edge");
 
@@ -982,7 +1045,10 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
                 )
                 .expect("alice inserts parent A");
             alice
-                .wait_for_batch(parent_a_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    parent_a_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("parent A reaches edge");
 
@@ -997,7 +1063,10 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
                 )
                 .expect("alice inserts parent B");
             alice
-                .wait_for_batch(parent_b_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    parent_b_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("parent B reaches edge");
 
@@ -1008,7 +1077,10 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
                 )
                 .expect("alice inserts child");
             alice
-                .wait_for_batch(child_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    child_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("child reaches edge");
 
@@ -1022,7 +1094,10 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
                 )
                 .expect("alice reparent update should be admitted by inherited UPDATE policy");
             alice
-                .wait_for_batch(update_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    update_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("inherited reparent update reaches edge");
 

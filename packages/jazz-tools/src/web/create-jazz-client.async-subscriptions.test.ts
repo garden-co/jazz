@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "../runtime/context.js";
-import type { CreateOptions, DeleteOptions, UpdateOptions } from "../runtime/client.js";
+import type { BatchId, CreateOptions, DeleteOptions, UpdateOptions } from "../runtime/client.js";
 import type { QueryBuilder, QueryOptions, TableProxy } from "../runtime/db.js";
 import { applySubscriptionDelta, type SubscriptionDelta } from "../runtime/subscription-manager.js";
 import {
@@ -130,7 +130,7 @@ function createChannel(rows: TestRow[]): SubscriptionChannel & {
       const value = { id: "async-inserted", ...(data as Record<string, unknown>) } as T;
       return {
         value,
-        transactionId: "tx-insert",
+        batchId: Promise.resolve("tx-insert" as BatchId),
         wait: async () => value,
       };
     },
@@ -143,7 +143,7 @@ function createChannel(rows: TestRow[]): SubscriptionChannel & {
     ) {
       this.writes.push({ operation: "update", id, session });
       return {
-        transactionId: "tx-update",
+        batchId: Promise.resolve("tx-update" as BatchId),
         wait: async () => undefined,
       };
     },
@@ -155,7 +155,7 @@ function createChannel(rows: TestRow[]): SubscriptionChannel & {
     ) {
       this.writes.push({ operation: "delete", id, session });
       return {
-        transactionId: "tx-delete",
+        batchId: Promise.resolve("tx-delete" as BatchId),
         wait: async () => undefined,
       };
     },
@@ -220,7 +220,7 @@ function createTypedChannel(rows: TestRow[]): SubscriptionChannel & {
       const value = { id: "async-inserted", ...(data as Record<string, unknown>) } as T;
       return {
         value,
-        transactionId: "tx-insert",
+        batchId: Promise.resolve("tx-insert" as BatchId),
         wait: async () => value,
       };
     },
@@ -233,7 +233,7 @@ function createTypedChannel(rows: TestRow[]): SubscriptionChannel & {
     ) {
       this.writes.push({ operation: "update", id, session });
       return {
-        transactionId: "tx-update",
+        batchId: Promise.resolve("tx-update" as BatchId),
         wait: async () => undefined,
       };
     },
@@ -245,7 +245,7 @@ function createTypedChannel(rows: TestRow[]): SubscriptionChannel & {
     ) {
       this.writes.push({ operation: "delete", id, session });
       return {
-        transactionId: "tx-delete",
+        batchId: Promise.resolve("tx-delete" as BatchId),
         wait: async () => undefined,
       };
     },
@@ -289,17 +289,17 @@ function createMockDb(rows: TestRow[] = []) {
     updateAuthToken: vi.fn(),
     insert: vi.fn((_table, data) => ({
       value: { id: "worker-inserted", ...(data as Record<string, unknown>) },
-      transactionId: "tx-worker-insert",
+      batchId: Promise.resolve("tx-worker-insert" as BatchId),
       session: runtimeContext?.session,
       wait: vi.fn(async () => undefined),
     })),
     update: vi.fn(() => ({
-      transactionId: "tx-worker-update",
+      batchId: Promise.resolve("tx-worker-update" as BatchId),
       session: runtimeContext?.session,
       wait: vi.fn(async () => undefined),
     })),
     delete: vi.fn(() => ({
-      transactionId: "tx-worker-delete",
+      batchId: Promise.resolve("tx-worker-delete" as BatchId),
       session: runtimeContext?.session,
       wait: vi.fn(async () => undefined),
     })),
@@ -425,13 +425,13 @@ describe("web/createJazzClient async subscription channel", () => {
 
     await expect(client.db.insert(table, { value: "created" })).resolves.toMatchObject({
       value: { id: "async-inserted", value: "created" },
-      transactionId: "tx-insert",
+      batchId: expect.any(Promise),
     });
     await expect(client.db.update(table, "row-1", { value: "updated" })).resolves.toMatchObject({
-      transactionId: "tx-update",
+      batchId: expect.any(Promise),
     });
     await expect(client.db.delete(table, "row-1")).resolves.toMatchObject({
-      transactionId: "tx-delete",
+      batchId: expect.any(Promise),
     });
     await expect(client.db.canInsert(table, { value: "created" })).resolves.toBe(true);
     await expect(client.db.canUpdate(table, "row-1", { value: "updated" })).resolves.toBe(true);
@@ -551,15 +551,15 @@ describe("web/createJazzClient async subscription channel", () => {
 
     await expect(channel.insert(table, { value: "worker-created" })).resolves.toMatchObject({
       value: { id: "worker-inserted", value: "worker-created" },
-      transactionId: "tx-worker-insert",
+      batchId: expect.any(Promise),
     });
     await expect(
       channel.update(table, "row-1", { value: "worker-updated" }),
     ).resolves.toMatchObject({
-      transactionId: "tx-worker-update",
+      batchId: expect.any(Promise),
     });
     await expect(channel.delete(table, "row-1")).resolves.toMatchObject({
-      transactionId: "tx-worker-delete",
+      batchId: expect.any(Promise),
     });
     await expect(channel.canInsert(table, { value: "worker-created" })).resolves.toBe(true);
     await expect(channel.canUpdate(table, "row-1", { value: "worker-updated" })).resolves.toBe(

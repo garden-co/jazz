@@ -1,8 +1,26 @@
 import { describe, expect, it, vi } from "vitest";
-import { JazzClient, type Runtime, type TransactionalRuntime } from "./client.js";
+import {
+  JazzClient,
+  type BatchId,
+  type OpenBatchId,
+  type Runtime,
+  type TransactionalRuntime,
+  type WriteReceipt,
+} from "./client.js";
 import type { AppContext, Session } from "./context.js";
 
 function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
+  const receipt = (
+    writeContextJson: string | null | undefined,
+    committedId: string,
+  ): WriteReceipt => {
+    const openBatchId = writeContextJson
+      ? (JSON.parse(writeContextJson).batch_id as OpenBatchId | undefined)
+      : undefined;
+    return openBatchId
+      ? { kind: "staged", openBatchId }
+      : { kind: "committed", batchId: committedId as BatchId };
+  };
   const insertCalls: Array<
     [string, Record<string, unknown>, string | undefined, string | undefined]
   > = [];
@@ -13,7 +31,7 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
   const dryRunCalls: Array<[string, ...unknown[]]> = [];
 
   const runtimeBase: TransactionalRuntime = {
-    beginTransaction: (mode) => `transaction-${mode}`,
+    beginTransaction: (_mode, id) => id,
     insert: (
       table: string,
       values: Record<string, unknown>,
@@ -24,9 +42,7 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
       return {
         id: objectId ?? "00000000-0000-0000-0000-000000000001",
         values: [],
-        transactionId: writeContextJson
-          ? "insert-with-context-transaction-id"
-          : "insert-transaction-id",
+        ...receipt(writeContextJson, "insert-transaction-id"),
       };
     },
     restore: (
@@ -39,9 +55,7 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
       return {
         id: objectId,
         values: [],
-        transactionId: writeContextJson
-          ? "restore-with-context-transaction-id"
-          : "restore-transaction-id",
+        ...receipt(writeContextJson, "restore-transaction-id"),
       };
     },
     update: (
@@ -51,11 +65,7 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
       writeContextJson?: string | null,
     ) => {
       updateCalls.push([table, objectId, updates, writeContextJson ?? undefined]);
-      return {
-        transactionId: writeContextJson
-          ? "update-with-context-transaction-id"
-          : "update-transaction-id",
-      };
+      return receipt(writeContextJson, "update-transaction-id");
     },
     upsert: (
       table: string,
@@ -64,19 +74,11 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
       writeContextJson?: string | null,
     ) => {
       upsertCalls.push([table, objectId, values, writeContextJson ?? undefined]);
-      return {
-        transactionId: writeContextJson
-          ? "upsert-with-context-transaction-id"
-          : "upsert-transaction-id",
-      };
+      return receipt(writeContextJson, "upsert-transaction-id");
     },
     delete: (table: string, objectId: string, writeContextJson?: string | null) => {
       deleteCalls.push([table, objectId, writeContextJson ?? undefined]);
-      return {
-        transactionId: writeContextJson
-          ? "delete-with-context-transaction-id"
-          : "delete-transaction-id",
-      };
+      return receipt(writeContextJson, "delete-transaction-id");
     },
     canInsert: (table, values, session) => {
       dryRunCalls.push(["canInsert", table, values, session]);
@@ -103,8 +105,8 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
     createSubscription: () => 0,
     executeSubscription: () => {},
     unsubscribe: () => {},
-    commitTransaction: vi.fn(),
-    rollbackTransaction: () => false,
+    commitTransaction: vi.fn(async () => "committed-batch" as BatchId),
+    rollbackTransaction: async () => false,
   };
   const runtime: TransactionalRuntime = { ...runtimeBase, ...runtimeOverrides };
 

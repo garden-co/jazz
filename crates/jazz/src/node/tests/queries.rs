@@ -554,7 +554,8 @@ fn filterless_shape_and_degenerate_predicate_validation_agree() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     register_shape_binding(&mut core, &shape, &binding);
 
-    let tx_id = client.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    client.open_exclusive(tx_id).unwrap();
     assert!(client.tx_query(tx_id, &shape, &binding).unwrap().is_empty());
     commit_mergeable_global(
         &mut other,

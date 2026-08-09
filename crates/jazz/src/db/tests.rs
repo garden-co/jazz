@@ -2936,6 +2936,277 @@ fn include_deleted_fails_closed_on_live_subscription_apis() {
 }
 
 #[test]
+fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
+    let empty = JazzSchema::new([]);
+    let refs = empty.column_families();
+    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+    let owner = block_on(Db::open_history_complete(DbConfig {
+        schema: empty,
+        storage: doctest_support::MemoryStorage::new(&refs),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0x91; 16]),
+            author: AuthorId::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(91))),
+        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    }))
+    .unwrap();
+    let schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("done", ColumnType::Bool),
+        ],
+    )]);
+    let view = owner.register_schema_view(schema.clone()).unwrap();
+    let open = OpenBatchId::new();
+    owner.begin_mergeable(open).unwrap();
+    let inserted = row(0x91);
+    view.mergeable_tx_ref(open)
+        .insert_with_id_at_ms(
+            "todos",
+            inserted,
+            doctest_support::todo_cells("attached", false),
+            1_704_067_200_123,
+        )
+        .unwrap();
+    owner.commit_mergeable_handle(open).unwrap();
+
+    // Advance the owner's canonical schema after the query view was registered.
+    // The historical view still calls this column `title`; resolving projection
+    // against the canonical schema would silently omit it after the rename.
+    let renamed_schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("done", ColumnType::Bool),
+            ColumnSchema::new("summary", ColumnType::String),
+        ],
+    )]);
+    let renamed = SchemaVersion::new(renamed_schema);
+    owner
+        .publish_schema_with_lens(
+            2,
+            SchemaLineagePublication::new(
+                renamed.clone(),
+                MigrationLens::new(
+                    schema.version_id(),
+                    renamed.id,
+                    vec![TableLens {
+                        source_table: "todos".to_owned(),
+                        target_table: "todos".to_owned(),
+                        ops: vec![LensOp::RenameColumn {
+                            from: "title".to_owned(),
+                            to: "summary".to_owned(),
+                        }],
+                    }],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            ),
+        )
+        .unwrap();
+    owner
+        .set_current_write_schema(CurrentWriteSchema {
+            revision: 2,
+            schema: renamed.id,
+        })
+        .unwrap();
+
+    let overlay_open = OpenBatchId::new();
+    owner.begin_mergeable(overlay_open).unwrap();
+    let overlay_inserted = row(0x93);
+    let overlay_tx = view.mergeable_tx_ref(overlay_open);
+    overlay_tx
+        .insert_with_id_at_ms(
+            "todos",
+            overlay_inserted,
+            doctest_support::todo_cells("overlay", true),
+            1_704_067_200_456,
+        )
+        .unwrap();
+    let prepared = view
+        .prepare_query(
+            &view
+                .table("todos")
+                .select(["done", "title", "$createdAt", "$updatedAt"]),
+        )
+        .unwrap();
+    let overlay_rows = overlay_tx.all_prepared(&prepared).unwrap();
+    let overlay_row = overlay_rows
+        .iter()
+        .find(|row| row.row_uuid() == overlay_inserted)
+        .expect("staged historical-view row is visible");
+    assert!(
+        overlay_row
+            .encoded_record()
+            .0
+            .field_index("user_title")
+            .is_some()
+    );
+    assert!(
+        overlay_row
+            .encoded_record()
+            .0
+            .field_index("user_done")
+            .is_some()
+    );
+    assert_eq!(
+        overlay_row.cell_at(0),
+        Some(Value::String("overlay".to_owned()))
+    );
+    assert_eq!(overlay_row.cell_at(1), Some(Value::Bool(true)));
+    let overlay_provenance = overlay_row.provenance().unwrap().unwrap();
+    assert_eq!(overlay_provenance.created_at, TxTime(1_704_067_200_456));
+    assert_eq!(overlay_provenance.updated_at, TxTime(1_704_067_200_456));
+    owner.abandon_transaction_handle(overlay_open).unwrap();
+
+    let rows = block_on(view.all(&prepared, ReadOpts::default())).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), inserted);
+    assert!(
+        rows[0]
+            .encoded_record()
+            .0
+            .field_index("user_title")
+            .is_some()
+    );
+    assert_eq!(
+        rows[0].cell_at(0),
+        Some(Value::String("attached".to_owned()))
+    );
+}
+
+#[test]
+fn mergeable_overlay_uses_staged_provenance_and_preserves_it_at_commit() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let existing = row(0xa1);
+    db.insert_with_id_at_ms(
+        "todos",
+        existing,
+        doctest_support::todo_cells("existing", false),
+        100,
+    )
+    .unwrap();
+    let inserted = row(0xa2);
+    let tx = db.mergeable_tx().unwrap();
+    tx.insert_with_id_at_ms(
+        "todos",
+        inserted,
+        doctest_support::todo_cells("inserted", false),
+        200,
+    )
+    .unwrap();
+    tx.update_at_ms(
+        "todos",
+        existing,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        300,
+    )
+    .unwrap();
+    let query = db
+        .prepare_query(
+            &db.table("todos")
+                .select(["title", "$createdAt", "$updatedAt"]),
+        )
+        .unwrap();
+
+    let overlay = tx.all_prepared(&query).unwrap();
+    let repeated = tx.all_prepared(&query).unwrap();
+    assert_eq!(overlay, repeated, "transaction provenance must be stable");
+    let inserted_overlay = overlay
+        .iter()
+        .find(|row| row.row_uuid() == inserted)
+        .unwrap()
+        .provenance()
+        .unwrap()
+        .unwrap();
+    assert_eq!(inserted_overlay.created_at, TxTime(200));
+    assert_eq!(inserted_overlay.updated_at, TxTime(200));
+    assert_eq!(inserted_overlay.created_by, db.identity.author);
+    let updated_overlay = overlay
+        .iter()
+        .find(|row| row.row_uuid() == existing)
+        .unwrap()
+        .provenance()
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated_overlay.created_at, TxTime(100));
+    assert_eq!(updated_overlay.updated_at, TxTime(300));
+    assert_eq!(updated_overlay.updated_by, db.identity.author);
+
+    tx.commit().unwrap();
+    let committed = db.read(&query).unwrap();
+    for (row_id, staged) in [(inserted, inserted_overlay), (existing, updated_overlay)] {
+        let committed = committed
+            .iter()
+            .find(|row| row.row_uuid() == row_id)
+            .unwrap()
+            .provenance()
+            .unwrap()
+            .unwrap();
+        assert_eq!(committed.created_by, staged.created_by);
+        assert_eq!(committed.created_at, staged.created_at);
+        assert_eq!(committed.updated_by, staged.updated_by);
+        assert_eq!(committed.updated_at, staged.updated_at);
+    }
+}
+
+#[test]
+fn exclusive_overlay_reserves_stable_provenance_for_insert_and_update() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let existing = row(0xb1);
+    db.insert_with_id_at_ms(
+        "todos",
+        existing,
+        doctest_support::todo_cells("existing", false),
+        100,
+    )
+    .unwrap();
+    let inserted = row(0xb2);
+    let tx = db.exclusive_tx().unwrap();
+    tx.insert_with_id(
+        "todos",
+        inserted,
+        doctest_support::todo_cells("inserted", false),
+    )
+    .unwrap();
+    tx.update(
+        "todos",
+        existing,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+    )
+    .unwrap();
+    let query = db
+        .prepare_query(
+            &db.table("todos")
+                .select(["title", "$createdAt", "$updatedAt"]),
+        )
+        .unwrap();
+    let overlay = tx.all_prepared(&query).unwrap();
+    let repeated = tx.all_prepared(&query).unwrap();
+    assert_eq!(overlay, repeated, "exclusive provenance must be stable");
+    let provenance = |rows: &[CurrentRow], id| {
+        rows.iter()
+            .find(|row| row.row_uuid() == id)
+            .unwrap()
+            .provenance()
+            .unwrap()
+            .unwrap()
+    };
+    let inserted_overlay = provenance(&overlay, inserted);
+    let updated_overlay = provenance(&overlay, existing);
+    assert_ne!(inserted_overlay.created_at, TxTime(0));
+    assert_eq!(inserted_overlay.created_at, inserted_overlay.updated_at);
+    assert_eq!(updated_overlay.created_at, TxTime(100));
+    assert_ne!(updated_overlay.updated_at, TxTime(0));
+
+    tx.commit().unwrap();
+    let committed = db.read(&query).unwrap();
+    assert_eq!(provenance(&committed, inserted), inserted_overlay);
+    assert_eq!(provenance(&committed, existing), updated_overlay);
+}
+
+#[test]
 fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
     let schema = relation_schema();
     let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
@@ -4059,7 +4330,8 @@ fn mergeable_tx_and_ref_have_identical_restore_and_reinsert_results() {
         .unwrap();
     builder_tx.commit().unwrap();
 
-    let open_tx = handle.begin_mergeable().unwrap();
+    let open_tx = OpenBatchId::new();
+    handle.begin_mergeable(open_tx).unwrap();
     {
         let tx = handle.mergeable_tx_ref(open_tx);
         tx.restore(
@@ -4163,7 +4435,8 @@ fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
     db.insert_with_id("todos", row, doctest_support::todo_cells("base", false))
         .unwrap();
 
-    let open_tx = db.begin_exclusive().unwrap();
+    let open_tx = OpenBatchId::new();
+    db.begin_exclusive(open_tx).unwrap();
     {
         let tx = db.exclusive_tx_ref(open_tx);
         assert_eq!(
@@ -4255,8 +4528,8 @@ fn exclusive_tx_blind_writes_are_first_committer_wins() {
 
     first.commit().unwrap();
     let err = second.commit().unwrap_err();
-    assert_eq!(err.code, ErrorCode::WriteRejected);
-    assert!(err.message.contains("ExclusiveConflict"));
+    assert_eq!(err.code, ErrorCode::TransactionConflict);
+    assert!(err.message.contains("visible parent changed"));
     assert_eq!(
         core.one(&core.table("todos"))
             .unwrap()
@@ -6124,7 +6397,8 @@ impl CoreDb {
     }
 
     fn exclusive_tx(&self) -> Result<CoreExclusiveTx<'_>, Error> {
-        let tx_id = self.server.node().borrow_mut().open_exclusive()?;
+        let tx_id = OpenBatchId::new();
+        self.server.node().borrow_mut().open_exclusive(tx_id)?;
         Ok(CoreExclusiveTx {
             core: self,
             tx_id,
@@ -6176,7 +6450,7 @@ impl CoreDb {
 
 struct CoreExclusiveTx<'a> {
     core: &'a CoreDb,
-    tx_id: OpenTxId,
+    tx_id: OpenBatchId,
     has_reads: Cell<bool>,
 }
 
@@ -11854,7 +12128,9 @@ fn db_sync_surface_returns_exclusive_conflict_fate_to_client() {
         .insert_with_id("todos", row, cells("second", false, author))
         .unwrap();
     let first_tx = first.commit().unwrap();
-    let second_tx = second.commit().unwrap();
+    let second_error = second.commit().unwrap_err();
+    assert_eq!(second_error.code, ErrorCode::TransactionConflict);
+    assert!(second_error.message.contains("visible parent changed"));
 
     client.tick().unwrap();
     server.tick().unwrap();
@@ -11867,14 +12143,6 @@ fn db_sync_surface_returns_exclusive_conflict_fate_to_client() {
             durability: DurabilityTier::Global,
         }
     );
-    assert_eq!(
-        client.write_state(second_tx).unwrap(),
-        WriteState {
-            fate: Fate::Rejected(RejectionReason::ExclusiveConflict),
-            durability: DurabilityTier::Local,
-        }
-    );
-
     let rows = server.read(&Query::from("todos")).unwrap();
     assert_eq!(rows.len(), 1);
     let table = &schema.tables[0];

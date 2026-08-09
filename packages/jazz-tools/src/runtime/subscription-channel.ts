@@ -8,7 +8,13 @@ import type {
 } from "./file-storage.js";
 import type { AuthState } from "./auth-state.js";
 import type { RowDelta, SubscriptionDelta } from "./subscription-manager.js";
-import type { CreateOptions, DeleteOptions, DurabilityTier, UpdateOptions } from "./client.js";
+import type {
+  BatchId,
+  CreateOptions,
+  DeleteOptions,
+  DurabilityTier,
+  UpdateOptions,
+} from "./client.js";
 
 type MaybePromise<T> = T | Promise<T>;
 
@@ -111,7 +117,7 @@ export interface SubscriptionChannel {
 }
 
 export interface AsyncWriteHandle<T = void> {
-  readonly transactionId: string;
+  readonly batchId: Promise<BatchId>;
   wait(options: { tier: DurabilityTier }): Promise<T>;
 }
 

@@ -46,6 +46,7 @@ use crate::schema::{
 };
 use crate::text_merge::{Run as PlainTextRun, TextOp as PlainTextOp};
 use crate::time::{GlobalSeq, TxTime};
+use crate::tools::OpenBatchId;
 use crate::tx::{
     AbsentRead, BranchMergeProvenance, DeletionEvent, DurabilityTier, Fate, HistoryEntry,
     PredicateRead, RecordedMergeStrategy, RejectedTransaction, RejectedVersion, RejectionReason,
@@ -418,10 +419,10 @@ struct RegisteredBinding {
 
 /// Locally open transactions and local-only permission attribution.
 struct OpenTxState {
-    /// Open transaction handles keyed by local handle ID.
-    open_transactions: BTreeMap<OpenTxId, OpenTransaction>,
-    /// Next local transaction handle ID to allocate.
-    next_open_tx_id: u64,
+    /// Open transaction handles keyed by caller-generated identity.
+    open_transactions: BTreeMap<OpenBatchId, OpenTransaction>,
+    /// Identities consumed by commit or rollback; never reusable in this runtime.
+    closed_batches: BTreeSet<OpenBatchId>,
     /// Local-only permission subjects for transactions whose `made_by` keeps provenance.
     local_permission_subjects: BTreeMap<TxId, AuthorId>,
 }
@@ -691,7 +692,7 @@ where
             },
             open_tx: OpenTxState {
                 open_transactions: BTreeMap::new(),
-                next_open_tx_id: 1,
+                closed_batches: BTreeSet::new(),
                 local_permission_subjects: BTreeMap::new(),
             },
             rejections: RejectionTracking::default(),
@@ -1348,10 +1349,23 @@ where
         branch_merge: Option<BranchMergeProvenance>,
     ) -> Result<TxId, Error> {
         let write_schema_version = self.catalogue.current_write_schema.schema;
+        let commits = commits
+            .into_iter()
+            .map(|commit| (write_schema_version, commit))
+            .collect();
+        self.commit_mergeable_many_at_with_schema_versions(commits, made_at, branch_merge)
+    }
+
+    pub(super) fn commit_mergeable_many_at_with_schema_versions(
+        &mut self,
+        commits: Vec<(SchemaVersionId, MergeableCommit)>,
+        made_at: TxTime,
+        branch_merge: Option<BranchMergeProvenance>,
+    ) -> Result<TxId, Error> {
         let tx_id = TxId::new(made_at, self.node_uuid);
-        let made_by = commits[0].made_by;
-        let permission_subject = commits[0].effective_permission_subject();
-        let user_metadata_json = commits[0].user_metadata_json.clone();
+        let made_by = commits[0].1.made_by;
+        let permission_subject = commits[0].1.effective_permission_subject();
+        let user_metadata_json = commits[0].1.user_metadata_json.clone();
         let tx = Transaction {
             tx_id,
             kind: TxKind::Mergeable,
@@ -1359,7 +1373,7 @@ where
                 Error::InvalidMergeableCommit("transaction write count exceeds u32")
             })?,
             made_by,
-            permission_subject: commits[0].permission_subject,
+            permission_subject: commits[0].1.permission_subject,
             base_snapshot: None,
             row_read_set: None,
             absent_read_set: None,
@@ -1367,10 +1381,9 @@ where
             user_metadata_json,
             target_lineage: crate::tx::BranchLineage::Root,
             branch_merge,
-            merge_strategy: commits[0].merge_strategy.clone(),
+            merge_strategy: commits[0].1.merge_strategy.clone(),
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
-        let schema_version_alias = self.ensure_schema_version_alias(write_schema_version)?;
         let mut batch = self.database.open_batch();
         batch.insert(
             "jazz_transactions",
@@ -1384,7 +1397,8 @@ where
         );
         let mut stored_versions = Vec::new();
         let mut pending_parents = BTreeSet::new();
-        for commit in commits {
+        for (write_schema_version, commit) in commits {
+            let schema_version_alias = self.ensure_schema_version_alias(write_schema_version)?;
             let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
             let layer = VersionLayer::for_commit(&commit);
             let previous_current =
@@ -2541,10 +2555,24 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Option<CurrentRow>, Error> {
-        let table_schema =
-            self.table_in_schema(table, self.catalogue.current_write_schema.schema)?;
-        let content = self.local_current_content_row_candidate(&table_schema, row_uuid)?;
-        let deletion = self.local_current_deletion_candidate(&table_schema, row_uuid)?;
+        self.local_current_row_in_schema(
+            table,
+            row_uuid,
+            self.catalogue.current_write_schema.schema,
+        )
+    }
+
+    pub(crate) fn local_current_row_in_schema(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        schema_version: SchemaVersionId,
+    ) -> Result<Option<CurrentRow>, Error> {
+        let table_schema = self.table_in_schema(table, schema_version)?;
+        let content =
+            self.local_current_content_row_candidate(&table_schema, row_uuid, schema_version)?;
+        let deletion =
+            self.local_current_deletion_candidate(&table_schema, row_uuid, schema_version)?;
         if let (Some((_, content_tx)), Some((deletion, deletion_tx))) = (&content, &deletion)
             && deletion_tx > content_tx
             && *deletion == DeletionEvent::Deleted
@@ -2560,8 +2588,8 @@ where
         &mut self,
         table: &TableSchema,
         row_uuid: RowUuid,
+        schema_version: SchemaVersionId,
     ) -> Result<Option<(CurrentRow, (TxTime, NodeUuid))>, Error> {
-        let schema_version = self.catalogue.current_write_schema.schema;
         let prefix = vec![groove::ivm::LiteralValue::from(Value::Uuid(row_uuid.0))];
         let global = self.physical_current_source_scan_graph(
             schema_version,
@@ -2595,8 +2623,8 @@ where
         &mut self,
         table: &TableSchema,
         row_uuid: RowUuid,
+        schema_version: SchemaVersionId,
     ) -> Result<Option<(DeletionEvent, (TxTime, NodeUuid))>, Error> {
-        let schema_version = self.catalogue.current_write_schema.schema;
         let table_id = self.physical_table_id_for_schema(schema_version, &table.name)?;
         let prefix = vec![groove::ivm::LiteralValue::from(Value::Uuid(row_uuid.0))];
         let global = GraphBuilder::table_scan(
@@ -4489,9 +4517,6 @@ where
         table: &str,
         schema_version: SchemaVersionId,
     ) -> Result<TableSchema, Error> {
-        if schema_version == self.catalogue.current_schema_version_id {
-            return self.table(table).cloned();
-        }
         self.catalogue
             .catalogue_schemas
             .get(&schema_version)
@@ -4502,6 +4527,11 @@ where
                     .iter()
                     .find(|candidate| candidate.name == table)
                     .cloned()
+            })
+            .or_else(|| {
+                (schema_version == self.catalogue.current_schema_version_id)
+                    .then(|| self.table(table).ok().cloned())
+                    .flatten()
             })
             .ok_or_else(|| Error::TableNotFound(table.to_owned()))
     }
@@ -5468,10 +5498,6 @@ pub struct LargeValueMetrics {
     pub checkpoint_writes: u64,
 }
 
-/// Handle for an open transaction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct OpenTxId(u64);
-
 /// Explicit edit operation for one text/blob column.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LargeValueEditOp {
@@ -6260,6 +6286,9 @@ pub enum Error {
     /// Mergeable commit shape is invalid.
     #[error("invalid mergeable commit: {0}")]
     InvalidMergeableCommit(&'static str),
+    /// An exclusive transaction no longer matches its fixed local snapshot.
+    #[error("row visible parent changed since transaction write was staged")]
+    TransactionConflict,
     /// Stored value failed validation.
     #[error("invalid stored value: {0}")]
     InvalidStoredValue(&'static str),
@@ -6278,7 +6307,10 @@ pub enum Error {
     MaintainedViewMissingBundleWitness(&'static str),
     /// Open transaction handle was not known.
     #[error("missing open transaction: {0:?}")]
-    MissingOpenTx(OpenTxId),
+    MissingOpenBatch(OpenBatchId),
+    /// A caller attempted to reuse an identity that still names live mutable work.
+    #[error("duplicate open batch id: {0}")]
+    DuplicateOpenBatch(OpenBatchId),
     /// Fate or global-current update was non-monotone.
     #[error("non-monotone state update: {0}")]
     NonMonotoneState(&'static str),

@@ -100,7 +100,10 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 )
                 .expect("insert todo");
             client
-                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("todo settles locally");
 

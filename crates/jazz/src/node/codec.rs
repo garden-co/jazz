@@ -790,26 +790,6 @@ impl VersionRow {
             .transpose()
     }
 
-    pub(super) fn peek_cell(
-        &self,
-        table: &TableSchema,
-        column: &str,
-    ) -> Result<Option<Value>, Error> {
-        if self.is_register_record() {
-            return Ok(None);
-        }
-        let field = HistoryRowRecord::USER_CELLS
-            + table
-                .columns
-                .iter()
-                .position(|candidate| candidate.name == column)
-                .ok_or(Error::InvalidStoredValue("missing user column field"))?;
-        if field >= self.record.descriptor().fields().len() {
-            return Ok(None);
-        }
-        nullable_value(self.record.borrowed().get_idx(field)?)
-    }
-
     pub(super) fn is_register_record(&self) -> bool {
         self.record.descriptor().field_index("_deletion").is_some()
     }
@@ -1805,6 +1785,35 @@ pub(super) fn current_row_from_materialized_cells_with_layer_provenance(
     values.push(Value::U64(updated.updated_at().0));
     values.push(Value::U64(updated.tx_time().0));
     values.push(Value::U64(updated.tx_node_alias().0));
+    let raw = descriptor.create(&values)?;
+    Ok(CurrentRow::new(
+        table.name.clone(),
+        OwnedRecord::new(raw, descriptor),
+    ))
+}
+
+pub(super) fn current_row_from_cells_with_explicit_provenance(
+    table: &TableSchema,
+    row_uuid: RowUuid,
+    cells: &BTreeMap<String, Value>,
+    provenance: RowProvenance,
+    projected_tx: Option<(TxTime, NodeAlias)>,
+) -> Result<CurrentRow, Error> {
+    let descriptor = current_row_descriptor(table);
+    let mut values = Vec::with_capacity(table.columns.len() + 7);
+    values.push(Value::Uuid(row_uuid.0));
+    for column in &table.columns {
+        values.push(Value::Nullable(
+            cells.get(&column.name).cloned().map(Box::new),
+        ));
+    }
+    values.push(Value::Uuid(provenance.created_by.0));
+    values.push(Value::U64(provenance.created_at.0));
+    values.push(Value::Uuid(provenance.updated_by.0));
+    values.push(Value::U64(provenance.updated_at.0));
+    let (tx_time, tx_node_alias) = projected_tx.unwrap_or((TxTime(0), NodeAlias(0)));
+    values.push(Value::U64(tx_time.0));
+    values.push(Value::U64(tx_node_alias.0));
     let raw = descriptor.create(&values)?;
     Ok(CurrentRow::new(
         table.name.clone(),
