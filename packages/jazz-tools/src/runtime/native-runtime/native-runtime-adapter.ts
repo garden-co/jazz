@@ -2237,7 +2237,14 @@ function outputColumnsForTable(
   if (!tableSchema) throw new Error(`missing schema for subscription table ${table}`);
   const selected = select ?? tableSchema.columns.map((column) => column.name);
   const columns = selected
-    .map((columnName) => tableSchema.columns.find((column) => column.name === columnName))
+    .map((columnName) => {
+      const declared = tableSchema.columns.find((column) => column.name === columnName);
+      if (declared) return declared;
+      const magicType = magicColumnType(columnName);
+      return magicType
+        ? ({ name: columnName, column_type: magicType, nullable: false } satisfies ColumnDescriptor)
+        : undefined;
+    })
     .filter((column): column is ColumnDescriptor => column !== undefined);
 
   for (const subquery of arraySubqueries) {

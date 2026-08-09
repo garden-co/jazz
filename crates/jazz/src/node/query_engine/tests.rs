@@ -651,6 +651,8 @@ impl SourceResolver for InlineCollectorResolver {
                 ValueType::Nullable(Box::new(ValueType::String)),
             ),
             ("user_todo", ValueType::Nullable(Box::new(ValueType::Uuid))),
+            ("$createdAt", ValueType::U64),
+            ("$updatedAt", ValueType::U64),
         ]);
         let parent = row(0xd1).0;
         let rows = match request.source.table.as_str() {
@@ -660,6 +662,8 @@ impl SourceResolver for InlineCollectorResolver {
                         Value::Uuid(parent),
                         Value::Nullable(Some(Box::new(Value::String("parent".to_owned())))),
                         Value::Nullable(None),
+                        Value::U64(10),
+                        Value::U64(11),
                     ])
                     .expect("inline parent"),
             ],
@@ -678,6 +682,8 @@ impl SourceResolver for InlineCollectorResolver {
                             Value::Uuid(row(id).0),
                             Value::Nullable(Some(Box::new(Value::String(title.to_owned())))),
                             Value::Nullable(Some(Box::new(Value::Uuid(parent)))),
+                            Value::U64(20),
+                            Value::U64(21),
                         ])
                         .expect("inline child")
                 })
@@ -688,6 +694,8 @@ impl SourceResolver for InlineCollectorResolver {
                         Value::Uuid(row(0xd4).0),
                         Value::Nullable(Some(Box::new(Value::String("label".to_owned())))),
                         Value::Nullable(Some(Box::new(Value::Uuid(parent)))),
+                        Value::U64(30),
+                        Value::U64(31),
                     ])
                     .expect("inline sibling child"),
             ],
@@ -697,6 +705,8 @@ impl SourceResolver for InlineCollectorResolver {
                         Value::Uuid(row(0xd5).0),
                         Value::Nullable(Some(Box::new(Value::String("note".to_owned())))),
                         Value::Nullable(Some(Box::new(Value::Uuid(row(0xd2).0)))),
+                        Value::U64(40),
+                        Value::U64(41),
                     ])
                     .expect("inline grandchild"),
             ],
@@ -2070,6 +2080,47 @@ fn collector_tree_projects_authorized_child_rows_and_keeps_empty_optional_slots(
 }
 
 #[test]
+fn collector_layout_retains_public_magic_timestamp_fields_on_child_rows() {
+    let mut request = collector_request(system_policy_context());
+    let PayloadProjection::Tree(projection) = &mut request
+        .output
+        .app_rows
+        .as_mut()
+        .expect("app rows")
+        .projection
+    else {
+        panic!("collector request must use a tree projection");
+    };
+    projection.paths[0].fields = FieldProjection::Fields(BTreeSet::from([
+        "$createdAt".to_owned(),
+        "$updatedAt".to_owned(),
+    ]));
+    let program = lower_query_program(request, &mut InlineCollectorResolver::new(None))
+        .expect("magic timestamp child projection should lower");
+    let ProgramOutputSchemas::RowSet(outputs) = &program.lowered.output;
+    let descriptor = outputs
+        .iter()
+        .find_map(|output| match output {
+            OutputTerminalSchema::AppRows(schema) => Some(&schema.descriptor),
+            OutputTerminalSchema::Fact(_) => None,
+        })
+        .expect("app rows descriptor");
+    let tags = descriptor
+        .fields()
+        .iter()
+        .find(|field| field.name.as_deref() == Some("tags"))
+        .expect("tags output field");
+    let ValueType::Array(row) = &tags.value_type else {
+        panic!("tags must be an array");
+    };
+    let ValueType::Record(row) = row.as_ref() else {
+        panic!("tags must contain records");
+    };
+    assert!(row.field_index("$createdAt").is_some());
+    assert!(row.field_index("$updatedAt").is_some());
+}
+
+#[test]
 fn collector_tree_keeps_sibling_slots_distinct_and_nests_grandchildren_by_path() {
     // Internal execution test for the terminal descriptor: the public tree
     // receiver has not been switched to this carrier in this PR.
@@ -2128,7 +2179,7 @@ fn collector_tree_keeps_sibling_slots_distinct_and_nests_grandchildren_by_path()
         },
     );
     request.input.shape.nodes.insert(
-        nested_path,
+        nested_path.clone(),
         RowSetExpr::CorrelatedPathProjection {
             input: RowSetNodeId("child".to_owned()),
             child_input: nested_node,
@@ -2165,6 +2216,18 @@ fn collector_tree_keeps_sibling_slots_distinct_and_nests_grandchildren_by_path()
         ],
     });
 
+    let mut required_request = request.clone();
+    let RowSetExpr::CorrelatedPathProjection { requirement, .. } = required_request
+        .input
+        .shape
+        .nodes
+        .get_mut(&nested_path)
+        .expect("nested path")
+    else {
+        panic!("nested node must be a correlated path");
+    };
+    *requirement = CorrelationRequirement::MatchCorrelationCardinality;
+
     let program = lower_query_program(request, &mut InlineCollectorResolver::new(None))
         .expect("nested collector lowers");
     let graph = program
@@ -2191,6 +2254,27 @@ fn collector_tree_keeps_sibling_slots_distinct_and_nests_grandchildren_by_path()
         panic!("expected nested notes slot");
     };
     assert_eq!(notes.len(), 1);
+
+    let required_program =
+        lower_query_program(required_request, &mut InlineCollectorResolver::new(None))
+            .expect("nested required collector lowers");
+    let required_graph = required_program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "app_rows")
+        .expect("required app collector")
+        .graph
+        .clone();
+    let required_rows = run_collector_graph(required_graph);
+    let Value::Array(required_tags) = &required_rows[0].0[3] else {
+        panic!("expected required tags slot");
+    };
+    assert_eq!(
+        required_tags.len(),
+        1,
+        "a child whose required nested relation is missing must be filtered"
+    );
 }
 
 #[test]

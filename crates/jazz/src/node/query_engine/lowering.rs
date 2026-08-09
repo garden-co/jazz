@@ -2265,6 +2265,13 @@ fn lower_correlated_path_plan(
         resolved_sources,
         request,
     )?;
+    let child_graph = lower_required_nested_parent_graph(
+        child.graph,
+        &path.nested,
+        child_source,
+        resolved_sources,
+        request,
+    )?;
     let (parent_key, child_key) = lower_path_key_pair(
         &path.correlation,
         path.parent.root.source().ok_or_else(|| {
@@ -2277,8 +2284,8 @@ fn lower_correlated_path_plan(
     )?;
     let parent_key_nullable_depth = source_field_nullable_depth(root_source, &parent_key);
     let child_key_nullable_depth = source_field_nullable_depth(child_source, &child_key);
-    let child =
-        unwrap_join_key_if_nullable(child.graph, child_key.clone(), child_key_nullable_depth);
+    let child_graph =
+        unwrap_join_key_if_nullable(child_graph, child_key.clone(), child_key_nullable_depth);
 
     let lowered = match path.requirement {
         CorrelationRequirement::Optional => Ok(LoweredRelationInput {
@@ -2295,7 +2302,7 @@ fn lower_correlated_path_plan(
                 parent_key_nullable_depth,
             );
             let joined =
-                GraphBuilder::join(parent, child, [parent_key], [child_key]).project_fields(
+                GraphBuilder::join(parent, child_graph, [parent_key], [child_key]).project_fields(
                     project_source_fields_from_prefix(root_source, LEFT_JOIN_PREFIX),
                 );
             Ok(LoweredRelationInput {
@@ -2318,7 +2325,7 @@ fn lower_correlated_path_plan(
             );
             lower_cardinality_complete_parent_graph(
                 parent,
-                child,
+                child_graph,
                 root_source,
                 parent_key,
                 child_key,
@@ -2344,6 +2351,27 @@ fn lower_correlated_path_plan(
         }
     })?;
     Ok(lowered)
+}
+
+/// Apply requirements declared by nested relation builders to the rows of
+/// their immediate parent. Optional nested relations never gate that parent;
+/// their own descendants are handled when the optional relation is collected.
+fn lower_required_nested_parent_graph(
+    mut parent: GraphBuilder,
+    nested: &[CorrelatedPathPlan],
+    parent_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> Result<GraphBuilder, UnsupportedReason> {
+    for path in nested {
+        if path.requirement == CorrelationRequirement::Optional {
+            continue;
+        }
+        parent =
+            lower_correlated_path_plan(parent, path, parent_source, resolved_sources, request)?
+                .graph;
+    }
+    Ok(parent)
 }
 
 fn lower_cardinality_complete_parent_graph(
@@ -2473,6 +2501,13 @@ fn lower_correlated_path_relation_graph_from_parent(
         resolved_sources,
         request,
     )?;
+    let child_graph = lower_required_nested_parent_graph(
+        child.graph,
+        &path.nested,
+        child_source,
+        resolved_sources,
+        request,
+    )?;
     let (parent_key, child_key) = lower_path_key_pair(
         &path.correlation,
         path.parent.root.source().ok_or_else(|| {
@@ -2487,7 +2522,7 @@ fn lower_correlated_path_relation_graph_from_parent(
     let child_key_nullable_depth = source_field_nullable_depth(child_source, &child_key);
     let parent = unwrap_join_key_if_nullable(parent, parent_key.clone(), parent_key_nullable_depth);
     let child =
-        unwrap_join_key_if_nullable(child.graph, child_key.clone(), child_key_nullable_depth);
+        unwrap_join_key_if_nullable(child_graph, child_key.clone(), child_key_nullable_depth);
     Ok(LoweredRelationInput {
         graph: GraphBuilder::join(parent, child, [parent_key], [child_key]),
         root_source: None,
@@ -5829,16 +5864,14 @@ fn collect_slot_layouts(
 
 fn collect_projection_source_field(field: &str) -> String {
     match field {
-        "$createdAt" => "created_at".to_owned(),
-        "$createdBy" => "created_by".to_owned(),
-        "$updatedAt" => "updated_at".to_owned(),
-        "$updatedBy" => "updated_by".to_owned(),
+        "$createdAt" | "$createdBy" | "$updatedAt" | "$updatedBy" => field.to_owned(),
         _ => user_column_field(field),
     }
 }
 
 fn collect_projection_output_field(field: &str) -> String {
     match field {
+        "$createdAt" | "$createdBy" | "$updatedAt" | "$updatedBy" => field.to_owned(),
         "created_at" => "$createdAt".to_owned(),
         "created_by" => "$createdBy".to_owned(),
         "updated_at" => "$updatedAt".to_owned(),
