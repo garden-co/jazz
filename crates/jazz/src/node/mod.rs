@@ -6257,6 +6257,9 @@ pub enum Error {
     /// Mergeable commit shape is invalid.
     #[error("invalid mergeable commit: {0}")]
     InvalidMergeableCommit(&'static str),
+    /// An exclusive transaction no longer matches its fixed local snapshot.
+    #[error("row visible parent changed since transaction write was staged")]
+    TransactionConflict,
     /// Stored value failed validation.
     #[error("invalid stored value: {0}")]
     InvalidStoredValue(&'static str),

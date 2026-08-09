@@ -257,5 +257,8 @@ fn exclusive_view_commit_rejects_concurrent_local_row_change() {
     .unwrap();
 
     let error = owner.commit_exclusive_handle(batch).unwrap_err();
-    assert!(error.message.contains("conflicts with local changes"));
+    assert_eq!(
+        error.to_string(),
+        "(transaction_conflict): row visible parent changed since transaction write was staged"
+    );
 }

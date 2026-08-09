@@ -501,9 +501,7 @@ where
             ));
         }
         if !self.open_exclusive_is_locally_serializable(open_batch_id)? {
-            return Err(Error::InvalidMergeableCommit(
-                "exclusive transaction conflicts with local changes after its snapshot",
-            ));
+            return Err(Error::TransactionConflict);
         }
         let open_tx = self
             .open_tx

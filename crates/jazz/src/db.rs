@@ -7770,14 +7770,26 @@ pub enum Propagation {
 }
 
 /// Public API error with stable machine-readable codes.
-#[derive(Debug, Error, serde::Deserialize, serde::Serialize)]
-#[error("{code:?}: {message}")]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct Error {
     /// Stable error code.
     pub code: ErrorCode,
     /// Human-readable detail.
     pub message: String,
 }
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.code {
+            ErrorCode::TransactionConflict => {
+                write!(formatter, "(transaction_conflict): {}", self.message)
+            }
+            _ => write!(formatter, "{:?}: {}", self.code, self.message),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 impl Error {
     fn new(code: ErrorCode, message: impl Into<String>) -> Self {
@@ -7813,6 +7825,8 @@ pub enum ErrorCode {
     Query,
     /// Write was rejected.
     WriteRejected,
+    /// An exclusive transaction's fixed snapshot was invalidated locally.
+    TransactionConflict,
     /// Storage failed.
     Storage,
     /// Protocol or local node operation failed.
@@ -7833,6 +7847,7 @@ impl From<crate::node::Error> for Error {
             }
             crate::node::Error::Storage(_) | crate::node::Error::Groove(_) => ErrorCode::Storage,
             crate::node::Error::Query(_) => ErrorCode::Query,
+            crate::node::Error::TransactionConflict => ErrorCode::TransactionConflict,
             crate::node::Error::TableNotFound(_)
             | crate::node::Error::UnsupportedColumnType(_)
             | crate::node::Error::InvalidMergeableCommit(_) => ErrorCode::Schema,
