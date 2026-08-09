@@ -576,10 +576,10 @@ describe("forRequest concurrent session isolation", () => {
 
     // Cross-user update must be rejected.
     expect(() => aliceDb.update(todoApp.todos, bobRow.id, { title: "alice-as-bob" })).toThrow(
-      'Update failed: WriteError("policy denied UPDATE on table todos")',
+      'Update failed: WriteError("read policy denied partial UPDATE on table todos: the operation requires read permission on the target row")',
     );
     expect(() => bobDb.update(todoApp.todos, aliceRow.id, { title: "bob-as-alice" })).toThrow(
-      'Update failed: WriteError("policy denied UPDATE on table todos")',
+      'Update failed: WriteError("read policy denied partial UPDATE on table todos: the operation requires read permission on the target row")',
     );
   }, 30_000);
 
