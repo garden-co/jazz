@@ -83,7 +83,7 @@ function makeClientStub() {
     shutdown: vi.fn(async () => undefined),
     updateAuthToken: vi.fn(),
     connectTransport: vi.fn(),
-    disconnectTransport: vi.fn(),
+    disconnectTransport: vi.fn(async () => undefined),
     getRuntime: vi.fn(() => ({}) as never),
   } as unknown as JazzClient & {
     connectTransport: ReturnType<typeof vi.fn>;

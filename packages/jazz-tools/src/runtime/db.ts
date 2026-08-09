@@ -1099,6 +1099,11 @@ export class Db {
 
       if (this.config.serverUrl && !this.isTransportDisconnected) {
         client.connectTransport(this.config.serverUrl, this.transportAuthConfig());
+      } else if (this.config.serverUrl) {
+        // A schema-specific client can be created lazily after Db.disconnect().
+        // Put its runtime behind the reconnect barrier immediately too; otherwise
+        // its first edge/global operation could run as if the Db were connected.
+        void client.disconnectTransport().catch(() => undefined);
       }
       this.clients.set(key, client);
       this.clientSchemas.set(key, runtimeSchema);
