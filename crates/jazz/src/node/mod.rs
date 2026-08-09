@@ -2550,10 +2550,24 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Option<CurrentRow>, Error> {
-        let table_schema =
-            self.table_in_schema(table, self.catalogue.current_write_schema.schema)?;
-        let content = self.local_current_content_row_candidate(&table_schema, row_uuid)?;
-        let deletion = self.local_current_deletion_candidate(&table_schema, row_uuid)?;
+        self.local_current_row_in_schema(
+            table,
+            row_uuid,
+            self.catalogue.current_write_schema.schema,
+        )
+    }
+
+    pub(crate) fn local_current_row_in_schema(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        schema_version: SchemaVersionId,
+    ) -> Result<Option<CurrentRow>, Error> {
+        let table_schema = self.table_in_schema(table, schema_version)?;
+        let content =
+            self.local_current_content_row_candidate(&table_schema, row_uuid, schema_version)?;
+        let deletion =
+            self.local_current_deletion_candidate(&table_schema, row_uuid, schema_version)?;
         if let (Some((_, content_tx)), Some((deletion, deletion_tx))) = (&content, &deletion)
             && deletion_tx > content_tx
             && *deletion == DeletionEvent::Deleted
@@ -2569,8 +2583,8 @@ where
         &mut self,
         table: &TableSchema,
         row_uuid: RowUuid,
+        schema_version: SchemaVersionId,
     ) -> Result<Option<(CurrentRow, (TxTime, NodeUuid))>, Error> {
-        let schema_version = self.catalogue.current_write_schema.schema;
         let prefix = vec![groove::ivm::LiteralValue::from(Value::Uuid(row_uuid.0))];
         let global = self.physical_current_source_scan_graph(
             schema_version,
@@ -2604,8 +2618,8 @@ where
         &mut self,
         table: &TableSchema,
         row_uuid: RowUuid,
+        schema_version: SchemaVersionId,
     ) -> Result<Option<(DeletionEvent, (TxTime, NodeUuid))>, Error> {
-        let schema_version = self.catalogue.current_write_schema.schema;
         let table_id = self.physical_table_id_for_schema(schema_version, &table.name)?;
         let prefix = vec![groove::ivm::LiteralValue::from(Value::Uuid(row_uuid.0))];
         let global = GraphBuilder::table_scan(

@@ -782,15 +782,11 @@ where
                 PendingCells::Patch(patch) => {
                     let table_schema = self.table_in_schema(&write.table, write.schema_version)?;
                     let mut cells = BTreeMap::new();
-                    if let Some(existing) = self
-                        .current_rows_for_schema(
-                            &write.table,
-                            write.schema_version,
-                            DurabilityTier::Local,
-                        )?
-                        .into_iter()
-                        .find(|row| row.row_uuid() == write.row_uuid)
-                    {
+                    if let Some(existing) = self.local_current_row_in_schema(
+                        &write.table,
+                        write.row_uuid,
+                        write.schema_version,
+                    )? {
                         for column in &table_schema.columns {
                             if let Some(value) = existing.cell(&table_schema, &column.name) {
                                 cells.insert(column.name.clone(), value);
