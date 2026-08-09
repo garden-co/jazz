@@ -6,7 +6,6 @@ import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   createRecord,
   decodeNativeRowValues,
-  decodeNativeTerminalRow,
   decodeRecordValue,
   encodeNativeRowValues,
   readDescriptor,
@@ -24,26 +23,6 @@ type NativeRowCodecCase = {
 };
 
 describe("native row codec", () => {
-  it("decodes terminal payload offsets relative to the record after its physical key", () => {
-    const columns = [
-      { name: "first", column_type: { type: "Text" as const }, nullable: false },
-      { name: "second", column_type: { type: "Text" as const }, nullable: false },
-    ];
-    const payload = createRecord(
-      columns.map((column) => ({ name: column.name, valueType: { tag: 8 } })),
-      [new TextEncoder().encode("one"), new TextEncoder().encode("two")],
-    );
-    const raw = new Uint8Array(16 + payload.byteLength);
-    raw.set(payload, 16);
-
-    expect(
-      decodeNativeTerminalRow("00000000-0000-0000-0000-000000000000", columns, raw).values,
-    ).toEqual([
-      { type: "Text", value: "one" },
-      { type: "Text", value: "two" },
-    ]);
-  });
-
   it("round-trips the Record descriptor payload before reading the next field", () => {
     const writer = new PostcardWriter();
     writeDescriptor(writer, [

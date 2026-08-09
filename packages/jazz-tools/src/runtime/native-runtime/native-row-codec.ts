@@ -262,20 +262,27 @@ export function decodeNativeRow(
   return row;
 }
 
+const terminalRowKeyColumn: ColumnDescriptor = {
+  name: "__jazz_terminal_row_key",
+  column_type: { type: "Uuid" },
+  nullable: false,
+};
+
 /** Decode a Groove terminal record, whose first physical field is its row key. */
 export function decodeNativeTerminalRow(
   id: string,
   columns: readonly ColumnDescriptor[],
   raw: Uint8Array,
 ): WasmRow {
-  if (raw.byteLength < 16) throw new Error("terminal record is missing its physical key");
-  const embeddedKey = formatUuid(raw.subarray(0, 16));
-  if (embeddedKey !== id) {
-    throw new Error(`terminal record key ${embeddedKey} does not match addressed key ${id}`);
+  const terminalColumns = [terminalRowKeyColumn, ...columns];
+  const decoded = decodeNativeRowValues(terminalColumns, raw);
+  const embeddedKey = decoded[0];
+  if (embeddedKey?.type !== "Uuid" || embeddedKey.value !== id) {
+    throw new Error(
+      `terminal record key ${embeddedKey?.type === "Uuid" ? embeddedKey.value : "<non-uuid>"} does not match addressed key ${id}`,
+    );
   }
-  // Groove prefixes the physical key to an independently encoded record. Its
-  // variable offsets therefore remain relative to the payload after the key.
-  const values = decodeNativeRowValues(columns, raw.subarray(16));
+  const values = decoded.slice(1);
   const valuesByColumn = new Map(columns.map((column, index) => [column.name, values[index]!]));
   const row = { id, values };
   Object.defineProperty(row, "valuesByColumn", {
