@@ -665,7 +665,34 @@ where
         params: BTreeMap<String, Value>,
     ) -> Result<PreparedQuery, Error> {
         let (schema, schema_version) = self.current_write_schema_for_query()?;
-        let shape = query.validate_with_schema_version(&schema, schema_version)?;
+        self.prepare_query_bound_for_schema(query, params, &schema, schema_version)
+    }
+
+    /// Prepare a query against the schema this database handle was opened with.
+    ///
+    /// Typed client facades are pinned to that schema even when a catalogue
+    /// snapshot advances or rolls back the separate current-write pointer.
+    #[cfg(feature = "client")]
+    pub(crate) fn prepare_query_for_open_schema(
+        &self,
+        query: &Query,
+    ) -> Result<PreparedQuery, Error> {
+        self.prepare_query_bound_for_schema(
+            query,
+            BTreeMap::new(),
+            &self.schema,
+            self.schema_version_id,
+        )
+    }
+
+    fn prepare_query_bound_for_schema(
+        &self,
+        query: &Query,
+        params: BTreeMap<String, Value>,
+        schema: &JazzSchema,
+        schema_version: SchemaVersionId,
+    ) -> Result<PreparedQuery, Error> {
+        let shape = query.validate_with_schema_version(schema, schema_version)?;
         let binding = shape.bind(params)?;
         let (local_plan, global_plan) = if should_install_prepared_plan(&shape)
             && !self.node.node.borrow().uses_schema_projected_read(&shape)
