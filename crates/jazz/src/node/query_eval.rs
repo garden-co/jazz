@@ -2,7 +2,7 @@
 //! evaluation for `jazz/SPEC/6_queries.md`. This module owns lowering validated Jazz
 //! queries to groove plans, evaluating one-shot reads, recording predicate reads,
 //! and applying binding deltas; the pure AST lives in [`crate::query`], policy
-//! checks in [`super::policy`], and sync view payload assembly in [`super::views`].
+//! checks in [`super::policy`], and sync view transport in [`super::views`].
 //! It is the node layer's query bridge to groove IVM.
 
 use super::*;
@@ -8960,9 +8960,9 @@ where
     ) -> Result<RelationSnapshot, Error> {
         let root_rows = self.materialize_relation_snapshot_root_rows(shape, snapshots)?;
         let root_count = root_rows.len();
-        // Structured output is already recursively assembled by Groove's
-        // app-rows terminal. Do not rebuild the same value from relation-fact
-        // side terminals at the Jazz boundary.
+        // Groove's app-rows terminal is the sole structured-output owner.
+        // Jazz transports its recursive roots; relation facts are not a second
+        // public representation and never participate in tree assembly.
         if !shape.query().array_subqueries.is_empty() {
             return Ok(RelationSnapshot {
                 root_count,

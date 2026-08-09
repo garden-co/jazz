@@ -741,6 +741,7 @@ impl PeerState {
             .collect();
         if result_member_adds.is_empty()
             && result_member_removes.is_empty()
+            && terminal_operations.is_empty()
             && program_fact_adds.is_empty()
             && program_fact_removes.is_empty()
         {

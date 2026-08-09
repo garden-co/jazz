@@ -796,12 +796,7 @@ impl IvmRuntime {
                     {
                         Some(terminal)
                     } else if !records.is_empty() {
-                        let terminal = terminal_deltas_from_record_deltas(&records)?;
-                        terminal
-                            .operations
-                            .iter()
-                            .all(|operation| !operation.path.is_empty())
-                            .then_some(terminal)
+                        Some(terminal_deltas_from_record_deltas(&records)?)
                     } else {
                         None
                     };
@@ -3059,21 +3054,24 @@ impl IvmRuntime {
             }
             validate_collect_by_key_types(&input_output, &group_field_indices)?;
             let slots = collect_by_slots(&input_output, &collect.slots, &group_field_indices, 1)?;
-            let order_field_indices = collect
-                .order_cols
-                .iter()
-                .map(|order| resolve_field_ref(&input_output, &order.field))
-                .collect::<Result<Vec<_>, _>>()?;
-            let tie_field_indices = collect
-                .tie_cols
-                .iter()
-                .map(|field| resolve_field_ref(&input_output, field))
-                .collect::<Result<Vec<_>, _>>()?;
-            if order_field_indices.is_empty() || tie_field_indices.is_empty() {
-                return Err(IvmRuntimeError::InvalidCollectBy(
-                    "tree root order and tie fields must be complete and non-empty".into(),
-                ));
-            }
+            let order_field_indices = if collect.order_cols.is_empty() {
+                group_field_indices.clone()
+            } else {
+                collect
+                    .order_cols
+                    .iter()
+                    .map(|order| resolve_field_ref(&input_output, &order.field))
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            let tie_field_indices = if collect.tie_cols.is_empty() {
+                group_field_indices.clone()
+            } else {
+                collect
+                    .tie_cols
+                    .iter()
+                    .map(|field| resolve_field_ref(&input_output, field))
+                    .collect::<Result<Vec<_>, _>>()?
+            };
             validate_collect_by_key_types(&input_output, &order_field_indices)?;
             validate_collect_by_key_types(&input_output, &tie_field_indices)?;
             let group_fields = group_field_indices
@@ -3095,14 +3093,16 @@ impl IvmRuntime {
                         tuple_fields: Vec::new(),
                         occurrence_id_fields: Vec::new(),
                         occurrence_id_field_indices: Vec::new(),
-                        order_fields: collect
-                            .order_cols
+                        order_fields: order_field_indices
                             .iter()
-                            .zip(&order_field_indices)
-                            .map(|(order, field_idx)| {
+                            .enumerate()
+                            .map(|(index, field_idx)| {
                                 Ok(TopByOrderField {
                                     field: field_name_at(&input_output, *field_idx)?,
-                                    direction: order.direction,
+                                    direction: collect
+                                        .order_cols
+                                        .get(index)
+                                        .map_or(TopByDirection::Asc, |order| order.direction),
                                 })
                             })
                             .collect::<Result<Vec<_>, IvmRuntimeError>>()?,
@@ -3115,10 +3115,15 @@ impl IvmRuntime {
                             .chain(&tie_field_indices)
                             .copied()
                             .collect(),
-                        sort_directions: collect
-                            .order_cols
+                        sort_directions: order_field_indices
                             .iter()
-                            .map(|order| order.direction)
+                            .enumerate()
+                            .map(|(index, _)| {
+                                collect
+                                    .order_cols
+                                    .get(index)
+                                    .map_or(TopByDirection::Asc, |order| order.direction)
+                            })
                             .chain(std::iter::repeat_n(
                                 TopByDirection::Asc,
                                 tie_field_indices.len(),
@@ -10193,6 +10198,9 @@ fn update_unbounded_collect_by_terminal_state(
         state.groups.clear();
         state.roots.clear();
     }
+    let root_groups_before = direct_tree_slot
+        .is_none()
+        .then(|| state.groups.keys().cloned().collect::<BTreeSet<_>>());
     let mut operations = Vec::new();
     for delta in deltas {
         let group_key =
@@ -10328,6 +10336,49 @@ fn update_unbounded_collect_by_terminal_state(
         }
     }
     state.groups.retain(|_, group| !group.is_empty());
+    if let Some(root_groups_before) = root_groups_before {
+        let root_groups_after = state.groups.keys().cloned().collect::<BTreeSet<_>>();
+        operations.retain(|operation| {
+            root_groups_before.contains(&operation.root_key)
+                && root_groups_after.contains(&operation.root_key)
+        });
+        for root_key in root_groups_before.difference(&root_groups_after) {
+            operations.push(TerminalOperation {
+                root_key: root_key.clone(),
+                path: Vec::new(),
+                edit: TerminalEdit::Remove {
+                    key: root_key.clone(),
+                },
+            });
+        }
+        for root_key in root_groups_after.difference(&root_groups_before) {
+            let group = state
+                .groups
+                .get(root_key)
+                .expect("root key came from collect state");
+            let records = group
+                .iter()
+                .map(|((_, record), weight)| (record.clone(), *weight))
+                .collect::<Vec<_>>();
+            let record =
+                collect_by_parent_from_records(input_desc, output_desc, collect_by, &records)?
+                    .ok_or_else(|| {
+                        IvmRuntimeError::InvalidCollectBy(
+                            "new collect root did not render a terminal row".to_owned(),
+                        )
+                    })?;
+            let index = root_groups_after.range(..root_key.clone()).count();
+            operations.push(TerminalOperation {
+                root_key: root_key.clone(),
+                path: Vec::new(),
+                edit: TerminalEdit::Insert {
+                    index,
+                    key: root_key.clone(),
+                    value: record.to_vec(),
+                },
+            });
+        }
+    }
     Ok(operations)
 }
 
