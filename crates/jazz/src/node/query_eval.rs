@@ -5483,7 +5483,7 @@ where
             return Ok(BTreeMap::new());
         }
         let mut access_paths = self.current_query_primary_key_access_paths(shape, binding)?;
-        let table = self.table(&query.table)?.clone();
+        let table = self.table_in_schema(&query.table, shape.schema_version())?;
         let equalities = root_literal_equalities(query, binding)?;
         let Some(access_path) = select_current_access_path(&table, &equalities) else {
             return Ok(access_paths);
