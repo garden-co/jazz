@@ -193,11 +193,11 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   waitForTransaction(batchId: BatchId, tier: string): Promise<void> {
-    const wait = this.enqueueCommand(async () => {
+    const wait = (async () => {
       await this.opened;
       if (tier === "edge" || tier === "global") await this.connectionReady.promise;
       await this.send("waitForTransaction", [batchId, tier]);
-    });
+    })();
     let waits = this.settledWrites.get(batchId);
     if (!waits) {
       waits = new Map();
@@ -295,7 +295,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     optionsJson?: string | null,
   ): Promise<unknown> {
     const readFence = this.captureReadFence(optionsJson);
-    return this.enqueueCommand(async () => {
+    return (async () => {
       await this.opened;
       await this.awaitReadBatchBegin(optionsJson);
       this.assertReadTransactionOpen(optionsJson);
@@ -305,7 +305,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
         await this.settleServerWaitsForRead(tier);
       }
       return this.send("query", [queryJson, sessionJson, tier, optionsJson]);
-    });
+    })();
   }
 
   createSubscription(
@@ -316,7 +316,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   ): number {
     const localHandle = this.nextSubscriptionId++;
     const readFence = this.captureReadFence(optionsJson);
-    const remoteHandle = this.enqueueCommand(async () => {
+    const remoteHandle = this.opened.then(async () => {
       await this.awaitReadBatchBegin(optionsJson);
       this.assertReadTransactionOpen(optionsJson);
       await this.settleReadFence(readFence);
@@ -397,12 +397,18 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
 
   connect(url: string, authJson: string): void {
     if (this.closing || this.closed) return;
-    const gate = this.waitingForReconnect ? this.connectionReady : connectionGate();
+    const reconnecting = this.waitingForReconnect;
+    const gate = reconnecting ? this.connectionReady : connectionGate();
     this.connectionReady = gate;
-    const connected = this.opened.then(() => {
-      if (this.closed) return undefined;
-      return this.send("connect", [url, authJson]);
-    });
+    const connectWorker = () =>
+      this.opened.then(() => {
+        if (this.closed) return undefined;
+        return this.send("connect", [url, authJson]);
+      });
+    // An initial connect is an ordinary FIFO command. Reconnect is the control
+    // operation that releases already-parked server commands, so it must bypass
+    // their queue position or the queue would deadlock on its own reconnect gate.
+    const connected = reconnecting ? connectWorker() : this.enqueueCommand(connectWorker);
     void connected.then(
       () => {
         if (this.connectionReady === gate) this.waitingForReconnect = false;

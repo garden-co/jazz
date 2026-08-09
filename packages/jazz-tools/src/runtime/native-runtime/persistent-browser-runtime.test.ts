@@ -214,9 +214,9 @@ describe("PersistentBrowserOpfsRuntime", () => {
       worker.messages.find((message) => message.method === "connect")!.id,
       "arbitrary websocket failure",
     );
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let attempt = 0; surfaced.length === 0 && attempt < 10; attempt += 1) {
+      await Promise.resolve();
+    }
 
     expect(surfaced).toHaveLength(1);
     expect(() => surfaced[0]!()).toThrow("arbitrary websocket failure");
@@ -508,7 +508,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
       expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
     });
     const insert = worker.messages.find((message) => message.method === "insert");
-    worker.respond(insert!.id, { transactionId: "native-runtime-transaction" });
+    worker.respond(insert!.id, { kind: "committed", batchId: "native-runtime-transaction" });
 
     await runtime.close();
   });
@@ -542,7 +542,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
     );
 
     const insert = worker.messages.find((message) => message.method === "insert")!;
-    worker.respond(insert.id, { transactionId: "native-runtime-transaction" });
+    worker.respond(insert.id, { kind: "committed", batchId: "native-runtime-transaction" });
     await vi.waitFor(() => {
       expect(
         worker.messages.some((message) => message.method === "createExecutedSubscription"),
@@ -662,14 +662,19 @@ describe("PersistentBrowserOpfsRuntime", () => {
     );
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "connect")).toBe(true);
-      expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
     });
     const connectMessage = worker.messages.find((message) => message.method === "connect");
-    const insertMessage = worker.messages.find((message) => message.method === "insert");
     worker.respond(connectMessage!.id, undefined);
-    worker.respond(insertMessage!.id, { transactionId: "native-runtime-transaction" });
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
+    });
+    const insertMessage = worker.messages.find((message) => message.method === "insert");
+    worker.respond(insertMessage!.id, {
+      kind: "committed",
+      batchId: "native-runtime-transaction",
+    });
 
-    const waitPromise = runtime.waitForTransaction(insert.transactionId, "edge");
+    const waitPromise = runtime.waitForTransaction(await committed(insert).batchId, "edge");
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
     });
