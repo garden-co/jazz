@@ -1220,6 +1220,20 @@ impl WasmDb {
         })
     }
 
+    /// Attach this typed view to an existing owner-wide exclusive batch.
+    #[wasm_bindgen(js_name = attachExclusiveTx)]
+    pub fn attach_exclusive_tx(&self, open_batch_id: String) -> Result<WasmTx, JsValue> {
+        let open_batch_id = open_batch_id
+            .parse::<OpenBatchId>()
+            .map_err(|error| JsValue::from_str(&error))?;
+        Ok(WasmTx {
+            db: self.inner.clone(),
+            kind: WasmTxKind::Exclusive,
+            open_tx: Some(open_batch_id),
+            owns_lifetime: false,
+        })
+    }
+
     /// Begin one owner-wide batch without creating an owning per-schema Tx.
     #[wasm_bindgen(js_name = beginTransaction)]
     pub fn begin_transaction(
@@ -2791,7 +2805,7 @@ fn to_js_error(error: impl std::fmt::Display) -> JsValue {
 #[cfg(test)]
 mod dynamic_schema_view_tests {
     use super::*;
-    use jazz::db::{DbConfig, DbIdentity};
+    use jazz::db::{DbConfig, DbIdentity, ExclusiveTxOps};
     use jazz::groove::schema::ColumnType;
     use jazz::schema::{ColumnSchema, Policy, TableSchema};
 
@@ -2835,5 +2849,25 @@ mod dynamic_schema_view_tests {
             )
             .unwrap();
         owner.commit_mergeable_handle(batch).unwrap();
+
+        let exclusive = OpenBatchId::new();
+        owner.begin_exclusive(exclusive).unwrap();
+        drop(WasmTx {
+            db: WasmDbInner::Memory(Rc::clone(&view)),
+            kind: WasmTxKind::Exclusive,
+            open_tx: Some(exclusive),
+            owns_lifetime: false,
+        });
+        view.exclusive_tx_ref(exclusive)
+            .insert_with_id(
+                "items",
+                RowUuid::from_bytes([2; 16]),
+                BTreeMap::from([(
+                    "label".to_owned(),
+                    Value::String("exclusive-kept".to_owned()),
+                )]),
+            )
+            .unwrap();
+        owner.commit_exclusive_handle(exclusive).unwrap();
     }
 }
