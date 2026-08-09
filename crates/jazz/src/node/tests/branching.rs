@@ -345,6 +345,11 @@ fn branches_do_not_observe_sibling_overlays_and_recover_metadata() {
         reopened.branch_record(right).unwrap().base.as_ref().unwrap().global_base,
         GlobalSeq(1)
     );
+    assert_eq!(
+        reopened.branch_record(left).unwrap().created_by,
+        AuthorId(uuid::Uuid::nil()),
+        "branch creator attribution must survive durable recovery"
+    );
 }
 #[test]
 fn branch_exclusive_returns_v1_error() {
@@ -627,6 +632,7 @@ fn branch_writes_reject_unknown_and_closed_branches() {
         closed,
         crate::node::branches::BranchRecord {
             branch_id: closed,
+            created_by: AuthorId::SYSTEM,
             parent: None,
             base: None,
             state: codec::BranchState::Merged,

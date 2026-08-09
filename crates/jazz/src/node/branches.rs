@@ -20,12 +20,26 @@ use crate::tx::{
 pub struct BranchRecord {
     /// Branch identity.
     pub branch_id: BranchId,
+    /// Authenticated session identity that created the branch.
+    pub created_by: AuthorId,
     /// Parent branch, or `None` for a root branch.
     pub parent: Option<BranchId>,
     /// Frozen parent settled cut. Root branches have no base.
     pub base: Option<Snapshot>,
     /// Branch lifecycle state.
     pub state: codec::BranchState,
+}
+
+impl From<&BranchRecord> for crate::protocol::BranchMetadata {
+    fn from(record: &BranchRecord) -> Self {
+        Self {
+            branch_id: record.branch_id,
+            created_by: record.created_by,
+            parent: record.parent,
+            base: record.base.clone(),
+            open: record.state == codec::BranchState::Open,
+        }
+    }
 }
 
 impl<S> NodeState<S>
@@ -37,21 +51,41 @@ where
     /// Creation writes only one metadata row; overlay tables are created lazily
     /// on the first branch write.
     pub fn create_branch(&mut self, branch_id: BranchId) -> Result<BranchRecord, Error> {
+        self.create_branch_as(branch_id, AuthorId(uuid::Uuid::nil()))
+    }
+
+    /// Create a snapshot-base branch attributed to an authenticated session.
+    pub fn create_branch_as(
+        &mut self,
+        branch_id: BranchId,
+        created_by: AuthorId,
+    ) -> Result<BranchRecord, Error> {
+        if let Some(existing) = self.branches.branches.get(&branch_id) {
+            if existing.created_by == created_by
+                && existing.parent.is_none()
+                && existing.base.is_some()
+                && existing.state == codec::BranchState::Open
+            {
+                return Ok(existing.clone());
+            }
+            return Err(Error::InvalidStoredValue("conflicting branch creation"));
+        }
         let record = BranchRecord {
             branch_id,
+            created_by,
             parent: None,
             base: Some(
                 Snapshot::exclusive_base(
-                    self.node_uuid,
+                    NodeUuid(uuid::Uuid::nil()),
                     self.clock.applied_global_watermark,
-                    self.clock.tx_time,
+                    TxTime::default(),
                     Vec::new(),
                 )
                 .map_err(Error::InvalidStoredValue)?,
             ),
             state: codec::BranchState::Open,
         };
-        self.persist_branch_record(&record)?;
+        self.persist_branch_record(&record, true)?;
         self.branches.branches.insert(branch_id, record.clone());
         Ok(record)
     }
@@ -60,11 +94,14 @@ where
     pub fn create_root_branch(&mut self, branch_id: BranchId) -> Result<BranchRecord, Error> {
         let record = BranchRecord {
             branch_id,
+            created_by: AuthorId(uuid::Uuid::nil()),
             parent: None,
             base: None,
             state: codec::BranchState::Open,
         };
-        self.persist_branch_record(&record)?;
+        // The distinguished root is local storage scaffolding, not session-authored
+        // branch metadata, so it must never enter the sync outbox.
+        self.persist_branch_record(&record, false)?;
         self.branches.branches.insert(branch_id, record.clone());
         Ok(record)
     }
@@ -72,6 +109,138 @@ where
     /// Return recovered branch metadata.
     pub fn branch_record(&self, branch_id: BranchId) -> Option<&BranchRecord> {
         self.branches.branches.get(&branch_id)
+    }
+
+    /// Durable locally-authored or session-relayed metadata awaiting an exact
+    /// acknowledgement from this node's upstream.
+    pub fn pending_branch_metadata_uploads(&self) -> Vec<crate::protocol::BranchMetadata> {
+        self.branches
+            .pending_metadata_uploads
+            .iter()
+            .filter_map(|branch| self.branches.branches.get(branch))
+            .map(Into::into)
+            .collect()
+    }
+
+    /// Clear a durable metadata outbox item after an exact upstream echo.
+    pub fn acknowledge_branch_metadata(
+        &mut self,
+        metadata: &crate::protocol::BranchMetadata,
+    ) -> Result<(), Error> {
+        if !self
+            .branches
+            .pending_metadata_uploads
+            .contains(&metadata.branch_id)
+        {
+            // An unsolicited lifecycle update is not an acknowledgement. Let
+            // normal inbound admission validate and persist it.
+            return Ok(());
+        }
+        let Some(record) = self.branches.branches.get(&metadata.branch_id).cloned() else {
+            return Ok(());
+        };
+        if crate::protocol::BranchMetadata::from(&record) != *metadata {
+            return Err(Error::InvalidStoredValue(
+                "branch metadata acknowledgement does not match local record",
+            ));
+        }
+        self.persist_branch_record(&record, false)?;
+        Ok(())
+    }
+
+    /// Idempotently admit durable branch routing metadata received before a
+    /// branch-target unit. Conflicting redefinitions are rejected: branch
+    /// identity is immutable once observed.
+    pub fn admit_branch_metadata(
+        &mut self,
+        metadata: crate::protocol::BranchMetadata,
+    ) -> Result<(), Error> {
+        self.admit_branch_metadata_with_upstream_relay(metadata, false)
+    }
+
+    fn admit_branch_metadata_with_upstream_relay(
+        &mut self,
+        metadata: crate::protocol::BranchMetadata,
+        relay_upstream: bool,
+    ) -> Result<(), Error> {
+        let record = BranchRecord {
+            branch_id: metadata.branch_id,
+            created_by: metadata.created_by,
+            parent: metadata.parent,
+            base: metadata.base,
+            state: if metadata.open {
+                codec::BranchState::Open
+            } else {
+                codec::BranchState::Discarded
+            },
+        };
+        if let Some(existing) = self.branches.branches.get(&record.branch_id) {
+            if existing == &record {
+                return Ok(());
+            }
+            if existing.branch_id == record.branch_id
+                && existing.created_by == record.created_by
+                && existing.parent == record.parent
+                && existing.base == record.base
+                && existing.state == codec::BranchState::Open
+                && record.state == codec::BranchState::Discarded
+            {
+                self.persist_branch_record(&record, relay_upstream)?;
+                self.branches.branches.insert(record.branch_id, record);
+                return Ok(());
+            }
+            return Err(Error::InvalidStoredValue("conflicting branch metadata"));
+        }
+        self.persist_branch_record(&record, relay_upstream)?;
+        self.branches.branches.insert(record.branch_id, record);
+        Ok(())
+    }
+
+    /// Admit locally-authored branch metadata from an authenticated session.
+    /// The link identity, not the self-asserted payload alone, authenticates the
+    /// immutable creator. Dependencies must already be locally readable.
+    pub fn admit_session_branch_metadata(
+        &mut self,
+        metadata: crate::protocol::BranchMetadata,
+        identity: AuthorId,
+    ) -> Result<bool, Error> {
+        if metadata.created_by != identity {
+            return Err(Error::InvalidStoredValue(
+                "branch metadata creator does not match authenticated session",
+            ));
+        }
+        if metadata.parent.is_some() {
+            return Err(Error::InvalidStoredValue(
+                "v1 session branch metadata must be parentless",
+            ));
+        }
+        if !self.branches.branches.contains_key(&metadata.branch_id) && !metadata.open {
+            return Err(Error::InvalidStoredValue(
+                "first-seen session branch metadata must be open",
+            ));
+        }
+        let Some(base) = metadata.base.as_ref() else {
+            return Err(Error::InvalidStoredValue(
+                "session branch metadata requires a snapshot base",
+            ));
+        };
+        if base.owner != NodeUuid(uuid::Uuid::nil())
+            || base.local_base != TxTime::default()
+            || !base.dots.is_empty()
+        {
+            return Err(Error::InvalidStoredValue(
+                "unsupported v1 branch snapshot shape",
+            ));
+        }
+        if base.global_base > self.clock.applied_global_watermark {
+            return Ok(false);
+        }
+        // New metadata and lifecycle advances received from a client session
+        // become a durable upstream relay. Exact downstream retries preserve
+        // the existing pending/acknowledged state instead of reopening a
+        // completed relay and creating an echo loop.
+        self.admit_branch_metadata_with_upstream_relay(metadata, true)?;
+        Ok(true)
     }
 
     /// Discard an open branch without deleting its overlay history.
@@ -86,7 +255,7 @@ where
             return Err(Error::BranchClosed(branch_id));
         }
         record.state = codec::BranchState::Discarded;
-        self.persist_branch_record(&record)?;
+        self.persist_branch_record(&record, true)?;
         self.branches.branches.insert(branch_id, record);
         Ok(())
     }
@@ -576,12 +745,14 @@ where
         binding: &Binding,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let branch = self
-            .branches
-            .branches
-            .get(&branch_id)
-            .cloned()
-            .ok_or(Error::BranchNotFound(branch_id))?;
+        let Some(branch) = self.branches.branches.get(&branch_id).cloned() else {
+            // Remote/session branch reads deliberately conflate an unknown
+            // lineage with a lineage the caller is not allowed to enumerate.
+            if identity != AuthorId::SYSTEM {
+                return Ok(Vec::new());
+            }
+            return Err(Error::BranchNotFound(branch_id));
+        };
         if !self.branch_read_policy_allows(&branch, identity)? {
             return Ok(Vec::new());
         }
@@ -601,6 +772,21 @@ where
         }
         self.branch_read_policy_authorized_branch_ids(branch.branch_id, identity)
             .map(|branches| branches.contains(&RowUuid(branch.branch_id.0)))
+    }
+
+    /// Whether an authenticated link may learn a branch routing record. This
+    /// is deliberately the same first-level branch gate as branch reads, so
+    /// metadata cannot become a branch-existence oracle when an empty result
+    /// is otherwise legitimate.
+    pub(crate) fn branch_metadata_visible_to(
+        &mut self,
+        branch_id: BranchId,
+        identity: AuthorId,
+    ) -> Result<bool, Error> {
+        let Some(branch) = self.branches.branches.get(&branch_id).cloned() else {
+            return Ok(false);
+        };
+        self.branch_read_policy_allows(&branch, identity)
     }
 
     pub(super) fn branch_write_policy_allows(
@@ -1289,23 +1475,37 @@ where
         }
     }
 
-    fn persist_branch_record(&mut self, record: &BranchRecord) -> Result<(), Error> {
+    fn persist_branch_record(
+        &mut self,
+        record: &BranchRecord,
+        metadata_pending: bool,
+    ) -> Result<(), Error> {
         let mut batch = self.database.open_batch();
         batch.update(
             "jazz_branches",
             vec![
                 Value::Uuid(record.branch_id.0),
+                Value::Uuid(record.created_by.0),
                 Value::Nullable(record.parent.map(|id| Box::new(Value::Uuid(id.0)))),
-                Value::Nullable(
-                    record
-                        .base
-                        .as_ref()
-                        .map(|base| Box::new(Value::U64(base.global_base.0))),
-                ),
+                Value::Nullable(record.base.as_ref().map(|base| {
+                    Box::new(Value::Bytes(
+                        serde_json::to_vec(base).expect("snapshot is serializable"),
+                    ))
+                })),
                 Value::String(branch_state_string(record.state).to_owned()),
+                Value::Bool(metadata_pending),
             ],
         );
         self.database.commit_batch(batch)?;
+        if metadata_pending {
+            self.branches
+                .pending_metadata_uploads
+                .insert(record.branch_id);
+        } else {
+            self.branches
+                .pending_metadata_uploads
+                .remove(&record.branch_id);
+        }
         Ok(())
     }
 
@@ -1314,32 +1514,33 @@ where
         record: BorrowedRecord<'_>,
     ) -> Result<(), Error> {
         let branch_id = BranchId(record.get_uuid(BranchRowRecord::FIELD_BRANCH_ID_IDX)?);
+        let created_by = AuthorId(record.get_uuid(BranchRowRecord::FIELD_CREATED_BY_IDX)?);
         let parent = record
             .get_nullable_uuid(BranchRowRecord::FIELD_PARENT_IDX)?
             .map(BranchId);
         let base = record
-            .get_nullable_u64(BranchRowRecord::FIELD_BASE_GLOBAL_IDX)?
-            .map(|global| {
-                Snapshot::exclusive_base(
-                    self.node_uuid,
-                    GlobalSeq(global),
-                    TxTime::default(),
-                    Vec::new(),
-                )
-                .map_err(Error::InvalidStoredValue)
+            .get_nullable_bytes(BranchRowRecord::FIELD_BASE_SNAPSHOT_IDX)?
+            .map(|bytes| {
+                serde_json::from_slice(bytes)
+                    .map_err(|_| Error::InvalidStoredValue("invalid stored branch snapshot"))
             })
             .transpose()?;
         let state =
             branch_state_from_discriminant(record.get_enum(BranchRowRecord::FIELD_STATE_IDX)?)?;
+        let metadata_pending = record.get_bool(BranchRowRecord::FIELD_METADATA_PENDING_IDX)?;
         self.branches.branches.insert(
             branch_id,
             BranchRecord {
                 branch_id,
+                created_by,
                 parent,
                 base,
                 state,
             },
         );
+        if metadata_pending {
+            self.branches.pending_metadata_uploads.insert(branch_id);
+        }
         Ok(())
     }
 

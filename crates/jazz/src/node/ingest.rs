@@ -145,6 +145,13 @@ where
             .expand_version_carriers_for_receive()
             .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
         match message {
+            SyncMessage::BranchMetadata(metadata) => {
+                self.admit_branch_metadata(metadata)?;
+                self.drain_parked_commit_units()
+            }
+            SyncMessage::FetchBranchMetadata { .. } => Err(Error::UnsupportedSyncMessage(
+                "branch metadata repair must be served by peer state",
+            )),
             SyncMessage::SessionClaims { identity, claims } => {
                 if let Some(context) = ingest_context
                     && context.trust == CommitUnitTrust::TrustedBackend
@@ -531,7 +538,8 @@ where
         let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage else {
             return Ok(());
         };
-        if !commit_unit_write_count_matches(tx, versions.len())
+        if !self.branches.branches.contains_key(&branch_id)
+            || !commit_unit_write_count_matches(tx, versions.len())
             || versions.iter().any(|version| {
                 !self
                     .catalogue
@@ -824,6 +832,17 @@ where
                 }]);
             }
         }
+        if self.park_commit_unit_if_missing_branch_metadata_with_mode(
+            &tx,
+            &versions,
+            now_ms,
+            CommitUnitParkMode {
+                ingress_role: ParkedIngressRole::EdgeAccepted,
+                ..CommitUnitParkMode::default()
+            },
+        )? {
+            return Ok(Vec::new());
+        }
         if self.park_commit_unit_if_missing_schema_versions_with_mode(
             &tx,
             &versions,
@@ -988,6 +1007,14 @@ where
             ingress_role: ParkedIngressRole::Relay,
             ..CommitUnitParkMode::default()
         };
+        if self.park_commit_unit_if_missing_branch_metadata_with_mode(
+            &tx,
+            &versions,
+            u64::MAX - SKEW_TOLERANCE_MS,
+            relay_mode,
+        )? {
+            return Ok(());
+        }
         if self.park_commit_unit_if_missing_schema_versions_with_mode(
             &tx,
             &versions,
@@ -1083,6 +1110,17 @@ where
                     durability: fate_update_durability_claim(&existing.fate, existing.durability),
                 }]);
             }
+        }
+        if self.park_commit_unit_if_missing_branch_metadata_with_mode(
+            &tx,
+            &versions,
+            now_ms,
+            CommitUnitParkMode {
+                ingest_context,
+                ..CommitUnitParkMode::default()
+            },
+        )? {
+            return Ok(Vec::new());
         }
         if self.park_commit_unit_if_missing_schema_versions_with_mode(
             &tx,
@@ -1285,6 +1323,17 @@ where
                     durability: fate_update_durability_claim(&existing.fate, existing.durability),
                 }]);
             }
+        }
+        if self.park_commit_unit_if_missing_branch_metadata_with_mode(
+            &tx,
+            &versions,
+            now_ms,
+            CommitUnitParkMode {
+                ingest_context,
+                ingress_role: ParkedIngressRole::EdgeAuthority,
+            },
+        )? {
+            return Ok(Vec::new());
         }
         if self.park_commit_unit_if_missing_schema_versions_with_mode(
             &tx,
@@ -2228,6 +2277,47 @@ where
         Ok(true)
     }
 
+    /// Park a branch-targeted unit until the authenticated routing record has
+    /// arrived.  Branch metadata is a transport prerequisite, not a synthetic
+    /// transaction parent, so this deliberately shares the ordinary bounded
+    /// orphan queue and its idempotence/conflict checks.
+    pub(super) fn park_commit_unit_if_missing_branch_metadata_with_mode(
+        &mut self,
+        tx: &Transaction,
+        versions: &[VersionRecord],
+        now_ms: u64,
+        mode: CommitUnitParkMode,
+    ) -> Result<bool, Error> {
+        let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage else {
+            return Ok(false);
+        };
+        if self.branches.branches.contains_key(&branch_id) {
+            return Ok(false);
+        }
+        if let Some(existing) = self.parking.parked_commit_units.get_mut(&tx.tx_id) {
+            if existing.tx != *tx
+                || existing.versions != versions
+                || existing.ingest_context != mode.ingest_context
+            {
+                return Err(Error::ConflictingCommitUnit(tx.tx_id));
+            }
+            existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
+            return Ok(true);
+        }
+        self.sync_metrics.parked_orphans += 1;
+        self.parking.parked_commit_units.insert(
+            tx.tx_id,
+            ParkedCommitUnit {
+                tx: tx.clone(),
+                versions: versions.to_vec(),
+                now_ms,
+                ingest_context: mode.ingest_context,
+                ingress_role: mode.ingress_role,
+            },
+        );
+        Ok(true)
+    }
+
     pub(super) fn park_commit_unit_if_missing_content_with_mode(
         &mut self,
         tx: &Transaction,
@@ -2335,7 +2425,10 @@ where
                     self.catalogue
                         .catalogue_schemas
                         .contains_key(&version.schema_version())
-                }) && self.missing_parent_refs(&versions)?.is_empty()
+                }) && branch_metadata_available(
+                    self,
+                    &self.parking.parked_commit_units[&tx_id].tx,
+                ) && self.missing_parent_refs(&versions)?.is_empty()
                     && self.missing_content_refs(&versions)?.is_empty()
                 {
                     ready.push(tx_id);
@@ -2399,7 +2492,10 @@ where
                     self.catalogue
                         .catalogue_schemas
                         .contains_key(&version.schema_version())
-                }) && self.missing_parent_refs(&versions)?.is_empty()
+                }) && branch_metadata_available(
+                    self,
+                    &self.parking.parked_commit_units[&tx_id].tx,
+                ) && self.missing_parent_refs(&versions)?.is_empty()
                     && self.missing_content_refs(&versions)?.is_empty()
                 {
                     ready.push(tx_id);
@@ -5175,6 +5271,13 @@ fn counter_value_from_i128(
         _ => Err(Error::InvalidStoredValue(
             "counter strategy requires integer column",
         )),
+    }
+}
+
+fn branch_metadata_available<S: OrderedKvStorage>(node: &NodeState<S>, tx: &Transaction) -> bool {
+    match tx.target_lineage {
+        crate::tx::BranchLineage::Root => true,
+        crate::tx::BranchLineage::Branch(branch) => node.branches.branches.contains_key(&branch),
     }
 }
 

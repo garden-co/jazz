@@ -45,6 +45,8 @@ Invariant digest:
 - `INV-BRANCH-33`: The calculator MUST consume an exact current-schema contribution view containing projected values, authored presence, and strategy operations; when storage/lenses cannot supply that view exactly, or the initiator cannot prove source-read authorization for every included content/deletion contribution, it MUST fail locally before minting the ordinary transaction.
 - `INV-BRANCH-34`: A source contribution is target-known only when it is already present in the exact target-parent contribution closure or an exact field substitution names that dot; sharing a `TxId`, appearing inside `from_frontier`/`through_frontier`, or transferring another field from the same source version MUST NOT suppress an omitted row, layer, column, or operation, and a reducing strategy's substitution MUST name every novel dot reduced into its output, including losing concurrent dots.
 - `INV-BRANCH-35`: Every transaction MUST carry one canonical operational target lineage (`Root` or a stable `BranchId`); all ordinary persistence, recovery, synchronization, authorization, fate, and exact-retransmission paths MUST route its complete commit unit to that lineage without interpreting branch-merge provenance.
+- `INV-BRANCH-36`: Before a receiver may admit a commit unit or view payload targeted at a branch, trusted transport MUST deliver the durable branch record needed to route that lineage. A receiver that observes data first MUST park it, request the bounded missing branch record, and drain it only after exact idempotent metadata admission; a branch record received without a currently requested readable view reveals no branch row payload.
+- `INV-BRANCH-37`: Branch creation is local-first: the local database durably authors a random branch id, authenticated creator, and complete locally known snapshot base before any network round trip, and immediately permits branch-local commits. Branch metadata has an independent durable sync outbox. Session admission is fail-closed to the supported parentless v1 snapshot shape; exact replay is idempotent and discard is the only permitted lifecycle transition.
 
 ## Details
 
@@ -79,7 +81,7 @@ watermark answers `at(position).read(...)` locally at exactly that position.
 
 The branch model has one branch kind: the **snapshot-base branch**. A branch is
 identified by a branch record (`BranchRecord`) with
-`{ branch_id, parent: Option<BranchId>, base: Option<SnapshotRef>, state }`, where
+`{ branch_id, created_by: AuthorId, parent: Option<BranchId>, base: Option<SnapshotRef>, state }`, where
 `state ∈ {Open, Discarded}`. A root branch has `parent: None` and no
 base/fallback. An ordinary branch has a base snapshot that is **frozen at
 creation**: later parent commits do not appear in the branch except through the
@@ -97,9 +99,28 @@ Schema-version/lens
 partitions (ch. 10) are orthogonal to branch identity.
 
 Creating a branch records metadata only. It is O(1)-style and never copies base
-rows into the overlay (`INV-BRANCH-11`). Branch creation is itself a
-**mergeable write that works offline**: an offline creator branches at _its own_
-settled watermark, honestly "the base as this client saw it".
+rows into the overlay (`INV-BRANCH-11`). Creation is local-first: the local
+database chooses a random `BranchId`, records its authenticated identity as
+immutable `created_by`, freezes its locally known settled snapshot, persists the
+record, and can commit into the branch before connecting to a server. The full
+snapshot (`owner`, global and local bases, and dots) is persisted without
+receiver re-authoring. Branch metadata has an independent durable outbox, so an
+empty branch retries across reconnect and reopen until an exact upstream echo
+acknowledges it. Every intermediary durably relays newly admitted session
+metadata (including `Open` to `Discarded`) until its own upstream acknowledges
+that hop; acknowledging the downstream hop does not clear the upstream relay,
+and a delayed exact downstream retry does not reopen an acknowledged relay.
+Branch-target data is separately parked until metadata lands.
+
+Session-authored v1 creation is deliberately narrower than trusted backend
+replay: it must be first-seen `Open`, parentless, and use the canonical settled
+global cut (`owner` is the nil node UUID, `local_base` is zero, and `dots` is
+empty). Its `created_by` must match the authenticated session identity, and its
+global base must already be available or the metadata is parked. This
+parentless-only rule avoids treating knowledge of a parent id as read authority;
+a self-asserted author without session context grants nothing. Exact replay is
+idempotent, immutable conflicts are rejected, and `Open` to `Discarded` is the
+only lifecycle transition (`INV-BRANCH-37`).
 
 ### 11.3 Branch reads
 
@@ -139,12 +160,23 @@ effects are written. Consequently a target reader can process a merge as an
 ordinary transaction once routing has selected its target partition, without
 source-branch knowledge.
 
+**Synchronization.** Branch metadata is a durable routing prerequisite, not a
+replacement transaction format. Cores and edges may retain every branch record
+and branch-target transaction. When a client registers a branch read view, the
+serving node first applies the branch-row read gate, then sends the exact branch
+record before any branch-target version or view payload. A client parks an
+out-of-order branch-target unit, requests the missing record through the
+ordinary bounded repair lane, and resumes normal ingest after idempotent
+metadata admission (`INV-BRANCH-36`). The branch target remains solely the
+ordinary transaction's `target_lineage`; metadata never reconstructs a facade
+state or gives an unauthorized client branch rows.
+
 **Implementation status.** The current branch write model rejects exclusive
 branch writes: `open_exclusive_on_branch` returns
 `UnsupportedBranchExclusive`, and `branch_exclusive_returns_v1_error` covers
 that behavior. Branch subscriptions are not yet implemented. Their intended
-contract is `INV-BRANCH-16`. A write to a non-open or unknown branch fails
-rather than creating an implicit branch (`INV-BRANCH-14`).
+contract is `INV-BRANCH-16` and `INV-BRANCH-36`. A write to a non-open or
+unknown branch fails rather than creating an implicit branch (`INV-BRANCH-14`).
 
 _Further invariants._ `INV-BRANCH-10` — branch metadata (including the frozen
 `base_global` cut) is durably recoverable across reopen. `INV-BRANCH-12` —

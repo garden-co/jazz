@@ -406,6 +406,7 @@ pub(crate) fn branch_metadata_table_schema() -> TableSchema {
         "jazz_branches",
         [
             ColumnSchema::new("branch_id", GrooveColumnType::Uuid),
+            ColumnSchema::new("created_by", GrooveColumnType::Uuid),
             ColumnSchema::new("parent", GrooveColumnType::Uuid.nullable()),
             ColumnSchema::new("base_global", GrooveColumnType::U64.nullable()),
             ColumnSchema::new("state", GrooveColumnType::String),
@@ -1223,12 +1224,14 @@ fn branches_table() -> GrooveTableSchema {
         "jazz_branches",
         [
             column("branch_id", GrooveColumnType::Uuid),
+            column("created_by", GrooveColumnType::Uuid),
             column("parent", GrooveColumnType::Uuid.nullable()),
-            column("base_global", GrooveColumnType::U64.nullable()),
+            column("base_snapshot", GrooveColumnType::Bytes.nullable()),
             column(
                 "state",
                 storage_enum("jazz_branch_state", &["open", "merged", "discarded"]),
             ),
+            column("metadata_pending", GrooveColumnType::Bool),
         ],
     )
     .with_primary_key(PrimaryKey::composite([PrimaryKeyColumn::uuid("branch_id")]))
