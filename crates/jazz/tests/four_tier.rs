@@ -1170,6 +1170,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
         settled_through: jazz::time::GlobalSeq(0),
         reset_result_set: false,
         version_carriers: Vec::new(),
+        evidence_version_carriers: Vec::new(),
         version_bundles: vec![VersionBundle {
             tx,
             versions,
@@ -1180,6 +1181,8 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
         peer_payload_inventory: PeerPayloadInventory::default(),
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
+        evidence_member_adds: Vec::new(),
+        evidence_member_removes: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     })

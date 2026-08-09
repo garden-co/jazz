@@ -363,6 +363,8 @@ struct QueryServing {
     /// full result set.
     settled_result_row_index:
         BTreeMap<BindingViewKey, BTreeMap<ResultRowMembershipKey, ResultMemberEntry>>,
+    /// Authority-scoped dependency membership, kept separate from public rows.
+    settled_evidence_sets: BTreeMap<BindingViewKey, BTreeSet<ResultMemberEntry>>,
     /// Subscriber-side settled non-row facts by canonical query binding/view.
     settled_program_facts: BTreeMap<BindingViewKey, BTreeSet<ViewFactEntry>>,
     /// Server-stamped settled-through cursor for each canonical binding view.
@@ -676,6 +678,7 @@ where
                 registered_bindings: BTreeMap::new(),
                 settled_result_sets: BTreeMap::new(),
                 settled_result_row_index: BTreeMap::new(),
+                settled_evidence_sets: BTreeMap::new(),
                 settled_program_facts: BTreeMap::new(),
                 settled_through_by_binding_view: BTreeMap::new(),
                 authorization_progress_by_binding_view: BTreeMap::new(),
@@ -5664,11 +5667,14 @@ pub(crate) struct ViewUpdateParts {
     pub(crate) defer_settlement: bool,
     pub(crate) reset_result_set: bool,
     pub(crate) version_carriers: Vec<VersionCarrier>,
+    pub(crate) evidence_version_carriers: Vec<VersionCarrier>,
     pub(crate) version_bundles: Vec<VersionBundle>,
     pub(crate) peer_complete_tx_payload_refs: Vec<TxId>,
     pub(crate) authorization_progress: Option<u64>,
     pub(crate) result_member_adds: Vec<ResultMemberEntry>,
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
+    pub(crate) evidence_member_adds: Vec<ResultMemberEntry>,
+    pub(crate) evidence_member_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ViewFactEntry>,
     pub(crate) program_fact_removes: Vec<ViewFactEntry>,
 }

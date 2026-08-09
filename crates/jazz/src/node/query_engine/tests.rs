@@ -130,6 +130,7 @@ fn normalized_shape(byte: u8) -> NormalizedRowSetShape {
         },
         auxiliary_sources: BTreeSet::new(),
         closure_paths: Vec::new(),
+        authorization_join_contributions: Vec::new(),
         join_contributions: Vec::new(),
         reachable_contributions: Vec::new(),
         nodes: BTreeMap::from([(
@@ -175,6 +176,7 @@ fn chained_row_set_input(byte: u8, binding_values: BTreeMap<String, Value>) -> R
             },
             auxiliary_sources: BTreeSet::new(),
             closure_paths: Vec::new(),
+            authorization_join_contributions: Vec::new(),
             join_contributions: Vec::new(),
             reachable_contributions: Vec::new(),
             nodes: BTreeMap::from([
@@ -258,6 +260,7 @@ fn aggregate_over_window_row_set_input(byte: u8) -> RowSetProgramInput {
             },
             auxiliary_sources: BTreeSet::new(),
             closure_paths: Vec::new(),
+            authorization_join_contributions: Vec::new(),
             join_contributions: Vec::new(),
             reachable_contributions: Vec::new(),
             nodes: BTreeMap::from([
@@ -339,6 +342,7 @@ fn claim_filtered_row_set_input(byte: u8, claim: &str) -> RowSetProgramInput {
             },
             auxiliary_sources: BTreeSet::new(),
             closure_paths: Vec::new(),
+            authorization_join_contributions: Vec::new(),
             join_contributions: Vec::new(),
             reachable_contributions: Vec::new(),
             nodes: BTreeMap::from([
@@ -1051,6 +1055,7 @@ fn current_source_select_projection_and_default_ordered_slice_lower() {
                 },
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
+                authorization_join_contributions: Vec::new(),
                 join_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
@@ -1150,6 +1155,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                 },
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
+                authorization_join_contributions: Vec::new(),
                 join_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
@@ -1310,6 +1316,7 @@ fn current_join_via_can_use_union_relation_input() {
                 },
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
+                authorization_join_contributions: Vec::new(),
                 join_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
@@ -1450,6 +1457,7 @@ fn current_join_via_lowers_source_column_row_id_target_and_correlations() {
                 },
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
+                authorization_join_contributions: Vec::new(),
                 join_contributions: vec![JoinContribution {
                     id: "join_via:0".to_owned(),
                     source: join_source.clone(),
@@ -1591,6 +1599,7 @@ fn join_contribution_membership_can_use_projected_bridge_fields() {
                 },
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
+                authorization_join_contributions: Vec::new(),
                 join_contributions: vec![JoinContribution {
                     id: "join_via:0".to_owned(),
                     source: join_source.clone(),
@@ -1733,6 +1742,7 @@ fn correlated_path_projection_lowers_with_relation_fact_schemas() {
                 },
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
+                authorization_join_contributions: Vec::new(),
                 join_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
@@ -1932,6 +1942,7 @@ fn correlated_path_request(
                 },
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
+                authorization_join_contributions: Vec::new(),
                 join_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
@@ -2542,6 +2553,7 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
                 },
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
+                authorization_join_contributions: Vec::new(),
                 join_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
@@ -2849,6 +2861,7 @@ fn recursive_relation_seed_claim_lowers_from_policy_context() {
                 },
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
+                authorization_join_contributions: Vec::new(),
                 join_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([

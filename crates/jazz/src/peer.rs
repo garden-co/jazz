@@ -590,10 +590,13 @@ impl PeerState {
                 settled_through: node.applied_global_watermark(),
                 reset_result_set: false,
                 version_carriers: Vec::new(),
+                evidence_version_carriers: Vec::new(),
                 version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
+                evidence_member_adds: Vec::new(),
+                evidence_member_removes: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             });
@@ -669,7 +672,7 @@ impl PeerState {
             adds: result_member_adds,
             removes: mut result_member_removes,
             evidence_adds,
-            evidence_removes: _,
+            evidence_removes,
             result_payload_adds: _,
             result_payload_removes: _,
             program_fact_adds,
@@ -749,10 +752,13 @@ impl PeerState {
                 settled_through: node.applied_global_watermark(),
                 reset_result_set: false,
                 version_carriers: Vec::new(),
+                evidence_version_carriers: Vec::new(),
                 version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
+                evidence_member_adds: Vec::new(),
+                evidence_member_removes: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             });
@@ -798,6 +804,7 @@ impl PeerState {
                     result_member_adds,
                     result_member_removes,
                     evidence_member_adds: evidence_adds,
+                    evidence_member_removes: evidence_removes,
                     program_fact_adds,
                     program_fact_removes,
                     identity: self.identity(),
@@ -1151,6 +1158,7 @@ impl PeerState {
                 result_member_adds,
                 result_member_removes,
                 evidence_member_adds: transitions.evidence_adds,
+                evidence_member_removes: transitions.evidence_removes,
                 program_fact_adds,
                 program_fact_removes,
                 identity: self.identity(),
@@ -1335,7 +1343,7 @@ impl PeerState {
             adds: source_adds,
             removes: source_removes,
             evidence_adds: source_evidence_adds,
-            evidence_removes: _,
+            evidence_removes: source_evidence_removes,
             result_payload_adds: _,
             result_payload_removes: _,
             program_fact_adds: source_program_fact_adds,
@@ -1356,10 +1364,13 @@ impl PeerState {
                 settled_through: node.applied_global_watermark(),
                 reset_result_set: false,
                 version_carriers: Vec::new(),
+                evidence_version_carriers: Vec::new(),
                 version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: source_adds,
                 result_member_removes: source_removes,
+                evidence_member_adds: source_evidence_adds.clone(),
+                evidence_member_removes: source_evidence_removes.clone(),
                 program_fact_adds: source_program_fact_adds,
                 program_fact_removes: source_program_fact_removes,
             });
@@ -1423,6 +1434,7 @@ impl PeerState {
                     result_member_adds,
                     result_member_removes: Vec::new(),
                     evidence_member_adds: source_evidence_adds,
+                    evidence_member_removes: source_evidence_removes,
                     program_fact_adds: Vec::new(),
                     program_fact_removes: Vec::new(),
                     identity: self.identity(),
@@ -2488,10 +2500,13 @@ mod tests {
             settled_through: GlobalSeq(0),
             reset_result_set,
             version_carriers: Vec::new(),
+            evidence_version_carriers: Vec::new(),
             version_bundles: Vec::new(),
             peer_payload_inventory: Default::default(),
             result_member_adds: adds,
             result_member_removes: removes,
+            evidence_member_adds: Vec::new(),
+            evidence_member_removes: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         };
@@ -2883,6 +2898,17 @@ mod tests {
                 );
                 bundles
             }
+            _ => Vec::new(),
+        }
+    }
+
+    fn evidence_version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
+        match update {
+            SyncMessage::ViewUpdate {
+                evidence_version_carriers,
+                ..
+            } => expand_version_carriers(evidence_version_carriers)
+                .expect("test evidence carriers should expand"),
             _ => Vec::new(),
         }
     }
@@ -4354,10 +4380,13 @@ mod tests {
                 settled_through: crate::time::GlobalSeq(1),
                 reset_result_set: false,
                 version_carriers: Vec::new(),
+                evidence_version_carriers: Vec::new(),
                 version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
+                evidence_member_adds: Vec::new(),
+                evidence_member_removes: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             }
@@ -5077,6 +5106,7 @@ mod tests {
         core.reset_query_engine_read_metrics();
         let update = peer.current_rows_update(&mut core, "docs").unwrap();
         let version_bundles = version_bundles_for_update(&update);
+        let evidence_version_bundles = evidence_version_bundles_for_update(&update);
         let SyncMessage::ViewUpdate {
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
@@ -5096,7 +5126,7 @@ mod tests {
         );
         assert!(result_member_removes.is_empty());
         assert!(complete_tx_payload_refs.is_empty());
-        assert_eq!(version_bundles.len(), 2);
+        assert_eq!(version_bundles.len(), 1);
         let docs_bundle = version_bundles
             .iter()
             .find(|bundle| bundle.tx.tx_id == docs_tx)
@@ -5105,7 +5135,7 @@ mod tests {
         assert!(docs_bundle.tx.n_total_writes > docs_bundle.versions.len() as u32);
         assert_eq!(docs_bundle.versions.len(), 1);
         assert_eq!(docs_bundle.versions[0].row_uuid(), doc_a);
-        let evidence_bundle = version_bundles
+        let evidence_bundle = evidence_version_bundles
             .iter()
             .find(|bundle| bundle.tx.tx_id == grant_a)
             .expect("authorized policy contributor must ship as evidence");
@@ -5367,6 +5397,7 @@ mod tests {
         let mut peer = PeerState::client_link(user);
         let first_update = peer.current_rows_update(&mut core, "docs").unwrap();
         let version_bundles = version_bundles_for_update(&first_update);
+        let evidence_version_bundles = evidence_version_bundles_for_update(&first_update);
         let SyncMessage::ViewUpdate {
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
@@ -5384,7 +5415,7 @@ mod tests {
             result_member_adds,
             &vec![("docs".to_owned().into(), doc_one, docs_tx)]
         );
-        assert_eq!(version_bundles.len(), 2);
+        assert_eq!(version_bundles.len(), 1);
         let docs_bundle = version_bundles
             .iter()
             .find(|bundle| bundle.tx.tx_id == docs_tx)
@@ -5393,7 +5424,7 @@ mod tests {
         assert_eq!(docs_bundle.versions.len(), 1);
         assert_eq!(docs_bundle.versions[0].row_uuid(), doc_one);
         assert!(
-            version_bundles
+            evidence_version_bundles
                 .iter()
                 .any(|bundle| bundle.tx.tx_id == first_grant)
         );
@@ -5418,6 +5449,7 @@ mod tests {
 
         let grant_update = peer.current_rows_update(&mut core, "docs").unwrap();
         let version_bundles = version_bundles_for_update(&grant_update);
+        let evidence_version_bundles = evidence_version_bundles_for_update(&grant_update);
         let SyncMessage::ViewUpdate {
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
@@ -5437,7 +5469,7 @@ mod tests {
             result_member_adds,
             &vec![("docs".to_owned().into(), doc_two, docs_tx),]
         );
-        assert_eq!(version_bundles.len(), 2);
+        assert_eq!(version_bundles.len(), 1);
         let docs_bundle = version_bundles
             .iter()
             .find(|bundle| bundle.tx.tx_id == docs_tx)
@@ -5446,7 +5478,7 @@ mod tests {
         assert_eq!(docs_bundle.versions.len(), 1);
         assert_eq!(docs_bundle.versions[0].row_uuid(), doc_two);
         assert!(
-            version_bundles
+            evidence_version_bundles
                 .iter()
                 .any(|bundle| bundle.tx.tx_id == second_grant)
         );

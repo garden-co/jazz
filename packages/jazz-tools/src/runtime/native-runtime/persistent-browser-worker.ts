@@ -48,7 +48,7 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
       case "update":
       case "upsert":
       case "delete": {
-        const result = dispatchWrite(message);
+        const result = await dispatchWrite(message);
         await getRuntime().waitForTransaction(result.transactionId, "local");
         postResult(message.id, result);
         return;
@@ -145,13 +145,19 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
   }
 }
 
-function dispatchWrite(message: WriteMessage): { transactionId: string } {
+async function dispatchWrite(message: WriteMessage): Promise<{ transactionId: string }> {
   const runtime = getRuntime();
   let result: { transactionId: string };
   switch (message.method) {
     case "insert": {
       const [table, values, writeContext, objectId] = message.args;
-      result = runtime.insert(table, values, writeContext, objectId);
+      try {
+        result = runtime.insert(table, values, writeContext, objectId);
+      } catch (error) {
+        if (!String(error).includes("policy denied INSERT")) throw error;
+        await runtime.settleInsertEvidence(table, values, writeContext);
+        result = runtime.insert(table, values, writeContext, objectId);
+      }
       break;
     }
     case "restore": {

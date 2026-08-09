@@ -135,6 +135,10 @@ pub enum SyncMessage {
         /// Receivers validate this stream and apply packed runs directly.
         /// Legacy/test paths may still expand carriers into `version_bundles`.
         version_carriers: Vec<VersionCarrier>,
+        /// Authority-scoped dependency payloads used to evaluate this view's
+        /// policies. These rows are storage evidence, never public result
+        /// payload or ordinary version-bundle coverage.
+        evidence_version_carriers: Vec<VersionCarrier>,
         /// Version bundles not previously shipped on the peer.
         ///
         /// Partial bundles may contain only the versions that contribute to this
@@ -155,6 +159,11 @@ pub enum SyncMessage {
         result_member_adds: Vec<ResultMemberEntry>,
         /// Typed result membership removals for the subscription.
         result_member_removes: Vec<ResultMemberEntry>,
+        /// Authority-scoped dependency memberships for local policy settlement.
+        /// These never participate in the public result set.
+        evidence_member_adds: Vec<ResultMemberEntry>,
+        /// Released authority-scoped dependency memberships.
+        evidence_member_removes: Vec<ResultMemberEntry>,
         /// Non-row program fact additions, such as relation edges.
         program_fact_adds: Vec<ProgramFactEntry>,
         /// Non-row program fact removals, such as relation edges.

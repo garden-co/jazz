@@ -24,6 +24,16 @@ fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
         _ => Vec::new(),
     }
 }
+fn evidence_version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
+    match update {
+        SyncMessage::ViewUpdate {
+            evidence_version_carriers,
+            ..
+        } => crate::protocol::expand_version_carriers(evidence_version_carriers)
+            .expect("test evidence carriers should expand"),
+        _ => Vec::new(),
+    }
+}
 fn assert_currency_tables_match_storage<S>(node: &mut NodeState<S>, table: &str)
 where
     S: OrderedKvStorage,

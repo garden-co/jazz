@@ -7007,10 +7007,13 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             settled_through,
             reset_result_set,
             version_carriers,
+            evidence_version_carriers,
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
+            evidence_member_adds,
+            evidence_member_removes,
             program_fact_adds,
             program_fact_removes,
         } => ViewUpdateParts {
@@ -7019,11 +7022,14 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             defer_settlement: false,
             reset_result_set,
             version_carriers,
+            evidence_version_carriers,
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
             authorization_progress: peer_payload_inventory.authorization_progress,
             result_member_adds,
             result_member_removes,
+            evidence_member_adds,
+            evidence_member_removes,
             program_fact_adds,
             program_fact_removes,
         },
@@ -7131,24 +7137,32 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             settled_through,
             reset_result_set,
             version_carriers,
+            evidence_version_carriers,
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
+            evidence_member_adds,
+            evidence_member_removes,
             program_fact_adds,
             program_fact_removes,
         } => format!(
-            "ViewUpdate {} settled={} reset={} bundles={} inventory={} adds={} removes={} fact_adds={} fact_removes={}",
+            "ViewUpdate {} settled={} reset={} bundles={} inventory={} adds={} removes={} evidence_adds={} evidence_removes={} fact_adds={} fact_removes={}",
             summarize_subscription_key(*subscription),
             settled_through.0,
             reset_result_set,
             version_bundles.len()
                 + expand_version_carriers(version_carriers)
                     .map(|bundles| bundles.len())
+                    .unwrap_or_default()
+                + expand_version_carriers(evidence_version_carriers)
+                    .map(|bundles| bundles.len())
                     .unwrap_or_default(),
             peer_payload_inventory.complete_tx_payloads.len(),
             result_member_adds.len(),
             result_member_removes.len(),
+            evidence_member_adds.len(),
+            evidence_member_removes.len(),
             program_fact_adds.len(),
             program_fact_removes.len()
         ),

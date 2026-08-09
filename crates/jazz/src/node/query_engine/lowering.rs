@@ -5121,51 +5121,86 @@ fn lowered_terminals(
                     });
                 }
             }
-            for contribution in &request.input.shape.join_contributions {
-                let resolved_source =
-                    resolved_sources.get(&contribution.source).ok_or_else(|| {
-                        Box::new(CapabilityReport {
-                            gaps: vec![UnsupportedReason::Runtime(format!(
-                                "join contribution source {:?} was not resolved",
-                                contribution.source
-                            ))],
-                            explain: ExplainPlan::default(),
-                        })
-                    })?;
-                let output = fact_output_with_terminal(
-                    fact,
-                    ProgramFactTerminal::Primary,
-                    plan,
-                    resolved_source,
-                    resolved_sources,
-                    claim_route_fields.clone(),
-                )?;
+            if has_explicit_closure_path(&request.input.shape)
+                || request
+                    .output
+                    .facts
+                    .contains(&ProgramFactKey::AuthorizedRows)
+            {
+                for contribution in &request.input.shape.join_contributions {
+                    let resolved_source =
+                        resolved_sources.get(&contribution.source).ok_or_else(|| {
+                            Box::new(CapabilityReport {
+                                gaps: vec![UnsupportedReason::Runtime(format!(
+                                    "join contribution source {:?} was not resolved",
+                                    contribution.source
+                                ))],
+                                explain: ExplainPlan::default(),
+                            })
+                        })?;
+                    let output = fact_output_with_terminal(
+                        fact,
+                        ProgramFactTerminal::Primary,
+                        plan,
+                        resolved_source,
+                        resolved_sources,
+                        claim_route_fields.clone(),
+                    )?;
+                    let contribution_graph = join_contribution_membership_graph(
+                        closure.visible_root.clone(),
+                        contribution,
+                        source,
+                        resolved_source,
+                        &request.input.shape.nodes,
+                        resolved_sources,
+                        request,
+                    )?;
+                    let graph = fact_terminal_graph(
+                        fact,
+                        contribution_graph,
+                        plan,
+                        resolved_source,
+                        resolved_sources,
+                        request,
+                        output_routing_fields(&output),
+                    )?;
+                    terminals.push(LoweredTerminal {
+                        sink: scoped_fact_sink_name(fact, &contribution.source),
+                        graph,
+                        output: OutputTerminalSchema::Fact(output),
+                    });
+                }
+            }
+        } else if matches!(fact, ProgramFactKey::VersionWitnesses) {
+            let mut evidence_members = closure
+                .all_visible_members(source.row_shape.source.clone())
+                .into_iter()
+                .collect::<BTreeMap<_, _>>();
+            for contribution in &request.input.shape.authorization_join_contributions {
+                let Some(contribution_source) = resolved_sources.get(&contribution.source) else {
+                    continue;
+                };
                 let contribution_graph = join_contribution_membership_graph(
                     closure.visible_root.clone(),
                     contribution,
                     source,
-                    resolved_source,
+                    contribution_source,
                     &request.input.shape.nodes,
                     resolved_sources,
                     request,
                 )?;
-                let graph = fact_terminal_graph(
-                    fact,
-                    contribution_graph,
-                    plan,
-                    resolved_source,
-                    resolved_sources,
-                    request,
-                    output_routing_fields(&output),
-                )?;
-                terminals.push(LoweredTerminal {
-                    sink: scoped_fact_sink_name(fact, &contribution.source),
-                    graph,
-                    output: OutputTerminalSchema::Fact(output),
-                });
+                evidence_members
+                    .entry(contribution.source.clone())
+                    .and_modify(|existing| {
+                        *existing =
+                            GraphBuilder::union([existing.clone(), contribution_graph.clone()]);
+                    })
+                    .or_insert(contribution_graph);
             }
-        } else if matches!(fact, ProgramFactKey::VersionWitnesses) {
             for (source_id, resolved_source) in resolved_sources {
+                let Some(member_graph) = evidence_members.get(source_id) else {
+                    continue;
+                };
                 let content_output = fact_output_with_terminal(
                     fact,
                     ProgramFactTerminal::VersionWitnessContent,
@@ -5176,7 +5211,12 @@ fn lowered_terminals(
                 )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_fact_sink_name(fact, source_id),
-                    graph: content_version_witness_graph(resolved_source, "version_content")?,
+                    graph: GraphBuilder::semi_join(
+                        content_version_witness_graph(resolved_source, "version_content")?,
+                        member_graph.clone(),
+                        ["row_uuid"],
+                        [resolved_source.row_shape.row_uuid_field.clone()],
+                    ),
                     output: OutputTerminalSchema::Fact(content_output),
                 });
                 if resolved_source.deletion_register.is_none() {
@@ -5192,10 +5232,15 @@ fn lowered_terminals(
                 )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_deletion_fact_sink_name(fact, source_id),
-                    graph: deletion_witness_graph_for_current_register(
-                        resolved_source,
-                        "version_deletion",
-                    )?,
+                    graph: GraphBuilder::semi_join(
+                        deletion_witness_graph_for_current_register(
+                            resolved_source,
+                            "version_deletion",
+                        )?,
+                        member_graph.clone(),
+                        ["row_uuid"],
+                        [resolved_source.row_shape.row_uuid_field.clone()],
+                    ),
                     output: OutputTerminalSchema::Fact(deletion_output),
                 });
             }
@@ -6129,7 +6174,34 @@ fn join_contribution_membership_graph(
             contribution_graph = unwrap_nullable_join_key(contribution_graph, join_key.clone(), 1);
         }
     }
-    let mut projection = project_source_fields_from_prefix(contribution_source, RIGHT_JOIN_PREFIX);
+    let mut projection = contribution_source
+        .row_shape
+        .descriptor
+        .fields()
+        .iter()
+        .filter_map(|field| field.name.as_ref())
+        .filter_map(|field| {
+            let relation_field = if lowered.fields.contains(field) {
+                field.as_str()
+            } else if field == &contribution_source.row_shape.row_uuid_field
+                && !lowered.fields.contains(field)
+                && lowered.fields.contains("id")
+            {
+                "id"
+            } else if let Some(public_field) = field.strip_prefix("user_")
+                && !lowered.fields.contains(field)
+                && lowered.fields.contains(public_field)
+            {
+                public_field
+            } else {
+                return None;
+            };
+            Some(ProjectField::renamed(
+                right_field(relation_field),
+                field.clone(),
+            ))
+        })
+        .collect::<Vec<_>>();
     projection.extend(
         parameter_domain_for_request(request)
             .map_err(single_gap_report)?
@@ -6785,7 +6857,12 @@ fn route_literal_project_field(
         let literal = domain
             .claim_params
             .get(route_field)
-            .map(|claim| coerce_literal_for_value_type(value.clone().into(), &claim.ty.clone()))
+            .map(|claim| match &claim.ty {
+                ValueType::Nullable(inner) => {
+                    coerce_literal_for_value_type(value.clone().into(), inner)
+                }
+                ty => coerce_literal_for_value_type(value.clone().into(), ty),
+            })
             .unwrap_or_else(|| value.into());
         return Ok(ProjectField::literal(route_field.to_owned(), literal));
     }
@@ -6802,7 +6879,12 @@ fn route_literal_project_field(
     let literal = domain
         .user_params
         .get(param)
-        .map(|ty| coerce_literal_for_value_type(value.clone().into(), &ty.clone()))
+        .map(|ty| match ty {
+            ValueType::Nullable(inner) => {
+                coerce_literal_for_value_type(value.clone().into(), inner)
+            }
+            ty => coerce_literal_for_value_type(value.clone().into(), ty),
+        })
         .unwrap_or_else(|| value.clone().into());
     Ok(ProjectField::literal(route_field.to_owned(), literal))
 }

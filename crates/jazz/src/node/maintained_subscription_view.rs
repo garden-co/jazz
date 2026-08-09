@@ -53,6 +53,7 @@ pub(crate) struct MaintainedSubscriptionView {
     structured_app_rows: BTreeMap<RowUuid, BTreeMap<Vec<u8>, i64>>,
     structured_app_row_descriptor: Option<RecordDescriptor>,
     versions: WeightedVersionIndex,
+    evidence_versions: WeightedVersionIndex,
     replacements: ReplacementIndex,
 }
 
@@ -150,6 +151,7 @@ pub(crate) enum DecodedMaintainedEvent {
     },
     VersionContent(VersionRow),
     VersionDeletion(VersionRow),
+    EvidenceVersion(VersionRow),
     ReplacementContent(VersionRow),
     ReplacementDeletion(VersionRow),
     RelationEdge(RelationEdgeEntry),
@@ -171,6 +173,8 @@ enum MaintainedTerminalKind {
     AggregateResult(AggregateResultSchema),
     VersionContent(VersionWitnessSchema),
     VersionDeletion(VersionWitnessSchema),
+    EvidenceVersionContent(VersionWitnessSchema),
+    EvidenceVersionDeletion(VersionWitnessSchema),
     ReplacementContent(VersionWitnessSchema),
     ReplacementDeletion(VersionWitnessSchema),
     RelationEdge(RelationEdgeSchema),
@@ -182,6 +186,7 @@ enum EventIdentity {
     Result(ResultMemberEntry),
     Evidence(ResultMemberEntry),
     Version(VersionIdentity),
+    EvidenceVersion(VersionIdentity),
     Replacement(ReplacementKey, VersionIdentity),
     ProgramFact(ProgramFactEntry),
     StructuredAppRow(RowUuid, Vec<u8>),
@@ -198,6 +203,7 @@ enum NetEvent {
         Vec<String>,
     ),
     Version(VersionIdentity, VersionRow),
+    EvidenceVersion(VersionIdentity, VersionRow),
     Replacement(ReplacementKey, VersionIdentity, VersionRow),
     ProgramFact(ProgramFactEntry),
     StructuredAppRow(RowUuid, OwnedRecord),
@@ -304,6 +310,10 @@ impl MaintainedSubscriptionView {
                     let identity = VersionIdentity::for_row(&row);
                     NetEvent::Version(identity, row)
                 }
+                DecodedMaintainedEvent::EvidenceVersion(row) => {
+                    let identity = VersionIdentity::for_row(&row);
+                    NetEvent::EvidenceVersion(identity, row)
+                }
                 DecodedMaintainedEvent::ReplacementContent(row) => {
                     let identity = VersionIdentity::for_row(&row);
                     let key = ReplacementKey::for_row(&row, VersionLayer::Content);
@@ -365,6 +375,10 @@ impl MaintainedSubscriptionView {
                     self.versions
                         .apply_delta(identity, row, weight, node_aliases)?;
                 }
+                NetEvent::EvidenceVersion(identity, row) => {
+                    self.evidence_versions
+                        .apply_delta(identity, row, weight, node_aliases)?;
+                }
                 NetEvent::Replacement(key, identity, row) => {
                     self.replacements
                         .apply_delta(key, identity, row, weight, node_aliases)?;
@@ -386,7 +400,18 @@ impl MaintainedSubscriptionView {
     }
 
     pub(crate) fn versions_by_tx(&self, tx_id: TxId) -> Vec<VersionRow> {
-        self.versions.versions_by_tx(tx_id)
+        let mut rows = self.versions.versions_by_tx(tx_id);
+        rows.extend(self.evidence_versions.versions_by_tx(tx_id));
+        rows
+    }
+
+    pub(crate) fn current_version_rows(&self) -> Vec<(VersionRow, TxId)> {
+        self.evidence_versions
+            .by_identity
+            .values()
+            .filter(|version| version.weight > 0 && version.row.deletion().is_none())
+            .map(|version| (version.row.clone(), version.tx_id))
+            .collect()
     }
 
     pub(crate) fn replacement_for(
@@ -412,7 +437,8 @@ impl MaintainedSubscriptionView {
                     result_member_entry_bytes(member) + result_member_payload_entry_bytes(payload)
                 })
                 .sum::<usize>();
-        let versions_bytes = self.versions.footprint_bytes();
+        let versions_bytes =
+            self.versions.footprint_bytes() + self.evidence_versions.footprint_bytes();
         let replacements_bytes = self.replacements.footprint_bytes();
         let structured_app_rows_bytes = self
             .structured_app_rows
@@ -439,14 +465,22 @@ impl MaintainedSubscriptionView {
                 .values()
                 .map(|records| records.values().filter(|weight| **weight > 0).count())
                 .sum(),
-            version_identities: self.versions.by_identity.len(),
+            version_identities: self.versions.by_identity.len()
+                + self.evidence_versions.by_identity.len(),
             version_tx_entries: self
                 .versions
                 .by_tx
                 .values()
                 .flat_map(|by_sort_key| by_sort_key.values())
                 .map(BTreeSet::len)
-                .sum(),
+                .sum::<usize>()
+                + self
+                    .evidence_versions
+                    .by_tx
+                    .values()
+                    .flat_map(|by_sort_key| by_sort_key.values())
+                    .map(BTreeSet::len)
+                    .sum::<usize>(),
             replacement_entries: self.replacements.entry_count(),
             result_weights_bytes,
             result_payloads_bytes,
@@ -726,6 +760,12 @@ impl MaintainedTerminalSchemas {
                         MaintainedTerminalKind::ResultCurrent(schema) => {
                             MaintainedTerminalKind::EvidenceCurrent(schema)
                         }
+                        MaintainedTerminalKind::VersionContent(schema) => {
+                            MaintainedTerminalKind::EvidenceVersionContent(schema)
+                        }
+                        MaintainedTerminalKind::VersionDeletion(schema) => {
+                            MaintainedTerminalKind::EvidenceVersionDeletion(schema)
+                        }
                         other => other,
                     }
                 } else {
@@ -913,6 +953,16 @@ fn decode_typed_terminal_record(
             validate_witness_event_kind(record, "version_deletion")?;
             decode_typed_version_witness(record, schema, tables, decode_plan_cache)
                 .map(DecodedMaintainedEvent::VersionDeletion)
+        }
+        MaintainedTerminalKind::EvidenceVersionContent(schema) => {
+            validate_witness_event_kind(record, "version_content")?;
+            decode_typed_version_witness(record, schema, tables, decode_plan_cache)
+                .map(DecodedMaintainedEvent::EvidenceVersion)
+        }
+        MaintainedTerminalKind::EvidenceVersionDeletion(schema) => {
+            validate_witness_event_kind(record, "version_deletion")?;
+            decode_typed_version_witness(record, schema, tables, decode_plan_cache)
+                .map(DecodedMaintainedEvent::EvidenceVersion)
         }
         MaintainedTerminalKind::ReplacementContent(schema) => {
             validate_witness_event_kind(record, "replacement_content")?;
@@ -1589,6 +1639,7 @@ impl NetEvent {
             Self::Evidence(entry) => EventIdentity::Evidence(entry.clone()),
             Self::AggregateResult(member, ..) => EventIdentity::Result(member.clone()),
             Self::Version(identity, _) => EventIdentity::Version(identity.clone()),
+            Self::EvidenceVersion(identity, _) => EventIdentity::EvidenceVersion(identity.clone()),
             Self::Replacement(key, identity, _) => {
                 EventIdentity::Replacement(key.clone(), identity.clone())
             }

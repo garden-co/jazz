@@ -81,6 +81,9 @@ pub(crate) struct NormalizedRowSetShape {
     /// Join-side rows that are part of the materialized maintained/sync
     /// payload when they contribute to a visible root result.
     pub(crate) join_contributions: Vec<JoinContribution>,
+    /// Join-side rows needed to evaluate authorization, including joins inside
+    /// policy branches that must never become public result members.
+    pub(crate) authorization_join_contributions: Vec<JoinContribution>,
     /// Reachable access rows that contribute to a visible root result through
     /// a recursive closure.
     pub(crate) reachable_contributions: Vec<ReachableContribution>,

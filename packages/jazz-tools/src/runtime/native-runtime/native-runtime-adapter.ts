@@ -488,6 +488,40 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.finishInsert(table, rowId, values, write);
   }
 
+  async settleInsertEvidence(
+    table: string,
+    values: InsertValues,
+    writeContext?: string | null,
+  ): Promise<void> {
+    const session = sessionFromWriteContext(writeContext);
+    this.applySessionClaims(session);
+    const dependencies = this.table(table).columns.flatMap((column) => {
+      if (!column.references) return [];
+      const value = values[column.name];
+      if (!value || value.type !== "Uuid") return [];
+      return [{ table: column.references, rowId: value.value }];
+    });
+    for (const dependency of dependencies) {
+      const queryJson = JSON.stringify({
+        table: dependency.table,
+        conditions: [{ column: "id", op: "eq", value: dependency.rowId }],
+        array_subqueries: [],
+      });
+      const query = this.prepareQuery(queryJson);
+      const attachment = await this.attachQueryIfNeeded("edge", null, query, session);
+      try {
+        const opts = readOptions("edge", false, null);
+        if (session) {
+          this.db.allForIdentity(query, session.identity, opts);
+        } else {
+          this.db.all(query, opts);
+        }
+      } finally {
+        if (attachment !== undefined) this.db.detachQuery?.(attachment);
+      }
+    }
+  }
+
   restore(
     table: string,
     objectId: string,

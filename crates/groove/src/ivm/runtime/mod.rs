@@ -1817,9 +1817,11 @@ impl IvmRuntime {
                 let mut output = None;
                 for input in inputs {
                     let next = self.infer_builder_output_cached(input, output_memo)?;
-                    if let Some(output) = output {
-                        if output != next {
-                            return Err(IvmRuntimeError::GraphOutputMismatch);
+                    if let Some(current) = output {
+                        if current != next {
+                            output = Some(union_compatible_descriptor(current, next)?);
+                        } else {
+                            output = Some(current);
                         }
                     } else {
                         output = Some(next);
@@ -2848,7 +2850,35 @@ impl IvmRuntime {
             GraphBuilder::Union { inputs } => {
                 let mut input_nodes = Vec::with_capacity(inputs.len());
                 for input in inputs {
-                    let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
+                    let mut compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
+                    for output_field in inferred_output.fields() {
+                        let Some(field) = output_field.name.as_deref() else {
+                            return Err(IvmRuntimeError::GraphOutputMismatch);
+                        };
+                        let Some(field_idx) = compiled_input.output.field_index(field) else {
+                            return Err(IvmRuntimeError::GraphOutputMismatch);
+                        };
+                        let input_field = &compiled_input.output.fields()[field_idx];
+                        if let ValueType::Nullable(inner) = &input_field.value_type
+                            && inner.as_ref() == &output_field.value_type
+                        {
+                            let output =
+                                unwrap_nullable_descriptor(&compiled_input.output, field_idx)?;
+                            let node = self.graph.dedup_node(
+                                NodeDescriptor::new(
+                                    OpType::UnwrapNullable(UnwrapNullableOp {
+                                        field: field.to_owned(),
+                                        field_idx,
+                                    }),
+                                    [compiled_input.node],
+                                    output,
+                                ),
+                                NodeDurability::Ephemeral,
+                            );
+                            self.initialize_node_runtime(node);
+                            compiled_input = CompiledNode { output, node };
+                        }
+                    }
                     let input_node = compiled_input.node;
                     let input_output = compiled_input.output;
                     if inferred_output != input_output {
@@ -8136,6 +8166,40 @@ fn unwrap_nullable_descriptor(
         })
         .collect::<Result<Vec<_>, IvmRuntimeError>>()
         .map(RecordDescriptor::new)
+}
+
+fn union_compatible_descriptor(
+    left: RecordDescriptor,
+    right: RecordDescriptor,
+) -> Result<RecordDescriptor, IvmRuntimeError> {
+    if left.fields().len() != right.fields().len() {
+        return Err(IvmRuntimeError::GraphOutputMismatch);
+    }
+    let fields = left
+        .fields()
+        .iter()
+        .zip(right.fields())
+        .map(|(left, right)| {
+            if left.name != right.name {
+                return Err(IvmRuntimeError::GraphOutputMismatch);
+            }
+            let value_type = if left.value_type == right.value_type {
+                left.value_type.clone()
+            } else {
+                match (&left.value_type, &right.value_type) {
+                    (ValueType::Nullable(inner), other) if inner.as_ref() == other => other.clone(),
+                    (other, ValueType::Nullable(inner)) if inner.as_ref() == other => other.clone(),
+                    _ => return Err(IvmRuntimeError::GraphOutputMismatch),
+                }
+            };
+            let name = left
+                .name
+                .clone()
+                .ok_or(IvmRuntimeError::GraphOutputMismatch)?;
+            Ok((name, value_type))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(RecordDescriptor::new(fields))
 }
 
 fn unnest_descriptor(

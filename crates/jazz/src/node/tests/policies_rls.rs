@@ -2935,7 +2935,8 @@ fn prepared_subscription_multi_segment_forward_include_keeps_root_delta() {
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
     let SyncMessage::ViewUpdate {
-        result_member_adds, ..
+        result_member_adds,
+        ..
     } = update
     else {
         panic!("expected view update");
@@ -5016,6 +5017,7 @@ fn reverse_referencing_select_policy_allows_root_row_through_source_row() {
         .with_read_policy(Policy::public())
         .with_write_policy(Policy::public()),
     ]);
+    let reader_schema = schema.clone();
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let alice = user(0xa1);
     let bob = user(0xb2);
@@ -5058,9 +5060,21 @@ fn reverse_referencing_select_policy_allows_root_row_through_source_row() {
     let shape = Query::from("files").validate(&core.catalogue.schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let mut peer = PeerState::client_link(alice);
-    let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let update = peer
+        .rehydrate_query_with_opts(
+            &mut core,
+            &shape,
+            &binding,
+            RegisterShapeOptions {
+                tier: DurabilityTier::Edge,
+                ..RegisterShapeOptions::default()
+            },
+        )
+        .unwrap();
     let SyncMessage::ViewUpdate {
-        result_member_adds, ..
+        result_member_adds,
+        evidence_member_adds,
+        ..
     } = &update
     else {
         panic!("expected maintained file view update");
@@ -5069,7 +5083,11 @@ fn reverse_referencing_select_policy_allows_root_row_through_source_row() {
         member.as_row(),
         Some((ref table, _, _)) if table.as_str() == "attachments"
     )));
-    let shipped_rows = version_bundles_for_update(&update)
+    assert!(evidence_member_adds.iter().any(|member| matches!(
+        member.as_row(),
+        Some((ref table, row, _)) if table.as_str() == "attachments" && row == attachment
+    )));
+    let shipped_rows = evidence_version_bundles_for_update(&update)
         .iter()
         .flat_map(|bundle| bundle.versions.iter().map(|version| version.row_uuid()))
         .collect::<BTreeSet<_>>();
@@ -5077,6 +5095,222 @@ fn reverse_referencing_select_policy_allows_root_row_through_source_row() {
         shipped_rows.contains(&attachment),
         "expected attachment evidence, shipped {shipped_rows:?}"
     );
+
+    let (_reader_dir, mut reader) = open_node_with_schema(node(8), reader_schema);
+    reader
+        .apply_sync_message(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: crate::protocol::ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions {
+                tier: DurabilityTier::Edge,
+                ..RegisterShapeOptions::default()
+            },
+        })
+        .unwrap();
+    reader
+        .apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+            shape_id: shape.shape_id(),
+            subscription: SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: RegisterShapeOptions {
+                    tier: DurabilityTier::Edge,
+                    ..RegisterShapeOptions::default()
+                }
+                .read_view_key(),
+            },
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .unwrap();
+    let (mut local, initial) = reader
+        .open_local_maintained_view_subscription(
+            &shape,
+            &binding,
+            alice,
+            DurabilityTier::Edge,
+            &crate::protocol::ReadViewSpec::default(),
+            None,
+        )
+        .unwrap();
+    assert!(initial.rows.is_empty());
+    reader.apply_sync_message(update.clone()).unwrap();
+    assert!(
+        reader
+            .dry_run_read_current_allows("files", alice_file, alice)
+            .unwrap(),
+        "receiver authorization graph must replay from transported attachment evidence"
+    );
+    assert!(
+        reader
+            .query_rows(&shape, &binding, DurabilityTier::Edge)
+            .unwrap()
+            .iter()
+            .any(|row| row.row_uuid() == alice_file),
+        "receiver settled query must publish the public file root"
+    );
+    let local_update = reader
+        .drain_local_maintained_view_subscription(&mut local)
+        .unwrap()
+        .expect("receiver evidence must dirty the local maintained graph");
+    assert!(
+        local_update
+            .added
+            .iter()
+            .any(|row| row.row_uuid() == alice_file),
+        "receiver local maintained graph must publish the public file root"
+    );
+
+    let filtered_shape = Query::from("files")
+        .filter(eq(
+            col("id"),
+            lit(Value::Uuid(unlinked_file.0)),
+        ))
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let filtered_binding = filtered_shape.bind(BTreeMap::new()).unwrap();
+    let filtered_opts = RegisterShapeOptions {
+        tier: DurabilityTier::Edge,
+        ..RegisterShapeOptions::default()
+    };
+    let filtered_subscription = SubscriptionKey {
+        shape_id: filtered_shape.shape_id(),
+        binding_id: filtered_binding.binding_id(),
+        read_view: filtered_opts.read_view_key(),
+    };
+    let mut filtered_peer = PeerState::client_link(alice);
+    let filtered_initial = filtered_peer
+        .rehydrate_query_with_opts(
+            &mut core,
+            &filtered_shape,
+            &filtered_binding,
+            filtered_opts.clone(),
+        )
+        .unwrap();
+    assert!(matches!(
+        &filtered_initial,
+        SyncMessage::ViewUpdate {
+            result_member_adds,
+            ..
+        } if result_member_adds.is_empty()
+    ));
+    reader
+        .apply_sync_message(SyncMessage::RegisterShape {
+            shape_id: filtered_shape.shape_id(),
+            ast: crate::protocol::ShapeAst::from_validated(&filtered_shape),
+            opts: filtered_opts.clone(),
+        })
+        .unwrap();
+    reader
+        .apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+            shape_id: filtered_shape.shape_id(),
+            subscription: filtered_subscription,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .unwrap();
+    let (mut filtered_local, filtered_snapshot) = reader
+        .open_local_maintained_view_subscription(
+            &filtered_shape,
+            &filtered_binding,
+            alice,
+            DurabilityTier::Edge,
+            &crate::protocol::ReadViewSpec::default(),
+            None,
+        )
+        .unwrap();
+    assert!(filtered_snapshot.rows.is_empty());
+    reader.apply_sync_message(filtered_initial.clone()).unwrap();
+    let filtered_local_id = filtered_local.subscription_id();
+    assert!(reader.unsubscribe_groove_subscription(filtered_local_id));
+    let (reopened_filtered_local, reopened_snapshot) = reader
+        .open_local_maintained_view_subscription(
+            &filtered_shape,
+            &filtered_binding,
+            alice,
+            DurabilityTier::Edge,
+            &crate::protocol::ReadViewSpec::default(),
+            None,
+        )
+        .unwrap();
+    filtered_local = reopened_filtered_local;
+    assert!(reopened_snapshot.rows.is_empty());
+
+    let later_attachment = row(0xa8);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("attachments", later_attachment, 21).cells(BTreeMap::from([
+            ("fileId".to_owned(), Value::Uuid(unlinked_file.0)),
+            ("ownerId".to_owned(), Value::String(alice.0.to_string())),
+        ])),
+    );
+    let edge_opts = RegisterShapeOptions {
+        tier: DurabilityTier::Edge,
+        ..RegisterShapeOptions::default()
+    };
+    let incremental = peer
+        .query_update_for_subscription_with_opts(
+            &mut core,
+            SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: edge_opts.read_view_key(),
+            },
+            &shape,
+            &binding,
+            edge_opts,
+        )
+        .unwrap();
+    let filtered_incremental = filtered_peer
+        .query_update_for_subscription_with_opts(
+            &mut core,
+            filtered_subscription,
+            &filtered_shape,
+            &filtered_binding,
+            filtered_opts,
+        )
+        .unwrap();
+    assert!(matches!(
+        &filtered_incremental,
+        SyncMessage::ViewUpdate {
+            result_member_adds,
+            evidence_member_adds,
+            ..
+        } if result_member_adds.iter().any(|member| matches!(
+                member.as_row(),
+                Some((ref table, row, _)) if table.as_str() == "files" && row == unlinked_file
+            )) && evidence_member_adds.iter().any(|member| matches!(
+                member.as_row(),
+                Some((ref table, row, _)) if table.as_str() == "attachments" && row == later_attachment
+            ))
+    ));
+    reader
+        .apply_sync_message(filtered_incremental.clone())
+        .unwrap();
+    let filtered_local_update = reader
+        .drain_local_maintained_view_subscription(&mut filtered_local)
+        .unwrap()
+        .expect("filtered receiver evidence must dirty the local maintained graph");
+    assert!(filtered_local_update
+        .added
+        .iter()
+        .any(|row| row.row_uuid() == unlinked_file));
+    let SyncMessage::ViewUpdate {
+        result_member_adds,
+        evidence_member_adds,
+        ..
+    } = incremental
+    else {
+        panic!("expected incremental maintained file update");
+    };
+    assert!(result_member_adds.iter().any(|member| matches!(
+        member.as_row(),
+        Some((ref table, row, _)) if table.as_str() == "files" && row == unlinked_file
+    )));
+    assert!(evidence_member_adds.iter().any(|member| matches!(
+        member.as_row(),
+        Some((ref table, row, _)) if table.as_str() == "attachments" && row == later_attachment
+    )));
 }
 
 #[test]

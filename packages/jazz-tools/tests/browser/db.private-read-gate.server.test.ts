@@ -503,7 +503,7 @@ describe("raw websocket private read gate", () => {
       `File "${hiddenFile.id}" was not found.`,
     );
 
-    await withTimeout(
+    const attachment = await withTimeout(
       alice
         .insert(camelChatApp.attachments, {
           messageId: bobMessage.id,
@@ -559,7 +559,7 @@ describe("raw websocket private read gate", () => {
       `File "${rawFile.id}" was not found.`,
     );
 
-    await withTimeout(
+    const rawAttachment = await withTimeout(
       alice
         .insert(camelChatApp.attachments, {
           messageId: bobMessage.id,
@@ -613,7 +613,10 @@ describe("raw websocket private read gate", () => {
       {
         label: "rendered message attachments",
         query: camelChatApp.attachments.where({ messageId: bobMessage.id }),
-        predicate: (rows: unknown[]) => rows.length === 0,
+        predicate: (rows: Array<{ id: string }>) => {
+          const ids = new Set(rows.map((row) => row.id));
+          return ids.size === 2 && ids.has(attachment.id) && ids.has(rawAttachment.id);
+        },
       },
       {
         label: "rendered message reactions",

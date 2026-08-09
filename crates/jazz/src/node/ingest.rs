@@ -474,10 +474,13 @@ where
                 settled_through,
                 reset_result_set,
                 version_carriers,
+                evidence_version_carriers,
                 version_bundles,
                 peer_payload_inventory,
                 result_member_adds,
                 result_member_removes,
+                evidence_member_adds,
+                evidence_member_removes,
                 program_fact_adds,
                 program_fact_removes,
             } => {
@@ -487,11 +490,14 @@ where
                     defer_settlement: false,
                     reset_result_set,
                     version_carriers,
+                    evidence_version_carriers,
                     version_bundles,
                     peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
                     authorization_progress: peer_payload_inventory.authorization_progress,
                     result_member_adds,
                     result_member_removes,
+                    evidence_member_adds,
+                    evidence_member_removes,
                     program_fact_adds,
                     program_fact_removes,
                 })?;
@@ -5297,6 +5303,19 @@ where
     ) -> Result<(), Error> {
         self.ingest_transaction_and_versions_with_current_indexes(
             tx, versions, fate, global_seq, durability, false,
+        )
+    }
+
+    pub(super) fn ingest_authorization_evidence_fragment_with_current_indexes(
+        &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        fate: Fate,
+        global_seq: Option<GlobalSeq>,
+        durability: DurabilityTier,
+    ) -> Result<(), Error> {
+        self.ingest_transaction_and_versions_with_current_indexes(
+            tx, versions, fate, global_seq, durability, true,
         )
     }
 

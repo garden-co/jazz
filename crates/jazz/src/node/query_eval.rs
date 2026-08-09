@@ -4233,16 +4233,23 @@ fn normalize_false_policy_branch(
     node
 }
 
+#[derive(Default)]
+struct JoinContributionCollectors {
+    public: Vec<JoinContribution>,
+    authorization: Vec<JoinContribution>,
+}
+
 fn normalize_filter_join_chain(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
-    join_contributions: &mut Vec<JoinContribution>,
+    join_contributions: &mut JoinContributionCollectors,
     schema: &JazzSchema,
     root_source: &SourceId,
     start: RowSetNodeId,
     prefix: &str,
     chain: FilterJoinChain<'_>,
     record_join_contributions: bool,
+    record_authorization_contributions: bool,
 ) -> Result<RowSetNodeId, Error> {
     let mut current = start;
     if !chain.filters.is_empty() {
@@ -4266,13 +4273,17 @@ fn normalize_filter_join_chain(
         let (right, join_source) =
             normalize_join_via_right(nodes, auxiliary_sources, schema, join, &path)?;
         let join_predicate = join_via_predicate(root_source, &join_source, join);
+        let contribution = JoinContribution {
+            id: path.clone(),
+            source: join_source.clone(),
+            input: right.clone(),
+            membership: join_predicate.clone(),
+        };
+        if record_authorization_contributions {
+            join_contributions.authorization.push(contribution.clone());
+        }
         if record_join_contributions {
-            join_contributions.push(JoinContribution {
-                id: path.clone(),
-                source: join_source.clone(),
-                input: right.clone(),
-                membership: join_predicate.clone(),
-            });
+            join_contributions.public.push(contribution);
         }
         let join_node = RowSetNodeId(format!("{path}:join"));
         nodes.insert(
@@ -4293,7 +4304,7 @@ fn normalize_filter_join_chain(
 fn normalize_policy_atom_chain(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
-    join_contributions: &mut Vec<JoinContribution>,
+    join_contributions: &mut JoinContributionCollectors,
     reachable_contributions: &mut Vec<ReachableContribution>,
     schema: &JazzSchema,
     root_source: &SourceId,
@@ -4303,6 +4314,7 @@ fn normalize_policy_atom_chain(
     binding_source_shape: &str,
     param_types: &BTreeMap<String, ColumnType>,
     record_join_contributions: bool,
+    record_authorization_contributions: bool,
     inheritance_path: &InheritanceExpansionPath,
 ) -> Result<RowSetNodeId, Error> {
     let mut current = normalize_filter_join_chain(
@@ -4318,6 +4330,7 @@ fn normalize_policy_atom_chain(
             joins: chain.joins,
         },
         record_join_contributions,
+        record_authorization_contributions,
     )?;
     for (index, inherits) in chain.inherits.iter().enumerate() {
         current = normalize_inherited_parent_policy(
@@ -4358,7 +4371,7 @@ fn normalize_policy_atom_chain(
 fn normalize_inherited_parent_policy(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
-    join_contributions: &mut Vec<JoinContribution>,
+    join_contributions: &mut JoinContributionCollectors,
     reachable_contributions: &mut Vec<ReachableContribution>,
     schema: &JazzSchema,
     child_source: &SourceId,
@@ -4443,6 +4456,7 @@ fn normalize_inherited_parent_policy(
                 binding_source_shape,
                 param_types,
                 false,
+                false,
                 &parent_inheritance_path,
             )?
         };
@@ -4471,7 +4485,7 @@ fn normalize_inherited_parent_policy(
 fn normalize_policy_branch_authorization(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
-    join_contributions: &mut Vec<JoinContribution>,
+    join_contributions: &mut JoinContributionCollectors,
     reachable_contributions: &mut Vec<ReachableContribution>,
     schema: &JazzSchema,
     root_source: &SourceId,
@@ -4509,6 +4523,7 @@ fn normalize_policy_branch_authorization(
             },
             binding_source_shape,
             param_types,
+            false,
             false,
             inheritance_path,
         )?;
@@ -4549,6 +4564,7 @@ fn normalize_policy_branch_authorization(
             },
             binding_source_shape,
             param_types,
+            false,
             false,
             inheritance_path,
         )?;
@@ -6352,7 +6368,7 @@ where
             },
         )]);
         let mut current = source_node;
-        let mut join_contributions = Vec::new();
+        let mut join_contributions = JoinContributionCollectors::default();
         let mut reachable_contributions = Vec::new();
         let inheritance_path = InheritanceExpansionPath::default();
 
@@ -6387,6 +6403,7 @@ where
                     &binding_source_shape,
                     shape.params(),
                     false,
+                    true,
                     &inheritance_path,
                 )?;
                 union_inputs.push(UnionInput {
@@ -6427,6 +6444,7 @@ where
                     &binding_source_shape,
                     shape.params(),
                     false,
+                    true,
                     &inheritance_path,
                 )?;
                 union_inputs.push(UnionInput {
@@ -6483,6 +6501,7 @@ where
                 },
                 &binding_source_shape,
                 shape.params(),
+                true,
                 true,
                 &inheritance_path,
             )?;
@@ -6726,7 +6745,8 @@ where
             },
             auxiliary_sources,
             closure_paths,
-            join_contributions,
+            join_contributions: join_contributions.public,
+            authorization_join_contributions: join_contributions.authorization,
             reachable_contributions,
             nodes,
         };
@@ -7907,6 +7927,9 @@ where
             .get(&binding_view_key)
             .cloned()
             .unwrap_or_default();
+        if let Some(evidence) = self.query.settled_evidence_sets.get(&binding_view_key) {
+            local.result_set.extend(evidence.iter().cloned());
+        }
         local.program_facts = self
             .query
             .settled_program_facts

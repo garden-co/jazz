@@ -164,6 +164,7 @@ pub(crate) struct MaintainedViewBundleInputs<'a> {
     pub(crate) result_member_adds: Vec<ResultMemberEntry>,
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
     pub(crate) evidence_member_adds: Vec<ResultMemberEntry>,
+    pub(crate) evidence_member_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
     pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
     pub(crate) identity: AuthorId,
@@ -332,6 +333,7 @@ where
             result_member_adds,
             result_member_removes,
             evidence_member_adds: transitions.evidence_adds,
+            evidence_member_removes: transitions.evidence_removes,
             program_fact_adds: transitions.program_fact_adds,
             program_fact_removes: transitions.program_fact_removes,
             peer_complete_tx_payloads,
@@ -360,6 +362,7 @@ where
             result_member_adds,
             result_member_removes,
             evidence_member_adds,
+            evidence_member_removes,
             mut program_fact_adds,
             program_fact_removes,
             identity: _identity,
@@ -430,15 +433,15 @@ where
             })
             .collect::<BTreeSet<_>>();
         let relation_edge_add_rows = relation_edge_version_rows_for_bundle(&program_fact_adds);
-        let wanted_add_rows_by_tx = row_result_adds
+        let maintained_witness_rows = maintained_facts
+            .current_version_rows()
+            .into_iter()
+            .map(|(version, tx_id)| (version.table.to_string(), version.row_uuid(), tx_id))
+            .collect::<Vec<_>>();
+        let public_add_rows_by_tx = row_result_adds
             .iter()
             .map(|(table, row_uuid, tx_id)| (table.to_string(), *row_uuid, *tx_id))
-            .chain(
-                evidence_row_adds
-                    .iter()
-                    .map(|(table, row_uuid, tx_id)| (table.to_string(), *row_uuid, *tx_id)),
-            )
-            .chain(relation_edge_add_rows)
+            .chain(relation_edge_add_rows.iter().cloned())
             .fold(
                 BTreeMap::<TxId, BTreeSet<(String, RowUuid)>>::new(),
                 |mut by_tx, (table, row_uuid, tx_id)| {
@@ -446,6 +449,24 @@ where
                     by_tx
                 },
             );
+        let evidence_add_rows_by_tx = evidence_row_adds
+            .iter()
+            .map(|(table, row_uuid, tx_id)| (table.to_string(), *row_uuid, *tx_id))
+            .chain(maintained_witness_rows.iter().cloned())
+            .fold(
+                BTreeMap::<TxId, BTreeSet<(String, RowUuid)>>::new(),
+                |mut by_tx, (table, row_uuid, tx_id)| {
+                    by_tx.entry(tx_id).or_default().insert((table, row_uuid));
+                    by_tx
+                },
+            );
+        let mut wanted_add_rows_by_tx = public_add_rows_by_tx.clone();
+        for (tx_id, rows) in &evidence_add_rows_by_tx {
+            wanted_add_rows_by_tx
+                .entry(*tx_id)
+                .or_default()
+                .extend(rows.iter().cloned());
+        }
         self.preload_transaction_memo(wanted_add_rows_by_tx.keys().copied(), &mut context)?;
         let mut version_bundles = Vec::with_capacity(row_result_adds.len());
         let mut peer_payload_inventory_refs = Vec::new();
@@ -572,7 +593,7 @@ where
         for (entry_table, row_uuid, old_tx_id) in &row_result_removes {
             let (content_winner, deletion_winner) =
                 maintained_facts.replacement_for(entry_table, *row_uuid);
-            for (version, missing_witness) in [
+            for (version, _missing_witness) in [
                 (
                     content_winner.as_ref(),
                     "removed result row missing content replacement witness",
@@ -597,8 +618,13 @@ where
                 let tx_versions = tx_versions_cache
                     .entry(tx_id)
                     .or_insert_with(|| maintained_facts.versions_by_tx(tx_id));
+                // The version terminal retracts in the same Groove drain as
+                // the dependent result membership. `replacement_for` retains
+                // the exact winner needed to construct that removal, so keep
+                // that scoped witness alive through this bundle and release it
+                // after the transition is emitted.
                 if !maintained_view_tx_versions_contain_winner(tx_versions, version) {
-                    return Err(Error::MaintainedViewMissingBundleWitness(missing_witness));
+                    tx_versions.push(version.clone());
                 }
                 emitted_versions.insert(tx_id);
                 let stored_tx = self
@@ -626,13 +652,45 @@ where
                     || wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
             });
         }
+        let mut evidence_version_bundles = Vec::new();
+        for bundle in &mut version_bundles {
+            let Some(evidence_rows) = evidence_add_rows_by_tx.get(&bundle.tx.tx_id) else {
+                continue;
+            };
+            let public_rows = public_add_rows_by_tx.get(&bundle.tx.tx_id);
+            let evidence_versions = bundle
+                .versions
+                .iter()
+                .filter(|version| {
+                    let key = (version.table().to_owned(), version.row_uuid());
+                    evidence_rows.contains(&key)
+                        && !public_rows.is_some_and(|rows| rows.contains(&key))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if evidence_versions.is_empty() {
+                continue;
+            }
+            bundle.versions.retain(|version| {
+                let key = (version.table().to_owned(), version.row_uuid());
+                version.deletion().is_some() || public_rows.is_some_and(|rows| rows.contains(&key))
+            });
+            let mut evidence_bundle = bundle.clone();
+            evidence_bundle.versions = evidence_versions;
+            evidence_version_bundles.push(evidence_bundle);
+        }
+        version_bundles.retain(|bundle| !bundle.versions.is_empty());
         let version_carriers = build_version_carriers_from_singletons(version_bundles)
             .map_err(|_| Error::InvalidStoredValue("failed to build version-bundle run"))?;
+        let evidence_version_carriers =
+            build_version_carriers_from_singletons(evidence_version_bundles)
+                .map_err(|_| Error::InvalidStoredValue("failed to build evidence-bundle run"))?;
         Ok(SyncMessage::ViewUpdate {
             subscription,
             settled_through: self.clock.applied_global_watermark,
             reset_result_set: false,
             version_carriers,
+            evidence_version_carriers,
             version_bundles: Vec::new(),
             peer_payload_inventory: PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs,
@@ -640,6 +698,8 @@ where
             },
             result_member_adds: result_member_adds.into_iter().collect(),
             result_member_removes: result_member_removes.into_iter().collect(),
+            evidence_member_adds,
+            evidence_member_removes,
             program_fact_adds,
             program_fact_removes,
         })
@@ -696,9 +756,11 @@ where
         let bulk_loaded_tx_ids = self.ingest_reset_view_bundle_refs_in_bulk(&bulk_candidates)?;
         let mut receiver_candidates = BTreeMap::<TxId, VersionBundle>::new();
         for update in &updates {
-            for bundle in
-                version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
-            {
+            let refs = version_bundle_refs_for_carriers(
+                &update.version_bundles,
+                &update.version_carriers,
+            )?;
+            for bundle in refs {
                 if bulk_loaded_tx_ids.contains(&bundle.tx.tx_id) {
                     continue;
                 }
@@ -760,16 +822,21 @@ where
             defer_settlement,
             reset_result_set,
             version_carriers,
+            evidence_version_carriers,
             version_bundles,
             peer_complete_tx_payload_refs,
             authorization_progress,
             result_member_adds,
             result_member_removes,
+            evidence_member_adds,
+            evidence_member_removes,
             program_fact_adds,
             program_fact_removes,
         } = update;
         let version_bundle_refs =
             version_bundle_refs_for_carriers(&version_bundles, &version_carriers)?;
+        let evidence_bundle_refs =
+            version_bundle_refs_for_carriers(&[], &evidence_version_carriers)?;
         let binding_view_key = match self.binding_view_key_for_subscription(subscription) {
             Ok(binding_view_key) => binding_view_key,
             Err(Error::InvalidStoredValue(
@@ -834,6 +901,9 @@ where
                 self.ingest_view_bundle_ref(*bundle)?;
             }
         }
+        for bundle in evidence_bundle_refs {
+            self.ingest_evidence_view_bundle_ref(bundle)?;
+        }
         let mut available_peer_complete_tx_payload_refs = Vec::new();
         for tx_id in peer_complete_tx_payload_refs.iter() {
             if bulk_loaded_tx_ids.contains(tx_id) {
@@ -872,6 +942,8 @@ where
             && program_fact_removes.is_empty();
         let persisted_member_adds = result_member_adds.clone();
         let persisted_member_removes = result_member_removes.clone();
+        let persisted_evidence_adds = evidence_member_adds.clone();
+        let persisted_evidence_removes = evidence_member_removes.clone();
         let persisted_fact_adds = program_fact_adds.clone();
         let persisted_fact_removes = program_fact_removes.clone();
         // A reset only replaces shared canonical state when it carries the
@@ -887,6 +959,7 @@ where
         let reset_cleared_shared_state = reset_result_set && !preserve_existing_shared_state;
         if reset_cleared_shared_state {
             self.clear_settled_result_view(binding_view_key);
+            self.query.settled_evidence_sets.remove(&binding_view_key);
             self.query.settled_program_facts.remove(&binding_view_key);
             self.query
                 .settled_through_by_binding_view
@@ -897,7 +970,20 @@ where
                 .settled_result_sets
                 .entry(binding_view_key)
                 .or_default();
+            self.query
+                .settled_evidence_sets
+                .entry(binding_view_key)
+                .or_default();
         }
+        let settled_evidence = self
+            .query
+            .settled_evidence_sets
+            .entry(binding_view_key)
+            .or_default();
+        for member in persisted_evidence_removes {
+            settled_evidence.remove(&member);
+        }
+        settled_evidence.extend(persisted_evidence_adds);
         let mut result_members_need_rewrite = false;
         let member_rewrite;
         let fact_rewrite;
@@ -1125,6 +1211,20 @@ where
         self.ingest_view_bundle(bundle.to_owned_bundle())
     }
 
+    fn ingest_evidence_view_bundle_ref(
+        &mut self,
+        bundle: VersionBundleRef<'_>,
+    ) -> Result<(), Error> {
+        validate_received_view_bundle_global_seq_durability(bundle.global_seq, bundle.durability)?;
+        self.ingest_authorization_evidence_fragment_with_current_indexes(
+            bundle.tx.clone(),
+            bundle.versions.to_vec(),
+            bundle.fate.clone(),
+            bundle.global_seq,
+            bundle.durability,
+        )
+    }
+
     fn stage_view_bundle(
         &mut self,
         batch: &mut DatabaseBatch,
@@ -1163,9 +1263,13 @@ where
         &self,
         update: &ViewUpdateParts,
     ) -> Result<(), Error> {
-        for bundle in
-            version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
-        {
+        let mut refs =
+            version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?;
+        refs.extend(version_bundle_refs_for_carriers(
+            &[],
+            &update.evidence_version_carriers,
+        )?);
+        for bundle in refs {
             validate_received_view_bundle_global_seq_durability(
                 bundle.global_seq,
                 bundle.durability,
