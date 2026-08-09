@@ -310,49 +310,58 @@ export class SubscriptionManager<T extends { id: string }> {
   ): SubscriptionDelta<T> {
     const beforeIndices = new Map(this.orderedIdIndex);
     const affectedRoots = new Set<string>();
-    const rootOperations = operations.filter((operation) => operation.path.length === 0);
-    const descendantOperations = operations.filter((operation) => operation.path.length > 0);
+    const rootInserts = operations.filter(
+      (operation) => operation.path.length === 0 && "Insert" in operation.edit,
+    );
 
-    // Root records establish the addressable tree first. Groove may serialize
-    // child edits before their root within one logical batch.
-    for (const operation of rootOperations) {
+    // Pre-establish only newly inserted roots so child-before-root batches are
+    // addressable. Updates remain in producer order: Groove deliberately emits
+    // nested diffs before the final full root update.
+    for (const operation of rootInserts) {
       const rootId = terminalKeyId(operation.root_key);
       const edit = operation.edit;
       assertTerminalRootEditKey(operation.root_key, edit);
-      if ("Insert" in edit) {
-        this.terminalRows.set(
-          rootId,
-          decodeNativeTerminalRow(rootId, rootColumns, Uint8Array.from(edit.Insert.value)),
-        );
-        this.removeId(rootId);
-        this.insertIdAt(rootId, edit.Insert.index);
-      } else if ("Update" in edit) {
-        if (!this.terminalRows.has(rootId)) {
-          throw new Error(`terminal root update addressed missing root ${rootId}`);
-        }
-        this.terminalRows.set(
-          rootId,
-          decodeNativeTerminalRow(rootId, rootColumns, Uint8Array.from(edit.Update.value)),
-        );
-      } else if ("Remove" in edit) {
-        if (!this.terminalRows.delete(rootId)) {
-          throw new Error(`terminal root removal addressed missing root ${rootId}`);
-        }
-        this.currentResults.delete(rootId);
-        this.removeId(rootId);
-      } else if ("Move" in edit) {
-        if (!this.terminalRows.has(rootId)) {
-          throw new Error(`terminal root move addressed missing root ${rootId}`);
-        }
-        this.removeId(rootId);
-        this.insertIdAt(rootId, edit.Move.index);
-      }
+      if (!("Insert" in edit)) throw new Error("terminal root insert partition is invalid");
+      this.terminalRows.set(
+        rootId,
+        decodeNativeTerminalRow(rootId, rootColumns, Uint8Array.from(edit.Insert.value)),
+      );
+      this.removeId(rootId);
+      this.insertIdAt(rootId, edit.Insert.index);
       affectedRoots.add(rootId);
     }
 
-    for (const operation of descendantOperations) {
+    for (const operation of operations) {
       const rootId = terminalKeyId(operation.root_key);
       const edit = operation.edit;
+      if (operation.path.length === 0) {
+        assertTerminalRootEditKey(operation.root_key, edit);
+        if ("Insert" in edit) continue;
+        if ("Update" in edit) {
+          if (!this.terminalRows.has(rootId)) {
+            throw new Error(`terminal root update addressed missing root ${rootId}`);
+          }
+          this.terminalRows.set(
+            rootId,
+            decodeNativeTerminalRow(rootId, rootColumns, Uint8Array.from(edit.Update.value)),
+          );
+        } else if ("Remove" in edit) {
+          if (!this.terminalRows.delete(rootId)) {
+            throw new Error(`terminal root removal addressed missing root ${rootId}`);
+          }
+          this.currentResults.delete(rootId);
+          this.removeId(rootId);
+        } else if ("Move" in edit) {
+          if (!this.terminalRows.has(rootId)) {
+            throw new Error(`terminal root move addressed missing root ${rootId}`);
+          }
+          this.removeId(rootId);
+          this.insertIdAt(rootId, edit.Move.index);
+        }
+        affectedRoots.add(rootId);
+        continue;
+      }
+
       const root = this.terminalRows.get(rootId);
       if (!root) throw new Error(`terminal child edit addressed missing root ${rootId}`);
       const target = terminalCollection(root, rootColumns, operation.path);

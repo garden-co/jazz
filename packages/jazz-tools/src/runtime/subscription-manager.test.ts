@@ -459,6 +459,38 @@ describe("SubscriptionManager", () => {
       ),
     ).toThrow(/does not match addressed key/);
     expect(manager.all()).toEqual(result.all);
+
+    const removed = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: rootKey,
+            path: [{ Collection: "__jazz_include_project" }],
+            edit: { Remove: { key: childKey } },
+          },
+          {
+            root_key: rootKey,
+            path: [],
+            edit: {
+              Update: {
+                key: rootKey,
+                value: [...terminalRootWithEmptyChildren(rootId, "Updated subscription")],
+              },
+            },
+          },
+        ],
+      },
+      transformIncluded,
+      rootColumns,
+    );
+    expect(removed.all).toEqual([{ id: rootId, title: "Updated subscription", project: null }]);
   });
 
   it("clears tracked state before applying native reset frames", () => {
