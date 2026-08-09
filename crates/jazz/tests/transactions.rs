@@ -587,25 +587,24 @@ async fn transaction_staged_before_receiving_concurrent_commit_is_rejected() {
 
     let alice_tx = alice.begin_transaction().expect("begin alice transaction");
     let bob_tx = bob.begin_transaction().expect("begin bob transaction");
-    let alice_batch_id = alice_tx
+    let alice_staged = alice_tx
         .update(
             todo_id,
             vec![("title".to_string(), Value::Text("alice".to_string()))],
         )
         .expect("alice stages update");
-    let bob_batch_id = bob_tx
+    let bob_staged = bob_tx
         .update(
             todo_id,
             vec![("title".to_string(), Value::Text("bob".to_string()))],
         )
         .expect("bob stages stale update");
 
-    assert_eq!(
-        alice_tx.commit().expect("commit alice transaction"),
-        alice_batch_id.expect("ordinary mutation commits immediately")
-    );
+    assert!(alice_staged.is_none(), "transaction update remains staged");
+    assert!(bob_staged.is_none(), "transaction update remains staged");
+    let alice_batch_id = alice_tx.commit().expect("commit alice transaction");
     alice
-        .wait_for_batch(alice_batch_id.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
+        .wait_for_batch(alice_batch_id, DurabilityTier::EdgeServer)
         .await
         .expect("alice transaction accepted");
     wait_for_todos(
@@ -616,14 +615,9 @@ async fn transaction_staged_before_receiving_concurrent_commit_is_rejected() {
     )
     .await;
 
-    assert_eq!(
-        bob_tx.commit().expect("commit bob transaction"),
-        bob_batch_id.expect("ordinary mutation commits immediately")
-    );
-    let rejection = bob
-        .wait_for_batch(bob_batch_id.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
-        .await
-        .expect_err("bob transaction staged from stale base should be rejected")
+    let rejection = bob_tx
+        .commit()
+        .expect_err("bob transaction staged from stale base should be rejected locally")
         .to_string();
     assert!(
         rejection.contains("transaction_conflict"),
@@ -661,18 +655,16 @@ async fn transaction_staged_after_receiving_concurrent_commit_is_accepted() {
     .await;
 
     let alice_tx = alice.begin_transaction().expect("begin alice transaction");
-    let alice_batch_id = alice_tx
+    let alice_staged = alice_tx
         .update(
             todo_id,
             vec![("title".to_string(), Value::Text("alice".to_string()))],
         )
         .expect("alice stages update");
-    assert_eq!(
-        alice_tx.commit().expect("commit alice transaction"),
-        alice_batch_id.expect("ordinary mutation commits immediately")
-    );
+    assert!(alice_staged.is_none(), "transaction update remains staged");
+    let alice_batch_id = alice_tx.commit().expect("commit alice transaction");
     alice
-        .wait_for_batch(alice_batch_id.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
+        .wait_for_batch(alice_batch_id, DurabilityTier::EdgeServer)
         .await
         .expect("alice transaction accepted");
     wait_for_todos(
@@ -684,17 +676,15 @@ async fn transaction_staged_after_receiving_concurrent_commit_is_accepted() {
     .await;
 
     let bob_tx = bob.begin_transaction().expect("begin bob transaction");
-    let bob_batch_id = bob_tx
+    let bob_staged = bob_tx
         .update(
             todo_id,
             vec![("title".to_string(), Value::Text("bob".to_string()))],
         )
         .expect("bob stages update from latest visible row");
-    assert_eq!(
-        bob_tx.commit().expect("commit bob transaction"),
-        bob_batch_id.expect("ordinary mutation commits immediately")
-    );
-    bob.wait_for_batch(bob_batch_id.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
+    assert!(bob_staged.is_none(), "transaction update remains staged");
+    let bob_batch_id = bob_tx.commit().expect("commit bob transaction");
+    bob.wait_for_batch(bob_batch_id, DurabilityTier::EdgeServer)
         .await
         .expect("bob transaction based on latest row should be accepted");
 
