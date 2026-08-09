@@ -234,19 +234,6 @@ fn terminal_nested_values(
         .collect()
 }
 
-fn terminal_sorted_limited_text_values(
-    snapshot: &RelationSnapshot,
-    root: RowUuid,
-    relation: &str,
-    column: &str,
-    limit: usize,
-) -> Vec<String> {
-    let mut values = terminal_nested_text_values(snapshot, root, relation, column);
-    values.sort();
-    values.truncate(limit);
-    values
-}
-
 fn schema_table<'a>(schema: &'a JazzSchema, table: &str) -> &'a TableSchema {
     schema
         .tables
@@ -3004,15 +2991,24 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
     while let Some(next) = subscription.try_next_event() {
         child_added = next;
     }
-    let SubscriptionEvent::Delta { reset, added, .. } = &child_added else {
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        updated,
+        removed,
+        ..
+    } = &child_added
+    else {
         panic!("expected root replacement")
     };
-    assert!(*reset);
+    assert!(!*reset, "a child insertion must remain incremental");
+    assert!(added.is_empty());
     assert_eq!(
-        added.len(),
+        updated.len(),
         1,
-        "a child insertion replaces the terminal root set"
+        "only the changed terminal root is replaced"
     );
+    assert!(removed.is_empty());
     apply_subscription_event(&mut snapshot, child_added);
     assert_eq!(
         terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
@@ -3046,7 +3042,7 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
 }
 
 #[test]
-fn structured_subscription_resets_in_terminal_root_order_after_insert() {
+fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     let schema = relation_schema();
     let db = open_db(0xc4, AuthorId::from_bytes([0xc4; 16]), &schema);
     db.insert_with_id(
@@ -3067,7 +3063,8 @@ fn structured_subscription_resets_in_terminal_root_order_after_insert() {
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
     let initial = block_on(subscription.next_event()).unwrap();
-    assert_eq!(row_ids(&snapshot_from_event(initial).rows), vec![row(0xa1)]);
+    let mut snapshot = snapshot_from_event(initial);
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1)]);
 
     db.insert_with_id(
         "users",
@@ -3077,14 +3074,23 @@ fn structured_subscription_resets_in_terminal_root_order_after_insert() {
     .unwrap();
     db.tick().unwrap();
     let reordered = block_on(subscription.next_event()).unwrap();
-    let SubscriptionEvent::Delta { reset, .. } = &reordered else {
-        panic!("expected terminal reset")
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        removed,
+        ..
+    } = &reordered
+    else {
+        panic!("expected terminal splice")
     };
-    assert!(*reset, "root reordering must replace the public terminal");
+    assert!(!*reset, "root reordering must remain incremental");
+    assert_eq!(removed.len(), 1);
     assert_eq!(
-        row_ids(&snapshot_from_event(reordered).rows),
+        row_ids(&added.iter().map(|row| row.row.clone()).collect::<Vec<_>>()),
         vec![row(0xb1), row(0xa1)]
     );
+    apply_subscription_event(&mut snapshot, reordered);
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xb1), row(0xa1)]);
 
     db.update(
         "users",
@@ -3094,23 +3100,33 @@ fn structured_subscription_resets_in_terminal_root_order_after_insert() {
     .unwrap();
     db.tick().unwrap();
     let updated = block_on(subscription.next_event()).unwrap();
-    let SubscriptionEvent::Delta { reset, .. } = &updated else {
-        panic!("expected update reset")
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        removed,
+        ..
+    } = &updated
+    else {
+        panic!("expected update splice")
     };
-    assert!(*reset);
+    assert!(!*reset);
+    assert_eq!(removed.len(), 2);
     assert_eq!(
-        row_ids(&snapshot_from_event(updated).rows),
+        row_ids(&added.iter().map(|row| row.row.clone()).collect::<Vec<_>>()),
         vec![row(0xa1), row(0xb1)]
     );
+    apply_subscription_event(&mut snapshot, updated);
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1), row(0xb1)]);
 
     db.delete("users", row(0xa1)).unwrap();
     db.tick().unwrap();
     let removed = block_on(subscription.next_event()).unwrap();
     let SubscriptionEvent::Delta { reset, .. } = &removed else {
-        panic!("expected removal reset")
+        panic!("expected removal splice")
     };
-    assert!(*reset);
-    assert_eq!(row_ids(&snapshot_from_event(removed).rows), vec![row(0xb1)]);
+    assert!(!*reset);
+    apply_subscription_event(&mut snapshot, removed);
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xb1)]);
 }
 
 #[test]
@@ -3208,14 +3224,18 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
         ]),
     )
     .unwrap();
-    let query = Query::from("todos")
-        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id"));
+    let query = Query::from("todos").array_subquery(
+        ArraySubquery::new("comments", "comments", "todo_id", "id")
+            .order_by("body", OrderDirection::Asc)
+            .offset(1)
+            .limit(1),
+    );
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
     let mut snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
     assert_eq!(
-        terminal_sorted_limited_text_values(&snapshot, row(0x31), "comments", "body", 1),
+        terminal_nested_text_values(&snapshot, row(0x31), "comments", "body"),
         Vec::<String>::new()
     );
 
@@ -3229,10 +3249,13 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     db.tick().unwrap();
-    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
+    assert!(
+        subscription.try_next_event().is_none(),
+        "a child outside the actual collector window must not publish a root update"
+    );
     assert_eq!(
-        terminal_sorted_limited_text_values(&snapshot, row(0x31), "comments", "body", 1),
-        vec!["b".to_owned()]
+        terminal_nested_text_values(&snapshot, row(0x31), "comments", "body"),
+        Vec::<String>::new()
     );
 
     db.insert_with_id(
@@ -3245,13 +3268,11 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     db.tick().unwrap();
-    if let Some(outside_boundary_event) = subscription.try_next_event() {
-        apply_subscription_event(&mut snapshot, outside_boundary_event);
-        assert_eq!(
-            terminal_sorted_limited_text_values(&snapshot, row(0x31), "comments", "body", 1),
-            vec!["b".to_owned()]
-        );
-    }
+    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, row(0x31), "comments", "body"),
+        vec!["c".to_owned()]
+    );
 
     db.insert_with_id(
         "comments",
@@ -3265,8 +3286,8 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     db.tick().unwrap();
     apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
     assert_eq!(
-        terminal_sorted_limited_text_values(&snapshot, row(0x31), "comments", "body", 1),
-        vec!["a".to_owned()]
+        terminal_nested_text_values(&snapshot, row(0x31), "comments", "body"),
+        vec!["b".to_owned()]
     );
 
     db.update(
@@ -3278,8 +3299,8 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     db.tick().unwrap();
     apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
     assert_eq!(
-        terminal_sorted_limited_text_values(&snapshot, row(0x31), "comments", "body", 1),
-        vec!["b".to_owned()]
+        terminal_nested_text_values(&snapshot, row(0x31), "comments", "body"),
+        vec!["c".to_owned()]
     );
 }
 

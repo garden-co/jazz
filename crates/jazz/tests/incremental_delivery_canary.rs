@@ -299,9 +299,18 @@ fn drain_until_idle(server: &Db<MemoryStorage>, client: &Db<MemoryStorage>) {
 
 fn expect_parent_snapshot(event: SubscriptionEvent, parent: RowUuid, label: &str) {
     match event {
-        SubscriptionEvent::Delta { added, .. } => {
+        SubscriptionEvent::Delta {
+            reset,
+            added,
+            updated,
+            ..
+        } => {
+            if label == "measured update" {
+                assert!(!reset, "{label}: structured update must remain incremental");
+            }
             assert!(
-                added.iter().any(|row| row.row_uuid() == parent),
+                added.iter().any(|row| row.row_uuid() == parent)
+                    || updated.iter().any(|row| row.row_uuid() == parent),
                 "{label}: terminal delta did not include parent state"
             );
         }

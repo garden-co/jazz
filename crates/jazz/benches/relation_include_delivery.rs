@@ -386,9 +386,12 @@ fn expect_single_child_delta(event: SubscriptionEvent, parent: RowUuid) -> Deliv
             removed,
             ..
         } => {
+            assert!(!reset, "structured child changes must remain incremental");
+            assert!(added.is_empty(), "an existing terminal root is not added");
+            assert_eq!(updated.len(), 1, "exactly one terminal root is updated");
             assert!(
-                reset,
-                "structured child changes replace the ordered terminal"
+                removed.is_empty(),
+                "an existing terminal root is not removed"
             );
             assert!(
                 added.iter().any(|row| row.row_uuid() == parent)

@@ -4606,11 +4606,11 @@ where
                                     read_view,
                                 );
                                 let state_ref = &mut *state_ref;
-                                let event = subscription_reset_event(
+                                let event = subscription_terminal_delta_event(
                                     snapshot_tier,
                                     settled,
-                                    snapshot.clone(),
-                                    true,
+                                    &state_ref.snapshot,
+                                    &snapshot,
                                 );
                                 state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
                                 state_ref.snapshot_index =
@@ -8710,6 +8710,59 @@ fn subscription_reset_event(
             .collect(),
         updated: Vec::new(),
         removed: Vec::new(),
+        settled,
+        tier,
+    }
+}
+
+/// Publishes an ordered terminal as a root-addressed suffix splice.
+///
+/// A row delta has stable occurrence identities but no positional field. When
+/// terminal ordering changes, retracting and re-adding the first changed suffix
+/// is therefore the smallest representation that lets every consumer recover
+/// the authoritative Groove order. Content-only changes retain their position
+/// and remain ordinary `updated` roots, independent of total result size.
+fn subscription_terminal_delta_event(
+    tier: DurabilityTier,
+    settled: bool,
+    previous: &RelationSnapshot,
+    current: &RelationSnapshot,
+) -> SubscriptionEvent {
+    let previous_roots = &previous.rows[..previous.root_count];
+    let current_roots = &current.rows[..current.root_count];
+    let common_prefix = previous_roots
+        .iter()
+        .zip(current_roots)
+        .take_while(|(previous, current)| {
+            subscription_row_occurrence_id(previous) == subscription_row_occurrence_id(current)
+        })
+        .count();
+
+    let updated = previous_roots[..common_prefix]
+        .iter()
+        .zip(&current_roots[..common_prefix])
+        .filter(|(previous, current)| previous != current)
+        .map(|(_, current)| subscription_output_row(current.clone()))
+        .collect();
+    let removed = previous_roots[common_prefix..]
+        .iter()
+        .map(|row| RemovedRow {
+            table: row.table().to_owned(),
+            row_uuid: row.row_uuid(),
+            occurrence_id: subscription_row_occurrence_id(row),
+        })
+        .collect();
+    let added = current_roots[common_prefix..]
+        .iter()
+        .cloned()
+        .map(subscription_output_row)
+        .collect();
+
+    SubscriptionEvent::Delta {
+        reset: false,
+        added,
+        updated,
+        removed,
         settled,
         tier,
     }
