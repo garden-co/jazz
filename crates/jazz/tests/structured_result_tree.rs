@@ -170,7 +170,7 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
     assert_eq!(
         children(&selected_children[0], "grandchildren")[0]
             .row
-            .cell_at(1),
+            .cell_at(0),
         Some(Value::String("visible".to_owned()))
     );
 
@@ -182,8 +182,20 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
     else {
         panic!("expected maintained reset");
     };
-    assert_eq!(added.first().map(|row| row.row_uuid()), Some(parent));
-    assert!(added.iter().any(|row| row.table() == "children"));
+    assert_eq!(added.len(), 1, "Groove emits one complete terminal parent");
+    assert_eq!(added[0].row_uuid(), parent);
+    let (descriptor, raw) = added[0].encoded_record();
+    let children_idx = descriptor
+        .field_index("children")
+        .expect("terminal relation field");
+    let Value::Array(children) = descriptor
+        .bind(raw)
+        .get_idx(children_idx)
+        .expect("decode terminal relation")
+    else {
+        panic!("expected terminal child array");
+    };
+    assert_eq!(children.len(), 2);
 }
 
 #[test]
@@ -236,14 +248,21 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
     else {
         panic!("expected initial maintained reset");
     };
-    assert_eq!(
-        added
-            .into_iter()
-            .map(|row| row.row_uuid())
-            .collect::<Vec<_>>(),
-        vec![matching_parent, initial_child],
-        "the routed subscription delivers the matching root and its array member"
-    );
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row_uuid(), matching_parent);
+    let (descriptor, raw) = added[0].encoded_record();
+    let Value::Array(children) = descriptor
+        .bind(raw)
+        .get("children")
+        .expect("decode terminal children")
+    else {
+        panic!("expected terminal child array");
+    };
+    assert_eq!(children.len(), 1);
+    let Value::Record(child) = &children[0] else {
+        panic!("expected terminal child record");
+    };
+    assert_eq!(child.get_idx(0), Ok(Value::Uuid(initial_child.0)));
 
     let added_child = db
         .insert(
@@ -259,21 +278,29 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
     let SubscriptionEvent::Delta {
         reset: false,
         added,
+        updated,
         added_related,
         ..
     } = block_on(subscription.next_event()).expect("incremental maintained delivery")
     else {
         panic!("expected incremental maintained delta");
     };
-    assert_eq!(
-        added
-            .into_iter()
-            .map(|row| row.row_uuid())
-            .chain(added_related.into_iter().map(|row| row.row_uuid()))
-            .collect::<Vec<_>>(),
-        vec![added_child],
-        "the routed subscription delivers later array members through the public relation delta"
-    );
+    assert!(added_related.is_empty());
+    assert!(added.is_empty());
+    assert_eq!(updated.len(), 1, "one complete parent replacement");
+    assert_eq!(updated[0].row_uuid(), matching_parent);
+    let (descriptor, raw) = updated[0].encoded_record();
+    let Value::Array(children) = descriptor
+        .bind(raw)
+        .get("children")
+        .expect("decode replacement children")
+    else {
+        panic!("expected terminal child array");
+    };
+    assert_eq!(children.len(), 2);
+    assert!(children.into_iter().any(|value| {
+        matches!(value, Value::Record(child) if child.get_idx(0) == Ok(Value::Uuid(added_child.0)))
+    }));
 }
 
 #[test]

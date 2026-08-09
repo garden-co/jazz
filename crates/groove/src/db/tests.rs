@@ -5111,15 +5111,11 @@ fn collect_by_expand_rejects_duplicate_occurrence_source_ids() {
 }
 
 #[test]
-fn collect_by_rejects_every_consumer_including_another_collector() {
+fn collect_by_rejects_join_and_nested_collector_consumers() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
     let mut database = Database::new(history_schema(), storage).unwrap();
     let collector = history_collect_by(2);
-    let consumers = [
-        collector
-            .clone()
-            .filter(PredicateExpr::eq("row", Value::U64(1))),
-        collector.clone().project(["row"]),
+    let relational_consumers = [
         GraphBuilder::join(
             collector.clone(),
             GraphBuilder::table("history"),
@@ -5138,7 +5134,7 @@ fn collect_by_rejects_every_consumer_including_another_collector() {
             TopByLimit::Finite(1),
         ),
     ];
-    for graph in consumers {
+    for graph in relational_consumers {
         assert!(matches!(
             database.subscribe_one_sink(graph),
             Err(Error::IvmRuntime(IvmRuntimeError::CollectByMustBeTerminal))

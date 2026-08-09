@@ -6886,11 +6886,9 @@ where
             Arc::from(collect_by.group_fields.clone()),
             ValueComparison::Exact,
         )?;
-        // A CollectBy input is always a root graph node: validate this here as
-        // a runtime backstop to keep its materialization out of recursive state.
-        if arrangement_key.scope != ScopeId::root() {
-            return Err(IvmRuntimeError::CollectByMustBeTerminal);
-        }
+        // Structural validation permits only terminal filter/projection
+        // adapters above CollectBy, so a non-root evaluation scope here is a
+        // routed terminal adapter, never recursive relational state.
         let sub_tick = self.arrangement_sub_tick(&arrangement_key);
         let mut arrangement = self
             .arrangement_states
@@ -7822,21 +7820,36 @@ fn validate_collect_by_key_types(
             .get(index)
             .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(index))?
             .value_type;
-        let scalar = matches!(
-            value_type,
+        let scalar = match value_type {
+            ValueType::Nullable(inner) => matches!(
+                inner.as_ref(),
+                ValueType::U8
+                    | ValueType::U16
+                    | ValueType::U32
+                    | ValueType::U64
+                    | ValueType::I32
+                    | ValueType::I64
+                    | ValueType::F64
+                    | ValueType::Bool
+                    | ValueType::String
+                    | ValueType::Bytes
+                    | ValueType::Uuid
+                    | ValueType::Enum(_)
+            ),
             ValueType::U8
-                | ValueType::U16
-                | ValueType::U32
-                | ValueType::U64
-                | ValueType::I32
-                | ValueType::I64
-                | ValueType::F64
-                | ValueType::Bool
-                | ValueType::String
-                | ValueType::Bytes
-                | ValueType::Uuid
-                | ValueType::Enum(_)
-        );
+            | ValueType::U16
+            | ValueType::U32
+            | ValueType::U64
+            | ValueType::I32
+            | ValueType::I64
+            | ValueType::F64
+            | ValueType::Bool
+            | ValueType::String
+            | ValueType::Bytes
+            | ValueType::Uuid
+            | ValueType::Enum(_) => true,
+            _ => false,
+        };
         if value_type.contains_record() || !scalar {
             return Err(IvmRuntimeError::InvalidCollectBy(
                 "group, order, and tie fields must be scalar ordered values without records".into(),
@@ -7889,9 +7902,10 @@ fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<(), IvmRuntim
             validate_collect_by_terminality(seed)?;
             validate_collect_by_terminality(step)
         }
-        GraphBuilder::Filter { input, .. }
-        | GraphBuilder::Project { input, .. }
-        | GraphBuilder::UnwrapNullable { input, .. }
+        GraphBuilder::Filter { input, .. } | GraphBuilder::Project { input, .. } => {
+            validate_collect_by_terminality(input)
+        }
+        GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }

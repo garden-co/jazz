@@ -1159,14 +1159,15 @@ fn array_subquery_match_correlation_cardinality_requires_every_referenced_member
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([complete, empty])
     );
-    assert_eq!(
-        snapshot
-            .edges
-            .iter()
-            .filter(|edge| edge.source_row == complete)
-            .count(),
-        2
-    );
+    let complete = snapshot
+        .rows
+        .iter()
+        .find(|row| row.row_uuid() == complete)
+        .expect("complete group terminal row");
+    let Value::Array(members) = complete.raw_field("memberRows").expect("memberRows") else {
+        panic!("expected memberRows array");
+    };
+    assert_eq!(members.len(), 2);
 }
 
 #[test]
@@ -1468,21 +1469,19 @@ fn relation_snapshot_array_subquery_filters_use_parent_binding_params() {
             .iter()
             .map(|row| (row.table().to_owned(), row.row_uuid()))
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            ("users".to_owned(), alice),
-            ("todos".to_owned(), matching_todo),
-        ])
+        BTreeSet::from([("users".to_owned(), alice)])
     );
-    assert_eq!(
-        snapshot.edges.into_iter().collect::<BTreeSet<_>>(),
-        BTreeSet::from([RelationEdge {
-            source_table: "users".to_owned(),
-            source_row: alice,
-            relation: "todosViaOwner".to_owned(),
-            target_table: "todos".to_owned(),
-            target_row: matching_todo,
-        }])
-    );
+    let Value::Array(todos) = snapshot.rows[0]
+        .raw_field("todosViaOwner")
+        .expect("todosViaOwner")
+    else {
+        panic!("expected todosViaOwner array");
+    };
+    assert_eq!(todos.len(), 1);
+    let Value::Record(todo) = &todos[0] else {
+        panic!("expected nested todo record");
+    };
+    assert_eq!(todo.get_idx(0), Ok(Value::Uuid(matching_todo.0)));
 }
 
 #[test]

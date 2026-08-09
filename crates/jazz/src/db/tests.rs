@@ -271,39 +271,6 @@ fn schema_table<'a>(schema: &'a JazzSchema, table: &str) -> &'a TableSchema {
         .expect("test schema table should exist")
 }
 
-fn related_text_values(
-    snapshot: &RelationSnapshot,
-    schema: &JazzSchema,
-    source_table: &str,
-    source_row: RowUuid,
-    relation: &str,
-    target_table: &str,
-    column: &str,
-) -> Vec<String> {
-    let table = schema_table(schema, target_table);
-    snapshot
-        .edges
-        .iter()
-        .filter(|edge| {
-            edge.source_table == source_table
-                && edge.source_row == source_row
-                && edge.relation == relation
-                && edge.target_table == target_table
-        })
-        .map(|edge| {
-            snapshot
-                .rows
-                .iter()
-                .find(|row| row.table() == target_table && row.row_uuid() == edge.target_row)
-                .unwrap_or_else(|| panic!("missing target row for edge {edge:?}"))
-        })
-        .map(|row| match row.cell(table, column) {
-            Some(Value::String(value)) => value,
-            other => panic!("expected text cell {target_table}.{column}, got {other:?}"),
-        })
-        .collect()
-}
-
 fn oversized_row_version_refs(len: usize) -> Vec<RowVersionRef> {
     (0..len)
         .map(|idx| {
@@ -317,28 +284,6 @@ fn oversized_row_version_refs(len: usize) -> Vec<RowVersionRef> {
             )
         })
         .collect()
-}
-
-fn sorted_related_text_values(
-    snapshot: &RelationSnapshot,
-    schema: &JazzSchema,
-    source_table: &str,
-    source_row: RowUuid,
-    relation: &str,
-    target_table: &str,
-    column: &str,
-) -> Vec<String> {
-    let mut values = related_text_values(
-        snapshot,
-        schema,
-        source_table,
-        source_row,
-        relation,
-        target_table,
-        column,
-    );
-    values.sort();
-    values
 }
 
 fn event_settled(event: &SubscriptionEvent) -> bool {
@@ -3332,15 +3277,7 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
     ))
     .unwrap();
     assert_eq!(
-        sorted_related_text_values(
-            &admin,
-            &schema,
-            "todos",
-            row(0x41),
-            "comments",
-            "comments",
-            "body"
-        ),
+        terminal_nested_text_values(&admin, row(0x41), "comments", "body"),
         vec!["member-visible".to_owned(), "other-visible".to_owned()]
     );
 
@@ -3351,15 +3288,7 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
     ))
     .unwrap();
     assert_eq!(
-        sorted_related_text_values(
-            &member_snapshot,
-            &schema,
-            "todos",
-            row(0x41),
-            "comments",
-            "comments",
-            "body"
-        ),
+        terminal_nested_text_values(&member_snapshot, row(0x41), "comments", "body"),
         vec!["member-visible".to_owned()]
     );
 
@@ -3367,15 +3296,7 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
         block_on(db.all_relation_snapshot_for_identity(&prepared_query, ReadOpts::default(), spy))
             .unwrap();
     assert_eq!(
-        sorted_related_text_values(
-            &spy_snapshot,
-            &schema,
-            "todos",
-            row(0x41),
-            "comments",
-            "comments",
-            "body"
-        ),
+        terminal_nested_text_values(&spy_snapshot, row(0x41), "comments", "body"),
         Vec::<String>::new()
     );
 }
@@ -3416,15 +3337,7 @@ fn array_subquery_one_shot_and_maintained_subscription_are_equivalent() {
 
     assert_eq!(
         terminal_nested_text_values(&maintained, row(0x51), "comments", "body"),
-        sorted_related_text_values(
-            &one_shot,
-            &schema,
-            "todos",
-            row(0x51),
-            "comments",
-            "comments",
-            "body"
-        )
+        terminal_nested_text_values(&one_shot, row(0x51), "comments", "body")
     );
 }
 
@@ -3558,15 +3471,8 @@ fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
         client.tick().unwrap();
         if let Some(event) = subscription.try_next_event() {
             let snapshot = snapshot_from_event(event);
-            if sorted_related_text_values(
-                &snapshot,
-                &schema,
-                "users",
-                row(0xa6),
-                "todosViaOwner",
-                "todos",
-                "title",
-            ) == vec!["remote child".to_owned()]
+            if terminal_nested_text_values(&snapshot, row(0xa6), "todosViaOwner", "title")
+                == vec!["remote child".to_owned()]
             {
                 delivered = Some(snapshot);
                 break;
@@ -3575,7 +3481,7 @@ fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
     }
     assert!(
         delivered.is_some(),
-        "remote maintained array subscription must hydrate the child row referenced by relation-edge facts"
+        "remote maintained array subscription must deliver the Groove terminal parent"
     );
 }
 

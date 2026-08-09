@@ -8005,7 +8005,7 @@ where
         })
     }
 
-    fn materialize_local_maintained_relation_snapshot(
+    pub(crate) fn materialize_local_maintained_relation_snapshot(
         &mut self,
         local: &LocalMaintainedViewSubscription,
     ) -> Result<RelationSnapshot, Error> {
@@ -8942,6 +8942,16 @@ where
     ) -> Result<RelationSnapshot, Error> {
         let root_rows = self.materialize_relation_snapshot_root_rows(shape, snapshots)?;
         let root_count = root_rows.len();
+        // Structured output is already recursively assembled by Groove's
+        // app-rows terminal. Do not rebuild the same value from relation-fact
+        // side terminals at the Jazz boundary.
+        if !shape.query().array_subqueries.is_empty() {
+            return Ok(RelationSnapshot {
+                root_count,
+                rows: root_rows,
+                edges: Vec::new(),
+            });
+        }
         let mut snapshot = RelationSnapshot {
             root_count,
             rows: root_rows,

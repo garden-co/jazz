@@ -4952,25 +4952,10 @@ fn lowered_terminals(
     // domain rather than only `root_route_fields` to keep routed maintained
     // array queries on their existing fact-terminal path; the tree collector
     // cannot retain any routed binding fields yet.
-    let has_routed_tree_app_projection = matches!(
-        &request.output.app_rows,
-        Some(AppRowOutputRequest {
-            projection: PayloadProjection::Tree(tree),
-            ..
-        }) if !tree.paths.is_empty() && !routing_param_fields.is_empty()
-    );
-    if let Some(app_rows) = &request.output.app_rows
-        && !has_routed_tree_app_projection
-    {
+    if let Some(app_rows) = &request.output.app_rows {
         let projected_output = projected_multisource_terminal(plan, source);
         let (graph, descriptor, hidden_fields) = match app_rows.projection.clone() {
             PayloadProjection::Tree(tree) if !tree.paths.is_empty() => {
-                if !root_route_fields.is_empty() {
-                    return Err(single_gap_report(UnsupportedReason::Operator(
-                        "tree app projections with routed parameters are not lowered yet"
-                            .to_owned(),
-                    )));
-                }
                 let collected = lower_collect_by_app_rows(
                     closure.visible_root.clone(),
                     &tree,
@@ -4978,6 +4963,7 @@ fn lowered_terminals(
                     source,
                     resolved_sources,
                     request,
+                    routing_param_fields,
                 )?;
                 (
                     collected.graph,
@@ -5290,6 +5276,10 @@ struct CollectSlotLayout {
     fields: Vec<CollectFlatField>,
     row_id_input: String,
     presence_input: String,
+    order_cols: Vec<TopByOrder>,
+    tie_cols: Vec<String>,
+    offset: u64,
+    limit: TopByLimit,
     children: Vec<CollectSlotLayout>,
 }
 
@@ -5313,8 +5303,15 @@ fn lower_collect_by_app_rows(
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
+    routing_param_fields: &BTreeSet<String>,
 ) -> CapabilityResult<LoweredCollectByAppRows> {
-    let mut layout = collect_layout(projection, root_source, resolved_sources)?;
+    let mut layout = collect_layout(
+        projection,
+        root_source,
+        resolved_sources,
+        request,
+        routing_param_fields,
+    )?;
     align_collect_join_key_types(&mut layout.slots, plan, resolved_sources, request)?;
     let root_context = root_collect_context_graph(visible_root.clone(), &layout)?;
     let mut association_graphs = Vec::new();
@@ -5370,10 +5367,12 @@ fn lower_collect_by_app_rows(
             .iter()
             .map(|slot| collect_slot_builder(slot, &root_group)),
     );
+    let mut hidden_fields = hidden_source_fields(&root_source.row_shape);
+    hidden_fields.extend(routing_param_fields.iter().cloned());
     Ok(LoweredCollectByAppRows {
         graph,
         descriptor,
-        hidden_fields: hidden_source_fields(&root_source.row_shape),
+        hidden_fields,
     })
 }
 
@@ -5430,15 +5429,81 @@ fn align_collect_join_key_types(
             }
             field.value_type = ValueType::Nullable(Box::new(payload.clone()));
         }
+        for step in &path.child.steps {
+            match step {
+                LinearStep::OrderBy(keys) => {
+                    slot.order_cols = keys
+                        .iter()
+                        .map(|key| {
+                            let field = collect_slot_input_for_value(slot, &key.value)?;
+                            Ok(match key.direction {
+                                SortDirection::Asc => TopByOrder::asc(field),
+                                SortDirection::Desc => TopByOrder::desc(field),
+                            })
+                        })
+                        .collect::<CapabilityResult<Vec<_>>>()?;
+                }
+                LinearStep::Slice {
+                    limit,
+                    offset,
+                    tie_breaker,
+                    ..
+                } => {
+                    slot.offset = u64::from(*offset);
+                    slot.limit = limit
+                        .map(|limit| TopByLimit::Finite(u64::from(limit)))
+                        .unwrap_or(TopByLimit::Unbounded);
+                    slot.tie_cols = tie_breaker
+                        .iter()
+                        .map(|value| collect_slot_input_for_value(slot, value))
+                        .collect::<CapabilityResult<Vec<_>>>()?;
+                }
+                _ => {}
+            }
+        }
+        if slot.order_cols.is_empty() {
+            slot.order_cols = vec![TopByOrder::asc(&slot.row_id_input)];
+        }
+        if slot.tie_cols.is_empty() {
+            slot.tie_cols = vec![slot.row_id_input.clone()];
+        }
         align_collect_join_key_types(&mut slot.children, plan, resolved_sources, request)?;
     }
     Ok(())
+}
+
+fn collect_slot_input_for_value(
+    slot: &CollectSlotLayout,
+    value: &NormalizedValueRef,
+) -> CapabilityResult<String> {
+    match value {
+        NormalizedValueRef::SourceField { field, .. } => slot
+            .fields
+            .iter()
+            .find(|candidate| {
+                candidate.source_field.as_deref() == Some(field)
+                    || candidate
+                        .source_field
+                        .as_deref()
+                        .is_some_and(|source| logical_user_column(source) == field)
+            })
+            .map(|candidate| candidate.input.clone()),
+        NormalizedValueRef::RowId(RowIdRef::Source(_)) => Some(slot.row_id_input.clone()),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        single_gap_report(UnsupportedReason::Operator(format!(
+            "collector window key {value:?} is not present in the child projection"
+        )))
+    })
 }
 
 fn collect_layout(
     projection: &AppProjectionTree,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+    routing_param_fields: &BTreeSet<String>,
 ) -> CapabilityResult<CollectLayout> {
     let mut selected_root = BTreeSet::from([root_source.row_shape.row_uuid_field.clone()]);
     match &projection.fields {
@@ -5456,7 +5521,7 @@ fn collect_layout(
                 .map(|field| user_column_field(field)),
         ),
     }
-    let root_fields = root_source
+    let mut root_fields = root_source
         .row_shape
         .descriptor
         .fields()
@@ -5478,6 +5543,36 @@ fn collect_layout(
             })
         })
         .collect::<Vec<_>>();
+    let parameter_domain = parameter_domain_for_request(request).map_err(single_gap_report)?;
+    for route_field in routing_param_fields {
+        let value_type = if let Some(param) = route_param_from_field(route_field) {
+            parameter_domain
+                .user_params
+                .get(param)
+                .or_else(|| request.input.binding.param_types.get(param))
+                .cloned()
+        } else {
+            parameter_domain
+                .claim_params
+                .get(route_field)
+                .map(|claim| claim.ty.clone())
+        }
+        .ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Runtime(format!(
+                "collector route field {route_field:?} has no parameter type"
+            )))
+        })?;
+        root_fields.push(CollectFlatField {
+            input: route_field.clone(),
+            output: route_field.clone(),
+            value_type: value_type.clone(),
+            output_value_type: value_type,
+            source_field: Some(route_field.clone()),
+            is_row_id: false,
+            is_presence: false,
+            is_output: true,
+        });
+    }
     let mut next_slot = 0usize;
     let slots = collect_slot_layouts(&projection.paths, resolved_sources, 1, &mut next_slot)?;
     Ok(CollectLayout { root_fields, slots })
@@ -5540,8 +5635,14 @@ fn collect_slot_layouts(
                         .map(|field| user_column_field(field)),
                 ),
             }
-            let fields = selected
-                .into_iter()
+            let fields = source
+                .row_shape
+                .descriptor
+                .fields()
+                .iter()
+                .filter_map(|field| field.name.as_ref())
+                .filter(|source_field| selected.contains(*source_field))
+                .cloned()
                 .map(|source_field| {
                     let value_type = source_field_type(source, &source_field).cloned().ok_or_else(|| {
                         single_gap_report(UnsupportedReason::Operator(format!(
@@ -5602,6 +5703,10 @@ fn collect_slot_layouts(
                 fields,
                 row_id_input,
                 presence_input,
+                order_cols: Vec::new(),
+                tie_cols: Vec::new(),
+                offset: 0,
+                limit: TopByLimit::Unbounded,
                 children,
             })
         })
@@ -5823,10 +5928,10 @@ fn collect_slot_builder(slot: &CollectSlotLayout, parent_row_id: &str) -> Collec
         slot.children
             .iter()
             .map(|child| collect_slot_builder(child, &slot.row_id_input)),
-        [TopByOrder::asc(&slot.row_id_input)],
-        [&slot.row_id_input],
-        0,
-        TopByLimit::Unbounded,
+        slot.order_cols.clone(),
+        slot.tie_cols.clone(),
+        slot.offset,
+        slot.limit,
     )
     .with_presence_col(&slot.presence_input)
 }

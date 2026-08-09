@@ -20,7 +20,7 @@ use std::task::{Context, Poll, Waker};
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_channel::oneshot;
 use futures_core::Stream;
-use groove::records::Value;
+use groove::records::{OwnedRecord, RecordDescriptor, Value};
 use groove::schema::ColumnType as GrooveColumnType;
 use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use thiserror::Error;
@@ -1212,13 +1212,6 @@ where
                 .borrow_mut()
                 .unsubscribe_groove_subscription(local_subscription_id);
         }));
-        // Array output is admitted only as a complete terminal-rendered parent.
-        // Validate the reset before retaining subscription state or publishing
-        // its reset event, so an over-budget parent cannot become a partial
-        // replacement through the maintained path.
-        if !prepared.shape.query().array_subqueries.is_empty() {
-            materialize_result_tree(prepared.shape.query(), snapshot.clone())?;
-        }
         let maintained_subscription = Some(subscription);
         let terminal_rows = !local_shape.query().array_subqueries.is_empty();
         let mut state_shape = local_shape;
@@ -4439,7 +4432,33 @@ where
                     }
                     let snapshot_tier = remote_settled_tier.unwrap_or(read_tier);
                     let authoritative_reset = authoritative_reset_pending;
-                    if authoritative_reset {
+                    if authoritative_reset && terminal_rows {
+                        let Some(maintained) = maintained_subscription.as_mut() else {
+                            return Err(Error::new(
+                                ErrorCode::Protocol,
+                                "structured subscription lost its Groove terminal",
+                            ));
+                        };
+                        let snapshot = {
+                            let mut node_ref = node.borrow_mut();
+                            node_ref.drain_local_maintained_view_subscription_state(maintained)?;
+                            node_ref.materialize_local_maintained_relation_snapshot(maintained)?
+                        };
+                        let settled = subscription_is_settled(
+                            &node.borrow(),
+                            &shape,
+                            &binding,
+                            settled_tier,
+                            read_view,
+                        );
+                        (
+                            snapshot,
+                            SubscriptionSnapshotSource::LocalMaintained,
+                            settled,
+                            snapshot_tier,
+                            true,
+                        )
+                    } else if authoritative_reset {
                         let authoritative_snapshot = {
                             let mut node_ref = node.borrow_mut();
                             match node_ref.authoritative_reset_snapshot_for_binding_view(
@@ -4600,7 +4619,12 @@ where
                             }
                             continue;
                         }
-                        let (snapshot, snapshot_source) = if remote_settled_tier.is_some() {
+                        let (snapshot, snapshot_source) = if terminal_rows {
+                            (
+                                state_ref.snapshot.clone(),
+                                SubscriptionSnapshotSource::LocalMaintained,
+                            )
+                        } else if remote_settled_tier.is_some() {
                             let previous = state_ref.snapshot.clone();
                             if previous.root_count == 0
                                 && previous.edges.is_empty()
@@ -8317,66 +8341,95 @@ fn write_rejected(reason: RejectionReason) -> Error {
     Error::new(ErrorCode::WriteRejected, format!("{reason:?}"))
 }
 
-/// Render the flat maintained/query fact boundary once, at the Jazz public
-/// result boundary. In particular, consumers must not rebuild relation trees
-/// from `RelationSnapshot` rows and edges themselves.
+/// Decode Groove's recursively assembled terminal value into Jazz's typed
+/// structured-result view. This separates relation fields from scalar row
+/// fields, but does not join or assemble relation facts.
 fn materialize_result_tree(query: &Query, snapshot: RelationSnapshot) -> Result<ResultTree, Error> {
-    type RowKey = (String, RowUuid);
-    let roots = snapshot
-        .rows
-        .iter()
-        .take(snapshot.root_count)
-        .map(|row| (row.table().to_owned(), row.row_uuid()))
-        .collect::<Vec<_>>();
-    let rows = snapshot
-        .rows
-        .into_iter()
-        .map(|row| ((row.table().to_owned(), row.row_uuid()), row))
-        .collect::<BTreeMap<RowKey, CurrentRow>>();
-    let mut edges = BTreeMap::<RowKey, Vec<RelationEdge>>::new();
-    for edge in snapshot.edges {
-        edges
-            .entry((edge.source_table.clone(), edge.source_row))
-            .or_default()
-            .push(edge);
-    }
-
-    fn node(
-        row_key: &(String, RowUuid),
-        row: &CurrentRow,
+    fn node_from_record(
+        table: &str,
+        record: OwnedRecord,
         arrays: &[crate::query::ArraySubquery],
-        rows: &BTreeMap<RowKey, CurrentRow>,
-        edges: &BTreeMap<RowKey, Vec<RelationEdge>>,
-        root: bool,
     ) -> Result<ResultNode, Error> {
+        let descriptor = *record.descriptor();
+        let values = record.to_values().map_err(|error| {
+            Error::new(
+                ErrorCode::Protocol,
+                format!("invalid Groove terminal record: {error}"),
+            )
+        })?;
+        let array_by_name = arrays
+            .iter()
+            .map(|array| (array.column_name.as_str(), array))
+            .collect::<BTreeMap<_, _>>();
+        let mut scalar_fields = Vec::new();
+        let mut scalar_values = Vec::new();
         let mut relations = BTreeMap::new();
-        for array in arrays {
-            let children = edges
-                .get(row_key)
+        for (field, value) in descriptor.fields().iter().zip(values) {
+            let Some(name) = field.name.as_deref() else {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    "Groove terminal emitted an unnamed field",
+                ));
+            };
+            let Some(array) = array_by_name.get(name) else {
+                scalar_fields.push((name.to_owned(), field.value_type.clone()));
+                scalar_values.push(value);
+                continue;
+            };
+            let Value::Array(children) = value else {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    format!("Groove terminal relation {name} was not an array"),
+                ));
+            };
+            let children = children
                 .into_iter()
-                .flatten()
-                .filter(|edge| edge.relation == array.column_name)
-                .filter_map(|edge| {
-                    let key = (edge.target_table.clone(), edge.target_row);
-                    rows.get(&key).map(|child| (key, child))
+                .map(|value| {
+                    let Value::Record(record) = value else {
+                        return Err(Error::new(
+                            ErrorCode::Protocol,
+                            format!("Groove terminal relation {name} contained a non-record"),
+                        ));
+                    };
+                    node_from_record(&array.table, record, &array.nested_arrays)
                 })
-                .map(|(key, child)| node(&key, child, &array.nested_arrays, rows, edges, false))
                 .collect::<Result<Vec<_>, _>>()?;
-            relations.insert(array.column_name.clone(), ResultRelation::Array(children));
+            relations.insert(name.to_owned(), ResultRelation::Array(children));
         }
+        let scalar_descriptor = RecordDescriptor::new(scalar_fields);
+        let raw = scalar_descriptor.create(&scalar_values).map_err(|error| {
+            Error::new(
+                ErrorCode::Protocol,
+                format!("invalid scalar projection from Groove terminal: {error}"),
+            )
+        })?;
+        let row = CurrentRow::new(table, OwnedRecord::new(raw, scalar_descriptor));
         let occurrence = OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0));
-        let _ = root;
         Ok(ResultNode {
             occurrence,
-            row: row.clone(),
+            row,
             relations,
         })
     }
 
-    let roots = roots
+    if !snapshot.edges.is_empty() {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "structured result unexpectedly contained relation-fact edges",
+        ));
+    }
+    let roots = snapshot
+        .rows
         .into_iter()
-        .filter_map(|key| rows.get(&key).map(|row| (key, row)))
-        .map(|(key, row)| node(&key, row, &query.array_subqueries, &rows, &edges, true))
+        .take(snapshot.root_count)
+        .map(|row| {
+            let (descriptor, raw) = row.encoded_record();
+            node_from_record(
+                row.table(),
+                OwnedRecord::new(raw.to_vec(), *descriptor),
+                &query.array_subqueries,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ResultTree { roots })
 }

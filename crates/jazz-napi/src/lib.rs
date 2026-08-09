@@ -1987,24 +1987,27 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
                 .collect::<Vec<_>>();
             let delta = encode_core_subscription_delta(&added, &updated, removed)
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-            let relation_delta = encode_core_relation_subscription_delta(
-                &added,
-                &updated,
-                removed,
-                added_related,
-                added_edges,
-                removed_edges,
-            )
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-            Ok(serde_json::json!({
+            let mut payload = serde_json::json!({
                 "type": "delta",
                 "reset": reset,
                 "delta": delta,
-                "relation_delta": relation_delta,
                 "output_mode": if *terminal_rows { "terminal_rows" } else { "relation_facts" },
                 "settled": settled,
                 "tier": format!("{tier:?}"),
-            }))
+            });
+            if !terminal_rows {
+                let relation_delta = encode_core_relation_subscription_delta(
+                    &added,
+                    &updated,
+                    removed,
+                    added_related,
+                    added_edges,
+                    removed_edges,
+                )
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                payload["relation_delta"] = serde_json::json!(relation_delta);
+            }
+            Ok(payload)
         }
         SubscriptionEvent::Rejected { reason } => {
             let reason = match reason {
@@ -2418,9 +2421,10 @@ pub fn verify_local_first_identity_proof_napi(
 
 #[cfg(test)]
 mod tests {
-    use crate::core_read_opts_from_json;
-    use jazz::db::Propagation as CorePropagation;
+    use crate::{core_read_opts_from_json, core_subscription_event_to_json};
+    use jazz::db::{Propagation as CorePropagation, SubscriptionEvent};
     use jazz::tools::{ColumnType, Schema, SchemaBuilder, TableName, TableSchema, Value};
+    use jazz::tx::DurabilityTier;
     use serde_json::json;
 
     #[test]
@@ -2479,5 +2483,25 @@ mod tests {
             .expect("parse read opts");
 
         assert_eq!(opts.propagation, CorePropagation::LocalOnly);
+    }
+
+    #[test]
+    fn terminal_subscription_payload_omits_relation_delta() {
+        let payload = core_subscription_event_to_json(&SubscriptionEvent::Delta {
+            reset: false,
+            added: Vec::new(),
+            updated: Vec::new(),
+            removed: Vec::new(),
+            added_related: Vec::new(),
+            added_edges: Vec::new(),
+            removed_edges: Vec::new(),
+            settled: true,
+            tier: DurabilityTier::Local,
+            terminal_rows: true,
+        })
+        .expect("encode terminal delta");
+
+        assert_eq!(payload["output_mode"], "terminal_rows");
+        assert!(payload.get("relation_delta").is_none());
     }
 }

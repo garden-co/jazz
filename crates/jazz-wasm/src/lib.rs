@@ -2479,26 +2479,28 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
                 .collect::<Vec<_>>();
             let delta =
                 encode_subscription_delta(&added, &updated, &removed).map_err(to_js_error)?;
-            let relation_delta = encode_relation_subscription_delta(
-                &added,
-                &updated,
-                &removed,
-                &added_related,
-                &added_edges,
-                &removed_edges,
-            )
-            .map_err(to_js_error)?;
             set_prop(&object, "type", JsValue::from_str("delta"))?;
             set_prop(
                 &object,
                 "delta",
                 js_sys::Uint8Array::from(delta.as_slice()).into(),
             )?;
-            set_prop(
-                &object,
-                "relation_delta",
-                js_sys::Uint8Array::from(relation_delta.as_slice()).into(),
-            )?;
+            if !terminal_rows {
+                let relation_delta = encode_relation_subscription_delta(
+                    &added,
+                    &updated,
+                    &removed,
+                    &added_related,
+                    &added_edges,
+                    &removed_edges,
+                )
+                .map_err(to_js_error)?;
+                set_prop(
+                    &object,
+                    "relation_delta",
+                    js_sys::Uint8Array::from(relation_delta.as_slice()).into(),
+                )?;
+            }
             set_prop(&object, "reset", JsValue::from_bool(reset))?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;
             set_prop(&object, "tier", JsValue::from_str(&format!("{tier:?}")))?;

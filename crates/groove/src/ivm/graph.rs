@@ -972,11 +972,17 @@ impl IvmGraph {
             .filter_map(|input| self.nodes.get(input).map(|node| node.descriptor.output))
             .collect::<Vec<_>>();
         descriptor.validate(&input_outputs)?;
-        if descriptor.inputs.iter().any(|input| {
+        let consumes_collect_by = descriptor.inputs.iter().any(|input| {
             self.nodes
                 .get(input)
                 .is_some_and(|node| matches!(node.descriptor.operator, OpType::CollectBy(_)))
-        }) {
+        });
+        if consumes_collect_by
+            && !matches!(
+                descriptor.operator,
+                OpType::Filter(_) | OpType::MapProject(_)
+            )
+        {
             return Err(GraphValidationError::CollectByInputIsTerminal);
         }
         Ok(())
@@ -1200,21 +1206,7 @@ impl NodeDescriptor {
                         .chain(&collect_by.occurrence_id_field_indices)
                     {
                         let value_type = &input_outputs[0].fields()[field_idx].value_type;
-                        let scalar = matches!(
-                            value_type,
-                            ValueType::U8
-                                | ValueType::U16
-                                | ValueType::U32
-                                | ValueType::U64
-                                | ValueType::I32
-                                | ValueType::I64
-                                | ValueType::F64
-                                | ValueType::Bool
-                                | ValueType::String
-                                | ValueType::Bytes
-                                | ValueType::Uuid
-                                | ValueType::Enum(_)
-                        );
+                        let scalar = collect_by_ordered_scalar(value_type);
                         if !scalar || value_type.contains_record() {
                             return Err(GraphValidationError::CollectByKeyFieldMustBeScalar);
                         }
@@ -1355,21 +1347,7 @@ impl NodeDescriptor {
                     .chain(&collect_by.sort_field_indices)
                 {
                     let value_type = &input_outputs[0].fields()[field_idx].value_type;
-                    let scalar = matches!(
-                        value_type,
-                        ValueType::U8
-                            | ValueType::U16
-                            | ValueType::U32
-                            | ValueType::U64
-                            | ValueType::I32
-                            | ValueType::I64
-                            | ValueType::F64
-                            | ValueType::Bool
-                            | ValueType::String
-                            | ValueType::Bytes
-                            | ValueType::Uuid
-                            | ValueType::Enum(_)
-                    );
+                    let scalar = collect_by_ordered_scalar(value_type);
                     if !scalar || value_type.contains_record() {
                         return Err(GraphValidationError::CollectByKeyFieldMustBeScalar);
                     }
@@ -1511,6 +1489,25 @@ fn expect_same_output(
         Ok(())
     } else {
         Err(GraphValidationError::OutputDescriptorMismatch)
+    }
+}
+
+fn collect_by_ordered_scalar(value_type: &ValueType) -> bool {
+    match value_type {
+        ValueType::Nullable(inner) => collect_by_ordered_scalar(inner),
+        ValueType::U8
+        | ValueType::U16
+        | ValueType::U32
+        | ValueType::U64
+        | ValueType::I32
+        | ValueType::I64
+        | ValueType::F64
+        | ValueType::Bool
+        | ValueType::String
+        | ValueType::Bytes
+        | ValueType::Uuid
+        | ValueType::Enum(_) => true,
+        _ => false,
     }
 }
 
@@ -1869,10 +1866,10 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_a_direct_descriptor_consumer_of_collect_by() {
-        // This intentionally stays internal: public GraphBuilder attempts are
-        // covered at the database boundary, while this exercises the one
-        // descriptor-level route available to low-level graph embedders.
+    fn validation_allows_terminal_route_filter_over_collect_by() {
+        // Prepared terminals use this narrow consumer to route one already
+        // assembled terminal value to its binding. It must not reopen nested
+        // assembly or feed arbitrary relational operators.
         let mut graph = IvmGraph::new();
         let source = graph.dedup_node(
             NodeDescriptor::new(
@@ -1942,9 +1939,6 @@ mod tests {
             [collector],
             collected_output,
         );
-        assert_eq!(
-            graph.validate_node(&consumer),
-            Err(GraphValidationError::CollectByInputIsTerminal)
-        );
+        assert_eq!(graph.validate_node(&consumer), Ok(()));
     }
 }

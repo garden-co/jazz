@@ -5170,13 +5170,16 @@ impl CurrentRow {
 
     /// Cell value by application-schema column position.
     pub fn cell_at(&self, column_position: usize) -> Option<Value> {
-        nullable_value(
-            self.record
-                .borrowed()
-                .get_idx(CurrentRowRecord::USER_CELLS + column_position)
-                .expect("valid current user cell"),
-        )
-        .expect("valid nullable current user cell")
+        match self
+            .record
+            .borrowed()
+            .get_idx(CurrentRowRecord::USER_CELLS + column_position)
+            .expect("valid current user cell")
+        {
+            Value::Nullable(None) => None,
+            Value::Nullable(Some(value)) => Some(*value),
+            value => Some(value),
+        }
     }
 
     /// Cell value by application column name using the table schema to resolve position.
