@@ -74,32 +74,17 @@ impl Ord for ObjectId {
 /// rows in the query's declared join order. This is deliberately distinct from
 /// a source [`ObjectId`]: one source row can contribute to more than one output
 /// occurrence.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct OutputOccurrenceId {
     root: ObjectId,
     joined: SmallVec<[ObjectId; 2]>,
     /// Stable typed derivation discriminators keyed by joined-source position.
     /// Empty for the ordinary row-only identity and omitted from its wire form.
-    #[serde(default, skip_serializing_if = "SmallVec::is_empty")]
+    // The legacy OutputOccurrenceId wire value is exactly `(root, joined)`.
+    // Typed discriminators travel in ResultKey v2 / maintained sidecars and
+    // must never add a positional postcard field here.
+    #[serde(skip)]
     union_arms: SmallVec<[(usize, String); 1]>,
-}
-
-impl<'de> Deserialize<'de> for OutputOccurrenceId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Wire {
-            root: ObjectId,
-            joined: SmallVec<[ObjectId; 2]>,
-            #[serde(default)]
-            union_arms: SmallVec<[(usize, String); 1]>,
-        }
-        let wire = Wire::deserialize(deserializer)?;
-        OutputOccurrenceId::with_union_arms(wire.root, wire.joined, wire.union_arms)
-            .ok_or_else(|| serde::de::Error::custom("malformed occurrence discriminator"))
-    }
 }
 
 impl OutputOccurrenceId {
@@ -407,7 +392,53 @@ mod tests {
             serde_json::from_slice::<ResultKey>(&typed_encoded).expect("decode typed key"),
             typed
         );
+        let typed_postcard = postcard::to_allocvec(&typed).expect("postcard encode typed key");
+        assert_eq!(
+            postcard::from_bytes::<ResultKey>(&typed_postcard).expect("postcard decode typed key"),
+            typed
+        );
         assert_ne!(typed, plain);
+    }
+
+    #[test]
+    fn output_occurrence_postcard_remains_exact_legacy_two_field_wire() {
+        #[derive(Serialize)]
+        struct LegacyOccurrence {
+            root: ObjectId,
+            joined: SmallVec<[ObjectId; 2]>,
+        }
+
+        let root = ObjectId::from_uuid(Uuid::from_u128(1));
+        let joined = ObjectId::from_uuid(Uuid::from_u128(2));
+        let legacy = postcard::to_allocvec(&LegacyOccurrence {
+            root,
+            joined: SmallVec::from_slice(&[joined]),
+        })
+        .expect("encode legacy fixture");
+        let mut golden = vec![16];
+        golden.extend_from_slice(&[0_u8; 15]);
+        golden.push(1);
+        golden.push(1);
+        golden.push(16);
+        golden.extend_from_slice(&[0_u8; 15]);
+        golden.push(2);
+        assert_eq!(legacy, golden, "pin the historical postcard fixture");
+        let current = postcard::to_allocvec(&OutputOccurrenceId::new(root, [joined]))
+            .expect("encode current occurrence");
+        assert_eq!(current, legacy, "row-only postcard bytes are unchanged");
+        assert_eq!(
+            postcard::from_bytes::<OutputOccurrenceId>(&legacy)
+                .expect("decode exact legacy two-field bytes"),
+            OutputOccurrenceId::new(root, [joined])
+        );
+
+        let typed = OutputOccurrenceId::with_union_arms(root, [joined], [(0, "direct".to_owned())])
+            .expect("typed occurrence");
+        assert_eq!(
+            postcard::to_allocvec(&typed).expect("encode legacy occurrence carrier"),
+            legacy,
+            "typed derivation is deliberately not smuggled into the legacy wire struct"
+        );
     }
 
     #[test]
