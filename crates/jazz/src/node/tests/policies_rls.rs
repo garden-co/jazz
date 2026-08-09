@@ -2301,15 +2301,42 @@ fn nullable_join_code_claim_branch_allows_edge_chat_read() {
         [
             ColumnSchema::new("title", ColumnType::String),
             ColumnSchema::new("joinCode", ColumnType::String.nullable()),
+            ColumnSchema::new("owner", ColumnType::String),
+            ColumnSchema::new("isPublic", ColumnType::Bool),
         ],
     )
     .with_read_policy(Policy::shape(
         Query::from("chats")
             .filter(eq(lit(true), lit(false)))
+            .policy_branch(PolicyBranch::single_alternative_from_query(
+                Query::from("chats").filter(eq(col("owner"), claim("user_id"))),
+            ))
+            .policy_branch(PolicyBranch::single_alternative_from_query(
+                Query::from("chats")
+                    .join_via_column(
+                        "chatMembers",
+                        "chatId",
+                        "id",
+                        [eq(col("userId"), claim("user_id"))],
+                    ),
+            ))
+            .policy_branch(PolicyBranch::single_alternative_from_query(
+                Query::from("chats").filter(eq(col("isPublic"), lit(true))),
+            ))
             .policy_branch(PolicyBranch::single_alternative_from_query(Query::from("chats").filter(any_of([
                 eq(col("joinCode"), claim("join_code")),
             ])))),
     ))
+    .with_write_policy(Policy::public()),
+    TableSchema::new(
+        "chatMembers",
+        [
+            ColumnSchema::new("chatId", ColumnType::Uuid),
+            ColumnSchema::new("userId", ColumnType::String),
+        ],
+    )
+    .with_reference("chatId", "chats")
+    .with_read_policy(Policy::public())
     .with_write_policy(Policy::public())]);
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let alice = user(0xa1);
@@ -2322,6 +2349,8 @@ fn nullable_join_code_claim_branch_allows_edge_chat_read() {
                 .made_by(alice)
                 .cells(BTreeMap::from([
                     ("title".to_owned(), v("private by join code")),
+                    ("owner".to_owned(), v("someone else")),
+                    ("isPublic".to_owned(), Value::Bool(false)),
                     (
                         "joinCode".to_owned(),
                         Value::Nullable(Some(Box::new(v(join_code)))),
@@ -2333,13 +2362,19 @@ fn nullable_join_code_claim_branch_allows_edge_chat_read() {
         .unwrap();
     core.set_session_claims(
         reader,
-        BTreeMap::from([("join_code".to_owned(), v(join_code))]),
+        BTreeMap::from([
+            ("join_code".to_owned(), v(join_code)),
+            ("user_id".to_owned(), v(reader.0.to_string())),
+        ]),
     );
 
     let shape = Query::from("chats")
+        .filter(eq(col("id"), param("id")))
         .validate(&core.catalogue.schema)
         .unwrap();
-    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([("id".to_owned(), Value::Uuid(chat.0))]))
+        .unwrap();
 
     assert_eq!(
         core.query_rows_for_link(&shape, &binding, DurabilityTier::Edge, reader)

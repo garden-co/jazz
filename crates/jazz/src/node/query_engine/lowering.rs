@@ -4060,7 +4060,21 @@ fn lower_equality_param_filter_joins(
         projection.extend(
             retained_route_fields
                 .iter()
-                .map(|field| ProjectField::renamed(left_field(&field), field.clone())),
+                .map(|field| ProjectField::renamed(left_field(field), field.clone())),
+        );
+        projection.extend(
+            domain
+                .routing_params
+                .iter()
+                .filter(|field| **field != route_field && !retained_route_fields.contains(*field))
+                .filter_map(|field| {
+                    if domain.claim_params.contains_key(field) {
+                        Some(ProjectField::renamed(right_field(field), field.clone()))
+                    } else {
+                        route_param_from_field(field)
+                            .map(|param| ProjectField::renamed(right_field(param), field.clone()))
+                    }
+                }),
         );
         projection.push(ProjectField::renamed(
             right_field(&join.param),
@@ -4072,7 +4086,7 @@ fn lower_equality_param_filter_joins(
         }
         graph = policy_join_if_needed(graph, binding, [join.field], [join.param], request)
             .project_fields(projection);
-        retained_route_fields.insert(route_field);
+        retained_route_fields.extend(domain.routing_params);
     }
     let residual = match residual.len() {
         0 => PredicateExpr::True,
@@ -5107,50 +5121,48 @@ fn lowered_terminals(
                     });
                 }
             }
-            if has_explicit_closure_path(&request.input.shape) {
-                for contribution in &request.input.shape.join_contributions {
-                    let resolved_source =
-                        resolved_sources.get(&contribution.source).ok_or_else(|| {
-                            Box::new(CapabilityReport {
-                                gaps: vec![UnsupportedReason::Runtime(format!(
-                                    "join contribution source {:?} was not resolved",
-                                    contribution.source
-                                ))],
-                                explain: ExplainPlan::default(),
-                            })
-                        })?;
-                    let output = fact_output_with_terminal(
-                        fact,
-                        ProgramFactTerminal::Primary,
-                        plan,
-                        resolved_source,
-                        resolved_sources,
-                        claim_route_fields.clone(),
-                    )?;
-                    let contribution_graph = join_contribution_membership_graph(
-                        closure.visible_root.clone(),
-                        contribution,
-                        source,
-                        resolved_source,
-                        &request.input.shape.nodes,
-                        resolved_sources,
-                        request,
-                    )?;
-                    let graph = fact_terminal_graph(
-                        fact,
-                        contribution_graph,
-                        plan,
-                        resolved_source,
-                        resolved_sources,
-                        request,
-                        output_routing_fields(&output),
-                    )?;
-                    terminals.push(LoweredTerminal {
-                        sink: scoped_fact_sink_name(fact, &contribution.source),
-                        graph,
-                        output: OutputTerminalSchema::Fact(output),
-                    });
-                }
+            for contribution in &request.input.shape.join_contributions {
+                let resolved_source =
+                    resolved_sources.get(&contribution.source).ok_or_else(|| {
+                        Box::new(CapabilityReport {
+                            gaps: vec![UnsupportedReason::Runtime(format!(
+                                "join contribution source {:?} was not resolved",
+                                contribution.source
+                            ))],
+                            explain: ExplainPlan::default(),
+                        })
+                    })?;
+                let output = fact_output_with_terminal(
+                    fact,
+                    ProgramFactTerminal::Primary,
+                    plan,
+                    resolved_source,
+                    resolved_sources,
+                    claim_route_fields.clone(),
+                )?;
+                let contribution_graph = join_contribution_membership_graph(
+                    closure.visible_root.clone(),
+                    contribution,
+                    source,
+                    resolved_source,
+                    &request.input.shape.nodes,
+                    resolved_sources,
+                    request,
+                )?;
+                let graph = fact_terminal_graph(
+                    fact,
+                    contribution_graph,
+                    plan,
+                    resolved_source,
+                    resolved_sources,
+                    request,
+                    output_routing_fields(&output),
+                )?;
+                terminals.push(LoweredTerminal {
+                    sink: scoped_fact_sink_name(fact, &contribution.source),
+                    graph,
+                    output: OutputTerminalSchema::Fact(output),
+                });
             }
         } else if matches!(fact, ProgramFactKey::VersionWitnesses) {
             for (source_id, resolved_source) in resolved_sources {
@@ -6117,10 +6129,17 @@ fn join_contribution_membership_graph(
             contribution_graph = unwrap_nullable_join_key(contribution_graph, join_key.clone(), 1);
         }
     }
+    let mut projection = project_source_fields_from_prefix(contribution_source, RIGHT_JOIN_PREFIX);
+    projection.extend(
+        parameter_domain_for_request(request)
+            .map_err(single_gap_report)?
+            .routing_params
+            .into_iter()
+            .map(|field| ProjectField::renamed(left_field(&field), field)),
+    );
     Ok(
-        GraphBuilder::join(visible_root, contribution_graph, root_keys, join_keys).project_fields(
-            project_source_fields_from_prefix(contribution_source, RIGHT_JOIN_PREFIX),
-        ),
+        GraphBuilder::join(visible_root, contribution_graph, root_keys, join_keys)
+            .project_fields(projection),
     )
 }
 

@@ -6027,9 +6027,42 @@ where
     ) -> Result<QueryProgramRequest, Error> {
         let lowered_shape;
         let lowered_binding;
-        let use_prepared_binding_source = self.can_use_prepared_current_query_plan(shape)
+        let mut use_prepared_binding_source = self.can_use_prepared_current_query_plan(shape)
             && settled_binding_view.is_none()
             && !matches!(output, CurrentQueryProgramOutput::RelationSnapshot);
+        // A single Groove binding source can carry either an application
+        // binding route or a policy-claim route through a maintained graph.
+        // Mixing the two currently makes nested policy authorization advertise
+        // claim routing fields that the outer application filter can discard.
+        // Keep the policy claim routed and inline the application binding in
+        // that case; the resulting maintained graph still remains reusable for
+        // all sessions that share the claim route.
+        if use_prepared_binding_source && !shape.params().is_empty() {
+            let candidate_shape = self.normalized_row_set_shape(shape, binding)?;
+            let policy = self.query_program_policy_context(identity);
+            let policy_schema_version = self.read_policy_schema_for_table_name(
+                &shape.query().table,
+                shape.schema_version(),
+                &candidate_shape,
+            );
+            let policy_schema = self
+                .catalogue
+                .catalogue_schemas
+                .get(&policy_schema_version)
+                .ok_or(Error::InvalidStoredValue(
+                    "policy schema version is unknown",
+                ))?;
+            let mut claim_params = binding_claim_params_for_shape(&candidate_shape);
+            self.collect_policy_dependency_claim_params(
+                &policy_schema.schema,
+                &policy,
+                &candidate_shape,
+                &mut claim_params,
+            )?;
+            if !claim_params.is_empty() {
+                use_prepared_binding_source = false;
+            }
+        }
         let (shape, binding) = if !use_prepared_binding_source {
             let read_schema = self
                 .catalogue
