@@ -6125,7 +6125,8 @@ where
         // local execution must lower concrete bindings into its locally
         // available (already upstream-scoped at Edge/Global) data, rather
         // than trying to evaluate a server-maintained binding graph.
-        let use_prepared_binding_source = authorization_mode == QueryAuthorizationMode::TrustedServing
+        let use_prepared_binding_source = authorization_mode
+            == QueryAuthorizationMode::TrustedServing
             && self.can_use_prepared_current_query_plan(shape)
             && settled_binding_view.is_none()
             && !matches!(output, CurrentQueryProgramOutput::RelationSnapshot);
@@ -7803,7 +7804,14 @@ where
         retained_prepared_plan: Option<PreparedQueryPlanHandle>,
     ) -> Result<(LocalMaintainedViewSubscription, RelationSnapshot), Error> {
         let (subscription, maintained, terminal_schemas, transitions, tables) = self
-            .open_seeded_maintained_subscription_view(shape, binding, identity, tier, read_view)?;
+            .open_seeded_maintained_subscription_view_in_authorization_mode(
+                shape,
+                binding,
+                identity,
+                tier,
+                read_view,
+                QueryAuthorizationMode::ClientLocal,
+            )?;
         let mut local = LocalMaintainedViewSubscription {
             subscription,
             _retained_prepared_plan: retained_prepared_plan,
@@ -9002,12 +9010,17 @@ where
         identity: AuthorId,
     ) -> Result<(ValidatedQuery, Binding, PreparedQueryPlanHandle), Error> {
         let (shape, binding) = self.query_binding_for_link(shape, binding)?;
-        let program = self.compile_current_query_program(
+        // This plan only keeps the local maintained subscription's graph alive.
+        // The upstream shape is registered separately below, where serving
+        // compilation stays TrustedServing. Do not lower local policy here:
+        // locally stored rows are already scoped by that upstream boundary.
+        let program = self.compile_current_query_program_in_authorization_mode(
             &shape,
             &binding,
             tier,
             identity,
             CurrentQueryProgramOutput::AppRows,
+            QueryAuthorizationMode::ClientLocal,
         )?;
         let has_claim_binding = !program.lowered.parameters.claim_params.is_empty();
         let plan = if has_claim_binding {
@@ -9721,6 +9734,34 @@ where
         ),
         Error,
     > {
+        self.open_seeded_maintained_subscription_view_in_authorization_mode(
+            shape,
+            binding,
+            identity,
+            tier,
+            read_view,
+            QueryAuthorizationMode::TrustedServing,
+        )
+    }
+
+    fn open_seeded_maintained_subscription_view_in_authorization_mode(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorId,
+        tier: DurabilityTier,
+        read_view: &ReadViewSpec,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<
+        (
+            MultisinkSubscription,
+            MaintainedSubscriptionView,
+            MaintainedTerminalSchemas,
+            super::maintained_subscription_view::ResultTransitions,
+            BTreeMap<String, TableSchema>,
+        ),
+        Error,
+    > {
         let schema = self
             .catalogue
             .catalogue_schemas
@@ -9733,13 +9774,14 @@ where
             ParamBindingMode::RetainAllParams,
         )?;
         let binding = shape.bind(binding.values().clone())?;
-        let program = self.compile_current_query_program_for_read_view(
+        let program = self.compile_current_query_program_for_read_view_in_authorization_mode(
             &shape,
             &binding,
             tier,
             identity,
             CurrentQueryProgramOutput::MaintainedView,
             read_view,
+            authorization_mode,
         )?;
         let tables = program.lowered.maintained_terminal_tables.clone();
         let terminal_schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
