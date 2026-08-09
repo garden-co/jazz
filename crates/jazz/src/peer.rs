@@ -891,6 +891,7 @@ impl PeerState {
         let mut allow_storage_witness_fallback = false;
         let mut observed_delta_batches = 0_usize;
         let mut observed_result_delta_batches = 0_usize;
+        let mut terminal_operations = Vec::new();
         {
             let Some(maintained_subscription_view) = self
                 .subscriptions
@@ -913,6 +914,7 @@ impl PeerState {
                                 &node.node_aliases,
                             )?;
                         observed_result_delta_batches += transitions.observed_result_delta_batches;
+                        terminal_operations.extend(transitions.terminal_operations);
                         program_fact_adds.extend(filter_program_facts_for_result_table(
                             transitions.program_fact_adds,
                             result_table_filter,
@@ -1003,7 +1005,7 @@ impl PeerState {
             allow_storage_witness_fallback,
             observed_delta_batches,
             observed_result_delta_batches,
-            terminal_operations: Vec::new(),
+            terminal_operations,
         })
     }
 

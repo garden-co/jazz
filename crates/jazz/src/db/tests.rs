@@ -3610,6 +3610,49 @@ fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
         delivered.is_some(),
         "remote maintained array subscription must deliver the Groove terminal parent"
     );
+
+    server
+        .insert_with_id(
+            "todos",
+            row(0x67),
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("second child".to_owned())),
+                ("owner_id".to_owned(), Value::Uuid(row(0xa6).0)),
+            ]),
+        )
+        .unwrap();
+    let mut delivered_patch = None;
+    for _ in 0..20 {
+        client.tick().unwrap();
+        server.server.tick().unwrap();
+        client.tick().unwrap();
+        if let Some(event @ SubscriptionEvent::Delta { .. }) = subscription.try_next_event() {
+            if matches!(
+                &event,
+                SubscriptionEvent::Delta {
+                    reset: false,
+                    terminal_operations,
+                    added,
+                    updated,
+                    removed,
+                    ..
+                } if added.is_empty()
+                    && updated.is_empty()
+                    && removed.is_empty()
+                    && terminal_operations.iter().any(|operation| {
+                        !operation.path.is_empty()
+                            && matches!(operation.edit, groove::ivm::TerminalEdit::Insert { .. })
+                    })
+            ) {
+                delivered_patch = Some(event);
+                break;
+            }
+        }
+    }
+    assert!(
+        delivered_patch.is_some(),
+        "framed peer delivery must preserve a generic terminal patch without row replacement"
+    );
 }
 
 #[test]

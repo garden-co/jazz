@@ -4578,6 +4578,14 @@ where
                         )
                     } else {
                         if terminal_rows && !peer_terminal_operations.is_empty() {
+                            if let Some(maintained) = maintained_subscription.as_mut() {
+                                // The serving terminal is authoritative for
+                                // structural publication. Advance the local
+                                // Groove mirror for future resets without
+                                // publishing its redundant reconstruction.
+                                node.borrow_mut()
+                                    .drain_local_maintained_view_subscription_state(maintained)?;
+                            }
                             let settled = subscription_is_settled(
                                 &node.borrow(),
                                 &shape,
