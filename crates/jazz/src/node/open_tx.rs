@@ -102,10 +102,12 @@ where
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
-        let snapshot_row = self.snapshot_row(table, row_uuid, &snapshot);
-        self.open_tx_mut(tx_id)?
-            .base_snapshot_rows
-            .insert((table.to_owned(), row_uuid), snapshot_row.clone());
+        let snapshot_row =
+            self.snapshot_row_in_schema(schema_version, table, row_uuid, &snapshot)?;
+        self.open_tx_mut(tx_id)?.base_snapshot_rows.insert(
+            (schema_version, table.to_owned(), row_uuid),
+            snapshot_row.clone(),
+        );
         let result = self.overlay_pending_writes_in_schema(
             tx_id,
             schema_version,
@@ -185,7 +187,8 @@ where
             .collect::<BTreeSet<_>>();
         let mut current = Vec::new();
         for row_uuid in rows {
-            let snapshot_row = self.snapshot_row(table, row_uuid, &snapshot);
+            let snapshot_row =
+                self.snapshot_row_in_schema(schema_version, table, row_uuid, &snapshot)?;
             if let Some(cells) = self.overlay_pending_writes_with_table(
                 tx_id,
                 &table_schema,
@@ -261,7 +264,7 @@ where
             .map(|(column, value)| (column, value.into()))
             .collect::<BTreeMap<_, _>>();
         validate_mergeable_write_shape(cells.is_empty(), deletion.is_some())?;
-        let cache_key = (table.to_owned(), row_uuid);
+        let cache_key = (write_schema_version, table.to_owned(), row_uuid);
         let snapshot_row = if let Some(snapshot_row) = self
             .open_tx(tx_id)?
             .base_snapshot_rows
@@ -271,7 +274,7 @@ where
             snapshot_row
         } else {
             let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
-            self.snapshot_row(table, row_uuid, &snapshot)
+            self.snapshot_row_in_schema(write_schema_version, table, row_uuid, &snapshot)?
         };
         let parent = if snapshot_row.deleted {
             None
@@ -290,7 +293,11 @@ where
             refresh_parents_at_commit: false,
         };
         let open_tx = self.open_tx_mut(tx_id)?;
-        open_tx.base_snapshot_rows.remove(&cache_key);
+        open_tx
+            .base_snapshot_rows
+            .retain(|(_, cached_table, cached_row), _| {
+                cached_table != table || *cached_row != row_uuid
+            });
         if let Some(existing) = open_tx.writes.iter_mut().find(|write| {
             write.table == pending.table
                 && write.row_uuid == pending.row_uuid
@@ -429,9 +436,10 @@ where
         tx_id: OpenBatchId,
         pending: PendingWrite,
     ) -> Result<(), Error> {
-        let cache_key = (pending.table.clone(), pending.row_uuid);
         let open_tx = self.open_tx_mut(tx_id)?;
-        open_tx.base_snapshot_rows.remove(&cache_key);
+        open_tx
+            .base_snapshot_rows
+            .retain(|(_, table, row), _| table != &pending.table || *row != pending.row_uuid);
         if pending.deletion.is_none() {
             if let Some(existing) = open_tx.writes.iter_mut().find(|write| {
                 write.table == pending.table
@@ -588,6 +596,9 @@ where
         };
         let mut commits = Vec::with_capacity(open_tx.writes.len());
         for (index, write) in open_tx.writes.into_iter().enumerate() {
+            for parent in &write.parents {
+                self.merge_tx_time(parent.time);
+            }
             let parents = if write.refresh_parents_at_commit {
                 if write.deletion.is_none() {
                     self.local_content_winner_tx_id(&write.table, write.row_uuid)?
@@ -602,11 +613,20 @@ where
             let (cells, authored_columns) = match write.cells {
                 PendingCells::Replace(cells) => (cells, None),
                 PendingCells::Patch(patch) => {
-                    let table_schema = self.table(&write.table)?.clone();
+                    let table_schema = self.table_in_schema(&write.table, write.schema_version)?;
                     let mut cells = BTreeMap::new();
-                    if let Some(existing) = self.local_current_row(&write.table, write.row_uuid)? {
-                        for column in &table_schema.columns {
-                            if let Some(value) = existing.cell(&table_schema, &column.name) {
+                    let snapshot = self.open_tx(open_batch_id)?.base_snapshot.clone();
+                    if let Some(existing) = self
+                        .snapshot_row_in_schema(
+                            write.schema_version,
+                            &write.table,
+                            write.row_uuid,
+                            &snapshot,
+                        )?
+                        .content_cells
+                    {
+                        for (column, value) in table_schema.columns.iter().zip(existing) {
+                            if let Some(value) = value {
                                 cells.insert(column.name.clone(), value);
                             }
                         }
@@ -638,9 +658,14 @@ where
             {
                 commit = commit.user_metadata(metadata.clone());
             }
-            commits.push(commit);
+            commits.push((write.schema_version, commit));
         }
-        let committed = self.commit_mergeable_many(commits)?;
+        let first = commits.first().ok_or(Error::InvalidMergeableCommit(
+            "mergeable transaction requires at least one write",
+        ))?;
+        let made_at = self.mint_tx_time(first.1.now_ms);
+        let committed =
+            self.commit_mergeable_many_at_with_schema_versions(commits, made_at, None)?;
         self.open_tx.open_transactions.remove(&open_batch_id);
         self.open_tx.closed_batches.insert(open_batch_id);
         Ok(committed)
@@ -712,12 +737,13 @@ where
             })
     }
 
-    pub(super) fn snapshot_row(
+    pub(super) fn snapshot_row_in_schema(
         &mut self,
+        schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
         snapshot: &Snapshot,
-    ) -> SnapshotRow {
+    ) -> Result<SnapshotRow, Error> {
         let content = self.snapshot_layer_winner(table, row_uuid, VersionLayer::Content, snapshot);
         let deletion =
             self.snapshot_layer_winner(table, row_uuid, VersionLayer::Deletion, snapshot);
@@ -725,17 +751,33 @@ where
             deletion.as_ref().and_then(|version| version.deletion()),
             Some(DeletionEvent::Deleted)
         );
-        let table_schema = self.table(table).ok();
-        SnapshotRow {
-            content_cells: content.as_ref().and_then(|version| {
-                table_schema.map(|schema| {
-                    schema
+        let target_table = self.table_in_schema(table, schema_version)?;
+        let content_cells = if let Some(version) = content.as_ref() {
+            let source_schema = self
+                .schema_version_for_alias(version.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "history schema version alias must exist",
+                ))?;
+            let source_table = self.table_in_schema(version.table(), source_schema)?;
+            let mut cells = self.materialized_cells_for_version(&source_table, version)?;
+            let projected_table =
+                self.translate_cells(source_schema, schema_version, version.table(), &mut cells)?;
+            if projected_table.as_deref() == Some(table) {
+                Some(
+                    target_table
                         .columns
                         .iter()
-                        .map(|column| version.peek_cell(schema, &column.name).ok().flatten())
-                        .collect::<Vec<_>>()
-                })
-            }),
+                        .map(|column| cells.get(&column.name).cloned())
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        Ok(SnapshotRow {
+            content_cells,
             content_version: content
                 .as_ref()
                 .and_then(|version| self.version_tx_id(version).ok()),
@@ -749,7 +791,7 @@ where
                     .and_then(|version| self.version_tx_id(version).ok())
             },
             deleted,
-        }
+        })
     }
 
     pub(super) fn snapshot_layer_winner(
@@ -840,7 +882,7 @@ pub(super) struct OpenTransaction {
     /// Snapshot captured when the transaction opened.
     pub(super) base_snapshot: Snapshot,
     /// Base snapshot row derivations observed by point reads in this transaction.
-    pub(super) base_snapshot_rows: BTreeMap<(String, RowUuid), SnapshotRow>,
+    pub(super) base_snapshot_rows: BTreeMap<(SchemaVersionId, String, RowUuid), SnapshotRow>,
     /// Point reads recorded by the transaction.
     pub(super) row_reads: Vec<RowRead>,
     /// Absent-row reads recorded by the transaction.

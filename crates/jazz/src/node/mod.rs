@@ -1335,10 +1335,23 @@ where
         branch_merge: Option<BranchMergeProvenance>,
     ) -> Result<TxId, Error> {
         let write_schema_version = self.catalogue.current_write_schema.schema;
+        let commits = commits
+            .into_iter()
+            .map(|commit| (write_schema_version, commit))
+            .collect();
+        self.commit_mergeable_many_at_with_schema_versions(commits, made_at, branch_merge)
+    }
+
+    pub(super) fn commit_mergeable_many_at_with_schema_versions(
+        &mut self,
+        commits: Vec<(SchemaVersionId, MergeableCommit)>,
+        made_at: TxTime,
+        branch_merge: Option<BranchMergeProvenance>,
+    ) -> Result<TxId, Error> {
         let tx_id = TxId::new(made_at, self.node_uuid);
-        let made_by = commits[0].made_by;
-        let permission_subject = commits[0].effective_permission_subject();
-        let user_metadata_json = commits[0].user_metadata_json.clone();
+        let made_by = commits[0].1.made_by;
+        let permission_subject = commits[0].1.effective_permission_subject();
+        let user_metadata_json = commits[0].1.user_metadata_json.clone();
         let tx = Transaction {
             tx_id,
             kind: TxKind::Mergeable,
@@ -1346,7 +1359,7 @@ where
                 Error::InvalidMergeableCommit("transaction write count exceeds u32")
             })?,
             made_by,
-            permission_subject: commits[0].permission_subject,
+            permission_subject: commits[0].1.permission_subject,
             base_snapshot: None,
             row_read_set: None,
             absent_read_set: None,
@@ -1354,10 +1367,9 @@ where
             user_metadata_json,
             target_lineage: crate::tx::BranchLineage::Root,
             branch_merge,
-            merge_strategy: commits[0].merge_strategy.clone(),
+            merge_strategy: commits[0].1.merge_strategy.clone(),
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
-        let schema_version_alias = self.ensure_schema_version_alias(write_schema_version)?;
         let mut batch = self.database.open_batch();
         batch.insert(
             "jazz_transactions",
@@ -1371,7 +1383,8 @@ where
         );
         let mut stored_versions = Vec::new();
         let mut pending_parents = BTreeSet::new();
-        for commit in commits {
+        for (write_schema_version, commit) in commits {
+            let schema_version_alias = self.ensure_schema_version_alias(write_schema_version)?;
             let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
             let layer = VersionLayer::for_commit(&commit);
             let previous_current =

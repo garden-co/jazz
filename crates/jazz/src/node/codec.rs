@@ -790,26 +790,6 @@ impl VersionRow {
             .transpose()
     }
 
-    pub(super) fn peek_cell(
-        &self,
-        table: &TableSchema,
-        column: &str,
-    ) -> Result<Option<Value>, Error> {
-        if self.is_register_record() {
-            return Ok(None);
-        }
-        let field = HistoryRowRecord::USER_CELLS
-            + table
-                .columns
-                .iter()
-                .position(|candidate| candidate.name == column)
-                .ok_or(Error::InvalidStoredValue("missing user column field"))?;
-        if field >= self.record.descriptor().fields().len() {
-            return Ok(None);
-        }
-        nullable_value(self.record.borrowed().get_idx(field)?)
-    }
-
     pub(super) fn is_register_record(&self) -> bool {
         self.record.descriptor().field_index("_deletion").is_some()
     }

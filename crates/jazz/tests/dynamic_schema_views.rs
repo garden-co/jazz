@@ -153,3 +153,40 @@ fn one_batch_accepts_writes_from_structurally_distinct_views() {
     assert_eq!(rows.len(), 2);
     owner.commit_mergeable_handle(batch).unwrap();
 }
+
+/// A batch opened by an empty owner must resolve its fixed preexisting snapshot
+/// through the attached typed view, not through the owner's genesis schema.
+#[test]
+fn typed_view_reads_and_updates_preexisting_snapshot_rows() {
+    let owner = open_owner(JazzSchema::new([]));
+    let view = owner.register_schema_view(schema("initial")).unwrap();
+    let row = RowUuid::from_bytes([6; 16]);
+
+    let seed = OpenBatchId::new();
+    owner.begin_mergeable(seed).unwrap();
+    view.mergeable_tx_ref(seed)
+        .insert_with_id("items", row, Default::default())
+        .unwrap();
+    owner.commit_mergeable_handle(seed).unwrap();
+
+    let batch = OpenBatchId::new();
+    owner.begin_mergeable(batch).unwrap();
+    let tx = view.mergeable_tx_ref(batch);
+    assert_eq!(
+        tx.read("items", row).unwrap().unwrap()["label"],
+        Value::String("initial".to_owned())
+    );
+    let prepared = view.prepare_query(&view.table("items")).unwrap();
+    assert_eq!(tx.all_prepared(&prepared).unwrap().len(), 1);
+    tx.update(
+        "items",
+        row,
+        [("label".to_owned(), Value::String("updated".to_owned()))].into(),
+    )
+    .unwrap();
+    assert_eq!(
+        tx.read("items", row).unwrap().unwrap()["label"],
+        Value::String("updated".to_owned())
+    );
+    owner.commit_mergeable_handle(batch).unwrap();
+}
