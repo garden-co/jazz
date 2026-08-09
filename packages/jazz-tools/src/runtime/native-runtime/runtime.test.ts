@@ -22,6 +22,18 @@ import { decodeNativeDelta } from "../subscription-manager.js";
 import { definePermissions } from "../../permissions/index.js";
 import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
+import { createOpenBatchId, type BatchId, type OpenBatchId, type WriteReceipt } from "../client.js";
+
+function beginTestBatch(runtime: NativeRuntimeAdapter): OpenBatchId {
+  const id = createOpenBatchId();
+  runtime.beginTransaction("mergeable", id);
+  return id;
+}
+
+async function committedBatchId(receipt: WriteReceipt): Promise<BatchId> {
+  if (receipt.kind !== "committed") throw new Error("expected committed write receipt");
+  return await receipt.batchId;
+}
 
 const previousWebSocket = globalThis.WebSocket;
 
@@ -808,7 +820,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       "00000000-0000-0000-0000-000000000123",
     );
 
-    await runtime.waitForTransaction(inserted.transactionId, "edge");
+    await runtime.waitForTransaction(await committedBatchId(inserted), "edge");
 
     await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual([
       {
@@ -914,7 +926,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
 
-    const tx = runtime.beginTransaction("mergeable");
+    const tx = beginTestBatch(runtime);
     runtime.insert(
       "todos",
       { title: { type: "Text", value: "session tx" } },
@@ -964,7 +976,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
 
-    const tx = runtime.beginTransaction("mergeable");
+    const tx = beginTestBatch(runtime);
     const context = JSON.stringify({ batch_id: tx, updated_at: updatedAt });
     const rowId = "00000000-0000-0000-0000-000000000001";
     runtime.insert("todos", { title: { type: "Text", value: "inserted" } }, context, rowId);
@@ -1004,7 +1016,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
 
-    const tx = runtime.beginTransaction("mergeable");
+    const tx = beginTestBatch(runtime);
     runtime.insert(
       "todos",
       { title: { type: "Text", value: "one" } },
@@ -1030,7 +1042,6 @@ describe("NativeRuntimeAdapter server transport", () => {
 
   it("routes session-scoped transaction reads through the identity-aware native method", async () => {
     const alice = uuidBytes("00000000-0000-0000-0000-0000000000a1");
-    const bob = uuidBytes("00000000-0000-0000-0000-0000000000b2");
     const tx = fakeTx();
     const seenAuthors: string[] = [];
     const runtime = new NativeRuntimeAdapter(
@@ -1071,7 +1082,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
 
-    const transactionId = runtime.beginTransaction("mergeable");
+    const transactionId = beginTestBatch(runtime);
     runtime.insert(
       "todos",
       { title: { type: "Text", value: "alice pending" } },
