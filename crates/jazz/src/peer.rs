@@ -981,7 +981,9 @@ impl PeerState {
             let Some(table_name) = member.table_name() else {
                 continue;
             };
-            if result_table_filter.is_some_and(|table| table_name != table) {
+            if !matches!(member, ResultMemberEntry::Synthetic { .. })
+                && result_table_filter.is_some_and(|table| table_name != table)
+            {
                 continue;
             }
             if !output_tables.contains_key(table_name)
@@ -1075,7 +1077,8 @@ impl PeerState {
                 let Some(table_name) = member.table_name() else {
                     return false;
                 };
-                result_table_filter.is_none_or(|table| table_name == table)
+                (matches!(member, ResultMemberEntry::Synthetic { .. })
+                    || result_table_filter.is_none_or(|table| table_name == table))
                     && (output_tables.contains_key(table_name)
                         || (matches!(member, ResultMemberEntry::Synthetic { .. })
                             && !aggregate_is_policy_scoped))
@@ -2107,9 +2110,9 @@ fn filter_program_facts_for_result_table(
                 let Some(table_name) = payload.member.table_name() else {
                     return false;
                 };
-                result_table_filter.is_none_or(|table| table_name == table)
-                    && (output_tables.contains_key(table_name)
-                        || matches!(payload.member, ResultMemberEntry::Synthetic { .. }))
+                matches!(payload.member, ResultMemberEntry::Synthetic { .. })
+                    || (result_table_filter.is_none_or(|table| table_name == table)
+                        && output_tables.contains_key(table_name))
             }
             _ => true,
         })

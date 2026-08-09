@@ -4724,6 +4724,7 @@ where
     let pending_authoritative_resets = node
         .borrow_mut()
         .take_pending_authoritative_reset_binding_views();
+    let mut consumed_authoritative_resets = BTreeSet::new();
     node.borrow_mut().flush_query_runtime()?;
     for weak in subscriptions.borrow().iter() {
         let Some(state) = weak.upgrade() else {
@@ -4759,14 +4760,66 @@ where
                     }
                 }
             };
-            let (maintained, snapshot) =
+            let (mut maintained, mut snapshot) =
                 node.borrow_mut().open_local_maintained_view_subscription(
                     &shape, &binding, author, read_tier, &read_view, None,
                 )?;
-            let root_occurrence_ids = maintained.root_occurrence_ids().to_vec();
+            let delivered_binding_view = BindingViewKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: RegisterShapeOptions {
+                    tier: read_tier,
+                    read_view: read_view.clone(),
+                }
+                .read_view_key(),
+            };
+            let settled_tier = remote_read_tier.unwrap_or(read_tier);
+            let settled_binding_view = BindingViewKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: RegisterShapeOptions {
+                    tier: settled_tier,
+                    read_view: read_view.clone(),
+                }
+                .read_view_key(),
+            };
+            let pending_binding_view = pending_authoritative_resets
+                .contains(&delivered_binding_view)
+                .then_some(delivered_binding_view)
+                .or_else(|| {
+                    pending_authoritative_resets
+                        .contains(&settled_binding_view)
+                        .then_some(settled_binding_view)
+                });
+            if let Some(binding_view) = pending_binding_view {
+                let authoritative = node
+                    .borrow_mut()
+                    .authoritative_reset_snapshot_for_binding_view(&shape, binding_view)?;
+                if let Some(authoritative) = authoritative {
+                    node.borrow_mut()
+                        .reset_local_maintained_view_subscription_from_binding_view(
+                            &mut maintained,
+                            binding_view,
+                        );
+                    snapshot = authoritative;
+                    consumed_authoritative_resets.insert(binding_view);
+                }
+            }
+            let root_occurrence_ids = if shape.query().aggregate.is_some() {
+                snapshot
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        crate::tools::OutputOccurrenceId::single_source(
+                            crate::tools::ObjectId::from_uuid(row.row_uuid().0),
+                        )
+                    })
+                    .collect()
+            } else {
+                maintained.root_occurrence_ids().to_vec()
+            };
             let reset_outputs =
                 subscription_outputs_with_occurrence_sidecar(&snapshot, &root_occurrence_ids)?;
-            let settled_tier = remote_read_tier.unwrap_or(read_tier);
             let settled = subscription_is_settled(
                 &node.borrow(),
                 &shape,
@@ -4861,6 +4914,9 @@ where
                         };
                     let authoritative_reset_pending =
                         pending_authoritative_resets.contains(&authoritative_reset_binding_view);
+                    if authoritative_reset_pending {
+                        consumed_authoritative_resets.insert(authoritative_reset_binding_view);
+                    }
                     if node
                         .borrow()
                         .publication_deferred_for_binding_view(settled_binding_view)
@@ -5314,6 +5370,10 @@ where
             }
         }
         retained.push(Rc::downgrade(&state));
+    }
+    for pending in pending_authoritative_resets.difference(&consumed_authoritative_resets) {
+        node.borrow_mut()
+            .defer_authoritative_reset_for_binding_view(*pending);
     }
     *subscriptions.borrow_mut() = retained;
     Ok(changed)

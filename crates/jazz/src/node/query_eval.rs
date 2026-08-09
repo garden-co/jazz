@@ -100,6 +100,22 @@ fn aggregate_result_member_row_uuid(member: &ResultMemberEntry) -> Result<RowUui
     )))
 }
 
+fn public_result_member_occurrence_id(
+    member: &ResultMemberEntry,
+    result_table: &str,
+    aggregate_query: bool,
+) -> Result<Option<OutputOccurrenceId>, Error> {
+    if let Some(occurrence) = member.output_occurrence_id() {
+        return Ok(Some(occurrence));
+    }
+    is_public_aggregate_result_member(member, result_table, aggregate_query)
+        .then(|| {
+            aggregate_result_member_row_uuid(member)
+                .map(|row| OutputOccurrenceId::single_source(ObjectId::from_uuid(row.0)))
+        })
+        .transpose()
+}
+
 #[derive(Clone, Copy)]
 struct RelationSnapshotWindow {
     offset: usize,
@@ -8157,7 +8173,11 @@ where
             if local.result_set.insert(member.clone()) && materialize_update && !structured_output {
                 if let Some(row) =
                     self.materialize_local_maintained_view_result_member(local, &member)?
-                    && let Some(occurrence_id) = member.output_occurrence_id()
+                    && let Some(occurrence_id) = public_result_member_occurrence_id(
+                        &member,
+                        local.result_table.as_str(),
+                        local.result_query.aggregate.is_some(),
+                    )?
                 {
                     added.push((occurrence_id, row));
                 }
@@ -8308,12 +8328,14 @@ where
             if let Some(row) = self.materialize_local_maintained_view_result_member_with_cache(
                 local, member, &mut cache,
             )? {
-                let occurrence_id =
-                    member
-                        .output_occurrence_id()
-                        .ok_or(Error::InvalidStoredValue(
-                            "maintained root member has no occurrence identity",
-                        ))?;
+                let occurrence_id = public_result_member_occurrence_id(
+                    member,
+                    local.result_table.as_str(),
+                    local.result_query.aggregate.is_some(),
+                )?
+                .ok_or(Error::InvalidStoredValue(
+                    "maintained root member has no occurrence identity",
+                ))?;
                 row_keys.insert((row.table().to_owned(), row.row_uuid()));
                 rows.push(row);
                 root_occurrence_ids.push(occurrence_id);
@@ -8324,6 +8346,12 @@ where
         // maintained program already chose this result set. Materialize full
         // rows first, because an order key may not be in the public projection.
         self.apply_query_order(&local.result_query, &mut rows)?;
+        if local.result_query.aggregate.is_some() {
+            root_occurrence_ids = rows
+                .iter()
+                .map(|row| OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0)))
+                .collect();
+        }
         self.apply_projection(&local.result_query, &mut rows)?;
         let root_count = rows.len();
         let mut edges = Vec::with_capacity(local.program_facts.len());

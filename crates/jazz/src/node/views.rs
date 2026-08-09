@@ -758,6 +758,20 @@ where
             program_fact_adds,
             program_fact_removes,
         } = update;
+        let synthetic_result_changed = result_member_adds
+            .iter()
+            .chain(&result_member_removes)
+            .any(|member| matches!(member, ResultMemberEntry::Synthetic { .. }))
+            || program_fact_adds
+                .iter()
+                .chain(&program_fact_removes)
+                .any(|fact| {
+                    matches!(
+                        fact,
+                        ProgramFactEntry::ResultPayload(payload)
+                            if matches!(payload.member, ResultMemberEntry::Synthetic { .. })
+                    )
+                });
         let version_bundle_refs =
             version_bundle_refs_for_carriers(&version_bundles, &version_carriers)?;
         let binding_view_key = match self.binding_view_key_for_subscription(subscription) {
@@ -950,6 +964,16 @@ where
             }
             program_facts.extend(program_fact_adds);
             fact_rewrite = None;
+        }
+        if synthetic_result_changed
+            && self
+                .query
+                .initial_hydration_binding_views
+                .contains(&binding_view_key)
+        {
+            self.query
+                .pending_authoritative_reset_binding_views
+                .insert(binding_view_key);
         }
         if !defer_settlement {
             self.query

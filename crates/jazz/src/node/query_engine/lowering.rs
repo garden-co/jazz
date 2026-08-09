@@ -7453,6 +7453,24 @@ fn fact_terminal_graph(
         )),
         ProgramFactKey::ResultMembership => {
             if root_aggregate_step(plan).is_some() {
+                let graph = match root_aggregate_step(plan) {
+                    Some((group_by, outputs))
+                        if group_by.is_empty()
+                            && matches!(
+                                outputs,
+                                [AggregateExpr {
+                                    function: AggregateFunction::Count,
+                                    ..
+                                }]
+                            ) =>
+                    {
+                        graph.filter(GroovePredicateExpr::Neq {
+                            field: logical_user_column(&outputs[0].output.name).to_owned(),
+                            value: LiteralValue::U64(0),
+                        })
+                    }
+                    _ => graph,
+                };
                 return Ok(graph.project_fields(aggregate_result_membership_fields(
                     plan,
                     source,
