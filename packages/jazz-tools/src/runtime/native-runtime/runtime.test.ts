@@ -24,9 +24,13 @@ import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 import { createOpenBatchId, type BatchId, type OpenBatchId, type WriteReceipt } from "../client.js";
 
-function beginTestBatch(runtime: NativeRuntimeAdapter): OpenBatchId {
+function beginTestBatch(runtime: NativeRuntimeAdapter, userId?: string): OpenBatchId {
   const id = createOpenBatchId();
-  runtime.beginTransaction("mergeable", id);
+  runtime.beginTransaction(
+    "mergeable",
+    id,
+    userId === undefined ? undefined : JSON.stringify({ user_id: userId }),
+  );
   return id;
 }
 
@@ -898,6 +902,7 @@ describe("NativeRuntimeAdapter server transport", () => {
   });
 
   it("stages session-scoped mergeable transaction writes through identity-aware core txs", () => {
+    const alice = "00000000-0000-0000-0000-0000000000a1";
     const authors: string[] = [];
     const staged: string[] = [];
     const runtime = new NativeRuntimeAdapter(
@@ -926,13 +931,13 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
 
-    const tx = beginTestBatch(runtime);
+    const tx = beginTestBatch(runtime, alice);
     runtime.insert(
       "todos",
       { title: { type: "Text", value: "session tx" } },
       JSON.stringify({
         batch_id: tx,
-        session: { user_id: "00000000-0000-0000-0000-0000000000a1" },
+        session: { user_id: alice },
       }),
       "00000000-0000-0000-0000-000000000001",
     );
@@ -1084,6 +1089,7 @@ describe("NativeRuntimeAdapter server transport", () => {
   });
 
   it("rejects mixed identities within one mergeable transaction", () => {
+    const alice = "00000000-0000-0000-0000-0000000000a1";
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
@@ -1105,13 +1111,13 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
 
-    const tx = beginTestBatch(runtime);
+    const tx = beginTestBatch(runtime, alice);
     runtime.insert(
       "todos",
       { title: { type: "Text", value: "one" } },
       JSON.stringify({
         batch_id: tx,
-        session: { user_id: "00000000-0000-0000-0000-0000000000a1" },
+        session: { user_id: alice },
       }),
       "00000000-0000-0000-0000-000000000001",
     );
@@ -1171,7 +1177,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
 
-    const transactionId = beginTestBatch(runtime);
+    const transactionId = beginTestBatch(runtime, "00000000-0000-0000-0000-0000000000a1");
     runtime.insert(
       "todos",
       { title: { type: "Text", value: "alice pending" } },
@@ -6171,8 +6177,47 @@ function encodeBinaryLargeValueRows(): Uint8Array {
 function fakeDb<T extends object>(
   db: T,
 ): T & { setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void } {
+  type FakeOpenBatch = {
+    kind: "mergeable" | "exclusive";
+    author?: Uint8Array;
+    tx?: TxForTest;
+  };
+  const implementation = db as T & {
+    mergeableTx?(openBatchId: string): TxForTest;
+    mergeableTxForIdentity?(openBatchId: string, author: Uint8Array): TxForTest;
+    exclusiveTx?(openBatchId: string): TxForTest;
+  };
+  const openBatches = new Map<string, FakeOpenBatch>();
+  const attach = (openBatchId: string, kind: FakeOpenBatch["kind"]): TxForTest => {
+    const batch = openBatches.get(openBatchId);
+    if (!batch || batch.kind !== kind) throw new Error(`unknown ${kind} batch ${openBatchId}`);
+    batch.tx ??=
+      kind === "exclusive"
+        ? (implementation.exclusiveTx?.(openBatchId) ?? fakeTx())
+        : batch.author && implementation.mergeableTxForIdentity
+          ? implementation.mergeableTxForIdentity(openBatchId, batch.author)
+          : (implementation.mergeableTx?.(openBatchId) ?? fakeTx());
+    return batch.tx;
+  };
   return {
     setTickScheduler: () => undefined,
+    beginTransaction: (openBatchId: string, kind: FakeOpenBatch["kind"], author?: Uint8Array) => {
+      openBatches.set(openBatchId, { kind, author });
+    },
+    attachMergeableTx: (openBatchId: string) => attach(openBatchId, "mergeable"),
+    attachExclusiveTx: (openBatchId: string) => attach(openBatchId, "exclusive"),
+    commitTransaction: (openBatchId: string) => {
+      const batch = openBatches.get(openBatchId);
+      if (!batch) throw new Error(`unknown batch ${openBatchId}`);
+      openBatches.delete(openBatchId);
+      return batch.tx?.commit() ?? fakeWrite();
+    },
+    rollbackTransaction: (openBatchId: string) => {
+      const batch = openBatches.get(openBatchId);
+      if (!batch) throw new Error(`unknown batch ${openBatchId}`);
+      batch.tx?.rollback();
+      openBatches.delete(openBatchId);
+    },
     ...db,
   };
 }

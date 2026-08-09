@@ -754,8 +754,9 @@ export class NativeRuntimeAdapter implements Runtime {
     return Promise.resolve(recordWrite(write, this.writes));
   }
 
-  async waitForTransaction(batchId: BatchId, tier: string): Promise<void> {
+  async waitForTransaction(batchId: BatchId | Promise<BatchId>, tier: string): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.waitForTransaction(batchId, tier);
+    batchId = await batchId;
     const write = this.writes.get(batchId);
     if (!write) {
       throw new Error(`Wait for batch failed: unknown batch ${batchId}`);
@@ -1512,10 +1513,9 @@ export class NativeRuntimeAdapter implements Runtime {
     if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
       throw new Error("Native runtime mergeable transaction cannot mix write identities");
     }
-    if (identity && pending.txByView.size > 0 && !pending.identity) {
+    if (identity && !pending.identity) {
       throw new Error("Native runtime mergeable transaction cannot mix write identities");
     }
-    pending.identity = identity;
     return this.txForRead(pending);
   }
 
