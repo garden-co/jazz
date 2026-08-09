@@ -8379,7 +8379,11 @@ where
         // order cannot be exposed as a query reset order. Do not re-window: the
         // maintained program already chose this result set. Materialize full
         // rows first, because an order key may not be in the public projection.
-        self.apply_query_order(&local.result_query, &mut rows)?;
+        self.apply_query_order_with_occurrences(
+            &local.result_query,
+            &mut rows,
+            &mut root_occurrence_ids,
+        )?;
         if local.result_query.aggregate.is_some() {
             root_occurrence_ids = rows
                 .iter()
@@ -9613,6 +9617,101 @@ where
         rows: &mut [CurrentRow],
     ) -> Result<(), Error> {
         self.apply_query_order_in_schema(query, self.catalogue.current_write_schema.schema, rows)
+    }
+
+    fn apply_query_order_with_occurrences(
+        &self,
+        query: &crate::query::Query,
+        rows: &mut Vec<CurrentRow>,
+        occurrence_ids: &mut Vec<OutputOccurrenceId>,
+    ) -> Result<(), Error> {
+        let table = if query.order_by.is_empty() || query.aggregate.is_some() {
+            None
+        } else {
+            Some(self.table_in_schema(&query.table, self.catalogue.current_write_schema.schema)?)
+        };
+        Self::sort_query_rows_with_occurrences(query, table.as_ref(), rows, occurrence_ids)
+    }
+
+    fn sort_query_rows_with_occurrences(
+        query: &crate::query::Query,
+        table: Option<&TableSchema>,
+        rows: &mut Vec<CurrentRow>,
+        occurrence_ids: &mut Vec<OutputOccurrenceId>,
+    ) -> Result<(), Error> {
+        if rows.len() != occurrence_ids.len() {
+            return Err(Error::InvalidStoredValue(
+                "maintained root occurrence sidecar length does not match rows",
+            ));
+        }
+        let mut paired = rows
+            .drain(..)
+            .zip(occurrence_ids.drain(..))
+            .collect::<Vec<_>>();
+        if query.order_by.is_empty() {
+            paired.sort_by(
+                |(left_row, left_occurrence), (right_row, right_occurrence)| {
+                    default_query_row_order(left_row, right_row)
+                        .then_with(|| left_occurrence.cmp(right_occurrence))
+                },
+            );
+        } else if query.aggregate.is_some() {
+            paired.sort_by(
+                |(left_row, left_occurrence), (right_row, right_occurrence)| {
+                    for order in &query.order_by {
+                        let ordering = compare_optional_values(
+                            aggregate_row_cell(left_row, &order.column),
+                            aggregate_row_cell(right_row, &order.column),
+                        );
+                        let ordering = match order.direction {
+                            OrderDirection::Asc => ordering,
+                            OrderDirection::Desc => ordering.reverse(),
+                        };
+                        if ordering != Ordering::Equal {
+                            return ordering;
+                        }
+                    }
+                    left_row
+                        .row_uuid()
+                        .to_bytes()
+                        .cmp(&right_row.row_uuid().to_bytes())
+                        .then_with(|| left_row.record.raw().cmp(right_row.record.raw()))
+                        .then_with(|| left_occurrence.cmp(right_occurrence))
+                },
+            );
+        } else {
+            let table = table.ok_or(Error::InvalidStoredValue(
+                "ordered maintained rows are missing their table schema",
+            ))?;
+            paired.sort_by(
+                |(left_row, left_occurrence), (right_row, right_occurrence)| {
+                    for order in &query.order_by {
+                        let ordering = compare_optional_values(
+                            query_order_value(left_row, &table, &order.column),
+                            query_order_value(right_row, &table, &order.column),
+                        );
+                        let ordering = match order.direction {
+                            OrderDirection::Asc => ordering,
+                            OrderDirection::Desc => ordering.reverse(),
+                        };
+                        if ordering != Ordering::Equal {
+                            return ordering;
+                        }
+                    }
+                    left_row
+                        .row_uuid()
+                        .to_bytes()
+                        .cmp(&right_row.row_uuid().to_bytes())
+                        .then_with(|| left_row.record.raw().cmp(right_row.record.raw()))
+                        .then_with(|| left_occurrence.cmp(right_occurrence))
+                },
+            );
+        }
+        for (row, occurrence) in paired {
+            rows.push(row);
+            occurrence_ids.push(occurrence);
+        }
+        Ok(())
     }
 
     fn apply_query_order_in_schema(
@@ -12022,13 +12121,15 @@ fn compare_optional_values(left: Option<Value>, right: Option<Value>) -> Orderin
 }
 
 fn sort_query_default_rows(rows: &mut [CurrentRow]) {
-    rows.sort_by(|left, right| {
-        left.row_uuid()
-            .to_bytes()
-            .cmp(&right.row_uuid().to_bytes())
-            .then_with(|| left.projected_tx_alias().cmp(&right.projected_tx_alias()))
-            .then_with(|| left.record.raw().cmp(right.record.raw()))
-    });
+    rows.sort_by(default_query_row_order);
+}
+
+fn default_query_row_order(left: &CurrentRow, right: &CurrentRow) -> Ordering {
+    left.row_uuid()
+        .to_bytes()
+        .cmp(&right.row_uuid().to_bytes())
+        .then_with(|| left.projected_tx_alias().cmp(&right.projected_tx_alias()))
+        .then_with(|| left.record.raw().cmp(right.record.raw()))
 }
 
 fn aggregate_row_cell(row: &CurrentRow, column: &str) -> Option<Value> {
@@ -13002,6 +13103,54 @@ mod tests {
     use crate::schema::{JazzSchema, TableSchema};
 
     use super::*;
+
+    #[test]
+    fn maintained_root_order_keeps_occurrence_sidecar_aligned() {
+        let descriptor =
+            RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("user_rank", ValueType::U64)]);
+        let make_row = |id: u8, rank: u64| {
+            CurrentRow::new(
+                "todos",
+                OwnedRecord::new(
+                    descriptor
+                        .create(&[
+                            Value::Uuid(uuid::Uuid::from_bytes([id; 16])),
+                            Value::U64(rank),
+                        ])
+                        .expect("test row"),
+                    descriptor,
+                ),
+            )
+        };
+        let occurrence = |id: u8| {
+            OutputOccurrenceId::single_source(ObjectId::from_uuid(uuid::Uuid::from_bytes([id; 16])))
+        };
+        let mut rows = vec![make_row(0xa1, 3), make_row(0xb2, 1), make_row(0xc3, 2)];
+        let mut occurrences = vec![occurrence(0xa1), occurrence(0xb2), occurrence(0xc3)];
+        let query = Query::from("todos").order_by("rank", OrderDirection::Asc);
+        let table = TableSchema::new("todos", [ColumnSchema::new("rank", ColumnType::U64)]);
+
+        NodeState::<RocksDbStorage>::sort_query_rows_with_occurrences(
+            &query,
+            Some(&table),
+            &mut rows,
+            &mut occurrences,
+        )
+        .expect("sort maintained roots");
+
+        assert_eq!(
+            rows.iter().map(CurrentRow::row_uuid).collect::<Vec<_>>(),
+            vec![
+                RowUuid(uuid::Uuid::from_bytes([0xb2; 16])),
+                RowUuid(uuid::Uuid::from_bytes([0xc3; 16])),
+                RowUuid(uuid::Uuid::from_bytes([0xa1; 16]))
+            ]
+        );
+        assert_eq!(
+            occurrences,
+            vec![occurrence(0xb2), occurrence(0xc3), occurrence(0xa1)]
+        );
+    }
 
     #[test]
     fn predicate_params_collects_every_operand_position_and_operator() {
