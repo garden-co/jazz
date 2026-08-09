@@ -729,7 +729,8 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.pendingTxs.has(id) || this.completedTxs.has(id)) {
       throw new Error(`Begin transaction failed: batch ${id} has already been opened`);
     }
-    const identity = kind === "mergeable" ? readSession(sessionJson)?.identity : undefined;
+    const identity =
+      kind === "mergeable" ? sessionFromWriteContext(sessionJson)?.identity : undefined;
     this.db.beginTransaction(id, kind, identity);
     this.pendingTxs.set(id, { id, kind, identity, writes: [], txByView: new Map() });
     return id;

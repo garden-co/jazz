@@ -638,13 +638,13 @@ export class JazzClient {
     return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
   }
 
-  beginTransaction(kind: TransactionKind, session?: Session): OpenBatchId {
+  beginTransaction(kind: TransactionKind, session?: Session, attribution?: string): OpenBatchId {
     const id = createOpenBatchId();
-    const effectiveSession = session ?? this.resolvedSession;
+    const effectiveSession = this.resolveWriteSession(session, attribution);
     return requireTransactionalRuntime(this.runtime).beginTransaction(
       kind,
       id,
-      effectiveSession ? JSON.stringify(effectiveSession) : undefined,
+      this.encodeWriteContext(effectiveSession, attribution),
     );
   }
 
