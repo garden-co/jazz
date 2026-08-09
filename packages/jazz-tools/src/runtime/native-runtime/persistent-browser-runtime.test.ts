@@ -118,6 +118,98 @@ describe("PersistentBrowserOpfsRuntime", () => {
     FakeWorker.instances = [];
   });
 
+  it("does not require connect before server-tier work in a local-only runtime", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-local-only-ready-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    const wait = runtime.waitForTransaction("local-only-transaction", "edge");
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
+    });
+    const waitMessage = worker.messages.find((message) => message.method === "waitForTransaction");
+    worker.respond(waitMessage!.id, undefined);
+
+    await expect(wait).resolves.toBeUndefined();
+    await runtime.close();
+  });
+
+  it("handles rejected connection gates that have no server-tier waiters", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-unused-gate-rejection-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app/ws", "{}");
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "connect")).toBe(true);
+    });
+    worker.reject(
+      worker.messages.find((message) => message.method === "connect")!.id,
+      "Persistent browser native runtime connect failed",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    runtime.updateAuth("{}");
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "updateAuth")).toBe(true);
+    });
+    worker.reject(
+      worker.messages.find((message) => message.method === "updateAuth")!.id,
+      "Persistent browser native runtime auth update failed",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await runtime.close();
+  });
+
+  it("rejects server-tier work parked behind a reconnect when closed", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-close-reconnect-waiters-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    const disconnect = runtime.disconnect({ rejectWaiters: false });
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "disconnect")).toBe(true);
+    });
+    const disconnectMessage = worker.messages.find((message) => message.method === "disconnect");
+    worker.respond(disconnectMessage!.id, undefined);
+    await disconnect;
+
+    const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null);
+    const wait = runtime.waitForTransaction("parked-transaction", "global");
+    const queryRejection = expect(query).rejects.toThrow(
+      "Persistent browser native runtime is closed",
+    );
+    const waitRejection = expect(wait).rejects.toThrow(
+      "Persistent browser native runtime is closed",
+    );
+    await runtime.close();
+
+    await queryRejection;
+    await waitRejection;
+  });
+
   it("returns a pending write handle and waits on the worker transaction id", async () => {
     vi.stubGlobal("Worker", FakeWorker);
 
@@ -431,6 +523,64 @@ describe("PersistentBrowserOpfsRuntime", () => {
     expect(edgeQueryMessage?.args[2]).toBe("edge");
     worker.respond(edgeQueryMessage!.id, ["edge"]);
     await expect(edgeRead).resolves.toEqual(["edge"]);
+    await runtime.close();
+  });
+
+  it("does not release disconnected server-tier work when auth changes", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-disconnected-auth-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    const disconnect = runtime.disconnect({ rejectWaiters: false });
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "disconnect")).toBe(true);
+    });
+    worker.respond(
+      worker.messages.find((message) => message.method === "disconnect")!.id,
+      undefined,
+    );
+    await disconnect;
+
+    const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null);
+    const wait = runtime.waitForTransaction("disconnected-auth-transaction", "global");
+    runtime.updateAuth('{"token":"replacement"}');
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "updateAuth")).toBe(true);
+    });
+    worker.respond(
+      worker.messages.find((message) => message.method === "updateAuth")!.id,
+      undefined,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(worker.messages.some((message) => message.method === "query")).toBe(false);
+    expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(false);
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app/ws", "{}");
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "connect")).toBe(true);
+    });
+    worker.respond(worker.messages.find((message) => message.method === "connect")!.id, undefined);
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
+    });
+    worker.respond(
+      worker.messages.find((message) => message.method === "waitForTransaction")!.id,
+      undefined,
+    );
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "query")).toBe(true);
+    });
+    worker.respond(worker.messages.find((message) => message.method === "query")!.id, []);
+
+    await expect(query).resolves.toEqual([]);
+    await expect(wait).resolves.toBeUndefined();
     await runtime.close();
   });
 
