@@ -80,6 +80,11 @@ where
         S: ReopenableStorage,
     {
         let plan = self.plan_trusted_catalogue_snapshot(snapshot)?;
+        let runtime_semantics_changed = self.catalogue.schema != plan.catalogue.schema
+            || self.catalogue.catalogue_schemas != plan.catalogue.catalogue_schemas
+            || self.catalogue.catalogue_lenses != plan.catalogue.catalogue_lenses
+            || self.catalogue.physical_mappings != plan.catalogue.physical_mappings
+            || self.catalogue.current_write_schema != plan.catalogue.current_write_schema;
         let previous_catalogue = std::mem::replace(&mut self.catalogue, plan.catalogue.clone());
         if self.synchronize_physical_version_tables().is_err() {
             self.catalogue = previous_catalogue;
@@ -144,8 +149,11 @@ where
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
-        self.groove_runtime_token = next_groove_runtime_token();
+        if runtime_semantics_changed {
+            self.groove_runtime_token = next_groove_runtime_token();
+        }
         self.drain_parked_commit_units()?;
+        self.drain_parked_relay_commit_units()?;
         self.drain_parked_shape_registrations()?;
         Ok(())
     }
@@ -304,11 +312,18 @@ where
             ));
         }
         planned.current_write_schema = snapshot.current_write_schema;
-        if planned.current_write_schema.schema == planned.current_schema_version_id {
-            planned.schema = planned.catalogue_schemas[&planned.current_schema_version_id]
-                .schema
-                .clone();
-        }
+        // `schema` is the active read-schema payload supplied when this node
+        // was opened. Its policy metadata is intentionally outside the
+        // structural schema id and may therefore be refreshed by a snapshot
+        // even while the current write pointer names another schema.
+        planned.schema = planned
+            .catalogue_schemas
+            .get(&planned.current_schema_version_id)
+            .ok_or(Error::InvalidCatalogueUpdate(
+                "trusted catalogue snapshot omits the active read schema",
+            ))?
+            .schema
+            .clone();
         Ok(PlannedCatalogueSnapshot {
             catalogue: planned,
             activated_lineages,
@@ -867,6 +882,7 @@ where
                 applied: true,
             }));
             out.extend(self.drain_parked_commit_units()?);
+            self.drain_parked_relay_commit_units()?;
             self.drain_parked_shape_registrations()?;
             out.extend(self.drain_pending_catalogue_pointers()?);
         }

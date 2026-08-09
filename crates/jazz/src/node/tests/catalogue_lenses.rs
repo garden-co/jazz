@@ -1342,6 +1342,10 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
     let base = schema();
     let evolved = catalogue_evolved_schema();
     let evolved_id = evolved.version_id();
+    let evolved_cells = BTreeMap::from([
+        ("body".to_owned(), Value::String(String::new())),
+        ("title".to_owned(), Value::String("parked".to_owned())),
+    ]);
     let (_writer_dir, mut writer) = open_node_with_schema(node(0x36), base.clone());
     let (core_dir, mut core) = open_node_with_schema(node(0x37), base.clone());
     let (_tx_id, unit) = writer
@@ -1418,7 +1422,7 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>()
             .get(&row(0x55)),
-        Some(&title_cells("parked"))
+        Some(&evolved_cells)
     );
     drop(core);
     let mut reopened = reopen_node_at(&core_dir, node(0x37), base);
@@ -1434,7 +1438,7 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>()
             .get(&row(0x55)),
-        Some(&title_cells("parked"))
+        Some(&evolved_cells)
     );
 }
 
@@ -1488,22 +1492,33 @@ fn catalogue_arrival_drains_branch_relay_into_branch_partition() {
             .any(|(_, existing)| *existing == branch_id)
     );
 
-    relay
-        .apply_sync_message(SyncMessage::PublishSchema {
-            author: AuthorId::SYSTEM,
-            schema: Box::new(SchemaVersion::new(evolved.clone())),
-        })
-        .unwrap();
+    publish_schema_lineage(
+        &mut relay,
+        SchemaVersion::new(evolved.clone()),
+        MigrationLens::new(
+            base.version_id(),
+            evolved_id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String(String::new()),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
     let stored = relay.transaction_record(tx.tx_id).unwrap();
     assert_eq!(
         stored.target_lineage,
         crate::tx::BranchLineage::Branch(branch_id)
     );
     assert_eq!(stored.fate, Fate::Pending);
-    // The relayed row is authored in the newly arrived schema. Until a lens
-    // relates that schema to the active base schema, it is readable through
-    // its own physical lineage rather than through an invented name-based
-    // projection into the base schema.
+    // The relayed row is authored in the newly arrived schema and becomes
+    // readable through the physical lineage activated with its lens.
     let shape = Query::from("todos").validate(&evolved).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let rows = relay
@@ -1512,7 +1527,14 @@ fn catalogue_arrival_drains_branch_relay_into_branch_partition() {
         .into_iter()
         .map(current_row_pair)
         .collect::<BTreeMap<_, _>>();
-    assert_eq!(rows.get(&row(0x56)), Some(&title_cells("relay parked")));
+    let evolved_cells = BTreeMap::from([
+        ("body".to_owned(), Value::String(String::new())),
+        (
+            "title".to_owned(),
+            Value::String("relay parked".to_owned()),
+        ),
+    ]);
+    assert_eq!(rows.get(&row(0x56)), Some(&evolved_cells));
     assert!(
         relay
             .current_rows("todos", DurabilityTier::Local)
@@ -1533,7 +1555,7 @@ fn catalogue_arrival_drains_branch_relay_into_branch_partition() {
         .into_iter()
         .map(current_row_pair)
         .collect::<BTreeMap<_, _>>();
-    assert_eq!(rows.get(&row(0x56)), Some(&title_cells("relay parked")));
+    assert_eq!(rows.get(&row(0x56)), Some(&evolved_cells));
 }
 
 #[test]
@@ -1594,12 +1616,25 @@ fn parked_branch_ingress_role_keeps_authority_precedence_in_both_orders() {
                 .unwrap();
         }
 
-        let updates = receiver
-            .apply_sync_message(SyncMessage::PublishSchema {
-                author: AuthorId::SYSTEM,
-                schema: Box::new(SchemaVersion::new(evolved.clone())),
-            })
-            .unwrap();
+        let updates = publish_schema_lineage(
+            &mut receiver,
+            SchemaVersion::new(evolved.clone()),
+            MigrationLens::new(
+                base.version_id(),
+                evolved_id,
+                vec![TableLens {
+                    source_table: "todos".to_owned(),
+                    target_table: "todos".to_owned(),
+                    ops: vec![LensOp::AddColumn {
+                        column: "body".to_owned(),
+                        default: Value::String(String::new()),
+                    }],
+                }],
+            ),
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap();
         assert!(updates.iter().any(|update| matches!(
             update,
             SyncMessage::FateUpdate {

@@ -6481,7 +6481,13 @@ fn flat_join_occurrence_id_fields(
 fn flat_join_payload_fields(plan: &AnalyzedQueryPlan) -> Vec<TypedOutputField> {
     root_linear_steps(plan)
         .and_then(|steps| match steps.last() {
-            Some(LinearStep::Project(columns)) => Some(columns),
+            Some(LinearStep::Project(columns))
+                if columns
+                    .iter()
+                    .any(|column| column.output.name.starts_with("__flat_join_row_")) =>
+            {
+                Some(columns)
+            }
             _ => None,
         })
         .map(|columns| {

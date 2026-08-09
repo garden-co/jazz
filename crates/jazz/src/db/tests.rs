@@ -2620,8 +2620,7 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
         .unwrap();
 
     subscriber.borrow_mut().tick().unwrap();
-    let message = client_transport
-        .try_recv()
+    let message = try_recv_subscriber_payload(client_transport.as_mut())
         .expect("expected include subscription view update");
     let SyncMessage::ViewUpdate {
         subscription: served,
@@ -2652,8 +2651,7 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
         .unwrap();
 
     subscriber.borrow_mut().tick().unwrap();
-    let message = client_transport
-        .try_recv()
+    let message = try_recv_subscriber_payload(client_transport.as_mut())
         .expect("expected reopened include subscription view update");
     let SyncMessage::ViewUpdate {
         subscription: served,
@@ -4744,6 +4742,19 @@ fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
     )
 }
 
+/// Receive the next subscriber payload relevant to direct protocol assertions.
+/// A subscriber begins by publishing its trusted catalogue prerequisite; tests
+/// that do not model a receiving `Db` still need to consume that control-plane
+/// message before asserting the requested registration/subscription response.
+fn try_recv_subscriber_payload(transport: &mut dyn Transport) -> Option<SyncMessage> {
+    loop {
+        match transport.try_recv()? {
+            SyncMessage::CatalogueSnapshot(_) => continue,
+            message => return Some(message),
+        }
+    }
+}
+
 struct BackpressureOnceTransport {
     outbound: Rc<RefCell<std::collections::VecDeque<SyncMessage>>>,
     failed: bool,
@@ -6753,7 +6764,7 @@ fn session_branch_data_parks_until_authenticated_metadata_arrives() {
             .is_none()
     );
     assert!(matches!(
-        client_transport.try_recv(),
+        try_recv_subscriber_payload(client_transport.as_mut()),
         Some(SyncMessage::FetchBranchMetadata { branches }) if branches == vec![branch]
     ));
 
@@ -7127,8 +7138,7 @@ fn subscriber_connection_serves_single_branch_read_view_subscription() {
 
     subscriber.borrow_mut().tick().unwrap();
     assert_subscribe_rejected_branch_overlay(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("expected subscription rejection"),
         subscription,
     );
@@ -7189,8 +7199,7 @@ fn subscriber_connection_rejects_one_gapped_subscription_and_keeps_serving_other
         .unwrap();
     subscriber.borrow_mut().tick().unwrap();
     assert_view_update_for_subscription(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("expected initial supported view update"),
         supported_subscription,
     );
@@ -7212,8 +7221,7 @@ fn subscriber_connection_rejects_one_gapped_subscription_and_keeps_serving_other
         .unwrap();
     subscriber.borrow_mut().tick().unwrap();
     assert_subscribe_rejected_branch_overlay(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("expected branch subscription rejection"),
         branch_subscription,
     );
@@ -7222,8 +7230,7 @@ fn subscriber_connection_rejects_one_gapped_subscription_and_keeps_serving_other
     seed(&server, "todos", cells("second", false, owner));
     subscriber.borrow_mut().tick().unwrap();
     assert_view_update_for_subscription(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("expected supported update after rejection"),
         supported_subscription,
     );
@@ -7357,7 +7364,7 @@ fn subscriber_connection_surfaces_server_table_not_found_without_silence() {
 
     subscriber.borrow_mut().tick().unwrap();
 
-    match client_transport.try_recv() {
+    match try_recv_subscriber_payload(client_transport.as_mut()) {
         Some(SyncMessage::SubscribeRejected {
             subscription: rejected_subscription,
             reason:
@@ -7426,8 +7433,7 @@ fn subscriber_connection_serves_default_ordered_window_alongside_unbounded_shape
 
     subscriber.borrow_mut().tick().unwrap();
     assert_view_update_for_subscription(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("expected unbounded subscription update"),
         supported_subscription,
     );
@@ -7442,11 +7448,9 @@ fn subscriber_connection_serves_default_ordered_window_alongside_unbounded_shape
         .unwrap();
     seed(&server, "todos", cells("third", false, owner));
     subscriber.borrow_mut().tick().unwrap();
-    let first = client_transport
-        .try_recv()
+    let first = try_recv_subscriber_payload(client_transport.as_mut())
         .expect("expected maintained subscription update");
-    let second = client_transport
-        .try_recv()
+    let second = try_recv_subscriber_payload(client_transport.as_mut())
         .expect("expected maintained window update");
     let subscriptions = [first, second]
         .into_iter()
@@ -7492,8 +7496,7 @@ fn subscriber_connection_rejects_local_tier_register_shape() {
 
     subscriber.borrow_mut().tick().unwrap();
     assert_subscribe_rejected_unsupported_shape_capability_detail(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("expected local-tier registration rejection"),
         SubscriptionKey {
             shape_id: shape.shape_id(),
@@ -7527,8 +7530,7 @@ fn subscriber_connection_rejects_local_tier_register_shape() {
 
     subscriber.borrow_mut().tick().unwrap();
     assert_view_update_for_subscription(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("valid subscription should still be served after malformed register"),
         subscription,
     );
@@ -7627,7 +7629,7 @@ fn subscriber_connection_drops_oversized_known_state_and_keeps_serving() {
         1
     );
     assert!(
-        client_transport.try_recv().is_none(),
+        try_recv_subscriber_payload(client_transport.as_mut()).is_none(),
         "oversized known-state request should not receive a view update"
     );
 
@@ -7645,8 +7647,7 @@ fn subscriber_connection_drops_oversized_known_state_and_keeps_serving() {
 
     subscriber.borrow_mut().tick().unwrap();
     assert_view_update_for_subscription(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("valid resubscribe should be served after malformed known-state"),
         subscription,
     );
@@ -7703,8 +7704,7 @@ fn subscriber_connection_drops_oversized_fetch_row_versions_and_keeps_serving() 
 
     subscriber.borrow_mut().tick().unwrap();
     assert_view_update_for_subscription(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("valid subscription should still be served after malformed repair request"),
         subscription,
     );
@@ -7767,8 +7767,7 @@ fn subscriber_connection_drops_mismatched_shape_id_and_keeps_serving() {
 
     subscriber.borrow_mut().tick().unwrap();
     assert_view_update_for_subscription(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("valid subscription should still be served after mismatched shape id"),
         subscription,
     );
@@ -7872,8 +7871,7 @@ fn subscriber_connection_rejects_non_global_register_shape_options() {
 
     subscriber.borrow_mut().tick().unwrap();
     assert_subscribe_rejected_unsupported_shape_capability_detail(
-        client_transport
-            .try_recv()
+        try_recv_subscriber_payload(client_transport.as_mut())
             .expect("expected edge-tier registration rejection"),
         SubscriptionKey {
             shape_id: shape.shape_id(),
@@ -7909,7 +7907,7 @@ fn subscriber_connection_accepts_array_subquery_register_shape_for_serving_subsc
 
     subscriber.borrow_mut().tick().unwrap();
     assert!(
-        client_transport.try_recv().is_none(),
+        try_recv_subscriber_payload(client_transport.as_mut()).is_none(),
         "registering a supported array-subquery shape should not emit a rejection"
     );
 }
@@ -8016,7 +8014,7 @@ fn subscriber_connection_accepts_relation_register_shape_for_serving_subscriptio
         subscription: served,
         result_member_adds,
         ..
-    }) = client_transport.try_recv()
+    }) = try_recv_subscriber_payload(client_transport.as_mut())
     else {
         panic!("expected relation facade subscription view update");
     };

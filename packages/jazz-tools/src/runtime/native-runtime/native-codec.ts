@@ -266,6 +266,9 @@ export function queryWithPredicates(
     writePredicate(filter, predicate);
   }, predicates.length);
   writer.vec(() => undefined, 0);
+  // Query.flat_join follows joins in the postcard struct layout. The public
+  // runtime does not lower flat joins yet, so encode the absent option.
+  writer.none();
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);

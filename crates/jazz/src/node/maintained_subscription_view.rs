@@ -510,10 +510,15 @@ impl MaintainedSubscriptionView {
         let new = old + weight;
         if old <= 0 && new > 0 {
             transitions.adds.push(entry.clone());
-            transitions
-                .result_payload_adds
-                .push((entry.clone(), payload.clone()));
-            self.result_payloads.insert(entry.clone(), payload);
+            if entry
+                .as_real_row()
+                .is_some_and(|row| row.row_digest.is_some())
+            {
+                transitions
+                    .result_payload_adds
+                    .push((entry.clone(), payload.clone()));
+                self.result_payloads.insert(entry.clone(), payload);
+            }
         }
         if old > 0 && new <= 0 {
             transitions.removes.push(entry.clone());
