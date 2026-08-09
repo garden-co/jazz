@@ -5260,10 +5260,11 @@ fn lowered_terminals(
                 )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_deletion_fact_sink_name(fact, source_id),
-                    graph: deletion_witness_graph_for_current_register(
+                    graph: maintained_deletion_witness_graph(
                         resolved_source,
+                        member_graph.clone(),
+                        source_id == &source.row_shape.source,
                         "version_deletion",
-                        true,
                     )?,
                     output: OutputTerminalSchema::Fact(deletion_output),
                 });
@@ -7170,6 +7171,24 @@ fn deletion_witness_graph_for_current_register(
         register.graph.clone()
     };
     Ok(graph.project_fields(deletion_witness_fields_for_tagged_rows(source, event_kind)?))
+}
+
+fn maintained_deletion_witness_graph(
+    source: &ResolvedSource,
+    member_graph: GraphBuilder,
+    is_root: bool,
+    event_kind: &str,
+) -> CapabilityResult<GraphBuilder> {
+    let graph = deletion_witness_graph_for_current_register(source, event_kind, is_root)?;
+    if is_root {
+        return Ok(graph);
+    }
+    Ok(GraphBuilder::semi_join(
+        graph,
+        member_graph,
+        ["row_uuid"],
+        [source.row_shape.row_uuid_field.clone()],
+    ))
 }
 
 fn content_version_witness_graph(

@@ -5072,6 +5072,27 @@ fn reverse_referencing_select_policy_allows_root_row_through_source_row() {
             ("ownerId".to_owned(), Value::String(alice.0.to_string())),
         ])),
     );
+    let mut unrelated_deleted_attachments = BTreeSet::new();
+    let mut unrelated_delete_txs = Vec::new();
+    for offset in 0..64_u8 {
+        let row_uuid = row(0x20 + offset);
+        let content = accept_global(
+            &mut core,
+            MergeableCommit::new("attachments", row_uuid, 100 + u64::from(offset) * 2).cells(
+                BTreeMap::from([
+                    ("fileId".to_owned(), Value::Uuid(unlinked_file.0)),
+                    ("ownerId".to_owned(), Value::String(bob.0.to_string())),
+                ]),
+            ),
+        );
+        unrelated_delete_txs.push(accept_global(
+            &mut core,
+            MergeableCommit::new("attachments", row_uuid, 101 + u64::from(offset) * 2)
+                .parents(vec![content])
+                .deletion(DeletionEvent::Deleted),
+        ));
+        unrelated_deleted_attachments.insert(row_uuid);
+    }
 
     assert!(
         core.dry_run_read_current_allows("files", alice_file, alice)
@@ -5090,6 +5111,22 @@ fn reverse_referencing_select_policy_allows_root_row_through_source_row() {
 
     let shape = Query::from("files").validate(&core.catalogue.schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
+    let (receiver, maintained, _, _, _) = core
+        .open_seeded_maintained_subscription_view(
+            &shape,
+            &binding,
+            alice,
+            DurabilityTier::Edge,
+            &Default::default(),
+        )
+        .unwrap();
+    core.unsubscribe_groove_subscription(receiver.id());
+    assert!(
+        unrelated_delete_txs
+            .iter()
+            .all(|tx_id| maintained.versions_by_tx(*tx_id).is_empty()),
+        "private root must not retain unrelated public-child tombstones"
+    );
     let mut peer = PeerState::client_link(alice);
     let update = peer
         .rehydrate_query_with_opts(
@@ -5125,6 +5162,10 @@ fn reverse_referencing_select_policy_allows_root_row_through_source_row() {
     assert!(
         shipped_rows.contains(&attachment),
         "expected attachment evidence, shipped {shipped_rows:?}"
+    );
+    assert!(
+        shipped_rows.is_disjoint(&unrelated_deleted_attachments),
+        "private file view must not retain unrelated public attachment tombstones"
     );
 
     let (_reader_dir, mut reader) = open_node_with_schema(node(8), reader_schema);
