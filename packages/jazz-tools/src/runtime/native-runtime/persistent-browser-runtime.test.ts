@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { NativeRowDelta, WasmSchema } from "../../drivers/types.js";
-import { createOpenBatchId } from "../client.js";
+import { createOpenBatchId, type BatchId } from "../client.js";
 import type { InsertResult, MutationResult } from "../client.js";
 import type { PersistentBrowserSubscriptionMessage } from "./persistent-browser-protocol.js";
 import {
@@ -139,7 +139,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
     );
     const worker = FakeWorker.instances[0];
 
-    const wait = runtime.waitForTransaction("local-only-transaction", "edge");
+    const wait = runtime.waitForTransaction("local-only-transaction" as BatchId, "edge");
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
     });
@@ -246,7 +246,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
     await disconnect;
 
     const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null);
-    const wait = runtime.waitForTransaction("parked-transaction", "global");
+    const wait = runtime.waitForTransaction("parked-transaction" as BatchId, "global");
     const queryRejection = expect(query).rejects.toThrow(
       "Persistent browser native runtime is closed",
     );
@@ -777,7 +777,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
     await disconnect;
 
     const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null);
-    const wait = runtime.waitForTransaction("disconnected-auth-transaction", "global");
+    const wait = runtime.waitForTransaction("disconnected-auth-transaction" as BatchId, "global");
     runtime.updateAuth('{"token":"replacement"}');
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "updateAuth")).toBe(true);
