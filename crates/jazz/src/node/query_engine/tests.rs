@@ -554,6 +554,7 @@ impl SourceResolver for FakeSourceResolver {
             .contains(&SourceMetadataRequirement::DeletionMarkers)
             .then(|| DeletionRegisterSource {
                 graph: GraphBuilder::table(format!("resolved_{}_deletions", request.source.table)),
+                eligibility: None,
                 row_uuid_field: "row_uuid".to_owned(),
             });
         let content_version = request

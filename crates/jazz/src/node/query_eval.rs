@@ -1238,6 +1238,7 @@ where
         let deletion_register = self.deletion_register_source_for_request(
             request,
             &table,
+            &authorization,
             graph_tier,
             history_position,
             open_tx_overlay,
@@ -1310,6 +1311,7 @@ where
         &mut self,
         request: &SourceRequest,
         table: &TableSchema,
+        authorization: &SourceAuthorizationRequest,
         graph_tier: Option<DurabilityTier>,
         history_position: Option<GlobalSeq>,
         open_tx_overlay: Option<OpenTxId>,
@@ -1335,9 +1337,54 @@ where
         if branch_data.is_some() {
             return Err(source_resolution_error(request, SourceGap::BranchOverlay));
         }
+        let eligibility = match authorization {
+            SourceAuthorizationRequest::System => None,
+            SourceAuthorizationRequest::PolicyFiltered { .. }
+            | SourceAuthorizationRequest::PolicyProof { .. }
+                if table.read_policy == crate::schema::Policy::public() =>
+            {
+                None
+            }
+            SourceAuthorizationRequest::PolicyFiltered {
+                permission_subject,
+                plan,
+            }
+            | SourceAuthorizationRequest::PolicyProof {
+                permission_subject,
+                plan,
+            } => {
+                if plan.protected_source.table != table.name
+                    || plan.role != PolicyDecisionRole::Read
+                    || plan.protected_row_field != "row_uuid"
+                {
+                    return Err(source_resolution_error(request, SourceGap::Coverage));
+                }
+                let policy_request = self
+                    .node
+                    .table_read_policy_authorization_request_for_include_deleted(
+                        self.read_view.policy_schema,
+                        &table.name,
+                        *permission_subject,
+                        tier,
+                        plan.binding_source_shape.clone(),
+                        plan.binding_user_params.clone(),
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let authorized = self
+                    .node
+                    .policy_authorization_row_id_graph(policy_request)
+                    .map_err(|error| source_resolution_error_from_policy_proof(request, error))?;
+                self.policy_evidence_terminals
+                    .extend(authorized.evidence_terminals);
+                self.policy_evidence_tables
+                    .extend(authorized.evidence_tables);
+                Some(authorized.graph)
+            }
+        };
         if self.needs_projected_current_source(&request.source.table) {
             return Ok(Some(DeletionRegisterSource {
                 graph: self.projected_deletion_register_current_source_graph(request, tier)?,
+                eligibility,
                 row_uuid_field: "row_uuid".to_owned(),
             }));
         }
@@ -1350,6 +1397,7 @@ where
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         Ok(Some(DeletionRegisterSource {
             graph: deletion_register_current_source_graph(&table.name, &register_table, tier),
+            eligibility,
             row_uuid_field: "row_uuid".to_owned(),
         }))
     }

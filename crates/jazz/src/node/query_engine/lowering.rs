@@ -5202,19 +5202,7 @@ fn lowered_terminals(
                         .or_insert(member_graph);
                 }
             }
-            let mut seen_contributions = BTreeSet::new();
-            for contribution in request
-                .input
-                .shape
-                .join_contributions
-                .iter()
-                .chain(&request.input.shape.authorization_join_contributions)
-            {
-                if !seen_contributions
-                    .insert((contribution.id.clone(), contribution.source.clone()))
-                {
-                    continue;
-                }
+            for contribution in &request.input.shape.authorization_join_contributions {
                 let Some(contribution_source) = resolved_sources.get(&contribution.source) else {
                     continue;
                 };
@@ -5239,7 +5227,6 @@ fn lowered_terminals(
                 let Some(member_graph) = witness_members.get(source_id) else {
                     continue;
                 };
-                let version = version_witness_fields(&resolved_source.row_shape)?;
                 let content_output = fact_output_with_terminal(
                     fact,
                     ProgramFactTerminal::VersionWitnessContent,
@@ -5253,12 +5240,11 @@ fn lowered_terminals(
                     // A writer peer may need the complete atomic transaction,
                     // not only the row that matched this result. Bound the
                     // witness set by transactions reached from public members.
-                    graph: GraphBuilder::semi_join(
-                        content_version_witness_graph(resolved_source, "version_content")?,
+                    graph: transaction_bounded_content_version_witness_graph(
+                        resolved_source,
                         member_graph.clone(),
-                        ["tx_time", "tx_node_id"],
-                        [version.tx_time_field, version.tx_node_field],
-                    ),
+                        "version_content",
+                    )?,
                     output: OutputTerminalSchema::Fact(content_output),
                 });
                 if resolved_source.deletion_register.is_none() {
@@ -5274,12 +5260,10 @@ fn lowered_terminals(
                 )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_deletion_fact_sink_name(fact, source_id),
-                    // The deletion register is already policy-filtered and
-                    // includes authorized tombstones that have no visible row
-                    // with which to form a membership semi-join.
                     graph: deletion_witness_graph_for_current_register(
                         resolved_source,
                         "version_deletion",
+                        true,
                     )?,
                     output: OutputTerminalSchema::Fact(deletion_output),
                 });
@@ -5315,6 +5299,7 @@ fn lowered_terminals(
                     graph: deletion_witness_graph_for_current_register(
                         resolved_source,
                         "replacement_deletion",
+                        false,
                     )?,
                     output: OutputTerminalSchema::Fact(deletion_output),
                 });
@@ -7164,6 +7149,7 @@ fn correlated_relation_name(path: &CorrelatedPathPlan) -> String {
 fn deletion_witness_graph_for_current_register(
     source: &ResolvedSource,
     event_kind: &str,
+    apply_eligibility: bool,
 ) -> CapabilityResult<GraphBuilder> {
     let Some(register) = &source.deletion_register else {
         return Err(Box::new(CapabilityReport {
@@ -7173,10 +7159,17 @@ fn deletion_witness_graph_for_current_register(
             explain: ExplainPlan::default(),
         }));
     };
-    Ok(register
-        .graph
-        .clone()
-        .project_fields(deletion_witness_fields_for_tagged_rows(source, event_kind)?))
+    let graph = if apply_eligibility && let Some(eligibility) = &register.eligibility {
+        GraphBuilder::semi_join(
+            register.graph.clone(),
+            eligibility.clone(),
+            [register.row_uuid_field.clone()],
+            ["row_uuid"],
+        )
+    } else {
+        register.graph.clone()
+    };
+    Ok(graph.project_fields(deletion_witness_fields_for_tagged_rows(source, event_kind)?))
 }
 
 fn content_version_witness_graph(
@@ -7202,6 +7195,30 @@ fn content_version_witness_graph(
     .project_fields(unprefixed_version_witness_fields_for_tagged_rows(
         source, event_kind,
     )?))
+}
+
+fn transaction_bounded_content_version_witness_graph(
+    source: &ResolvedSource,
+    member_graph: GraphBuilder,
+    event_kind: &str,
+) -> CapabilityResult<GraphBuilder> {
+    let Some(content_version) = &source.content_version else {
+        return content_version_witness_graph(source, event_kind);
+    };
+    let reached_transactions = GraphBuilder::join(
+        member_graph,
+        content_version.graph.clone(),
+        [source.row_shape.row_uuid_field.clone()],
+        [content_version.row_uuid_field.clone()],
+    )
+    .project_fields(version_witness_fields_for_tagged_rows(source, event_kind)?);
+    Ok(GraphBuilder::join(
+        reached_transactions,
+        content_version.graph.clone(),
+        ["tx_time", "tx_node_id"],
+        ["tx_time", "tx_node_id"],
+    )
+    .project_fields(version_witness_fields_for_tagged_rows(source, event_kind)?))
 }
 
 fn result_membership_fields(

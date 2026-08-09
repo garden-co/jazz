@@ -3243,6 +3243,21 @@ fn maintained_view_seeded_query_engine_snapshot_matches_rows_and_witnesses() {
             .parents(vec![deleted_unreadable_content])
             .deletion(DeletionEvent::Deleted),
     );
+    let mut unauthorized_sibling_deletes = Vec::new();
+    for offset in 0..64_u8 {
+        let row_uuid = row(0x95 + offset);
+        let content = accept_global(
+            &mut core,
+            MergeableCommit::new("todos", row_uuid, 100 + u64::from(offset) * 2)
+                .cells(owner_cells(author_b, "hidden sibling")),
+        );
+        unauthorized_sibling_deletes.push(accept_global(
+            &mut core,
+            MergeableCommit::new("todos", row_uuid, 101 + u64::from(offset) * 2)
+                .parents(vec![content])
+                .deletion(DeletionEvent::Deleted),
+        ));
+    }
 
     let shape = Query::from("todos")
         .filter(eq(col("title"), lit("include")))
@@ -3283,6 +3298,22 @@ fn maintained_view_seeded_query_engine_snapshot_matches_rows_and_witnesses() {
             (row(0x94), VersionLayer::Content, false),
             (row(0x94), VersionLayer::Deletion, true),
         ],
+    );
+    let (receiver, maintained, _, _, _) = core
+        .open_seeded_maintained_subscription_view(
+            &shape,
+            &binding,
+            author_a,
+            DurabilityTier::Global,
+            &Default::default(),
+        )
+        .unwrap();
+    core.unsubscribe_groove_subscription(receiver.id());
+    assert!(
+        unauthorized_sibling_deletes
+            .iter()
+            .all(|tx_id| maintained.versions_by_tx(*tx_id).is_empty()),
+        "private maintained seeds must not retain unauthorized sibling tombstones"
     );
 }
 

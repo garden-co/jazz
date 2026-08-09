@@ -143,6 +143,8 @@ pub(crate) struct ContentVersionSource {
 pub(crate) struct DeletionRegisterSource {
     /// Graph emitting current deletion-register rows with canonical storage fields.
     pub(crate) graph: GraphBuilder,
+    /// Optional policy-authorized row domain used to bound tombstone witnesses.
+    pub(crate) eligibility: Option<GraphBuilder>,
     /// Field containing row identity.
     pub(crate) row_uuid_field: String,
 }
