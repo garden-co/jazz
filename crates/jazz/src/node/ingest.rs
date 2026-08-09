@@ -308,32 +308,17 @@ where
         self.query.policy_authorization_graph_cache.clear();
         if schema.id == self.catalogue.current_schema_version_id {
             self.catalogue.schema = schema.schema.clone();
-            self.query.current_row_graphs = current_row_graphs(&self.catalogue.schema);
         }
         self.persist_catalogue_schema(&schema)?;
+        self.ensure_provisional_physical_mapping(schema.id)?;
         self.ensure_schema_version_alias(schema.id)?;
+        self.synchronize_physical_version_tables()?;
         if active_schema_changed {
             // Policy declarations are intentionally outside the schema version
             // identity. Invalidate maintained handles when that same-version
             // payload changes so live subscriptions rebuild their authorization
             // graph without reopening storage through the old catalogue row.
             self.groove_runtime_token = next_groove_runtime_token();
-        }
-        if schema.id != self.catalogue.current_schema_version_id
-            && self.parking.parked_commit_units.values().any(|parked| {
-                parked
-                    .versions
-                    .iter()
-                    .any(|version| version.schema_version() == schema.id)
-            })
-        {
-            let mut added_partition = false;
-            for table in &schema.schema.tables {
-                added_partition |= self.persist_partition(table.name.clone(), schema.id)?;
-            }
-            if added_partition {
-                self.rebuild_database_slot()?;
-            }
         }
         let updates = self.drain_parked_commit_units()?;
         self.drain_parked_relay_commit_units()?;
@@ -368,19 +353,59 @@ where
             return Err(Error::InvalidCatalogueUpdate("lens endpoint is unknown"));
         }
         self.validate_migration_lens(&lens)?;
-        let installed = if let std::collections::btree_map::Entry::Vacant(entry) =
-            self.catalogue.catalogue_lenses.entry(lens.id)
-        {
-            entry.insert(lens.clone());
-            true
+        let installed = !self.catalogue.catalogue_lenses.contains_key(&lens.id);
+        let target_mapping_is_authoritative =
+            self.catalogue.catalogue_lenses.values().any(|published| {
+                published.source == lens.target || published.target == lens.target
+            });
+        let provisional_table_ids = if installed {
+            self.catalogue
+                .physical_mappings
+                .get(&lens.target)
+                .into_iter()
+                .flat_map(|mapping| mapping.tables.values().map(|table| table.table_id))
+                .collect::<BTreeSet<_>>()
         } else {
-            false
+            BTreeSet::new()
         };
+        let reconciled = if installed {
+            let candidate = self.reconcile_physical_mapping_for_lens(&lens)?;
+            if target_mapping_is_authoritative {
+                let authoritative = self.catalogue.physical_mappings.get(&lens.target).ok_or(
+                    Error::InvalidStoredValue("authoritative physical mapping missing"),
+                )?;
+                if candidate != *authoritative {
+                    return Err(Error::InvalidCatalogueUpdate(
+                        "lens conflicts with authoritative physical mapping",
+                    ));
+                }
+                None
+            } else {
+                Some(candidate)
+            }
+        } else {
+            None
+        };
+        self.persist_catalogue_lens_with_physical_metadata(&lens, reconciled.as_ref())?;
+        if installed {
+            self.catalogue
+                .catalogue_lenses
+                .insert(lens.id, lens.clone());
+        }
+        if let Some(mapping) = reconciled {
+            self.catalogue
+                .physical_mappings
+                .insert(lens.target, mapping);
+        }
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
-        self.persist_catalogue_lens(&lens)?;
+        self.query.version_storage_sources_cache.clear();
+        self.query.query_shape_cache.clear();
+        self.query.read_policy_authorization_request_cache.clear();
+        self.query.policy_authorization_graph_cache.clear();
         if installed {
-            self.rebuild_database_slot()?;
+            self.discard_unmapped_physical_version_tables(provisional_table_ids)?;
+            self.synchronize_physical_version_tables()?;
         }
         Ok(vec![SyncMessage::CatalogueAck(CatalogueAck {
             revision: None,
@@ -424,20 +449,6 @@ where
                 ))?;
             if pointer.schema == self.catalogue.current_schema_version_id {
                 self.catalogue.schema = active_schema.schema.clone();
-                self.query.current_row_graphs = current_row_graphs(&self.catalogue.schema);
-            }
-            let tables = active_schema
-                .schema
-                .tables
-                .iter()
-                .map(|table| table.name.clone())
-                .collect::<Vec<_>>();
-            let mut added_partition = false;
-            for table in tables {
-                added_partition |= self.persist_partition(table, pointer.schema)?;
-            }
-            if added_partition {
-                self.rebuild_database_slot()?;
             }
         }
         Ok(vec![SyncMessage::CatalogueAck(CatalogueAck {
@@ -1678,9 +1689,7 @@ where
             for version in versions {
                 let author_schema = version.schema_version();
                 let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
-                let (table_schema, target_schema, stored) = if author_schema
-                    != self.catalogue.current_write_schema.schema
-                {
+                let stored = if author_schema != self.catalogue.current_write_schema.schema {
                     let mut target_table = version.table().to_owned();
                     let mut target_cells = source_table_schema
                         .columns
@@ -1701,7 +1710,7 @@ where
                     target_table = translated_table;
                     let table_schema = self.table_in_schema(&target_table, target_schema)?;
                     let schema_version_alias = self.ensure_schema_version_alias(target_schema)?;
-                    let stored = VersionRow::from_parts_with_schema_version(
+                    VersionRow::from_parts_with_schema_version(
                         &table_schema,
                         VersionRowParts {
                             table: target_table,
@@ -1721,11 +1730,10 @@ where
                         },
                         (target_schema != self.catalogue.current_schema_version_id)
                             .then_some(target_schema),
-                    )?;
-                    (table_schema, target_schema, stored)
+                    )?
                 } else {
                     let schema_version_alias = self.ensure_schema_version_alias(author_schema)?;
-                    let stored = VersionRow::from_wire_with_schema_version(
+                    VersionRow::from_wire_with_schema_version(
                         &source_table_schema,
                         version,
                         tx_node_alias,
@@ -1733,19 +1741,13 @@ where
                         tx.tx_id.time,
                         (author_schema != self.catalogue.current_schema_version_id)
                             .then_some(author_schema),
-                    )?;
-                    (source_table_schema, author_schema, stored)
+                    )?
                 };
-                let history_table = self.cached_version_storage_table_name_for_schema(
-                    &table_schema.name,
-                    stored.layer(),
-                    target_schema,
-                    self.catalogue.current_schema_version_id,
-                );
+                let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
                 batch.insert_raw(
                     history_table.as_ref(),
                     history_primary_key(&stored),
-                    stored.record.raw().to_vec(),
+                    groove_record,
                 );
                 if stored.layer() == VersionLayer::Content {
                     content_versions.push(stored.clone());
@@ -2748,8 +2750,14 @@ where
         let affected_content_rows = rejected
             .iter()
             .filter(|version| version.layer() == VersionLayer::Content)
-            .map(|version| (version.table().to_owned(), version.row_uuid()))
-            .collect::<BTreeSet<_>>();
+            .map(|version| {
+                Ok((
+                    self.physical_table_id_for_version(version)?,
+                    version.table().to_owned(),
+                    version.row_uuid(),
+                ))
+            })
+            .collect::<Result<BTreeSet<_>, Error>>()?;
         let mut rejected_payload = None;
         if tx_id.node == self.node_uuid
             && let Fate::Rejected(reason) = &tx.fate
@@ -2776,16 +2784,16 @@ where
                 let table_schema = self.table_in_schema(version.table(), schema_version)?;
                 let rejected_version_table = table_schema.rejected_versions_storage_table();
                 let rejected_version_values = rejected_version_values(&table_schema, version)?;
-                batch.insert(
-                    rejected_versions_table_name(version.table()),
-                    rejected_version_values.clone(),
-                );
+                let rejected_version_record = owned_record_from_storage_values(
+                    &rejected_version_table,
+                    rejected_version_values,
+                )?;
+                let (storage_table, storage_record) =
+                    self.rejected_version_storage_write_binding(version, &rejected_version_record)?;
+                batch.insert(storage_table.as_ref(), storage_record);
                 rejected_versions.push(RejectedVersion::new(
                     version.table().to_owned(),
-                    owned_record_from_storage_values(
-                        &rejected_version_table,
-                        rejected_version_values,
-                    )?,
+                    rejected_version_record,
                 ));
             }
             rejected_versions.sort_by_key(|version| {
@@ -2803,13 +2811,11 @@ where
         }
         for version in &rejected {
             self.write_ahead_current_delete(batch, version)?;
-            batch.delete(
-                version_storage_table_name(&version.table, version.layer()),
-                history_primary_key(version),
-            );
+            let history_table = self.version_storage_table_for_row(version)?;
+            batch.delete(history_table.as_ref(), history_primary_key(version));
         }
-        for (table, row_uuid) in affected_content_rows {
-            self.rewrite_merge_heads_excluding_tx(batch, &table, row_uuid, tx_id)?;
+        for (table_id, table, row_uuid) in affected_content_rows {
+            self.rewrite_merge_heads_excluding_tx(batch, table_id, &table, row_uuid, tx_id)?;
         }
         self.invalidate_tx_version_tables_cache(tx_id);
         let _ = affected;
@@ -2833,11 +2839,18 @@ where
             if record.deletion().is_some() {
                 continue;
             }
-            let (_, table) = self.translate_cells_to_current_write_schema(
+            let (projected_schema, table) = self.translate_cells_to_current_write_schema(
                 record.schema_version(),
                 record.table(),
                 &mut BTreeMap::new(),
             )?;
+            // Synthetic merge versions are authored in the current write
+            // schema. An otherwise valid version in an unreconciled schema
+            // has its own physical lineage and merge-head set, but cannot be
+            // semantically merged into the write schema until a lens exists.
+            if projected_schema != self.catalogue.current_write_schema.schema {
+                continue;
+            }
             rows.push((table, record.row_uuid()));
         }
         rows.sort_unstable();
@@ -2860,15 +2873,11 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
-        let head_tx_ids = self.merge_head_tx_ids(table, row_uuid)?;
-        // Schema migrations can leave a single historical head under a table
-        // name that no longer exists. Preserve the old one-head fast path for
-        // that case; only a live table can need GSet materialization.
-        let table_schema = match self.table(table) {
-            Ok(table_schema) => table_schema.clone(),
-            Err(Error::TableNotFound(_)) if head_tx_ids.len() < 2 => return Ok(()),
-            Err(error) => return Err(error),
-        };
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_write_schema.schema, table)?;
+        let head_tx_ids = self.merge_head_tx_ids(table_id, row_uuid)?;
+        let table_schema =
+            self.table_in_schema(table, self.catalogue.current_write_schema.schema)?;
         let has_gset_column = table_schema
             .columns
             .iter()
@@ -2876,7 +2885,7 @@ where
         if head_tx_ids.len() < 2 && !has_gset_column {
             return Ok(());
         }
-        let row_versions = self.query_row_versions(table, row_uuid)?;
+        let row_versions = self.query_physical_content_row_versions(table_id, table, row_uuid)?;
         let mut row_versions_by_tx = BTreeMap::new();
         for version in row_versions {
             row_versions_by_tx.insert(self.version_tx_id(&version)?, version);
@@ -3563,15 +3572,12 @@ where
 
     fn read_merge_heads(
         &mut self,
-        table: &str,
+        table_id: PhysicalTableId,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeSet<TxId>>, Error> {
         let row = self.database.primary_key_get_raw(
             MERGE_HEADS_TABLE,
-            &[
-                Value::Bytes(table.as_bytes().to_vec()),
-                Value::Uuid(row_uuid.0),
-            ],
+            &[Value::U64(table_id.0), Value::Uuid(row_uuid.0)],
         )?;
         let Some(row) = row else {
             return Ok(None);
@@ -3583,16 +3589,13 @@ where
     fn read_merge_heads_in_batch(
         &mut self,
         batch: &DatabaseBatch,
-        table: &str,
+        table_id: PhysicalTableId,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeSet<TxId>>, Error> {
         let row = self.database.primary_key_get_raw_in_batch(
             batch,
             MERGE_HEADS_TABLE,
-            &[
-                Value::Bytes(table.as_bytes().to_vec()),
-                Value::Uuid(row_uuid.0),
-            ],
+            &[Value::U64(table_id.0), Value::Uuid(row_uuid.0)],
         )?;
         let Some(row) = row else {
             return Ok(None);
@@ -3603,10 +3606,10 @@ where
 
     fn require_merge_heads(
         &mut self,
-        table: &str,
+        table_id: PhysicalTableId,
         row_uuid: RowUuid,
     ) -> Result<BTreeSet<TxId>, Error> {
-        self.read_merge_heads(table, row_uuid)?
+        self.read_merge_heads(table_id, row_uuid)?
             .ok_or(Error::InvalidStoredValue(
                 "merge head set missing for existing global current row",
             ))
@@ -3614,19 +3617,66 @@ where
 
     fn write_merge_heads(
         batch: &mut DatabaseBatch,
-        table: &str,
+        table_id: PhysicalTableId,
         row_uuid: RowUuid,
         heads: &BTreeSet<TxId>,
     ) -> Result<(), Error> {
         batch.update(
             MERGE_HEADS_TABLE,
             vec![
-                Value::Bytes(table.as_bytes().to_vec()),
+                Value::U64(table_id.0),
                 Value::Uuid(row_uuid.0),
                 Value::Bytes(Self::encode_merge_heads(heads)?),
             ],
         );
         Ok(())
+    }
+
+    fn query_physical_content_row_versions(
+        &mut self,
+        table_id: PhysicalTableId,
+        requested_table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Vec<VersionRow>, Error> {
+        let storage_table = physical_history_table_name(table_id);
+        let raws = self
+            .database
+            .primary_key_scan_raw(&storage_table, &[Value::Uuid(row_uuid.0)])?
+            .into_iter()
+            .map(|raw| raw.owned_record())
+            .collect::<Vec<_>>();
+        let mut versions = raws
+            .into_iter()
+            .map(|record| self.decode_history_owned_record(requested_table, &storage_table, record))
+            .collect::<Result<Vec<_>, Error>>()?;
+        let aliases = self.node_aliases.clone();
+        versions.sort_by_key(|version| {
+            version_tx_id_from_aliases(version, &aliases).expect("valid version tx id")
+        });
+        Ok(versions)
+    }
+
+    fn query_physical_content_layer_winner(
+        &mut self,
+        table_id: PhysicalTableId,
+        requested_table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<VersionRow>, Error> {
+        let mut winner = None;
+        for version in
+            self.query_physical_content_row_versions(table_id, requested_table, row_uuid)?
+        {
+            let candidate_tx = self.version_tx_id(&version)?;
+            let replaces_winner = winner.as_ref().is_none_or(|existing: &VersionRow| {
+                let existing_tx = self.version_tx_id(existing).expect("valid version tx id");
+                candidate_tx.time.sort_key(candidate_tx.node)
+                    > existing_tx.time.sort_key(existing_tx.node)
+            });
+            if replaces_winner {
+                winner = Some(version);
+            }
+        }
+        Ok(winner)
     }
 
     pub(super) fn update_merge_heads_for_content_version(
@@ -3637,14 +3687,15 @@ where
         if version.layer() != VersionLayer::Content {
             return Ok(());
         }
+        let table_id = self.physical_table_id_for_version(version)?;
         let new_tx = self.version_tx_id(version)?;
-        let mut heads = match self.read_merge_heads(version.table(), version.row_uuid())? {
+        let mut heads = match self.read_merge_heads(table_id, version.row_uuid())? {
             Some(existing) => existing,
             None => {
-                if let Some(previous) = self.query_local_layer_winner(
+                if let Some(previous) = self.query_physical_content_layer_winner(
+                    table_id,
                     version.table(),
                     version.row_uuid(),
-                    VersionLayer::Content,
                 )? {
                     let previous_tx = self.version_tx_id(&previous)?;
                     if previous_tx != new_tx {
@@ -3665,6 +3716,7 @@ where
             .map(|head| {
                 self.content_version_reaches_tx_in_batch(
                     batch,
+                    table_id,
                     version.table(),
                     version.row_uuid(),
                     head,
@@ -3677,7 +3729,7 @@ where
         if !dominated_by_existing_head {
             heads.insert(new_tx);
         }
-        Self::write_merge_heads(batch, version.table(), version.row_uuid(), &heads)
+        Self::write_merge_heads(batch, table_id, version.row_uuid(), &heads)
     }
 
     fn update_merge_heads_for_content_version_in_batch(
@@ -3688,42 +3740,40 @@ where
         if version.layer() != VersionLayer::Content {
             return Ok(());
         }
+        let table_id = self.physical_table_id_for_version(version)?;
         let new_tx = self.version_tx_id(version)?;
-        let mut heads =
-            match self.read_merge_heads_in_batch(batch, version.table(), version.row_uuid())? {
-                Some(existing) => existing,
-                None => {
-                    if let Some(previous) = self.query_local_layer_winner(
-                        version.table(),
-                        version.row_uuid(),
-                        VersionLayer::Content,
-                    )? {
-                        let previous_tx = self.version_tx_id(&previous)?;
-                        if previous_tx != new_tx {
-                            return Err(Error::InvalidStoredValue(
-                                "merge head set missing for existing content row",
-                            ));
-                        }
+        let mut heads = match self.read_merge_heads_in_batch(batch, table_id, version.row_uuid())? {
+            Some(existing) => existing,
+            None => {
+                if let Some(previous) = self.query_physical_content_layer_winner(
+                    table_id,
+                    version.table(),
+                    version.row_uuid(),
+                )? {
+                    let previous_tx = self.version_tx_id(&previous)?;
+                    if previous_tx != new_tx {
+                        return Err(Error::InvalidStoredValue(
+                            "merge head set missing for existing content row",
+                        ));
                     }
-                    BTreeSet::new()
                 }
-            };
+                BTreeSet::new()
+            }
+        };
         for parent in version.parents() {
             heads.remove(&parent);
         }
         let dominated_by_existing_head = heads
             .iter()
             .copied()
-            .map(|head| {
-                self.content_version_reaches_tx(version.table(), version.row_uuid(), head, new_tx)
-            })
+            .map(|head| self.content_version_reaches_tx(table_id, version.row_uuid(), head, new_tx))
             .collect::<Result<Vec<_>, Error>>()?
             .into_iter()
             .any(|reaches| reaches);
         if !dominated_by_existing_head {
             heads.insert(new_tx);
         }
-        Self::write_merge_heads(batch, version.table(), version.row_uuid(), &heads)
+        Self::write_merge_heads(batch, table_id, version.row_uuid(), &heads)
     }
 
     fn query_global_layer_winner_in_batch(
@@ -3733,30 +3783,24 @@ where
         row_uuid: RowUuid,
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
-        let (schema_version, base_for_current_names) = if self
+        let schema_version = if self
             .table_in_schema(table, self.catalogue.current_schema_version_id)
             .is_ok()
         {
-            (
-                self.catalogue.current_schema_version_id,
-                self.catalogue.current_schema_version_id,
-            )
+            self.catalogue.current_schema_version_id
         } else {
             self.table_in_schema(table, self.catalogue.current_write_schema.schema)?;
-            (
-                self.catalogue.current_write_schema.schema,
-                self.catalogue.current_write_schema.schema,
-            )
+            self.catalogue.current_write_schema.schema
         };
-        let current_table = self.cached_global_current_table_name_for_schema(
+        let current_table = self.physical_current_table_for_schema(
+            schema_version,
             table,
             layer,
-            schema_version,
-            base_for_current_names,
-        );
+            PhysicalCurrentClass::Global,
+        )?;
         let raw = self.database.primary_key_get_raw_in_batch(
             batch,
-            current_table.as_ref(),
+            &current_table,
             &[Value::Uuid(row_uuid.0)],
         )?;
         let Some(raw) = raw else {
@@ -3778,7 +3822,7 @@ where
         tx_time: TxTime,
         tx_node_alias: NodeAlias,
     ) -> Result<Option<VersionRow>, Error> {
-        for (storage_table, descriptor) in self.version_storage_sources_for_layer(table, layer)? {
+        for storage_table in self.version_storage_sources_for_layer(table, layer)? {
             let raw = self.database.primary_key_get_raw_in_batch(
                 batch,
                 &storage_table,
@@ -3788,12 +3832,12 @@ where
                     Value::U64(tx_node_alias.0),
                 ],
             )?;
-            let raw = raw.map(|raw| raw.raw().to_vec());
-            let Some(raw) = raw else {
+            let record = raw.map(|raw| raw.owned_record());
+            let Some(record) = record else {
                 continue;
             };
             return self
-                .decode_history_record(table, BorrowedRecord::new(&raw, &descriptor))
+                .decode_history_owned_record(table, &storage_table, record)
                 .map(Some);
         }
         Ok(None)
@@ -3804,23 +3848,26 @@ where
         batch: &mut DatabaseBatch,
         versions: &[VersionRow],
     ) -> Result<(), Error> {
-        let mut by_row = BTreeMap::<(String, RowUuid), Vec<&VersionRow>>::new();
+        let mut by_row = BTreeMap::<(PhysicalTableId, RowUuid), Vec<&VersionRow>>::new();
         for version in versions {
             if version.layer() == VersionLayer::Content {
+                let table_id = self.physical_table_id_for_version(version)?;
                 by_row
-                    .entry((version.table().to_owned(), version.row_uuid()))
+                    .entry((table_id, version.row_uuid()))
                     .or_default()
                     .push(version);
             }
         }
-        for ((table, row_uuid), mut row_versions) in by_row {
+        for ((table_id, row_uuid), mut row_versions) in by_row {
             row_versions.sort_by_key(|version| {
                 let tx_id = self
                     .version_tx_id(version)
                     .expect("bulk content version must have node alias");
                 tx_id.time.sort_key(tx_id.node)
             });
-            let mut heads = self.read_merge_heads(&table, row_uuid)?.unwrap_or_default();
+            let mut heads = self
+                .read_merge_heads(table_id, row_uuid)?
+                .unwrap_or_default();
             let mut staged_parents = BTreeMap::<TxId, Vec<TxId>>::new();
             for version in &row_versions {
                 staged_parents.insert(self.version_tx_id(version)?, version.parents());
@@ -3836,7 +3883,11 @@ where
                     .map(|head| {
                         content_version_reaches_tx_in_staged_parents(head, new_tx, &staged_parents)
                             .map_or_else(
-                                || self.content_version_reaches_tx(&table, row_uuid, head, new_tx),
+                                || {
+                                    self.content_version_reaches_tx(
+                                        table_id, row_uuid, head, new_tx,
+                                    )
+                                },
                                 Ok,
                             )
                     })
@@ -3847,14 +3898,14 @@ where
                     heads.insert(new_tx);
                 }
             }
-            Self::write_merge_heads(batch, &table, row_uuid, &heads)?;
+            Self::write_merge_heads(batch, table_id, row_uuid, &heads)?;
         }
         Ok(())
     }
 
     fn content_version_reaches_tx(
         &mut self,
-        table: &str,
+        table_id: PhysicalTableId,
         row_uuid: RowUuid,
         start: TxId,
         target: TxId,
@@ -3869,7 +3920,7 @@ where
                 continue;
             }
             for version in self.query_versions_for_tx(tx_id)? {
-                if version.table() == table
+                if self.physical_table_id_for_version(&version)? == table_id
                     && version.row_uuid() == row_uuid
                     && version.layer() == VersionLayer::Content
                 {
@@ -3883,6 +3934,7 @@ where
     fn content_version_reaches_tx_in_batch(
         &mut self,
         batch: &DatabaseBatch,
+        table_id: PhysicalTableId,
         table: &str,
         row_uuid: RowUuid,
         start: TxId,
@@ -3897,10 +3949,13 @@ where
             if !seen.insert(tx_id) {
                 continue;
             }
-            for version in
-                self.query_versions_for_tx_in_batch_for_row(batch, tx_id, table, row_uuid)?
+            for version in self
+                .query_versions_for_tx_in_batch_for_row(batch, tx_id, table_id, table, row_uuid)?
             {
-                if version.row_uuid() == row_uuid && version.layer() == VersionLayer::Content {
+                if self.physical_table_id_for_version(&version)? == table_id
+                    && version.row_uuid() == row_uuid
+                    && version.layer() == VersionLayer::Content
+                {
                     stack.extend(version.parents());
                 }
             }
@@ -3912,6 +3967,7 @@ where
         &mut self,
         batch: &DatabaseBatch,
         tx_id: TxId,
+        table_id: PhysicalTableId,
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Vec<VersionRow>, Error> {
@@ -3919,24 +3975,21 @@ where
         let Some(tx_node_alias) = self.node_aliases.get(&tx_id.node).copied() else {
             return Ok(versions);
         };
-        for (storage_table, descriptor) in
-            self.version_storage_sources_for_layer(table, VersionLayer::Content)?
-        {
-            let Some(raw) = self.database.primary_key_get_raw_in_batch(
-                batch,
+        let storage_table = physical_history_table_name(table_id);
+        if let Some(raw) = self.database.primary_key_get_raw_in_batch(
+            batch,
+            &storage_table,
+            &[
+                Value::Uuid(row_uuid.0),
+                Value::U64(tx_id.time.0),
+                Value::U64(tx_node_alias.0),
+            ],
+        )? {
+            versions.push(self.decode_history_owned_record(
+                table,
                 &storage_table,
-                &[
-                    Value::Uuid(row_uuid.0),
-                    Value::U64(tx_id.time.0),
-                    Value::U64(tx_node_alias.0),
-                ],
-            )?
-            else {
-                continue;
-            };
-            let raw = raw.raw().to_vec();
-            versions
-                .push(self.decode_history_record(table, BorrowedRecord::new(&raw, &descriptor))?);
+                raw.owned_record(),
+            )?);
         }
         Ok(versions)
     }
@@ -3944,11 +3997,12 @@ where
     fn rewrite_merge_heads_excluding_tx(
         &mut self,
         batch: &mut DatabaseBatch,
+        table_id: PhysicalTableId,
         table: &str,
         row_uuid: RowUuid,
         excluded_tx: TxId,
     ) -> Result<(), Error> {
-        let versions = self.query_row_versions(table, row_uuid)?;
+        let versions = self.query_physical_content_row_versions(table_id, table, row_uuid)?;
         let candidate_indices = versions
             .iter()
             .enumerate()
@@ -3963,15 +4017,15 @@ where
         for idx in head_indices {
             heads.insert(self.version_tx_id(&versions[idx])?);
         }
-        Self::write_merge_heads(batch, table, row_uuid, &heads)
+        Self::write_merge_heads(batch, table_id, row_uuid, &heads)
     }
 
     fn merge_head_tx_ids(
         &mut self,
-        table: &str,
+        table_id: PhysicalTableId,
         row_uuid: RowUuid,
     ) -> Result<BTreeSet<TxId>, Error> {
-        self.require_merge_heads(table, row_uuid)
+        self.require_merge_heads(table_id, row_uuid)
     }
 
     #[cfg(test)]
@@ -3980,7 +4034,9 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<BTreeSet<TxId>, Error> {
-        let versions = self.query_row_versions(table, row_uuid)?;
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_write_schema.schema, table)?;
+        let versions = self.query_physical_content_row_versions(table_id, table, row_uuid)?;
         let mut candidate_indices = Vec::new();
         for (idx, version) in versions.iter().enumerate() {
             if version.layer() != VersionLayer::Content {
@@ -4009,8 +4065,10 @@ where
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
         let heads = self.recomputed_merge_heads_from_history_for_test(table, row_uuid)?;
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_write_schema.schema, table)?;
         let mut batch = self.database.open_batch();
-        Self::write_merge_heads(&mut batch, table, row_uuid, &heads)?;
+        Self::write_merge_heads(&mut batch, table_id, row_uuid, &heads)?;
         self.database.commit_batch(batch)?;
         Ok(())
     }
@@ -4022,7 +4080,9 @@ where
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
         let expected = self.recomputed_merge_heads_from_history_for_test(table, row_uuid)?;
-        let actual = self.require_merge_heads(table, row_uuid)?;
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_write_schema.schema, table)?;
+        let actual = self.require_merge_heads(table_id, row_uuid)?;
         if actual != expected {
             let versions = self
                 .query_row_versions(table, row_uuid)?
@@ -4135,34 +4195,26 @@ where
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
-        let base_for_current_names = if self
-            .table_in_schema(version.table(), self.catalogue.current_schema_version_id)
-            .is_ok()
-        {
-            self.catalogue.current_schema_version_id
-        } else {
-            schema_version
-        };
         let table = self.table_in_schema(version.table(), schema_version)?;
         let storage_tables = table.global_current_storage_tables();
         let (current_table, current_schema, expected_values) = match version.layer() {
             VersionLayer::Content => (
-                self.cached_global_current_table_name_for_schema(
+                groove::Intern::new(self.physical_current_table_for_schema(
+                    schema_version,
                     version.table(),
                     VersionLayer::Content,
-                    schema_version,
-                    base_for_current_names,
-                ),
+                    PhysicalCurrentClass::Global,
+                )?),
                 &storage_tables[0],
                 global_current_values(&table, version, Some(global_seq))?,
             ),
             VersionLayer::Deletion => (
-                self.cached_global_current_table_name_for_schema(
+                groove::Intern::new(self.physical_current_table_for_schema(
+                    schema_version,
                     version.table(),
                     VersionLayer::Deletion,
-                    schema_version,
-                    base_for_current_names,
-                ),
+                    PhysicalCurrentClass::Global,
+                )?),
                 &storage_tables[1],
                 register_global_current_values(version, Some(global_seq)),
             ),
@@ -4193,10 +4245,14 @@ where
         version: &VersionRow,
         global_seq: GlobalSeq,
     ) -> Result<(), Error> {
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+        let table_id = self.physical_table_id_for_schema(schema_version, version.table())?;
         let rows = self.database.primary_key_scan_raw(
             "jazz_global_changes",
             &[
-                Value::Bytes(version.table().as_bytes().to_vec()),
+                Value::U64(table_id.0),
                 Value::Uuid(version.row_uuid().0),
                 Value::Bytes(version_layer_string(version.layer()).into_bytes()),
                 Value::U64(global_seq.0),
@@ -4252,56 +4308,57 @@ where
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
-        let base_for_current_names = if self
-            .table_in_schema(version.table(), self.catalogue.current_schema_version_id)
-            .is_ok()
-        {
-            self.catalogue.current_schema_version_id
-        } else {
-            schema_version
-        };
         match version.layer() {
             VersionLayer::Content => {
                 let table = self.table_in_schema(version.table(), schema_version)?;
-                let current_table = global_current_table_name_for_schema(
-                    version.table(),
+                let binding = physical_current_binding(
+                    &self.catalogue.catalogue_schemas,
+                    &self.catalogue.physical_mappings,
                     schema_version,
-                    base_for_current_names,
-                );
+                    version.table(),
+                    PhysicalCurrentClass::Global,
+                )?;
+                let logical = owned_record_from_storage_values(
+                    &table.global_current_storage_tables()[0],
+                    global_current_values(&table, version, Some(global_seq))
+                        .expect("valid global current values"),
+                )
+                .expect("valid global current row");
                 batch.update_raw(
-                    current_table,
+                    binding.storage_table,
                     global_current_primary_key(version.row_uuid()),
-                    owned_record_from_storage_values(
-                        &table.global_current_storage_tables()[0],
-                        global_current_values(&table, version, Some(global_seq))
-                            .expect("valid global current values"),
-                    )
-                    .expect("valid global current row")
-                    .raw()
-                    .to_vec(),
+                    groove::records::VersionedRecord::new(
+                        version.schema_version_alias().0,
+                        OwnedRecord::new(logical.raw().to_vec(), binding.descriptor),
+                    ),
                 );
             }
             VersionLayer::Deletion => batch.update_raw(
-                register_global_current_table_name_for_schema(
-                    version.table(),
+                self.physical_current_table_for_schema(
                     schema_version,
-                    base_for_current_names,
-                ),
+                    version.table(),
+                    VersionLayer::Deletion,
+                    PhysicalCurrentClass::Global,
+                )?,
                 global_current_primary_key(version.row_uuid()),
-                owned_record_from_storage_values(
-                    &self
-                        .table_in_schema(version.table(), schema_version)?
-                        .global_current_storage_tables()[1],
-                    register_global_current_values(version, Some(global_seq)),
-                )
-                .expect("valid register global current row")
-                .raw()
-                .to_vec(),
+                version.bind_groove_record(
+                    owned_record_from_storage_values(
+                        &self
+                            .table_in_schema(version.table(), schema_version)?
+                            .global_current_storage_tables()[1],
+                        register_global_current_values(version, Some(global_seq)),
+                    )
+                    .expect("valid register global current row"),
+                ),
             ),
         }
         batch.update(
             "jazz_global_changes",
-            global_change_values(version, global_seq),
+            global_change_values(
+                self.physical_table_id_for_schema(schema_version, version.table())?,
+                version,
+                global_seq,
+            ),
         );
         Ok(())
     }
@@ -4314,54 +4371,48 @@ where
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
-        let base_for_current_names = if self
-            .table_in_schema(version.table(), self.catalogue.current_schema_version_id)
-            .is_ok()
-        {
-            self.catalogue.current_schema_version_id
-        } else {
-            schema_version
-        };
         match version.layer() {
             VersionLayer::Content => {
                 let table = self.table_in_schema(version.table(), schema_version)?;
+                let binding = physical_current_binding(
+                    &self.catalogue.catalogue_schemas,
+                    &self.catalogue.physical_mappings,
+                    schema_version,
+                    version.table(),
+                    PhysicalCurrentClass::Ahead,
+                )?;
+                let logical = owned_record_from_storage_values(
+                    &table.ahead_current_storage_tables()[0],
+                    global_current_values(&table, version, None)
+                        .expect("valid ahead current values"),
+                )
+                .expect("valid ahead current row");
                 batch.insert_raw(
-                    self.cached_ahead_current_table_name_for_schema(
-                        version.table(),
-                        VersionLayer::Content,
-                        schema_version,
-                        base_for_current_names,
-                    )
-                    .as_ref(),
+                    binding.storage_table,
                     history_primary_key(version),
-                    owned_record_from_storage_values(
-                        &table.ahead_current_storage_tables()[0],
-                        global_current_values(&table, version, None)
-                            .expect("valid ahead current values"),
-                    )
-                    .expect("valid ahead current row")
-                    .raw()
-                    .to_vec(),
+                    groove::records::VersionedRecord::new(
+                        version.schema_version_alias().0,
+                        OwnedRecord::new(logical.raw().to_vec(), binding.descriptor),
+                    ),
                 );
             }
             VersionLayer::Deletion => batch.insert_raw(
-                self.cached_ahead_current_table_name_for_schema(
+                self.physical_current_table_for_schema(
+                    schema_version,
                     version.table(),
                     VersionLayer::Deletion,
-                    schema_version,
-                    base_for_current_names,
-                )
-                .as_ref(),
+                    PhysicalCurrentClass::Ahead,
+                )?,
                 history_primary_key(version),
-                owned_record_from_storage_values(
-                    &self
-                        .table_in_schema(version.table(), schema_version)?
-                        .ahead_current_storage_tables()[1],
-                    register_global_current_values(version, None),
-                )
-                .expect("valid register ahead current row")
-                .raw()
-                .to_vec(),
+                version.bind_groove_record(
+                    owned_record_from_storage_values(
+                        &self
+                            .table_in_schema(version.table(), schema_version)?
+                            .ahead_current_storage_tables()[1],
+                        register_global_current_values(version, None),
+                    )
+                    .expect("valid register ahead current row"),
+                ),
             ),
         }
         self.insert_ahead_current_key(
@@ -4382,21 +4433,13 @@ where
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
-        let base_for_current_names = if self
-            .table_in_schema(version.table(), self.catalogue.current_schema_version_id)
-            .is_ok()
-        {
-            self.catalogue.current_schema_version_id
-        } else {
-            schema_version
-        };
-        let table = self.cached_ahead_current_table_name_for_schema(
+        let table = self.physical_current_table_for_schema(
+            schema_version,
             version.table(),
             version.layer(),
-            schema_version,
-            base_for_current_names,
-        );
-        batch.delete(table.as_ref(), history_primary_key(version));
+            PhysicalCurrentClass::Ahead,
+        )?;
+        batch.delete(table, history_primary_key(version));
         self.remove_ahead_current_key(
             version.table(),
             version.layer(),
@@ -4614,7 +4657,7 @@ where
         for version in versions {
             let author_schema = version.schema_version();
             let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
-            let (table_schema, target_schema, stored) =
+            let (table_schema, _target_schema, stored) =
                 if author_schema != self.catalogue.current_write_schema.schema {
                     let mut target_table = version.table().to_owned();
                     let mut target_cells = source_table_schema
@@ -4728,27 +4771,16 @@ where
                     }
                 }
             }
-            let history_table = match tx.target_lineage {
-                crate::tx::BranchLineage::Root => self
-                    .cached_version_storage_table_name_for_schema(
-                        &table_schema.name,
-                        stored.layer(),
-                        target_schema,
-                        self.catalogue.current_schema_version_id,
-                    )
-                    .as_ref()
-                    .to_owned(),
-                crate::tx::BranchLineage::Branch(branch_id) => branch_version_storage_table_name(
-                    &table_schema.name,
-                    stored.layer(),
-                    target_schema,
-                    branch_id,
-                ),
+            let (history_table, groove_record) = match tx.target_lineage {
+                crate::tx::BranchLineage::Root => self.version_storage_write_binding(&stored)?,
+                crate::tx::BranchLineage::Branch(branch_id) => {
+                    self.branch_version_storage_write_binding(&stored, branch_id)?
+                }
             };
             if tx_already_known {
                 let existing = self.database.primary_key_get_raw_in_batch(
                     batch,
-                    &history_table,
+                    history_table.as_ref(),
                     &[
                         Value::Uuid(stored.row_uuid().0),
                         Value::U64(stored.tx_time().0),
@@ -4761,16 +4793,16 @@ where
                     }
                 } else {
                     batch.insert_raw(
-                        &history_table,
+                        history_table.as_ref(),
                         history_primary_key(&stored),
-                        stored.record.raw().to_vec(),
+                        groove_record,
                     );
                 }
             } else {
                 batch.insert_raw_fresh(
-                    &history_table,
+                    history_table.as_ref(),
                     history_primary_key(&stored),
-                    stored.record.raw().to_vec(),
+                    groove_record,
                 );
             }
             if update_current_indexes && !matches!(fate, Fate::Rejected(_)) && global_seq.is_none()

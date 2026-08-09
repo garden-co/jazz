@@ -7,12 +7,7 @@
 
 use super::query_engine::{left_field, user_column_field};
 use super::*;
-use crate::schema::{
-    ColumnSchema, branch_partition_history_table_name, branch_partition_register_table_name,
-    partition_ahead_current_table_name, partition_global_current_table_name,
-    partition_history_table_name, partition_register_ahead_current_table_name,
-    partition_register_global_current_table_name, partition_register_table_name,
-};
+use crate::schema::ColumnSchema;
 
 use groove::schema::TableSchema as GrooveTableSchema;
 
@@ -80,7 +75,7 @@ groove::define_record! {
 
 groove::define_record! {
     pub(super) struct GlobalChangeRowRecord {
-        0 => table_name: Vec<u8>,
+        0 => physical_table_id: u64,
         1 => row_uuid: RowUuid,
         2 => layer: Vec<u8>,
         3 => global_seq: GlobalSeq,
@@ -235,6 +230,7 @@ groove::define_record! {
     pub(super) struct SchemaVersionAliasRowRecord {
         0 => id: SchemaVersionAlias,
         1 => uuid: SchemaVersionId,
+        2 => physical_mapping: Vec<u8>,
     }
 }
 
@@ -254,17 +250,9 @@ groove::define_record! {
 }
 
 groove::define_record! {
-    pub(super) struct PartitionRowRecord {
-        0 => table_name: Vec<u8>,
-        1 => schema_version: SchemaVersionId,
-    }
-}
-
-groove::define_record! {
     pub(super) struct BranchPartitionRowRecord {
-        0 => table_name: Vec<u8>,
-        1 => schema_version: SchemaVersionId,
-        2 => branch_id: BranchId,
+        0 => physical_table_id: u64,
+        1 => branch_id: BranchId,
     }
 }
 
@@ -416,6 +404,12 @@ pub(super) fn debug_assert_lowered_layouts(schema: &JazzSchema) {
             .record_schema();
         SchemaVersionAliasRowRecord::assert_layout(&schema_version_descriptor);
 
+        let branch_partition_descriptor = groove_schema
+            .table("jazz_branch_partitions")
+            .expect("branch partitions table")
+            .record_schema();
+        BranchPartitionRowRecord::assert_layout(&branch_partition_descriptor);
+
         let rejected_tx_descriptor = groove_schema
             .table("jazz_rejected_transactions")
             .expect("rejected transactions table")
@@ -428,11 +422,15 @@ pub(super) fn debug_assert_lowered_layouts(schema: &JazzSchema) {
             .record_schema();
         PendingEdgeRowRecord::assert_layout(&pending_edge_descriptor);
 
+        let global_change_descriptor = groove_schema
+            .table("jazz_global_changes")
+            .expect("global changes table")
+            .record_schema();
+        GlobalChangeRowRecord::assert_layout(&global_change_descriptor);
+
         for table in &schema.tables {
-            let rejected_version_descriptor = groove_schema
-                .table(&rejected_versions_table_name(&table.name))
-                .expect("rejected versions table")
-                .record_schema();
+            let rejected_version_descriptor =
+                table.rejected_versions_storage_table().record_schema();
             RejectedVersionRowRecord::assert_layout(&rejected_version_descriptor);
         }
 
@@ -531,20 +529,16 @@ impl VersionRow {
     pub(super) fn from_parts_with_schema_version(
         table: &TableSchema,
         parts: VersionRowParts,
-        storage_schema_version: Option<SchemaVersionId>,
+        _storage_schema_version: Option<SchemaVersionId>,
     ) -> Result<Self, Error> {
         let (storage_table, values) = if parts.deletion.is_some() {
             (
-                storage_schema_version
-                    .map(|version| table.register_partition_storage_table(version))
-                    .unwrap_or_else(|| table.register_storage_table()),
+                table.register_storage_table(),
                 register_values_from_parts(&parts)?,
             )
         } else {
             (
-                storage_schema_version
-                    .map(|version| table.history_partition_storage_table(version))
-                    .unwrap_or_else(|| table.history_storage_table()),
+                table.history_storage_table(),
                 history_values_from_parts(table, &parts)?,
             )
         };
@@ -560,13 +554,11 @@ impl VersionRow {
         tx_node_alias: NodeAlias,
         schema_version_alias: SchemaVersionAlias,
         tx_time: TxTime,
-        storage_schema_version: Option<SchemaVersionId>,
+        _storage_schema_version: Option<SchemaVersionId>,
     ) -> Result<Self, Error> {
         let (storage_table, values) = if let Some(deletion) = version.deletion() {
             (
-                storage_schema_version
-                    .map(|version| table.register_partition_storage_table(version))
-                    .unwrap_or_else(|| table.register_storage_table()),
+                table.register_storage_table(),
                 register_values_from_wire(
                     version,
                     tx_node_alias,
@@ -577,9 +569,7 @@ impl VersionRow {
             )
         } else {
             (
-                storage_schema_version
-                    .map(|version| table.history_partition_storage_table(version))
-                    .unwrap_or_else(|| table.history_storage_table()),
+                table.history_storage_table(),
                 history_values_from_wire(
                     table,
                     version,
@@ -714,6 +704,20 @@ impl VersionRow {
                 .get_u64(idx)
                 .expect("valid schema_version"),
         )
+    }
+
+    /// Bind this row's encoded payload to the schema version already stored in
+    /// its Jazz metadata before handing it to Groove.
+    pub(super) fn groove_record(&self) -> groove::records::VersionedRecord {
+        self.bind_groove_record(self.record.clone())
+    }
+
+    /// Bind a derived storage row to the same schema version as this version.
+    pub(super) fn bind_groove_record(
+        &self,
+        record: OwnedRecord,
+    ) -> groove::records::VersionedRecord {
+        groove::records::VersionedRecord::new(self.schema_version_alias().0, record)
     }
 
     pub(super) fn deletion(&self) -> Option<DeletionEvent> {
@@ -1524,9 +1528,13 @@ pub(super) fn register_global_current_values(
     values
 }
 
-pub(super) fn global_change_values(version: &VersionRow, global_seq: GlobalSeq) -> Vec<Value> {
+pub(super) fn global_change_values(
+    table_id: PhysicalTableId,
+    version: &VersionRow,
+    global_seq: GlobalSeq,
+) -> Vec<Value> {
     vec![
-        Value::Bytes(version.table().as_bytes().to_vec()),
+        Value::U64(table_id.0),
         Value::Uuid(version.row_uuid().0),
         Value::Bytes(version_layer_string(version.layer()).into_bytes()),
         Value::U64(global_seq.0),
@@ -1538,6 +1546,21 @@ pub(super) fn global_change_values(version: &VersionRow, global_seq: GlobalSeq) 
                 .map(|deletion| Box::new(deletion_event_value(deletion))),
         ),
     ]
+}
+
+pub(super) fn global_change_primary_key_from_record(
+    record: &BorrowedRecord<'_>,
+) -> Result<PrimaryKeyValue, Error> {
+    Ok(PrimaryKeyValue::Composite(vec![
+        PrimaryKeyValue::U64(record.get_u64(GlobalChangeRowRecord::FIELD_PHYSICAL_TABLE_ID_IDX)?),
+        PrimaryKeyValue::Uuid(record.get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?),
+        PrimaryKeyValue::Bytes(
+            record
+                .get_bytes(GlobalChangeRowRecord::FIELD_LAYER_IDX)?
+                .to_vec(),
+        ),
+        PrimaryKeyValue::U64(record.get_u64(GlobalChangeRowRecord::FIELD_GLOBAL_SEQ_IDX)?),
+    ]))
 }
 
 pub(super) fn rejected_transaction_primary_key(alias: NodeAlias, tx_id: TxId) -> PrimaryKeyValue {
@@ -1686,25 +1709,6 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
                     ProjectField::named("tx_node_id"),
                 ]),
         )
-}
-
-pub(super) fn current_row_graphs(
-    schema: &JazzSchema,
-) -> BTreeMap<(String, DurabilityTier), GraphBuilder> {
-    let mut graphs = BTreeMap::new();
-    for table in &schema.tables {
-        for tier in [
-            DurabilityTier::None,
-            DurabilityTier::Local,
-            DurabilityTier::Global,
-        ] {
-            graphs.insert(
-                (table.name.clone(), tier),
-                visible_current_graph(table, tier),
-            );
-        }
-    }
-    graphs
 }
 
 pub(super) fn decode_current_row(
@@ -2115,156 +2119,6 @@ pub(super) fn tx_id_value(tx_id: TxId) -> Value {
     Value::Tuple(vec![Value::U64(tx_id.time.0), Value::Uuid(tx_id.node.0)])
 }
 
-pub(super) fn history_table_name(table: &str) -> String {
-    format!("jazz_{table}_history")
-}
-
-pub(super) fn rejected_versions_table_name(table: &str) -> String {
-    format!("jazz_{table}_rejected_versions")
-}
-
-pub(super) fn register_table_name(table: &str) -> String {
-    format!("jazz_{table}_register")
-}
-
-pub(super) fn version_storage_table_name(table: &str, layer: VersionLayer) -> String {
-    match layer {
-        VersionLayer::Content => history_table_name(table),
-        VersionLayer::Deletion => register_table_name(table),
-    }
-}
-
-pub(super) fn version_storage_table_name_for_schema(
-    table: &str,
-    layer: VersionLayer,
-    schema_version: SchemaVersionId,
-    base_schema_version: SchemaVersionId,
-) -> String {
-    if schema_version == base_schema_version {
-        return version_storage_table_name(table, layer);
-    }
-    match layer {
-        VersionLayer::Content => partition_history_table_name(table, schema_version),
-        VersionLayer::Deletion => partition_register_table_name(table, schema_version),
-    }
-}
-
-impl<S> NodeState<S>
-where
-    S: OrderedKvStorage,
-{
-    pub(super) fn cached_version_storage_table_name_for_schema(
-        &mut self,
-        table: &str,
-        layer: VersionLayer,
-        schema_version: SchemaVersionId,
-        base_schema_version: SchemaVersionId,
-    ) -> groove::Intern<String> {
-        self.cached_physical_table_name(
-            table,
-            PhysicalTableClass::VersionStorage(layer),
-            schema_version,
-            base_schema_version,
-            |table| {
-                version_storage_table_name_for_schema(
-                    table,
-                    layer,
-                    schema_version,
-                    base_schema_version,
-                )
-            },
-        )
-    }
-
-    pub(super) fn cached_global_current_table_name_for_schema(
-        &mut self,
-        table: &str,
-        layer: VersionLayer,
-        schema_version: SchemaVersionId,
-        base_schema_version: SchemaVersionId,
-    ) -> groove::Intern<String> {
-        self.cached_physical_table_name(
-            table,
-            PhysicalTableClass::GlobalCurrent(layer),
-            schema_version,
-            base_schema_version,
-            |table| match layer {
-                VersionLayer::Content => {
-                    global_current_table_name_for_schema(table, schema_version, base_schema_version)
-                }
-                VersionLayer::Deletion => register_global_current_table_name_for_schema(
-                    table,
-                    schema_version,
-                    base_schema_version,
-                ),
-            },
-        )
-    }
-
-    pub(super) fn cached_ahead_current_table_name_for_schema(
-        &mut self,
-        table: &str,
-        layer: VersionLayer,
-        schema_version: SchemaVersionId,
-        base_schema_version: SchemaVersionId,
-    ) -> groove::Intern<String> {
-        self.cached_physical_table_name(
-            table,
-            PhysicalTableClass::AheadCurrent(layer),
-            schema_version,
-            base_schema_version,
-            |table| match layer {
-                VersionLayer::Content => {
-                    ahead_current_table_name_for_schema(table, schema_version, base_schema_version)
-                }
-                VersionLayer::Deletion => register_ahead_current_table_name_for_schema(
-                    table,
-                    schema_version,
-                    base_schema_version,
-                ),
-            },
-        )
-    }
-
-    fn cached_physical_table_name(
-        &mut self,
-        table: &str,
-        class: PhysicalTableClass,
-        schema_version: SchemaVersionId,
-        base_schema_version: SchemaVersionId,
-        build: impl FnOnce(&str) -> String,
-    ) -> groove::Intern<String> {
-        let key = PhysicalTableNameKey {
-            table: table.to_owned(),
-            class,
-            schema_version,
-            base_schema_version,
-        };
-        if let Some(name) = self.query.physical_table_name_cache.get(&key) {
-            return *name;
-        }
-        let name = groove::Intern::new(build(table));
-        self.query.physical_table_name_cache.insert(key, name);
-        name
-    }
-}
-
-pub(super) fn branch_version_storage_table_name(
-    table: &str,
-    layer: VersionLayer,
-    schema_version: SchemaVersionId,
-    branch_id: BranchId,
-) -> String {
-    match layer {
-        VersionLayer::Content => {
-            branch_partition_history_table_name(table, schema_version, branch_id)
-        }
-        VersionLayer::Deletion => {
-            branch_partition_register_table_name(table, schema_version, branch_id)
-        }
-    }
-}
-
 pub(super) fn global_current_table_name(table: &str) -> String {
     format!("jazz_{table}_global_current")
 }
@@ -2279,54 +2133,6 @@ pub(super) fn ahead_current_table_name(table: &str) -> String {
 
 pub(super) fn register_ahead_current_table_name(table: &str) -> String {
     format!("jazz_{table}_register_ahead_current")
-}
-
-pub(super) fn global_current_table_name_for_schema(
-    table: &str,
-    schema_version: SchemaVersionId,
-    base_schema_version: SchemaVersionId,
-) -> String {
-    if schema_version == base_schema_version {
-        global_current_table_name(table)
-    } else {
-        partition_global_current_table_name(table, schema_version)
-    }
-}
-
-pub(super) fn register_global_current_table_name_for_schema(
-    table: &str,
-    schema_version: SchemaVersionId,
-    base_schema_version: SchemaVersionId,
-) -> String {
-    if schema_version == base_schema_version {
-        register_global_current_table_name(table)
-    } else {
-        partition_register_global_current_table_name(table, schema_version)
-    }
-}
-
-pub(super) fn ahead_current_table_name_for_schema(
-    table: &str,
-    schema_version: SchemaVersionId,
-    base_schema_version: SchemaVersionId,
-) -> String {
-    if schema_version == base_schema_version {
-        ahead_current_table_name(table)
-    } else {
-        partition_ahead_current_table_name(table, schema_version)
-    }
-}
-
-pub(super) fn register_ahead_current_table_name_for_schema(
-    table: &str,
-    schema_version: SchemaVersionId,
-    base_schema_version: SchemaVersionId,
-) -> String {
-    if schema_version == base_schema_version {
-        register_ahead_current_table_name(table)
-    } else {
-        partition_register_ahead_current_table_name(table, schema_version)
-    }
 }
 
 pub(super) fn version_layer_string(layer: VersionLayer) -> String {

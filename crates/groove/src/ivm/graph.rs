@@ -136,6 +136,7 @@ pub enum GraphBuilder {
     Table {
         table: String,
         scan: Option<StaticScanSpec>,
+        variant_projection: Option<String>,
     },
     InlineRecords {
         output: RecordDescriptor,
@@ -343,6 +344,7 @@ impl GraphBuilder {
         Self::Table {
             table: table.into(),
             scan: None,
+            variant_projection: None,
         }
     }
 
@@ -350,6 +352,34 @@ impl GraphBuilder {
         Self::Table {
             table: table.into(),
             scan: Some(scan),
+            variant_projection: None,
+        }
+    }
+
+    /// Read a heterogeneous table through one fixed-output projection target.
+    ///
+    /// Projection cases live in the runtime registry rather than this builder,
+    /// so registering another source discriminator does not replace the graph
+    /// node or disturb active subscriptions.
+    pub fn variant_project(table: impl Into<String>, projection_target: impl Into<String>) -> Self {
+        Self::Table {
+            table: table.into(),
+            scan: None,
+            variant_projection: Some(projection_target.into()),
+        }
+    }
+
+    /// Read a bounded range of a heterogeneous table through one fixed-output
+    /// projection target.
+    pub fn variant_project_scan(
+        table: impl Into<String>,
+        projection_target: impl Into<String>,
+        scan: StaticScanSpec,
+    ) -> Self {
+        Self::Table {
+            table: table.into(),
+            scan: Some(scan),
+            variant_projection: Some(projection_target.into()),
         }
     }
 
@@ -1570,6 +1600,7 @@ mod tests {
             OpType::TableSource(TableSourceOp {
                 table: "albums".to_owned(),
                 scan: None,
+                variant_projection: None,
             }),
             [],
             output(),
@@ -1588,6 +1619,7 @@ mod tests {
             OpType::TableSource(TableSourceOp {
                 table: "albums".to_owned(),
                 scan: None,
+                variant_projection: None,
             }),
             [],
             output(),
@@ -1613,6 +1645,7 @@ mod tests {
             OpType::TableSource(TableSourceOp {
                 table: "albums".to_owned(),
                 scan: None,
+                variant_projection: None,
             }),
             [],
             output(),
@@ -1621,6 +1654,7 @@ mod tests {
             OpType::TableSource(TableSourceOp {
                 table: "artists".to_owned(),
                 scan: None,
+                variant_projection: None,
             }),
             [],
             output(),
@@ -1641,6 +1675,7 @@ mod tests {
                 OpType::TableSource(TableSourceOp {
                     table: "albums".to_owned(),
                     scan: None,
+                    variant_projection: None,
                 }),
                 [],
                 output(),
@@ -1670,6 +1705,7 @@ mod tests {
                 OpType::TableSource(TableSourceOp {
                     table: "albums".to_owned(),
                     scan: None,
+                    variant_projection: None,
                 }),
                 [],
                 output(),
@@ -1805,6 +1841,7 @@ mod tests {
                 OpType::TableSource(TableSourceOp {
                     table: "rows".to_owned(),
                     scan: None,
+                    variant_projection: None,
                 }),
                 [],
                 output(),

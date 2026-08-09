@@ -666,11 +666,7 @@ where
         let shape = query.validate_with_schema_version(&schema, schema_version)?;
         let binding = shape.bind(params)?;
         let (local_plan, global_plan) = if should_install_prepared_plan(&shape)
-            && !self
-                .node
-                .node
-                .borrow()
-                .uses_partitioned_or_schema_projected_read(&shape)
+            && !self.node.node.borrow().uses_schema_projected_read(&shape)
         {
             let mut node = self.node.node.borrow_mut();
             (

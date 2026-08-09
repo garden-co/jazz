@@ -16,11 +16,7 @@ where
         read_schema_version: SchemaVersionId,
         tier: DurabilityTier,
     ) -> Result<Vec<CurrentRow>, Error> {
-        if read_schema_version == self.catalogue.current_schema_version_id
-            && !self.catalogue.partitions.iter().any(|(logical, version)| {
-                logical == table && *version != self.catalogue.current_schema_version_id
-            })
-        {
+        if read_schema_version == self.catalogue.current_schema_version_id {
             return self.current_rows(table, tier);
         }
         let read_table = self.table_in_schema(table, read_schema_version)?;
@@ -63,10 +59,10 @@ where
         }
         let mut rows = Vec::new();
         for (row_uuid, version) in content {
-            if deletions.get(&row_uuid).is_some_and(|deletion| {
-                deletion.deletion() == Some(DeletionEvent::Deleted)
-                    && deletion.tx_time() > version.tx_time()
-            }) {
+            if deletions
+                .get(&row_uuid)
+                .is_some_and(|deletion| deletion.deletion() == Some(DeletionEvent::Deleted))
+            {
                 continue;
             }
             let source_schema = self
@@ -134,10 +130,10 @@ where
         }
         let mut rows = Vec::new();
         for (row_uuid, content) in content {
-            if deletions.get(&row_uuid).is_some_and(|deletion| {
-                deletion.deletion() == Some(DeletionEvent::Deleted)
-                    && deletion.tx_time() > content.tx_time()
-            }) {
+            if deletions
+                .get(&row_uuid)
+                .is_some_and(|deletion| deletion.deletion() == Some(DeletionEvent::Deleted))
+            {
                 continue;
             }
             let source_schema = self
@@ -227,10 +223,9 @@ where
                 continue;
             };
             if projected_table == table {
-                let deleted = deletions.get(&row_uuid).is_some_and(|deletion| {
-                    deletion.deletion() == Some(DeletionEvent::Deleted)
-                        && deletion.tx_time() > version.tx_time()
-                });
+                let deleted = deletions
+                    .get(&row_uuid)
+                    .is_some_and(|deletion| deletion.deletion() == Some(DeletionEvent::Deleted));
                 rows.push((
                     current_row_from_cells(&read_table, row_uuid, &cells)?,
                     deleted,
@@ -246,7 +241,7 @@ where
         Ok(rows)
     }
 
-    fn translate_cells(
+    pub(super) fn translate_cells(
         &mut self,
         source: SchemaVersionId,
         target: SchemaVersionId,

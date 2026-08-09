@@ -18,13 +18,15 @@ where
         layer: VersionLayer,
         global_base: GlobalSeq,
     ) -> Result<Option<VersionRow>, Error> {
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
         let prefix = [
-            Value::Bytes(table.as_bytes().to_vec()),
+            Value::U64(table_id.0),
             Value::Uuid(row_uuid.0),
             Value::Bytes(version_layer_string(layer).into_bytes()),
         ];
         let upper = [
-            Value::Bytes(table.as_bytes().to_vec()),
+            Value::U64(table_id.0),
             Value::Uuid(row_uuid.0),
             Value::Bytes(version_layer_string(layer).into_bytes()),
             Value::U64(global_base.0),
@@ -68,10 +70,12 @@ where
         table: &str,
         global_base: GlobalSeq,
     ) -> Result<bool, Error> {
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
         let Some(raw) = self.database.index_last_raw(
             "jazz_global_changes",
             "by_table_global_seq",
-            &[Value::Bytes(table.as_bytes().to_vec())],
+            &[Value::U64(table_id.0)],
         )?
         else {
             return Ok(false);
@@ -85,16 +89,21 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Option<TxId> {
-        let table_schema = self.table(table).ok()?.clone();
-        let storage_tables = table_schema.global_current_storage_tables();
-        let deletion_current_table = &storage_tables[1].name;
-        let deletion_descriptor = storage_tables[1].record_schema();
+        let schema_version = self.catalogue.current_write_schema.schema;
+        let deletion_current_table = self
+            .physical_current_table_for_schema(
+                schema_version,
+                table,
+                VersionLayer::Deletion,
+                PhysicalCurrentClass::Global,
+            )
+            .ok()?;
         if let Some(raw) = self
             .database
-            .primary_key_get_raw(deletion_current_table, &[Value::Uuid(row_uuid.0)])
+            .primary_key_get_raw(&deletion_current_table, &[Value::Uuid(row_uuid.0)])
             .ok()?
         {
-            let record = BorrowedRecord::new(raw.record().raw(), &deletion_descriptor);
+            let record = raw.record();
             let deletion = deletion_event_from_value(
                 record
                     .get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)
@@ -106,10 +115,17 @@ where
             }
         }
 
-        let content_current_table = &storage_tables[0].name;
+        let content_current_table = self
+            .physical_current_table_for_schema(
+                schema_version,
+                table,
+                VersionLayer::Content,
+                PhysicalCurrentClass::Global,
+            )
+            .ok()?;
         let raw = self
             .database
-            .primary_key_get_raw(content_current_table, &[Value::Uuid(row_uuid.0)])
+            .primary_key_get_raw(&content_current_table, &[Value::Uuid(row_uuid.0)])
             .ok()??;
         let record = raw.record();
         let tx_time = TxTime(

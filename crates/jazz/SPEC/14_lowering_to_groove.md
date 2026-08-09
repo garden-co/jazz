@@ -16,20 +16,20 @@ semantic scan.
 
 Invariant digest:
 
-- `INV-DATA-20`: JazzSchema::lowertogroove() MUST include the fixed metadata tables, transaction/rejection tables, per-application-table rejected/history/register/global-current tables...
+- `INV-DATA-20`: Jazz schema lowering MUST provide fixed system storage, while catalogue physical mappings MUST add the application lineage tables required at node open.
 - `groove/SPEC/INVARIANTS.md::INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffi...
 - `INV-LOWER-1`: Jazz schemas MUST be lowered into a `groove::schema::DatabaseSchema` before opening the node's `groove::db::Database`.
-- `INV-LOWER-2`: The lowered content history table for each logical table MUST have composite primary key `(row_uuid, tx_time, tx_node_id)`.
+- `INV-LOWER-2`: The physical content-history table for each `PhysicalTableId` MUST have composite primary key `(row_uuid, tx_time, tx_node_id)`.
 - `INV-LOWER-3`: Node-local aliases in `jazz_nodes.id` and `jazz_schema_versions.id` MUST NOT be wire identities; wire tx/schema references MUST use `NodeUuid` and `SchemaVersionId`.
-- `INV-LOWER-4`: Content versions MUST lower to `jazz_{table}_history`; deletion-register versions MUST lower to `jazz_{table}_register`; a single lowered version row MUST NOT contain both user cells and `_deletion`.
+- `INV-LOWER-4`: Content and deletion-register versions MUST resolve through their schema's durable physical mapping to separate per-lineage tables; a single lowered version row MUST NOT contain both user cells and `_deletion`.
 - `INV-LOWER-5`: Visible current rows MUST be computed as current content winners anti-joined with current deletion winners where `_deletion == deleted`.
 - `INV-LOWER-6`: Local/non-global current-row lowering MUST use groove `arg_max_by` over `(tx_time, tx_node_id)` per `row_uuid` for both content and deletion-register tables.
-- `INV-LOWER-7`: Global current-row reads MUST use `jazz_{table}_global_current` and `jazz_{table}_register_global_current`, not scan full history, and MUST exclude rows whose register global-current winner is `Deleted`.
-- `INV-LOWER-8`: `jazz_global_changes` MUST be keyed by `(table_name, row_uuid, layer, global_seq)` and MUST expose index `by_global_seq(global_seq, table_name, row_uuid, layer)` for global-base probes.
-- `INV-LOWER-9`: Query lowering MUST begin from `visible_current_graph` and therefore MUST apply deletion visibility before user filters/joins/reachable traversal.
+- `INV-LOWER-7`: Global current-row reads MUST use the physical lineage's content and register global-current tables, not scan full history, and MUST exclude rows whose register winner is `Deleted`.
+- `INV-LOWER-8`: `jazz_global_changes` MUST be keyed by `(physical_table_id, row_uuid, layer, global_seq)` and expose global-sequence and physical-table/global-sequence indexes.
+- `INV-LOWER-9`: Query lowering MUST begin from a resolved visible-current source and therefore MUST apply deletion visibility before user filters/joins/reachable traversal.
 - `INV-LOWER-10`: Parameterized query plans MUST be prepared as groove shapes with binding descriptor and stable name `jazz-query:<shape_id>`, then executed through `Database::bind_shape`; maintained subscription views with hidden routing provenance MUST prepare a clean output graph plus an internal routing graph through `Database::prepare_one_sink_with_routing`.
 - `INV-LOWER-11`: Prepared graph lowering MUST preserve the semantics of every accepted predicate shape and explicitly reject unsupported predicate shapes.
-- `INV-LOWER-12`: Query shapes whose storage read crosses partitioned or schema-projected data MUST bypass prepared groove lowering; supported root current reads MUST evaluate from projected current source rows, while unsupported joins/reachable shapes MUST fail loudly instead of falling back to the semantic oracle.
+- `INV-LOWER-12`: Schema projection MUST lower as a Groove source-boundary `VariantProject`. Parameter-bound joins over projected rows MUST preserve their source descriptor and payload, and plans prepared before lens publication MUST remain valid as projection cases are registered.
 - `INV-LOWER-13`: Aggregation, ordinary read ordering, general pagination, and projection MUST be applied by the node after row materialization, not required from groove lowering, except maintained unordered `limit(1)` with offset `0` which MAY lower through groove `ArgMinBy` over `row_uuid`, and maintained ordered windows or ordered suffixes which MUST lower through groove `TopBy`.
 - `INV-LOWER-14`: Sync query updates SHOULD consume maintained terminal facts for result membership, path/correlation coverage, payload/replacement/version witnesses, policy witnesses, and read-frontier settlement; query-row recompute paths are migration/oracle debt, not an alternate production engine.
 - `INV-LOWER-15`: Whole-table current-row sync views MUST be represented as the normal table-rooted row-set shape, not a separate current-row serving engine; their result set must match the node's lowered `current_rows` result while migration code still exists.
@@ -59,31 +59,30 @@ schema and never bypasses it for queryable record storage, current-row
 maintenance, or query/sync evaluation (`INV-LOWER-1`).
 
 There is one deliberate exception: **large-value content bytes** do not lower to
-groove's record/IVM machinery. Op-log _metadata_ lowers normally (it rides
-commit units as ordinary cells), but the content bytes live in the raw
-`jazz_content` store below the table/IVM layer, reached through groove's raw
-column-family handle (ch. 12). The boundary is precise: anything queryable lowers
-to groove; anything only ever ranged-read lives in the content store. Query and
-sync row results carry large-value handles, not bodies. Value-returning APIs
+groove's IVM machinery. Op-log _metadata_ lowers normally (it rides commit units
+as ordinary cells), but content bytes live in direct extent, metadata, and
+checkpoint stores below the IVM layer (ch. 12). The boundary is precise:
+anything queryable lowers to groove; anything only ever ranged-read lives in the
+content stores. Query and sync row results carry large-value handles, not bodies. Value-returning APIs
 materialize those handles by pulling authorized content extents and folding
 op-log extents at the access boundary; encoded ops and content handles do not
 escape as application cell bytes.
 
 ### 14.2 Schema → groove
 
-A jazz schema lowers to a complete groove schema
-(`JazzSchema::lower_to_groove`, or `…_with_partitions` when partitions are in
-scope). The lowered schema contains the fixed metadata tables, each
-application table's layer tables, the global-current tables,
-`jazz_global_changes`, and the raw KV store `jazz_content` (ch. 2,
-`INV-DATA-20`).
+A jazz schema lowers its fixed system tables and direct record stores through
+`JazzSchema::lower_to_groove`. During node open, durable
+`jazz_schema_versions` mappings add one schema-versioned set of history,
+register, current, ahead-current, and rejected-version tables per
+`PhysicalTableId`. The full Groove schema is therefore the fixed lowering plus
+the recovered physical lineages (ch. 2, `INV-DATA-20`).
 
 Wire identities remain UUIDs. Lowered storage may intern those identities into
 node-local `u64` aliases in `jazz_nodes`/`jazz_schema_versions`, but those
 aliases must never appear on the wire (ch. 2, `INV-LOWER-3`).
 
-_Further invariants._ `INV-LOWER-2`, `INV-LOWER-4` — content lowers to
-`jazz_{table}_history` and deletion to `jazz_{table}_register`, each PK
+_Further invariants._ `INV-LOWER-2`, `INV-LOWER-4` — content and deletion lower
+to distinct tables belonging to the resolved `PhysicalTableId`, each with PK
 `(row_uuid, tx_time, tx_node_id)`, never mixing user cells and `_deletion`.
 `INV-LOWER-17` — `text`/`blob` lower their cell type to nullable groove `Bytes`.
 `INV-LOWER-18` — `Counter` is rejected on nullable/non-integer/large-value
@@ -97,17 +96,17 @@ the row set seen by queries and sync. Visible current rows are computed in groov
 as **content-current anti-joined with deletion-current** (ch. 4, `INV-LOWER-5`).
 Non-global tiers use groove `arg_max_by` over `(tx_time, tx_node_id)` per
 `row_uuid` on the history and register tables (`INV-LOWER-6`); the global tier
-reads the global-current tables directly, excluding rows whose register winner
-is `Deleted`, rather than scanning history (`INV-LOWER-7`). The
-`jazz_global_changes` index (`by_global_seq`) backs global-base probes
-(`INV-LOWER-8`, ch. 5).
+reads the physical lineage's global-current tables directly, excluding rows
+whose register winner is `Deleted`, rather than scanning history
+(`INV-LOWER-7`). The `jazz_global_changes` indexes keyed by
+`PhysicalTableId` back global-base probes (`INV-LOWER-8`, ch. 5).
 
 ### 14.4 Queries → groove
 
 Query evaluation starts from the same visibility model as current-row reads:
-lowering **begins from `visible_current_graph(table, tier)`**, so deletion
-visibility is applied before user filters, joins, or reachable traversal
-(`INV-LOWER-9`, ch. 6). Parameterized query shapes lower to groove prepared
+lowering begins from a resolved visible-current source, so deletion visibility
+is applied before user filters, joins, or reachable traversal (`INV-LOWER-9`,
+ch. 6). Parameterized query shapes normally lower to groove prepared
 shapes named `jazz-query:<shape_id>`, are cached by
 `(ShapeId, DurabilityTier, binding-param signature)`, and execute via
 `Database::bind_shape` with parameter types taken from the shape
@@ -122,7 +121,7 @@ schema/lens projections, or branch merges) and a query algebra fragment
 (filters, joins, reachability,
 ordering/window operators that are in the maintained surface). The base source
 is not hidden inside the algebra: current rows, historical rows,
-partition/schema-projected rows, branch reads, transaction overlays, and
+schema-projected rows, branch reads, transaction overlays, and
 snapshot refs compose as source expressions, then reuse the same algebra
 lowering where their source can be represented in groove.
 
@@ -258,13 +257,15 @@ offset `0` which lowers through `ArgMinBy` and maintained ordered windows or
 ordered suffixes which lower through `TopBy`. For maintained subscriptions, ch.
 16 tracks
 aggregate/projection/predicate-policy lowering gaps separately from remaining
-window capability limits. `INV-LOWER-12` — a read crossing
-partitioned/schema-projected data bypasses the ordinary prepared current plan
-cache; supported root current reads use projected current source rows, and
-unsupported join/reachable projected shapes fail loudly until they have
-source-aware lowering. Historical current reads with filters and joins lower
-through the shared clause layer over a historical source; historical reachable
-still requires source-aware reachable lowering. These staged source gaps must not
+window capability limits. `INV-LOWER-12` — schema projection is a Groove
+`VariantProject` source-boundary operation. Heterogeneous physical lineages use
+the ordinary prepared path. When a parameter join unwraps a nullable source
+field, its projection restores that wrapper so the prepared terminal keeps the
+source descriptor and payload. Since projection cases are registered into the
+live node, a plan prepared before lens publication remains valid for rows of the
+new schema variant. Historical current reads with filters and joins lower through
+the shared clause layer over a historical source; historical reachable still
+requires source-aware reachable lowering. These staged source gaps must not
 create a second query algebra. `INV-LOWER-11` — prepared lowering rejects `!=`
 parameter predicates until supported.
 

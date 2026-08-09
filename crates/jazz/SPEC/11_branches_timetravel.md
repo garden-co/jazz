@@ -137,9 +137,11 @@ and siblings: branch overlay writes never affect parent/main current reads
 (`INV-BRANCH-8`), and a read on one branch never observes a sibling's overlay
 (`INV-BRANCH-9`).
 
-Branch overlays are stored in partition tables keyed by
-`(table, schema_version, branch_id)`, with those partitions recorded in
-`jazz_branch_partitions`.
+Branch overlays are stored in one content-history and deletion-register table
+per `(PhysicalTableId, BranchId)`. Rows retain their authored
+`SchemaVersionAlias`, while `jazz_branch_partitions` records only the stable
+physical table and branch identities. Reads and merge-back project mixed-schema
+winners into their requested schema.
 
 ### 11.4 Branch writes (v1: mergeable-only)
 

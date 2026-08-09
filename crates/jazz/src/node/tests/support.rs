@@ -67,10 +67,16 @@ where
     }
 
     let mut actual_global = BTreeMap::<(RowUuid, VersionLayer), TxId>::new();
+    let physical_table = node
+        .physical_table_id_for_schema(node.catalogue.current_schema_version_id, table)
+        .unwrap();
     for (storage_table, layer) in [
-        (global_current_table_name(table), VersionLayer::Content),
         (
-            register_global_current_table_name(table),
+            physical_global_current_table_name(physical_table),
+            VersionLayer::Content,
+        ),
+        (
+            physical_register_global_current_table_name(physical_table),
             VersionLayer::Deletion,
         ),
     ] {
@@ -128,13 +134,19 @@ fn ahead_current_row_count<S>(node: &mut NodeState<S>, table: &str) -> usize
 where
     S: OrderedKvStorage,
 {
+    let physical_table = node
+        .physical_table_id_for_schema(node.catalogue.current_schema_version_id, table)
+        .unwrap();
     node.database
-        .primary_key_scan_raw(&ahead_current_table_name(table), &[])
+        .primary_key_scan_raw(&physical_ahead_current_table_name(physical_table), &[])
         .unwrap()
         .len()
         + node
             .database
-            .primary_key_scan_raw(&register_ahead_current_table_name(table), &[])
+            .primary_key_scan_raw(
+                &physical_register_ahead_current_table_name(physical_table),
+                &[],
+            )
             .unwrap()
             .len()
 }

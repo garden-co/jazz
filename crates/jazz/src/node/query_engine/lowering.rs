@@ -3955,7 +3955,11 @@ fn lower_equality_param_filter_joins(
         } else {
             route_param_field(&join.param)
         };
-        let mut projection = project_source_fields_from_prefix(source, LEFT_JOIN_PREFIX);
+        let mut projection = project_source_fields_from_prefix_rewrapping_nullable(
+            source,
+            LEFT_JOIN_PREFIX,
+            join.nullable.then_some(join.field.as_str()),
+        );
         projection.extend(
             retained_route_fields
                 .iter()
@@ -6136,13 +6140,28 @@ fn closure_path_segments(path: &ClosurePath) -> Vec<&ClosurePathSegment> {
 }
 
 fn project_source_fields_from_prefix(source: &ResolvedSource, prefix: &str) -> Vec<ProjectField> {
+    project_source_fields_from_prefix_rewrapping_nullable(source, prefix, None)
+}
+
+fn project_source_fields_from_prefix_rewrapping_nullable(
+    source: &ResolvedSource,
+    prefix: &str,
+    nullable_field: Option<&str>,
+) -> Vec<ProjectField> {
     source
         .row_shape
         .descriptor
         .fields()
         .iter()
         .filter_map(|field| field.name.as_ref())
-        .map(|field| ProjectField::renamed(format!("{prefix}{field}"), field.clone()))
+        .map(|field| {
+            let source_field = format!("{prefix}{field}");
+            if nullable_field == Some(field.as_str()) {
+                ProjectField::nullable(source_field, field.clone())
+            } else {
+                ProjectField::renamed(source_field, field.clone())
+            }
+        })
         .collect()
 }
 

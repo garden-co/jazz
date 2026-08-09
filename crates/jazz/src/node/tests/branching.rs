@@ -562,7 +562,7 @@ fn branch_creation_persists_no_overlay_partition_until_first_write() {
     assert!(
         !core.branches.branch_partitions
             .iter()
-            .any(|(_, _, existing)| *existing == branch_id),
+            .any(|(_, existing)| *existing == branch_id),
         "INV-BRANCH-12: branch creation must not eagerly create overlay partitions"
     );
 
@@ -571,12 +571,13 @@ fn branch_creation_persists_no_overlay_partition_until_first_write() {
         MergeableCommit::new("todos", row(1), 10).cells(title_cells("branch write")),
     )
     .unwrap();
+    let table_id = core
+        .physical_table_id_for_schema(core.current_write_schema().schema, "todos")
+        .unwrap();
     assert!(
-        core.branches.branch_partitions.iter().any(
-            |(table, schema_version, existing)| table == "todos"
-                && *schema_version == core.current_write_schema().schema
-                && *existing == branch_id
-        ),
+        core.branches
+            .branch_partitions
+            .contains(&(table_id, branch_id)),
         "INV-BRANCH-12: first branch write must create the overlay partition"
     );
 }
@@ -605,13 +606,314 @@ fn branch_overlay_partition_creation_rebuilds_live_database_without_storage_reop
         rows,
         BTreeMap::from([(row(0x22), title_cells("branch partition write"))])
     );
+    let table_id = core
+        .physical_table_id_for_schema(core.current_write_schema().schema, "todos")
+        .unwrap();
     assert!(
-        core.branches.branch_partitions.iter().any(
-            |(table, schema_version, existing)| table == "todos"
-                && *schema_version == core.current_write_schema().schema
-                && *existing == branch_id
-        ),
+        core.branches
+            .branch_partitions
+            .contains(&(table_id, branch_id)),
         "first branch write must create a live overlay partition without reopening storage"
+    );
+}
+
+#[test]
+fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
+    // Physical branch partition identity is internal storage topology; the
+    // branch read and merge-back assertions cover its user-visible semantics.
+    let base = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("obsolete", ColumnType::String),
+        ],
+    )]);
+    let renamed = SchemaVersion::new(JazzSchema::new([TableSchema::new(
+        "tasks",
+        [
+            ColumnSchema::new("added", ColumnType::String),
+            ColumnSchema::new("name", ColumnType::String),
+        ],
+    )]));
+    let (dir, mut core) = open_history_complete_node_with_schema(node(0x23), base.clone());
+    let branch_id = branch(0x23);
+    core.create_root_branch(branch_id).unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row(0x23), 10).cells(BTreeMap::from([
+            ("title".to_owned(), v("before rename")),
+            ("obsolete".to_owned(), v("must not become the title")),
+        ])),
+    )
+    .unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row(0x26), 11).cells(title_cells("deleted after rename")),
+    )
+    .unwrap();
+
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(renamed.clone()),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::PublishLens {
+        author: AuthorId::SYSTEM,
+        lens: MigrationLens::new(
+            base.version_id(),
+            renamed.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "tasks".to_owned(),
+                ops: vec![
+                    LensOp::RenameTable {
+                        from: "todos".to_owned(),
+                        to: "tasks".to_owned(),
+                    },
+                    LensOp::RenameColumn {
+                        from: "title".to_owned(),
+                        to: "name".to_owned(),
+                    },
+                    LensOp::DropColumn {
+                        column: "obsolete".to_owned(),
+                        backwards_default: v("retired"),
+                    },
+                    LensOp::AddColumn {
+                        column: "added".to_owned(),
+                        default: v("default-added"),
+                    },
+                ],
+            }],
+        ),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: renamed.id,
+        },
+    })
+    .unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("tasks", row(0x24), 12)
+            .cells(BTreeMap::from([
+                ("added".to_owned(), v("new field")),
+                ("name".to_owned(), v("after rename")),
+            ])),
+    )
+    .unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("tasks", row(0x26), 13).deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
+
+    let base_table_id = core.catalogue.physical_mappings[&base.version_id()].tables["todos"]
+        .table_id;
+    assert_eq!(
+        core.catalogue.physical_mappings[&renamed.id].tables["tasks"].table_id,
+        base_table_id
+    );
+    assert_eq!(
+        core.branches.branch_partitions,
+        BTreeSet::from([(base_table_id, branch_id)])
+    );
+    let stored = core
+        .database
+        .primary_key_scan_raw(
+            &physical_branch_history_table_name(base_table_id, branch_id),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(stored.len(), 3);
+    assert_eq!(
+        stored
+            .iter()
+            .map(|raw| raw.schema_version())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        2,
+        "one physical branch table must retain both authored schema variants"
+    );
+    assert_eq!(
+        core.database
+            .primary_key_scan_raw(
+                &physical_branch_register_table_name(base_table_id, branch_id),
+                &[],
+            )
+            .unwrap()
+            .len(),
+        1,
+        "the shared deletion register must accept the renamed schema variant"
+    );
+
+    let shape = Query::from("todos").validate(&base).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let expected_overlay = BTreeMap::from([
+        (
+            row(0x23),
+            BTreeMap::from([
+                ("obsolete".to_owned(), v("must not become the title")),
+                ("title".to_owned(), v("before rename")),
+            ]),
+        ),
+        (
+            row(0x24),
+            BTreeMap::from([
+                ("obsolete".to_owned(), v("retired")),
+                ("title".to_owned(), v("after rename")),
+            ]),
+        ),
+    ]);
+    assert_eq!(
+        core.query_rows_on_branch(branch_id, &shape, &binding)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        expected_overlay
+    );
+
+    drop(core);
+    let mut reopened = reopen_node_at(&dir, node(0x23), base.clone());
+    assert_eq!(
+        reopened.query_rows_on_branch(branch_id, &shape, &binding)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        expected_overlay
+    );
+    let merge_back = reopened.merge_back_branch(branch_id).unwrap();
+    assert_eq!(
+        reopened
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([
+            (
+                row(0x23),
+                BTreeMap::from([
+                    ("obsolete".to_owned(), v("retired")),
+                    ("title".to_owned(), v("before rename")),
+                ]),
+            ),
+            (
+                row(0x24),
+                BTreeMap::from([
+                    ("obsolete".to_owned(), v("retired")),
+                    ("title".to_owned(), v("after rename")),
+                ]),
+            ),
+        ])
+    );
+    assert_eq!(
+        reopened
+            .transaction_record(merge_back)
+            .unwrap()
+            .branch_merge
+            .as_ref()
+            .map(|provenance| provenance.source_lineage),
+        Some(BranchLineage::Branch(branch_id))
+    );
+    // A second merge validates the first merge's substitutions and rebuilds
+    // the known target-source dot set. Both paths must decode the old authored
+    // descriptor before projecting contribution columns to the write schema.
+    reopened
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("tasks", row(0x24), 14)
+                .cells(BTreeMap::from([("name".to_owned(), v("second merge"))])),
+        )
+        .unwrap();
+    let second_merge = reopened.merge_back_branch(branch_id).unwrap();
+    assert!(reopened
+        .transaction_record(second_merge)
+        .unwrap()
+        .branch_merge
+        .is_some());
+}
+
+#[test]
+fn publishing_lens_discards_branch_overlay_for_replaced_provisional_lineage() {
+    // Provisional physical IDs and branch partition metadata are internal; an
+    // empty branch view is the observable result of the chosen discard policy.
+    let base = schema();
+    let target = SchemaVersion::new(catalogue_evolved_schema());
+    let (_dir, mut core) = open_history_complete_node_with_schema(node(0x25), base.clone());
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(target.clone()),
+    })
+    .unwrap();
+    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: target.id,
+        },
+    })
+    .unwrap();
+
+    let branch_id = branch(0x25);
+    core.create_root_branch(branch_id).unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row(0x25), 10).cells(BTreeMap::from([
+            ("title".to_owned(), v("provisional")),
+            ("body".to_owned(), v("branch body")),
+        ])),
+    )
+    .unwrap();
+    let provisional = core.catalogue.physical_mappings[&target.id].tables["todos"].table_id;
+    let provisional_table = physical_branch_history_table_name(provisional, branch_id);
+    assert_eq!(
+        core.database
+            .primary_key_scan_raw(&provisional_table, &[])
+            .unwrap()
+            .len(),
+        1
+    );
+
+    core.apply_sync_message(SyncMessage::PublishLens {
+        author: AuthorId::SYSTEM,
+        lens: MigrationLens::new(
+            base.version_id(),
+            target.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: v(""),
+                }],
+            }],
+        ),
+    })
+    .unwrap();
+
+    assert!(core.branches.branch_partitions.is_empty());
+    assert!(
+        core.database
+            .primary_key_scan_raw(&provisional_table, &[])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(core
+        .database
+        .primary_key_scan_raw("jazz_branch_partitions", &[])
+        .unwrap()
+        .is_empty());
+    let shape = Query::from("todos").validate(&base).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    assert!(
+        core.query_rows_on_branch(branch_id, &shape, &binding)
+            .unwrap()
+            .is_empty()
     );
 }
 
@@ -648,7 +950,7 @@ fn branch_writes_reject_unknown_and_closed_branches() {
     assert!(
         !core.branches.branch_partitions
             .iter()
-            .any(|(_, _, existing)| *existing == unknown || *existing == closed),
+            .any(|(_, existing)| *existing == unknown || *existing == closed),
         "INV-BRANCH-14: rejected branch writes must not create implicit partitions"
     );
 }
@@ -954,6 +1256,79 @@ fn merge_back_accumulates_authored_columns_across_successive_branch_patches() {
     );
 }
 
+/// Legacy wire versions carry no explicit authored-column set. Their present
+/// cells remain native target contributions after projection; otherwise a
+/// later branch merge can forget the target dot while validating provenance.
+///
+/// Planted positive: replace the projected-cell-key fallback in
+/// `validated_target_source_dots` with `unwrap_or_default()`. The direct dot
+/// assertion then loses `title`.
+#[test]
+fn legacy_target_version_without_authored_columns_contributes_present_cells() {
+    let schema = schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0x91), schema.clone());
+    let (_core_dir, mut core) = open_history_complete_node_with_schema(node(0x92), schema.clone());
+    let root_tx = writer
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0x91), 10).cells(title_cells("legacy root")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = writer.commit_unit_for(root_tx).unwrap() else {
+        panic!("commit unit expected");
+    };
+    let legacy_versions = versions
+        .into_iter()
+        .map(|version| {
+            VersionRecord::from_cells(
+                &schema.tables[0],
+                schema.version_id(),
+                version.row_uuid(),
+                version.parents(),
+                version.created_by(),
+                version.created_at(),
+                version.updated_by(),
+                version.updated_at(),
+                &version_record_cells(&version, &schema.tables[0]),
+                version.deletion(),
+            )
+            .unwrap()
+        })
+        .collect();
+    core.ingest_relay_commit_unit(tx, legacy_versions).unwrap();
+
+    let branch_id = branch(0x91);
+    core.create_root_branch(branch_id).unwrap();
+    let known = core
+        .validated_target_source_dots(
+            BranchLineage::Branch(branch_id),
+            BranchLineage::Root,
+        )
+        .unwrap();
+    assert!(known.contains(&ContributionDot {
+        lineage: BranchLineage::Root,
+        tx_id: root_tx,
+        coordinate: ContributionCoordinate {
+            table: "todos".to_owned(),
+            row_uuid: row(0x91),
+            layer: MergeAspect::Content,
+            component: ContributionComponent::Column("title".to_owned()),
+        },
+    }));
+
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row(0x92), 20).cells(title_cells("first")),
+    )
+    .unwrap();
+    core.merge_back_branch(branch_id).unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row(0x93), 21).cells(title_cells("second")),
+    )
+    .unwrap();
+    assert!(core.merge_back_branch(branch_id).is_ok());
+}
+
 #[test]
 fn merge_back_deduplicates_shared_transaction_parent_edges() {
     let (_core_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());
@@ -1215,7 +1590,7 @@ fn invalid_branch_targets_do_not_persist_poison_partitions() {
             .branches
             .branch_partitions
             .iter()
-            .any(|(_, _, existing)| *existing == branch_id)
+            .any(|(_, existing)| *existing == branch_id)
     );
     drop(unknown_schema);
     let reopened = reopen_node_at(&unknown_schema_dir, node(2), schema());
@@ -1224,7 +1599,7 @@ fn invalid_branch_targets_do_not_persist_poison_partitions() {
             .branches
             .branch_partitions
             .iter()
-            .any(|(_, _, existing)| *existing == branch_id)
+            .any(|(_, existing)| *existing == branch_id)
     );
 
     let (unknown_table_dir, mut unknown_table) =
@@ -1248,7 +1623,7 @@ fn invalid_branch_targets_do_not_persist_poison_partitions() {
             .branches
             .branch_partitions
             .iter()
-            .any(|(_, _, existing)| *existing == branch_id)
+            .any(|(_, existing)| *existing == branch_id)
     );
     drop(unknown_table);
     let reopened = reopen_node_at(&unknown_table_dir, node(3), schema());
@@ -1257,7 +1632,7 @@ fn invalid_branch_targets_do_not_persist_poison_partitions() {
             .branches
             .branch_partitions
             .iter()
-            .any(|(_, _, existing)| *existing == branch_id)
+            .any(|(_, existing)| *existing == branch_id)
     );
 
     let (oversized_dir, mut oversized) = open_history_complete_node_with_schema(node(4), schema());
@@ -1284,7 +1659,7 @@ fn invalid_branch_targets_do_not_persist_poison_partitions() {
             .branches
             .branch_partitions
             .iter()
-            .any(|(_, _, existing)| *existing == branch_id)
+            .any(|(_, existing)| *existing == branch_id)
     );
     drop(oversized);
     let reopened = reopen_node_at(&oversized_dir, node(4), schema());
@@ -1293,7 +1668,7 @@ fn invalid_branch_targets_do_not_persist_poison_partitions() {
             .branches
             .branch_partitions
             .iter()
-            .any(|(_, _, existing)| *existing == branch_id)
+            .any(|(_, existing)| *existing == branch_id)
     );
 }
 
