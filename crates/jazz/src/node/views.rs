@@ -944,6 +944,7 @@ where
         let persisted_member_removes = result_member_removes.clone();
         let persisted_evidence_adds = evidence_member_adds.clone();
         let persisted_evidence_removes = evidence_member_removes.clone();
+        let mut evidence_removal_candidates = persisted_evidence_removes.clone();
         let persisted_fact_adds = program_fact_adds.clone();
         let persisted_fact_removes = program_fact_removes.clone();
         // A reset only replaces shared canonical state when it carries the
@@ -958,6 +959,14 @@ where
                 .is_some_and(|members| !members.is_empty());
         let reset_cleared_shared_state = reset_result_set && !preserve_existing_shared_state;
         if reset_cleared_shared_state {
+            evidence_removal_candidates.extend(
+                self.query
+                    .settled_evidence_sets
+                    .get(&binding_view_key)
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
             self.clear_settled_result_view(binding_view_key);
             self.query.settled_evidence_sets.remove(&binding_view_key);
             self.query.settled_program_facts.remove(&binding_view_key);
@@ -1037,6 +1046,7 @@ where
             program_facts.extend(program_fact_adds);
             fact_rewrite = None;
         }
+        self.revoke_unreferenced_authorization_evidence(&evidence_removal_candidates)?;
         if !defer_settlement {
             self.query
                 .settled_through_by_binding_view
@@ -1223,6 +1233,91 @@ where
             bundle.global_seq,
             bundle.durability,
         )
+    }
+
+    pub(super) fn revoke_unreferenced_authorization_evidence(
+        &mut self,
+        candidates: &[ResultMemberEntry],
+    ) -> Result<(), Error> {
+        let removed_members = candidates
+            .iter()
+            .filter_map(ResultMemberEntry::as_row)
+            .map(|(table, row_uuid, tx_id)| (table.to_string(), row_uuid, tx_id))
+            .collect::<BTreeSet<_>>();
+        let rows = removed_members
+            .iter()
+            .map(|(table, row_uuid, _)| (table.clone(), *row_uuid))
+            .collect::<BTreeSet<_>>();
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let active_members = self
+            .query
+            .settled_evidence_sets
+            .values()
+            .chain(self.query.settled_result_sets.values())
+            .flat_map(|members| members.iter())
+            .filter_map(ResultMemberEntry::as_row)
+            .map(|(table, row_uuid, tx_id)| (table.to_string(), row_uuid, tx_id))
+            .collect::<BTreeSet<_>>();
+        let mut batch = self.database.open_batch();
+        for (table, row_uuid) in rows {
+            for layer in [VersionLayer::Content, VersionLayer::Deletion] {
+                let Some(current) = self.query_global_layer_winner(&table, row_uuid, layer)? else {
+                    continue;
+                };
+                let current_tx = self.version_tx_id(&current)?;
+                if !removed_members.contains(&(table.clone(), row_uuid, current_tx))
+                    || active_members.contains(&(table.clone(), row_uuid, current_tx))
+                {
+                    continue;
+                }
+
+                let mut replacement: Option<(VersionRow, TxId, TxTime)> = None;
+                for (_, _, tx_id) in
+                    active_members
+                        .iter()
+                        .filter(|(active_table, active_row, _)| {
+                            active_table == &table && *active_row == row_uuid
+                        })
+                {
+                    for version in self.query_versions_for_tx(*tx_id)? {
+                        if version.table() != table
+                            || version.row_uuid() != row_uuid
+                            || version.layer() != layer
+                        {
+                            continue;
+                        }
+                        let made_at = self.version_made_at(&version)?;
+                        let previous =
+                            replacement
+                                .as_ref()
+                                .map(|(winner, winner_tx, winner_made_at)| {
+                                    (winner, *winner_tx, *winner_made_at)
+                                });
+                        if version_wins_over_open_winner(&version, *tx_id, made_at, previous) {
+                            replacement = Some((version, *tx_id, made_at));
+                        }
+                    }
+                }
+                if let Some((replacement, replacement_tx, _)) = replacement {
+                    let (_, global_seq, _) = self
+                        .transaction_state(replacement_tx)
+                        .ok_or(Error::MissingTransaction(replacement_tx))?;
+                    let global_seq = global_seq.ok_or(Error::InvalidStoredValue(
+                        "authorization evidence replacement was not globally settled",
+                    ))?;
+                    self.write_global_current_update(&mut batch, &replacement, global_seq)?;
+                } else {
+                    self.write_global_current_delete(&mut batch, &current)?;
+                }
+            }
+        }
+        if !batch.is_empty() {
+            self.database.commit_batch(batch)?;
+        }
+        Ok(())
     }
 
     fn stage_view_bundle(

@@ -5096,6 +5096,24 @@ where
         Ok(())
     }
 
+    pub(super) fn write_global_current_delete(
+        &self,
+        batch: &mut DatabaseBatch,
+        version: &VersionRow,
+    ) -> Result<(), Error> {
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+        let table = self.physical_current_table_for_schema(
+            schema_version,
+            version.table(),
+            version.layer(),
+            PhysicalCurrentClass::Global,
+        )?;
+        batch.delete(table, global_current_primary_key(version.row_uuid()));
+        Ok(())
+    }
+
     pub(super) fn write_ahead_current_insert(
         &mut self,
         batch: &mut DatabaseBatch,

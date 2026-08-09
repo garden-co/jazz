@@ -5237,7 +5237,7 @@ fn reverse_referencing_select_policy_allows_root_row_through_source_row() {
     assert!(reopened_snapshot.rows.is_empty());
 
     let later_attachment = row(0xa8);
-    accept_global(
+    let later_attachment_tx = accept_global(
         &mut core,
         MergeableCommit::new("attachments", later_attachment, 21).cells(BTreeMap::from([
             ("fileId".to_owned(), Value::Uuid(unlinked_file.0)),
@@ -5284,6 +5284,7 @@ fn reverse_referencing_select_policy_allows_root_row_through_source_row() {
                 Some((ref table, row, _)) if table.as_str() == "attachments" && row == later_attachment
             ))
     ));
+    reader.apply_sync_message(incremental.clone()).unwrap();
     reader
         .apply_sync_message(filtered_incremental.clone())
         .unwrap();
@@ -5311,6 +5312,131 @@ fn reverse_referencing_select_policy_allows_root_row_through_source_row() {
         member.as_row(),
         Some((ref table, row, _)) if table.as_str() == "attachments" && row == later_attachment
     )));
+
+    let mut filtered_release = filtered_incremental;
+    if let SyncMessage::ViewUpdate {
+        version_carriers,
+        evidence_version_carriers,
+        result_member_adds,
+        evidence_member_adds,
+        evidence_member_removes,
+        ..
+    } = &mut filtered_release
+    {
+        version_carriers.clear();
+        evidence_version_carriers.clear();
+        result_member_adds.clear();
+        *evidence_member_removes = std::mem::take(evidence_member_adds);
+    }
+    reader.apply_sync_message(filtered_release).unwrap();
+    assert!(
+        reader
+            .dry_run_read_current_allows("files", unlinked_file, alice)
+            .unwrap(),
+        "one binding releasing shared evidence must not revoke another binding's authorization"
+    );
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("attachments", later_attachment, 22)
+            .parents(vec![later_attachment_tx])
+            .deletion(DeletionEvent::Deleted),
+    );
+    let revoke = peer
+        .query_update_for_subscription_with_opts(
+            &mut core,
+            SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: RegisterShapeOptions {
+                    tier: DurabilityTier::Edge,
+                    ..RegisterShapeOptions::default()
+                }
+                .read_view_key(),
+            },
+            &shape,
+            &binding,
+            RegisterShapeOptions {
+                tier: DurabilityTier::Edge,
+                ..RegisterShapeOptions::default()
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        &revoke,
+        SyncMessage::ViewUpdate {
+            result_member_removes,
+            evidence_member_removes,
+            ..
+        } if result_member_removes.iter().any(|member| matches!(
+            member.as_row(),
+            Some((ref table, row, _)) if table.as_str() == "files" && row == unlinked_file
+        )) && evidence_member_removes.iter().any(|member| matches!(
+            member.as_row(),
+            Some((ref table, row, _)) if table.as_str() == "attachments" && row == later_attachment
+        ))
+    ));
+    reader.apply_sync_message(revoke).unwrap();
+    assert!(
+        !reader
+            .dry_run_read_current_allows("files", unlinked_file, alice)
+            .unwrap(),
+        "the final evidence release must retract contributor authorization"
+    );
+}
+
+#[test]
+fn evidence_revocation_restores_the_remaining_owned_version() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "attachments",
+        [ColumnSchema::new("name", ColumnType::String)],
+    )]);
+    let (_dir, mut receiver) = open_node_with_schema(node(9), schema);
+    let attachment = row(0xa9);
+    let old_tx = accept_global(
+        &mut receiver,
+        MergeableCommit::new("attachments", attachment, 10)
+            .cells(BTreeMap::from([("name".to_owned(), v("old"))])),
+    );
+    let new_tx = accept_global(
+        &mut receiver,
+        MergeableCommit::new("attachments", attachment, 11)
+            .parents(vec![old_tx])
+            .cells(BTreeMap::from([("name".to_owned(), v("new"))])),
+    );
+    let shape = Query::from("attachments")
+        .validate(&receiver.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let binding_view = BindingViewKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let old_member: ResultMemberEntry = (
+        groove::Intern::new("attachments".to_owned()),
+        attachment,
+        old_tx,
+    )
+        .into();
+    let new_member: ResultMemberEntry = (
+        groove::Intern::new("attachments".to_owned()),
+        attachment,
+        new_tx,
+    )
+        .into();
+    receiver
+        .query
+        .settled_evidence_sets
+        .insert(binding_view, BTreeSet::from([old_member]));
+    receiver
+        .revoke_unreferenced_authorization_evidence(std::slice::from_ref(&new_member))
+        .unwrap();
+    let restored = receiver
+        .query_global_layer_winner("attachments", attachment, VersionLayer::Content)
+        .unwrap()
+        .expect("the remaining owned evidence version must become current");
+    assert_eq!(receiver.version_tx_id(&restored).unwrap(), old_tx);
 }
 
 #[test]
