@@ -26,6 +26,18 @@ pub(super) type JoinKey = SmallVec<[u8; 64]>;
 type JoinBucket = HashMap<Bytes, i64>;
 type JoinIndex = HashMap<JoinKey, JoinBucket>;
 
+pub(super) fn touched_join_keys(
+    descriptor: &RecordDescriptor,
+    fields: &[String],
+    deltas: &[RecordDelta],
+    comparison: ValueComparison,
+) -> Result<Vec<Vec<u8>>, IvmRuntimeError> {
+    Ok(keyed_join_deltas(descriptor, fields, deltas, comparison)?
+        .into_iter()
+        .map(|delta| delta.key.into_vec())
+        .collect())
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct JoinState;
 
