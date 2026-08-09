@@ -263,6 +263,7 @@ enum NapiSubscription {
 pub struct Tx {
     db: NapiDbInnerStorage,
     open_tx: Option<CoreOpenBatchId>,
+    owns_lifetime: bool,
 }
 
 macro_rules! with_napi_mergeable_tx {
@@ -529,6 +530,11 @@ impl Tx {
 
     #[napi]
     pub fn commit(&mut self) -> napi::Result<Write> {
+        if !self.owns_lifetime {
+            return Err(napi::Error::from_reason(
+                "attached transaction views cannot commit the owner-wide batch",
+            ));
+        }
         let open_tx = self.open_tx()?;
         let write = match &self.db {
             NapiDbInnerStorage::Memory(db) => core_commit_tx_memory(db, open_tx),
@@ -540,6 +546,11 @@ impl Tx {
 
     #[napi]
     pub fn rollback(&mut self) -> napi::Result<()> {
+        if !self.owns_lifetime {
+            return Err(napi::Error::from_reason(
+                "attached transaction views cannot roll back the owner-wide batch",
+            ));
+        }
         let open_tx = self.open_tx()?;
         self.abandon(open_tx)?;
         self.open_tx.take();
@@ -564,6 +575,9 @@ impl Tx {
 
 impl Drop for Tx {
     fn drop(&mut self) {
+        if !self.owns_lifetime {
+            return;
+        }
         let Some(open_tx) = self.open_tx.take() else {
             return;
         };
@@ -574,6 +588,7 @@ impl Drop for Tx {
 #[napi(js_name = "NapiDb")]
 pub struct NapiDb {
     inner: NapiDbInner,
+    owns_runtime: bool,
 }
 
 #[napi]
@@ -587,6 +602,7 @@ impl NapiDb {
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
+            owns_runtime: true,
         })
     }
 
@@ -607,7 +623,152 @@ impl NapiDb {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
                 db,
             ))))),
+            owns_runtime: true,
         })
+    }
+
+    /// Register and return a typed view backed by this same runtime owner.
+    #[napi(js_name = "registerSchema")]
+    pub fn register_schema(&self, schema: Uint8Array) -> napi::Result<Self> {
+        let schema: JazzSchema = postcard::from_bytes(&schema)
+            .map_err(|error| napi::Error::from_reason(format!("decode schema: {error}")))?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let view = match db {
+            NapiDbInnerStorage::Memory(db) => NapiDbInnerStorage::Memory(Rc::new(
+                db.register_schema_view(schema)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            )),
+            NapiDbInnerStorage::Persistent(db) => NapiDbInnerStorage::Persistent(Rc::new(
+                db.register_schema_view(schema)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            )),
+        };
+        Ok(Self {
+            inner: Rc::new(RefCell::new(Some(view))),
+            owns_runtime: false,
+        })
+    }
+
+    /// Attach a schema view to an owner-wide mergeable batch without opening,
+    /// committing, or abandoning that batch.
+    #[napi(js_name = "attachMergeableTx")]
+    pub fn attach_mergeable_tx(&self, open_batch_id: String) -> napi::Result<Tx> {
+        let open_batch_id = open_batch_id
+            .parse::<CoreOpenBatchId>()
+            .map_err(napi::Error::from_reason)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        Ok(Tx {
+            db: match db {
+                NapiDbInnerStorage::Memory(db) => NapiDbInnerStorage::Memory(Rc::clone(db)),
+                NapiDbInnerStorage::Persistent(db) => NapiDbInnerStorage::Persistent(Rc::clone(db)),
+            },
+            open_tx: Some(open_batch_id),
+            owns_lifetime: false,
+        })
+    }
+
+    /// Begin one owner-wide batch without creating an owning per-schema Tx.
+    #[napi(js_name = "beginTransaction")]
+    pub fn begin_transaction(
+        &self,
+        open_batch_id: String,
+        kind: String,
+        author: Option<Uint8Array>,
+    ) -> napi::Result<()> {
+        let open_batch_id = open_batch_id
+            .parse::<CoreOpenBatchId>()
+            .map_err(napi::Error::from_reason)?;
+        let author = author
+            .as_deref()
+            .map(core_author_id_from_bytes)
+            .transpose()?;
+        if kind != "mergeable" && kind != "exclusive" {
+            return Err(napi::Error::from_reason(format!(
+                "unknown batch kind {kind}"
+            )));
+        }
+        if kind == "exclusive" && author.is_some() {
+            return Err(napi::Error::from_reason(
+                "exclusive batches do not accept an identity override",
+            ));
+        }
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        macro_rules! begin {
+            ($db:expr) => {
+                if kind == "mergeable" {
+                    match author {
+                        Some(author) => $db.begin_mergeable_for_identity(open_batch_id, author),
+                        None => $db.begin_mergeable(open_batch_id),
+                    }
+                } else {
+                    $db.begin_exclusive(open_batch_id)
+                }
+            };
+        }
+        match db {
+            NapiDbInnerStorage::Memory(db) => begin!(db),
+            NapiDbInnerStorage::Persistent(db) => begin!(db),
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    /// Commit an owner-wide mergeable batch by id.
+    #[napi(js_name = "commitTransaction")]
+    pub fn commit_transaction(
+        &self,
+        open_batch_id: String,
+        kind: Option<String>,
+    ) -> napi::Result<Write> {
+        let open_batch_id = open_batch_id
+            .parse::<CoreOpenBatchId>()
+            .map_err(napi::Error::from_reason)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match (db, kind.as_deref().unwrap_or("mergeable")) {
+            (NapiDbInnerStorage::Memory(db), "mergeable") => {
+                core_commit_tx_memory(db, open_batch_id)
+            }
+            (NapiDbInnerStorage::Persistent(db), "mergeable") => {
+                core_commit_tx_persistent(db, open_batch_id)
+            }
+            (NapiDbInnerStorage::Memory(db), "exclusive") => {
+                core_commit_exclusive_tx_memory(db, open_batch_id)
+            }
+            (NapiDbInnerStorage::Persistent(db), "exclusive") => {
+                core_commit_exclusive_tx_persistent(db, open_batch_id)
+            }
+            (_, kind) => Err(napi::Error::from_reason(format!(
+                "unknown batch kind {kind}"
+            ))),
+        }
+    }
+
+    /// Roll back an owner-wide open batch by id.
+    #[napi(js_name = "rollbackTransaction")]
+    pub fn rollback_transaction(&self, open_batch_id: String) -> napi::Result<()> {
+        let open_batch_id = open_batch_id
+            .parse::<CoreOpenBatchId>()
+            .map_err(napi::Error::from_reason)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => db.abandon_transaction_handle(open_batch_id),
+            NapiDbInnerStorage::Persistent(db) => db.abandon_transaction_handle(open_batch_id),
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi(js_name = "setTickScheduler")]
@@ -1457,6 +1618,7 @@ impl NapiDb {
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
                     open_batch_id
                 }),
+                owns_lifetime: true,
             }),
             NapiDbInnerStorage::Persistent(db) => Ok(Tx {
                 db: NapiDbInnerStorage::Persistent(Rc::clone(db)),
@@ -1465,6 +1627,7 @@ impl NapiDb {
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
                     open_batch_id
                 }),
+                owns_lifetime: true,
             }),
         }
     }
@@ -1491,6 +1654,7 @@ impl NapiDb {
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
                     open_batch_id
                 }),
+                owns_lifetime: true,
             }),
             NapiDbInnerStorage::Persistent(db) => Ok(Tx {
                 db: NapiDbInnerStorage::Persistent(Rc::clone(db)),
@@ -1499,6 +1663,7 @@ impl NapiDb {
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
                     open_batch_id
                 }),
+                owns_lifetime: true,
             }),
         }
     }
@@ -1506,6 +1671,9 @@ impl NapiDb {
     #[napi]
     pub fn close(&self) -> napi::Result<()> {
         let inner = self.inner.borrow_mut().take();
+        if !self.owns_runtime {
+            return Ok(());
+        }
         if let Some(inner) = inner {
             match inner {
                 NapiDbInnerStorage::Memory(db) => db
@@ -1794,6 +1962,38 @@ fn core_commit_tx_persistent(
     open_tx: CoreOpenBatchId,
 ) -> napi::Result<Write> {
     let tx_id = core_commit_tx(db, open_tx)?;
+    core_tx_write(
+        tx_id,
+        Some(NapiWrite::Persistent {
+            db: Rc::clone(db),
+            tx_id,
+        }),
+    )
+}
+
+fn core_commit_exclusive_tx_memory(
+    db: &Rc<CoreDb<CoreMemoryStorage>>,
+    open_tx: CoreOpenBatchId,
+) -> napi::Result<Write> {
+    let tx_id = db
+        .commit_exclusive_handle(open_tx)
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    core_tx_write(
+        tx_id,
+        Some(NapiWrite::Memory {
+            db: Rc::clone(db),
+            tx_id,
+        }),
+    )
+}
+
+fn core_commit_exclusive_tx_persistent(
+    db: &Rc<CoreDb<CoreRocksDbStorage>>,
+    open_tx: CoreOpenBatchId,
+) -> napi::Result<Write> {
+    let tx_id = db
+        .commit_exclusive_handle(open_tx)
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
     core_tx_write(
         tx_id,
         Some(NapiWrite::Persistent {
@@ -2440,8 +2640,22 @@ pub fn verify_local_first_identity_proof_napi(
 
 #[cfg(test)]
 mod tests {
-    use crate::core_read_opts_from_json;
-    use jazz::db::Propagation as CorePropagation;
+    use std::collections::BTreeMap;
+    use std::rc::Rc;
+
+    use crate::{NapiDbInnerStorage, Tx, core_block_on, core_read_opts_from_json};
+    use jazz::db::{
+        Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, MergeableTxOps,
+        Propagation as CorePropagation,
+    };
+    use jazz::groove::records::Value as CoreValue;
+    use jazz::groove::schema::ColumnType as GrooveColumnType;
+    use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
+    use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
+    use jazz::schema::{
+        ColumnSchema as CoreColumnSchema, JazzSchema, Policy, TableSchema as CoreTableSchema,
+    };
+    use jazz::tools::OpenBatchId as CoreOpenBatchId;
     use jazz::tools::{ColumnType, Schema, SchemaBuilder, TableName, TableSchema, Value};
     use serde_json::json;
 
@@ -2501,5 +2715,46 @@ mod tests {
             .expect("parse read opts");
 
         assert_eq!(opts.propagation, CorePropagation::LocalOnly);
+    }
+
+    /// A short-lived NAPI schema attachment must not own or abandon the
+    /// owner-wide OpenBatch lifetime when its JS wrapper is collected.
+    #[test]
+    fn attached_tx_drop_preserves_owner_batch() {
+        let schema = JazzSchema::new([CoreTableSchema::new(
+            "items",
+            [CoreColumnSchema::new("label", GrooveColumnType::String)],
+        )
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public())]);
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let owner = Rc::new(
+            core_block_on(CoreDb::open(CoreDbConfig::new(
+                schema.clone(),
+                CoreMemoryStorage::new(&refs),
+                CoreDbIdentity {
+                    node: CoreNodeUuid::from_bytes([0x44; 16]),
+                    author: CoreAuthorId::from_bytes([0xa4; 16]),
+                },
+            )))
+            .unwrap(),
+        );
+        let view = Rc::new(owner.register_schema_view(schema).unwrap());
+        let batch = CoreOpenBatchId::new();
+        owner.begin_mergeable(batch).unwrap();
+        drop(Tx {
+            db: NapiDbInnerStorage::Memory(Rc::clone(&view)),
+            open_tx: Some(batch),
+            owns_lifetime: false,
+        });
+        view.mergeable_tx_ref(batch)
+            .insert_with_id(
+                "items",
+                CoreRowUuid::from_bytes([1; 16]),
+                BTreeMap::from([("label".to_owned(), CoreValue::String("kept".to_owned()))]),
+            )
+            .unwrap();
+        owner.commit_mergeable_handle(batch).unwrap();
     }
 }
