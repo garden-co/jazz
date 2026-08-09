@@ -777,6 +777,7 @@ impl IvmRuntime {
             storage: Some(storage),
             context: EvalContext::root(),
             metrics: &mut metrics,
+            terminal_deltas: HashMap::default(),
         };
 
         for (subscription_id, subscription) in &self.multisink_subscriptions {
@@ -787,14 +788,30 @@ impl IvmRuntime {
                 if !records.deltas.is_empty() && records.descriptor != output.output {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
-                if !records.is_empty() {
-                    let records = records.as_ref().clone();
-                    if evaluator.output_is_structured_collect_by(output.node)? {
+                let structured = evaluator.output_is_structured_collect_by(output.node)?;
+                let records = records.as_ref().clone();
+                if structured {
+                    let terminal = if let Some(terminal) =
+                        evaluator.take_terminal_deltas_for_output(output.node)?
+                    {
+                        Some(terminal)
+                    } else if !records.is_empty() {
                         let terminal = terminal_deltas_from_record_deltas(&records)?;
-                        if !terminal.is_empty() {
-                            terminal_sinks.insert(sink.clone(), terminal);
-                        }
+                        terminal
+                            .operations
+                            .iter()
+                            .all(|operation| !operation.path.is_empty())
+                            .then_some(terminal)
+                    } else {
+                        None
+                    };
+                    if let Some(terminal) = terminal
+                        && !terminal.is_empty()
+                    {
+                        terminal_sinks.insert(sink.clone(), terminal);
                     }
+                }
+                if !records.is_empty() {
                     // Keep the rendered terminal record available for legacy
                     // single-sink consumers and hydration. Structured carriers
                     // select `terminal_sinks` for incremental delivery.
@@ -989,6 +1006,7 @@ impl IvmRuntime {
             storage: Some(storage),
             context: EvalContext::root_snapshot(),
             metrics: &mut metrics,
+            terminal_deltas: HashMap::default(),
         };
         let records = evaluator
             .update_node(output_node)
@@ -1055,6 +1073,7 @@ impl IvmRuntime {
                 EvalContext::root_snapshot()
             },
             metrics: &mut metrics,
+            terminal_deltas: HashMap::default(),
         };
         let records = evaluator
             .update_node(output_node)
@@ -1153,6 +1172,7 @@ impl IvmRuntime {
             storage: Some(storage),
             context: EvalContext::root(),
             metrics: &mut metrics,
+            terminal_deltas: HashMap::default(),
         };
 
         for node in durable_nodes {
@@ -5804,6 +5824,12 @@ enum OperatorState {
     SemiJoin(AntiJoinState),
     AntiJoin(AntiJoinState),
     Recursive(AsOf<RecursiveState, Tick>),
+    CollectBy(CollectByIncrementalState),
+}
+
+#[derive(Clone, Debug, Default)]
+struct CollectByIncrementalState {
+    groups: BTreeMap<Vec<u8>, BTreeMap<(Vec<TopBySortPart>, Bytes), i64>>,
 }
 
 fn operator_state_for(operator: &OpType) -> OperatorState {
@@ -5812,6 +5838,7 @@ fn operator_state_for(operator: &OpType) -> OperatorState {
         OpType::SemiJoin(_) => OperatorState::SemiJoin(AntiJoinState),
         OpType::AntiJoin(_) => OperatorState::AntiJoin(AntiJoinState),
         OpType::Recursive(_) => OperatorState::Recursive(AsOf::new(RecursiveState::default())),
+        OpType::CollectBy(_) => OperatorState::CollectBy(CollectByIncrementalState::default()),
         _ => OperatorState::Stateless,
     }
 }
@@ -5906,6 +5933,7 @@ struct TickEvaluator<'a, S> {
     storage: Option<&'a S>,
     context: EvalContext,
     metrics: &'a mut TickMetrics,
+    terminal_deltas: HashMap<NodeId, TerminalDeltas>,
 }
 
 /// Borrowed runtime pieces used by recursive evaluation to run child graphs.
@@ -6004,6 +6032,7 @@ where
             storage: Some(self.storage),
             context: EvalContext::with_binding(self.scope, sub_tick, binding, deltas),
             metrics: self.metrics,
+            terminal_deltas: HashMap::default(),
         };
         evaluator
             .update_node(node)
@@ -6045,6 +6074,7 @@ where
                 ArrangementUpdateMode::Replace,
             ),
             metrics: self.metrics,
+            terminal_deltas: HashMap::default(),
         };
         evaluator
             .update_node(node)
@@ -6084,6 +6114,7 @@ where
                 hydrate_arrangements: false,
             },
             metrics: self.metrics,
+            terminal_deltas: HashMap::default(),
         };
         evaluator
             .update_node(node)
@@ -6095,6 +6126,28 @@ impl<S> TickEvaluator<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn take_terminal_deltas_for_output(
+        &mut self,
+        node: NodeId,
+    ) -> Result<Option<TerminalDeltas>, IvmRuntimeError> {
+        let mut pending = vec![node];
+        let mut seen = HashSet::new();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            if let Some(deltas) = self.terminal_deltas.remove(&node) {
+                return Ok(Some(deltas));
+            }
+            let node = self
+                .graph
+                .node(node)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+            pending.extend(node.descriptor.inputs.iter().copied());
+        }
+        Ok(None)
+    }
+
     fn output_is_structured_collect_by(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
         let mut pending = vec![node];
         let mut seen = HashSet::new();
@@ -7128,6 +7181,49 @@ where
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         if input.deltas.is_empty() || collect_by.limit == TopByLimit::Finite(0) {
             return Ok(RecordDeltas::empty(output_desc));
+        }
+        let direct_tree_slot = match collect_by.slots.as_slice() {
+            [] if collect_by.limit == TopByLimit::Unbounded => None,
+            [slot] if slot.slots.is_empty() && slot.limit == TopByLimit::Unbounded => Some(slot),
+            _ => None,
+        };
+        if collect_by.mode == CollectByMode::Collect
+            && (collect_by.slots.is_empty() || direct_tree_slot.is_some())
+            && (collect_by.limit == TopByLimit::Unbounded || direct_tree_slot.is_some())
+            && direct_tree_slot.is_none_or(|slot| {
+                slot.presence_field_index.is_none_or(|field| {
+                    input.deltas.iter().all(|delta| {
+                        BorrowedRecord::new(delta.raw(), &input.descriptor)
+                            .get_bool(field)
+                            .unwrap_or(false)
+                    })
+                })
+            })
+        {
+            let operator_key = self.operator_key(node)?;
+            let mut operator = self
+                .operator_states
+                .remove(&operator_key)
+                .unwrap_or_else(|| OperatorState::CollectBy(CollectByIncrementalState::default()));
+            let OperatorState::CollectBy(state) = &mut operator else {
+                return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
+            };
+            let operations = update_unbounded_collect_by_terminal_state(
+                input.descriptor,
+                collect_by,
+                direct_tree_slot,
+                state,
+                &input.deltas,
+                self.context.eval_mode == EvalMode::Tick,
+            )?;
+            self.operator_states.insert(operator_key, operator);
+            if self.context.eval_mode == EvalMode::Tick {
+                if !operations.is_empty() {
+                    self.terminal_deltas
+                        .insert(node, TerminalDeltas { operations });
+                }
+                return Ok(RecordDeltas::empty(output_desc));
+            }
         }
         let [input_node] = self
             .graph
@@ -10032,6 +10128,108 @@ fn collect_by_projected_value(
         Value::Nullable(None) => Ok(Value::Nullable(None)),
         value => Ok(value),
     }
+}
+
+fn update_unbounded_collect_by_terminal_state(
+    input_desc: RecordDescriptor,
+    collect_by: &CollectByOp,
+    direct_tree_slot: Option<&CollectBySlot>,
+    state: &mut CollectByIncrementalState,
+    deltas: &[RecordDelta],
+    emit: bool,
+) -> Result<Vec<TerminalOperation>, IvmRuntimeError> {
+    if !emit {
+        state.groups.clear();
+    }
+    let mut operations = Vec::new();
+    for delta in deltas {
+        let group_key =
+            encoded_record_key_part(input_desc, delta.raw(), &collect_by.group_field_indices)?;
+        if let Some(presence_field) = direct_tree_slot.and_then(|slot| slot.presence_field_index)
+            && !BorrowedRecord::new(delta.raw(), &input_desc).get_bool(presence_field)?
+        {
+            continue;
+        }
+        let (sort_field_indices, sort_directions) = direct_tree_slot.map_or(
+            (
+                collect_by.sort_field_indices.as_slice(),
+                collect_by.sort_directions.as_slice(),
+            ),
+            |slot| {
+                (
+                    slot.sort_field_indices.as_slice(),
+                    slot.sort_directions.as_slice(),
+                )
+            },
+        );
+        let sort_key = collect_by_sort_key_for_fields(
+            input_desc,
+            delta.raw(),
+            sort_field_indices,
+            sort_directions,
+        )?;
+        let state_key = (sort_key, delta.record.clone());
+        let group = state.groups.entry(group_key.clone()).or_default();
+        let before_weight = group.get(&state_key).copied().unwrap_or_default();
+        let before_index = (before_weight > 0).then(|| {
+            group
+                .range(..state_key.clone())
+                .filter(|(_, weight)| **weight > 0)
+                .count()
+        });
+        let after_weight = before_weight + delta.weight;
+        if after_weight == 0 {
+            group.remove(&state_key);
+        } else {
+            group.insert(state_key.clone(), after_weight);
+        }
+        if !emit || (before_weight > 0) == (after_weight > 0) {
+            continue;
+        }
+        let source_values = BorrowedRecord::new(delta.raw(), &input_desc)
+            .to_values()
+            .map_err(IvmRuntimeError::RecordEncoding)?;
+        let child_fields = direct_tree_slot
+            .map(|slot| slot.child_fields.as_slice())
+            .unwrap_or(collect_by.child_fields.as_slice());
+        let child_descriptor = direct_tree_slot
+            .map(|slot| slot.child_descriptor)
+            .unwrap_or(collect_by.child_descriptor);
+        let collection_field = direct_tree_slot
+            .map(|slot| slot.collection_field.as_str())
+            .unwrap_or(collect_by.collection_field.as_str());
+        let child_values = child_fields
+            .iter()
+            .map(|field| collect_by_projected_value(&source_values, field))
+            .collect::<Result<Vec<_>, _>>()?;
+        let child_record: Vec<u8> = child_descriptor.create(&child_values)?;
+        let child_key = encoded_record_key_part(child_descriptor, &child_record, &[0])?;
+        let path = vec![TerminalPathSegment::Collection(collection_field.to_owned())];
+        if after_weight > 0 {
+            let index = group
+                .range(..state_key)
+                .filter(|(_, weight)| **weight > 0)
+                .count();
+            operations.push(TerminalOperation {
+                root_key: group_key,
+                path,
+                edit: TerminalEdit::Insert {
+                    index,
+                    key: child_key,
+                    value: child_record,
+                },
+            });
+        } else {
+            operations.push(TerminalOperation {
+                root_key: group_key,
+                path,
+                edit: TerminalEdit::Remove { key: child_key },
+            });
+            debug_assert!(before_index.is_some());
+        }
+    }
+    state.groups.retain(|_, group| !group.is_empty());
+    Ok(operations)
 }
 
 fn collect_by_parent_from_records(

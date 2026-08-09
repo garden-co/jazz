@@ -303,15 +303,24 @@ fn expect_parent_snapshot(event: SubscriptionEvent, parent: RowUuid, label: &str
             reset,
             added,
             updated,
+            terminal_operations,
             ..
         } => {
             if label == "measured update" {
                 assert!(!reset, "{label}: structured update must remain incremental");
             }
+            let patched_parent = terminal_operations.iter().any(|operation| {
+                operation.root_key.as_slice()
+                    == [10]
+                        .into_iter()
+                        .chain(parent.0.as_bytes().iter().copied())
+                        .collect::<Vec<_>>()
+            });
             assert!(
                 added.iter().any(|row| row.row_uuid() == parent)
-                    || updated.iter().any(|row| row.row_uuid() == parent),
-                "{label}: terminal delta did not include parent state"
+                    || updated.iter().any(|row| row.row_uuid() == parent)
+                    || patched_parent,
+                "{label}: terminal delta did not address parent state: {terminal_operations:?}"
             );
         }
         other => panic!("{label}: expected relation event, got {other:?}"),

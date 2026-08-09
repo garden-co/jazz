@@ -4590,6 +4590,31 @@ where
                         };
                         if let Some(update) = maintained_update {
                             if terminal_rows {
+                                if !update.terminal_operations.is_empty() {
+                                    let settled = subscription_is_settled(
+                                        &node.borrow(),
+                                        &shape,
+                                        &binding,
+                                        settled_tier,
+                                        read_view,
+                                    );
+                                    let state_ref = &mut *state_ref;
+                                    let event = SubscriptionEvent::Delta {
+                                        reset: false,
+                                        added: Vec::new(),
+                                        updated: Vec::new(),
+                                        removed: Vec::new(),
+                                        terminal_operations: update.terminal_operations,
+                                        settled,
+                                        tier: snapshot_tier,
+                                    };
+                                    state_ref.settled = settled;
+                                    retained.push(Rc::downgrade(&state));
+                                    if state_ref.sender.unbounded_send(event).is_ok() {
+                                        changed += 1;
+                                    }
+                                    continue;
+                                }
                                 let Some(maintained) = maintained_subscription.as_ref() else {
                                     return Err(Error::new(
                                         ErrorCode::Protocol,

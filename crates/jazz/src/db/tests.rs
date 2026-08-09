@@ -3233,7 +3233,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
-    let mut snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    let snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
     assert_eq!(
         terminal_nested_text_values(&snapshot, row(0x31), "comments", "body"),
         Vec::<String>::new()
@@ -3268,11 +3268,24 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     db.tick().unwrap();
-    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
-    assert_eq!(
-        terminal_nested_text_values(&snapshot, row(0x31), "comments", "body"),
-        vec!["c".to_owned()]
-    );
+    let expect_inserted_child = |event: SubscriptionEvent, expected: RowUuid| match event {
+        SubscriptionEvent::Delta {
+            terminal_operations,
+            ..
+        } => assert!(terminal_operations.iter().any(|operation| {
+            matches!(
+                &operation.edit,
+                groove::ivm::TerminalEdit::Insert { key, .. }
+                    if key.as_slice()
+                        == [10]
+                            .into_iter()
+                            .chain(expected.0.as_bytes().iter().copied())
+                            .collect::<Vec<_>>()
+            )
+        })),
+        other => panic!("expected terminal patch event, got {other:?}"),
+    };
+    expect_inserted_child(block_on(subscription.next_event()).unwrap(), row(0xd2));
 
     db.insert_with_id(
         "comments",
@@ -3284,11 +3297,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     db.tick().unwrap();
-    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
-    assert_eq!(
-        terminal_nested_text_values(&snapshot, row(0x31), "comments", "body"),
-        vec!["b".to_owned()]
-    );
+    expect_inserted_child(block_on(subscription.next_event()).unwrap(), row(0xd1));
 
     db.update(
         "comments",
@@ -3297,11 +3306,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     db.tick().unwrap();
-    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
-    assert_eq!(
-        terminal_nested_text_values(&snapshot, row(0x31), "comments", "body"),
-        vec!["c".to_owned()]
-    );
+    expect_inserted_child(block_on(subscription.next_event()).unwrap(), row(0xd2));
 }
 
 #[test]
