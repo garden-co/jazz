@@ -20,7 +20,7 @@ fn exclusive_begin_resolves_sparse_global_dots_without_scanning_history_after_re
     for ordinal in 1..=128 {
         core.commit_mergeable(
             MergeableCommit::new("todos", row(ordinal), ordinal as u64)
-                .cells(title_cells(&format!("history-{ordinal}"))),
+                .cells(title_cells(format!("history-{ordinal}"))),
         )
         .unwrap();
     }
