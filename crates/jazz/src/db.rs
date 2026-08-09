@@ -4588,36 +4588,74 @@ where
                             None
                         };
                         if let Some(update) = maintained_update {
-                            let state_ref = &mut *state_ref;
-                            let mut event = apply_maintained_update_to_snapshot(
-                                &mut state_ref.snapshot,
-                                &mut state_ref.snapshot_index,
-                                update,
-                                snapshot_tier,
-                                previous_settled,
-                                terminal_rows,
-                            );
-                            state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
-                            let settled = subscription_is_settled(
-                                &node.borrow(),
-                                &shape,
-                                &binding,
-                                settled_tier,
-                                read_view,
-                            );
-                            state_ref.settled = settled;
-                            retained.push(Rc::downgrade(&state));
-                            if let SubscriptionEvent::Delta {
-                                settled: event_settled,
-                                ..
-                            } = &mut event
-                            {
-                                *event_settled = settled;
+                            if terminal_rows {
+                                let Some(maintained) = maintained_subscription.as_ref() else {
+                                    return Err(Error::new(
+                                        ErrorCode::Protocol,
+                                        "structured subscription lost its Groove terminal",
+                                    ));
+                                };
+                                let snapshot = node
+                                    .borrow_mut()
+                                    .materialize_local_maintained_relation_snapshot(maintained)?;
+                                let settled = subscription_is_settled(
+                                    &node.borrow(),
+                                    &shape,
+                                    &binding,
+                                    settled_tier,
+                                    read_view,
+                                );
+                                let state_ref = &mut *state_ref;
+                                let event = subscription_reset_event(
+                                    snapshot_tier,
+                                    settled,
+                                    snapshot.clone(),
+                                    true,
+                                );
+                                state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
+                                state_ref.snapshot_index =
+                                    RelationSnapshotIndex::from_snapshot(&state_ref.snapshot);
+                                state_ref.snapshot_source =
+                                    SubscriptionSnapshotSource::LocalMaintained;
+                                state_ref.settled = settled;
+                                retained.push(Rc::downgrade(&state));
+                                if state_ref.sender.unbounded_send(event).is_ok() {
+                                    changed += 1;
+                                }
+                                continue;
+                            } else {
+                                let state_ref = &mut *state_ref;
+                                let mut event = apply_maintained_update_to_snapshot(
+                                    &mut state_ref.snapshot,
+                                    &mut state_ref.snapshot_index,
+                                    update,
+                                    snapshot_tier,
+                                    previous_settled,
+                                    terminal_rows,
+                                );
+                                state_ref.snapshot_source =
+                                    SubscriptionSnapshotSource::LocalMaintained;
+                                let settled = subscription_is_settled(
+                                    &node.borrow(),
+                                    &shape,
+                                    &binding,
+                                    settled_tier,
+                                    read_view,
+                                );
+                                state_ref.settled = settled;
+                                retained.push(Rc::downgrade(&state));
+                                if let SubscriptionEvent::Delta {
+                                    settled: event_settled,
+                                    ..
+                                } = &mut event
+                                {
+                                    *event_settled = settled;
+                                }
+                                if state_ref.sender.unbounded_send(event).is_ok() {
+                                    changed += 1;
+                                }
+                                continue;
                             }
-                            if state_ref.sender.unbounded_send(event).is_ok() {
-                                changed += 1;
-                            }
-                            continue;
                         }
                         let (snapshot, snapshot_source) = if terminal_rows {
                             (

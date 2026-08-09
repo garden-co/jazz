@@ -3069,6 +3069,74 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
 }
 
 #[test]
+fn structured_subscription_resets_in_terminal_root_order_after_insert() {
+    let schema = relation_schema();
+    let db = open_db(0xc4, AuthorId::from_bytes([0xc4; 16]), &schema);
+    db.insert_with_id(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("zulu".to_owned()))]),
+    )
+    .unwrap();
+
+    let query = Query::from("users")
+        .order_by("name", OrderDirection::Asc)
+        .array_subquery(ArraySubquery::new(
+            "todosViaOwner",
+            "todos",
+            "owner_id",
+            "id",
+        ));
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let initial = block_on(subscription.next_event()).unwrap();
+    assert_eq!(row_ids(&snapshot_from_event(initial).rows), vec![row(0xa1)]);
+
+    db.insert_with_id(
+        "users",
+        row(0xb1),
+        BTreeMap::from([("name".to_owned(), Value::String("alpha".to_owned()))]),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let reordered = block_on(subscription.next_event()).unwrap();
+    let SubscriptionEvent::Delta { reset, .. } = &reordered else {
+        panic!("expected terminal reset")
+    };
+    assert!(*reset, "root reordering must replace the public terminal");
+    assert_eq!(
+        row_ids(&snapshot_from_event(reordered).rows),
+        vec![row(0xb1), row(0xa1)]
+    );
+
+    db.update(
+        "users",
+        row(0xb1),
+        BTreeMap::from([("name".to_owned(), Value::String("zzzz".to_owned()))]),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let updated = block_on(subscription.next_event()).unwrap();
+    let SubscriptionEvent::Delta { reset, .. } = &updated else {
+        panic!("expected update reset")
+    };
+    assert!(*reset);
+    assert_eq!(
+        row_ids(&snapshot_from_event(updated).rows),
+        vec![row(0xa1), row(0xb1)]
+    );
+
+    db.delete("users", row(0xa1)).unwrap();
+    db.tick().unwrap();
+    let removed = block_on(subscription.next_event()).unwrap();
+    let SubscriptionEvent::Delta { reset, .. } = &removed else {
+        panic!("expected removal reset")
+    };
+    assert!(*reset);
+    assert_eq!(row_ids(&snapshot_from_event(removed).rows), vec![row(0xb1)]);
+}
+
+#[test]
 fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
     let schema = relation_schema();
     let db = open_db(0xc2, AuthorId::from_bytes([0xc2; 16]), &schema);
