@@ -668,7 +668,7 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
 function decodeRowValue(
   columns: readonly ColumnDescriptor[],
   bytes: Uint8Array,
-): { id?: string; values: Value[] } {
+): { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } {
   if (bytes.byteLength < 5) throw new Error("invalid nested row value");
   const hasId = bytes[0] === 1;
   let offset = 1;
@@ -682,7 +682,11 @@ function decodeRowValue(
   offset += 4;
   const raw = bytes.subarray(offset, offset + len);
   if (raw.byteLength !== len) throw new Error("invalid nested row value length");
-  return { id, values: decodeNativeRowValues(columns, raw) };
+  return {
+    id,
+    values: decodeNativeRowValues(columns, raw),
+    valuesByColumn: decodeNativeRowValuesByColumn(columns, raw),
+  };
 }
 
 function decodePlainValue(type: ColumnType, bytes: Uint8Array, columnName?: string): unknown {

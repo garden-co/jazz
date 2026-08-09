@@ -324,6 +324,7 @@ type NativeRowFieldPlan = {
   name: string;
   index: number;
   type?: ColumnType;
+  storageType: ValueType;
   includeInValues: boolean;
 };
 
@@ -1723,7 +1724,7 @@ export class NativeRuntimeAdapter implements Runtime {
         subscription.packedResetRows = packedResetRows;
         subscription.opened = true;
         this.publishSubscriptionRows(subscription, packedResetRows, chunk.settled, true);
-      } else if (subscription.snapshotRefresh) {
+      } else if (subscription.snapshotRefresh && !chunk.terminalRows) {
         materializePackedResetRows(subscription, this.schema);
         const previousRows = subscription.rows;
         // Guarded so the argument never evaluates without a server transport:
@@ -3638,6 +3639,7 @@ function nativeRowFieldPlans(
       name,
       index,
       type,
+      storageType: batch.descriptor[index]!.valueType,
       includeInValues: !isHiddenIncludeColumn(name) && !isProvenanceMagicColumn(name),
     });
   }
@@ -3663,7 +3665,27 @@ function rowsFromRelationSnapshot(
   schema: WasmSchema,
   materialization: RelationMaterializationSpec,
 ): RowState[] {
-  const rows = stripRelationSnapshotMetadata(rowsFromBatches(snapshot.rows, schema), schema);
+  const projectedColumns = materialization.rootTable
+    ? outputColumnsForTable(
+        materialization.rootTable,
+        schema,
+        undefined,
+        materialization.arraySubqueries,
+      )
+    : undefined;
+  const rows = stripRelationSnapshotMetadata(
+    rowsFromBatches(snapshot.rows, schema, projectedColumns),
+    schema,
+  );
+  const roots = rows.slice(0, snapshot.rootCount);
+  const isTerminalSnapshot =
+    materialization.arraySubqueries.length > 0 &&
+    roots.every((row) =>
+      materialization.arraySubqueries.every((subquery) =>
+        row.valuesByColumn?.has(subquery.columnName),
+      ),
+    );
+  if (isTerminalSnapshot) return roots;
   return materializeRelationRows(rows, snapshot.edges, snapshot.rootCount, materialization);
 }
 
@@ -4057,10 +4079,15 @@ function decodePlannedField(
   const bytes = decodeRecord(raw, field.index);
   if (bytes == null) return { type: "Null" };
   if (!field.type) return { type: "Bytea", value: bytes };
-  return decodeBytes(field.type, bytes, field.name);
+  return decodeBytes(field.type, bytes, field.name, field.storageType);
 }
 
-function decodeBytes(type: ColumnType, bytes: Uint8Array, fieldName?: string): Value {
+function decodeBytes(
+  type: ColumnType,
+  bytes: Uint8Array,
+  fieldName?: string,
+  storageType?: ValueType,
+): Value {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   switch (type.type) {
     case "Boolean":
@@ -4087,16 +4114,57 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array, fieldName?: string): V
     case "Bytea":
       return { type: "Bytea", value: bytes.slice() };
     case "Array":
-      return { type: "Array", value: decodeArrayBytes(type.element, bytes) };
+      return {
+        type: "Array",
+        value: decodeArrayBytes(type.element, bytes, storageType?.inner),
+      };
     case "Row":
-      return { type: "Row", value: decodeNestedRowBytes(type.columns, bytes) };
+      return {
+        type: "Row",
+        value: decodeNestedRowBytes(type.columns, bytes, storageType?.record),
+      };
   }
 }
 
 function decodeNestedRowBytes(
   columns: readonly ColumnDescriptor[],
   bytes: Uint8Array,
-): { id?: string; values: Value[] } {
+  descriptor?: DescriptorField[],
+): { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } {
+  if (descriptor) {
+    const decodeRecord = createRecordValueDecoder(descriptor);
+    const columnsByName = new Map(columns.map((column) => [column.name, column]));
+    const valuesByColumn = new Map<string, Value>();
+    let id: string | undefined;
+    for (let index = 0; index < descriptor.length; index += 1) {
+      const name = descriptor[index]?.name;
+      if (!name) continue;
+      const valueBytes = decodeRecord(bytes, index);
+      if (name === "row_uuid" && valueBytes) {
+        id = formatUuid(valueBytes);
+        continue;
+      }
+      const column = columnsByName.get(name);
+      if (!column) continue;
+      valuesByColumn.set(
+        name,
+        valueBytes == null
+          ? { type: "Null" }
+          : decodeBytes(column.column_type, valueBytes, name, descriptor[index]?.valueType),
+      );
+    }
+    return {
+      id,
+      values: columns.map(
+        (column) =>
+          valuesByColumn.get(column.name) ??
+          (column.column_type.type === "Array"
+            ? ({ type: "Array", value: [] } satisfies Value)
+            : ({ type: "Null" } satisfies Value)),
+      ),
+      valuesByColumn,
+    };
+  }
   if (bytes.byteLength < 5) throw new Error("invalid nested row value");
   const hasId = bytes[0] === 1;
   let offset = 1;
@@ -4113,8 +4181,14 @@ function decodeNestedRowBytes(
   return { id, values: decodeNativeRowValues(columns, raw) };
 }
 
-function decodeArrayBytes(elementType: ColumnType, bytes: Uint8Array): Value[] {
-  const elementWidth = fixedValueSize(storageColumnTypeToValueType(elementType));
+function decodeArrayBytes(
+  elementType: ColumnType,
+  bytes: Uint8Array,
+  storageElementType?: ValueType,
+): Value[] {
+  const elementWidth = fixedValueSize(
+    storageElementType ?? storageColumnTypeToValueType(elementType),
+  );
   if (elementWidth != null) {
     if (elementWidth === 0) return [];
     if (bytes.length % elementWidth !== 0) {
@@ -4122,7 +4196,14 @@ function decodeArrayBytes(elementType: ColumnType, bytes: Uint8Array): Value[] {
     }
     const values: Value[] = [];
     for (let offset = 0; offset < bytes.length; offset += elementWidth) {
-      values.push(decodeBytes(elementType, bytes.subarray(offset, offset + elementWidth)));
+      values.push(
+        decodeBytes(
+          elementType,
+          bytes.subarray(offset, offset + elementWidth),
+          undefined,
+          storageElementType,
+        ),
+      );
     }
     return values;
   }
@@ -4144,7 +4225,9 @@ function decodeArrayBytes(elementType: ColumnType, bytes: Uint8Array): Value[] {
     if (start > end || end > bytes.length) {
       throw new Error("invalid variable-width array element offset");
     }
-    values.push(decodeBytes(elementType, bytes.subarray(start, end)));
+    values.push(
+      decodeBytes(elementType, bytes.subarray(start, end), undefined, storageElementType),
+    );
   }
   return values;
 }
@@ -4510,7 +4593,15 @@ function encodeNativeRows(
       encodeRow = createNativeRowValueEncoder(columns);
       encodersByColumns.set(columns, encodeRow);
     }
-    const raw = encodeRow(valuesForNativeFrame(row, columns));
+    const frameValues = valuesForNativeFrame(row, columns);
+    let raw: Uint8Array;
+    try {
+      raw = encodeRow(frameValues);
+    } catch (error) {
+      throw new Error(
+        `${String(error)} while encoding ${row.table}: ${columns.map((column, index) => `${column.name}:${column.column_type.type}=${frameValues[index]?.type}`).join(", ")}`,
+      );
+    }
     chunks.push(
       requiredUuidBytes(row.id),
       u32Le(rowIndexByKey.get(rowKey(row.table, row.id)) ?? 0),

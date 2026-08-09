@@ -9766,10 +9766,10 @@ fn collect_by_projected_value(
     }
     match value {
         Value::Nullable(Some(value)) => Ok(*value),
-        Value::Nullable(None) => Err(IvmRuntimeError::InvalidCollectBy(format!(
-            "collect field {:?} cannot unwrap NULL on a present row",
-            field.output_name
-        ))),
+        // A present child can legitimately carry an application NULL. Keep
+        // it saturated at NULL; descriptor validation will reject this value
+        // when the requested output field is non-nullable.
+        Value::Nullable(None) => Ok(Value::Nullable(None)),
         value => Ok(value),
     }
 }
