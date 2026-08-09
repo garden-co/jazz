@@ -72,9 +72,10 @@ fn open_receipt_counts_physical_recovery_scans_exactly() {
     )
     .unwrap();
 
-    // The transaction index is the actual physical access path. This would
-    // become stale if receipt code resumed scanning logical schema tables.
-    assert_eq!(receipt.global_sequence_records_scanned, 2);
+    // The nullable global-sequence index is the actual physical access path:
+    // local pending transactions remain in its `None` bucket and must not be
+    // decoded by bounded `Some`-range recovery.
+    assert_eq!(receipt.global_sequence_records_scanned, 0);
     assert_eq!(receipt.accepted_global_sequences, 0);
     assert_eq!(receipt.ahead_current_entries, 2);
 }
