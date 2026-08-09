@@ -17,7 +17,7 @@ use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 use jazz::groove::storage::OpfsStorage;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::node::OpenTxId;
+use jazz::tools::OpenBatchId;
 use jazz::query::{Query, RelationExpr, RelationQuery};
 use jazz::schema::JazzSchema;
 use jazz::tx::{DurabilityTier, TxId};
@@ -467,20 +467,20 @@ impl WasmDbInner {
         ))
     }
 
-    fn begin_exclusive(&self) -> Result<OpenTxId, jazz::db::Error> {
-        with_wasm_db!(self, |db| db.begin_exclusive())
+    fn begin_exclusive(&self, id: OpenBatchId) -> Result<(), jazz::db::Error> {
+        with_wasm_db!(self, |db| db.begin_exclusive(id))
     }
 
-    fn begin_mergeable(&self, author: Option<AuthorId>) -> Result<OpenTxId, jazz::db::Error> {
+    fn begin_mergeable(&self, id: OpenBatchId, author: Option<AuthorId>) -> Result<(), jazz::db::Error> {
         with_wasm_db!(self, |db| match author {
-            Some(author) => db.begin_mergeable_for_identity(author),
-            None => db.begin_mergeable(),
+            Some(author) => db.begin_mergeable_for_identity(id, author),
+            None => db.begin_mergeable(id),
         })
     }
 
     fn exclusive_all_for_identity(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         query: &PreparedQuery,
         author: AuthorId,
     ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
@@ -491,19 +491,19 @@ impl WasmDbInner {
 
     fn exclusive_all(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         query: &PreparedQuery,
     ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
         with_wasm_db!(self, |db| db.exclusive_tx_ref(tx_id).all_prepared(query))
     }
 
-    fn abandon_transaction(&self, tx_id: OpenTxId) -> Result<(), jazz::db::Error> {
+    fn abandon_transaction(&self, tx_id: OpenBatchId) -> Result<(), jazz::db::Error> {
         with_wasm_db!(self, |db| db.abandon_transaction_handle(tx_id))
     }
 
     fn mergeable_insert(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row_id: RowUuid,
         cells: RowCells,
@@ -521,7 +521,7 @@ impl WasmDbInner {
 
     fn mergeable_update(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row_id: RowUuid,
         patch: RowCells,
@@ -537,7 +537,7 @@ impl WasmDbInner {
 
     fn mergeable_delete(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row_id: RowUuid,
         now_ms: Option<u64>,
@@ -552,7 +552,7 @@ impl WasmDbInner {
 
     fn mergeable_restore(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row_id: RowUuid,
         cells: RowCells,
@@ -568,7 +568,7 @@ impl WasmDbInner {
 
     fn exclusive_write(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row_id: RowUuid,
         cells: RowCells,
@@ -580,7 +580,7 @@ impl WasmDbInner {
 
     fn exclusive_update(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row_id: RowUuid,
         patch: RowCells,
@@ -592,7 +592,7 @@ impl WasmDbInner {
 
     fn exclusive_delete(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row_id: RowUuid,
     ) -> Result<(), jazz::db::Error> {
@@ -601,7 +601,7 @@ impl WasmDbInner {
 
     fn exclusive_restore(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row_id: RowUuid,
         cells: RowCells,
@@ -611,11 +611,11 @@ impl WasmDbInner {
             .restore(table, row_id, cells))
     }
 
-    fn commit_exclusive(&self, tx_id: OpenTxId) -> Result<TxId, jazz::db::Error> {
+    fn commit_exclusive(&self, tx_id: OpenBatchId) -> Result<TxId, jazz::db::Error> {
         with_wasm_db!(self, |db| db.commit_exclusive_handle(tx_id))
     }
 
-    fn commit_mergeable(&self, tx_id: OpenTxId) -> Result<TxId, jazz::db::Error> {
+    fn commit_mergeable(&self, tx_id: OpenBatchId) -> Result<TxId, jazz::db::Error> {
         with_wasm_db!(self, |db| db.commit_mergeable_handle(tx_id))
     }
 
@@ -1108,7 +1108,7 @@ impl WasmDbInner {
 pub struct WasmTx {
     db: WasmDbInner,
     kind: WasmTxKind,
-    open_tx: Option<OpenTxId>,
+    open_tx: Option<OpenBatchId>,
 }
 
 impl Drop for WasmTx {
@@ -1778,34 +1778,36 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = mergeableTx)]
-    pub fn mergeable_tx(&self) -> Result<WasmTx, JsValue> {
+    pub fn mergeable_tx(&self, open_batch_id: String) -> Result<WasmTx, JsValue> {
+        let open_batch_id = open_batch_id.parse::<OpenBatchId>().map_err(|error| JsValue::from_str(&error))?;
+        self.inner.begin_mergeable(open_batch_id, None).map_err(to_js_error)?;
         Ok(WasmTx {
             db: self.inner.clone(),
             kind: WasmTxKind::Mergeable,
-            open_tx: Some(self.inner.begin_mergeable(None).map_err(to_js_error)?),
+            open_tx: Some(open_batch_id),
         })
     }
 
     #[wasm_bindgen(js_name = mergeableTxForIdentity)]
-    pub fn mergeable_tx_for_identity(&self, author: Vec<u8>) -> Result<WasmTx, JsValue> {
+    pub fn mergeable_tx_for_identity(&self, open_batch_id: String, author: Vec<u8>) -> Result<WasmTx, JsValue> {
+        let open_batch_id = open_batch_id.parse::<OpenBatchId>().map_err(|error| JsValue::from_str(&error))?;
         let author = author_id_from_bytes(&author)?;
+        self.inner.begin_mergeable(open_batch_id, Some(author)).map_err(to_js_error)?;
         Ok(WasmTx {
             db: self.inner.clone(),
             kind: WasmTxKind::Mergeable,
-            open_tx: Some(
-                self.inner
-                    .begin_mergeable(Some(author))
-                    .map_err(to_js_error)?,
-            ),
+            open_tx: Some(open_batch_id),
         })
     }
 
     #[wasm_bindgen(js_name = exclusiveTx)]
-    pub fn exclusive_tx(&self) -> Result<WasmTx, JsValue> {
+    pub fn exclusive_tx(&self, open_batch_id: String) -> Result<WasmTx, JsValue> {
+        let open_batch_id = open_batch_id.parse::<OpenBatchId>().map_err(|error| JsValue::from_str(&error))?;
+        self.inner.begin_exclusive(open_batch_id).map_err(to_js_error)?;
         Ok(WasmTx {
             db: self.inner.clone(),
             kind: WasmTxKind::Exclusive,
-            open_tx: Some(self.inner.begin_exclusive().map_err(to_js_error)?),
+            open_tx: Some(open_batch_id),
         })
     }
 
@@ -2024,7 +2026,7 @@ impl WasmTx {
         Ok(())
     }
 
-    fn open_tx_for_read(&self) -> Result<OpenTxId, JsValue> {
+    fn open_tx_for_read(&self) -> Result<OpenBatchId, JsValue> {
         self.open_tx
             .ok_or_else(|| JsValue::from_str("transaction is already closed"))
     }

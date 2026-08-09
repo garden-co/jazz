@@ -12,29 +12,27 @@ where
     S: OrderedKvStorage,
 {
     /// Open an exclusive transaction over the current snapshot.
-    pub fn open_exclusive(&mut self) -> Result<OpenTxId, Error> {
-        self.open_transaction(OpenTransactionKind::Exclusive)
+    pub fn open_exclusive(&mut self, id: OpenBatchId) -> Result<(), Error> {
+        self.open_transaction(id, OpenTransactionKind::Exclusive)
     }
 
     /// Open a mergeable transaction over the current snapshot.
     pub(crate) fn open_mergeable(
         &mut self,
+        id: OpenBatchId,
         made_by: AuthorId,
         permission_subject: Option<AuthorId>,
-    ) -> Result<OpenTxId, Error> {
-        self.open_transaction(OpenTransactionKind::Mergeable {
+    ) -> Result<(), Error> {
+        self.open_transaction(id, OpenTransactionKind::Mergeable {
             made_by,
             permission_subject,
         })
     }
 
-    fn open_transaction(&mut self, kind: OpenTransactionKind) -> Result<OpenTxId, Error> {
-        let id = OpenTxId(self.open_tx.next_open_tx_id);
-        self.open_tx.next_open_tx_id = self
-            .open_tx
-            .next_open_tx_id
-            .checked_add(1)
-            .ok_or(Error::InvalidStoredValue("open tx id overflow"))?;
+    fn open_transaction(&mut self, id: OpenBatchId, kind: OpenTransactionKind) -> Result<(), Error> {
+        if self.open_tx.open_transactions.contains_key(&id) {
+            return Err(Error::DuplicateOpenBatch(id));
+        }
         let local_base = self.clock.tx_time;
         let base_snapshot = Snapshot::exclusive_base(
             self.node_uuid,
@@ -56,13 +54,13 @@ where
                 user_metadata_json: None,
             },
         );
-        Ok(id)
+        Ok(())
     }
 
     /// Read a row inside an exclusive transaction.
     pub fn tx_read(
         &mut self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
@@ -103,7 +101,7 @@ where
     /// Read all current rows inside an exclusive transaction.
     pub fn tx_current_rows(
         &mut self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.table(table)?;
@@ -154,7 +152,7 @@ where
     /// Stage a row write inside an exclusive transaction.
     pub fn tx_write<V: Into<Value>>(
         &mut self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row_uuid: RowUuid,
         cells: BTreeMap<String, V>,
@@ -216,7 +214,7 @@ where
 
     pub(crate) fn tx_write_mergeable(
         &mut self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row_uuid: RowUuid,
         cells: BTreeMap<String, Value>,
@@ -254,7 +252,7 @@ where
 
     pub(crate) fn tx_patch_mergeable(
         &mut self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row_uuid: RowUuid,
         patch: BTreeMap<String, Value>,
@@ -291,7 +289,7 @@ where
 
     fn stage_mergeable_write(
         &mut self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         pending: PendingWrite,
     ) -> Result<(), Error> {
         let cache_key = (pending.table.clone(), pending.row_uuid);
@@ -337,7 +335,7 @@ where
     }
 
     /// Attach application metadata to an open transaction.
-    pub fn tx_set_metadata(&mut self, tx_id: OpenTxId, json: String) -> Result<(), Error> {
+    pub fn tx_set_metadata(&mut self, tx_id: OpenBatchId, json: String) -> Result<(), Error> {
         self.open_tx_mut(tx_id)?.user_metadata_json = Some(json);
         Ok(())
     }
@@ -345,7 +343,7 @@ where
     /// Commit an exclusive transaction and return its sync commit unit.
     pub fn commit_exclusive(
         &mut self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         made_by: AuthorId,
         now_ms: u64,
     ) -> Result<(TxId, SyncMessage), Error> {
@@ -419,7 +417,7 @@ where
     /// Commit a mergeable open transaction through the ordinary mergeable batch path.
     pub(crate) fn commit_mergeable_open(
         &mut self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         mut next_now_ms: impl FnMut() -> u64,
     ) -> Result<TxId, Error> {
         if !matches!(
@@ -502,7 +500,7 @@ where
     }
 
     /// Abandon an open transaction.
-    pub fn abandon_tx(&mut self, tx_id: OpenTxId) -> Result<(), Error> {
+    pub fn abandon_tx(&mut self, tx_id: OpenBatchId) -> Result<(), Error> {
         self.open_tx
             .open_transactions
             .remove(&tx_id)
@@ -511,18 +509,18 @@ where
     }
 
     /// Return whether local transaction time advanced after this transaction opened.
-    pub fn open_exclusive_snapshot_moved(&self, tx_id: OpenTxId) -> Result<bool, Error> {
+    pub fn open_exclusive_snapshot_moved(&self, tx_id: OpenBatchId) -> Result<bool, Error> {
         Ok(self.clock.tx_time > self.open_tx(tx_id)?.base_snapshot.local_base)
     }
 
-    pub(super) fn open_tx(&self, tx_id: OpenTxId) -> Result<&OpenTransaction, Error> {
+    pub(super) fn open_tx(&self, tx_id: OpenBatchId) -> Result<&OpenTransaction, Error> {
         self.open_tx
             .open_transactions
             .get(&tx_id)
             .ok_or(Error::MissingOpenTx(tx_id))
     }
 
-    pub(super) fn open_tx_mut(&mut self, tx_id: OpenTxId) -> Result<&mut OpenTransaction, Error> {
+    pub(super) fn open_tx_mut(&mut self, tx_id: OpenBatchId) -> Result<&mut OpenTransaction, Error> {
         self.open_tx
             .open_transactions
             .get_mut(&tx_id)
@@ -628,7 +626,7 @@ where
 
     pub(super) fn overlay_pending_writes(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row_uuid: RowUuid,
         snapshot_row: SnapshotRow,

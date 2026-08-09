@@ -22,7 +22,7 @@ use groove::db::GraphBuilder;
 use groove::records::{RecordDescriptor, Value};
 use groove::schema::ColumnType;
 
-use super::OpenTxId;
+use super::OpenBatchId;
 use crate::ids::{AuthorId, BranchId, RowUuid, SchemaVersionId};
 use crate::protocol::{BindingViewKey, RegisterShapeOptions};
 use crate::query::{BindingId, Query, RecursionBound, RelationQuery, ShapeId};

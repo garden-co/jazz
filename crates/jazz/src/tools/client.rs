@@ -21,10 +21,10 @@ use crate::groove::storage::MemoryStorage as CoreMemoryStorage;
 #[cfg(feature = "rocksdb")]
 use crate::groove::storage::RocksDbStorage as CoreRocksDbStorage;
 use crate::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
-use crate::node::OpenTxId as CoreOpenTxId;
 use crate::protocol::{
     ReadViewSourceSpec as CoreReadViewSourceSpec, ReadViewSpec as CoreReadViewSpec,
 };
+use crate::tools::OpenBatchId;
 use crate::tools::public_api::query::{
     Condition as PublicCondition, SortDirection as PublicSortDirection,
 };
@@ -155,8 +155,8 @@ struct ClientDbInner {
     upstream: Option<BackendConnection>,
     write_map: HashMap<BatchId, CoreTxId>,
     row_tables: HashMap<ObjectId, String>,
-    transactions: HashMap<BatchId, ExclusiveTransactionState>,
-    closed_transactions: HashMap<BatchId, ClosedTransactionState>,
+    transactions: HashMap<OpenBatchId, ExclusiveTransactionState>,
+    closed_transactions: HashMap<OpenBatchId, ClosedTransactionState>,
     tick_driver_error: Option<String>,
     tick_driver_error_notify: Arc<tokio::sync::Notify>,
 }
@@ -591,17 +591,17 @@ impl Backend {
         }
     }
 
-    fn begin_exclusive(&self) -> std::result::Result<CoreOpenTxId, CoreDbError> {
+    fn begin_exclusive(&self, id: OpenBatchId) -> std::result::Result<(), CoreDbError> {
         match self {
-            Self::Memory(db) => db.begin_exclusive(),
+            Self::Memory(db) => db.begin_exclusive(id),
             #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.begin_exclusive(),
+            Self::RocksDb(db) => db.begin_exclusive(id),
         }
     }
 
     fn exclusive_write(
         &self,
-        tx_id: CoreOpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
@@ -619,7 +619,7 @@ impl Backend {
 
     fn exclusive_update(
         &self,
-        tx_id: CoreOpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
@@ -633,7 +633,7 @@ impl Backend {
 
     fn exclusive_delete(
         &self,
-        tx_id: CoreOpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<(), CoreDbError> {
@@ -646,7 +646,7 @@ impl Backend {
 
     fn commit_exclusive_handle(
         &self,
-        tx_id: CoreOpenTxId,
+        tx_id: OpenBatchId,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
         match self {
             Self::Memory(db) => db.commit_exclusive_handle(tx_id),
@@ -657,7 +657,7 @@ impl Backend {
 }
 
 struct ExclusiveTransactionState {
-    tx_id: CoreOpenTxId,
+    tx_id: OpenBatchId,
     writes: Vec<ExclusiveTransactionWrite>,
 }
 
@@ -839,7 +839,7 @@ impl ClientDb {
 
     fn stage_insert(
         &self,
-        batch_id: BatchId,
+        batch_id: OpenBatchId,
         table: String,
         row_id: Option<Uuid>,
         cells: crate::db::RowCells,
@@ -894,7 +894,7 @@ impl ClientDb {
 
     fn stage_upsert(
         &self,
-        batch_id: BatchId,
+        batch_id: OpenBatchId,
         table: String,
         row_id: Uuid,
         cells: crate::db::RowCells,
@@ -965,7 +965,7 @@ impl ClientDb {
 
     fn stage_update(
         &self,
-        batch_id: BatchId,
+        batch_id: OpenBatchId,
         row_id: ObjectId,
         cells: crate::db::RowCells,
     ) -> Result<()> {
@@ -1011,7 +1011,7 @@ impl ClientDb {
         Ok(tx_id)
     }
 
-    fn stage_delete(&self, batch_id: BatchId, row_id: ObjectId) -> Result<()> {
+    fn stage_delete(&self, batch_id: OpenBatchId, row_id: ObjectId) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
             JazzError::Write("delete requires a row created or observed by this client".to_string())
@@ -1034,23 +1034,21 @@ impl ClientDb {
         Ok(())
     }
 
-    fn begin_transaction(&self) -> Result<BatchId> {
+    fn begin_transaction(&self) -> Result<OpenBatchId> {
         let mut inner = self.inner.borrow_mut();
-        let mut batch_id = BatchId::new();
+        let mut batch_id = OpenBatchId::new();
         while inner.transactions.contains_key(&batch_id)
             || inner.closed_transactions.contains_key(&batch_id)
-            || inner.write_map.contains_key(&batch_id)
         {
-            batch_id = BatchId::new();
+            batch_id = OpenBatchId::new();
         }
-        let tx_id = inner
-            .db
-            .begin_exclusive()
+        inner.db
+            .begin_exclusive(batch_id)
             .map_err(|error| JazzError::Write(error.to_string()))?;
         inner.transactions.insert(
             batch_id,
             ExclusiveTransactionState {
-                tx_id,
+                tx_id: batch_id,
                 writes: Vec::new(),
             },
         );
@@ -1065,7 +1063,7 @@ impl ClientDb {
             .map_err(|error| JazzError::Query(error.to_string()))
     }
 
-    fn commit_transaction(&self, batch_id: BatchId) -> Result<()> {
+    fn commit_transaction(&self, batch_id: OpenBatchId) -> Result<BatchId> {
         let mut inner = self.inner.borrow_mut();
         inner.ensure_transaction_open(batch_id)?;
         if inner
@@ -1087,18 +1085,18 @@ impl ClientDb {
             .db
             .commit_exclusive_handle(state.tx_id)
             .map_err(|error| JazzError::Write(error.to_string()))?;
-        inner.write_map.insert(batch_id, tx_id);
-        inner.write_map.insert(core_batch_id(tx_id), tx_id);
+        let committed_id = core_batch_id(tx_id);
+        inner.write_map.insert(committed_id, tx_id);
         for write in state.writes {
             inner.row_tables.insert(write.row_id, write.table);
         }
         inner
             .closed_transactions
             .insert(batch_id, ClosedTransactionState::Committed);
-        Ok(())
+        Ok(committed_id)
     }
 
-    fn rollback_transaction(&self, batch_id: BatchId) -> Result<bool> {
+    fn rollback_transaction(&self, batch_id: OpenBatchId) -> Result<bool> {
         let mut inner = self.inner.borrow_mut();
         inner.ensure_transaction_open(batch_id)?;
         let removed = inner.transactions.remove(&batch_id).is_some();
@@ -1301,7 +1299,7 @@ impl ClientDbInner {
         Ok(db.connect_upstream(Box::new(WireTransportAdapter::current(transport))))
     }
 
-    fn ensure_transaction_open(&self, batch_id: BatchId) -> Result<()> {
+    fn ensure_transaction_open(&self, batch_id: OpenBatchId) -> Result<()> {
         if self.transactions.contains_key(&batch_id) {
             return Ok(());
         }
@@ -1315,7 +1313,7 @@ impl ClientDbInner {
         )))
     }
 
-    fn closed_transaction_message(batch_id: BatchId, state: ClosedTransactionState) -> String {
+    fn closed_transaction_message(batch_id: OpenBatchId, state: ClosedTransactionState) -> String {
         match state {
             ClosedTransactionState::Committed => {
                 format!("transaction {batch_id} already committed")
@@ -1549,15 +1547,6 @@ impl ClientDbInner {
                 let borrowed = inner.borrow();
                 if let Some(tx_id) = borrowed.write_map.get(&batch_id).copied() {
                     tx_id
-                } else if borrowed.transactions.contains_key(&batch_id) {
-                    drop(borrowed);
-                    if tokio::time::Instant::now() >= deadline {
-                        return Err(JazzError::Sync(format!(
-                            "timed out waiting for batch {batch_id}"
-                        )));
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                    continue;
                 } else {
                     return Err(JazzError::Sync(format!("unknown batch {batch_id}")));
                 }
@@ -1644,13 +1633,13 @@ fn normalize_subscription_updates<T>(
 /// by [`JazzClient::begin_transaction`]. The handle dereferences to the scoped
 /// [`JazzClient`] so regular client methods can be used directly.
 pub struct JazzTransaction {
-    batch_id: BatchId,
+    batch_id: OpenBatchId,
     client: JazzClient,
 }
 
 impl JazzTransaction {
     /// Logical batch id backing this transaction.
-    pub fn batch_id(&self) -> BatchId {
+    pub fn open_batch_id(&self) -> OpenBatchId {
         self.batch_id
     }
 
@@ -1664,8 +1653,7 @@ impl JazzTransaction {
     /// Returns the transaction batch id so callers can wait for durability with
     /// [`JazzClient::wait_for_batch`] if needed.
     pub fn commit(self) -> Result<BatchId> {
-        self.client.commit_transaction(self.batch_id)?;
-        Ok(self.batch_id)
+        self.client.commit_transaction(self.batch_id)
     }
 
     /// Roll back this transaction locally.
@@ -2862,6 +2850,64 @@ impl JazzClient {
             })
             .collect()
     }
+    fn apply_core_transaction_overlay(
+        &self,
+        query: &Query,
+        batch_id: OpenBatchId,
+        rows: &mut Vec<(ObjectId, Vec<Value>)>,
+    ) -> Result<()> {
+        let table = query.table.as_str();
+        let schema = self.schema()?;
+        let table_schema = schema
+            .get(&TableName::new(table))
+            .ok_or_else(|| JazzError::Query(format!("unknown table {table}")))?;
+        let columns = query.select_columns.clone().unwrap_or_else(|| {
+            table_schema
+                .columns
+                .columns
+                .iter()
+                .map(|column| column.name.as_str().to_string())
+                .collect()
+        });
+
+        let inner = self.db.inner.borrow();
+        let tx = inner.transactions.get(&batch_id).ok_or_else(|| {
+            let message = inner
+                .closed_transactions
+                .get(&batch_id)
+                .copied()
+                .map(|state| ClientDbInner::closed_transaction_message(batch_id, state))
+                .unwrap_or_else(|| format!("transaction {batch_id} is not open"));
+            JazzError::Query(message)
+        })?;
+
+        for write in tx.writes.iter().filter(|write| write.table == table) {
+            if write.deletion == Some(CoreDeletionEvent::Deleted) {
+                rows.retain(|(row_id, _)| *row_id != write.row_id);
+                continue;
+            }
+
+            let existing_position = rows.iter().position(|(row_id, _)| *row_id == write.row_id);
+            let mut values = existing_position
+                .map(|position| rows[position].1.clone())
+                .unwrap_or_else(|| vec![Value::Null; columns.len()]);
+
+            for (column, value) in &write.cells {
+                if let Some(position) = columns.iter().position(|candidate| candidate == column) {
+                    values[position] = core_to_public_value(value.clone())?;
+                }
+            }
+
+            if let Some(position) = existing_position {
+                rows[position].1 = values;
+            } else {
+                rows.push((write.row_id, values));
+            }
+        }
+
+        Ok(())
+    }
+
     /// Connect to Jazz with the given configuration.
     pub async fn connect(context: AppContext) -> Result<Self> {
         Self::connect_inner(context).await
@@ -3000,7 +3046,7 @@ impl JazzClient {
         &self,
         table: &str,
         values: HashMap<String, Value>,
-    ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
+    ) -> Result<(ObjectId, Vec<Value>, Option<BatchId>)> {
         self.insert_with_id(table, Option::<Uuid>::None, values)
     }
 
@@ -3010,7 +3056,7 @@ impl JazzClient {
         table: &str,
         object_id: impl Into<Option<Uuid>>,
         values: HashMap<String, Value>,
-    ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
+    ) -> Result<(ObjectId, Vec<Value>, Option<BatchId>)> {
         {
             let row_values = self.core_ordered_values(table, &values)?;
             let cells = self.core_cells(table, values)?;
@@ -3018,7 +3064,7 @@ impl JazzClient {
                 let row_id =
                     self.db
                         .stage_insert(batch_id, table.to_string(), object_id.into(), cells)?;
-                Ok((row_id, row_values, batch_id))
+                Ok((row_id, row_values, None))
             } else {
                 let (row_id, tx_id) = self.db.insert(
                     table.to_string(),
@@ -3027,7 +3073,7 @@ impl JazzClient {
                     self.write_identity(),
                 )?;
                 let batch_id = core_batch_id(tx_id);
-                Ok((row_id, row_values, batch_id))
+                Ok((row_id, row_values, Some(batch_id)))
             }
         }
     }
@@ -3038,24 +3084,24 @@ impl JazzClient {
         table: &str,
         object_id: Uuid,
         values: HashMap<String, Value>,
-    ) -> Result<BatchId> {
+    ) -> Result<Option<BatchId>> {
         {
             let cells = self.core_cells(table, values)?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.db
                     .stage_upsert(batch_id, table.to_string(), object_id, cells)?;
-                Ok(batch_id)
+                Ok(None)
             } else {
                 let tx_id =
                     self.db
                         .upsert(table.to_string(), object_id, cells, self.write_identity())?;
-                Ok(core_batch_id(tx_id))
+                Ok(Some(core_batch_id(tx_id)))
             }
         }
     }
 
     /// Update a row.
-    pub fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<BatchId> {
+    pub fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<Option<BatchId>> {
         {
             let table = self
                 .db
@@ -3072,10 +3118,10 @@ impl JazzClient {
             let cells = self.core_cells(&table, updates.into_iter().collect())?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.db.stage_update(batch_id, object_id, cells)?;
-                Ok(batch_id)
+                Ok(None)
             } else {
                 let tx_id = self.db.update(object_id, cells, self.write_identity())?;
-                Ok(core_batch_id(tx_id))
+                Ok(Some(core_batch_id(tx_id)))
             }
         }
     }
@@ -3102,14 +3148,14 @@ impl JazzClient {
     }
 
     /// Delete a row.
-    pub fn delete(&self, object_id: ObjectId) -> Result<BatchId> {
+    pub fn delete(&self, object_id: ObjectId) -> Result<Option<BatchId>> {
         {
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.db.stage_delete(batch_id, object_id)?;
-                Ok(batch_id)
+                Ok(None)
             } else {
                 let tx_id = self.db.delete(object_id, self.write_identity())?;
-                Ok(core_batch_id(tx_id))
+                Ok(Some(core_batch_id(tx_id)))
             }
         }
     }
@@ -3128,14 +3174,14 @@ impl JazzClient {
     }
 
     /// Commit an open transaction by batch id.
-    pub fn commit_transaction(&self, batch_id: BatchId) -> Result<()> {
+    pub fn commit_transaction(&self, batch_id: OpenBatchId) -> Result<BatchId> {
         self.db.commit_transaction(batch_id)
     }
 
     /// Roll back an open transaction by batch id.
     ///
     /// Returns whether a local batch record existed for the transaction.
-    pub fn rollback_transaction(&self, batch_id: BatchId) -> Result<bool> {
+    pub fn rollback_transaction(&self, batch_id: OpenBatchId) -> Result<bool> {
         self.db.rollback_transaction(batch_id)
     }
 

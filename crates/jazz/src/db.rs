@@ -39,9 +39,10 @@ pub use crate::node::CommitUnitTrust;
 use crate::node::{
     CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LargeValueEditCommit, LargeValueEditOp,
     LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate, MergeableCommit,
-    NodeState, OpenTxId, PreparedQueryPlanHandle, QueryReadProfile, RelationEdge, RelationSnapshot,
+    NodeState, PreparedQueryPlanHandle, QueryReadProfile, RelationEdge, RelationSnapshot,
     RowProvenance, ViewUpdateParts,
 };
+use crate::tools::OpenBatchId;
 use crate::peer::{PeerRole, PeerState};
 #[cfg(feature = "sync-autopsy")]
 use crate::protocol::expand_version_carriers;
@@ -2259,9 +2260,11 @@ where
 
     /// Build a mergeable transaction that commits multiple writes under one id.
     pub fn mergeable_tx(&self) -> Result<MergeableTx<'_, S>, Error> {
+        let tx_id = OpenBatchId::new();
+        self.begin_mergeable(tx_id)?;
         Ok(MergeableTx {
             db: self,
-            tx_id: self.begin_mergeable()?,
+            tx_id,
             committed: false,
         })
     }
@@ -2282,9 +2285,11 @@ where
 
     /// Build a mergeable transaction authored and permission-checked as `author`.
     pub fn mergeable_tx_for_identity(&self, author: AuthorId) -> Result<MergeableTx<'_, S>, Error> {
+        let tx_id = OpenBatchId::new();
+        self.begin_mergeable_for_identity(tx_id, author)?;
         Ok(MergeableTx {
             db: self,
-            tx_id: self.begin_mergeable_for_identity(author)?,
+            tx_id,
             committed: false,
         })
     }
@@ -2407,22 +2412,22 @@ where
     /// [`MergeableTxRef`], which can be reconstructed from this id for each
     /// foreign-function call. Rust callers that want RAII should use
     /// [`Db::mergeable_tx`] instead.
-    pub fn begin_mergeable(&self) -> Result<OpenTxId, Error> {
+    pub fn begin_mergeable(&self, id: OpenBatchId) -> Result<(), Error> {
         self.node
             .node
             .borrow_mut()
-            .open_mergeable(self.identity.author, None)
+            .open_mergeable(id, self.identity.author, None)
             .map_err(Into::into)
     }
 
     /// Open a mergeable transaction authored and permission-checked as `author`.
     ///
     /// See [`Db::begin_mergeable`] for ownership and operation-handle guidance.
-    pub fn begin_mergeable_for_identity(&self, author: AuthorId) -> Result<OpenTxId, Error> {
+    pub fn begin_mergeable_for_identity(&self, id: OpenBatchId, author: AuthorId) -> Result<(), Error> {
         self.node
             .node
             .borrow_mut()
-            .open_mergeable(author, Some(author))
+            .open_mergeable(id, author, Some(author))
             .map_err(Into::into)
     }
 
@@ -2432,13 +2437,13 @@ where
     /// for a single call in a binding that retains `tx_id` between calls. Its
     /// CRUD API is defined by [`MergeableTxOps`] and is shared with the owning
     /// [`MergeableTx`] handle.
-    pub fn mergeable_tx_ref(&self, tx_id: OpenTxId) -> MergeableTxRef<'_, S> {
+    pub fn mergeable_tx_ref(&self, tx_id: OpenBatchId) -> MergeableTxRef<'_, S> {
         MergeableTxRef { db: self, tx_id }
     }
 
     fn stage_mergeable_insert(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
         cells: RowCells,
@@ -2454,7 +2459,7 @@ where
 
     fn stage_mergeable_update(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
         patch: RowCells,
@@ -2469,7 +2474,7 @@ where
 
     fn stage_mergeable_delete(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
         now_ms: Option<u64>,
@@ -2492,7 +2497,7 @@ where
 
     fn stage_mergeable_restore(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
         cells: RowCells,
@@ -2532,7 +2537,7 @@ where
     }
 
     /// Commit an owned mergeable transaction handle.
-    pub fn commit_mergeable_handle(&self, open_tx_id: OpenTxId) -> Result<TxId, Error> {
+    pub fn commit_mergeable_handle(&self, open_tx_id: OpenBatchId) -> Result<TxId, Error> {
         let tx_id = self
             .node
             .node
@@ -2544,7 +2549,7 @@ where
     }
 
     /// Abandon an owned open transaction handle.
-    pub fn abandon_transaction_handle(&self, open_tx_id: OpenTxId) -> Result<(), Error> {
+    pub fn abandon_transaction_handle(&self, open_tx_id: OpenBatchId) -> Result<(), Error> {
         self.node
             .node
             .borrow_mut()
@@ -2556,9 +2561,10 @@ where
     ///
     /// This is the owning, RAII flavour. It abandons an uncommitted transaction
     /// on drop. Use [`Db::exclusive_tx_ref`] only when another layer retains the
-    /// `OpenTxId` and owns that lifetime explicitly.
+    /// `OpenBatchId` and owns that lifetime explicitly.
     pub fn exclusive_tx(&self) -> Result<ExclusiveTx<'_, S>, Error> {
-        let tx_id = self.open_exclusive_handle()?;
+        let tx_id = OpenBatchId::new();
+        self.open_exclusive_handle(tx_id)?;
         Ok(ExclusiveTx {
             db: self,
             tx_id,
@@ -2573,8 +2579,8 @@ where
     /// [`Db::abandon_exclusive_handle`]. Perform its operations through an
     /// [`ExclusiveTxRef`]. Rust callers that want RAII should use
     /// [`Db::exclusive_tx`] instead.
-    pub fn begin_exclusive(&self) -> Result<OpenTxId, Error> {
-        self.open_exclusive_handle()
+    pub fn begin_exclusive(&self, id: OpenBatchId) -> Result<(), Error> {
+        self.open_exclusive_handle(id)
     }
 
     /// Return a non-owning operations handle for an already-open exclusive transaction.
@@ -2583,13 +2589,13 @@ where
     /// for a single call in a binding that retains `tx_id` between calls. Its
     /// CRUD API is defined by [`ExclusiveTxOps`] and is shared with the owning
     /// [`ExclusiveTx`] handle.
-    pub fn exclusive_tx_ref(&self, tx_id: OpenTxId) -> ExclusiveTxRef<'_, S> {
+    pub fn exclusive_tx_ref(&self, tx_id: OpenBatchId) -> ExclusiveTxRef<'_, S> {
         ExclusiveTxRef { db: self, tx_id }
     }
 
     fn exclusive_read(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
     ) -> Result<Option<RowCells>, Error> {
@@ -2602,7 +2608,7 @@ where
 
     fn exclusive_all(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         prepared: &PreparedQuery,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.exclusive_all_for_identity(tx_id, prepared, self.identity.author)
@@ -2610,7 +2616,7 @@ where
 
     pub(crate) fn exclusive_all_for_identity(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         prepared: &PreparedQuery,
         author: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
@@ -2623,7 +2629,7 @@ where
 
     fn stage_exclusive_insert(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
         cells: RowCells,
@@ -2638,7 +2644,7 @@ where
 
     fn stage_exclusive_delete(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
     ) -> Result<(), Error> {
@@ -2657,7 +2663,7 @@ where
 
     fn stage_exclusive_restore(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
         cells: RowCells,
@@ -2680,7 +2686,7 @@ where
     }
 
     /// Commit an owned exclusive transaction handle.
-    pub fn commit_exclusive_handle(&self, open_tx_id: OpenTxId) -> Result<TxId, Error> {
+    pub fn commit_exclusive_handle(&self, open_tx_id: OpenBatchId) -> Result<TxId, Error> {
         let (tx_id, unit) = self.node.node.borrow_mut().commit_exclusive(
             open_tx_id,
             self.identity.author,
@@ -2692,15 +2698,15 @@ where
     }
 
     /// Abandon an owned exclusive transaction handle.
-    pub fn abandon_exclusive_handle(&self, open_tx_id: OpenTxId) -> Result<(), Error> {
+    pub fn abandon_exclusive_handle(&self, open_tx_id: OpenBatchId) -> Result<(), Error> {
         self.abandon_transaction_handle(open_tx_id)
     }
 
-    pub(crate) fn open_exclusive_handle(&self) -> Result<OpenTxId, Error> {
+    pub(crate) fn open_exclusive_handle(&self, id: OpenBatchId) -> Result<(), Error> {
         self.node
             .node
             .borrow_mut()
-            .open_exclusive()
+            .open_exclusive(id)
             .map_err(Into::into)
     }
 
@@ -7926,7 +7932,7 @@ where
     fn db(&self) -> &Db<S>;
 
     /// The id of the already-open transaction.
-    fn tx_id(&self) -> OpenTxId;
+    fn tx_id(&self) -> OpenBatchId;
 
     /// Stage an insert with a generated row id.
     fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
@@ -8055,13 +8061,13 @@ where
 ///
 /// This handle owns the transaction lifetime and abandons an uncommitted
 /// transaction on drop. Use [`MergeableTxRef`] when a caller retains an
-/// [`OpenTxId`] between calls and must not close the transaction on return.
+/// [`OpenBatchId`] between calls and must not close the transaction on return.
 pub struct MergeableTx<'a, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
-    tx_id: OpenTxId,
+    tx_id: OpenBatchId,
     /// Set once the transaction has been committed, so `Drop` does not then
     /// abandon it. Without this, `commit` consumed `self` and `Drop` still ran
     /// `abandon_transaction_handle` on an already-committed transaction — benign
@@ -8096,7 +8102,7 @@ where
         self.db
     }
 
-    fn tx_id(&self) -> OpenTxId {
+    fn tx_id(&self) -> OpenBatchId {
         self.tx_id
     }
 }
@@ -8104,13 +8110,13 @@ where
 /// Non-owning operations handle for an already-open mergeable transaction.
 ///
 /// Construct this with [`Db::mergeable_tx_ref`] when another layer owns the
-/// [`OpenTxId`] lifetime. Dropping this ref never abandons the transaction.
+/// [`OpenBatchId`] lifetime. Dropping this ref never abandons the transaction.
 pub struct MergeableTxRef<'a, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
-    tx_id: OpenTxId,
+    tx_id: OpenBatchId,
 }
 
 impl<S> MergeableTxOps<S> for MergeableTxRef<'_, S>
@@ -8121,7 +8127,7 @@ where
         self.db
     }
 
-    fn tx_id(&self) -> OpenTxId {
+    fn tx_id(&self) -> OpenBatchId {
         self.tx_id
     }
 }
@@ -8151,7 +8157,7 @@ where
     fn db(&self) -> &Db<S>;
 
     /// The id of the already-open transaction.
-    fn tx_id(&self) -> OpenTxId;
+    fn tx_id(&self) -> OpenBatchId;
 
     /// Read one row inside the exclusive transaction.
     fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
@@ -8219,13 +8225,13 @@ where
 ///
 /// This handle owns the transaction lifetime and abandons an uncommitted
 /// transaction on drop. Use [`ExclusiveTxRef`] when a caller retains an
-/// [`OpenTxId`] between calls and must not close the transaction on return.
+/// [`OpenBatchId`] between calls and must not close the transaction on return.
 pub struct ExclusiveTx<'a, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
-    tx_id: OpenTxId,
+    tx_id: OpenBatchId,
     committed: bool,
 }
 
@@ -8255,7 +8261,7 @@ where
         self.db
     }
 
-    fn tx_id(&self) -> OpenTxId {
+    fn tx_id(&self) -> OpenBatchId {
         self.tx_id
     }
 }
@@ -8275,13 +8281,13 @@ where
 /// Non-owning operations handle for an already-open exclusive transaction.
 ///
 /// Construct this with [`Db::exclusive_tx_ref`] when another layer owns the
-/// [`OpenTxId`] lifetime. Dropping this ref never abandons the transaction.
+/// [`OpenBatchId`] lifetime. Dropping this ref never abandons the transaction.
 pub struct ExclusiveTxRef<'a, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
-    tx_id: OpenTxId,
+    tx_id: OpenBatchId,
 }
 
 impl<S> ExclusiveTxOps<S> for ExclusiveTxRef<'_, S>
@@ -8292,7 +8298,7 @@ where
         self.db
     }
 
-    fn tx_id(&self) -> OpenTxId {
+    fn tx_id(&self) -> OpenBatchId {
         self.tx_id
     }
 }

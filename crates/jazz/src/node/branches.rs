@@ -568,7 +568,7 @@ where
     }
 
     /// Branch-scoped exclusives are intentionally not implemented in v1.
-    pub fn open_exclusive_on_branch(&mut self, _branch_id: BranchId) -> Result<OpenTxId, Error> {
+    pub fn open_exclusive_on_branch(&mut self, _branch_id: BranchId) -> Result<OpenBatchId, Error> {
         Err(Error::UnsupportedBranchExclusive)
     }
 

@@ -59,7 +59,7 @@ use jazz::groove::storage::{
     ReopenableStorage as CoreReopenableStorage, RocksDbStorage as CoreRocksDbStorage,
 };
 use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
-use jazz::node::OpenTxId as CoreOpenTxId;
+use jazz::tools::OpenBatchId as CoreOpenBatchId;
 use jazz::query::{
     Query as CoreQuery, RelationExpr as CoreRelationExpr, RelationQuery as CoreRelationQuery,
 };
@@ -261,7 +261,7 @@ enum NapiSubscription {
 #[napi(js_name = "Tx")]
 pub struct Tx {
     db: NapiDbInnerStorage,
-    open_tx: Option<CoreOpenTxId>,
+    open_tx: Option<CoreOpenBatchId>,
 }
 
 macro_rules! with_napi_mergeable_tx {
@@ -542,12 +542,12 @@ impl Tx {
 }
 
 impl Tx {
-    fn open_tx(&self) -> napi::Result<CoreOpenTxId> {
+    fn open_tx(&self) -> napi::Result<CoreOpenBatchId> {
         self.open_tx
             .ok_or_else(|| napi::Error::from_reason("transaction is already closed"))
     }
 
-    fn abandon(&self, open_tx: CoreOpenTxId) -> napi::Result<()> {
+    fn abandon(&self, open_tx: CoreOpenBatchId) -> napi::Result<()> {
         match &self.db {
             NapiDbInnerStorage::Memory(db) => db.abandon_transaction_handle(open_tx),
             NapiDbInnerStorage::Persistent(db) => db.abandon_transaction_handle(open_tx),
@@ -1435,7 +1435,10 @@ impl NapiDb {
     }
 
     #[napi(js_name = "mergeableTx")]
-    pub fn mergeable_tx(&self) -> napi::Result<Tx> {
+    pub fn mergeable_tx(&self, open_batch_id: String) -> napi::Result<Tx> {
+        let open_batch_id = open_batch_id
+            .parse::<CoreOpenBatchId>()
+            .map_err(napi::Error::from_reason)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1443,23 +1446,28 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => Ok(Tx {
                 db: NapiDbInnerStorage::Memory(Rc::clone(db)),
-                open_tx: Some(
-                    db.begin_mergeable()
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                ),
+                open_tx: Some({
+                    db.begin_mergeable(open_batch_id)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    open_batch_id
+                }),
             }),
             NapiDbInnerStorage::Persistent(db) => Ok(Tx {
                 db: NapiDbInnerStorage::Persistent(Rc::clone(db)),
-                open_tx: Some(
-                    db.begin_mergeable()
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                ),
+                open_tx: Some({
+                    db.begin_mergeable(open_batch_id)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    open_batch_id
+                }),
             }),
         }
     }
 
     #[napi(js_name = "mergeableTxForIdentity")]
-    pub fn mergeable_tx_for_identity(&self, author: Uint8Array) -> napi::Result<Tx> {
+    pub fn mergeable_tx_for_identity(&self, open_batch_id: String, author: Uint8Array) -> napi::Result<Tx> {
+        let open_batch_id = open_batch_id
+            .parse::<CoreOpenBatchId>()
+            .map_err(napi::Error::from_reason)?;
         let author = core_author_id_from_bytes(&author)?;
         let db = self.inner.borrow();
         let db = db
@@ -1468,17 +1476,19 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => Ok(Tx {
                 db: NapiDbInnerStorage::Memory(Rc::clone(db)),
-                open_tx: Some(
-                    db.begin_mergeable_for_identity(author)
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                ),
+                open_tx: Some({
+                    db.begin_mergeable_for_identity(open_batch_id, author)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    open_batch_id
+                }),
             }),
             NapiDbInnerStorage::Persistent(db) => Ok(Tx {
                 db: NapiDbInnerStorage::Persistent(Rc::clone(db)),
-                open_tx: Some(
-                    db.begin_mergeable_for_identity(author)
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                ),
+                open_tx: Some({
+                    db.begin_mergeable_for_identity(open_batch_id, author)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    open_batch_id
+                }),
             }),
         }
     }
@@ -1744,7 +1754,7 @@ fn resolve_raw_promise(env: sys::napi_env, deferred: sys::napi_deferred) {
     }
 }
 
-fn core_commit_tx<S>(db: &CoreDb<S>, open_tx: CoreOpenTxId) -> napi::Result<TxId>
+fn core_commit_tx<S>(db: &CoreDb<S>, open_tx: CoreOpenBatchId) -> napi::Result<TxId>
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
@@ -1754,7 +1764,7 @@ where
 
 fn core_commit_tx_memory(
     db: &Rc<CoreDb<CoreMemoryStorage>>,
-    open_tx: CoreOpenTxId,
+    open_tx: CoreOpenBatchId,
 ) -> napi::Result<Write> {
     let tx_id = core_commit_tx(db, open_tx)?;
     core_tx_write(
@@ -1768,7 +1778,7 @@ fn core_commit_tx_memory(
 
 fn core_commit_tx_persistent(
     db: &Rc<CoreDb<CoreRocksDbStorage>>,
-    open_tx: CoreOpenTxId,
+    open_tx: CoreOpenBatchId,
 ) -> napi::Result<Write> {
     let tx_id = core_commit_tx(db, open_tx)?;
     core_tx_write(
