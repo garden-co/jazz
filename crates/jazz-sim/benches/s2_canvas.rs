@@ -2563,6 +2563,7 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
         | SyncMessage::RegisterShape { .. }
         | SyncMessage::Subscribe(_)
         | SyncMessage::PublishSchema { .. }
+        | SyncMessage::PublishSchemaWithLens { .. }
         | SyncMessage::PublishLens { .. }
         | SyncMessage::SetCurrentWriteSchema { .. }
         | SyncMessage::CatalogueAck(_)
@@ -2571,7 +2572,8 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
         | SyncMessage::SubscribeRejected { .. }
         | SyncMessage::Unsubscribe { .. }
         | SyncMessage::FetchRowVersions { .. }
-        | SyncMessage::RowVersionPayloads { .. } => 0,
+        | SyncMessage::RowVersionPayloads { .. }
+        | SyncMessage::CatalogueSnapshot(_) => 0,
     }
 }
 

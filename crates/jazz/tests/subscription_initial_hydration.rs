@@ -6,8 +6,8 @@ use std::time::Duration;
 use jazz::row_input;
 use jazz::tools::server::JazzServer;
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, OutputOccurrenceId, QueryBuilder, Schema,
-    SchemaBuilder, SubscriptionStreamItem, TableSchema,
+    ColumnType, DurabilityTier, JazzClient, QueryBuilder, ResultKey, Schema, SchemaBuilder,
+    SubscriptionStreamItem, TableSchema,
 };
 
 fn hydration_schema() -> Schema {
@@ -91,10 +91,7 @@ async fn fresh_subscription_first_delivery_reduces_from_empty_to_initial_view() 
                     "initial reset must not add an occurrence twice"
                 );
             }
-            let expected = BTreeSet::from([
-                OutputOccurrenceId::from(first_id),
-                OutputOccurrenceId::from(second_id),
-            ]);
+            let expected = BTreeSet::from([ResultKey::from(first_id), ResultKey::from(second_id)]);
             assert_eq!(
                 reduced.keys().cloned().collect::<BTreeSet<_>>(),
                 expected,

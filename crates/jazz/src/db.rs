@@ -48,8 +48,8 @@ use crate::protocol::expand_version_carriers;
 use crate::protocol::{
     BindingViewKey, ContentExtent, CoverageKey, CurrentWriteSchema, LargeValueOwnerRef,
     MigrationLens, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
-    SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
-    SubscriptionKey, SyncMessage,
+    SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
+    SubscribeServerFailureCode, SubscriptionKey, SyncMessage,
 };
 use crate::protocol_limits::{
     MAX_FETCH_BRANCH_METADATA, MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES, MAX_INFLIGHT_LOGICAL_MESSAGES,
@@ -665,7 +665,34 @@ where
         params: BTreeMap<String, Value>,
     ) -> Result<PreparedQuery, Error> {
         let (schema, schema_version) = self.current_write_schema_for_query()?;
-        let shape = query.validate_with_schema_version(&schema, schema_version)?;
+        self.prepare_query_bound_for_schema(query, params, &schema, schema_version)
+    }
+
+    /// Prepare a query against the schema this database handle was opened with.
+    ///
+    /// Typed client facades are pinned to that schema even when a catalogue
+    /// snapshot advances or rolls back the separate current-write pointer.
+    #[cfg(feature = "client")]
+    pub(crate) fn prepare_query_for_open_schema(
+        &self,
+        query: &Query,
+    ) -> Result<PreparedQuery, Error> {
+        self.prepare_query_bound_for_schema(
+            query,
+            BTreeMap::new(),
+            &self.schema,
+            self.schema_version_id,
+        )
+    }
+
+    fn prepare_query_bound_for_schema(
+        &self,
+        query: &Query,
+        params: BTreeMap<String, Value>,
+        schema: &JazzSchema,
+        schema_version: SchemaVersionId,
+    ) -> Result<PreparedQuery, Error> {
+        let shape = query.validate_with_schema_version(schema, schema_version)?;
         let binding = shape.bind(params)?;
         let (local_plan, global_plan) = if should_install_prepared_plan(&shape)
             && !self.node.node.borrow().uses_schema_projected_read(&shape)
@@ -2264,9 +2291,27 @@ where
         self.node
             .node
             .borrow_mut()
-            .apply_sync_message(SyncMessage::PublishSchema {
+            .apply_trusted_catalogue_message(SyncMessage::PublishSchema {
                 author: self.identity.author,
                 schema: Box::new(schema),
+            })
+            .map_err(Into::into)
+    }
+
+    /// Atomically publish a non-genesis schema and its lineage-defining lens.
+    pub fn publish_schema_with_lens(
+        &self,
+        catalogue_seq: u64,
+        publication: SchemaLineagePublication,
+    ) -> Result<Vec<SyncMessage>, Error> {
+        self.check_catalogue_admin()?;
+        self.node
+            .node
+            .borrow_mut()
+            .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+                author: self.identity.author,
+                catalogue_seq,
+                publication: Box::new(publication),
             })
             .map_err(Into::into)
     }
@@ -2277,7 +2322,7 @@ where
         self.node
             .node
             .borrow_mut()
-            .apply_sync_message(SyncMessage::PublishLens {
+            .apply_trusted_catalogue_message(SyncMessage::PublishLens {
                 author: self.identity.author,
                 lens,
             })
@@ -2293,7 +2338,7 @@ where
         self.node
             .node
             .borrow_mut()
-            .apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+            .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
                 author: self.identity.author,
                 pointer,
             })
@@ -2319,6 +2364,21 @@ where
             .catalogue_schemas()
             .get(&schema)
             .map(|schema| schema.schema.clone())
+    }
+
+    /// Highest contiguously activated authoritative catalogue position.
+    pub fn active_catalogue_seq(&self) -> u64 {
+        self.node.node.borrow().active_catalogue_seq()
+    }
+
+    /// Return a published migration lens known to this database.
+    pub fn catalogue_lens(&self, lens: crate::ids::MigrationLensId) -> Option<MigrationLens> {
+        self.node
+            .node
+            .borrow()
+            .catalogue_lenses()
+            .get(&lens)
+            .cloned()
     }
 
     /// Open a mergeable transaction and return its id.
@@ -2530,7 +2590,7 @@ where
         self.exclusive_all_for_identity(tx_id, prepared, self.identity.author)
     }
 
-    fn exclusive_all_for_identity(
+    pub(crate) fn exclusive_all_for_identity(
         &self,
         tx_id: OpenTxId,
         prepared: &PreparedQuery,
@@ -5833,6 +5893,16 @@ where
                         summarize_sync_message(&message)
                     ));
                     match message {
+                        SyncMessage::CatalogueSnapshot(snapshot) => {
+                            if !pending_view_updates.is_empty() {
+                                self.node.borrow_mut().apply_view_updates_in_batch(
+                                    std::mem::take(&mut pending_view_updates),
+                                )?;
+                            }
+                            self.node
+                                .borrow_mut()
+                                .apply_trusted_catalogue_snapshot(*snapshot)?;
+                        }
                         SyncMessage::RowVersionPayloads { version_bundles } => {
                             if !pending_view_updates.is_empty() {
                                 self.node.borrow_mut().apply_view_updates_in_batch(
@@ -7052,6 +7122,17 @@ fn send_with_content_extents<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    let snapshot = node.borrow().catalogue_snapshot();
+    let catalogue_fingerprint = *blake3::hash(
+        &serde_json::to_vec(&snapshot).expect("catalogue snapshot serialization is infallible"),
+    )
+    .as_bytes();
+    if peer.needs_catalogue_snapshot(catalogue_fingerprint) {
+        transport
+            .send(SyncMessage::CatalogueSnapshot(Box::new(snapshot)))
+            .map_err(transport_error)?;
+        peer.mark_catalogue_snapshot_announced(catalogue_fingerprint);
+    }
     let mut message = message;
     if let SyncMessage::ViewUpdate {
         subscription,
@@ -8329,7 +8410,7 @@ impl RelationSnapshotIndex {
         for (position, row) in snapshot.rows.iter().take(snapshot.root_count).enumerate() {
             index
                 .roots
-                .insert(single_source_occurrence_id(row), position);
+                .insert(subscription_row_occurrence_id(row), position);
         }
         for (offset, row) in snapshot.rows.iter().skip(snapshot.root_count).enumerate() {
             index.related.insert(
@@ -8601,10 +8682,11 @@ fn subscription_delta_event_with_reset(
 
     for (key, _) in &previous_by_id {
         if !current_by_id.contains_key(key) {
+            let row = previous_by_id[key];
             removed.push(RemovedRow {
-                table: key.0.clone(),
-                row_uuid: key.1,
-                occurrence_id: OutputOccurrenceId::single_source(ObjectId::from_uuid(key.1.0)),
+                table: row.table().to_owned(),
+                row_uuid: row.row_uuid(),
+                occurrence_id: key.clone(),
             });
         }
     }
@@ -8718,7 +8800,7 @@ fn apply_maintained_update_to_snapshot(
     let mut added_related = Vec::new();
 
     for row in &update_added {
-        let key = single_source_occurrence_id(row);
+        let key = subscription_row_occurrence_id(row);
         if let Some(position) = snapshot_index.roots.get(&key).copied() {
             if snapshot.rows[position] != *row {
                 snapshot.rows[position] = row.clone();
@@ -8731,7 +8813,7 @@ fn apply_maintained_update_to_snapshot(
             }
             snapshot_index
                 .roots
-                .insert(single_source_occurrence_id(row), snapshot.root_count);
+                .insert(subscription_row_occurrence_id(row), snapshot.root_count);
             snapshot.root_count += 1;
             added.push(subscription_output_row(row.clone()));
         }
@@ -8739,23 +8821,21 @@ fn apply_maintained_update_to_snapshot(
 
     let mut index = 0;
     while index < snapshot.root_count {
-        let row_key = (
-            snapshot.rows[index].table().to_owned(),
-            snapshot.rows[index].row_uuid(),
-        );
-        if update_removed
-            .iter()
-            .any(|(table, row_uuid)| row_key.0 == *table && row_key.1 == *row_uuid)
+        let occurrence_id = subscription_row_occurrence_id(&snapshot.rows[index]);
+        if update_removed.contains(&occurrence_id)
+            && !update_added
+                .iter()
+                .any(|added| subscription_row_occurrence_id(added) == occurrence_id)
         {
             let row = snapshot.rows.remove(index);
             snapshot.root_count -= 1;
             snapshot_index
                 .roots
-                .remove(&single_source_occurrence_id(&row));
+                .remove(&subscription_row_occurrence_id(&row));
             removed.push(RemovedRow {
                 table: row.table().to_owned(),
                 row_uuid: row.row_uuid(),
-                occurrence_id: single_source_occurrence_id(&row),
+                occurrence_id,
             });
         } else {
             index += 1;
@@ -8782,7 +8862,7 @@ fn apply_maintained_update_to_snapshot(
         let Some(row) = row else {
             continue;
         };
-        let root_key = single_source_occurrence_id(row);
+        let root_key = subscription_row_occurrence_id(row);
         if snapshot_index.roots.contains_key(&root_key) {
             continue;
         }
@@ -8870,19 +8950,28 @@ where
     })
 }
 
-fn single_source_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
-    OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0))
+pub(crate) fn subscription_row_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
+    let root = ObjectId::from_uuid(row.row_uuid().0);
+    let mut joined = Vec::new();
+    for position in 1.. {
+        let Some(Value::Uuid(row_id)) = row.raw_field(&format!("__flat_join_row_{position}"))
+        else {
+            break;
+        };
+        joined.push(ObjectId::from_uuid(row_id));
+    }
+    OutputOccurrenceId::new(root, joined)
 }
 
 fn subscription_output_row(row: CurrentRow) -> SubscriptionOutputRow {
     SubscriptionOutputRow {
-        occurrence_id: single_source_occurrence_id(&row),
+        occurrence_id: subscription_row_occurrence_id(&row),
         row,
     }
 }
 
-fn subscription_row_key(row: &CurrentRow) -> (String, RowUuid) {
-    (row.table().to_owned(), row.row_uuid())
+fn subscription_row_key(row: &CurrentRow) -> OutputOccurrenceId {
+    subscription_row_occurrence_id(row)
 }
 
 #[cfg(test)]

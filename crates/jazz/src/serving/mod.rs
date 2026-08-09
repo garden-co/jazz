@@ -24,10 +24,11 @@ use crate::groove::records::Value;
 use crate::groove::storage::MemoryStorage;
 #[cfg(feature = "rocksdb")]
 use crate::groove::storage::RocksDbStorage;
-use crate::ids::{AuthorId, BranchId, RowUuid, SchemaVersionId};
+use crate::ids::{AuthorId, BranchId, MigrationLensId, RowUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
 use crate::protocol::{
-    CatalogueAck, CurrentWriteSchema, MigrationLens, SchemaVersion, SyncMessage,
+    CatalogueAck, CurrentWriteSchema, MigrationLens, SchemaLineagePublication, SchemaVersion,
+    SyncMessage, TableLens,
 };
 use crate::schema::JazzSchema;
 use crate::wire::{TransportError, WireTransport};
@@ -327,6 +328,22 @@ impl ShellDb {
         }
     }
 
+    fn active_catalogue_seq(&self) -> u64 {
+        match self {
+            Self::Memory(db) => db.active_catalogue_seq(),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db.active_catalogue_seq(),
+        }
+    }
+
+    fn catalogue_lens(&self, lens: MigrationLensId) -> Option<MigrationLens> {
+        match self {
+            Self::Memory(db) => db.catalogue_lens(lens),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db.catalogue_lens(lens),
+        }
+    }
+
     fn connect_upstream(&self, transport: Box<dyn Transport>) -> ShellPeerConnection {
         match self {
             Self::Memory(db) => ShellPeerConnection::Memory(db.connect_upstream(transport)),
@@ -348,6 +365,22 @@ impl ShellDb {
             Self::Memory(db) => db.publish_lens(lens).map_err(Into::into),
             #[cfg(feature = "rocksdb")]
             Self::Rocks(db) => db.publish_lens(lens).map_err(Into::into),
+        }
+    }
+
+    fn publish_schema_with_lens(
+        &self,
+        catalogue_seq: u64,
+        publication: SchemaLineagePublication,
+    ) -> ShellResult<Vec<SyncMessage>> {
+        match self {
+            Self::Memory(db) => db
+                .publish_schema_with_lens(catalogue_seq, publication)
+                .map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db
+                .publish_schema_with_lens(catalogue_seq, publication)
+                .map_err(Into::into),
         }
     }
 
@@ -583,12 +616,24 @@ impl InMemoryServerShell {
         self.runtime_schema_state.current_write_revision
     }
 
+    #[cfg(test)]
+    pub(crate) fn runtime_catalogue_contains(
+        &self,
+        schema: SchemaVersionId,
+        lens: MigrationLensId,
+    ) -> (bool, bool) {
+        (
+            self.db.catalogue_schema(schema).is_some(),
+            self.db.catalogue_lens(lens).is_some(),
+        )
+    }
+
     fn bootstrap_runtime_schema(&mut self, schema: JazzSchema) -> ShellResult<()> {
         let schema_id = schema.version_id();
         let current = self.db.current_write_schema();
         if current.schema == schema_id
             && current.revision > 0
-            && self.db.catalogue_schema(schema_id).as_ref() == Some(&schema)
+            && self.db.catalogue_schema(schema_id).is_some()
         {
             self.runtime_schema_state.current_write_revision = current.revision;
             self.runtime_schema_state.last_published_schema = Some(schema_id);
@@ -599,8 +644,9 @@ impl InMemoryServerShell {
         Ok(())
     }
 
-    /// Publish a schema to the local runtime catalogue and make it the current write schema.
-    pub fn publish_runtime_schema(&mut self, schema: JazzSchema) -> ShellResult<SchemaVersionId> {
+    // Genesis-only bootstrap. Non-genesis callers must use atomic lineage
+    // admission through `publish_runtime_schema_with_lens`.
+    fn publish_runtime_schema(&mut self, schema: JazzSchema) -> ShellResult<SchemaVersionId> {
         let schema_version = SchemaVersion::new(schema);
         let schema_id = schema_version.id;
         let expected_schema = schema_version.schema.clone();
@@ -653,22 +699,33 @@ impl InMemoryServerShell {
         Ok(schema_id)
     }
 
-    /// Publish a schema to the runtime catalogue without changing the current
-    /// write-schema pointer.
-    pub fn publish_catalogue_schema(&mut self, schema: JazzSchema) -> ShellResult<SchemaVersionId> {
+    /// Atomically admit a non-genesis schema with its lineage-defining lens.
+    pub fn publish_runtime_schema_with_lens(
+        &mut self,
+        schema: JazzSchema,
+        lens: MigrationLens,
+        new_tables: Vec<String>,
+        dropped_tables: Vec<String>,
+    ) -> ShellResult<SchemaVersionId> {
         let schema_version = SchemaVersion::new(schema);
         let schema_id = schema_version.id;
-        let expected_schema = schema_version.schema.clone();
-        if self.db.catalogue_schema(schema_id).as_ref() == Some(&expected_schema) {
-            return Ok(schema_id);
+        if self.db.catalogue_schema(schema_id).is_some() {
+            if self.db.catalogue_lens(lens.id).as_ref() == Some(&lens) {
+                return Ok(schema_id);
+            }
+            return Err(ShellError::MissingEvent("atomic schema lineage"));
         }
-
-        let publish_acks = catalogue_acks_from_messages(self.db.publish_schema(schema_version)?);
-        let publish_applied = publish_acks
+        let publication =
+            SchemaLineagePublication::new(schema_version, lens, new_tables, dropped_tables);
+        let catalogue_seq = self.db.active_catalogue_seq().saturating_add(1);
+        let acks = catalogue_acks_from_messages(
+            self.db
+                .publish_schema_with_lens(catalogue_seq, publication)?,
+        );
+        if !acks
             .iter()
-            .any(|ack| ack.applied && ack.schema == Some(schema_id));
-        if !publish_applied
-            || self.db.catalogue_schema(schema_id).as_ref() != Some(&expected_schema)
+            .any(|ack| ack.applied && ack.schema == Some(schema_id))
+            || self.db.catalogue_schema(schema_id).is_none()
         {
             return Err(ShellError::MissingEvent("CatalogueAck"));
         }
@@ -693,8 +750,55 @@ impl InMemoryServerShell {
     pub fn publish_permissions_schema(
         &mut self,
         schema: JazzSchema,
+        lineage_source: SchemaVersionId,
     ) -> ShellResult<SchemaVersionId> {
-        let schema_id = self.publish_runtime_schema(schema)?;
+        let schema_id = schema.version_id();
+        let existing = self.db.catalogue_schema(schema_id);
+        if existing.as_ref() != Some(&schema) && existing.is_some() {
+            let acks = catalogue_acks_from_messages(
+                self.db.publish_schema(SchemaVersion::new(schema.clone()))?,
+            );
+            if !acks
+                .iter()
+                .any(|ack| ack.applied && ack.schema == Some(schema_id))
+            {
+                return Err(ShellError::MissingEvent("CatalogueAck"));
+            }
+        } else if existing.is_none() {
+            let lens = MigrationLens::new(
+                lineage_source,
+                schema_id,
+                schema
+                    .tables
+                    .iter()
+                    .map(|table| TableLens {
+                        source_table: table.name.clone(),
+                        target_table: table.name.clone(),
+                        ops: Vec::new(),
+                    })
+                    .collect(),
+            );
+            self.publish_runtime_schema_with_lens(schema, lens, Vec::new(), Vec::new())?;
+        }
+
+        let current = self.db.current_write_schema();
+        if current.schema != schema_id {
+            let revision = current.revision.saturating_add(1);
+            let acks = catalogue_acks_from_messages(self.db.set_current_write_schema(
+                CurrentWriteSchema {
+                    revision,
+                    schema: schema_id,
+                },
+            )?);
+            if !acks.iter().any(|ack| {
+                ack.applied && ack.revision == Some(revision) && ack.schema == Some(schema_id)
+            }) {
+                return Err(ShellError::MissingEvent("CatalogueAck"));
+            }
+        }
+        let current = self.db.current_write_schema();
+        self.runtime_schema_state.current_write_revision = current.revision;
+        self.runtime_schema_state.last_published_schema = Some(schema_id);
         self.db.set_permissions_ready(true)?;
         Ok(schema_id)
     }
@@ -1627,7 +1731,7 @@ impl std::error::Error for ConfigError {}
 mod tests {
     use super::*;
     use crate::groove::schema::ColumnType;
-    use crate::schema::{ColumnSchema, TableSchema};
+    use crate::schema::{ColumnSchema, Policy, TableSchema};
 
     fn simple_schema() -> JazzSchema {
         JazzSchema::new([TableSchema::new(
@@ -1637,6 +1741,60 @@ mod tests {
                 ColumnSchema::new("done", ColumnType::Bool),
             ],
         )])
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn permission_payload_updates_keep_structural_genesis_and_survive_reopen() {
+        let structural = JazzSchema::new([TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("owner", ColumnType::Uuid),
+                ColumnSchema::new("editor", ColumnType::Uuid),
+            ],
+        )]);
+        let first = JazzSchema::new([structural.tables[0]
+            .clone()
+            .with_read_policy(Policy::owner_only("todos", "owner"))]);
+        let second = JazzSchema::new([structural.tables[0]
+            .clone()
+            .with_read_policy(Policy::owner_only("todos", "editor"))]);
+        let schema_id = structural.version_id();
+        assert_eq!(first.version_id(), schema_id);
+        assert_eq!(second.version_id(), schema_id);
+        let dir = tempfile::tempdir().unwrap();
+        let identity = DbIdentity {
+            node: crate::ids::NodeUuid::from_bytes([0x5e; 16]),
+            author: AuthorId::SYSTEM,
+        };
+        let config = InMemoryServerShellConfig::new(structural.clone(), identity)
+            .with_runtime_schema_bootstrap();
+        let mut shell = InMemoryServerShell::start_with_storage(
+            config.clone(),
+            StorageConfig::RocksDb {
+                path: dir.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+
+        shell.publish_permissions_schema(first, schema_id).unwrap();
+        shell
+            .publish_permissions_schema(second.clone(), schema_id)
+            .unwrap();
+        assert_eq!(shell.db.catalogue_schema(schema_id), Some(second.clone()));
+        assert_eq!(shell.db.current_write_schema().schema, schema_id);
+        drop(shell);
+
+        let reopened = InMemoryServerShell::start_with_storage(
+            config,
+            StorageConfig::RocksDb {
+                path: dir.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        assert_eq!(reopened.db.catalogue_schema(schema_id), Some(second));
+        assert_eq!(reopened.db.current_write_schema().schema, schema_id);
     }
 
     #[test]

@@ -1548,6 +1548,7 @@ pub(super) fn global_change_values(
     ]
 }
 
+#[allow(dead_code)]
 pub(super) fn global_change_primary_key_from_record(
     record: &BorrowedRecord<'_>,
 ) -> Result<PrimaryKeyValue, Error> {

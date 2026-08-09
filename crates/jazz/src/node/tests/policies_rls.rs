@@ -5190,7 +5190,14 @@ fn content_extent_visibility_requires_referencing_readable_version_row() {
 
     let unreferenced = core
         .content_store()
-        .append(owner, row_uuid, "body", b"not referenced")
+        .append(
+            schema.version_id(),
+            "docs",
+            owner,
+            row_uuid,
+            "body",
+            b"not referenced",
+        )
         .unwrap();
     assert!(matches!(
         owner_peer.serve_content_extents(&mut core, row_uuid, [unreferenced]),

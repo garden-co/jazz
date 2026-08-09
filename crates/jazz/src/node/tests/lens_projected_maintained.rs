@@ -24,14 +24,10 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(evolved_payload.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
             base.version_id(),
             evolved_payload.id,
             vec![TableLens {
@@ -49,9 +45,11 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
                 ],
             }],
         ),
-    })
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,

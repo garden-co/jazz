@@ -212,14 +212,10 @@ fn merge_heads_share_physical_identity_across_table_rename_and_restart() {
         )
         .unwrap();
 
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(renamed.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+        &mut core,
+        renamed.clone(),
+        MigrationLens::new(
             base.version_id(),
             renamed.id,
             vec![TableLens {
@@ -237,9 +233,11 @@ fn merge_heads_share_physical_identity_across_table_rename_and_restart() {
                 ],
             }],
         ),
-    })
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -275,64 +273,6 @@ fn merge_heads_share_physical_identity_across_table_rename_and_restart() {
         .unwrap();
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].record().get_u64(0).unwrap(), table_id.0);
-}
-
-#[test]
-fn merge_heads_keep_unreconciled_same_name_lineages_separate() {
-    // Before a lens reconciles two same-named tables, their local physical IDs
-    // are authoritative. Derived merge metadata must not combine their rows.
-    let base = schema();
-    let target = SchemaVersion::new(catalogue_evolved_schema());
-    let (_dir, mut core) = open_node_with_schema(node(0xcc), base.clone());
-    let row_uuid = row(0xcc);
-    core.commit_mergeable(
-        MergeableCommit::new("todos", row_uuid, 10).cells(BTreeMap::from([(
-            "title".to_owned(),
-            v("base lineage"),
-        )])),
-    )
-    .unwrap();
-
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(target.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: target.id,
-        },
-    })
-    .unwrap();
-    core.commit_mergeable(
-        MergeableCommit::new("todos", row_uuid, 11).cells(BTreeMap::from([
-            ("title".to_owned(), v("provisional lineage")),
-            ("body".to_owned(), v("body")),
-        ])),
-    )
-    .unwrap();
-
-    let base_id = core.catalogue.physical_mappings[&base.version_id()].tables["todos"].table_id;
-    let target_id = core.catalogue.physical_mappings[&target.id].tables["todos"].table_id;
-    assert_ne!(base_id, target_id);
-    assert_eq!(
-        core.database
-            .primary_key_scan_raw("jazz_merge_heads", &[Value::U64(base_id.0)])
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(
-        core.database
-            .primary_key_scan_raw("jazz_merge_heads", &[Value::U64(target_id.0)])
-            .unwrap()
-            .len(),
-        1
-    );
-    core.assert_merge_heads_match_history_for_test("todos", row_uuid)
-        .unwrap();
 }
 
 #[test]

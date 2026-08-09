@@ -510,13 +510,20 @@ impl MaintainedSubscriptionView {
         let new = old + weight;
         if old <= 0 && new > 0 {
             transitions.adds.push(entry.clone());
-            transitions
-                .result_payload_adds
-                .push((entry.clone(), payload.clone()));
+            if entry
+                .as_real_row()
+                .is_some_and(|row| row.row_digest.is_some())
+            {
+                transitions
+                    .result_payload_adds
+                    .push((entry.clone(), payload.clone()));
+                self.result_payloads.insert(entry.clone(), payload);
+            }
         }
         if old > 0 && new <= 0 {
             transitions.removes.push(entry.clone());
             transitions.result_payload_removes.push(entry.clone());
+            self.result_payloads.remove(&entry);
         }
         if new == 0 {
             self.result_weights.remove(&entry);
@@ -773,13 +780,37 @@ fn decode_typed_terminal_record(
                 .map(|field| nullable_u64(record, field).map(|seq| seq.map(GlobalSeq)))
                 .transpose()?
                 .flatten();
-            let member: ResultMemberEntry = RealRowMemberEntry::current_content((
+            let flat_join_digest = (!schema.payload_fields.is_empty())
+                .then(|| {
+                    schema
+                        .payload_fields
+                        .iter()
+                        .map(|field| {
+                            record
+                                .get_idx(field_idx(record, &field.name)?)
+                                .map_err(super::Error::from)
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                        .and_then(|values| {
+                            postcard::to_allocvec(&values).map_err(|_| {
+                                super::Error::InvalidStoredValue(
+                                    "flat joined result revision encoding failed",
+                                )
+                            })
+                        })
+                })
+                .transpose()?;
+            let member = RealRowMemberEntry::current_content((
                 table.name.clone().into(),
                 row_uuid,
                 TxId::new(tx_time, tx_node),
             ))
             .with_occurrence_id(occurrence_id)
-            .with_settle_position(settle_position)
+            .with_settle_position(settle_position);
+            let member: ResultMemberEntry = match flat_join_digest {
+                Some(digest) => member.with_row_digest(digest),
+                None => member,
+            }
             .into();
             let payload = ResultMemberPayloadEntry {
                 member: member.clone(),

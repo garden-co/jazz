@@ -299,6 +299,9 @@ function writePolicyQuery(
     query.filters.length,
   );
   writer.vec((join, index) => writePolicyJoin(join, query.joins[index]!), query.joins.length);
+  // Rust Query::flat_join follows joins. Policy queries never lower to a
+  // flat join, but postcard still requires the absent Option discriminant.
+  writer.none();
   writer.vec(
     (branch, index) => writePolicyBranch(branch, alternatives[index]!),
     alternatives.length === 1 ? 0 : alternatives.length,

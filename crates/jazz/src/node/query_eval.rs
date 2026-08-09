@@ -58,6 +58,7 @@ use crate::query::{
     QueryError, ShapeId, ValidatedQuery, binding_id_for_values, relation_query_to_query,
 };
 use crate::schema::{ColumnSchema, branch_metadata_table_schema};
+use crate::tools::{ObjectId, OutputOccurrenceId};
 
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
@@ -356,6 +357,7 @@ fn fact_public_fields(
             fields.extend(result_membership_version_fields(&schema.version));
             fields.extend(schema.settle_position_field.clone());
             fields.extend(schema.routing_param_fields.iter().cloned());
+            fields.extend(schema.payload_fields.iter().map(|field| field.name.clone()));
             Ok(fields)
         }
         ProgramFactSchema::AggregateResult(schema) => {
@@ -553,7 +555,7 @@ fn version_identity_fields(schema: &VersionIdentityFields) -> Vec<String> {
 
 pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
     pub(crate) added: Vec<CurrentRow>,
-    pub(crate) removed: Vec<(String, RowUuid)>,
+    pub(crate) removed: Vec<OutputOccurrenceId>,
     pub(crate) added_edges: Vec<(RelationEdge, Option<CurrentRow>)>,
     pub(crate) removed_edges: Vec<RelationEdge>,
 }
@@ -2517,7 +2519,8 @@ fn current_query_output_request(
         .then(|| AppRowOutputRequest {
             projection: app_row_payload_projection(
                 query,
-                matches!(output, CurrentQueryProgramOutput::MaintainedView),
+                matches!(output, CurrentQueryProgramOutput::MaintainedView)
+                    || !query.array_subqueries.is_empty(),
             ),
             large_values: Vec::new(),
         }),
@@ -3591,11 +3594,6 @@ fn normalize_reachable_seed(
     param_types: &BTreeMap<String, ColumnType>,
 ) -> Result<(RowSetNodeId, Vec<ValueSourceColumn>), Error> {
     if let Some(seed) = &reachable.seed {
-        if !predicate_params(&seed.filters).is_empty() {
-            return Err(normalization_gap(
-                "reachable_via relation seed filters with retained params need binding-param filter lowering",
-            ));
-        }
         let seed_source = reachable_seed_source_id(seed, reachable_id);
         let mut columns = reachable_seed_frontier_columns(schema, &seed_source, seed)?;
         let edge_route_columns = reachable_edge_route_columns(reachable, param_types)?;
@@ -5042,7 +5040,9 @@ where
         // query rank. Membership/windowing is already lowered; only restore the
         // selected roots to their advertised order before sending a reset.
         self.apply_query_order(shape.query(), &mut rows)?;
-        self.apply_projection(shape.query(), &mut rows)?;
+        if shape.query().flat_join.is_none() {
+            self.apply_projection(shape.query(), &mut rows)?;
+        }
         let root_count = rows.len();
         let mut edges = Vec::new();
         for fact in program_facts {
@@ -5091,7 +5091,7 @@ where
                 .current_row_from_aggregate_result_payload(query, member, payload)
                 .map(Some);
         }
-        if member.as_row().is_none()
+        if (query.flat_join.is_some() || member.as_row().is_none())
             && let Some(payload) = result_payloads.get(member)
         {
             let Some(table_name) = member.table_name() else {
@@ -6217,6 +6217,163 @@ where
             )?;
         }
 
+        // Flat joins are an output form separate from `JoinVia`. Every input
+        // stays a normal source, so read-policy filtering and read-view/lens
+        // projection happen before Groove's inner JoinOp combines records.
+        if let Some(flat_join) = &query.flat_join {
+            let root_name = flat_join
+                .root_alias
+                .as_deref()
+                .unwrap_or(query.table.as_str())
+                .to_owned();
+            let mut sources = BTreeMap::from([(root_name, root_source.clone())]);
+            let mut tuple_sources = vec![root_source.clone()];
+            let mut output_sources = vec![(
+                flat_join
+                    .root_alias
+                    .as_deref()
+                    .unwrap_or(query.table.as_str())
+                    .to_owned(),
+                root_source.clone(),
+            )];
+
+            for (index, join) in flat_join.sources.iter().enumerate() {
+                let name = join
+                    .alias
+                    .as_deref()
+                    .unwrap_or(join.table.as_str())
+                    .to_owned();
+                let source = SourceId {
+                    table: join.table.clone(),
+                    path: SourcePath {
+                        components: vec![SourceRole::Alias(format!("flat_join:{index}:{name}"))],
+                    },
+                };
+                let source_node = RowSetNodeId(format!("flat_join:{index}:source"));
+                nodes.insert(
+                    source_node.clone(),
+                    RowSetExpr::Source {
+                        source: source.clone(),
+                        visibility: RowVisibility::Visible,
+                    },
+                );
+                auxiliary_sources.insert(source.clone());
+                let value_ref = |field: &str| -> Result<NormalizedValueRef, Error> {
+                    let (scope, column) = field.rsplit_once('.').ok_or_else(|| {
+                        Error::QueryCapability(format!(
+                            "flat join field must be qualified: {field}"
+                        ))
+                    })?;
+                    let source = sources.get(scope).ok_or_else(|| {
+                        Error::QueryCapability(format!("unknown flat join source {scope}"))
+                    })?;
+                    Ok(if column == "id" || column == "_id" {
+                        NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
+                    } else {
+                        NormalizedValueRef::SourceField {
+                            source: source.clone(),
+                            field: column.to_owned(),
+                        }
+                    })
+                };
+                let (_, right_column) = join.on.right.rsplit_once('.').ok_or_else(|| {
+                    Error::QueryCapability(format!(
+                        "flat join field must be qualified: {}",
+                        join.on.right
+                    ))
+                })?;
+                let join_node = RowSetNodeId(format!("flat_join:{index}:join"));
+                nodes.insert(
+                    join_node.clone(),
+                    RowSetExpr::Join {
+                        left: current,
+                        right: source_node,
+                        mode: NormalizedJoinMode::Inner,
+                        on: NormalizedPredicateExpr::Compare {
+                            left: value_ref(&join.on.left)?,
+                            op: NormalizedComparisonOp::Eq,
+                            right: if right_column == "id" || right_column == "_id" {
+                                NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
+                            } else {
+                                NormalizedValueRef::SourceField {
+                                    source: source.clone(),
+                                    field: right_column.to_owned(),
+                                }
+                            },
+                        },
+                    },
+                );
+                current = join_node;
+                sources.insert(name.clone(), source.clone());
+                output_sources.push((name, source.clone()));
+                tuple_sources.push(source);
+            }
+
+            let projection_node = RowSetNodeId("flat_join:output".to_owned());
+            let mut columns = Vec::new();
+            for (position, source) in tuple_sources.iter().enumerate() {
+                columns.push(RowProjection {
+                    output: TypedOutputField {
+                        name: if position == 0 {
+                            "row_uuid".to_owned()
+                        } else {
+                            format!("__flat_join_row_{position}")
+                        },
+                        ty: ColumnType::Uuid,
+                    },
+                    value: NormalizedValueRef::RowId(RowIdRef::Source(source.clone())),
+                });
+            }
+            // Retain the representative root version used by the existing
+            // real-row membership envelope. Joined source versions stay in
+            // their own source terminals; the rendered tuple itself is kept
+            // in the membership payload below.
+            for (name, ty) in [
+                ("tx_time", ColumnType::U64),
+                ("tx_node_id", ColumnType::U64),
+            ] {
+                columns.push(RowProjection {
+                    output: TypedOutputField {
+                        name: name.to_owned(),
+                        ty,
+                    },
+                    value: NormalizedValueRef::SourceField {
+                        source: root_source.clone(),
+                        field: name.to_owned(),
+                    },
+                });
+            }
+            for (name, source) in &output_sources {
+                let source_schema = schema
+                    .tables
+                    .iter()
+                    .find(|table| table.name == source.table)
+                    .ok_or_else(|| {
+                        Error::QueryCapability(format!("unknown flat join table {}", source.table))
+                    })?;
+                for column in source_schema.columns.iter() {
+                    columns.push(RowProjection {
+                        output: TypedOutputField {
+                            name: format!("{name}.{}", column.name),
+                            ty: column.column_type.clone(),
+                        },
+                        value: NormalizedValueRef::SourceField {
+                            source: source.clone(),
+                            field: column.name.clone(),
+                        },
+                    });
+                }
+            }
+            nodes.insert(
+                projection_node.clone(),
+                RowSetExpr::Project {
+                    input: current,
+                    columns,
+                },
+            );
+            current = projection_node;
+        }
+
         for (index, subquery) in query.array_subqueries.iter().enumerate() {
             current = normalize_array_subquery(
                 &mut nodes,
@@ -6798,6 +6955,17 @@ where
         let deltas = deltas_result?;
         let mut rows = if shape.query().aggregate.is_some() {
             self.materialize_aggregate_query_rows(shape.query(), &table_schema, deltas)?
+        } else if shape.query().flat_join.is_some() {
+            deltas
+                .iter()
+                .filter(|(_, weight)| *weight > 0)
+                .map(|(record, _)| {
+                    CurrentRow::new(
+                        shape.query().table.clone(),
+                        OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
+                    )
+                })
+                .collect()
         } else {
             let mut rows = Vec::new();
             for (record, weight) in deltas.iter() {
@@ -6810,7 +6978,9 @@ where
         };
         let query = shape.query();
         self.finish_engine_query_rows(query, &mut rows)?;
-        self.apply_projection(query, &mut rows)?;
+        if query.flat_join.is_none() {
+            self.apply_projection(query, &mut rows)?;
+        }
         Ok(rows)
     }
 
@@ -7547,6 +7717,13 @@ where
             }
         }
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
+        let mut payload_states = BTreeMap::<
+            ResultMemberEntry,
+            (
+                Option<ResultMemberPayloadEntry>,
+                Option<ResultMemberPayloadEntry>,
+            ),
+        >::new();
         let mut fact_states = BTreeMap::<ProgramFactEntry, (bool, bool)>::new();
         loop {
             match local.subscription.try_recv() {
@@ -7571,6 +7748,20 @@ where
                             .and_modify(|(_, after)| *after = false)
                             .or_insert((before, false));
                     }
+                    for member in transitions.result_payload_removes {
+                        let before = local.result_payloads.get(&member).cloned();
+                        payload_states
+                            .entry(member)
+                            .and_modify(|(_, after)| *after = None)
+                            .or_insert((before, None));
+                    }
+                    for (member, payload) in transitions.result_payload_adds {
+                        let before = local.result_payloads.get(&member).cloned();
+                        payload_states
+                            .entry(member)
+                            .and_modify(|(_, after)| *after = Some(payload.clone()))
+                            .or_insert((before, Some(payload)));
+                    }
                     for fact in transitions.program_fact_adds {
                         let before = local.program_facts.contains(&fact);
                         fact_states
@@ -7592,7 +7783,7 @@ where
                 }
             }
         }
-        if states.is_empty() && fact_states.is_empty() {
+        if states.is_empty() && payload_states.is_empty() && fact_states.is_empty() {
             return Ok(None);
         }
         let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
@@ -7600,6 +7791,17 @@ where
             match (before, after) {
                 (false, true) => transitions.adds.push(entry),
                 (true, false) => transitions.removes.push(entry),
+                _ => {}
+            }
+        }
+        for (member, (before, after)) in payload_states {
+            match (before, after) {
+                (None, Some(payload)) => transitions.result_payload_adds.push((member, payload)),
+                (Some(_), None) => transitions.result_payload_removes.push(member),
+                (Some(before), Some(after)) if before != after => {
+                    transitions.result_payload_removes.push(member.clone());
+                    transitions.result_payload_adds.push((member, after));
+                }
                 _ => {}
             }
         }
@@ -7614,24 +7816,26 @@ where
         // members. Preserve their current values alongside membership while
         // coalescing a multisink batch; otherwise a present NULL or a revised
         // aggregate can be mistaken for an absent payload at materialization.
-        transitions.result_payload_adds = transitions
-            .program_fact_adds
-            .iter()
-            .filter_map(|fact| match fact {
-                ProgramFactEntry::ResultPayload(payload) => {
-                    Some((payload.member.clone(), payload.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-        transitions.result_payload_removes = transitions
-            .program_fact_removes
-            .iter()
-            .filter_map(|fact| match fact {
-                ProgramFactEntry::ResultPayload(payload) => Some(payload.member.clone()),
-                _ => None,
-            })
-            .collect();
+        if local.result_query.aggregate.is_some() {
+            transitions.result_payload_adds = transitions
+                .program_fact_adds
+                .iter()
+                .filter_map(|fact| match fact {
+                    ProgramFactEntry::ResultPayload(payload) => {
+                        Some((payload.member.clone(), payload.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            transitions.result_payload_removes = transitions
+                .program_fact_removes
+                .iter()
+                .filter_map(|fact| match fact {
+                    ProgramFactEntry::ResultPayload(payload) => Some(payload.member.clone()),
+                    _ => None,
+                })
+                .collect();
+        }
         Ok(Some(transitions))
     }
 
@@ -7703,8 +7907,8 @@ where
             }
             if local.result_set.remove(&member) {
                 if materialize_update {
-                    if let Some((table, row_uuid, _)) = member.as_row() {
-                        removed.push((table.to_string(), row_uuid));
+                    if let Some(occurrence_id) = member.output_occurrence_id() {
+                        removed.push(occurrence_id);
                     } else if is_public_aggregate_result_member(
                         &member,
                         local.result_table.as_str(),
@@ -7720,7 +7924,9 @@ where
                                 .is_ok_and(|candidate_uuid| candidate_uuid == row_uuid)
                         });
                         if !aggregate_replacements.contains(&row_uuid) && !replacement_is_current {
-                            removed.push((local.result_table.clone(), row_uuid));
+                            removed.push(OutputOccurrenceId::single_source(ObjectId::from_uuid(
+                                row_uuid.0,
+                            )));
                         }
                     }
                 }
@@ -7931,6 +8137,17 @@ where
             ));
         };
         let table = self.table(entry.0.as_str())?.clone();
+        if local.result_query.flat_join.is_some() {
+            let payload = local
+                .result_payloads
+                .get(member)
+                .ok_or(Error::InvalidStoredValue(
+                    "flat joined result member is missing its tuple payload",
+                ))?;
+            return self
+                .current_row_from_result_payload(&table, payload)
+                .map(Some);
+        }
         if local.result_select.is_some()
             && let Some(payload) = local.result_payloads.get(member)
         {
@@ -7993,6 +8210,17 @@ where
             ));
         };
         let table = self.table(entry.0.as_str())?.clone();
+        if local.result_query.flat_join.is_some() {
+            let payload = local
+                .result_payloads
+                .get(member)
+                .ok_or(Error::InvalidStoredValue(
+                    "flat joined result member is missing its tuple payload",
+                ))?;
+            return self
+                .current_row_from_result_payload(&table, payload)
+                .map(Some);
+        }
         let tx_versions = self.local_maintained_tx_versions(local, entry.2, cache);
         let version = if let Some(version) =
             local_maintained_view_content_witness(tx_versions, entry.0.as_str(), entry.1)
@@ -8131,6 +8359,48 @@ where
             .as_slice())
     }
 
+    fn large_value_version_for_tx_with_materialization_cache(
+        &mut self,
+        tx_id: TxId,
+        row_uuid: RowUuid,
+        table_id: PhysicalTableId,
+        column_id: PhysicalColumnId,
+        cache: &mut LocalMaintainedMaterializationCache,
+    ) -> Result<(VersionRow, TableSchema, String, SchemaVersionId), Error> {
+        let versions = self.tx_versions_for_materialization(tx_id, cache)?.to_vec();
+        for version in versions {
+            if version.row_uuid() != row_uuid || version.layer() != VersionLayer::Content {
+                continue;
+            }
+            let schema = self
+                .schema_version_for_alias(version.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "large-value ancestor schema alias is unknown",
+                ))?;
+            let Some(table_mapping) = self
+                .catalogue
+                .physical_mappings
+                .get(&schema)
+                .and_then(|mapping| mapping.tables.get(version.table()))
+            else {
+                continue;
+            };
+            if table_mapping.table_id != table_id {
+                continue;
+            }
+            let Some(column) = table_mapping
+                .columns
+                .iter()
+                .find_map(|(name, id)| (*id == column_id).then(|| name.clone()))
+            else {
+                continue;
+            };
+            let table = self.table_in_schema(version.table(), schema)?.clone();
+            return Ok((version, table, column, schema));
+        }
+        Err(Error::MissingTransaction(tx_id))
+    }
+
     fn current_row_from_materialized_version_with_materialization_cache(
         &mut self,
         table: &TableSchema,
@@ -8185,13 +8455,42 @@ where
         kind: LargeValueKind,
         cache: &mut LocalMaintainedMaterializationCache,
     ) -> Result<Vec<u8>, Error> {
-        let len =
-            self.large_value_column_len_with_materialization_cache(table, version, column, cache)?;
+        let canonical = self.canonical_maintained_view_witness(version)?;
+        let version = canonical.as_ref().unwrap_or(version);
+        let authored_schema = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "large-value schema alias is unknown",
+            ))?;
+        let (authored_table, authored_column) =
+            self.authored_large_value_identity(authored_schema, table, column)?;
+        let authored_table_schema = self
+            .table_in_schema(&authored_table, authored_schema)?
+            .clone();
+        let len = self.large_value_column_len_with_materialization_cache(
+            &authored_table_schema,
+            version,
+            &authored_column,
+            cache,
+        )?;
         let refs = self.large_value_extent_refs_for_version_with_materialization_cache(
-            table, version, column, kind, cache,
+            &authored_table_schema,
+            version,
+            &authored_column,
+            kind,
+            cache,
         )?;
         let tx_id = self.version_tx_id(version)?;
-        encode_large_value_handle(table, version.row_uuid(), column, tx_id, kind, len, refs)
+        encode_large_value_handle(
+            authored_schema,
+            &authored_table,
+            version.row_uuid(),
+            &authored_column,
+            tx_id,
+            kind,
+            len,
+            refs,
+        )
     }
 
     fn large_value_column_len_with_materialization_cache(
@@ -8204,25 +8503,36 @@ where
         let mut suffix = Vec::new();
         let mut current = self.version_tx_id(winner)?;
         let mut checkpoint_len = None;
+        let schema = self
+            .schema_version_for_alias(winner.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "large-value schema alias is unknown",
+            ))?;
+        let (authored_table, authored_column) =
+            self.authored_large_value_identity(schema, table, column)?;
+        let (table_id, column_id) =
+            self.large_value_lineage_ids(schema, &authored_table, &authored_column)?;
         loop {
-            let version = self
-                .tx_versions_for_materialization(current, cache)?
-                .iter()
-                .find(|version| {
-                    version.table() == table.name
-                        && version.row_uuid() == winner.row_uuid()
-                        && version.layer() == VersionLayer::Content
-                })
-                .cloned()
-                .ok_or(Error::MissingTransaction(current))?;
-            if let Some(value) =
-                self.large_value_checkpoint(table, version.row_uuid(), column, current)?
-            {
+            let (version, version_table, version_column, version_schema) = self
+                .large_value_version_for_tx_with_materialization_cache(
+                    current,
+                    winner.row_uuid(),
+                    table_id,
+                    column_id,
+                    cache,
+                )?;
+            if let Some(value) = self.large_value_checkpoint(
+                version_schema,
+                &version_table,
+                version.row_uuid(),
+                &version_column,
+                current,
+            )? {
                 checkpoint_len = Some(value.len());
                 break;
             }
             let parents = version.parents();
-            suffix.push(version);
+            suffix.push((version, version_table, version_column));
             match parents.as_slice() {
                 [] => break,
                 [parent] => current = *parent,
@@ -8232,11 +8542,11 @@ where
         suffix.reverse();
 
         let mut value_len = checkpoint_len.unwrap_or_default();
-        for version in &suffix {
-            let Some(Value::Bytes(payload)) = version.cell(table, column)? else {
+        for (version, version_table, version_column) in &suffix {
+            let Some(Value::Bytes(payload)) = version.cell(version_table, version_column)? else {
                 continue;
             };
-            match column_large_value_kind(table, column)? {
+            match column_large_value_kind(version_table, version_column)? {
                 LargeValueKind::Text => {
                     let op = self.decode_text_storage_op(&payload)?;
                     let value = vec![0; value_len];
@@ -8277,19 +8587,26 @@ where
     ) -> Result<Vec<content_store::Extent>, Error> {
         let mut suffix = Vec::new();
         let mut current = self.version_tx_id(winner)?;
+        let schema = self
+            .schema_version_for_alias(winner.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "large-value schema alias is unknown",
+            ))?;
+        let (authored_table, authored_column) =
+            self.authored_large_value_identity(schema, table, column)?;
+        let (table_id, column_id) =
+            self.large_value_lineage_ids(schema, &authored_table, &authored_column)?;
         loop {
-            let version = self
-                .tx_versions_for_materialization(current, cache)?
-                .iter()
-                .find(|version| {
-                    version.table() == table.name
-                        && version.row_uuid() == winner.row_uuid()
-                        && version.layer() == VersionLayer::Content
-                })
-                .cloned()
-                .ok_or(Error::MissingTransaction(current))?;
+            let (version, version_table, version_column, _) = self
+                .large_value_version_for_tx_with_materialization_cache(
+                    current,
+                    winner.row_uuid(),
+                    table_id,
+                    column_id,
+                    cache,
+                )?;
             let parents = version.parents();
-            suffix.push(version);
+            suffix.push((version, version_table, version_column));
             match parents.as_slice() {
                 [] => break,
                 [parent] => current = *parent,
@@ -8299,8 +8616,8 @@ where
         suffix.reverse();
 
         let mut refs = Vec::new();
-        for version in &suffix {
-            let Some(Value::Bytes(payload)) = version.cell(table, column)? else {
+        for (version, version_table, version_column) in &suffix {
+            let Some(Value::Bytes(payload)) = version.cell(version_table, version_column)? else {
                 continue;
             };
             match kind {
@@ -8401,6 +8718,9 @@ where
         let descriptor = RecordDescriptor::new(descriptor_fields);
         let raw = descriptor.create(&values)?;
         let row = CurrentRow::new(table.name.clone(), OwnedRecord::new(raw, descriptor));
+        if row.raw_field("__flat_join_row_1").is_some() {
+            return Ok(row);
+        }
         self.materialize_current_row(table, row)
     }
 
@@ -9030,9 +9350,9 @@ where
     ) -> Result<(), Error> {
         // `JoinVia` is an existential constraint on this query's root-row
         // result, not flat joined output: maintained membership and delivery
-        // remain addressed by the selected root row. Flat public join output,
-        // which can contain several occurrences for one root, remains rejected
-        // at the public-client boundary until it supplies source tuples.
+        // remain addressed by the selected root row. Flat public join output
+        // carries its source tuple through the maintained terminal, so it can
+        // safely address several occurrences for one root as well.
         self.compile_current_query_program_for_read_view(
             shape,
             binding,
@@ -12093,25 +12413,29 @@ mod tests {
         )]);
         let evolved_payload = SchemaVersion::new(evolved);
         let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xa2; 16]), base.clone());
-        node.apply_sync_message(SyncMessage::PublishSchema {
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
-            schema: Box::new(evolved_payload.clone()),
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                evolved_payload.clone(),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved_payload.id,
+                    vec![TableLens {
+                        source_table: "users".to_owned(),
+                        target_table: "people".to_owned(),
+                        ops: vec![LensOp::RenameTable {
+                            from: "users".to_owned(),
+                            to: "people".to_owned(),
+                        }],
+                    }],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
         })
         .unwrap();
-        node.apply_sync_message(SyncMessage::PublishLens {
-            author: AuthorId::SYSTEM,
-            lens: MigrationLens::new(
-                base.version_id(),
-                evolved_payload.id,
-                vec![TableLens {
-                    source_table: "users".to_owned(),
-                    target_table: "people".to_owned(),
-                    ops: vec![],
-                }],
-            ),
-        })
-        .unwrap();
-        node.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
@@ -13326,10 +13650,15 @@ mod tests {
             user_column: None,
             user_claim: None,
             team_column: "team".to_owned(),
-            filters: vec![eq(col("kind"), lit("sync"))],
+            filters: vec![gt(col("kind"), param("seed_kind_lower_bound"))],
         });
         let shape = query.validate(&schema).unwrap();
-        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let binding = shape
+            .bind(BTreeMap::from([(
+                "seed_kind_lower_bound".to_owned(),
+                Value::String("s".to_owned()),
+            )]))
+            .unwrap();
 
         let rows = node
             .query_rows(&shape, &binding, DurabilityTier::Global)

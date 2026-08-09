@@ -106,6 +106,7 @@ pub struct PeerState {
     deferred_edge_fates: BTreeMap<TxId, DeferredEdgeFate>,
     edge_scope_subscription_refs: BTreeMap<SubscriptionKey, usize>,
     idle_edge_scope_subscriptions: BTreeMap<SubscriptionKey, u64>,
+    announced_catalogue_fingerprint: Option<[u8; 32]>,
     /// Deterministic counters for this peer.
     pub metrics: PeerMetrics,
 }
@@ -279,6 +280,7 @@ impl Default for PeerState {
             deferred_edge_fates: BTreeMap::new(),
             edge_scope_subscription_refs: BTreeMap::new(),
             idle_edge_scope_subscriptions: BTreeMap::new(),
+            announced_catalogue_fingerprint: None,
             metrics: PeerMetrics::default(),
         }
     }
@@ -292,6 +294,14 @@ fn edge_scope_ttl_ms() -> u64 {
 }
 
 impl PeerState {
+    pub(crate) fn needs_catalogue_snapshot(&self, fingerprint: [u8; 32]) -> bool {
+        self.announced_catalogue_fingerprint != Some(fingerprint)
+    }
+
+    pub(crate) fn mark_catalogue_snapshot_announced(&mut self, fingerprint: [u8; 32]) {
+        self.announced_catalogue_fingerprint = Some(fingerprint);
+    }
+
     /// Construct a permanent relay peer.
     pub fn new() -> Self {
         Self::default()

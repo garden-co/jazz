@@ -251,6 +251,8 @@ impl JazzSchema {
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 CONTENT_EXTENTS_STORE,
                 RecordDescriptor::new([
+                    ("schema", ValueType::Uuid),
+                    ("table", ValueType::String),
                     ("writer", ValueType::Uuid),
                     ("row", ValueType::Uuid),
                     ("column", ValueType::String),
@@ -261,6 +263,8 @@ impl JazzSchema {
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 CONTENT_META_STORE,
                 RecordDescriptor::new([
+                    ("schema", ValueType::Uuid),
+                    ("table", ValueType::String),
                     ("writer", ValueType::Uuid),
                     ("row", ValueType::Uuid),
                     ("column", ValueType::String),
@@ -270,6 +274,7 @@ impl JazzSchema {
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 CONTENT_CHECKPOINTS_STORE,
                 RecordDescriptor::new([
+                    ("schema", ValueType::Uuid),
                     ("table", ValueType::String),
                     ("row", ValueType::Uuid),
                     ("column", ValueType::String),
