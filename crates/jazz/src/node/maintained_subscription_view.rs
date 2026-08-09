@@ -1651,6 +1651,7 @@ fn replacement_winner(
 mod tests {
     use std::collections::BTreeMap;
 
+    use groove::ivm::RecordDelta;
     use groove::records::Value;
     use groove::schema::ColumnType;
 
@@ -1762,6 +1763,112 @@ mod tests {
         assert!(second.adds.is_empty());
         assert_eq!(second.removes, vec![member]);
         assert!(maintained.result_weights.is_empty());
+    }
+
+    #[test]
+    fn typed_union_terminal_removes_one_arm_and_rehydrates_the_other() {
+        let descriptor = RecordDescriptor::new([
+            ("table", groove::records::ValueType::String),
+            ("row_uuid", groove::records::ValueType::Uuid),
+            ("joined_uuid", groove::records::ValueType::Uuid),
+            ("union_arm", groove::records::ValueType::String),
+            ("tx_time", groove::records::ValueType::U64),
+            ("tx_node", groove::records::ValueType::U64),
+        ]);
+        let schema = ResultMembershipSchema {
+            table_field: "table".to_owned(),
+            row_field: "row_uuid".to_owned(),
+            occurrence_id_fields: vec!["row_uuid".to_owned(), "joined_uuid".to_owned()],
+            occurrence_union_arm_fields: BTreeMap::from([(0, "union_arm".to_owned())]),
+            payload_fields: Vec::new(),
+            branch_or_prefix_field: None,
+            version: ResultMembershipVersionSchema::Content(
+                super::super::query_engine::ContentVersionFields {
+                    tx_time_field: "tx_time".to_owned(),
+                    tx_node_field: "tx_node".to_owned(),
+                },
+            ),
+            settle_position_field: None,
+            routing_param_fields: BTreeSet::new(),
+        };
+        let schemas = MaintainedTerminalSchemas {
+            sinks: BTreeMap::from([(
+                "maintained.result_current".to_owned(),
+                MaintainedTerminalKind::ResultCurrent(schema),
+            )]),
+        };
+        let tables = BTreeMap::from([("todos".to_owned(), table())]);
+        let encoded = |label: &str, weight| RecordDeltas {
+            descriptor: descriptor.clone(),
+            deltas: vec![RecordDelta {
+                record: descriptor
+                    .create(&[
+                        Value::String("todos".to_owned()),
+                        Value::Uuid(row(1).0),
+                        Value::Uuid(row(2).0),
+                        Value::String(label.to_owned()),
+                        Value::U64(10),
+                        Value::U64(10),
+                    ])
+                    .unwrap()
+                    .into(),
+                weight,
+            }],
+        };
+        let mut maintained = MaintainedSubscriptionView::default();
+        let direct = maintained
+            .apply_typed_deltas(
+                "maintained.result_current",
+                &encoded("direct", 1),
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap()
+            .adds
+            .pop()
+            .unwrap();
+        let inherited = maintained
+            .apply_typed_deltas(
+                "maintained.result_current",
+                &encoded("inherited", 1),
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap()
+            .adds
+            .pop()
+            .unwrap();
+        assert_ne!(
+            direct.output_occurrence_id(),
+            inherited.output_occurrence_id()
+        );
+
+        let removed = maintained
+            .apply_typed_deltas(
+                "maintained.result_current",
+                &encoded("direct", -1),
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap();
+        assert_eq!(removed.removes, [direct]);
+        assert_eq!(maintained.result_weights.get(&inherited), Some(&1));
+
+        let mut reopened = MaintainedSubscriptionView::default();
+        let rehydrated = reopened
+            .apply_typed_deltas(
+                "maintained.result_current",
+                &encoded("inherited", 1),
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap();
+        assert_eq!(rehydrated.adds, [inherited.clone()]);
+        assert_eq!(reopened.result_weights.get(&inherited), Some(&1));
     }
 
     #[test]

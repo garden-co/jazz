@@ -441,8 +441,12 @@ byte; keys with derivation discriminators use the version-2 typed encoding.
 Empty, duplicate-position, or out-of-range discriminators are malformed.
 Nested non-recursive unions compose their stable semantic arm labels into one
 typed path component; sibling insertion or reordering therefore does not rekey
-unchanged arms. Recursive bag inputs without a finite stable labeled source-row
-carrier MUST still fail lowering rather than collapse copies.
+unchanged arms. Sibling arm labels MUST be non-empty and unique within their
+union. A producer that cannot supply unique stable semantic labels MUST fail
+lowering rather than substitute traversal order or normalized node identity,
+both of which can churn occurrence keys after unrelated graph edits. Recursive
+bag inputs without a finite stable labeled source-row carrier MUST likewise fail
+lowering rather than collapse copies.
 
 Maintained flat-join additions, removals, updates, reset snapshots, and the
 subscriber cache MUST be keyed by `OutputOccurrenceId`; the root `ObjectId`

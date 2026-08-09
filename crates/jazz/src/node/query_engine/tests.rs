@@ -1559,6 +1559,87 @@ fn current_join_via_can_use_union_relation_input() {
 }
 
 #[test]
+fn union_occurrence_labels_survive_reorder_and_unrelated_arm_insertion() {
+    fn analyzed_labels(inputs: Vec<(&str, &str)>) -> Vec<String> {
+        let nodes = inputs
+            .iter()
+            .map(|(node, label)| {
+                (
+                    RowSetNodeId((*node).to_owned()),
+                    RowSetExpr::Source {
+                        source: source(label, SourceRole::Policy((*label).to_owned())),
+                        visibility: RowVisibility::Visible,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let union_inputs = inputs
+            .iter()
+            .map(|(node, label)| UnionInput {
+                node: RowSetNodeId((*node).to_owned()),
+                label: (*label).to_owned(),
+            })
+            .collect::<Vec<_>>();
+        analyzed_union_labels(&union_inputs, &nodes).expect("unique semantic labels lower")
+    }
+
+    let original = analyzed_labels(vec![("node-a", "direct"), ("node-b", "inherited")]);
+    let reordered_with_insert = analyzed_labels(vec![
+        ("replacement-node-b", "inherited"),
+        ("new-node", "delegated"),
+        ("replacement-node-a", "direct"),
+    ]);
+
+    assert_eq!(original, ["direct", "inherited"]);
+    assert!(reordered_with_insert.contains(&"direct".to_owned()));
+    assert!(reordered_with_insert.contains(&"inherited".to_owned()));
+    assert_eq!(
+        original.into_iter().collect::<BTreeSet<_>>(),
+        reordered_with_insert
+            .into_iter()
+            .filter(|label| label != "delegated")
+            .collect()
+    );
+}
+
+#[test]
+fn union_occurrence_rejects_duplicate_semantic_labels() {
+    let first = RowSetNodeId("first".to_owned());
+    let second = RowSetNodeId("second".to_owned());
+    let nodes = BTreeMap::from([
+        (
+            first.clone(),
+            RowSetExpr::Source {
+                source: source("first", SourceRole::Policy("first".to_owned())),
+                visibility: RowVisibility::Visible,
+            },
+        ),
+        (
+            second.clone(),
+            RowSetExpr::Source {
+                source: source("second", SourceRole::Policy("second".to_owned())),
+                visibility: RowVisibility::Visible,
+            },
+        ),
+    ]);
+    let error = analyzed_union_labels(
+        &[
+            UnionInput {
+                node: first,
+                label: "same".to_owned(),
+            },
+            UnionInput {
+                node: second,
+                label: "same".to_owned(),
+            },
+        ],
+        &nodes,
+    )
+    .expect_err("duplicate semantic arm identity must fail closed");
+    assert!(format!("{error:?}").contains("duplicated"));
+}
+
+#[test]
 fn current_join_via_lowers_source_column_row_id_target_and_correlations() {
     let root = RowSetNodeId("root".to_owned());
     let join_source_node = RowSetNodeId("join-source".to_owned());

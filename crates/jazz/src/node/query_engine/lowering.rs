@@ -1691,12 +1691,7 @@ fn analyze_union(
         ));
     }
 
-    let label_counts = inputs
-        .iter()
-        .fold(BTreeMap::<&str, usize>::new(), |mut counts, input| {
-            *counts.entry(input.label.as_str()).or_default() += 1;
-            counts
-        });
+    let mut labels = BTreeSet::new();
     let mut branches = Vec::new();
     for input in inputs {
         if input.label.is_empty() {
@@ -1704,19 +1699,32 @@ fn analyze_union(
                 "union arm labels must be non-empty stable semantic identities".to_owned(),
             ));
         }
+        if !labels.insert(input.label.as_str()) {
+            return Err(UnsupportedReason::Operator(format!(
+                "union arm label {:?} is duplicated; occurrence identity requires unique stable semantic arm labels",
+                input.label
+            )));
+        }
         let plan = analyze_relation_input_node(&input.node, nodes, visited)?;
-        // Normalized semantic labels are the stable identity. When a producer
-        // repeats one, disambiguate with the stable normalized node id rather
-        // than traversal order, so inserting/reordering siblings does not
-        // churn unchanged ResultKeys.
-        let label = if label_counts[input.label.as_str()] == 1 {
-            input.label.clone()
-        } else {
-            format!("{}\u{0}{}", input.label, input.node.0)
-        };
-        branches.push(UnionBranchPlan { label, plan });
+        branches.push(UnionBranchPlan {
+            label: input.label.clone(),
+            plan,
+        });
     }
     Ok(UnionPlan { branches })
+}
+
+#[cfg(test)]
+pub(super) fn analyzed_union_labels(
+    inputs: &[UnionInput],
+    nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
+) -> Result<Vec<String>, UnsupportedReason> {
+    analyze_union(inputs, nodes, &mut BTreeSet::new()).map(|plan| {
+        plan.branches
+            .into_iter()
+            .map(|branch| branch.label)
+            .collect()
+    })
 }
 
 fn validate_join_relation(plan: &LinearCurrentRoot) -> Result<(), UnsupportedReason> {
