@@ -28,11 +28,19 @@ const MAX_SCHEMA_LINEAGE_DECLARATIONS: usize = 4096;
 const MAX_SCHEMA_LINEAGE_NAME_BYTES: usize = 1024;
 const MAX_SCHEMA_LINEAGE_OPS: usize = 16_384;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct CommitUnitParkMode {
     ingest_context: Option<CommitUnitIngestContext>,
-    edge_authority_mergeable: bool,
-    edge_accepted_mergeable: bool,
+    ingress_role: ParkedIngressRole,
+}
+
+impl Default for CommitUnitParkMode {
+    fn default() -> Self {
+        Self {
+            ingest_context: None,
+            ingress_role: ParkedIngressRole::Authority,
+        }
+    }
 }
 
 struct LargeValueMergeCell {
@@ -428,6 +436,13 @@ where
             .expand_version_carriers_for_receive()
             .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
         match message {
+            SyncMessage::BranchMetadata(metadata) => {
+                self.admit_branch_metadata(metadata)?;
+                self.drain_parked_commit_units()
+            }
+            SyncMessage::FetchBranchMetadata { .. } => Err(Error::UnsupportedSyncMessage(
+                "branch metadata repair must be served by peer state",
+            )),
             SyncMessage::SessionClaims { identity, claims } => {
                 if let Some(context) = ingest_context
                     && context.trust == CommitUnitTrust::TrustedBackend
@@ -622,6 +637,7 @@ where
             self.groove_runtime_token = next_groove_runtime_token();
         }
         let updates = self.drain_parked_commit_units()?;
+        self.drain_parked_relay_commit_units()?;
         self.drain_parked_shape_registrations()?;
         let mut out = vec![SyncMessage::CatalogueAck(CatalogueAck {
             revision: None,
@@ -1269,13 +1285,44 @@ where
         Ok(())
     }
 
+    /// Prepare physical branch storage only after bounded structural checks and
+    /// catalogue dependencies are known to be satisfiable. Missing catalogue
+    /// schemas are left for the ordinary parking path.
+    fn prepare_branch_target_partitions_if_ready(
+        &mut self,
+        tx: &Transaction,
+        versions: &[VersionRecord],
+    ) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
+        let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage else {
+            return Ok(());
+        };
+        if !self.branches.branches.contains_key(&branch_id)
+            || !commit_unit_write_count_matches(tx, versions.len())
+            || versions.iter().any(|version| {
+                !self
+                    .catalogue
+                    .catalogue_schemas
+                    .contains_key(&version.schema_version())
+            })
+        {
+            return Ok(());
+        }
+        self.ensure_branch_target_partitions(branch_id, versions)
+    }
+
     /// Ingest a commit unit as fate authority.
     pub fn ingest_commit_unit(
         &mut self,
         tx: Transaction,
         versions: Vec<VersionRecord>,
         now_ms: u64,
-    ) -> Result<Vec<SyncMessage>, Error> {
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
         self.ingest_commit_unit_with_context(tx, versions, now_ms, None, None)
     }
 
@@ -1289,7 +1336,10 @@ where
         now_ms: u64,
         ingest_context: Option<CommitUnitIngestContext>,
         encoded_len: Option<usize>,
-    ) -> Result<Vec<SyncMessage>, Error> {
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
         if let Some(reason) = commit_unit_limit_violation(&tx, &versions, encoded_len) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
             self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
@@ -1302,6 +1352,7 @@ where
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
             return Ok(updates);
         }
+        self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
         let mut updates = self.ingest_commit_unit_once(tx, versions, now_ms, ingest_context)?;
         updates.extend(self.drain_parked_commit_units()?);
         Ok(updates)
@@ -1317,7 +1368,15 @@ where
         tx: Transaction,
         versions: Vec<VersionRecord>,
         now_ms: u64,
-    ) -> Result<Vec<SyncMessage>, Error> {
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        if commit_unit_limit_violation(&tx, &versions, None).is_none()
+            && commit_unit_write_count_matches(&tx, versions.len())
+        {
+            self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
+        }
         let mut updates =
             self.ingest_edge_authority_mergeable_commit_unit_once(tx, versions, now_ms, None)?;
         updates.extend(self.drain_parked_commit_units()?);
@@ -1332,7 +1391,15 @@ where
         versions: Vec<VersionRecord>,
         now_ms: u64,
         identity: AuthorId,
-    ) -> Result<Vec<SyncMessage>, Error> {
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        if commit_unit_limit_violation(&tx, &versions, None).is_none()
+            && commit_unit_write_count_matches(&tx, versions.len())
+        {
+            self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
+        }
         let ingest_context = Some(CommitUnitIngestContext {
             identity,
             trust: CommitUnitTrust::TrustedBackend,
@@ -1380,12 +1447,17 @@ where
             .get(&tx_id)
             .copied()
             .unwrap_or(stored.tx.made_by);
-        for version in &records {
-            if !self.version_satisfies_write_policy(version, permission_subject)? {
-                let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
-                self.ingest_rejected_transaction(stored.tx, fate)?;
-                return Ok(());
-            }
+        if !self.commit_unit_satisfies_write_policies(
+            &Transaction {
+                permission_subject: Some(permission_subject),
+                ..stored.tx.clone()
+            },
+            &records,
+            None,
+        )? {
+            let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
+            self.ingest_rejected_transaction(stored.tx, fate)?;
+            return Ok(());
         }
         let global_seq = self.clock.next_global_seq;
         self.clock.next_global_seq = self.clock.next_global_seq.next();
@@ -1395,7 +1467,9 @@ where
             Some(global_seq),
             Some(DurabilityTier::Global),
         )?;
-        self.create_merge_versions_for(&records)?;
+        if stored.tx.target_lineage == crate::tx::BranchLineage::Root {
+            self.create_merge_versions_for(&records)?;
+        }
         self.checkpoint_large_values_for_tx(tx_id)
     }
 
@@ -1441,7 +1515,9 @@ where
             Some(global_seq),
             Some(DurabilityTier::Global),
         )?;
-        self.create_merge_versions_for(&versions)?;
+        if tx.target_lineage == crate::tx::BranchLineage::Root {
+            self.create_merge_versions_for(&versions)?;
+        }
         self.checkpoint_large_values_for_tx(tx_id)?;
         Ok(Fate::Accepted)
     }
@@ -1517,12 +1593,23 @@ where
                 }]);
             }
         }
+        if self.park_commit_unit_if_missing_branch_metadata_with_mode(
+            &tx,
+            &versions,
+            now_ms,
+            CommitUnitParkMode {
+                ingress_role: ParkedIngressRole::EdgeAccepted,
+                ..CommitUnitParkMode::default()
+            },
+        )? {
+            return Ok(Vec::new());
+        }
         if self.park_commit_unit_if_missing_schema_versions_with_mode(
             &tx,
             &versions,
             now_ms,
             CommitUnitParkMode {
-                edge_accepted_mergeable: true,
+                ingress_role: ParkedIngressRole::EdgeAccepted,
                 ..CommitUnitParkMode::default()
             },
         )? {
@@ -1534,7 +1621,7 @@ where
             now_ms,
             &mut memo,
             CommitUnitParkMode {
-                edge_accepted_mergeable: true,
+                ingress_role: ParkedIngressRole::EdgeAccepted,
                 ..CommitUnitParkMode::default()
             },
         )? {
@@ -1545,7 +1632,7 @@ where
             &versions,
             now_ms,
             CommitUnitParkMode {
-                edge_accepted_mergeable: true,
+                ingress_role: ParkedIngressRole::EdgeAccepted,
                 ..CommitUnitParkMode::default()
             },
         )? {
@@ -1602,7 +1689,12 @@ where
         self.clock.next_global_seq = self.clock.next_global_seq.next();
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
-        let merge_rows = self.merge_rows_for_versions(&versions)?;
+        let root_target = tx.target_lineage == crate::tx::BranchLineage::Root;
+        let merge_rows = if root_target {
+            self.merge_rows_for_versions(&versions)?
+        } else {
+            Vec::new()
+        };
         self.ingest_known_transaction(
             tx.clone(),
             versions,
@@ -1611,7 +1703,9 @@ where
             durability,
         )?;
         debug_assert_eq!(self.clock.applied_global_watermark, global_seq);
-        self.create_merge_versions_for_rows(merge_rows)?;
+        if root_target {
+            self.create_merge_versions_for_rows(merge_rows)?;
+        }
         self.checkpoint_large_values_for_tx(tx.tx_id)?;
         Ok(vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
@@ -1626,7 +1720,16 @@ where
         &mut self,
         tx: Transaction,
         versions: Vec<VersionRecord>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
+        if commit_unit_limit_violation(&tx, &versions, None).is_some()
+            || !commit_unit_write_count_matches(&tx, versions.len())
+        {
+            return Err(Error::UnsupportedCommitUnit("malformed relay commit unit"));
+        }
+        self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
         self.ingest_relay_commit_unit_once(tx, versions)?;
         self.drain_parked_relay_commit_units()?;
         Ok(())
@@ -1661,24 +1764,43 @@ where
                 "commit unit version count does not match transaction n_total_writes",
             ));
         }
-        if self.park_commit_unit_if_missing_schema_versions(
+        let relay_mode = CommitUnitParkMode {
+            ingress_role: ParkedIngressRole::Relay,
+            ..CommitUnitParkMode::default()
+        };
+        if self.park_commit_unit_if_missing_branch_metadata_with_mode(
             &tx,
             &versions,
             u64::MAX - SKEW_TOLERANCE_MS,
+            relay_mode,
+        )? {
+            return Ok(());
+        }
+        if self.park_commit_unit_if_missing_schema_versions_with_mode(
+            &tx,
+            &versions,
+            u64::MAX - SKEW_TOLERANCE_MS,
+            relay_mode,
         )? {
             return Ok(());
         }
 
         let mut memo = IngestMemo::default();
-        if self.park_commit_unit_if_missing_parents(
+        if self.park_commit_unit_if_missing_parents_with_mode(
             &tx,
             &versions,
             u64::MAX - SKEW_TOLERANCE_MS,
             &mut memo,
+            relay_mode,
         )? {
             return Ok(());
         }
-        if self.park_commit_unit_if_missing_content(&tx, &versions, u64::MAX - SKEW_TOLERANCE_MS)? {
+        if self.park_commit_unit_if_missing_content_with_mode(
+            &tx,
+            &versions,
+            u64::MAX - SKEW_TOLERANCE_MS,
+            relay_mode,
+        )? {
             return Ok(());
         }
 
@@ -1749,6 +1871,17 @@ where
                     durability: fate_update_durability_claim(&existing.fate, existing.durability),
                 }]);
             }
+        }
+        if self.park_commit_unit_if_missing_branch_metadata_with_mode(
+            &tx,
+            &versions,
+            now_ms,
+            CommitUnitParkMode {
+                ingest_context,
+                ..CommitUnitParkMode::default()
+            },
+        )? {
+            return Ok(Vec::new());
         }
         if self.park_commit_unit_if_missing_schema_versions_with_mode(
             &tx,
@@ -1865,7 +1998,12 @@ where
         self.clock.next_global_seq = self.clock.next_global_seq.next();
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
-        let merge_rows = self.merge_rows_for_versions(&versions)?;
+        let root_target = tx.target_lineage == crate::tx::BranchLineage::Root;
+        let merge_rows = if root_target {
+            self.merge_rows_for_versions(&versions)?
+        } else {
+            Vec::new()
+        };
         self.ingest_known_transaction(
             tx.clone(),
             versions,
@@ -1874,7 +2012,9 @@ where
             durability,
         )?;
         debug_assert_eq!(self.clock.applied_global_watermark, global_seq);
-        self.create_merge_versions_for_rows(merge_rows)?;
+        if root_target {
+            self.create_merge_versions_for_rows(merge_rows)?;
+        }
         self.checkpoint_large_values_for_tx(tx.tx_id)?;
         Ok(vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
@@ -1945,14 +2085,24 @@ where
                 }]);
             }
         }
+        if self.park_commit_unit_if_missing_branch_metadata_with_mode(
+            &tx,
+            &versions,
+            now_ms,
+            CommitUnitParkMode {
+                ingest_context,
+                ingress_role: ParkedIngressRole::EdgeAuthority,
+            },
+        )? {
+            return Ok(Vec::new());
+        }
         if self.park_commit_unit_if_missing_schema_versions_with_mode(
             &tx,
             &versions,
             now_ms,
             CommitUnitParkMode {
                 ingest_context,
-                edge_authority_mergeable: true,
-                ..CommitUnitParkMode::default()
+                ingress_role: ParkedIngressRole::EdgeAuthority,
             },
         )? {
             return Ok(Vec::new());
@@ -1964,8 +2114,7 @@ where
             &mut memo,
             CommitUnitParkMode {
                 ingest_context,
-                edge_authority_mergeable: true,
-                ..CommitUnitParkMode::default()
+                ingress_role: ParkedIngressRole::EdgeAuthority,
             },
         )? {
             return Ok(Vec::new());
@@ -1976,8 +2125,7 @@ where
             now_ms,
             CommitUnitParkMode {
                 ingest_context,
-                edge_authority_mergeable: true,
-                ..CommitUnitParkMode::default()
+                ingress_role: ParkedIngressRole::EdgeAuthority,
             },
         )? {
             return Ok(Vec::new());
@@ -2326,6 +2474,8 @@ where
                             updated_by: version.updated_by(),
                             updated_at: version.updated_at(),
                             cells: target_cells,
+                            // Lens translation lacks authored-presence semantics.
+                            authored_columns: None,
                             deletion: version.deletion(),
                         },
                         (target_schema != self.catalogue.current_schema_version_id)
@@ -2457,6 +2607,7 @@ where
             Vec::new()
         };
 
+        let root_target = stored.tx.target_lineage == crate::tx::BranchLineage::Root;
         let mut batch = self.database.open_batch();
         let mut global_current_updates = Vec::new();
         let cleanup_rejected_versions = matches!(stored.fate, Fate::Rejected(_));
@@ -2466,7 +2617,7 @@ where
             .filter(|version| version.layer() == VersionLayer::Content)
             .cloned()
             .collect::<Vec<_>>();
-        if matches!(stored.fate, Fate::Accepted) && stored.global_seq.is_some() {
+        if root_target && matches!(stored.fate, Fate::Accepted) && stored.global_seq.is_some() {
             global_current_updates =
                 self.global_current_updates_for_versions(tx_id, &tx_versions)?;
         }
@@ -2501,7 +2652,7 @@ where
                 stored.durability,
             ),
         );
-        if !matches!(stored.fate, Fate::Rejected(_)) {
+        if root_target && !matches!(stored.fate, Fate::Rejected(_)) {
             for version in &content_versions {
                 self.update_merge_heads_for_content_version(&mut batch, version)?;
             }
@@ -2522,7 +2673,8 @@ where
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if matches!(stored.fate, Fate::Rejected(_)) || stored.global_seq.is_some() {
+        if root_target && (matches!(stored.fate, Fate::Rejected(_)) || stored.global_seq.is_some())
+        {
             self.cleanup_fated_ahead_current_for_versions(&mut batch, &tx_versions)?;
         }
         for global_seq in advanced_global_seqs
@@ -2532,7 +2684,7 @@ where
         {
             self.prune_ahead_current_for_global_seq(&mut batch, global_seq)?;
         }
-        let rejected_payload = if cleanup_rejected_versions {
+        let rejected_payload = if root_target && cleanup_rejected_versions {
             self.remove_rejected_local_versions(tx_id, &stored, &mut batch)?
         } else {
             None
@@ -2544,14 +2696,16 @@ where
         }
         #[cfg(test)]
         {
-            let rows = content_versions
-                .iter()
-                .map(|version| (version.table().to_owned(), version.row_uuid()))
-                .collect::<BTreeSet<_>>();
-            self.assert_merge_head_rows_match_history_for_test(&rows)?;
-            self.assert_global_current_updates_match_history_for_test(
-                &global_current_update_versions,
-            )?;
+            if root_target {
+                let rows = content_versions
+                    .iter()
+                    .map(|version| (version.table().to_owned(), version.row_uuid()))
+                    .collect::<BTreeSet<_>>();
+                self.assert_merge_head_rows_match_history_for_test(&rows)?;
+                self.assert_global_current_updates_match_history_for_test(
+                    &global_current_update_versions,
+                )?;
+            }
         }
         if let Some(rejected_payload) = rejected_payload {
             let tx_id = rejected_payload.tx_id();
@@ -2749,6 +2903,32 @@ where
             }
             None => tx.permission_subject.unwrap_or(tx.made_by),
         };
+        if let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage {
+            let branch = self
+                .branches
+                .branches
+                .get(&branch_id)
+                .cloned()
+                .ok_or(Error::BranchNotFound(branch_id))?;
+            if branch.state != codec::BranchState::Open {
+                return Ok(false);
+            }
+            if !self.branch_write_policy_allows(branch_id, permission_subject)? {
+                return Ok(false);
+            }
+            for version in versions {
+                let table = self.table_in_schema(version.table(), version.schema_version())?;
+                if !self.branch_table_write_policy_allows_version_record(
+                    &branch,
+                    &table,
+                    version,
+                    permission_subject,
+                )? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
         for version in versions {
             if !self.version_satisfies_write_policy(version, permission_subject)? {
                 return Ok(false);
@@ -2774,22 +2954,6 @@ where
         None
     }
 
-    pub(super) fn park_commit_unit_if_missing_parents(
-        &mut self,
-        tx: &Transaction,
-        versions: &[VersionRecord],
-        now_ms: u64,
-        memo: &mut IngestMemo,
-    ) -> Result<bool, Error> {
-        self.park_commit_unit_if_missing_parents_with_mode(
-            tx,
-            versions,
-            now_ms,
-            memo,
-            CommitUnitParkMode::default(),
-        )
-    }
-
     pub(super) fn park_commit_unit_if_missing_parents_with_mode(
         &mut self,
         tx: &Transaction,
@@ -2808,8 +2972,7 @@ where
             if existing.ingest_context != mode.ingest_context {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
-            existing.edge_authority_mergeable |= mode.edge_authority_mergeable;
-            existing.edge_accepted_mergeable |= mode.edge_accepted_mergeable;
+            existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
             return Ok(true);
         }
         self.sync_metrics.parked_orphans += 1;
@@ -2820,25 +2983,10 @@ where
                 versions: versions.to_vec(),
                 now_ms,
                 ingest_context: mode.ingest_context,
-                edge_authority_mergeable: mode.edge_authority_mergeable,
-                edge_accepted_mergeable: mode.edge_accepted_mergeable,
+                ingress_role: mode.ingress_role,
             },
         );
         Ok(true)
-    }
-
-    pub(super) fn park_commit_unit_if_missing_schema_versions(
-        &mut self,
-        tx: &Transaction,
-        versions: &[VersionRecord],
-        now_ms: u64,
-    ) -> Result<bool, Error> {
-        self.park_commit_unit_if_missing_schema_versions_with_mode(
-            tx,
-            versions,
-            now_ms,
-            CommitUnitParkMode::default(),
-        )
     }
 
     pub(super) fn park_commit_unit_if_missing_schema_versions_with_mode(
@@ -2862,8 +3010,7 @@ where
             if existing.ingest_context != mode.ingest_context {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
-            existing.edge_authority_mergeable |= mode.edge_authority_mergeable;
-            existing.edge_accepted_mergeable |= mode.edge_accepted_mergeable;
+            existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
             return Ok(true);
         }
         self.sync_metrics.parked_orphans += 1;
@@ -2876,25 +3023,51 @@ where
                 versions: versions.to_vec(),
                 now_ms,
                 ingest_context: mode.ingest_context,
-                edge_authority_mergeable: mode.edge_authority_mergeable,
-                edge_accepted_mergeable: mode.edge_accepted_mergeable,
+                ingress_role: mode.ingress_role,
             },
         );
         Ok(true)
     }
 
-    pub(super) fn park_commit_unit_if_missing_content(
+    /// Park a branch-targeted unit until the authenticated routing record has
+    /// arrived.  Branch metadata is a transport prerequisite, not a synthetic
+    /// transaction parent, so this deliberately shares the ordinary bounded
+    /// orphan queue and its idempotence/conflict checks.
+    pub(super) fn park_commit_unit_if_missing_branch_metadata_with_mode(
         &mut self,
         tx: &Transaction,
         versions: &[VersionRecord],
         now_ms: u64,
+        mode: CommitUnitParkMode,
     ) -> Result<bool, Error> {
-        self.park_commit_unit_if_missing_content_with_mode(
-            tx,
-            versions,
-            now_ms,
-            CommitUnitParkMode::default(),
-        )
+        let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage else {
+            return Ok(false);
+        };
+        if self.branches.branches.contains_key(&branch_id) {
+            return Ok(false);
+        }
+        if let Some(existing) = self.parking.parked_commit_units.get_mut(&tx.tx_id) {
+            if existing.tx != *tx
+                || existing.versions != versions
+                || existing.ingest_context != mode.ingest_context
+            {
+                return Err(Error::ConflictingCommitUnit(tx.tx_id));
+            }
+            existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
+            return Ok(true);
+        }
+        self.sync_metrics.parked_orphans += 1;
+        self.parking.parked_commit_units.insert(
+            tx.tx_id,
+            ParkedCommitUnit {
+                tx: tx.clone(),
+                versions: versions.to_vec(),
+                now_ms,
+                ingest_context: mode.ingest_context,
+                ingress_role: mode.ingress_role,
+            },
+        );
+        Ok(true)
     }
 
     pub(super) fn park_commit_unit_if_missing_content_with_mode(
@@ -2914,8 +3087,7 @@ where
             if existing.ingest_context != mode.ingest_context {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
-            existing.edge_authority_mergeable |= mode.edge_authority_mergeable;
-            existing.edge_accepted_mergeable |= mode.edge_accepted_mergeable;
+            existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
             return Ok(true);
         }
         self.sync_metrics.parked_orphans += 1;
@@ -2926,8 +3098,7 @@ where
                 versions: versions.to_vec(),
                 now_ms,
                 ingest_context: mode.ingest_context,
-                edge_authority_mergeable: mode.edge_authority_mergeable,
-                edge_accepted_mergeable: mode.edge_accepted_mergeable,
+                ingress_role: mode.ingress_role,
             },
         );
         Ok(true)
@@ -2987,13 +3158,17 @@ where
         Ok(true)
     }
 
-    pub(super) fn drain_parked_commit_units(&mut self) -> Result<Vec<SyncMessage>, Error> {
+    pub(super) fn drain_parked_commit_units(&mut self) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
         let mut updates = Vec::new();
         loop {
             let parked = self
                 .parking
                 .parked_commit_units
                 .iter()
+                .filter(|(_, unit)| unit.ingress_role != ParkedIngressRole::Relay)
                 .map(|(tx_id, unit)| (*tx_id, unit.versions.clone()))
                 .collect::<Vec<_>>();
             let mut ready = Vec::new();
@@ -3002,7 +3177,10 @@ where
                     self.catalogue
                         .catalogue_schemas
                         .contains_key(&version.schema_version())
-                }) && self.missing_parent_refs(&versions)?.is_empty()
+                }) && branch_metadata_available(
+                    self,
+                    &self.parking.parked_commit_units[&tx_id].tx,
+                ) && self.missing_parent_refs(&versions)?.is_empty()
                     && self.missing_content_refs(&versions)?.is_empty()
                 {
                     ready.push(tx_id);
@@ -3012,6 +3190,9 @@ where
                 break;
             }
             for tx_id in ready {
+                if let Some(unit) = self.parking.parked_commit_units.get(&tx_id).cloned() {
+                    self.prepare_branch_target_partitions_if_ready(&unit.tx, &unit.versions)?;
+                }
                 let Some(unit) = self.parking.parked_commit_units.remove(&tx_id) else {
                     continue;
                 };
@@ -3019,13 +3200,13 @@ where
                 if self.parking.parked_catalogue_commit_units.remove(&tx_id) {
                     self.sync_metrics.parked_catalogue_orphans_resolved += 1;
                 }
-                if unit.edge_accepted_mergeable {
+                if unit.ingress_role == ParkedIngressRole::EdgeAccepted {
                     updates.extend(self.finalize_edge_accepted_mergeable_commit_unit_once(
                         unit.tx,
                         unit.versions,
                         unit.now_ms,
                     )?);
-                } else if unit.edge_authority_mergeable {
+                } else if unit.ingress_role == ParkedIngressRole::EdgeAuthority {
                     updates.extend(self.ingest_edge_authority_mergeable_commit_unit_once(
                         unit.tx,
                         unit.versions,
@@ -3045,12 +3226,16 @@ where
         Ok(updates)
     }
 
-    pub(super) fn drain_parked_relay_commit_units(&mut self) -> Result<(), Error> {
+    pub(super) fn drain_parked_relay_commit_units(&mut self) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
         loop {
             let parked = self
                 .parking
                 .parked_commit_units
                 .iter()
+                .filter(|(_, unit)| unit.ingress_role == ParkedIngressRole::Relay)
                 .map(|(tx_id, unit)| (*tx_id, unit.versions.clone()))
                 .collect::<Vec<_>>();
             let mut ready = Vec::new();
@@ -3059,7 +3244,10 @@ where
                     self.catalogue
                         .catalogue_schemas
                         .contains_key(&version.schema_version())
-                }) && self.missing_parent_refs(&versions)?.is_empty()
+                }) && branch_metadata_available(
+                    self,
+                    &self.parking.parked_commit_units[&tx_id].tx,
+                ) && self.missing_parent_refs(&versions)?.is_empty()
                     && self.missing_content_refs(&versions)?.is_empty()
                 {
                     ready.push(tx_id);
@@ -3069,6 +3257,9 @@ where
                 break;
             }
             for tx_id in ready {
+                if let Some(unit) = self.parking.parked_commit_units.get(&tx_id).cloned() {
+                    self.prepare_branch_target_partitions_if_ready(&unit.tx, &unit.versions)?;
+                }
                 let Some(unit) = self.parking.parked_commit_units.remove(&tx_id) else {
                     continue;
                 };
@@ -3398,11 +3589,18 @@ where
             if record.deletion().is_some() {
                 continue;
             }
-            let (_, table) = self.translate_cells_to_current_write_schema(
+            let (projected_schema, table) = self.translate_cells_to_current_write_schema(
                 record.schema_version(),
                 record.table(),
                 &mut BTreeMap::new(),
             )?;
+            // Synthetic merge versions are authored in the current write
+            // schema. An otherwise valid version in an unreconciled schema
+            // has its own physical lineage and merge-head set, but cannot be
+            // semantically merged into the write schema until a lens exists.
+            if projected_schema != self.catalogue.current_write_schema.schema {
+                continue;
+            }
             rows.push((table, record.row_uuid()));
         }
         rows.sort_unstable();
@@ -3536,6 +3734,12 @@ where
                     }
                     let mut best: Option<(crate::time::TxTimeSortKey, Value)> = None;
                     for version in heads {
+                        if version
+                            .authored_columns(table_schema)?
+                            .is_some_and(|columns| !columns.contains(&column.name))
+                        {
+                            continue;
+                        }
                         let Some(value) = version.cell(table_schema, &column.name)? else {
                             continue;
                         };
@@ -5179,6 +5383,8 @@ where
         update_current_indexes: bool,
     ) -> Result<(), Error> {
         self.merge_tx_time(tx.tx_id.time);
+        let update_current_indexes =
+            update_current_indexes && tx.target_lineage == crate::tx::BranchLineage::Root;
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node)?;
         let tx_already_known = self.query_transaction(tx.tx_id)?.is_some();
         let tx_values =
@@ -5213,47 +5419,66 @@ where
         for version in versions {
             let author_schema = version.schema_version();
             let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
-            let mut target_table = version.table().to_owned();
-            let mut target_cells = source_table_schema
-                .columns
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, column)| {
-                    version
-                        .optional_cell_at(idx)
-                        .map(|value| (column.name.clone(), value))
-                })
-                .collect::<BTreeMap<_, _>>();
-            let (target_schema, translated_table) = self.translate_cells_to_current_write_schema(
-                author_schema,
-                &target_table,
-                &mut target_cells,
-            )?;
-            target_table = translated_table;
-            let table_schema = self.table_in_schema(&target_table, target_schema)?;
-            let schema_version_alias = self.ensure_schema_version_alias(target_schema)?;
+            let (table_schema, _target_schema, stored) =
+                if author_schema != self.catalogue.current_write_schema.schema {
+                    let mut target_table = version.table().to_owned();
+                    let mut target_cells = source_table_schema
+                        .columns
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(idx, column)| {
+                            version
+                                .optional_cell_at(idx)
+                                .map(|value| (column.name.clone(), value))
+                        })
+                        .collect::<BTreeMap<_, _>>();
+                    let (target_schema, translated_table) = self
+                        .translate_cells_to_current_write_schema(
+                            author_schema,
+                            &target_table,
+                            &mut target_cells,
+                        )?;
+                    target_table = translated_table;
+                    let table_schema = self.table_in_schema(&target_table, target_schema)?;
+                    let schema_version_alias = self.ensure_schema_version_alias(target_schema)?;
+                    let stored = VersionRow::from_parts_with_schema_version(
+                        &table_schema,
+                        VersionRowParts {
+                            table: target_table,
+                            row_uuid: version.row_uuid(),
+                            tx_node_alias,
+                            schema_version_alias,
+                            tx_time: tx.tx_id.time,
+                            parents: version.parents(),
+                            created_by: version.created_by(),
+                            created_at: version.created_at(),
+                            updated_by: version.updated_by(),
+                            updated_at: version.updated_at(),
+                            cells: target_cells,
+                            // Lens translation lacks authored-presence semantics.
+                            authored_columns: None,
+                            deletion: version.deletion(),
+                        },
+                        (target_schema != self.catalogue.current_schema_version_id)
+                            .then_some(target_schema),
+                    )?;
+                    (table_schema, target_schema, stored)
+                } else {
+                    let schema_version_alias = self.ensure_schema_version_alias(author_schema)?;
+                    let stored = VersionRow::from_wire_with_schema_version(
+                        &source_table_schema,
+                        &version,
+                        tx_node_alias,
+                        schema_version_alias,
+                        tx.tx_id.time,
+                        (author_schema != self.catalogue.current_schema_version_id)
+                            .then_some(author_schema),
+                    )?;
+                    (source_table_schema, author_schema, stored)
+                };
             let layer = VersionLayer::for_record(&version);
             let previous_current =
                 self.query_local_layer_winner(&table_schema.name, version.row_uuid(), layer)?;
-            let stored = VersionRow::from_parts_with_schema_version(
-                &table_schema,
-                VersionRowParts {
-                    table: target_table,
-                    row_uuid: version.row_uuid(),
-                    tx_node_alias,
-                    schema_version_alias,
-                    tx_time: tx.tx_id.time,
-                    parents: version.parents(),
-                    created_by: version.created_by(),
-                    created_at: version.created_at(),
-                    updated_by: version.updated_by(),
-                    updated_at: version.updated_at(),
-                    cells: target_cells,
-                    deletion: version.deletion(),
-                },
-                (target_schema != self.catalogue.current_schema_version_id)
-                    .then_some(target_schema),
-            )?;
             let previous_winner = if let Some(previous) = previous_current.as_ref() {
                 let previous_tx_id = self.version_tx_id(previous)?;
                 let previous_made_at = if previous_tx_id == tx.tx_id {
@@ -5308,7 +5533,12 @@ where
                     }
                 }
             }
-            let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
+            let (history_table, groove_record) = match tx.target_lineage {
+                crate::tx::BranchLineage::Root => self.version_storage_write_binding(&stored)?,
+                crate::tx::BranchLineage::Branch(branch_id) => {
+                    self.branch_version_storage_write_binding(&stored, branch_id)?
+                }
+            };
             if tx_already_known {
                 let existing = self.database.primary_key_get_raw_in_batch(
                     batch,
@@ -5342,7 +5572,7 @@ where
                 self.write_ahead_current_insert(batch, &stored)?;
             }
         }
-        if !matches!(fate, Fate::Rejected(_)) {
+        if update_current_indexes && !matches!(fate, Fate::Rejected(_)) {
             for stored in &content_versions {
                 self.update_merge_heads_for_content_version_in_batch(batch, stored)?;
             }
@@ -5835,6 +6065,13 @@ fn counter_value_from_i128(
         _ => Err(Error::InvalidStoredValue(
             "counter strategy requires integer column",
         )),
+    }
+}
+
+fn branch_metadata_available<S: OrderedKvStorage>(node: &NodeState<S>, tx: &Transaction) -> bool {
+    match tx.target_lineage {
+        crate::tx::BranchLineage::Root => true,
+        crate::tx::BranchLineage::Branch(branch) => node.branches.branches.contains_key(&branch),
     }
 }
 

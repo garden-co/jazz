@@ -10,7 +10,7 @@ use std::sync::mpsc::TryRecvError;
 
 use groove::db::{StorageReadBucket, StorageReadMetrics};
 use groove::ivm::MultisinkSubscription;
-use groove::storage::OrderedKvStorage;
+use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use web_time::Instant;
 
 use crate::ids::{AuthorId, RowUuid};
@@ -1731,7 +1731,7 @@ impl PeerState {
         now_ms: u64,
     ) -> Result<Vec<SyncMessage>, Error>
     where
-        S: OrderedKvStorage,
+        S: OrderedKvStorage + ReopenableStorage,
     {
         self.evict_idle_edge_scope_subscriptions(node, now_ms);
         if tx.kind != TxKind::Mergeable {
@@ -1780,7 +1780,7 @@ impl PeerState {
         now_ms: u64,
     ) -> Result<Vec<SyncMessage>, Error>
     where
-        S: OrderedKvStorage,
+        S: OrderedKvStorage + ReopenableStorage,
     {
         self.evict_idle_edge_scope_subscriptions(node, now_ms);
         let deferred = self

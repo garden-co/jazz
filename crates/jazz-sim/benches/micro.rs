@@ -11,7 +11,7 @@ use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::protocol::{SyncMessage, VersionRecord};
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::time::TxTime;
-use jazz::tx::{DeletionEvent, DurabilityTier, Fate, Transaction};
+use jazz::tx::{BranchLineage, DeletionEvent, DurabilityTier, Fate, Transaction};
 use jazz_sim::{emit_json_line, metadata_fields};
 use serde_json::{Map, Value as JsonValue, json};
 
@@ -231,7 +231,7 @@ fn run_commit_unit(config: &Config) {
                     node((rows_per_unit % 200) as u8 + 1),
                 ),
                 kind: jazz::tx::TxKind::Mergeable,
-                source_branch: None,
+                branch_merge: None,
                 n_total_writes: rows_per_unit.try_into().expect("rows per unit fits u32"),
                 made_by: AuthorId::SYSTEM,
                 permission_subject: None,
@@ -240,6 +240,7 @@ fn run_commit_unit(config: &Config) {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
+                target_lineage: BranchLineage::Root,
                 merge_strategy: None,
             };
             let unit = SyncMessage::CommitUnit {

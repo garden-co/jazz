@@ -39,6 +39,11 @@ impl QueryResult {
             .find(|field| field.name == name)
             .map(|field| &field.value)
     }
+
+    /// Consume this result and return its values in declared output order.
+    pub fn into_values(self) -> Vec<Value> {
+        self.fields.into_iter().map(|field| field.value).collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

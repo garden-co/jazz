@@ -16,7 +16,9 @@ use crate::query::{
     RelationQuery, ShapeId, ValidatedQuery, claim, col, contains, eq, gt, lit, ne, not, param,
 };
 use crate::schema::{MergeStrategy, Policy};
-use crate::tx::MergeAspect;
+use crate::tx::{
+    BranchLineage, ContributionComponent, ContributionCoordinate, ContributionDot, MergeAspect,
+};
 use groove::schema::{ColumnSchema, ColumnType};
 use groove::storage::{
     BtreeSyncPolicy, ColumnFamilyName, Key, MemoryStorage, NativeBtreeStorage, OrderedKvStorage,

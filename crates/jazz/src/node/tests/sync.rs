@@ -619,7 +619,8 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        source_branch: None,
+        target_lineage: crate::tx::BranchLineage::Root,
+        branch_merge: None,
         merge_strategy: None,
     };
     let first = version_record(row(1), Vec::new(), title_cells("one"), None);
@@ -713,7 +714,8 @@ fn sequential_partial_exclusive_bundles_index_the_complete_transaction() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        source_branch: None,
+        target_lineage: crate::tx::BranchLineage::Root,
+        branch_merge: None,
         merge_strategy: None,
     };
     let updates = [
@@ -759,7 +761,8 @@ fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        source_branch: None,
+        target_lineage: crate::tx::BranchLineage::Root,
+        branch_merge: None,
         merge_strategy: None,
     };
     reader
@@ -950,7 +953,8 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        source_branch: None,
+        target_lineage: crate::tx::BranchLineage::Root,
+        branch_merge: None,
         merge_strategy: None,
     };
     let first = version_record(row(1), Vec::new(), title_cells("one"), None);
@@ -1267,7 +1271,8 @@ fn originating_causality_rejection_retains_child_payload() {
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json: None,
-            source_branch: None,
+            target_lineage: crate::tx::BranchLineage::Root,
+            branch_merge: None,
             merge_strategy: None,
         },
         vec![version_record(row, Vec::new(), title_cells("parent"), None)],
@@ -1555,7 +1560,8 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
                     absent_read_set: None,
                     predicate_read_set: None,
                     user_metadata_json: None,
-                    source_branch: None,
+                    target_lineage: crate::tx::BranchLineage::Root,
+                    branch_merge: None,
                     merge_strategy: None,
                 },
                 versions: Vec::new(),
@@ -1997,7 +2003,8 @@ fn seed_policy_graph_known_global(
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
-                source_branch: None,
+                target_lineage: crate::tx::BranchLineage::Root,
+                branch_merge: None,
                 merge_strategy: None,
             },
             vec![version],
@@ -3672,7 +3679,8 @@ fn duplicate_commit_units_compare_versions_without_wire_order() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        source_branch: None,
+        target_lineage: crate::tx::BranchLineage::Root,
+        branch_merge: None,
         merge_strategy: None,
     };
     let versions = vec![
@@ -3687,5 +3695,82 @@ fn duplicate_commit_units_compare_versions_without_wire_order() {
     assert!(
         core.ingest_commit_unit(tx, reversed, u64::MAX - SKEW_TOLERANCE_MS)
             .is_ok()
+    );
+}
+/// A locally pending partial update is rebuilt from durable history after
+/// `bob` reopens, then uploaded as a real commit unit. Its explicitly authored
+/// `title` wins while `alice`'s concurrent `completed` edit survives.
+///
+/// ```text
+/// base(base,false) ─┬─ alice(completed=true) ──┐
+///                   └─ bob(title=base) ─ reopen ─ upload ─┴─► base,true
+/// ```
+///
+/// Planted positive: force `VersionRecord::from_stored` to attach
+/// `authored_columns=None`. Bob's materialized `completed=false` then appears
+/// authored on the rebuilt wire unit and this test fails.
+#[test]
+fn reopened_pending_partial_update_upload_preserves_authored_columns() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("completed", ColumnType::Bool),
+        ],
+    )]);
+    let (bob_dir, mut bob) = open_node_with_schema(node(0x91), schema.clone());
+    let (_alice_dir, mut alice) = open_node_with_schema(node(0x92), schema.clone());
+    let (_core_dir, mut core) =
+        open_history_complete_node_with_schema(node(0x93), schema.clone());
+    let row_uuid = row(0x91);
+
+    let (base, base_unit) = bob
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 10).cells(BTreeMap::from([
+                ("title".to_owned(), Value::String("base".to_owned())),
+                ("completed".to_owned(), Value::Bool(false)),
+            ])),
+        )
+        .unwrap();
+    let [base_fate] = core.apply_sync_message(base_unit).unwrap().try_into().unwrap();
+    bob.apply_sync_message(base_fate).unwrap();
+
+    let (_alice_tx, alice_unit) = alice
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 20)
+                .parents(vec![base])
+                .cells(BTreeMap::from([(
+                    "completed".to_owned(),
+                    Value::Bool(true),
+                )])),
+        )
+        .unwrap();
+    core.apply_sync_message(alice_unit).unwrap();
+
+    let bob_tx = bob
+        .commit_mergeable(
+            MergeableCommit::new("todos", row_uuid, 30)
+                .parents(vec![base])
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), Value::String("base".to_owned())),
+                    ("completed".to_owned(), Value::Bool(false)),
+                ]))
+                .authored_columns(BTreeSet::from(["title".to_owned()])),
+        )
+        .unwrap();
+    drop(bob);
+
+    let mut reopened = reopen_node_at(&bob_dir, node(0x91), schema);
+    let rebuilt = reopened.commit_unit_for(bob_tx).unwrap();
+    core.apply_sync_message(rebuilt).unwrap();
+
+    let rows = core.current_rows("todos", DurabilityTier::Local).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].test_cells_by_descriptor(),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("base".to_owned())),
+            ("completed".to_owned(), Value::Bool(true)),
+        ])
     );
 }

@@ -126,6 +126,9 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
                     )
                 })
                 .collect(),
+            authored_columns: deletion
+                .is_none()
+                .then(|| table.columns.iter().map(|column| column.name.clone()).collect()),
             deletion,
         }
     }
@@ -490,7 +493,8 @@ fn late_lower_hlc_child_is_rejected_at_admission() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
-            source_branch: None,
+                target_lineage: crate::tx::BranchLineage::Root,
+                branch_merge: None,
             merge_strategy: None,
             },
             vec![version_record(row, Vec::new(), title_cells("parent"), None)],
@@ -520,7 +524,8 @@ fn late_lower_hlc_child_is_rejected_at_admission() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
-            source_branch: None,
+                target_lineage: crate::tx::BranchLineage::Root,
+                branch_merge: None,
             merge_strategy: None,
             },
             vec![version_record(
@@ -574,7 +579,8 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
-            source_branch: None,
+                target_lineage: crate::tx::BranchLineage::Root,
+                branch_merge: None,
             merge_strategy: None,
             },
             vec![version_record(row, Vec::new(), title_cells("parent"), None)],
@@ -603,7 +609,8 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
-            source_branch: None,
+                target_lineage: crate::tx::BranchLineage::Root,
+                branch_merge: None,
             merge_strategy: None,
             },
             vec![version_record(

@@ -479,6 +479,7 @@ fn version_witness_public_fields(
         schema.identity.tx_node_field.clone(),
         schema.identity.schema_field.clone(),
         schema.parents_field.clone(),
+        schema.authored_columns_field.clone(),
         schema.created_by_field.clone(),
         schema.created_at_field.clone(),
         schema.updated_by_field.clone(),
@@ -876,7 +877,11 @@ where
                 .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
             let rows = self
                 .node
-                .branch_current_rows(&request.source.table, &branch)
+                .branch_current_rows_for_schema(
+                    &request.source.table,
+                    &branch,
+                    self.read_view.read_schema,
+                )
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             let schema_version_alias = self
                 .node
@@ -1641,7 +1646,12 @@ fn selected_visible_current_primary_key_graph(
         .iter()
         .map(|column| user_column_field(&column.name))
         .collect::<Vec<_>>();
-    let mut content_fields = vec!["row_uuid".to_owned()];
+    let mut content_fields = vec![
+        "row_uuid".to_owned(),
+        "schema_version".to_owned(),
+        "parents".to_owned(),
+        "authored_columns".to_owned(),
+    ];
     content_fields.extend(user_fields.iter().cloned());
     content_fields.extend([
         "created_by".to_owned(),
@@ -1916,6 +1926,7 @@ where
             ProjectField::literal("layer", Value::String("content".to_owned())),
             ProjectField::named("schema_version"),
             ProjectField::named("parents"),
+            ProjectField::named("authored_columns"),
             ProjectField::renamed("$createdBy", "created_by"),
             ProjectField::renamed("$createdAt", "created_at"),
             ProjectField::renamed("$updatedBy", "updated_by"),
@@ -2083,6 +2094,7 @@ fn canonical_current_source_fields(
         fields.extend([
             ProjectField::named("schema_version"),
             ProjectField::named("parents"),
+            ProjectField::named("authored_columns"),
         ]);
     }
     fields
@@ -2122,6 +2134,7 @@ fn storage_to_canonical_current_source_fields(
         fields.extend([
             ProjectField::named("schema_version"),
             ProjectField::named("parents"),
+            ProjectField::named("authored_columns"),
         ]);
     }
     if include_settle_position {
@@ -2151,6 +2164,10 @@ fn current_row_descriptor_with_hidden_source_fields(
             ("created_at".to_owned(), ValueType::U64),
             ("updated_by".to_owned(), ValueType::Uuid),
             ("updated_at".to_owned(), ValueType::U64),
+            (
+                "authored_columns".to_owned(),
+                ValueType::Nullable(Box::new(ValueType::Bytes)),
+            ),
         ]);
         if let Some(SourceMetadataFields::VersionWitnesses {
             branch_or_prefix_field: Some(field),
@@ -11589,7 +11606,11 @@ fn global_current_storage_fields(
 ) -> Vec<String> {
     let mut fields = vec!["row_uuid".to_owned()];
     if include_version {
-        fields.extend(["schema_version".to_owned(), "parents".to_owned()]);
+        fields.extend([
+            "schema_version".to_owned(),
+            "parents".to_owned(),
+            "authored_columns".to_owned(),
+        ]);
     }
     fields.extend(
         table
@@ -11797,6 +11818,7 @@ fn inline_current_record_with_source_metadata(
             Value::U64(provenance.created_at.0),
             Value::Uuid(provenance.updated_by.0),
             Value::U64(provenance.updated_at.0),
+            Value::Nullable(None),
         ]);
     }
     if descriptor.field_index("coverage").is_some() {
@@ -11955,6 +11977,7 @@ fn inline_branch_current_record(
             Value::U64(provenance.created_at.0),
             Value::Uuid(provenance.updated_by.0),
             Value::U64(provenance.updated_at.0),
+            Value::Nullable(None),
         ]);
         if descriptor.field_index("branch_id").is_some() {
             values.push(Value::Uuid(branch_id.0));
@@ -12103,7 +12126,12 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
         .iter()
         .map(|column| user_column_field(&column.name))
         .collect::<Vec<_>>();
-    let mut content_storage_fields = vec!["row_uuid".to_owned()];
+    let mut content_storage_fields = vec![
+        "row_uuid".to_owned(),
+        "schema_version".to_owned(),
+        "parents".to_owned(),
+        "authored_columns".to_owned(),
+    ];
     content_storage_fields.extend(user_fields.iter().cloned());
     content_storage_fields.push("created_by".to_owned());
     content_storage_fields.push("created_at".to_owned());
@@ -12268,6 +12296,7 @@ fn maintained_view_history_storage_field_names(table: &TableSchema) -> Vec<Strin
             .iter()
             .map(|column| user_column_field(&column.name)),
     );
+    fields.push("authored_columns".to_owned());
     fields
 }
 

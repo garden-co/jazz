@@ -337,6 +337,7 @@ pub(crate) fn branch_metadata_table_schema() -> TableSchema {
         "jazz_branches",
         [
             ColumnSchema::new("branch_id", GrooveColumnType::Uuid),
+            ColumnSchema::new("created_by", GrooveColumnType::Uuid),
             ColumnSchema::new("parent", GrooveColumnType::Uuid.nullable()),
             ColumnSchema::new("base_global", GrooveColumnType::U64.nullable()),
             ColumnSchema::new("state", GrooveColumnType::String),
@@ -697,7 +698,6 @@ impl TableSchema {
                 user_column.column_type.clone().nullable(),
             )
         }));
-
         GrooveTableSchema::new(format!("jazz_{}_rejected_versions", self.name), columns)
             .with_primary_key(PrimaryKey::composite([
                 PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
@@ -730,6 +730,12 @@ impl TableSchema {
                 user_column.column_type.clone().nullable(),
             )
         }));
+        // Absent on legacy records. When present, this is a serialized set of
+        // user columns explicitly authored by this version.
+        columns.push(column(
+            "authored_columns",
+            GrooveColumnType::Bytes.nullable(),
+        ));
 
         GrooveTableSchema::new(name, columns)
             .with_primary_key(PrimaryKey::composite([
@@ -801,6 +807,10 @@ impl TableSchema {
                 user_column.column_type.clone().nullable(),
             )
         }));
+        content_columns.push(column(
+            "authored_columns",
+            GrooveColumnType::Bytes.nullable(),
+        ));
         let mut content_table = GrooveTableSchema::new(
             format!("jazz_{}_global_current", self.name),
             content_columns,
@@ -854,6 +864,10 @@ impl TableSchema {
                 user_column.column_type.clone().nullable(),
             )
         }));
+        content_columns.push(column(
+            "authored_columns",
+            GrooveColumnType::Bytes.nullable(),
+        ));
         vec![
             GrooveTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
                 .with_primary_key(PrimaryKey::composite([
@@ -1008,12 +1022,14 @@ fn branches_table() -> GrooveTableSchema {
         "jazz_branches",
         [
             column("branch_id", GrooveColumnType::Uuid),
+            column("created_by", GrooveColumnType::Uuid),
             column("parent", GrooveColumnType::Uuid.nullable()),
-            column("base_global", GrooveColumnType::U64.nullable()),
+            column("base_snapshot", GrooveColumnType::Bytes.nullable()),
             column(
                 "state",
                 storage_enum("jazz_branch_state", &["open", "merged", "discarded"]),
             ),
+            column("metadata_pending", GrooveColumnType::Bool),
         ],
     )
     .with_primary_key(PrimaryKey::composite([PrimaryKeyColumn::uuid("branch_id")]))
@@ -1175,7 +1191,8 @@ fn transactions_table() -> GrooveTableSchema {
             column("absent_read_set", GrooveColumnType::Bytes.nullable()),
             column("predicate_read_set", GrooveColumnType::Bytes.nullable()),
             column("user_metadata", GrooveColumnType::String.nullable()),
-            column("source_branch", GrooveColumnType::Uuid.nullable()),
+            column("target_lineage", GrooveColumnType::Bytes),
+            column("branch_merge", GrooveColumnType::Bytes.nullable()),
             column("permission_subject", GrooveColumnType::Uuid.nullable()),
             column("merge_strategy", GrooveColumnType::String.nullable()),
             // upstream-decided: written only by fate/state application.

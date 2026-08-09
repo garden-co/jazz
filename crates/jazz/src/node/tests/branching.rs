@@ -345,6 +345,11 @@ fn branches_do_not_observe_sibling_overlays_and_recover_metadata() {
         reopened.branch_record(right).unwrap().base.as_ref().unwrap().global_base,
         GlobalSeq(1)
     );
+    assert_eq!(
+        reopened.branch_record(left).unwrap().created_by,
+        AuthorId(uuid::Uuid::nil()),
+        "branch creator attribution must survive durable recovery"
+    );
 }
 #[test]
 fn branch_exclusive_returns_v1_error() {
@@ -616,17 +621,29 @@ fn branch_overlay_partition_creation_rebuilds_live_database_without_storage_reop
 fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
     // Physical branch partition identity is internal storage topology; the
     // branch read and merge-back assertions cover its user-visible semantics.
-    let base = schema();
+    let base = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("obsolete", ColumnType::String),
+        ],
+    )]);
     let renamed = SchemaVersion::new(JazzSchema::new([TableSchema::new(
         "tasks",
-        [ColumnSchema::new("name", ColumnType::String)],
+        [
+            ColumnSchema::new("added", ColumnType::String),
+            ColumnSchema::new("name", ColumnType::String),
+        ],
     )]));
     let (dir, mut core) = open_history_complete_node_with_schema(node(0x23), base.clone());
     let branch_id = branch(0x23);
     core.create_root_branch(branch_id).unwrap();
     core.commit_mergeable_on_branch(
         branch_id,
-        MergeableCommit::new("todos", row(0x23), 10).cells(title_cells("before rename")),
+        MergeableCommit::new("todos", row(0x23), 10).cells(BTreeMap::from([
+            ("title".to_owned(), v("before rename")),
+            ("obsolete".to_owned(), v("must not become the title")),
+        ])),
     )
     .unwrap();
     core.commit_mergeable_on_branch(
@@ -653,6 +670,14 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
                         from: "title".to_owned(),
                         to: "name".to_owned(),
                     },
+                    LensOp::DropColumn {
+                        column: "obsolete".to_owned(),
+                        backwards_default: v("retired"),
+                    },
+                    LensOp::AddColumn {
+                        column: "added".to_owned(),
+                        default: v("default-added"),
+                    },
                 ],
             }],
         ),
@@ -671,7 +696,10 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
     core.commit_mergeable_on_branch(
         branch_id,
         MergeableCommit::new("tasks", row(0x24), 12)
-            .cells(BTreeMap::from([("name".to_owned(), v("after rename"))])),
+            .cells(BTreeMap::from([
+                ("added".to_owned(), v("new field")),
+                ("name".to_owned(), v("after rename")),
+            ])),
     )
     .unwrap();
     core.commit_mergeable_on_branch(
@@ -721,9 +749,21 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
 
     let shape = Query::from("todos").validate(&base).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let expected = BTreeMap::from([
-        (row(0x23), title_cells("before rename")),
-        (row(0x24), title_cells("after rename")),
+    let expected_overlay = BTreeMap::from([
+        (
+            row(0x23),
+            BTreeMap::from([
+                ("obsolete".to_owned(), v("must not become the title")),
+                ("title".to_owned(), v("before rename")),
+            ]),
+        ),
+        (
+            row(0x24),
+            BTreeMap::from([
+                ("obsolete".to_owned(), v("retired")),
+                ("title".to_owned(), v("after rename")),
+            ]),
+        ),
     ]);
     assert_eq!(
         core.query_rows_on_branch(branch_id, &shape, &binding)
@@ -731,7 +771,7 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
-        expected
+        expected_overlay
     );
 
     drop(core);
@@ -742,7 +782,7 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
-        expected
+        expected_overlay
     );
     let merge_back = reopened.merge_back_branch(branch_id).unwrap();
     assert_eq!(
@@ -752,12 +792,48 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
-        expected
+        BTreeMap::from([
+            (
+                row(0x23),
+                BTreeMap::from([
+                    ("obsolete".to_owned(), v("retired")),
+                    ("title".to_owned(), v("before rename")),
+                ]),
+            ),
+            (
+                row(0x24),
+                BTreeMap::from([
+                    ("obsolete".to_owned(), v("retired")),
+                    ("title".to_owned(), v("after rename")),
+                ]),
+            ),
+        ])
     );
     assert_eq!(
-        reopened.transaction_record(merge_back).unwrap().source_branch,
-        Some(branch_id)
+        reopened
+            .transaction_record(merge_back)
+            .unwrap()
+            .branch_merge
+            .as_ref()
+            .map(|provenance| provenance.source_lineage),
+        Some(BranchLineage::Branch(branch_id))
     );
+    // A second merge validates the first merge's substitutions and rebuilds
+    // the known target-source dot set. Both paths must decode the old authored
+    // descriptor before projecting contribution columns to the write schema.
+    reopened
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("tasks", row(0x24), 14)
+                .cells(BTreeMap::from([("name".to_owned(), v("second merge"))])),
+        )
+        .unwrap();
+    let second_merge = reopened.merge_back_branch(branch_id).unwrap();
+    assert!(reopened
+        .transaction_record(second_merge)
+        .unwrap()
+        .branch_merge
+        .is_some());
 }
 
 #[test]
@@ -777,6 +853,7 @@ fn branch_writes_reject_unknown_and_closed_branches() {
         closed,
         crate::node::branches::BranchRecord {
             branch_id: closed,
+            created_by: AuthorId::SYSTEM,
             parent: None,
             base: None,
             state: codec::BranchState::Merged,
@@ -827,7 +904,7 @@ fn discard_branch_closes_branch_for_writes_and_merge_back() {
 }
 
 #[test]
-fn merge_back_branch_squashes_net_overlay_into_parent_and_closes_branch() {
+fn merge_back_branch_emits_ordinary_target_transaction_and_leaves_branch_open() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (core_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());
     let mut oracle = Oracle::new();
@@ -865,10 +942,11 @@ fn merge_back_branch_squashes_net_overlay_into_parent_and_closes_branch() {
         )
         .unwrap();
 
-    let squash = core.merge_back_branch(branch_id).unwrap();
+    let merger = user(0x77);
+    let squash = core.merge_back_branch_as(branch_id, merger).unwrap();
     assert_eq!(
         core.branch_record(branch_id).unwrap().state,
-        codec::BranchState::Merged
+        codec::BranchState::Open
     );
     let parent_rows = core
         .current_rows("todos", DurabilityTier::Local)
@@ -885,36 +963,729 @@ fn merge_back_branch_squashes_net_overlay_into_parent_and_closes_branch() {
     );
 
     let tx = core.transaction_record(squash).unwrap();
-    assert_eq!(tx.source_branch, Some(branch_id));
+    assert_eq!(tx.made_by, merger);
+    assert_eq!(tx.fate, Fate::Pending);
+    assert_eq!(
+        tx.branch_merge.as_ref().map(|merge| merge.source_lineage),
+        Some(crate::tx::BranchLineage::Branch(branch_id))
+    );
+    let provenance = tx.branch_merge.as_ref().unwrap();
+    assert_eq!(
+        provenance.through_frontier,
+        vec![branch_update, branch_insert, branch_delete]
+    );
+    assert_eq!(provenance.substitutions.len(), 3);
+    assert!(provenance
+        .substitutions
+        .iter()
+        .all(|substitution| substitution.sources.len() == 1));
     assert_eq!(tx.user_metadata_json, None);
 
     let squash_versions = core.query_versions_for_tx(squash).unwrap();
     assert_eq!(squash_versions.len(), 3);
+    for substitution in &provenance.substitutions {
+        assert!(
+            core.validate_lww_branch_substitution(
+                branch_id,
+                provenance,
+                substitution,
+                &squash_versions,
+            )
+            .unwrap()
+        );
+    }
+    let mut forged = provenance.substitutions[0].clone();
+    forged.sources[0].tx_id = squash;
+    assert!(
+        !core
+            .validate_lww_branch_substitution(
+                branch_id,
+                provenance,
+                &forged,
+                &squash_versions,
+            )
+            .unwrap()
+    );
+    assert!(
+        squash_versions
+            .iter()
+            .all(|version| version.updated_by() == merger)
+    );
     for branch_tip in [branch_update, branch_insert, branch_delete] {
         assert!(
             squash_versions
                 .iter()
-                .any(|version| version.parents().contains(&branch_tip)),
-            "merge-back squash must retain the branch frontier as a parent"
+                .all(|version| !version.parents().contains(&branch_tip)),
+            "ordinary target transaction must not expose a source branch parent"
         );
     }
-    assert!(matches!(
-        core.commit_mergeable_on_branch(
+    let (_receiver_dir, mut receiver) = open_node_with_schema(node(0x78), schema());
+    let parent_ids = squash_versions
+        .iter()
+        .flat_map(|version| version.parents())
+        .collect::<BTreeSet<_>>();
+    for parent in parent_ids {
+        receiver
+            .apply_sync_message(core.commit_unit_for(parent).unwrap())
+            .unwrap();
+    }
+    receiver
+        .apply_sync_message(core.commit_unit_for(squash).unwrap())
+        .unwrap();
+    let received = receiver
+        .transaction_record(squash)
+        .unwrap()
+        .branch_merge
+        .unwrap();
+    assert_eq!(received, provenance.clone());
+    assert!(!received.substitutions.is_empty());
+    let late_write = core
+        .commit_mergeable_on_branch(
             branch_id,
             MergeableCommit::new("todos", row(4), 23).cells(title_cells("late write")),
-        ),
-        Err(Error::BranchClosed(id)) if id == branch_id
-    ));
-    assert!(matches!(
-        core.merge_back_branch(branch_id),
-        Err(Error::BranchClosed(id)) if id == branch_id
-    ));
+        )
+        .unwrap();
+    let second_merge = core.merge_back_branch(branch_id).unwrap();
+    let second_versions = core.query_versions_for_tx(second_merge).unwrap();
+    assert_eq!(second_versions.len(), 1);
+    assert_eq!(second_versions[0].row_uuid(), row(4));
+    let second_provenance = core
+        .transaction_record(second_merge)
+        .unwrap()
+        .branch_merge
+        .unwrap();
+    assert_eq!(second_provenance.substitutions.len(), 1);
+    assert_eq!(second_provenance.substitutions[0].sources[0].tx_id, late_write);
     drop(core);
     let mut reopened = reopen_node_at(&core_dir, node(2), schema());
     assert_eq!(
-        reopened.transaction_record(squash).unwrap().source_branch,
-        Some(branch_id)
+        reopened
+            .transaction_record(squash)
+            .unwrap()
+            .branch_merge
+            .map(|merge| merge.source_lineage),
+        Some(crate::tx::BranchLineage::Branch(branch_id))
     );
+    assert_eq!(
+        reopened.branch_record(branch_id).unwrap().state,
+        codec::BranchState::Open
+    );
+}
+
+#[test]
+fn merge_back_parents_every_concurrent_target_head() {
+    let (_core_dir, mut core) = open_node_with_schema(node(2), schema());
+    let row_uuid = row(0x41);
+    let branch_id = branch(0x41);
+    core.create_root_branch(branch_id).unwrap();
+
+    let (left, _) = core
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("left")),
+        )
+        .unwrap();
+    let (right, _) = core
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 11).cells(title_cells("right")),
+        )
+        .unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row_uuid, 12).cells(title_cells("branch")),
+    )
+    .unwrap();
+
+    let merge = core.merge_back_branch(branch_id).unwrap();
+    let version = core
+        .query_versions_for_tx(merge)
+        .unwrap()
+        .into_iter()
+        .find(|version| version.row_uuid() == row_uuid)
+        .unwrap();
+    let mut parents = version.parents();
+    parents.sort();
+    assert_eq!(parents, vec![left, right]);
+}
+
+/// Successive partial branch writes accumulate authored presence across their
+/// private ancestry. A later patch must not make an earlier explicit branch
+/// edit look inherited merely because the tip's own authored set names only
+/// the later patch.
+///
+/// Planted positive: calculate the merge from only the final branch winner's
+/// authored set. The merged transaction would then lose `title=branch`.
+#[test]
+fn merge_back_accumulates_authored_columns_across_successive_branch_patches() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("completed", ColumnType::Bool),
+        ],
+    )]);
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0x83), schema.clone());
+    let (_core_dir, mut core) = open_history_complete_node_with_schema(node(0x84), schema.clone());
+    let mut oracle = Oracle::new();
+    let row_uuid = row(0x83);
+    let (base, _) = commit_global_and_oracle(
+        &mut writer,
+        &mut core,
+        &mut oracle,
+        MergeableCommit::new("todos", row_uuid, 10).cells(BTreeMap::from([
+            ("title".to_owned(), Value::String("base".to_owned())),
+            ("completed".to_owned(), Value::Bool(false)),
+        ])),
+    );
+
+    let branch_id = branch(0x83);
+    core.create_branch(branch_id).unwrap();
+    let title_patch = core
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("todos", row_uuid, 20)
+                .parents(vec![base])
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), Value::String("branch".to_owned())),
+                    ("completed".to_owned(), Value::Bool(false)),
+                ]))
+                .authored_columns(BTreeSet::from(["title".to_owned()])),
+        )
+        .unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row_uuid, 30)
+            .parents(vec![title_patch])
+            .cells(BTreeMap::from([
+                ("title".to_owned(), Value::String("branch".to_owned())),
+                ("completed".to_owned(), Value::Bool(true)),
+            ]))
+            .authored_columns(BTreeSet::from(["completed".to_owned()])),
+    )
+    .unwrap();
+
+    core.merge_back_branch(branch_id).unwrap();
+    let rows = core.current_rows("todos", DurabilityTier::Local).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].test_cells_by_descriptor(),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("branch".to_owned())),
+            ("completed".to_owned(), Value::Bool(true)),
+        ])
+    );
+}
+
+/// Legacy wire versions carry no explicit authored-column set. Their present
+/// cells remain native target contributions after projection; otherwise a
+/// later branch merge can forget the target dot while validating provenance.
+///
+/// Planted positive: replace the projected-cell-key fallback in
+/// `validated_target_source_dots` with `unwrap_or_default()`. The direct dot
+/// assertion then loses `title`.
+#[test]
+fn legacy_target_version_without_authored_columns_contributes_present_cells() {
+    let schema = schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0x91), schema.clone());
+    let (_core_dir, mut core) = open_history_complete_node_with_schema(node(0x92), schema.clone());
+    let root_tx = writer
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0x91), 10).cells(title_cells("legacy root")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = writer.commit_unit_for(root_tx).unwrap() else {
+        panic!("commit unit expected");
+    };
+    let legacy_versions = versions
+        .into_iter()
+        .map(|version| {
+            VersionRecord::from_cells(
+                &schema.tables[0],
+                schema.version_id(),
+                version.row_uuid(),
+                version.parents(),
+                version.created_by(),
+                version.created_at(),
+                version.updated_by(),
+                version.updated_at(),
+                &version_record_cells(&version, &schema.tables[0]),
+                version.deletion(),
+            )
+            .unwrap()
+        })
+        .collect();
+    core.ingest_relay_commit_unit(tx, legacy_versions).unwrap();
+
+    let branch_id = branch(0x91);
+    core.create_root_branch(branch_id).unwrap();
+    let known = core
+        .validated_target_source_dots(
+            BranchLineage::Branch(branch_id),
+            BranchLineage::Root,
+        )
+        .unwrap();
+    assert!(known.contains(&ContributionDot {
+        lineage: BranchLineage::Root,
+        tx_id: root_tx,
+        coordinate: ContributionCoordinate {
+            table: "todos".to_owned(),
+            row_uuid: row(0x91),
+            layer: MergeAspect::Content,
+            component: ContributionComponent::Column("title".to_owned()),
+        },
+    }));
+
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row(0x92), 20).cells(title_cells("first")),
+    )
+    .unwrap();
+    core.merge_back_branch(branch_id).unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row(0x93), 21).cells(title_cells("second")),
+    )
+    .unwrap();
+    assert!(core.merge_back_branch(branch_id).is_ok());
+}
+
+#[test]
+fn merge_back_deduplicates_shared_transaction_parent_edges() {
+    let (_core_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());
+    let branch_id = branch(0x42);
+    core.create_root_branch(branch_id).unwrap();
+
+    let shared_parent = core
+        .commit_mergeable_many(vec![
+            MergeableCommit::new("todos", row(0x42), 10).cells(title_cells("root-one")),
+            MergeableCommit::new("todos", row(0x43), 10).cells(title_cells("root-two")),
+        ])
+        .unwrap();
+    core.commit_mergeable_many_on_branch(
+        branch_id,
+        vec![
+            MergeableCommit::new("todos", row(0x42), 20).cells(title_cells("branch-one")),
+            MergeableCommit::new("todos", row(0x43), 20).cells(title_cells("branch-two")),
+        ],
+    )
+    .unwrap();
+
+    let merge = core.merge_back_branch(branch_id).unwrap();
+    let versions = core.query_versions_for_tx(merge).unwrap();
+    assert_eq!(versions.len(), 2);
+    assert!(
+        versions
+            .iter()
+            .all(|version| version.parents() == vec![shared_parent])
+    );
+
+    let pending_edges = core
+        .database
+        .primary_key_scan_raw("jazz_pending_edges", &[])
+        .unwrap();
+    assert_eq!(
+        pending_edges.len(),
+        1,
+        "pending edges represent transaction dependencies, not version edges"
+    );
+}
+
+#[test]
+fn branch_target_is_canonical_atomic_transaction_state_across_reopen() {
+    let (core_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());
+    let branch_id = branch(0x61);
+    core.create_root_branch(branch_id).unwrap();
+    let tx_id = core
+        .commit_mergeable_many_on_branch(
+            branch_id,
+            vec![
+                MergeableCommit::new("todos", row(0x61), 10)
+                    .cells(title_cells("one")),
+                MergeableCommit::new("todos", row(0x62), 10)
+                    .cells(title_cells("two")),
+            ],
+        )
+        .unwrap();
+
+    let record = core.transaction_record(tx_id).unwrap();
+    assert_eq!(
+        record.target_lineage,
+        crate::tx::BranchLineage::Branch(branch_id)
+    );
+    assert_eq!(record.n_total_writes, 2);
+    let SyncMessage::CommitUnit { tx, versions } = core.commit_unit_for(tx_id).unwrap() else {
+        panic!("commit unit expected");
+    };
+    assert_eq!(tx.target_lineage, crate::tx::BranchLineage::Branch(branch_id));
+    assert_eq!(versions.len(), 2);
+    core.finalize_local_mergeable_commit(tx_id).unwrap();
+    assert_eq!(core.transaction_record(tx_id).unwrap().fate, Fate::Accepted);
+    assert!(
+        core.current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .all(|current| ![row(0x61), row(0x62)].contains(&current.row_uuid()))
+    );
+
+    drop(core);
+    let mut reopened = reopen_node_at(&core_dir, node(2), schema());
+    assert_eq!(
+        reopened.transaction_record(tx_id).unwrap().target_lineage,
+        crate::tx::BranchLineage::Branch(branch_id)
+    );
+    assert_eq!(reopened.query_versions_for_tx(tx_id).unwrap().len(), 2);
+}
+
+#[test]
+fn root_branch_transitive_merge_expands_provenance_without_echo() {
+    let (_core_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());
+    let branch_b = branch(0x62);
+    let branch_c = branch(0x63);
+    core.create_root_branch(branch_b).unwrap();
+    core.create_root_branch(branch_c).unwrap();
+
+    let root_native = core
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0x70), 10).cells(title_cells("root")),
+        )
+        .unwrap();
+    let root_to_b = core
+        .merge_lineage_into(
+            crate::tx::BranchLineage::Root,
+            crate::tx::BranchLineage::Branch(branch_b),
+        )
+        .unwrap();
+    assert_eq!(
+        core.transaction_record(root_to_b).unwrap().target_lineage,
+        crate::tx::BranchLineage::Branch(branch_b)
+    );
+    let b_to_c = core
+        .merge_lineage_into(
+            crate::tx::BranchLineage::Branch(branch_b),
+            crate::tx::BranchLineage::Branch(branch_c),
+        )
+        .unwrap();
+    let b_to_c_provenance = core
+        .transaction_record(b_to_c)
+        .unwrap()
+        .branch_merge
+        .unwrap();
+    assert_eq!(b_to_c_provenance.substitutions.len(), 1);
+    assert_eq!(b_to_c_provenance.substitutions[0].sources[0].tx_id, root_native);
+    assert_eq!(
+        b_to_c_provenance.substitutions[0].sources[0].lineage,
+        crate::tx::BranchLineage::Root
+    );
+
+    core.commit_mergeable_on_branch(
+        branch_c,
+        MergeableCommit::new("todos", row(0x71), 20).cells(title_cells("from-c")),
+    )
+    .unwrap();
+    let c_to_root = core
+        .merge_lineage_into(
+            crate::tx::BranchLineage::Branch(branch_c),
+            crate::tx::BranchLineage::Root,
+        )
+        .unwrap();
+    let versions = core.query_versions_for_tx(c_to_root).unwrap();
+    assert_eq!(versions.len(), 1, "root-originated row must not echo home");
+    assert_eq!(versions[0].row_uuid(), row(0x71));
+    assert!(versions[0].parents().iter().all(|parent| {
+        *parent != root_to_b && *parent != b_to_c
+    }));
+}
+
+#[test]
+fn ordinary_commit_unit_routes_to_branch_target_without_touching_root() {
+    let (_writer_dir, mut writer) = open_history_complete_node_with_schema(node(1), schema());
+    let (_receiver_dir, mut receiver) =
+        open_history_complete_node_with_schema(node(2), schema());
+    let branch_id = branch(0x64);
+    writer.create_root_branch(branch_id).unwrap();
+    receiver.create_root_branch(branch_id).unwrap();
+    let tx_id = writer
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("todos", row(0x81), 10).cells(title_cells("synced")),
+        )
+        .unwrap();
+
+    let unit = writer.commit_unit_for(tx_id).unwrap();
+    let updates = receiver.apply_sync_message(unit.clone()).unwrap();
+    assert!(updates.iter().any(|message| matches!(
+        message,
+        SyncMessage::FateUpdate {
+            tx_id: candidate,
+            fate: Fate::Accepted,
+            ..
+        } if *candidate == tx_id
+    )));
+    assert_eq!(
+        receiver.transaction_record(tx_id).unwrap().target_lineage,
+        crate::tx::BranchLineage::Branch(branch_id)
+    );
+    let shape = Query::from("todos")
+        .validate(&receiver.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let branch_rows = receiver
+        .query_rows_on_branch(branch_id, &shape, &binding)
+        .unwrap()
+        .into_iter()
+        .map(current_row_pair)
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(branch_rows.get(&row(0x81)), Some(&title_cells("synced")));
+    assert!(
+        receiver
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .all(|current| current.row_uuid() != row(0x81))
+    );
+    let root_tx = receiver
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0x81), 30).cells(title_cells("root-after-branch")),
+        )
+        .unwrap();
+    receiver.finalize_local_mergeable_commit(root_tx).unwrap();
+    receiver
+        .assert_merge_heads_match_history_for_test("todos", row(0x81))
+        .unwrap();
+    assert_eq!(
+        receiver
+            .visible_current_cells("todos", row(0x81))
+            .unwrap()
+            .unwrap(),
+        title_cells("root-after-branch")
+    );
+    receiver.apply_sync_message(unit).unwrap();
+    let SyncMessage::CommitUnit {
+        mut tx,
+        versions,
+    } = writer.commit_unit_for(tx_id).unwrap()
+    else {
+        panic!("commit unit expected");
+    };
+    tx.target_lineage = crate::tx::BranchLineage::Root;
+    assert!(matches!(
+        receiver.apply_sync_message(SyncMessage::CommitUnit { tx, versions }),
+        Err(Error::ConflictingCommitUnit(candidate)) if candidate == tx_id
+    ));
+}
+
+#[test]
+fn invalid_branch_targets_do_not_persist_poison_partitions() {
+    let (_writer_dir, mut writer) = open_history_complete_node_with_schema(node(1), schema());
+    let branch_id = branch(0x65);
+    writer.create_root_branch(branch_id).unwrap();
+    let tx_id = writer
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("todos", row(0x82), 10).cells(title_cells("candidate")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = writer.commit_unit_for(tx_id).unwrap() else {
+        panic!("expected commit unit");
+    };
+    let version = versions[0].clone();
+
+    let (unknown_schema_dir, mut unknown_schema) =
+        open_history_complete_node_with_schema(node(2), schema());
+    unknown_schema.create_root_branch(branch_id).unwrap();
+    let unknown_schema_version = SchemaVersionId(uuid::Uuid::from_bytes([0xee; 16]));
+    let unknown_schema_record = VersionRecord::new(
+        version.table(),
+        unknown_schema_version,
+        version.record().clone(),
+    );
+    unknown_schema
+        .apply_sync_message(SyncMessage::CommitUnit {
+            tx: tx.clone(),
+            versions: vec![unknown_schema_record],
+        })
+        .unwrap();
+    assert!(
+        !unknown_schema
+            .branches
+            .branch_partitions
+            .iter()
+            .any(|(_, existing)| *existing == branch_id)
+    );
+    drop(unknown_schema);
+    let reopened = reopen_node_at(&unknown_schema_dir, node(2), schema());
+    assert!(
+        !reopened
+            .branches
+            .branch_partitions
+            .iter()
+            .any(|(_, existing)| *existing == branch_id)
+    );
+
+    let (unknown_table_dir, mut unknown_table) =
+        open_history_complete_node_with_schema(node(3), schema());
+    unknown_table.create_root_branch(branch_id).unwrap();
+    let unknown_table_record = VersionRecord::new(
+        "unknown_table",
+        version.schema_version(),
+        version.record().clone(),
+    );
+    assert!(
+        unknown_table
+            .apply_sync_message(SyncMessage::CommitUnit {
+                tx: tx.clone(),
+                versions: vec![unknown_table_record],
+            })
+            .is_err()
+    );
+    assert!(
+        !unknown_table
+            .branches
+            .branch_partitions
+            .iter()
+            .any(|(_, existing)| *existing == branch_id)
+    );
+    drop(unknown_table);
+    let reopened = reopen_node_at(&unknown_table_dir, node(3), schema());
+    assert!(
+        !reopened
+            .branches
+            .branch_partitions
+            .iter()
+            .any(|(_, existing)| *existing == branch_id)
+    );
+
+    let (oversized_dir, mut oversized) = open_history_complete_node_with_schema(node(4), schema());
+    oversized.create_root_branch(branch_id).unwrap();
+    let oversized_versions =
+        vec![version; crate::protocol_limits::MAX_COMMIT_UNIT_VERSIONS + 1];
+    let mut oversized_tx = tx;
+    oversized_tx.n_total_writes = oversized_versions.len() as u32;
+    let updates = oversized
+        .apply_sync_message(SyncMessage::CommitUnit {
+            tx: oversized_tx,
+            versions: oversized_versions,
+        })
+        .unwrap();
+    assert!(updates.iter().any(|update| matches!(
+        update,
+        SyncMessage::FateUpdate {
+            fate: Fate::Rejected(RejectionReason::MalformedCommit(_)),
+            ..
+        }
+    )));
+    assert!(
+        !oversized
+            .branches
+            .branch_partitions
+            .iter()
+            .any(|(_, existing)| *existing == branch_id)
+    );
+    drop(oversized);
+    let reopened = reopen_node_at(&oversized_dir, node(4), schema());
+    assert!(
+        !reopened
+            .branches
+            .branch_partitions
+            .iter()
+            .any(|(_, existing)| *existing == branch_id)
+    );
+}
+
+#[test]
+fn ordinary_branch_target_ingest_applies_target_authorization() {
+    let schema = branch_rls_schema();
+    let (_writer_dir, mut writer) =
+        open_history_complete_node_with_schema(node(1), schema.clone());
+    let (_receiver_dir, mut receiver) = open_history_complete_node_with_schema(node(2), schema);
+    let branch_id = branch(0x65);
+    let allowed = user(0xa1);
+    let denied = user(0xb2);
+    seed_branch_acl(&mut writer, branch_id, allowed, row(0x90), 1);
+    seed_branch_acl(&mut receiver, branch_id, allowed, row(0x90), 1);
+    writer.create_branch(branch_id).unwrap();
+    receiver.create_branch(branch_id).unwrap();
+    let tx_id = writer
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("todos", row(0x91), 10)
+                .made_by(allowed)
+                .cells(owner_cells(allowed, "candidate")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit {
+        mut tx,
+        versions,
+    } = writer.commit_unit_for(tx_id).unwrap()
+    else {
+        panic!("commit unit expected");
+    };
+    tx.made_by = denied;
+    let updates = receiver
+        .apply_sync_message(SyncMessage::CommitUnit { tx, versions })
+        .unwrap();
+    assert!(updates.iter().any(|message| matches!(
+        message,
+        SyncMessage::FateUpdate {
+            tx_id: candidate,
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            ..
+        } if *candidate == tx_id
+    )));
+    let shape = Query::from("todos")
+        .validate(&receiver.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    assert!(
+        receiver
+            .query_rows_on_branch(branch_id, &shape, &binding)
+            .unwrap()
+            .into_iter()
+            .all(|current| current.row_uuid() != row(0x91))
+    );
+}
+
+#[test]
+fn merge_back_fails_whole_calculation_when_source_row_is_not_readable() {
+    let (_core_dir, mut core) =
+        open_history_complete_node_with_schema(node(2), owner_policy_schema());
+    let owner = user(0x71);
+    let outsider = user(0x72);
+    let branch_id = branch(0x42);
+    core.create_root_branch(branch_id).unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row(0x42), 10)
+            .made_by(owner)
+            .cells(owner_cells(owner, "private")),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        core.merge_back_branch_as(branch_id, outsider),
+        Err(Error::AuthorizationDenied)
+    ));
+    assert!(core.merge_back_branch_as(branch_id, owner).is_ok());
+}
+
+#[test]
+fn merge_back_fails_closed_for_strategy_without_contribution_capabilities() {
+    let (_core_dir, mut core) =
+        open_history_complete_node_with_schema(node(2), counter_schema());
+    let branch_id = branch(0x43);
+    core.create_root_branch(branch_id).unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("counters", row(0x43), 10)
+            .cell("count", Value::U64(1))
+            .cell("title", v("branch")),
+    )
+    .unwrap();
+    assert!(matches!(
+        core.merge_back_branch(branch_id),
+        Err(Error::BranchMergeCalculation(
+            "column strategy lacks branch contribution capabilities"
+        ))
+    ));
 }
 
 #[derive(Clone, Copy)]
@@ -1235,9 +2006,40 @@ fn assert_merge_back_visible_rows_match(
 fn assert_merge_back_versions_match(seed: u64, mut run: MergeBackOracleRun) {
     let merged = tx_version_summary(&mut run.merged, run.merge_back_tx);
     let direct = txs_version_summary(&mut run.direct, &run.direct_txs);
+    let merged_effects = merged
+        .iter()
+        .map(|(row, layer, deletion, cells, _)| (*row, *layer, *deletion, cells.clone()))
+        .collect::<Vec<_>>();
+    let direct_effects = direct
+        .iter()
+        .map(|(row, layer, deletion, cells, _)| (*row, *layer, *deletion, cells.clone()))
+        .collect::<Vec<_>>();
     assert_eq!(
-        merged, direct,
-        "seed {seed}: merge-back version structure must equal direct net effects"
+        merged_effects, direct_effects,
+        "seed {seed}: merge-back payload must equal direct target-local effects"
+    );
+    let provenance = run
+        .merged
+        .transaction_record(run.merge_back_tx)
+        .unwrap()
+        .branch_merge
+        .unwrap();
+    let source_txs = provenance
+        .through_frontier
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    assert!(
+        merged
+            .iter()
+            .flat_map(|(_, _, _, _, parents)| parents)
+            .all(|parent| !source_txs.contains(parent)),
+        "seed {seed}: source lineage must not appear in target causal parents"
+    );
+    assert_eq!(
+        provenance.substitutions.len(),
+        merged.len(),
+        "seed {seed}: every emitted LWW/register effect needs field provenance"
     );
 }
 

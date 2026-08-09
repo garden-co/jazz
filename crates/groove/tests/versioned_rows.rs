@@ -1,5 +1,5 @@
 use groove::db::{Database, Error, GraphBuilder, IvmRuntimeError, ProjectField};
-use groove::records::{RecordDescriptor, Value, VersionedRecord};
+use groove::records::{RecordDescriptor, Value, ValueType, VersionedRecord};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema,
     TableSchemaVersion,
@@ -66,7 +66,7 @@ fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
     let schema = DatabaseSchema::new([table]);
     let storage = MemoryStorage::new(&schema.column_families());
     let mut database = Database::new(schema, storage)?;
-    let output = RecordDescriptor::new([("id", ColumnType::U64), ("title", ColumnType::String)]);
+    let output = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
     database.define_variant_projection("items", "reader-v1", output)?;
     database.register_variant_projection_case(
         "items",
@@ -80,7 +80,7 @@ fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
     let subscription_id = subscription.id();
     assert!(subscription.recv()?.is_empty());
 
-    let v1 = RecordDescriptor::new([("title", ColumnType::String), ("id", ColumnType::U64)]);
+    let v1 = RecordDescriptor::new([("title", ValueType::String), ("id", ValueType::U64)]);
     let mut batch = database.open_batch();
     batch.insert(
         "items",
@@ -106,9 +106,9 @@ fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
     assert!(subscription.try_recv().is_err());
 
     let v2 = RecordDescriptor::new([
-        ("id", ColumnType::U64),
-        ("title", ColumnType::String),
-        ("completed", ColumnType::Bool),
+        ("id", ValueType::U64),
+        ("title", ValueType::String),
+        ("completed", ValueType::Bool),
     ]);
     let mut batch = database.open_batch();
     batch.update(
@@ -155,7 +155,7 @@ fn ignored_variant_projection_case_is_distinct_from_an_unregistered_case()
     let schema = versioned_schema();
     let storage = MemoryStorage::new(&schema.column_families());
     let mut database = Database::new(schema.clone(), storage)?;
-    let output = RecordDescriptor::new([("id", ColumnType::U64), ("title", ColumnType::String)]);
+    let output = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
     database.define_variant_projection("items", "v1-only", output)?;
     database.register_variant_projection_case(
         "items",
@@ -405,9 +405,9 @@ fn active_variant_index_accepts_a_live_schema_version_without_rebuilding()
     assert_eq!(subscription.id(), subscription_id);
 
     let descriptor = RecordDescriptor::new([
-        ("id", ColumnType::U64),
-        ("email", ColumnType::String),
-        ("active", ColumnType::Bool),
+        ("id", ValueType::U64),
+        ("email", ValueType::String),
+        ("active", ValueType::Bool),
     ]);
     let mut batch = database.open_batch();
     batch.insert(
@@ -455,8 +455,7 @@ fn live_variant_index_backfills_existing_rows_without_perturbing_subscriptions()
     column_families.push("indices");
     let storage = MemoryStorage::new(&column_families);
     let mut database = Database::new(schema.clone(), storage)?;
-    let projection =
-        RecordDescriptor::new([("id", ColumnType::U64), ("email", ColumnType::String)]);
+    let projection = RecordDescriptor::new([("id", ValueType::U64), ("email", ValueType::String)]);
     database.define_variant_projection("items", "reader", projection)?;
     for version in [1, 2] {
         database.register_variant_projection_case(
