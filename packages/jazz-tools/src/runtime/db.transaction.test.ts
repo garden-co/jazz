@@ -59,6 +59,18 @@ function allTodos() {
 }
 
 describe("Db transactions", () => {
+  it("anchors an exclusive read snapshot at the public begin call", async () => {
+    const { value: beforeBegin } = db.insert(app.todos, {
+      title: "visible at begin",
+      done: false,
+    });
+    const tx = db.beginExclusiveTransaction();
+    db.insert(app.todos, { title: "committed after begin", done: false });
+
+    await expect(tx.all(app.todos.where({}), { tier: "local" })).resolves.toEqual([beforeBegin]);
+    await tx.rollback();
+  });
+
   it("rolls back an exclusive callback transaction when commit is called inside the callback", async () => {
     await expect(
       db.exclusiveTransaction(async (tx) => {
@@ -91,7 +103,7 @@ describe("Db transactions", () => {
   });
 
   it("uses mergeable callback transactions by default", async () => {
-    const result = db.transaction((tx) => {
+    const result = await db.transaction((tx) => {
       expect(tx.kind).toBe("mergeable");
       tx.insert(app.todos, { title: "Rejected callback transaction", done: false });
       return tx.kind;
@@ -260,37 +272,34 @@ describe("Db transactions", () => {
     }
   });
 
-  it("types exclusive transaction waits without durability options", () => {
+  it("types exclusive transaction waits without durability options", async () => {
     if (false) {
-      const result = db.exclusiveTransaction((tx) => tx.kind);
+      const result = await db.exclusiveTransaction((tx) => tx.kind);
       void result.wait();
       // @ts-expect-error - exclusive transactions are confirmed by the global authority.
       void result.wait({ tier: "global" });
 
       const tx = db.beginExclusiveTransaction();
-      const committed = tx.commit();
+      const committed = await tx.commit();
       void committed.wait();
       // @ts-expect-error - exclusive transactions are confirmed by the global authority.
       void committed.wait({ tier: "global" });
     }
   });
 
-  it("throws when committing a db transaction before any actions", () => {
+  it("commits an empty exclusive batch opened at begin", async () => {
     const tx = db.beginExclusiveTransaction();
-
-    expect(() => tx.commit()).toThrow(
-      "DbTransaction.commit() requires at least one table operation first",
-    );
+    await expect(tx.commit()).resolves.toBeDefined();
   });
 
   it("rejects exclusive transaction operations after commit", async () => {
     const tx = db.beginExclusiveTransaction();
     tx.insert(app.todos, { title: "Committed transaction", done: false });
-    const transactionId = tx.transactionId();
+    const openBatchId = tx.openBatchId();
 
-    tx.commit();
+    await tx.commit();
 
-    const coreError = `transaction ${transactionId} is already committed`;
+    const coreError = `open batch ${openBatchId} is already committed`;
     expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.insert(app.todos, { title: "Nope", done: false })).toThrow(
@@ -304,11 +313,11 @@ describe("Db transactions", () => {
   it("rejects exclusive transaction operations after rollback", async () => {
     const tx = db.beginExclusiveTransaction();
     tx.insert(app.todos, { title: "Rolled-back transaction", done: false });
-    const transactionId = tx.transactionId();
+    const openBatchId = tx.openBatchId();
 
-    tx.rollback();
+    await tx.rollback();
 
-    const coreError = `transaction ${transactionId} has already been completed or was never opened`;
+    const coreError = `open batch ${openBatchId} has already been completed or was never opened`;
     expect(() => tx.commit()).toThrow(`Commit transaction failed: Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Rollback transaction failed: Write error: ${coreError}`);
     expect(() => tx.insert(app.todos, { title: "Nope", done: false })).toThrow(
@@ -319,33 +328,32 @@ describe("Db transactions", () => {
     );
   });
 
-  it("rejects db exclusive transaction writes against a different client/schema", () => {
+  it("stages exclusive writes from multiple schema views in one batch", async () => {
     const tx = db.beginExclusiveTransaction();
     tx.insert(app.todos, { title: "Primary client", done: false });
-
-    expect(() =>
-      tx.insert(otherApp.todos, { title: "Wrong client", done: false, note: "nope" }),
-    ).toThrow(/cannot be used with table "todos" from a different schema\/client/);
+    tx.insert(otherApp.todos, { title: "Second schema", done: false, note: "kept" });
+    await tx.commit();
+    await expect(allTodos()).resolves.toHaveLength(2);
   });
 });
 
 describe("Db mergeable transactions", () => {
-  it("throws when committing a mergeable transaction before any actions", () => {
+  it("rejects committing an empty mergeable batch", () => {
     const tx = db.beginTransaction();
 
     expect(() => tx.commit()).toThrow(
-      "DbTransaction.commit() requires at least one table operation first",
+      "empty mergeable batch has no committed unit; roll it back instead",
     );
   });
 
   it("rejects mergeable transaction operations after commit", async () => {
     const tx = db.beginTransaction();
     tx.insert(app.todos, { title: "Committed transaction", done: false });
-    const transactionId = tx.transactionId();
+    const openBatchId = tx.openBatchId();
 
-    tx.commit();
+    await tx.commit();
 
-    const coreError = `transaction ${transactionId} is already committed`;
+    const coreError = `open batch ${openBatchId} is already committed`;
     expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.insert(app.todos, { title: "Nope", done: false })).toThrow(
@@ -359,11 +367,11 @@ describe("Db mergeable transactions", () => {
   it("rejects mergeable transaction operations after rollback", async () => {
     const tx = db.beginTransaction();
     tx.insert(app.todos, { title: "Rolled-back transaction", done: false });
-    const transactionId = tx.transactionId();
+    const openBatchId = tx.openBatchId();
 
-    tx.rollback();
+    await tx.rollback();
 
-    const coreError = `transaction ${transactionId} has already been completed or was never opened`;
+    const coreError = `open batch ${openBatchId} has already been completed or was never opened`;
     expect(() => tx.commit()).toThrow(`Commit transaction failed: Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Rollback transaction failed: Write error: ${coreError}`);
     expect(() => tx.insert(app.todos, { title: "Nope", done: false })).toThrow(
@@ -377,12 +385,12 @@ describe("Db mergeable transactions", () => {
   it("rolls back a callback mergeable transaction when the callback throws after a write", async () => {
     const error = new Error("callback failed");
 
-    expect(() =>
+    await expect(
       db.transaction((tx) => {
         tx.insert(app.todos, { title: "Thrown callback transaction", done: false });
         throw error;
       }),
-    ).toThrow(error);
+    ).rejects.toThrow(error);
 
     await expect(allTodos()).resolves.toEqual([]);
   });
@@ -397,7 +405,7 @@ describe("Db mergeable transactions", () => {
     try {
       const tx = sessionDb.beginTransaction();
       tx.insert(app.todos, { title: "Session-scoped transaction", done: false });
-      tx.commit();
+      await tx.commit();
       await expect(sessionDb.all(app.todos.where({}), { tier: "local" })).resolves.toEqual([
         { id: expect.any(String), title: "Session-scoped transaction", done: false },
       ]);
@@ -406,13 +414,12 @@ describe("Db mergeable transactions", () => {
     }
   });
 
-  it("rejects db mergeable transaction writes against a different client/schema", () => {
+  it("stages mergeable writes from multiple schema views in one batch", async () => {
     const tx = db.beginTransaction();
     tx.insert(app.todos, { title: "Primary client", done: false });
-
-    expect(() =>
-      tx.insert(otherApp.todos, { title: "Wrong client", done: false, note: "nope" }),
-    ).toThrow(/cannot be used with table "todos" from a different schema\/client/);
+    tx.insert(otherApp.todos, { title: "Second schema", done: false, note: "kept" });
+    await tx.commit();
+    await expect(allTodos()).resolves.toHaveLength(2);
   });
 
   it("keeps write-policy dry-runs independent from uncommitted transaction rows", async () => {
@@ -424,7 +431,7 @@ describe("Db mergeable transactions", () => {
     expect(db.canUpdate(app.todos, staged.id, { done: true })).toBe(false);
     expect(tx.kind).toBe("mergeable");
 
-    tx.rollback();
+    await tx.rollback();
     await expect(allTodos()).resolves.toEqual([]);
   });
 });

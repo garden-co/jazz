@@ -279,6 +279,80 @@ describe("Db disconnect/reconnect", () => {
       );
     }, 60_000);
 
+    it("keeps a later local write behind a disconnected edge query", async () => {
+      const { db } = await createDbPair(ctx, createWorkerDb);
+      await db.disconnect();
+
+      const title = "strict query FIFO";
+      const edgeRead = db.all(todoByTitle(title), { tier: "edge", localUpdates: "deferred" });
+      const laterWrite = db.insert(todos, { title, done: false });
+      await expectStillPending(
+        laterWrite.batchId,
+        PENDING_ASSERTION_MS,
+        "worker mode: local write overtook a parked edge query",
+      );
+
+      await db.reconnect();
+      await expect(edgeRead).resolves.toEqual([]);
+      await withTimeout(
+        laterWrite.wait({ tier: "local" }),
+        SYNC_OPERATION_TIMEOUT_MS,
+        "worker mode: queued write did not run after edge query",
+      );
+    }, 60_000);
+
+    it("keeps a later local write behind a disconnected edge wait", async () => {
+      const { db } = await createDbPair(ctx, createWorkerDb);
+      const priorWrite = db.insert(todos, { title: "strict wait FIFO", done: false });
+      await priorWrite.wait({ tier: "local" });
+      await db.disconnect();
+
+      const edgeWait = priorWrite.wait({ tier: "edge" });
+      const laterWrite = db.insert(todos, { title: "after strict wait", done: false });
+      await expectStillPending(
+        laterWrite.batchId,
+        PENDING_ASSERTION_MS,
+        "worker mode: local write overtook a parked edge wait",
+      );
+
+      await db.reconnect();
+      await withTimeout(edgeWait, SYNC_OPERATION_TIMEOUT_MS, "worker mode: edge wait did not run");
+      await withTimeout(
+        laterWrite.wait({ tier: "local" }),
+        SYNC_OPERATION_TIMEOUT_MS,
+        "worker mode: queued write did not run after edge wait",
+      );
+    }, 60_000);
+
+    it("dispatches connection control around an executing worker durability wait", async () => {
+      const { db } = await createDbPair(ctx, createWorkerDb);
+      const write = db.insert(todos, { title: "blocked durability wait", done: false });
+      const batchId = await write.batchId;
+      await db.disconnect();
+
+      // Reach below the parent reconnect gate to reproduce a server-tier command
+      // already executing in the worker, as can happen when a connection drops
+      // after the worker dispatched the wait.
+      const clients = (db as unknown as { clients: Map<string, unknown> }).clients;
+      const client = clients.values().next().value as { runtime: unknown };
+      const runtime = client.runtime as {
+        send(method: "waitForTransaction", args: [typeof batchId, string]): Promise<void>;
+      };
+      const edgeWait = runtime.send("waitForTransaction", [batchId, "edge"]);
+      await expectStillPending(
+        edgeWait,
+        PENDING_ASSERTION_MS,
+        "worker mode: executing edge wait while disconnected",
+      );
+
+      await db.reconnect();
+      await withTimeout(
+        edgeWait,
+        SYNC_OPERATION_TIMEOUT_MS,
+        "worker mode: durability wait did not settle after reconnect",
+      );
+    }, 60_000);
+
     it("resolves local reads and defers edge reads while disconnected", async () => {
       const { db } = await createDbPair(ctx, createWorkerDb);
 

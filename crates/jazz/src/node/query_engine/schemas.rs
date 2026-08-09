@@ -120,6 +120,9 @@ pub(crate) struct ResultMembershipSchema {
     /// Ordered source-row identity fields for the rendered output occurrence.
     /// The root source is first; ordinary output contains only `row_field`.
     pub(crate) occurrence_id_fields: Vec<String>,
+    /// Typed UNION ALL arm discriminators keyed by joined-source position
+    /// (that is, position zero names the first field after the root).
+    pub(crate) occurrence_union_arm_fields: BTreeMap<usize, String>,
     /// Flattened public tuple fields retained with the membership record when
     /// this is a flat joined output. Ordinary row output leaves this empty.
     pub(crate) payload_fields: Vec<TypedOutputField>,

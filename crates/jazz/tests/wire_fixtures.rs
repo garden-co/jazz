@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
 use groove::records::Value;
 use groove::schema::ColumnType;
 use jazz::ids::{AuthorId, BranchId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
@@ -259,6 +260,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 },
                 result_member_adds: vec![result_row_entry(tx_id).into()],
                 result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             },
@@ -275,6 +277,31 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 peer_payload_inventory: PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
+            },
+        ),
+        (
+            "view_update_terminal_patch",
+            "ViewUpdate",
+            SyncMessage::ViewUpdate {
+                subscription,
+                settled_through: GlobalSeq(9),
+                reset_result_set: false,
+                version_carriers: Vec::new(),
+                version_bundles: Vec::new(),
+                peer_payload_inventory: PeerPayloadInventory::default(),
+                result_member_adds: Vec::new(),
+                result_member_removes: Vec::new(),
+                terminal_operations: vec![TerminalOperation {
+                    root_key: vec![10; 17],
+                    path: vec![TerminalPathSegment::Collection("children".to_owned())],
+                    edit: TerminalEdit::Move {
+                        key: vec![11; 17],
+                        index: 3,
+                    },
+                }],
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             },
@@ -535,7 +562,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v4",
+        fixture_set: "jazz-wire-message-frames-v6",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,

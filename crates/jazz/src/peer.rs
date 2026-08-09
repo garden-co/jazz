@@ -54,23 +54,11 @@ fn fast_current_membership_position(
     }
 }
 
-fn fast_authorization_progress(known_state: &Option<KnownStateDeclaration>) -> Option<u64> {
-    match known_state {
-        Some(KnownStateDeclaration::FastWithAuthorizationProgress {
-            completeness: KnownStateCompleteness::FastCurrentMembership,
-            authorization_progress,
-            ..
-        }) => Some(*authorization_progress),
-        Some(
-            KnownStateDeclaration::Fast { .. } | KnownStateDeclaration::ExactVersionSet { .. },
-        )
-        | None => None,
-    }
-}
-
 fn member_settle_position(member: &ResultMemberEntry) -> Option<crate::time::GlobalSeq> {
     match member {
-        ResultMemberEntry::Row(row) => row.settle_position,
+        ResultMemberEntry::Row(row) | ResultMemberEntry::TypedRow { row, .. } => {
+            row.settle_position
+        }
         ResultMemberEntry::Synthetic { .. } | ResultMemberEntry::PathTuple { .. } => None,
     }
 }
@@ -87,12 +75,11 @@ fn fast_cursor_membership_mismatch(
 }
 
 fn fast_cursor_requires_authoritative_reset(
-    authorization_matches: bool,
     position: crate::time::GlobalSeq,
     previous: &BTreeSet<ResultMemberEntry>,
     current: &BTreeSet<ResultMemberEntry>,
 ) -> bool {
-    !authorization_matches && fast_cursor_membership_mismatch(position, previous, current)
+    fast_cursor_membership_mismatch(position, previous, current)
 }
 
 /// Tracks what one downstream peer has already received.
@@ -594,6 +581,7 @@ impl PeerState {
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             });
@@ -676,6 +664,7 @@ impl PeerState {
             allow_storage_witness_fallback,
             observed_delta_batches: _,
             observed_result_delta_batches,
+            terminal_operations,
         } = transitions;
         let result_add_count = result_member_adds.len();
         let result_remove_count = result_member_removes.len();
@@ -689,6 +678,7 @@ impl PeerState {
         if observed_result_delta_batches > 0
             && result_member_adds.is_empty()
             && result_member_removes.is_empty()
+            && terminal_operations.is_empty()
             && program_fact_adds.is_empty()
             && program_fact_removes.is_empty()
         {
@@ -736,11 +726,13 @@ impl PeerState {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        if result_member_adds.is_empty()
-            && result_member_removes.is_empty()
-            && program_fact_adds.is_empty()
-            && program_fact_removes.is_empty()
-        {
+        if maintained_view_update_is_empty(
+            &result_member_adds,
+            &result_member_removes,
+            &terminal_operations,
+            &program_fact_adds,
+            &program_fact_removes,
+        ) {
             return Ok(SyncMessage::ViewUpdate {
                 subscription,
                 settled_through: node.applied_global_watermark(),
@@ -750,6 +742,7 @@ impl PeerState {
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             });
@@ -803,7 +796,14 @@ impl PeerState {
                 },
             )
         };
-        let update = update?;
+        let mut update = update?;
+        if let SyncMessage::ViewUpdate {
+            terminal_operations: outgoing,
+            ..
+        } = &mut update
+        {
+            *outgoing = terminal_operations;
+        }
         let bundle_elapsed = bundle_start.elapsed();
         let bundle_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         if trace_rehydrate {
@@ -880,6 +880,7 @@ impl PeerState {
         let mut allow_storage_witness_fallback = false;
         let mut observed_delta_batches = 0_usize;
         let mut observed_result_delta_batches = 0_usize;
+        let mut terminal_operations = Vec::new();
         {
             let Some(maintained_subscription_view) = self
                 .subscriptions
@@ -902,6 +903,7 @@ impl PeerState {
                                 &node.node_aliases,
                             )?;
                         observed_result_delta_batches += transitions.observed_result_delta_batches;
+                        terminal_operations.extend(transitions.terminal_operations);
                         program_fact_adds.extend(filter_program_facts_for_result_table(
                             transitions.program_fact_adds,
                             result_table_filter,
@@ -966,7 +968,9 @@ impl PeerState {
             let Some(table_name) = member.table_name() else {
                 continue;
             };
-            if result_table_filter.is_some_and(|table| table_name != table) {
+            if !matches!(member, ResultMemberEntry::Synthetic { .. })
+                && result_table_filter.is_some_and(|table| table_name != table)
+            {
                 continue;
             }
             if !output_tables.contains_key(table_name)
@@ -992,6 +996,7 @@ impl PeerState {
             allow_storage_witness_fallback,
             observed_delta_batches,
             observed_result_delta_batches,
+            terminal_operations,
         })
     }
 
@@ -1043,12 +1048,6 @@ impl PeerState {
             .get(&subscription)
             .and_then(|state| state.known_state.clone());
         let known_membership_position = fast_current_membership_position(&known_state);
-        let authorization_matches = self.subscriptions.get(&subscription).is_some_and(|state| {
-            fast_authorization_progress(&known_state)
-                .map_or(state.authorization_progress == 0, |progress| {
-                    progress == state.authorization_progress
-                })
-        });
         let watermark = node.applied_global_watermark();
         let simple_membership_delta =
             transitions.program_fact_adds.is_empty() && transitions.program_fact_removes.is_empty();
@@ -1059,7 +1058,8 @@ impl PeerState {
                 let Some(table_name) = member.table_name() else {
                     return false;
                 };
-                result_table_filter.is_none_or(|table| table_name == table)
+                (matches!(member, ResultMemberEntry::Synthetic { .. })
+                    || result_table_filter.is_none_or(|table| table_name == table))
                     && (output_tables.contains_key(table_name)
                         || (matches!(member, ResultMemberEntry::Synthetic { .. })
                             && !aggregate_is_policy_scoped))
@@ -1074,9 +1074,11 @@ impl PeerState {
         // removed prior member or newly visible pre-cursor member cannot be
         // reconstructed from that cursor, so it cannot safely suppress the
         // authoritative membership diff or the payload needed to apply it.
+        // Membership can change through policy rows without advancing the
+        // link-local authorization generation. Preserve the #1266 reset for
+        // pre-cursor grants/revokes; post-cursor additions remain incremental.
         let cursor_membership_mismatch = known_membership_position.is_some_and(|position| {
             fast_cursor_requires_authoritative_reset(
-                authorization_matches,
                 position,
                 previous_member_result_set,
                 &current_member_result_set,
@@ -1331,9 +1333,11 @@ impl PeerState {
             allow_storage_witness_fallback: source_allow_storage_witness_fallback,
             observed_delta_batches: _,
             observed_result_delta_batches: _,
+            terminal_operations: source_terminal_operations,
         } = source_transitions;
         if !source_adds.is_empty()
             || !source_removes.is_empty()
+            || !source_terminal_operations.is_empty()
             || !source_program_fact_adds.is_empty()
             || !source_program_fact_removes.is_empty()
         {
@@ -1346,6 +1350,7 @@ impl PeerState {
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: source_adds,
                 result_member_removes: source_removes,
+                terminal_operations: source_terminal_operations,
                 program_fact_adds: source_program_fact_adds,
                 program_fact_removes: source_program_fact_removes,
             });
@@ -2041,6 +2046,20 @@ impl PeerState {
     }
 }
 
+fn maintained_view_update_is_empty(
+    result_member_adds: &[ResultMemberEntry],
+    result_member_removes: &[ResultMemberEntry],
+    terminal_operations: &[groove::ivm::TerminalOperation],
+    program_fact_adds: &[ProgramFactEntry],
+    program_fact_removes: &[ProgramFactEntry],
+) -> bool {
+    result_member_adds.is_empty()
+        && result_member_removes.is_empty()
+        && terminal_operations.is_empty()
+        && program_fact_adds.is_empty()
+        && program_fact_removes.is_empty()
+}
+
 fn member_row_key(member: &ResultMemberEntry) -> Option<RowKey> {
     member.output_occurrence_id()
 }
@@ -2074,9 +2093,9 @@ fn filter_program_facts_for_result_table(
                 let Some(table_name) = payload.member.table_name() else {
                     return false;
                 };
-                result_table_filter.is_none_or(|table| table_name == table)
-                    && (output_tables.contains_key(table_name)
-                        || matches!(payload.member, ResultMemberEntry::Synthetic { .. }))
+                matches!(payload.member, ResultMemberEntry::Synthetic { .. })
+                    || (result_table_filter.is_none_or(|table| table_name == table)
+                        && output_tables.contains_key(table_name))
             }
             _ => true,
         })
@@ -2336,10 +2355,12 @@ mod tests {
     use crate::node::MergeableCommit;
     use crate::protocol::{ProgramFactEntry, RealRowMemberEntry, SyncMessage, VersionRecord};
     use crate::query::{
-        Aggregate, OrderDirection, Query, claim, col, eq, gt, is_null, lit, ne, not, param,
+        Aggregate, ArraySubquery, OrderDirection, Query, claim, col, eq, gt, is_null, lit, ne, not,
+        param,
     };
     use crate::schema::{JazzSchema, Policy, TableSchema};
     use crate::time::{GlobalSeq, TxTime};
+    use crate::tools::OpenBatchId;
     use crate::tx::DeletionEvent;
     use crate::tx::{DurabilityTier, Fate, TxKind};
     use groove::records::{BorrowedRecord, RecordDescriptor, Value, ValueType};
@@ -2398,7 +2419,7 @@ mod tests {
     }
 
     #[test]
-    fn fast_authorization_progress_bounds_membership_resets() {
+    fn fast_cursor_membership_bounds_authoritative_resets() {
         // This is intentionally an internal test: the four-way decision is a
         // peer-only protocol control-plane predicate, with no public API
         // surface. End-to-end rehydrate tests cover application of its output.
@@ -2409,32 +2430,40 @@ mod tests {
 
         // (1) same authorization, sufficient cursor: no reset.
         assert!(!fast_cursor_requires_authoritative_reset(
-            true, cursor, &previous, &previous,
+            cursor, &previous, &previous,
         ));
-        // (2) same authorization, insufficient cursor: an incremental repair
-        // remains permitted; this predicate must not force a reset.
+        // (2) same authorization, post-cursor add: incremental repair remains
+        // sufficient and this predicate must not force a reset.
         assert!(!fast_cursor_requires_authoritative_reset(
-            true,
             cursor,
             &previous,
             &BTreeSet::from([old.clone(), new.clone()]),
         ));
+        // Membership-affecting policy facts need the #1266 authoritative reset
+        // even when the link-local authorization generation did not advance.
+        assert!(fast_cursor_requires_authoritative_reset(
+            cursor,
+            &previous,
+            &BTreeSet::from([old.clone(), settled_member(row(3), 8)]),
+        ));
+        assert!(fast_cursor_requires_authoritative_reset(
+            cursor,
+            &previous,
+            &BTreeSet::new(),
+        ));
         // (3) changed authorization with a reconstructible post-cursor add.
         assert!(!fast_cursor_requires_authoritative_reset(
-            false,
             cursor,
             &previous,
             &BTreeSet::from([old.clone(), new]),
         ));
         // (4) changed authorization with either a pre-cursor grant or revoke.
         assert!(fast_cursor_requires_authoritative_reset(
-            false,
             cursor,
             &previous,
             &BTreeSet::from([old.clone(), settled_member(row(3), 8)]),
         ));
         assert!(fast_cursor_requires_authoritative_reset(
-            false,
             cursor,
             &previous,
             &BTreeSet::new(),
@@ -2477,6 +2506,7 @@ mod tests {
             peer_payload_inventory: Default::default(),
             result_member_adds: adds,
             result_member_removes: removes,
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         };
@@ -3036,6 +3066,83 @@ mod tests {
         peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 
         assert!(maintained_subscription_id(&peer, subscription).is_some());
+    }
+
+    #[test]
+    fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
+        let schema = JazzSchema::new([
+            TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]),
+            TableSchema::new(
+                "todos",
+                [
+                    ColumnSchema::new("title", ColumnType::String),
+                    ColumnSchema::new("owner_id", ColumnType::Uuid),
+                ],
+            ),
+        ]);
+        let (_dir, mut core) = open_node_with_schema(node(0x93), schema.clone());
+        let user = row(0xa1);
+        let user_tx =
+            core.commit_mergeable(MergeableCommit::new("users", user, 1_000).cells(
+                BTreeMap::from([("name".to_owned(), Value::String("owner".to_owned()))]),
+            ))
+            .unwrap();
+        accept_global(&mut core, user_tx, 1);
+        let shape = Query::from("users")
+            .array_subquery(ArraySubquery::new(
+                "todosViaOwner",
+                "todos",
+                "owner_id",
+                "id",
+            ))
+            .validate(&schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let mut peer = PeerState::new();
+        peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+
+        let child_tx = core
+            .commit_mergeable(MergeableCommit::new("todos", row(0xb1), 1_001).cells(
+                BTreeMap::from([
+                    ("title".to_owned(), Value::String("child".to_owned())),
+                    ("owner_id".to_owned(), Value::Uuid(user.0)),
+                ]),
+            ))
+            .unwrap();
+        accept_global(&mut core, child_tx, 2);
+        peer.query_update(&mut core, &shape, &binding).unwrap();
+        let child_update_tx = core
+            .commit_mergeable(MergeableCommit::new("todos", row(0xb1), 1_002).cells(
+                BTreeMap::from([(
+                    "title".to_owned(),
+                    Value::String("updated child".to_owned()),
+                )]),
+            ))
+            .unwrap();
+        accept_global(&mut core, child_update_tx, 3);
+        let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+        let SyncMessage::ViewUpdate {
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+            terminal_operations,
+            ..
+        } = update
+        else {
+            panic!("expected view update")
+        };
+        assert!(result_member_adds.is_empty());
+        assert!(result_member_removes.is_empty());
+        assert!(!terminal_operations.is_empty());
+        assert!(!maintained_view_update_is_empty(
+            &[],
+            &[],
+            &terminal_operations,
+            &[],
+            &[],
+        ));
+        let _ = (program_fact_adds, program_fact_removes);
     }
 
     #[test]
@@ -4343,6 +4450,7 @@ mod tests {
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             }
@@ -4825,7 +4933,8 @@ mod tests {
         let mut peer = PeerState::new();
 
         peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-        let tx = core.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        core.open_exclusive(tx).unwrap();
         core.tx_write(tx, "todos", row(0x61), title_cells("match"), None)
             .unwrap();
         let (tx_id, _unit) = core.commit_exclusive(tx, AuthorId::SYSTEM, 1_000).unwrap();
@@ -4859,7 +4968,8 @@ mod tests {
         let mut peer = PeerState::new();
 
         peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-        let tx = core.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        core.open_exclusive(tx).unwrap();
         core.tx_write(tx, "todos", row(0x71), title_cells("match"), None)
             .unwrap();
         core.tx_write(tx, "todos", row(0x72), title_cells("other"), None)
@@ -4906,7 +5016,8 @@ mod tests {
         peer.set_ship_complete_exclusive_payloads(true);
 
         peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-        let tx = core.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        core.open_exclusive(tx).unwrap();
         core.tx_write(tx, "todos", row(0x71), title_cells("match"), None)
             .unwrap();
         core.tx_write(tx, "todos", row(0x72), title_cells("other"), None)
@@ -4959,7 +5070,8 @@ mod tests {
                 (row(0x72), title_cells("other")),
             ]
         );
-        let open = reader.open_exclusive().unwrap();
+        let open = OpenBatchId::new();
+        reader.open_exclusive(open).unwrap();
         assert_eq!(
             reader.tx_read(open, "todos", row(0x72)).unwrap(),
             Some(title_cells("other"))
@@ -5037,7 +5149,8 @@ mod tests {
         let doc_b = row(0x82);
         let project = row(0x83);
 
-        let tx = core.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        core.open_exclusive(tx).unwrap();
         core.tx_write(tx, "docs", doc_a, doc_cells("a", project), None)
             .unwrap();
         core.tx_write(tx, "docs", doc_b, doc_cells("b", project), None)
@@ -5316,7 +5429,8 @@ mod tests {
         let doc_two = row(2);
         let project = row(9);
 
-        let tx = writer.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        writer.open_exclusive(tx).unwrap();
         writer
             .tx_write(tx, "docs", doc_one, doc_cells("one", project), None)
             .unwrap();
@@ -5444,7 +5558,8 @@ mod tests {
         assert!(result_member_adds.is_empty());
         assert!(version_bundles.is_empty());
 
-        let tx = core.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        core.open_exclusive(tx).unwrap();
         core.tx_write(tx, "todos", row_one, title_cells("one"), None)
             .unwrap();
         core.tx_write(tx, "todos", row_two, title_cells("two"), None)

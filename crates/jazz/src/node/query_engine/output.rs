@@ -13,6 +13,9 @@ pub(crate) struct RowSetOutputRequest {
 /// App-facing row payload request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AppRowOutputRequest {
+    /// Whether this is an app boundary terminal. Internal policy predicates
+    /// consume their filtered carrier directly instead of publishing rows.
+    pub(crate) public_terminal: bool,
     /// Public payload projection requested at the app boundary.
     pub(crate) projection: PayloadProjection,
     /// Large-value materialization requested for app rows.

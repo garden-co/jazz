@@ -15,4 +15,4 @@ pub use crate::tools::public_api::types::{
     SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema, Value, permissions,
     policy_expr,
 };
-pub use crate::tools::transaction::BatchId;
+pub use crate::tools::transaction::{BatchId, OpenBatchId};

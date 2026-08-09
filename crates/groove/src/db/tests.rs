@@ -7,14 +7,13 @@
 //! runtime module.
 
 use super::*;
-use std::cell::Cell;
-use std::rc::Rc;
 use std::sync::mpsc::TryRecvError;
 use std::time::Instant;
 
 use crate::ivm::{
     AggregateExpr, AggregateFunction, CollectByField, CollectBySlotBuilder, IvmRuntimeError,
-    LiteralValue, PlanExpr, PredicateExpr, ProjectField, StaticScanSpec, TopByLimit, TopByOrder,
+    LiteralValue, PlanExpr, PredicateExpr, ProjectField, StaticScanSpec, TerminalEdit,
+    TerminalPathSegment, TopByLimit, TopByOrder,
 };
 use crate::queries::{
     BinaryOp, ColumnRef, Cte, Expr, JoinConstraint, JoinKind, Query, Select, SelectItem, TableRef,
@@ -25,11 +24,7 @@ use crate::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType,
     PrimaryKey, PrimaryKeyColumn, PrimaryKeyType,
 };
-use crate::storage::{
-    ColumnFamilyName, Error as StorageError, Key, KeyValue, MemoryStorage, OrderedKvStorage,
-    RocksDbStorage, ScanVisitor, StorageLayout, Value as StorageValue, WriteOperation,
-};
-use crate::window_codec::TARGET_RECORDS_PER_WINDOW;
+use crate::storage::{MemoryStorage, OrderedKvStorage, RocksDbStorage, StorageLayout};
 
 fn version_zero_payload(stored: &[u8]) -> &[u8] {
     let (version, payload) = crate::records::split_versioned_record(stored).unwrap();
@@ -2070,178 +2065,58 @@ fn subscribe_sends_empty_hydration_snapshot_without_writes() {
 }
 
 #[test]
-fn history_windows_are_transparent_to_subscription_hydration() {
-    let mut database = jazz_docs_history_database();
-    let row_count = 260;
-    seed_jazz_docs_history(&mut database, 0, row_count);
+fn history_rows_remain_plain_across_hydration_post_write_and_reopen() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let schema = jazz_docs_history_schema();
+    let column_families = schema.column_families();
 
-    database
-        .consolidate_table_windows("jazz_docs_history", TARGET_RECORDS_PER_WINDOW)
-        .unwrap();
-    assert!(
+    {
+        let storage = RocksDbStorage::open(temp_dir.path(), &column_families).unwrap();
+        let mut database = Database::new(schema.clone(), storage).unwrap();
+        seed_jazz_docs_history(&mut database, 0, 12);
+
+        // A history record is one ordinary row at its primary key. The exact
+        // physical count makes a future hidden packer/window write observable.
+        assert_eq!(
+            database
+                .storage
+                .prefix("jazz_docs_history", b"")
+                .unwrap()
+                .len(),
+            12
+        );
+
+        let subscription = database
+            .subscribe_one_sink(GraphBuilder::table("jazz_docs_history"))
+            .unwrap();
+        assert_eq!(subscription.recv().unwrap().deltas.len(), 12);
+
+        seed_jazz_docs_history(&mut database, 12, 1);
+        assert_eq!(subscription.recv().unwrap().deltas.len(), 1);
+        assert_eq!(
+            database
+                .storage
+                .prefix("jazz_docs_history", b"")
+                .unwrap()
+                .len(),
+            13
+        );
+    }
+
+    let storage = RocksDbStorage::open(temp_dir.path(), &column_families).unwrap();
+    let mut database = Database::new(schema, storage).unwrap();
+    assert_eq!(
         database
             .storage
             .prefix("jazz_docs_history", b"")
             .unwrap()
-            .len()
-            < row_count as usize
+            .len(),
+        13
     );
-
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("jazz_docs_history"))
         .unwrap();
-    let rows = subscription.recv().unwrap();
-    assert_eq!(rows.deltas.len(), row_count as usize);
-
-    let indexed = database
-        .index_scan_raw(
-            "jazz_docs_history",
-            "by_tx",
-            &[Value::U64(128), Value::U64(7)],
-        )
-        .unwrap();
-    assert_eq!(indexed.len(), 1);
-}
-
-#[test]
-fn post_tick_history_consolidation_preserves_live_subscription_deltas_and_hydration() {
-    let mut control = jazz_docs_history_database();
-    let mut consolidated = jazz_docs_history_database();
-    seed_jazz_docs_history(&mut control, 0, 260);
-    seed_jazz_docs_history(&mut consolidated, 0, 260);
-
-    let control_live = control
-        .subscribe_one_sink(GraphBuilder::table("jazz_docs_history"))
-        .unwrap();
-    let consolidated_live = consolidated
-        .subscribe_one_sink(GraphBuilder::table("jazz_docs_history"))
-        .unwrap();
-    assert_eq!(
-        control_live.recv().unwrap(),
-        consolidated_live.recv().unwrap()
-    );
-    control.flush().unwrap();
-    consolidated.flush().unwrap();
-
-    let report = consolidated
-        .consolidate_history_windows(TARGET_RECORDS_PER_WINDOW, 2)
-        .unwrap();
-    assert_eq!(report.windows, 1);
-    assert_eq!(report.records, TARGET_RECORDS_PER_WINDOW);
-
-    seed_jazz_docs_history(&mut control, 260, 1);
-    seed_jazz_docs_history(&mut consolidated, 260, 1);
-    assert_eq!(
-        control_live.recv().unwrap(),
-        consolidated_live.recv().unwrap()
-    );
-
-    let control_fresh = control
-        .subscribe_one_sink(GraphBuilder::table("jazz_docs_history"))
-        .unwrap();
-    let consolidated_fresh = consolidated
-        .subscribe_one_sink(GraphBuilder::table("jazz_docs_history"))
-        .unwrap();
-    assert_eq!(
-        control_fresh.recv().unwrap(),
-        consolidated_fresh.recv().unwrap()
-    );
-}
-
-#[test]
-fn history_consolidation_visits_direct_record_stores() {
-    let schema = DatabaseSchema::new([]).with_direct_record_store(DirectRecordStoreSchema::new(
-        "jazz_docs_history",
-        RecordDescriptor::new([
-            ("row_uuid", ValueType::Uuid),
-            ("tx_time", ValueType::U64),
-            ("tx_node_id", ValueType::Uuid),
-        ]),
-        RecordDescriptor::new([("body", ValueType::Bytes)]),
-    ));
-    let storage = MemoryStorage::new(&schema.column_families());
-    let database = Database::new(schema, storage).unwrap();
-    let store = database.direct_record_store("jazz_docs_history").unwrap();
-    let row = uuid::Uuid::from_u128(7);
-    let node = uuid::Uuid::from_u128(9);
-    for idx in 0..(TARGET_RECORDS_PER_WINDOW + 3) {
-        store
-            .set(
-                &[Value::Uuid(row), Value::U64(idx as u64), Value::Uuid(node)],
-                &[Value::Bytes(vec![idx as u8])],
-            )
-            .unwrap();
-    }
-
-    let report = database
-        .consolidate_history_windows(TARGET_RECORDS_PER_WINDOW, 2)
-        .unwrap();
-
-    assert_eq!(
-        report,
-        WindowConsolidation {
-            windows: 1,
-            records: TARGET_RECORDS_PER_WINDOW
-        }
-    );
-    assert_eq!(
-        store
-            .get(&[
-                Value::Uuid(row),
-                Value::U64((TARGET_RECORDS_PER_WINDOW + 2) as u64),
-                Value::Uuid(node),
-            ])
-            .unwrap()
-            .unwrap()
-            .get("body")
-            .unwrap(),
-        Value::Bytes(vec![(TARGET_RECORDS_PER_WINDOW + 2) as u8])
-    );
-}
-
-#[test]
-fn partial_history_tail_is_marked_converged_until_dirtied() {
-    let schema = jazz_docs_history_schema();
-    let layout = StorageLayout::jazz_class_v1();
-    let physical_cfs = layout.physical_column_families(schema.column_families());
-    let physical_cf_refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = ScanCountingStorage::new(&physical_cf_refs);
-    let counter = storage.clone();
-    let mut database = Database::new_with_storage_layout(schema, storage, layout).unwrap();
-
-    seed_jazz_docs_history(&mut database, 0, 3);
-    let scans_after_seed = counter.scan_range_count();
-
-    let first = database.consolidate_history_windows(4, 2).unwrap();
-    assert_eq!(first, WindowConsolidation::default());
-    assert!(counter.scan_range_count() > scans_after_seed);
-
-    let scans_after_first = counter.scan_range_count();
-    let second = database.consolidate_history_windows(4, 2).unwrap();
-    assert_eq!(second, WindowConsolidation::default());
-    assert_eq!(counter.scan_range_count(), scans_after_first);
-
-    seed_jazz_docs_history(&mut database, 3, 1);
-    let scans_after_dirty = counter.scan_range_count();
-    let after_dirty = database.consolidate_history_windows(4, 2).unwrap();
-    assert_eq!(
-        after_dirty,
-        WindowConsolidation {
-            windows: 1,
-            records: 4
-        }
-    );
-    assert!(counter.scan_range_count() > scans_after_dirty);
-
-    let scans_after_reconverge = counter.scan_range_count();
-    let after_reconverge = database.consolidate_history_windows(4, 2).unwrap();
-    assert_eq!(after_reconverge, WindowConsolidation::default());
-    assert!(counter.scan_range_count() > scans_after_reconverge);
-
-    let scans_after_tail_converged = counter.scan_range_count();
-    let skipped = database.consolidate_history_windows(4, 2).unwrap();
-    assert_eq!(skipped, WindowConsolidation::default());
-    assert_eq!(counter.scan_range_count(), scans_after_tail_converged);
+    assert_eq!(subscription.recv().unwrap().deltas.len(), 13);
 }
 
 fn jazz_docs_history_schema() -> DatabaseSchema {
@@ -2263,111 +2138,6 @@ fn jazz_docs_history_schema() -> DatabaseSchema {
         "by_tx",
         ["tx_time", "tx_node", "row_uuid"],
     ))])
-}
-
-fn jazz_docs_history_database() -> Database<MemoryStorage> {
-    let schema = jazz_docs_history_schema();
-    let layout = StorageLayout::jazz_class_v1();
-    let physical_cfs = layout.physical_column_families(schema.column_families());
-    let physical_cf_refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = MemoryStorage::new(&physical_cf_refs);
-    Database::new_with_storage_layout(schema, storage, layout).unwrap()
-}
-
-#[derive(Clone)]
-struct ScanCountingStorage {
-    inner: MemoryStorage,
-    scan_range_count: Rc<Cell<usize>>,
-}
-
-impl ScanCountingStorage {
-    fn new(column_families: &[&str]) -> Self {
-        Self {
-            inner: MemoryStorage::new(column_families),
-            scan_range_count: Rc::new(Cell::new(0)),
-        }
-    }
-
-    fn scan_range_count(&self) -> usize {
-        self.scan_range_count.get()
-    }
-}
-
-impl OrderedKvStorage for ScanCountingStorage {
-    fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<StorageValue>, StorageError> {
-        self.inner.get(cf, key)
-    }
-
-    fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), StorageError> {
-        self.inner.set(cf, key, value)
-    }
-
-    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), StorageError> {
-        self.inner.delete(cf, key)
-    }
-
-    fn close(&self) -> Result<(), StorageError> {
-        self.inner.close()
-    }
-
-    fn approximate_class_bytes(&self, cf: &ColumnFamilyName) -> Result<Option<u64>, StorageError> {
-        self.inner.approximate_class_bytes(cf)
-    }
-
-    fn scan_range(
-        &self,
-        cf: &ColumnFamilyName,
-        start: &Key,
-        end: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), StorageError> {
-        self.scan_range_count
-            .set(self.scan_range_count.get().saturating_add(1));
-        self.inner.scan_range(cf, start, end, visit)
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), StorageError> {
-        self.inner.scan_prefix(cf, prefix, visit)
-    }
-
-    fn scan_prefix_reverse(
-        &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), StorageError> {
-        self.inner.scan_prefix_reverse(cf, prefix, visit)
-    }
-
-    fn last_with_prefix(
-        &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-    ) -> Result<Option<KeyValue>, StorageError> {
-        self.inner.last_with_prefix(cf, prefix)
-    }
-
-    fn last_with_prefix_before_or_at(
-        &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        upper: &Key,
-    ) -> Result<Option<KeyValue>, StorageError> {
-        self.inner.last_with_prefix_before_or_at(cf, prefix, upper)
-    }
-
-    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), StorageError> {
-        self.inner.write_many(operations)
-    }
-
-    fn column_family_names(&self) -> Option<Vec<String>> {
-        self.inner.column_family_names()
-    }
 }
 
 fn seed_jazz_docs_history<S: OrderedKvStorage>(
@@ -5181,15 +4951,11 @@ fn collect_by_expand_rejects_duplicate_occurrence_source_ids() {
 }
 
 #[test]
-fn collect_by_rejects_every_consumer_including_another_collector() {
+fn collect_by_rejects_join_and_nested_collector_consumers() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
     let mut database = Database::new(history_schema(), storage).unwrap();
     let collector = history_collect_by(2);
-    let consumers = [
-        collector
-            .clone()
-            .filter(PredicateExpr::eq("row", Value::U64(1))),
-        collector.clone().project(["row"]),
+    let relational_consumers = [
         GraphBuilder::join(
             collector.clone(),
             GraphBuilder::table("history"),
@@ -5208,7 +4974,7 @@ fn collect_by_rejects_every_consumer_including_another_collector() {
             TopByLimit::Finite(1),
         ),
     ];
-    for graph in consumers {
+    for graph in relational_consumers {
         assert!(matches!(
             database.subscribe_one_sink(graph),
             Err(Error::IvmRuntime(IvmRuntimeError::CollectByMustBeTerminal))
@@ -5246,6 +5012,86 @@ fn collect_by_suppresses_unchanged_rendered_group_and_replaces_once_at_boundary(
     assert_eq!(
         replacement[1],
         (collect_parent(1, &[(5, "front"), (10, "first")]), 1)
+    );
+}
+
+#[test]
+fn collect_by_multisink_emits_descendant_terminal_operations() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe([("rows", history_collect_by(2))])
+        .unwrap();
+    let initial = subscription.recv().unwrap();
+    assert!(initial.terminal_sinks.is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    batch.insert("history", history_values(1, 20, 20, "second"));
+    database.commit_batch(batch).unwrap();
+    let initial_rows = subscription.recv().unwrap();
+    assert!(matches!(
+        initial_rows.terminal_sinks["rows"].operations.as_slice(),
+        [crate::ivm::TerminalOperation {
+            path,
+            edit: TerminalEdit::Insert { .. },
+            ..
+        }] if path.is_empty()
+    ));
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 5, 5, "front"));
+    database.commit_batch(batch).unwrap();
+    let update = subscription.recv().unwrap();
+    let operations = &update.terminal_sinks["rows"].operations;
+    assert!(operations.iter().all(|operation| {
+        matches!(operation.path.as_slice(), [TerminalPathSegment::Collection(field)] if field == "children")
+    }));
+    assert!(
+        operations
+            .iter()
+            .any(|operation| matches!(operation.edit, TerminalEdit::Insert { index: 0, .. }))
+    );
+    assert!(
+        operations
+            .iter()
+            .any(|operation| matches!(operation.edit, TerminalEdit::Remove { .. }))
+    );
+    assert!(
+        operations
+            .iter()
+            .all(|operation| !matches!(operation.edit, TerminalEdit::Update { .. }))
+    );
+}
+
+#[test]
+fn one_shot_query_does_not_discard_live_collect_by_arrangement() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database.subscribe_one_sink(history_collect_by(2)).unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(collect_parent(1, &[(10, "first")]), 1)]
+    );
+
+    // One-shot queries collect their ephemeral graph immediately. That GC
+    // boundary must retain arrangements owned by an unrelated live terminal.
+    let snapshot = database.query_graph(GraphBuilder::table("rows")).unwrap();
+    assert!(snapshot.is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 20, 20, "second"));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (collect_parent(1, &[(10, "first")]), -1),
+            (collect_parent(1, &[(10, "first"), (20, "second")]), 1),
+        ]
     );
 }
 

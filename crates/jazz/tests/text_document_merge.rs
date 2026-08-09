@@ -133,7 +133,10 @@ async fn sequential_text_typing_round_trips_byte_exact() {
                 .insert("docs", row_input!("body" => b"".to_vec()))
                 .expect("insert doc");
             alice
-                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("base settles");
 
@@ -181,9 +184,12 @@ async fn offline_concurrent_text_edits_reconnect_and_converge() {
                 .for_session(Session::new(bob_id))
                 .insert_with_id("docs", *doc.uuid(), row_input!("body" => b"".to_vec()))
                 .expect("bob inserts base doc");
-            bob.wait_for_batch(bob_base_batch, DurabilityTier::EdgeServer)
-                .await
-                .expect("bob base settles");
+            bob.wait_for_batch(
+                bob_base_batch.expect("ordinary mutation commits immediately"),
+                DurabilityTier::EdgeServer,
+            )
+            .await
+            .expect("bob base settles");
             wait_for_body_at(
                 &alice,
                 doc,

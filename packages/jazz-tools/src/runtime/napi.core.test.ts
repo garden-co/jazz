@@ -12,6 +12,22 @@ import { encodeSchema } from "./native-runtime/native-runtime-adapter.js";
 import { hasJazzNapiBuild, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 import { SubscriptionManager } from "./subscription-manager.js";
 import type { WasmRow } from "../drivers/types.js";
+import { createOpenBatchId, type BatchId, type OpenBatchId, type WriteReceipt } from "./client.js";
+
+function beginTestBatch(runtime: NativeRuntimeAdapter): OpenBatchId {
+  const id = createOpenBatchId();
+  runtime.beginTransaction("mergeable", id);
+  return id;
+}
+
+async function committedBatchId(receipt: WriteReceipt): Promise<BatchId> {
+  if (receipt.kind !== "committed") throw new Error("expected committed write receipt");
+  return await receipt.batchId;
+}
+
+function expectStaged(receipt: WriteReceipt, openBatchId: OpenBatchId): void {
+  expect(receipt).toMatchObject({ kind: "staged", openBatchId });
+}
 
 const TEST_SCHEMA: WasmSchema = {
   todos: {
@@ -549,7 +565,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     expect(updates).toEqual([{ all: [], delta: [], reset: true }]);
 
-    const tx = runtime.beginTransaction("mergeable");
+    const tx = beginTestBatch(runtime);
     const writeContext = JSON.stringify({ batch_id: tx });
     const first = runtime.insert(
       "todos",
@@ -570,12 +586,12 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       "44444444-4444-4444-8444-444444444444",
     );
 
-    expect(first.transactionId).toBe(tx);
-    expect(second.transactionId).toBe(tx);
+    expectStaged(first, tx);
+    expectStaged(second, tx);
     expect(updates).toHaveLength(1);
 
-    runtime.commitTransaction(tx);
-    await runtime.waitForTransaction(tx, "local");
+    const batchId = await runtime.commitTransaction(tx);
+    await runtime.waitForTransaction(batchId, "local");
 
     expect(updates).toHaveLength(2);
     expect(updates[1]?.reset).not.toBe(true);
@@ -607,7 +623,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       },
       aliceSession,
     );
-    await runtime.waitForTransaction(aliceTodo.transactionId, "local");
+    await runtime.waitForTransaction(await committedBatchId(aliceTodo), "local");
 
     const aliceRows = await runtime.query(
       JSON.stringify({ table: "todos" }),
@@ -637,7 +653,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         },
         aliceSession,
       );
-      await runtime.waitForTransaction(foreignOwnerTodo.transactionId, "local");
+      await runtime.waitForTransaction(await committedBatchId(foreignOwnerTodo), "local");
     } catch (error) {
       if (!String(error).includes("policy denied INSERT on table todos")) throw error;
     }
@@ -664,7 +680,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       },
       bobSession,
     );
-    await runtime.waitForTransaction(bobTodo.transactionId, "local");
+    await runtime.waitForTransaction(await committedBatchId(bobTodo), "local");
 
     const aliceRowsAfterBobInsert = await runtime.query(
       JSON.stringify({ table: "todos" }),
@@ -737,8 +753,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     );
 
     await Promise.all([
-      runtime.waitForTransaction(aliceTodo.transactionId, "local"),
-      runtime.waitForTransaction(bobTodo.transactionId, "local"),
+      runtime.waitForTransaction(await committedBatchId(aliceTodo), "local"),
+      runtime.waitForTransaction(await committedBatchId(bobTodo), "local"),
     ]);
 
     expect(await runtime.query(query, aliceSession, "local")).toEqual([
@@ -828,8 +844,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     );
 
     await Promise.all([
-      runtime.waitForTransaction(aliceTodo.transactionId, "local"),
-      runtime.waitForTransaction(bobTodo.transactionId, "local"),
+      runtime.waitForTransaction(await committedBatchId(aliceTodo), "local"),
+      runtime.waitForTransaction(await committedBatchId(bobTodo), "local"),
     ]);
 
     expect(() => runtime.delete("todos", bobTodo.id, aliceSession)).toThrow(
@@ -843,8 +859,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const bobDelete = runtime.delete("todos", bobTodo.id, bobSession);
 
     await Promise.all([
-      runtime.waitForTransaction(aliceDelete.transactionId, "local"),
-      runtime.waitForTransaction(bobDelete.transactionId, "local"),
+      runtime.waitForTransaction(await committedBatchId(aliceDelete), "local"),
+      runtime.waitForTransaction(await committedBatchId(bobDelete), "local"),
     ]);
 
     await expect(runtime.query(JSON.stringify({ table: "todos" }), aliceSession)).resolves.toEqual(
@@ -905,11 +921,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     await Promise.all([
       waitForPromise(
-        runtime.waitForTransaction(aliceTodo.transactionId, "edge"),
+        runtime.waitForTransaction(await committedBatchId(aliceTodo), "edge"),
         "alice insert did not settle at edge",
       ),
       waitForPromise(
-        runtime.waitForTransaction(bobTodo.transactionId, "edge"),
+        runtime.waitForTransaction(await committedBatchId(bobTodo), "edge"),
         "bob insert did not settle at edge",
       ),
     ]);
@@ -926,11 +942,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     await Promise.all([
       waitForPromise(
-        runtime.waitForTransaction(aliceDelete.transactionId, "edge"),
+        runtime.waitForTransaction(await committedBatchId(aliceDelete), "edge"),
         "alice delete did not settle at edge",
       ),
       waitForPromise(
-        runtime.waitForTransaction(bobDelete.transactionId, "edge"),
+        runtime.waitForTransaction(await committedBatchId(bobDelete), "edge"),
         "bob delete did not settle at edge",
       ),
     ]);
@@ -1000,11 +1016,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
       await Promise.all([
         waitForPromise(
-          runtime.waitForTransaction(aliceTodo.transactionId, "edge"),
+          runtime.waitForTransaction(await committedBatchId(aliceTodo), "edge"),
           "alice persistent insert did not settle at edge",
         ),
         waitForPromise(
-          runtime.waitForTransaction(bobTodo.transactionId, "edge"),
+          runtime.waitForTransaction(await committedBatchId(bobTodo), "edge"),
           "bob persistent insert did not settle at edge",
         ),
       ]);
@@ -1021,11 +1037,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
       await Promise.all([
         waitForPromise(
-          runtime.waitForTransaction(aliceDelete.transactionId, "edge"),
+          runtime.waitForTransaction(await committedBatchId(aliceDelete), "edge"),
           "alice persistent delete did not settle at edge",
         ),
         waitForPromise(
-          runtime.waitForTransaction(bobDelete.transactionId, "edge"),
+          runtime.waitForTransaction(await committedBatchId(bobDelete), "edge"),
           "bob persistent delete did not settle at edge",
         ),
       ]);
@@ -1066,7 +1082,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       done: { type: "Boolean", value: false },
     });
 
-    const tx = runtime.beginTransaction("mergeable");
+    const tx = beginTestBatch(runtime);
     runtime.update(
       "todos",
       inserted.id,
@@ -1091,8 +1107,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       JSON.stringify({ batch_id: tx }),
       "22222222-2222-4222-8222-222222222222",
     );
-    runtime.commitTransaction(tx);
-    await runtime.waitForTransaction(tx, "local");
+    const committed = await runtime.commitTransaction(tx);
+    await runtime.waitForTransaction(committed, "local");
 
     const rows = await runtime.query(JSON.stringify({ table: "todos" }));
     expect(rows).toHaveLength(3);
@@ -1172,7 +1188,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       done: { type: "Boolean", value: false },
     });
     await waitForPromise(
-      writer.waitForTransaction(inserted.transactionId, "edge"),
+      writer.waitForTransaction(await committedBatchId(inserted), "edge"),
       "writer insert did not settle at edge",
     );
 
@@ -1233,7 +1249,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         done: { type: "Boolean", value: false },
       });
       await waitForPromise(
-        writer.waitForTransaction(inserted.transactionId, "edge"),
+        writer.waitForTransaction(await committedBatchId(inserted), "edge"),
         "writer insert did not settle at persistent edge",
       );
       writer.close();
@@ -1313,7 +1329,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     });
 
     await waitForPromise(
-      writer.waitForTransaction(inserted.transactionId, "edge"),
+      writer.waitForTransaction(await committedBatchId(inserted), "edge"),
       "writer public chat insert did not settle at edge",
     );
 
@@ -1346,7 +1362,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       text: { type: "Text", value: "hello through public chat policy" },
     });
     await waitForPromise(
-      writer.waitForTransaction(message.transactionId, "edge"),
+      writer.waitForTransaction(await committedBatchId(message), "edge"),
       "writer public-chat message insert did not settle at edge",
     );
 
@@ -1401,7 +1417,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         title: { type: "Text", value: "direct napi persistent row" },
         done: { type: "Boolean", value: false },
       });
-      await firstRuntime.waitForTransaction(inserted.transactionId, "local");
+      await firstRuntime.waitForTransaction(await committedBatchId(inserted), "local");
       firstRuntime.close();
       firstRuntime = null;
 

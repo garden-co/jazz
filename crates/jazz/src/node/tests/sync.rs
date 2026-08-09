@@ -99,7 +99,8 @@ fn client_side_rejection_cascades_to_local_mergeable_descendant() {
         &mut core,
         MergeableCommit::new("todos", row, 1).cells(title_cells("old")),
     );
-    let tx_id = client.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    client.open_exclusive(tx_id).unwrap();
     client
         .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
         .unwrap();
@@ -171,7 +172,8 @@ fn authority_unparks_child_after_unknown_parent_accepts() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let row = row(7);
-    let tx_id = client.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    client.open_exclusive(tx_id).unwrap();
     client
         .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
         .unwrap();
@@ -494,6 +496,7 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
             authorization_progress: None,
             result_member_adds,
             result_member_removes,
+            terminal_operations: Vec::new(),
             program_fact_adds,
             program_fact_removes,
         }])
@@ -563,6 +566,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                     tx_id,
                 ))],
                 result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             },
@@ -583,6 +587,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
             authorization_progress: None,
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             },
@@ -649,6 +654,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                     tx_id,
                 ))],
                 result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             },
@@ -673,6 +679,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                     tx_id,
                 ))],
                 result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             },
@@ -825,6 +832,7 @@ fn partial_exclusive_view_update(
             tx_id,
         ))],
         result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     }
@@ -921,6 +929,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
                 new_tx,
             ))],
             result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         }])
@@ -976,6 +985,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: vec![("todos".to_owned().into(), row(1), tx_id).into()],
             result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -1010,6 +1020,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: vec![("todos".to_owned().into(), row(2), tx_id).into()],
             result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -1043,6 +1054,7 @@ fn view_updates_drop_unknown_usage_site_bindings() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -1572,6 +1584,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -2300,6 +2313,7 @@ fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
             row_uuid,
             TxId::new(TxTime(777), node(44)),
         ))],
+        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     };
@@ -2340,6 +2354,7 @@ fn late_view_update_for_never_registered_subscription_is_dropped_and_counted() {
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     };
@@ -2403,6 +2418,7 @@ fn known_state_removal_without_local_body_clears_membership_without_repair() {
             row_uuid,
             invisible_tx,
         ))],
+        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     };
@@ -2451,6 +2467,7 @@ fn known_state_removal_for_never_known_row_is_noop_but_settles() {
             row_uuid,
             TxId::new(TxTime(1000), node(45)),
         ))],
+        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     };
@@ -2542,6 +2559,7 @@ fn empty_reset_for_duplicate_usage_subscription_does_not_degrade_canonical_view(
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -3463,6 +3481,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
             authorization_progress: None,
             result_member_adds,
             result_member_removes,
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -3524,6 +3543,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             authorization_progress: None,
             result_member_adds,
             result_member_removes,
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -3572,6 +3592,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             authorization_progress: None,
             result_member_adds,
             result_member_removes,
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -3597,6 +3618,7 @@ fn view_updates_downgrade_unknown_peer_payload_inventory_refs() {
             authorization_progress: None,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })

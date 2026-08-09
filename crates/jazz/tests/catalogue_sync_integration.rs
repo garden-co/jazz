@@ -879,7 +879,10 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published_impl() 
         )
         .expect("admin creates user after permissions publish");
     admin
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("admin creates user after permissions publish");
 
@@ -941,7 +944,10 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
         )
         .expect("pre-permissions create should stage locally");
     let queued_write_error = writer
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect_err("pre-permissions persisted create should be rejected");
     let queued_write_error = queued_write_error.to_string();
@@ -993,7 +999,10 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
         )
         .expect("post-publish create should succeed");
     writer
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("post-publish create should settle");
 
@@ -1031,7 +1040,10 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
         )
         .expect("update should succeed once permissions exist");
     writer
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("update should settle once permissions exist");
 
@@ -1059,7 +1071,10 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
         .delete(accepted_row_id)
         .expect("delete should succeed once permissions exist");
     writer
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("delete should settle once permissions exist");
 
@@ -1141,7 +1156,10 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout_impl() {
         )
         .expect("create should succeed after permissions publish");
     writer
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("create should settle after permissions publish");
 
@@ -1234,7 +1252,10 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
         )
         .expect("admin creates user after permissions publish");
     admin
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("admin user reaches edge after permissions publish");
 
@@ -1341,7 +1362,10 @@ async fn column_addition_new_client_can_read_old_rows_impl() {
         .insert("users", user_values_v1(user_id_value, "Alice Smith"))
         .expect("alice creates user after permissions publish");
     alice
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("alice user reaches edge after permissions publish");
 
@@ -1433,7 +1457,10 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
         .insert("users", user_values_v1(user_id, "Alice Pending Lens"))
         .expect("alice creates v1 user");
     alice
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("alice user reaches edge");
 
@@ -1562,7 +1589,10 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
         .insert("users", user_values_v1(alice_user_id, "Alice Multi-Hop"))
         .expect("alice creates v1 user");
     alice
-        .wait_for_batch(alice_batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            alice_batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("alice user reaches edge");
 
@@ -1579,9 +1609,12 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
             user_values_v2(bob_user_id, "Bob Multi-Hop", "bob@example.com"),
         )
         .expect("bob creates v2 user");
-    bob.wait_for_batch(bob_batch_id, DurabilityTier::EdgeServer)
-        .await
-        .expect("bob user reaches edge");
+    bob.wait_for_batch(
+        bob_batch_id.expect("ordinary mutation commits immediately"),
+        DurabilityTier::EdgeServer,
+    )
+    .await
+    .expect("bob user reaches edge");
 
     let charlie = JazzClient::connect(
         server.make_client_context_for_user(v3_schema, test_user_id("charlie-multi-hop")),
@@ -1602,7 +1635,10 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
         )
         .expect("charlie creates v3 user");
     charlie
-        .wait_for_batch(charlie_batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            charlie_batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("charlie user reaches edge");
 
@@ -1727,7 +1763,10 @@ async fn multi_hop_column_renames_new_client_can_read_old_rows_impl() {
         )
         .expect("alice creates v1 user");
     alice
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("alice user reaches edge");
 
@@ -1813,9 +1852,12 @@ async fn multi_hop_column_renames_old_client_can_read_new_rows_impl() {
     let (row_id, _, batch_id) = bob
         .insert("users", rename_chain_values_v3(user_id, "bob@example.com"))
         .expect("bob creates v3 user");
-    bob.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
-        .await
-        .expect("bob user reaches edge");
+    bob.wait_for_batch(
+        batch_id.expect("ordinary mutation commits immediately"),
+        DurabilityTier::EdgeServer,
+    )
+    .await
+    .expect("bob user reaches edge");
 
     let alice = JazzClient::connect(
         server.make_client_context_for_user(v1_schema, test_user_id("alice-rename-chain-old")),
@@ -1902,7 +1944,10 @@ async fn table_rename_new_client_can_read_old_rows_impl() {
         )
         .expect("alice creates v1 user");
     alice
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("alice user reaches edge");
 
@@ -2133,9 +2178,12 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
     let (row_id, _, batch_id) = bob
         .insert("people", table_rename_values_v2(user_id, "bob@example.com"))
         .expect("bob creates v2 person");
-    bob.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
-        .await
-        .expect("bob person reaches edge");
+    bob.wait_for_batch(
+        batch_id.expect("ordinary mutation commits immediately"),
+        DurabilityTier::EdgeServer,
+    )
+    .await
+    .expect("bob person reaches edge");
 
     wait_for_subscription_update(
         &mut stream,
@@ -2215,7 +2263,10 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
         )
         .expect("alice creates v1 user");
     alice
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("alice user reaches edge");
 
@@ -2237,9 +2288,12 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
             )],
         )
         .expect("bob updates renamed row");
-    bob.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
-        .await
-        .expect("bob update reaches edge");
+    bob.wait_for_batch(
+        batch_id.expect("ordinary mutation commits immediately"),
+        DurabilityTier::EdgeServer,
+    )
+    .await
+    .expect("bob update reaches edge");
 
     let rows_after_update = wait_for_query(
         &bob,
@@ -2264,9 +2318,12 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
     assert_eq!(rows_after_update.len(), 1);
 
     let batch_id = bob.delete(row_id).expect("bob deletes renamed row");
-    bob.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
-        .await
-        .expect("bob delete reaches edge");
+    bob.wait_for_batch(
+        batch_id.expect("ordinary mutation commits immediately"),
+        DurabilityTier::EdgeServer,
+    )
+    .await
+    .expect("bob delete reaches edge");
 
     let rows_after_delete = wait_for_query(
         &bob,
@@ -2327,7 +2384,10 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
         .insert("users", table_rename_join_user_values(author_id, "Alice"))
         .expect("alice creates v1 user");
     alice
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("alice user reaches edge");
 
@@ -2339,7 +2399,10 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
         )
         .expect("alice creates v1 post");
     alice
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("alice post reaches edge");
 
@@ -2428,7 +2491,10 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
         .insert("users", table_rename_join_user_values(author_id, "Alice"))
         .expect("alice creates v1 user");
     alice
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("alice user reaches edge");
 
@@ -2440,7 +2506,10 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
         )
         .expect("alice creates v1 post");
     alice
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("alice post reaches edge");
 
@@ -2538,7 +2607,10 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         .insert("users", legacy_join_provenance_user_values("bob"))
         .expect("admin creates legacy user");
     admin
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("legacy user reaches edge");
 
@@ -2549,7 +2621,10 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         )
         .expect("admin creates legacy post");
     admin
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("legacy post reaches edge");
 
@@ -2573,7 +2648,10 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         )
         .expect("admin creates current-schema post");
     current_admin
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("current-schema post reaches edge");
 
@@ -2637,9 +2715,12 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
             vec![("viewer_name".to_owned(), Value::Text(test_user_id("alice")))],
         )
         .expect("move one joined occurrence to Alice's policy scope");
-    bob.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
-        .await
-        .expect("selective policy update reaches edge");
+    bob.wait_for_batch(
+        batch_id.expect("ordinary mutation commits immediately"),
+        DurabilityTier::EdgeServer,
+    )
+    .await
+    .expect("selective policy update reaches edge");
 
     let retained_bob_rows = wait_for_query_results(
         &bob,
@@ -2729,7 +2810,10 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
         )
         .expect("alice creates v1 user");
     alice
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("alice row reaches edge");
 
@@ -2753,9 +2837,12 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
             multi_hop_table_rename_values_v2(bob_id, "bob@example.com"),
         )
         .expect("bob creates v2 person");
-    bob.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
-        .await
-        .expect("bob row reaches edge");
+    bob.wait_for_batch(
+        batch_id.expect("ordinary mutation commits immediately"),
+        DurabilityTier::EdgeServer,
+    )
+    .await
+    .expect("bob row reaches edge");
 
     publish_allow_all_permissions(
         &server.base_url(),
@@ -2780,7 +2867,10 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
         )
         .expect("carol creates v3 member");
     carol
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("carol row reaches edge");
 
@@ -2879,7 +2969,10 @@ async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
         )
         .expect("alice creates v1 user");
     alice
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("alice row reaches edge");
 
@@ -2905,9 +2998,12 @@ async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
             removed_readded_values_v3(bob_id, "Bob New Lineage", "bob@example.com"),
         )
         .expect("bob creates v3 user");
-    bob.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
-        .await
-        .expect("bob row reaches edge");
+    bob.wait_for_batch(
+        batch_id.expect("ordinary mutation commits immediately"),
+        DurabilityTier::EdgeServer,
+    )
+    .await
+    .expect("bob row reaches edge");
 
     let rows = wait_for_query(
         &bob,
@@ -3095,7 +3191,10 @@ async fn keeps_authorization_through_v1_head_impl() {
         .insert("users", user_values_v1(user_id_value, "Alice Through Lens"))
         .expect("alice creates user after v1 permissions publish");
     alice
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("alice user reaches edge after v1 permissions publish");
 

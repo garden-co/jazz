@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { PersistentBrowserOpfsRuntime } from "../../src/runtime/native-runtime/persistent-browser-runtime.js";
+import { createOpenBatchId } from "../../src/runtime/client.js";
 
 const schema: WasmSchema = {
   orgs: {
@@ -575,6 +576,95 @@ describe("db.all browser integration", () => {
     } finally {
       await runtime.close();
     }
+  });
+
+  it("preserves staged work when a real persistent worker rejects a duplicate OpenBatchId", async () => {
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      uniqueDbName("duplicate-open-batch-worker"),
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const id = createOpenBatchId();
+    try {
+      runtime.beginTransaction("mergeable", id);
+      runtime.insert(
+        "todos",
+        {
+          title: { type: "Text", value: "first" },
+          done: { type: "Boolean", value: false },
+          tags: { type: "Array", value: [] },
+        },
+        JSON.stringify({ batch_id: id }),
+      );
+      expect(() => runtime.beginTransaction("mergeable", id)).toThrow(
+        `Begin transaction failed: batch ${id} has already been opened`,
+      );
+      runtime.insert(
+        "todos",
+        {
+          title: { type: "Text", value: "second" },
+          done: { type: "Boolean", value: false },
+          tags: { type: "Array", value: [] },
+        },
+        JSON.stringify({ batch_id: id }),
+      );
+      await runtime.commitTransaction(id);
+      const rows = (await runtime.query(
+        JSON.stringify({ table: "todos" }),
+        null,
+        "local",
+      )) as unknown[];
+      expect(rows).toHaveLength(2);
+
+      const emptyMergeable = createOpenBatchId();
+      runtime.beginTransaction("mergeable", emptyMergeable);
+      await expect(runtime.commitTransaction(emptyMergeable)).rejects.toThrow(
+        "empty mergeable batch has no committed unit; roll it back instead",
+      );
+      await runtime.rollbackTransaction(emptyMergeable);
+
+      const emptyExclusive = createOpenBatchId();
+      runtime.beginTransaction("exclusive", emptyExclusive);
+      await expect(runtime.commitTransaction(emptyExclusive)).resolves.toMatch(/^[0-9a-f]{32}$/);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("lets real-worker close preempt an edge durability wait", async () => {
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      uniqueDbName("close-preempts-worker-wait"),
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const receipt = runtime.insert("todos", {
+      title: { type: "Text", value: "pending" },
+      done: { type: "Boolean", value: false },
+      tags: { type: "Array", value: [] },
+    });
+    if (receipt.kind !== "committed") throw new Error("expected committed write");
+    const batchId = await receipt.batchId;
+    const wait = runtime.waitForTransaction(batchId, "edge");
+    const laterReceipt = runtime.insert("todos", {
+      title: { type: "Text", value: "queued behind wait" },
+      done: { type: "Boolean", value: false },
+      tags: { type: "Array", value: [] },
+    });
+    if (laterReceipt.kind !== "committed") throw new Error("expected committed write");
+    const waitRejected = expect(wait).rejects.toThrow("closed");
+    const laterWriteRejected = expect(laterReceipt.batchId).rejects.toThrow("closed");
+    await expect(
+      Promise.race([
+        runtime.close(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("close timed out")), 2_000)),
+      ]),
+    ).resolves.toBeUndefined();
+    await waitRejected;
+    await laterWriteRejected;
   });
 
   it("supports multi-hop queries", async () => {

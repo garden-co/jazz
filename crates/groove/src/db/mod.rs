@@ -31,8 +31,7 @@ use crate::schema::{
 };
 use crate::storage::{
     LayoutStorage, OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay,
-    StagedWriteState, StorageLayout, WindowConsolidation, WriteOperation,
-    is_windowed_history_table,
+    StagedWriteState, StorageLayout, WriteOperation,
 };
 use thiserror::Error;
 
@@ -50,7 +49,6 @@ pub struct Database<S> {
     last_commit_metrics: Option<CommitMetrics>,
     last_tick_metrics: Option<TickMetrics>,
     storage_read_metrics: RefCell<StorageReadMetrics>,
-    converged_history_window_stores: RefCell<HashSet<String>>,
     poisoned: bool,
 }
 
@@ -172,7 +170,6 @@ where
             last_commit_metrics: None,
             last_tick_metrics: None,
             storage_read_metrics: RefCell::new(StorageReadMetrics::default()),
-            converged_history_window_stores: RefCell::new(HashSet::new()),
             poisoned: false,
         })
     }
@@ -1465,149 +1462,6 @@ where
             .transpose()
     }
 
-    /// Consolidate plain records for an opted-in physical record store into
-    /// bounded codec windows.
-    ///
-    /// This is deliberately explicit for now: hot writes still land as plain
-    /// records, and future flush/checkpoint plumbing can call this at a safe
-    /// consolidation boundary.
-    pub fn consolidate_table_windows(
-        &self,
-        table: &str,
-        max_records: usize,
-    ) -> Result<WindowConsolidation, Error> {
-        let table_schema = self.table(table)?;
-        let Some(primary_key) = table_schema.primary_key.as_ref() else {
-            return Err(Error::MissingPrimaryKey(table.to_owned()));
-        };
-        let descriptor = table_schema.record_schema();
-        let key_descriptor = primary_key_descriptor(primary_key);
-        let store = record_store_for_table(&self.storage, table, Some(key_descriptor), &descriptor);
-        store.consolidate_windows(max_records).map_err(Error::from)
-    }
-
-    /// Consolidate at most `max_windows` codec windows across opted-in history
-    /// tables in this schema.
-    ///
-    /// This is intended for caller-owned post-tick maintenance: the write path
-    /// remains plain-record first, and this bounded pass rewrites old runs in
-    /// atomic storage batches between runtime ticks.
-    pub fn consolidate_history_windows(
-        &self,
-        max_records_per_window: usize,
-        max_windows: usize,
-    ) -> Result<WindowConsolidation, Error> {
-        let mut remaining_windows = max_windows;
-        let mut total = WindowConsolidation::default();
-        if max_records_per_window == 0 || max_windows == 0 {
-            return Ok(total);
-        }
-        if self.all_history_window_stores_converged() {
-            return Ok(total);
-        }
-        for table in &self.ivm_runtime.schema().tables {
-            if remaining_windows == 0 {
-                break;
-            }
-            if !is_windowed_history_table(&table.name) {
-                continue;
-            }
-            if self.history_window_store_converged(&table.name) {
-                continue;
-            }
-            let Some(primary_key) = table.primary_key.as_ref() else {
-                continue;
-            };
-            let descriptor = table.record_schema();
-            let key_descriptor = primary_key_descriptor(primary_key);
-            let store = record_store_for_table(
-                &self.storage,
-                &table.name,
-                Some(key_descriptor),
-                &descriptor,
-            );
-            let next = store
-                .consolidate_full_windows_bounded(max_records_per_window, remaining_windows)
-                .map_err(Error::from)?;
-            if next.windows == 0 {
-                self.mark_history_window_store_converged(&table.name);
-            }
-            remaining_windows = remaining_windows.saturating_sub(next.windows);
-            total.windows += next.windows;
-            total.records += next.records;
-        }
-        for store in &self.ivm_runtime.schema().direct_record_stores {
-            if remaining_windows == 0 {
-                break;
-            }
-            if !is_windowed_history_table(&store.name) {
-                continue;
-            }
-            if self.history_window_store_converged(&store.name) {
-                continue;
-            }
-            let key_descriptor = RecordDescriptor::new(store.key.clone());
-            let descriptor = RecordDescriptor::new(store.value.clone());
-            let record_store =
-                RecordStore::new_windowed(&self.storage, &store.name, key_descriptor, &descriptor);
-            let next = record_store
-                .consolidate_full_windows_bounded(max_records_per_window, remaining_windows)
-                .map_err(Error::from)?;
-            if next.windows == 0 {
-                self.mark_history_window_store_converged(&store.name);
-            }
-            remaining_windows = remaining_windows.saturating_sub(next.windows);
-            total.windows += next.windows;
-            total.records += next.records;
-        }
-        Ok(total)
-    }
-
-    fn all_history_window_stores_converged(&self) -> bool {
-        let converged_stores = self.converged_history_window_stores.borrow();
-        let mut saw_history_store = false;
-
-        for table in &self.ivm_runtime.schema().tables {
-            if !is_windowed_history_table(&table.name) {
-                continue;
-            }
-            saw_history_store = true;
-            if !converged_stores.contains(&table.name) {
-                return false;
-            }
-        }
-
-        for store in &self.ivm_runtime.schema().direct_record_stores {
-            if !is_windowed_history_table(&store.name) {
-                continue;
-            }
-            saw_history_store = true;
-            if !converged_stores.contains(&store.name) {
-                return false;
-            }
-        }
-
-        saw_history_store
-    }
-
-    fn history_window_store_converged(&self, store: &str) -> bool {
-        self.converged_history_window_stores
-            .borrow()
-            .contains(store)
-    }
-
-    fn mark_history_window_store_converged(&self, store: &str) {
-        self.converged_history_window_stores
-            .borrow_mut()
-            .insert(store.to_owned());
-    }
-
-    fn mark_history_window_store_dirty(&self, store: &str) {
-        self.converged_history_window_stores
-            .borrow_mut()
-            .remove(store);
-    }
-
     /// Return encoded records whose explicit schema index exactly matches the
     /// supplied index-column key.
     ///
@@ -1956,12 +1810,6 @@ where
             // failure rather than serve possibly torn in-memory state.
             self.poisoned = true;
             return Err(Error::from(error));
-        }
-        for write in &pending_writes {
-            let table = write.table();
-            if is_windowed_history_table(table) {
-                self.mark_history_window_store_dirty(table);
-            }
         }
         let storage_write_time = storage_start.elapsed();
         self.last_tick_metrics = Some(tick.clone());
@@ -2368,11 +2216,7 @@ where
     }
 
     fn record_store(&self) -> RecordStore<'_, LayoutStorage<S>> {
-        if is_windowed_history_table(&self.name) {
-            RecordStore::new_windowed(self.storage, &self.name, self.key, &self.value)
-        } else {
-            RecordStore::new(self.storage, &self.name, &self.value)
-        }
+        RecordStore::new(self.storage, &self.name, &self.value)
     }
 
     fn decode_key(&self, key: &[u8]) -> Result<Vec<Value>, Error> {
@@ -3053,13 +2897,8 @@ fn record_store_for_table<'a, S>(
 where
     S: OrderedKvStorage,
 {
-    if is_windowed_history_table(table)
-        && let Some(key_descriptor) = key_descriptor
-    {
-        RecordStore::new_windowed_versioned(storage, table, key_descriptor, descriptor)
-    } else {
-        RecordStore::new(storage, table, descriptor)
-    }
+    let _ = key_descriptor;
+    RecordStore::new(storage, table, descriptor)
 }
 
 fn primary_key_descriptor(primary_key: &PrimaryKey) -> RecordDescriptor {

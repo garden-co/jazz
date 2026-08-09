@@ -554,7 +554,8 @@ fn filterless_shape_and_degenerate_predicate_validation_agree() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     register_shape_binding(&mut core, &shape, &binding);
 
-    let tx_id = client.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    client.open_exclusive(tx_id).unwrap();
     assert!(client.tx_query(tx_id, &shape, &binding).unwrap().is_empty());
     commit_mergeable_global(
         &mut other,
@@ -1159,14 +1160,15 @@ fn array_subquery_match_correlation_cardinality_requires_every_referenced_member
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([complete, empty])
     );
-    assert_eq!(
-        snapshot
-            .edges
-            .iter()
-            .filter(|edge| edge.source_row == complete)
-            .count(),
-        2
-    );
+    let complete = snapshot
+        .rows
+        .iter()
+        .find(|row| row.row_uuid() == complete)
+        .expect("complete group terminal row");
+    let Value::Array(members) = complete.raw_field("memberRows").expect("memberRows") else {
+        panic!("expected memberRows array");
+    };
+    assert_eq!(members.len(), 2);
 }
 
 #[test]
@@ -1291,24 +1293,17 @@ fn relation_snapshot_single_level_array_uses_query_engine_edges() {
         .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
         .unwrap();
 
-    assert_eq!(
-        snapshot
-            .rows
-            .iter()
-            .map(|row| (row.table().to_owned(), row.row_uuid()))
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([("users".to_owned(), alice), ("todos".to_owned(), todo_a)])
-    );
-    assert_eq!(
-        snapshot.edges.into_iter().collect::<BTreeSet<_>>(),
-        BTreeSet::from([RelationEdge {
-            source_table: "users".to_owned(),
-            source_row: alice,
-            relation: "todosViaOwner".to_owned(),
-            target_table: "todos".to_owned(),
-            target_row: todo_a,
-        }])
-    );
+    assert_eq!(snapshot.rows.len(), 1);
+    assert_eq!(snapshot.rows[0].row_uuid(), alice);
+    assert!(snapshot.edges.is_empty());
+    let (descriptor, raw) = snapshot.rows[0].encoded_record();
+    let Value::Array(todos) = descriptor.bind(raw).get("todosViaOwner").unwrap() else {
+        panic!("expected terminal todo array")
+    };
+    let Value::Record(todo) = &todos[0] else {
+        panic!("expected terminal todo record")
+    };
+    assert_eq!(todo.get("row_uuid"), Ok(Value::Uuid(todo_a.0)));
 }
 
 #[test]
@@ -1371,37 +1366,24 @@ fn relation_snapshot_materializes_reverse_array_edges() {
         .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
         .unwrap();
 
-    assert_eq!(
-        snapshot
-            .rows
-            .iter()
-            .map(|row| (row.table().to_owned(), row.row_uuid()))
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            ("users".to_owned(), alice),
-            ("todos".to_owned(), todo_a),
-            ("comments".to_owned(), comment),
-        ])
-    );
-    assert_eq!(
-        snapshot.edges.into_iter().collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            RelationEdge {
-                source_table: "users".to_owned(),
-                source_row: alice,
-                relation: "todosViaOwner".to_owned(),
-                target_table: "todos".to_owned(),
-                target_row: todo_a,
-            },
-            RelationEdge {
-                source_table: "todos".to_owned(),
-                source_row: todo_a,
-                relation: "commentsViaTodo".to_owned(),
-                target_table: "comments".to_owned(),
-                target_row: comment,
-            },
-        ])
-    );
+    assert_eq!(snapshot.rows.len(), 1);
+    assert_eq!(snapshot.rows[0].row_uuid(), alice);
+    assert!(snapshot.edges.is_empty());
+    let (descriptor, raw) = snapshot.rows[0].encoded_record();
+    let Value::Array(todos) = descriptor.bind(raw).get("todosViaOwner").unwrap() else {
+        panic!("expected terminal todo array")
+    };
+    let Value::Record(todo) = &todos[0] else {
+        panic!("expected terminal todo record")
+    };
+    assert_eq!(todo.get("row_uuid"), Ok(Value::Uuid(todo_a.0)));
+    let Value::Array(comments) = todo.get("commentsViaTodo").unwrap() else {
+        panic!("expected terminal comment array")
+    };
+    let Value::Record(comment_row) = &comments[0] else {
+        panic!("expected terminal comment record")
+    };
+    assert_eq!(comment_row.get("row_uuid"), Ok(Value::Uuid(comment.0)));
 }
 
 #[test]
@@ -1468,21 +1450,19 @@ fn relation_snapshot_array_subquery_filters_use_parent_binding_params() {
             .iter()
             .map(|row| (row.table().to_owned(), row.row_uuid()))
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            ("users".to_owned(), alice),
-            ("todos".to_owned(), matching_todo),
-        ])
+        BTreeSet::from([("users".to_owned(), alice)])
     );
-    assert_eq!(
-        snapshot.edges.into_iter().collect::<BTreeSet<_>>(),
-        BTreeSet::from([RelationEdge {
-            source_table: "users".to_owned(),
-            source_row: alice,
-            relation: "todosViaOwner".to_owned(),
-            target_table: "todos".to_owned(),
-            target_row: matching_todo,
-        }])
-    );
+    let Value::Array(todos) = snapshot.rows[0]
+        .raw_field("todosViaOwner")
+        .expect("todosViaOwner")
+    else {
+        panic!("expected todosViaOwner array");
+    };
+    assert_eq!(todos.len(), 1);
+    let Value::Record(todo) = &todos[0] else {
+        panic!("expected nested todo record");
+    };
+    assert_eq!(todo.get_idx(0), Ok(Value::Uuid(matching_todo.0)));
 }
 
 #[test]

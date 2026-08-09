@@ -48,7 +48,7 @@ describe("native write path", () => {
     try {
       for (let txIndex = 0; txIndex < txCount; txIndex += 1) {
         const started = performance.now();
-        const result = db.transaction((tx) => {
+        const result = await db.transaction((tx) => {
           for (let rowIndex = 0; rowIndex < 200; rowIndex += 1) {
             const ordinal = txIndex * 200 + rowIndex;
             tx.upsert(
@@ -114,7 +114,7 @@ describe("native write path", () => {
     try {
       for (let txIndex = 0; txIndex < txCount; txIndex += 1) {
         const started = performance.now();
-        const result = db.transaction((tx) => {
+        const result = await db.transaction((tx) => {
           for (let rowIndex = 0; rowIndex < 200; rowIndex += 1) {
             const ordinal = txIndex * 200 + rowIndex;
             tx.upsert(

@@ -43,7 +43,7 @@ pub struct Query {
     pub inherits: Vec<InheritsVia>,
     /// Included reference paths.
     pub includes: Vec<Include>,
-    /// Correlated relation arrays materialized as relation payload edges.
+    /// Correlated arrays assembled into recursive values by the output terminal.
     #[serde(default)]
     pub array_subqueries: Vec<ArraySubquery>,
     /// Selected application columns. Row id is always included.
@@ -1841,7 +1841,7 @@ pub enum ArraySubqueryRequirement {
     MatchCorrelationCardinality,
 }
 
-/// Correlated relation array materialized in the relation payload.
+/// Correlated array assembled into its named slot by the output terminal.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ArraySubquery {
     /// Name of the output relation.

@@ -1,4 +1,11 @@
-import type { InsertResult, MutationResult, Runtime, TransactionKind } from "../client.js";
+import type {
+  BatchId,
+  InsertResult,
+  MutationResult,
+  OpenBatchId,
+  Runtime,
+  TransactionKind,
+} from "../client.js";
 import type { NativeRowDelta } from "../../drivers/types.js";
 import type { RuntimeSourcesConfig } from "../context.js";
 import type { InsertValues, Value, WasmSchema } from "../../drivers/types.js";
@@ -18,6 +25,7 @@ import {
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 
 type PendingCall = {
+  method: PersistentBrowserWorkerMethod;
   resolve: (value: unknown) => void;
   reject: (error: unknown) => void;
 };
@@ -36,28 +44,74 @@ type ConnectionGate = {
   reject: (error: unknown) => void;
 };
 
+type PersistentRuntimeShared = {
+  worker: Worker;
+  pending: Map<number, PendingCall>;
+  pendingWrites: Set<Promise<unknown>>;
+  settledWrites: Map<string, Map<string, Promise<void>>>;
+  transactionWrites: Map<string, Promise<unknown>[]>;
+  completedTxs: Map<string, CompletedTxState>;
+  openTxs: Set<OpenBatchId>;
+  beginResults: Map<OpenBatchId, Promise<OpenBatchId>>;
+  failedBegins: Map<OpenBatchId, unknown>;
+  committingTxs: Set<OpenBatchId>;
+  rollingBackTxs: Set<OpenBatchId>;
+  subscriptions: Map<number, Function>;
+  remoteSubscriptions: Map<number, Promise<number>>;
+  nextCallId: number;
+  nextSubscriptionId: number;
+  commandTail: Promise<void>;
+  blockingServerCommands: number;
+};
+
 export type { PersistentBrowserOpfsOwnerRequest } from "./persistent-browser-protocol.js";
 
 export class PersistentBrowserOpfsRuntime implements Runtime {
-  private readonly worker: Worker;
-  private readonly pending = new Map<number, PendingCall>();
+  private readonly shared: PersistentRuntimeShared;
+  private readonly ownerRuntime: PersistentBrowserOpfsRuntime;
+  private readonly viewId: Promise<number | undefined>;
+  private get worker(): Worker {
+    return this.shared.worker;
+  }
+  private get pending(): Map<number, PendingCall> {
+    return this.shared.pending;
+  }
   // Runtime writes are synchronous, but the worker owns the NativeRuntimeAdapter that can
   // produce the real core transaction id. These ids are pending handles
   // that are only valid for waitForTransaction translation below.
-  private readonly writes = new Map<string, Promise<string>>();
-  private readonly settledWrites = new Map<string, Map<string, Promise<void>>>();
-  private readonly transactionRemoteIds = new Map<string, Promise<string>>();
-  private readonly transactionWrites = new Map<string, Promise<string>[]>();
-  private readonly completedTxs = new Map<string, CompletedTxState>();
-  private readonly readOnlyCommittedTxs = new Set<string>();
-  private readonly commitErrors = new Map<string, Error>();
-  private readonly subscriptions = new Map<number, Function>();
-  private readonly remoteSubscriptions = new Map<number, Promise<number>>();
-  // A public subscription is synchronous at this boundary, while the worker
-  // registration is asynchronous. Preserve the caller's program order: a
-  // write issued immediately after subscribe must not overtake registration
-  // and become invisible to its maintained view.
-  private subscriptionRegistration: Promise<void> = Promise.resolve();
+  private get pendingWrites() {
+    return this.shared.pendingWrites;
+  }
+  private get settledWrites() {
+    return this.shared.settledWrites;
+  }
+  private get transactionWrites() {
+    return this.shared.transactionWrites;
+  }
+  private get completedTxs() {
+    return this.shared.completedTxs;
+  }
+  private get openTxs() {
+    return this.shared.openTxs;
+  }
+  private get beginResults() {
+    return this.shared.beginResults;
+  }
+  private get failedBegins() {
+    return this.shared.failedBegins;
+  }
+  private get committingTxs() {
+    return this.shared.committingTxs;
+  }
+  private get rollingBackTxs() {
+    return this.shared.rollingBackTxs;
+  }
+  private get subscriptions() {
+    return this.shared.subscriptions;
+  }
+  private get remoteSubscriptions() {
+    return this.shared.remoteSubscriptions;
+  }
   private authFailureCallback: ((reason: string) => void) | undefined;
   // Server-tier operations capture this gate while intentionally disconnected.
   // Reconnect resolves that same gate, so outstanding operations survive instead
@@ -68,8 +122,12 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   private connectionReady = connectionGate(true);
   private waitingForReconnect = false;
   private pagehideAbort: AbortController | null = null;
-  private nextCallId = 1;
-  private nextSubscriptionId = 1;
+  private get nextSubscriptionId(): number {
+    return this.shared.nextSubscriptionId;
+  }
+  private set nextSubscriptionId(value: number) {
+    this.shared.nextSubscriptionId = value;
+  }
   private closed = false;
   private closing = false;
   private readonly opened: Promise<void>;
@@ -81,20 +139,51 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     private readonly node: Uint8Array,
     private readonly author: Uint8Array,
     private readonly initialSyncFlushEvery: number | undefined = 512,
+    owner?: PersistentBrowserOpfsRuntime,
   ) {
-    this.worker = new Worker(new URL("./persistent-browser-worker.js", import.meta.url), {
+    if (owner) {
+      this.ownerRuntime = owner.ownerRuntime;
+      this.shared = owner.shared;
+      this.viewId = this.ownerRuntime.enqueueCommand(
+        () => this.ownerRuntime.sendOwner("registerSchema", [schema]) as Promise<number>,
+      );
+      this.opened = this.viewId.then(() => undefined);
+      return;
+    }
+    this.ownerRuntime = this;
+    const worker = new Worker(new URL("./persistent-browser-worker.js", import.meta.url), {
       type: "module",
     });
-    this.worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
+    this.shared = {
+      worker,
+      pending: new Map(),
+      pendingWrites: new Set(),
+      settledWrites: new Map(),
+      transactionWrites: new Map(),
+      completedTxs: new Map(),
+      openTxs: new Set(),
+      beginResults: new Map(),
+      failedBegins: new Map(),
+      committingTxs: new Set(),
+      rollingBackTxs: new Set(),
+      subscriptions: new Map(),
+      remoteSubscriptions: new Map(),
+      nextCallId: 1,
+      nextSubscriptionId: 1,
+      commandTail: Promise.resolve(),
+      blockingServerCommands: 0,
+    };
+    this.viewId = Promise.resolve(undefined);
+    worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
       this.handleWorkerMessage(event.data);
     };
-    this.worker.onerror = (event) => {
+    worker.onerror = (event) => {
       if (
         this.closing ||
         this.closed ||
         event.message.includes("Persistent browser native runtime closed")
       ) {
-        this.resolveAll();
+        this.rejectAll(new Error("Persistent browser native runtime closed"));
         return;
       }
       this.rejectAll(
@@ -108,7 +197,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
         ),
       );
     };
-    this.opened = this.send("open", [
+    this.opened = this.sendOwner("open", [
       runtimeSources,
       dbName,
       schema,
@@ -128,6 +217,18 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     }
   }
 
+  registerSchemaView(schema: WasmSchema): PersistentBrowserOpfsRuntime {
+    return new PersistentBrowserOpfsRuntime(
+      this.runtimeSources,
+      schema,
+      this.dbName,
+      this.node,
+      this.author,
+      this.initialSyncFlushEvery,
+      this,
+    );
+  }
+
   insert(
     table: string,
     values: InsertValues,
@@ -135,12 +236,11 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     objectId?: string | null,
   ): InsertResult {
     const rowId = objectId ? parseUuid(objectId) : crypto.getRandomValues(new Uint8Array(16));
-    const transactionId = this.writeId();
-    this.queueWrite(transactionId, "insert", table, values, writeContext, formatUuid(rowId));
+    const receipt = this.queueWrite("insert", table, values, writeContext, formatUuid(rowId));
     return {
       id: formatUuid(rowId),
       values: valuesForRow(this.schema, table, values),
-      transactionId,
+      ...receipt,
     };
   }
 
@@ -150,9 +250,8 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     values: InsertValues,
     writeContext?: string | null,
   ): InsertResult {
-    const transactionId = this.writeId();
-    this.queueWrite(transactionId, "restore", table, objectId, values, writeContext);
-    return { id: objectId, values: valuesForRow(this.schema, table, values), transactionId };
+    const receipt = this.queueWrite("restore", table, objectId, values, writeContext);
+    return { id: objectId, values: valuesForRow(this.schema, table, values), ...receipt };
   }
 
   update(
@@ -162,9 +261,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     writeContext?: string | null,
   ): MutationResult {
     encodeCellsForPatch(tableDefinition(this.schema, table), values);
-    const transactionId = this.writeId();
-    this.queueWrite(transactionId, "update", table, objectId, values, writeContext);
-    return { transactionId };
+    return this.queueWrite("update", table, objectId, values, writeContext);
   }
 
   upsert(
@@ -178,117 +275,155 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     } catch (error) {
       throw new Error(normalizeWriteSetupMessage(errorMessage(error)));
     }
-    const transactionId = this.writeId();
-    this.queueWrite(transactionId, "upsert", table, objectId, values, writeContext);
-    return { transactionId };
+    return this.queueWrite("upsert", table, objectId, values, writeContext);
   }
 
   delete(table: string, objectId: string, writeContext?: string | null): MutationResult {
     tableDefinition(this.schema, table);
-    const transactionId = this.writeId();
-    this.queueWrite(transactionId, "delete", table, objectId, writeContext);
-    return { transactionId };
+    return this.queueWrite("delete", table, objectId, writeContext);
   }
 
-  async waitForTransaction(transactionId: string, tier: string): Promise<void> {
-    await this.opened;
-    if (tier === "edge" || tier === "global") {
-      await this.connectionReady.promise;
-    }
-    const pendingWrite = this.writes.get(transactionId);
-    const workerTransactionId = pendingWrite ? await pendingWrite : transactionId;
-    const commitError = this.commitErrors.get(transactionId);
-    if (commitError) {
-      throw commitError;
-    }
-    if (this.readOnlyCommittedTxs.has(transactionId)) {
-      return;
-    }
-    const wait = this.send("waitForTransaction", [workerTransactionId, tier]).then(() => undefined);
-    let waits = this.settledWrites.get(transactionId);
-    if (!waits) {
-      waits = new Map();
-      this.settledWrites.set(transactionId, waits);
-    }
-    waits.set(tier, wait);
-    await wait;
-  }
-
-  beginTransaction(kind: TransactionKind): string {
-    const transactionId = `pending-worker-tx-${this.nextCallId++}`;
-    const workerTransactionId = this.opened.then(
-      () => this.send("beginTransaction", [kind]) as Promise<string>,
-    );
-    this.writes.set(transactionId, workerTransactionId);
-    this.transactionRemoteIds.set(transactionId, workerTransactionId);
-    void workerTransactionId.catch(() => undefined);
-    return transactionId;
-  }
-
-  commitTransaction(transactionId: string): void {
-    if (this.completedTxs.has(transactionId)) {
-      throw new Error(commitTransactionMessage(transactionId, this.completedTxs));
-    }
-    const workerTransactionId = this.writes.get(transactionId);
-    if (!workerTransactionId) {
-      throw new Error(commitTransactionMessage(transactionId, this.completedTxs));
-    }
-    const transactionWrites = this.transactionWrites.get(transactionId) ?? [];
-    if (transactionWrites.length === 0) {
-      this.readOnlyCommittedTxs.add(transactionId);
-    }
-    const committed = workerTransactionId.then(async (remote) => {
-      await Promise.all(transactionWrites);
-      this.transactionWrites.delete(transactionId);
-      this.transactionRemoteIds.delete(transactionId);
-      try {
-        await this.send("commitTransaction", [remote]);
-      } catch (error) {
-        this.commitErrors.set(
-          transactionId,
-          error instanceof Error ? error : new Error(String(error)),
-        );
-      }
-      return remote;
+  waitForTransaction(batchId: BatchId | Promise<BatchId>, tier: string): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.waitForTransaction(batchId, tier);
+    const blocksOnServer = tier === "edge" || tier === "global";
+    if (blocksOnServer) this.shared.blockingServerCommands += 1;
+    const wait = this.enqueueCommand(async () => {
+      const resolvedBatchId = await batchId;
+      await this.opened;
+      if (blocksOnServer) await this.connectionReady.promise;
+      await this.send("waitForTransaction", [resolvedBatchId, tier]);
+    }).finally(() => {
+      if (blocksOnServer) this.shared.blockingServerCommands -= 1;
     });
-    this.writes.set(transactionId, committed);
-    this.completedTxs.set(transactionId, "committed");
-    void committed.catch(() => undefined);
+    void Promise.resolve(batchId)
+      .then((resolvedBatchId) => {
+        let waits = this.settledWrites.get(resolvedBatchId);
+        if (!waits) {
+          waits = new Map();
+          this.settledWrites.set(resolvedBatchId, waits);
+        }
+        waits.set(tier, wait);
+      })
+      .catch(() => undefined);
+    return wait;
   }
 
-  rollbackTransaction(transactionId: string): void {
-    if (this.completedTxs.has(transactionId)) {
-      throw new Error(rollbackTransactionMessage(transactionId, this.completedTxs));
+  beginTransaction(
+    kind: TransactionKind,
+    id: OpenBatchId,
+    sessionJson?: string | null,
+  ): OpenBatchId {
+    if (this !== this.ownerRuntime)
+      return this.ownerRuntime.beginTransaction(kind, id, sessionJson);
+    if (this.openTxs.has(id) || this.completedTxs.has(id) || this.failedBegins.has(id)) {
+      throw new Error(`Begin transaction failed: batch ${id} has already been opened`);
     }
-    const workerTransactionId = this.writes.get(transactionId);
-    if (!workerTransactionId) {
-      throw new Error(rollbackTransactionMessage(transactionId, this.completedTxs));
-    }
-    this.transactionWrites.delete(transactionId);
-    this.transactionRemoteIds.delete(transactionId);
-    void workerTransactionId
-      .then((remote) => this.send("rollbackTransaction", [remote]))
-      .catch(ignoreExpectedShutdown);
-    this.writes.delete(transactionId);
-    this.completedTxs.set(transactionId, "rolled_back");
+    this.openTxs.add(id);
+    const begun = this.enqueueCommand(
+      () =>
+        this.sendOwner(
+          "beginTransaction",
+          sessionJson === undefined ? [kind, id] : [kind, id, sessionJson],
+        ) as Promise<OpenBatchId>,
+    );
+    this.beginResults.set(id, begun);
+    void begun.catch((error) => {
+      this.openTxs.delete(id);
+      this.failedBegins.set(id, error);
+    });
+    void begun.catch(() => undefined);
+    return id;
   }
 
-  async query(
+  commitTransaction(openBatchId: OpenBatchId): Promise<BatchId> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.commitTransaction(openBatchId);
+    this.assertOpenBatchKnown(openBatchId, "Commit transaction");
+    if (this.rollingBackTxs.has(openBatchId)) {
+      throw new Error(`Commit transaction failed: batch ${openBatchId} is already rolling back`);
+    }
+    if (this.committingTxs.has(openBatchId)) {
+      throw new Error(`Commit transaction failed: batch ${openBatchId} is already committing`);
+    }
+    if (this.completedTxs.has(openBatchId)) {
+      throw new Error(commitTransactionMessage(openBatchId, this.completedTxs));
+    }
+    const transactionWrites = this.transactionWrites.get(openBatchId) ?? [];
+    this.committingTxs.add(openBatchId);
+    return this.enqueueCommand(async () => {
+      await this.awaitBegin(openBatchId);
+      await Promise.all(transactionWrites);
+      return this.send("commitTransaction", [openBatchId]) as Promise<BatchId>;
+    }).then(
+      (batchId) => {
+        this.committingTxs.delete(openBatchId);
+        this.transactionWrites.delete(openBatchId);
+        this.openTxs.delete(openBatchId);
+        this.beginResults.delete(openBatchId);
+        this.completedTxs.set(openBatchId, "committed");
+        return batchId;
+      },
+      (error) => {
+        this.committingTxs.delete(openBatchId);
+        throw error;
+      },
+    );
+  }
+
+  rollbackTransaction(openBatchId: OpenBatchId): Promise<boolean> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.rollbackTransaction(openBatchId);
+    this.assertOpenBatchKnown(openBatchId, "Rollback transaction");
+    if (this.committingTxs.has(openBatchId)) {
+      throw new Error(`Rollback transaction failed: batch ${openBatchId} is already committing`);
+    }
+    if (this.rollingBackTxs.has(openBatchId)) {
+      throw new Error(`Rollback transaction failed: batch ${openBatchId} is already rolling back`);
+    }
+    if (this.completedTxs.has(openBatchId)) {
+      throw new Error(rollbackTransactionMessage(openBatchId, this.completedTxs));
+    }
+    this.rollingBackTxs.add(openBatchId);
+    return this.enqueueCommand(async () => {
+      await this.awaitBegin(openBatchId);
+      return this.send("rollbackTransaction", [openBatchId]) as Promise<boolean>;
+    }).then(
+      (rolledBack) => {
+        this.rollingBackTxs.delete(openBatchId);
+        this.transactionWrites.delete(openBatchId);
+        this.openTxs.delete(openBatchId);
+        this.beginResults.delete(openBatchId);
+        this.completedTxs.set(openBatchId, "rolled_back");
+        return rolledBack;
+      },
+      (error) => {
+        this.rollingBackTxs.delete(openBatchId);
+        throw error;
+      },
+    );
+  }
+
+  query(
     queryJson: string,
     sessionJson?: string | null,
     tier?: string | null,
     optionsJson?: string | null,
   ): Promise<unknown> {
     const readFence = this.captureReadFence(optionsJson);
-    await this.opened;
-    this.assertReadTransactionOpen(optionsJson);
-    await this.settleReadFence(readFence);
-    const translatedOptionsJson = await this.prepareReadOptions(optionsJson);
-    if (requiresServerPropagation(tier, optionsJson)) {
-      await this.connectionReady.promise;
-      await this.settleServerWaitsForRead(tier);
-    }
-    return this.send("query", [queryJson, sessionJson, tier, translatedOptionsJson]);
+    const blocksOnServer = requiresServerPropagation(tier, optionsJson);
+    const serverWaitFence = this.captureServerWaitsForRead(tier);
+    if (blocksOnServer) this.shared.blockingServerCommands += 1;
+    return this.enqueueCommand(async () => {
+      await this.opened;
+      await this.awaitReadBatchBegin(optionsJson);
+      this.assertReadTransactionOpen(optionsJson);
+      await this.settleReadFence(readFence);
+      if (blocksOnServer) {
+        await this.connectionReady.promise;
+        await Promise.all(serverWaitFence);
+      }
+      return this.send("query", [queryJson, sessionJson, tier, optionsJson]);
+    }).finally(() => {
+      if (blocksOnServer) this.shared.blockingServerCommands -= 1;
+    });
   }
 
   createSubscription(
@@ -299,17 +434,19 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   ): number {
     const localHandle = this.nextSubscriptionId++;
     const readFence = this.captureReadFence(optionsJson);
-    const remoteHandle = this.opened.then(async () => {
+    const serverWaitFence = this.captureServerWaitsForRead(tier);
+    const remoteHandle = this.enqueueCommand(async () => {
+      await this.opened;
+      await this.awaitReadBatchBegin(optionsJson);
       this.assertReadTransactionOpen(optionsJson);
       await this.settleReadFence(readFence);
-      const translatedOptionsJson = await this.prepareReadOptions(optionsJson);
       if (requiresServerPropagation(tier, optionsJson)) {
         await this.connectionReady.promise;
-        await this.settleServerWaitsForRead(tier);
+        await Promise.all(serverWaitFence);
       }
       return this.send(
         "createExecutedSubscription",
-        [localHandle, queryJson, sessionJson, tier, translatedOptionsJson],
+        [localHandle, queryJson, sessionJson, tier, optionsJson],
         {
           query: queryJson,
           debugName: subscriptionDebugName(queryJson),
@@ -318,9 +455,6 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     });
     void remoteHandle.catch(ignoreExpectedShutdown);
     this.remoteSubscriptions.set(localHandle, remoteHandle);
-    this.subscriptionRegistration = this.subscriptionRegistration
-      .catch(() => undefined)
-      .then(() => remoteHandle.then(() => undefined).catch(() => undefined));
     return localHandle;
   }
 
@@ -333,19 +467,24 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     const remoteHandle = this.remoteSubscriptions.get(handle);
     this.remoteSubscriptions.delete(handle);
     if (remoteHandle) {
-      void remoteHandle
-        .then((remote) => this.send("unsubscribe", [remote]))
-        .catch(ignoreExpectedShutdown);
+      void this.enqueueCommand(async () => {
+        const remote = await remoteHandle;
+        await this.send("unsubscribe", [remote]);
+      }).catch(ignoreExpectedShutdown);
     }
   }
 
   async close(): Promise<void> {
-    if (this.closed) return;
+    if (this !== this.ownerRuntime) return;
+    if (this.closing || this.closed) return;
     this.closing = true;
     this.rejectConnectionWaiters();
     try {
       await this.opened;
-      await Promise.allSettled(this.writes.values());
+      const durabilityWaitIsExecuting =
+        this.shared.blockingServerCommands > 0 ||
+        Array.from(this.pending.values()).some((call) => call.method === "waitForTransaction");
+      if (!durabilityWaitIsExecuting) await this.shared.commandTail;
       await this.send("close", []);
     } finally {
       this.closed = true;
@@ -353,18 +492,18 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       this.pagehideAbort?.abort();
       this.pagehideAbort = null;
       this.worker.terminate();
-      this.resolveAll();
+      this.rejectAll(new Error("Persistent browser native runtime closed"));
     }
   }
 
   async clearClientStorage(): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.clearClientStorage();
     if (this.closed) return;
     this.closing = true;
     this.rejectConnectionWaiters();
     let namespace = this.dbName;
     try {
       await this.opened;
-      await Promise.allSettled(this.writes.values());
       namespace = (await this.send("closeForStorageClear", [])) as string;
     } catch (error) {
       if (!isExpectedShutdownError(error)) throw error;
@@ -374,19 +513,26 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       this.pagehideAbort?.abort();
       this.pagehideAbort = null;
       this.worker.terminate();
-      this.resolveAll();
+      this.rejectAll(new Error("Persistent browser native runtime closed"));
     }
     await destroyBrowserStorage(this.runtimeSources, namespace);
   }
 
   connect(url: string, authJson: string): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.connect(url, authJson);
     if (this.closing || this.closed) return;
-    const gate = this.waitingForReconnect ? this.connectionReady : connectionGate();
+    const reconnecting = this.waitingForReconnect;
+    const gate = reconnecting ? this.connectionReady : connectionGate();
     this.connectionReady = gate;
-    const connected = this.opened.then(() => {
-      if (this.closed) return undefined;
-      return this.send("connect", [url, authJson]);
-    });
+    const connectWorker = () =>
+      this.opened.then(() => {
+        if (this.closed) return undefined;
+        return this.send("connect", [url, authJson], reconnecting ? { control: "reconnect" } : {});
+      });
+    // An initial connect is an ordinary FIFO command. Reconnect is the control
+    // operation that releases already-parked server commands, so it must bypass
+    // their queue position or the queue would deadlock on its own reconnect gate.
+    const connected = reconnecting ? connectWorker() : this.enqueueCommand(connectWorker);
     void connected.then(
       () => {
         if (this.connectionReady === gate) this.waitingForReconnect = false;
@@ -401,6 +547,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   disconnect(options?: { rejectWaiters?: boolean }): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
     if (this.closing || this.closed) return Promise.resolve();
     if (!this.waitingForReconnect) this.connectionReady = connectionGate();
     this.waitingForReconnect = true;
@@ -413,6 +560,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   updateAuth(authJson: string): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.updateAuth(authJson);
     if (this.closing || this.closed) return;
     // Updating credentials cannot reconnect an explicitly disconnected worker:
     // without a server endpoint the worker treats updateAuth as a no-op. Keep the
@@ -439,6 +587,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   onAuthFailure(callback: (reason: string) => void): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onAuthFailure(callback);
     this.authFailureCallback = callback;
   }
 
@@ -447,11 +596,17 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     this.connectionReady.reject(new Error("Persistent browser native runtime is closed"));
   }
 
-  private writeId(): string {
-    return `pending-worker-write-${this.nextCallId++}`;
+  private send<Method extends PersistentBrowserWorkerMethod>(
+    method: Method,
+    args: PersistentBrowserRequestArgs<Method>,
+    metadata?: Partial<PersistentBrowserOpfsOwnerRequest>,
+  ): Promise<unknown> {
+    return this.viewId.then((viewId) =>
+      this.sendOwner(method, args, viewId === undefined ? metadata : { ...metadata, viewId }),
+    );
   }
 
-  private send<Method extends PersistentBrowserWorkerMethod>(
+  private sendOwner<Method extends PersistentBrowserWorkerMethod>(
     method: Method,
     args: PersistentBrowserRequestArgs<Method>,
     metadata?: Partial<PersistentBrowserOpfsOwnerRequest>,
@@ -459,9 +614,9 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     if (this.closed) {
       return Promise.reject(new Error("Persistent browser native runtime is closed"));
     }
-    const id = this.nextCallId++;
+    const id = this.shared.nextCallId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      this.pending.set(id, { method, resolve, reject });
       this.worker.postMessage({
         id,
         method,
@@ -471,57 +626,70 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     });
   }
 
+  private enqueueCommand<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.shared.commandTail.then(operation);
+    this.shared.commandTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
   private fireAndForget<Method extends PersistentBrowserWorkerMethod>(
     method: Method,
     ...args: PersistentBrowserRequestArgs<Method>
   ): void {
     if (this.closed) return;
-    void this.opened
-      .then(() => {
+    void this.enqueueCommand(() =>
+      this.opened.then(() => {
         if (!this.closed) return this.send(method, args);
-      })
-      .catch(() => undefined);
+      }),
+    ).catch(() => undefined);
   }
 
   private queueWrite<Method extends PersistentBrowserWriteRequest["method"]>(
-    transactionId: string,
     method: Method,
     ...args: PersistentBrowserRequestArgs<Method>
-  ): void {
-    // Capture the registration frontier at the public call boundary. A
-    // subscription created after this write must not retroactively delay it.
-    const registrationBeforeWrite = this.subscriptionRegistration;
+  ): MutationResult {
     const batchId = this.batchIdFromWriteArgs(method, args);
+    if (
+      batchId &&
+      (this.committingTxs.has(batchId as OpenBatchId) ||
+        this.rollingBackTxs.has(batchId as OpenBatchId))
+    ) {
+      throw new Error(`${writeOperationName(method)} failed: batch ${batchId} is completing`);
+    }
     if (batchId && this.completedTxs.has(batchId)) {
       throw new Error(
         `${writeOperationName(method)} failed: WriteError("${txStateMessage(batchId, this.completedTxs)}")`,
       );
     }
-    // The worker owns the real NativeRuntimeAdapter, so durability waits must use the
-    // worker's transaction id. The public Runtime API is synchronous, so the
-    // result returned from insert/update/etc. is only a pending handle.
-    const write = this.opened.then(async () => {
-      await registrationBeforeWrite;
+    const write = this.enqueueCommand(async () => {
+      if (batchId) await this.awaitBegin(batchId as OpenBatchId);
       if (batchId && this.completedTxs.get(batchId) === "rolled_back") {
-        return batchId;
+        return { kind: "staged", openBatchId: batchId as OpenBatchId } satisfies MutationResult;
       }
-      const translatedArgs = (await this.translateWriteArgs(
-        method,
-        args,
-      )) as PersistentBrowserRequestArgs<Method>;
-      const result = (await this.send(method, translatedArgs)) as { transactionId: string };
-      if (!result || typeof result.transactionId !== "string") {
-        throw new Error("Persistent browser worker write did not return a transaction id");
-      }
-      return result.transactionId;
+      return (await this.send(method, args)) as MutationResult;
     });
-    this.writes.set(transactionId, write);
+    this.pendingWrites.add(write);
+    void write.finally(() => this.pendingWrites.delete(write)).catch(() => undefined);
     if (batchId) {
       const writes = this.transactionWrites.get(batchId) ?? [];
       writes.push(write);
       this.transactionWrites.set(batchId, writes);
+      void write.catch(() => undefined);
+      return { kind: "staged", openBatchId: batchId as OpenBatchId };
     }
     void write.catch(() => undefined);
+    return {
+      kind: "committed",
+      batchId: write.then((result) => {
+        if (result.kind !== "committed") {
+          throw new Error(`Worker returned staged batch ${result.openBatchId} for ordinary write`);
+        }
+        return result.batchId;
+      }),
+    };
   }
 
   private batchIdFromWriteArgs<Method extends PersistentBrowserWriteRequest["method"]>(
@@ -539,64 +707,48 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     }
   }
 
-  private async translateWriteArgs<Method extends PersistentBrowserWriteRequest["method"]>(
-    method: Method,
-    args: PersistentBrowserRequestArgs<Method>,
-  ): Promise<PersistentBrowserRequestArgs<Method>> {
-    const mutable = [...args] as unknown[];
-    const writeContextIndex = method === "delete" ? 2 : method === "insert" ? 2 : 3;
-    mutable[writeContextIndex] = await this.translateWriteContext(
-      mutable[writeContextIndex] as string | null | undefined,
-    );
-    return mutable as PersistentBrowserRequestArgs<Method>;
-  }
-
-  private async translateWriteContext(
-    writeContext: string | null | undefined,
-  ): Promise<string | null | undefined> {
-    if (!writeContext) return writeContext;
-    let parsed: { batch_id?: unknown };
-    try {
-      parsed = JSON.parse(writeContext) as { batch_id?: unknown };
-    } catch {
-      return writeContext;
-    }
-    if (typeof parsed.batch_id !== "string") return writeContext;
-    const workerTransactionId = this.transactionRemoteIds.get(parsed.batch_id);
-    if (!workerTransactionId) return writeContext;
-    return JSON.stringify({ ...parsed, batch_id: await workerTransactionId });
-  }
-
-  private async prepareReadOptions(
-    optionsJson: string | null | undefined,
-  ): Promise<string | null | undefined> {
-    if (!optionsJson) return optionsJson;
-    let parsed: { transaction_batch_id?: unknown };
-    try {
-      parsed = JSON.parse(optionsJson) as { transaction_batch_id?: unknown };
-    } catch {
-      return optionsJson;
-    }
-    if (typeof parsed.transaction_batch_id !== "string") return optionsJson;
-    const workerTransactionId = this.transactionRemoteIds.get(parsed.transaction_batch_id);
-    if (!workerTransactionId) return optionsJson;
-    return JSON.stringify({ ...parsed, transaction_batch_id: await workerTransactionId });
-  }
-
   private captureReadFence(optionsJson: string | null | undefined): Promise<unknown>[] {
-    const transactionId = transactionIdFromReadOptions(optionsJson);
-    if (transactionId) {
-      return [...(this.transactionWrites.get(transactionId) ?? [])];
+    const openBatchId = openBatchIdFromReadOptions(optionsJson);
+    if (openBatchId) {
+      return [...(this.transactionWrites.get(openBatchId) ?? [])];
     }
-    return [...this.writes.values()];
+    return [...this.pendingWrites];
+  }
+
+  private async awaitBegin(openBatchId: OpenBatchId): Promise<void> {
+    const failed = this.failedBegins.get(openBatchId);
+    if (failed !== undefined) throw failed;
+    if (this.completedTxs.has(openBatchId)) {
+      throw new Error(
+        `Query setup failed: Write error: ${txStateMessage(openBatchId, this.completedTxs)}`,
+      );
+    }
+    const begun = this.beginResults.get(openBatchId);
+    if (!begun) {
+      throw new Error(`open batch ${openBatchId} was never opened`);
+    }
+    await begun;
+  }
+
+  private async awaitReadBatchBegin(optionsJson: string | null | undefined): Promise<void> {
+    const openBatchId = openBatchIdFromReadOptions(optionsJson);
+    if (openBatchId) await this.awaitBegin(openBatchId as OpenBatchId);
+  }
+
+  private assertOpenBatchKnown(openBatchId: OpenBatchId, operation: string): void {
+    if (this.openTxs.has(openBatchId)) return;
+    const failed = this.failedBegins.get(openBatchId);
+    if (failed !== undefined) throw failed;
+    if (this.completedTxs.has(openBatchId)) return;
+    throw new Error(`${operation} failed: open batch ${openBatchId} was never opened`);
   }
 
   private async settleReadFence(fence: readonly Promise<unknown>[]): Promise<void> {
     await Promise.all(fence);
   }
 
-  private async settleServerWaitsForRead(tier: string | null | undefined): Promise<void> {
-    if (tier !== "edge" && tier !== "global") return;
+  private captureServerWaitsForRead(tier: string | null | undefined): readonly Promise<void>[] {
+    if (tier !== "edge" && tier !== "global") return [];
     const waits: Promise<void>[] = [];
     for (const writeWaits of this.settledWrites.values()) {
       const globalWait = writeWaits.get("global");
@@ -607,14 +759,14 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       const edgeWait = writeWaits.get("edge");
       if (edgeWait) waits.push(edgeWait);
     }
-    await Promise.all(waits);
+    return waits;
   }
 
   private assertReadTransactionOpen(optionsJson: string | null | undefined): void {
-    const transactionId = transactionIdFromReadOptions(optionsJson);
-    if (!transactionId || !this.completedTxs.has(transactionId)) return;
+    const openBatchId = openBatchIdFromReadOptions(optionsJson);
+    if (!openBatchId || !this.completedTxs.has(openBatchId)) return;
     throw new Error(
-      `Query setup failed: Write error: ${txStateMessage(transactionId, this.completedTxs)}`,
+      `Query setup failed: Write error: ${txStateMessage(openBatchId, this.completedTxs)}`,
     );
   }
 
@@ -659,13 +811,6 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     }
     this.pending.clear();
   }
-
-  private resolveAll(): void {
-    for (const pending of this.pending.values()) {
-      pending.resolve(undefined);
-    }
-    this.pending.clear();
-  }
 }
 
 function nativeDeltaFromFrame(
@@ -683,6 +828,7 @@ function nativeDeltaFromFrame(
     addedCount: message.frame.addedCount,
     removedCount: message.frame.removedCount,
     updatedCount: message.frame.updatedCount,
+    terminalOperations: message.frame.terminalOperations,
   };
 }
 
@@ -772,12 +918,14 @@ function requiresServerPropagation(tier?: string | null, _optionsJson?: string |
   return tier === "edge" || tier === "global";
 }
 
-function transactionIdFromReadOptions(optionsJson: string | null | undefined): string | undefined {
+function openBatchIdFromReadOptions(
+  optionsJson: string | null | undefined,
+): OpenBatchId | undefined {
   if (!optionsJson) return undefined;
   try {
     const parsed = JSON.parse(optionsJson) as { transaction_batch_id?: unknown };
     return typeof parsed.transaction_batch_id === "string"
-      ? parsed.transaction_batch_id
+      ? (parsed.transaction_batch_id as OpenBatchId)
       : undefined;
   } catch {
     return undefined;
@@ -802,31 +950,31 @@ function errorMessage(error: unknown): string {
 }
 
 function txStateMessage(
-  transactionId: string,
-  completedTxs: Map<string, CompletedTxState>,
+  openBatchId: string,
+  completedBatches: Map<string, CompletedTxState>,
 ): string {
-  if (completedTxs.get(transactionId) === "committed") {
-    return `transaction ${transactionId} is already committed`;
+  if (completedBatches.get(openBatchId) === "committed") {
+    return `open batch ${openBatchId} is already committed`;
   }
-  return `transaction ${transactionId} has already been completed or was never opened`;
+  return `open batch ${openBatchId} has already been completed or was never opened`;
 }
 
 function commitTransactionMessage(
-  transactionId: string,
-  completedTxs: Map<string, CompletedTxState>,
+  openBatchId: string,
+  completedBatches: Map<string, CompletedTxState>,
 ): string {
-  const message = txStateMessage(transactionId, completedTxs);
-  return completedTxs.get(transactionId) === "committed"
+  const message = txStateMessage(openBatchId, completedBatches);
+  return completedBatches.get(openBatchId) === "committed"
     ? `Write error: ${message}`
     : `Commit transaction failed: Write error: ${message}`;
 }
 
 function rollbackTransactionMessage(
-  transactionId: string,
-  completedTxs: Map<string, CompletedTxState>,
+  openBatchId: string,
+  completedBatches: Map<string, CompletedTxState>,
 ): string {
-  const message = txStateMessage(transactionId, completedTxs);
-  return completedTxs.get(transactionId) === "committed"
+  const message = txStateMessage(openBatchId, completedBatches);
+  return completedBatches.get(openBatchId) === "committed"
     ? `Write error: ${message}`
     : `Rollback transaction failed: Write error: ${message}`;
 }

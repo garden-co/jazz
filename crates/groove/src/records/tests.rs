@@ -1725,3 +1725,30 @@ fn owned_record_round_trips_through_postcard_as_descriptor_and_raw_bytes() {
         Value::Bytes(vec![1, 3, 5, 8])
     );
 }
+
+#[test]
+fn unwrap_nested_nullable_preserves_outer_none_as_inner_null() {
+    let inner = ValueType::Nullable(Box::new(ValueType::I32));
+    let source = RecordDescriptor::new([("value", ValueType::Nullable(Box::new(inner.clone())))]);
+    let target = RecordDescriptor::new([("value", inner)]);
+    let mut output = bytes::BytesMut::new();
+    let mut scratch = RawProjectionScratch::default();
+
+    for (source_value, expected) in [
+        (Value::Nullable(None), Value::Nullable(None)),
+        (
+            Value::Nullable(Some(Box::new(Value::Nullable(Some(Box::new(Value::I32(
+                7,
+            ))))))),
+            Value::Nullable(Some(Box::new(Value::I32(7)))),
+        ),
+    ] {
+        output.clear();
+        let raw = source.create(&[source_value]).unwrap();
+        let span = target
+            .unwrap_nullable_field_into(&source, &raw, 0, &mut output, &mut scratch)
+            .unwrap()
+            .expect("nested nullable absence remains a row");
+        assert_eq!(target.get_idx(&output[span], 0).unwrap(), expected);
+    }
+}

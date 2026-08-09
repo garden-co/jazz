@@ -315,7 +315,7 @@ pub(crate) enum OverlayRef {
     /// visible at the requested durability tier.
     AcceptedTransaction(TxId),
     /// Include one open mutable transaction.
-    OpenTransaction(OpenTxId),
+    OpenTransaction(OpenBatchId),
 }
 
 /// Resolved own-pending overlay identity used by shared maintained work.

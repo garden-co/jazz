@@ -126,6 +126,7 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
     let query = child_query(
         ArraySubquery::new("children", "children", "parent_id", "id")
             .select(["label", "rank"])
+            .order_by("rank", OrderDirection::Desc)
             .offset(1)
             .limit(2)
             .nested(
@@ -156,7 +157,7 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
             .iter()
             .map(|child| child.row.row_uuid())
             .collect::<Vec<_>>(),
-        child_ids[1..]
+        vec![child_ids[1], child_ids[0]]
     );
     assert!(children(&tree.roots[0], "empty").is_empty());
     assert_eq!(
@@ -170,7 +171,7 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
     assert_eq!(
         children(&selected_children[0], "grandchildren")[0]
             .row
-            .cell_at(1),
+            .cell_at(0),
         Some(Value::String("visible".to_owned()))
     );
 
@@ -182,8 +183,31 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
     else {
         panic!("expected maintained reset");
     };
-    assert_eq!(added.first().map(|row| row.row_uuid()), Some(parent));
-    assert!(added.iter().any(|row| row.table() == "children"));
+    assert_eq!(added.len(), 1, "Groove emits one complete terminal parent");
+    assert_eq!(added[0].row_uuid(), parent);
+    let (descriptor, raw) = added[0].encoded_record();
+    let children_idx = descriptor
+        .field_index("children")
+        .expect("terminal relation field");
+    let Value::Array(children) = descriptor
+        .bind(raw)
+        .get_idx(children_idx)
+        .expect("decode terminal relation")
+    else {
+        panic!("expected terminal child array");
+    };
+    assert_eq!(children.len(), 2);
+    let child_ids_from_terminal = children
+        .into_iter()
+        .map(|value| match value {
+            Value::Record(child) => child.get_idx(0).expect("terminal child id"),
+            other => panic!("expected terminal child record, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        child_ids_from_terminal,
+        vec![Value::Uuid(child_ids[1].0), Value::Uuid(child_ids[0].0)]
+    );
 }
 
 #[test]
@@ -236,16 +260,23 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
     else {
         panic!("expected initial maintained reset");
     };
-    assert_eq!(
-        added
-            .into_iter()
-            .map(|row| row.row_uuid())
-            .collect::<Vec<_>>(),
-        vec![matching_parent, initial_child],
-        "the routed subscription delivers the matching root and its array member"
-    );
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row_uuid(), matching_parent);
+    let (descriptor, raw) = added[0].encoded_record();
+    let Value::Array(children) = descriptor
+        .bind(raw)
+        .get("children")
+        .expect("decode terminal children")
+    else {
+        panic!("expected terminal child array");
+    };
+    assert_eq!(children.len(), 1);
+    let Value::Record(child) = &children[0] else {
+        panic!("expected terminal child record");
+    };
+    assert_eq!(child.get_idx(0), Ok(Value::Uuid(initial_child.0)));
 
-    let added_child = db
+    let _added_child = db
         .insert(
             "children",
             BTreeMap::from([
@@ -257,23 +288,30 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
         .expect("insert later child")
         .row_uuid();
     let SubscriptionEvent::Delta {
-        reset: false,
+        reset,
         added,
-        added_related,
+        updated,
+        removed,
+        terminal_operations,
         ..
-    } = block_on(subscription.next_event()).expect("incremental maintained delivery")
+    } = block_on(subscription.next_event()).expect("maintained terminal delivery")
     else {
         panic!("expected incremental maintained delta");
     };
-    assert_eq!(
-        added
-            .into_iter()
-            .map(|row| row.row_uuid())
-            .chain(added_related.into_iter().map(|row| row.row_uuid()))
-            .collect::<Vec<_>>(),
-        vec![added_child],
-        "the routed subscription delivers later array members through the public relation delta"
-    );
+    assert!(!reset);
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    assert!(matches!(
+        terminal_operations.as_slice(),
+        [jazz::groove::ivm::TerminalOperation {
+            path,
+            edit: jazz::groove::ivm::TerminalEdit::Insert { index: 1, .. },
+            ..
+        }] if path == &[jazz::groove::ivm::TerminalPathSegment::Collection(
+            "children".to_owned()
+        )]
+    ));
 }
 
 #[test]

@@ -105,7 +105,7 @@ describe("TS Insert API", () => {
     const tx = db.beginTransaction();
     const project = tx.insert(app.projects, { name: "Backfilled Project" }, { updatedAt });
 
-    await tx.commit().wait({ tier: "local" });
+    await (await tx.commit()).wait({ tier: "local" });
 
     const projected = await db.one(
       app.projects.select("name", "$updatedAt").where({ id: { eq: project.id } }),

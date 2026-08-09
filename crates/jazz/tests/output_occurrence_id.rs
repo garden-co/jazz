@@ -100,7 +100,10 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 )
                 .expect("insert todo");
             client
-                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("todo settles locally");
 
@@ -137,7 +140,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 "result keys retain their complete opaque identity through serialization"
             );
             let mut unsupported = wire;
-            unsupported[0] = 2;
+            unsupported[0] = 3;
             assert!(
                 serde_json::from_value::<ResultKey>(serde_json::json!(unsupported)).is_err(),
                 "unknown ResultKey wire versions fail closed"
@@ -167,7 +170,10 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 )
                 .expect("insert first matching joined row");
             client
-                .wait_for_batch(batch, DurabilityTier::Local)
+                .wait_for_batch(
+                    batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::Local,
+                )
                 .await
                 .expect("first joined row settles locally");
             let first_added = next_delta_with_added(&mut joined_stream).await;
@@ -193,7 +199,10 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 )
                 .expect("insert second matching join row");
             client
-                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("second todo settles");
             let fan_out = next_delta_with_added(&mut joined_stream).await;
@@ -274,7 +283,10 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 )
                 .expect("replace root source content");
             client
-                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("replacement settles");
             let replacement = next_delta_with_updated(&mut joined_stream).await;
@@ -301,7 +313,10 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 )
                 .expect("replace joined source content");
             client
-                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("joined-side replacement settles");
             let joined_replacement = next_delta_with_updated(&mut joined_stream).await;
@@ -333,7 +348,10 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
 
             let batch = client.delete(first).expect("remove first joined row");
             client
-                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("joined-row removal settles");
             let removal = next_delta_with_removed(&mut joined_stream).await;
@@ -416,7 +434,10 @@ async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction_batc
                 )
                 .expect("insert root");
             client
-                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("root settles");
 
@@ -455,7 +476,10 @@ async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction_batc
                 )
                 .expect("insert durable matching joined row");
             client
-                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("durable joined row settles");
             let delta = next_delta_with_added(&mut stream).await;

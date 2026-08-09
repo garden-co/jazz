@@ -45,6 +45,7 @@ Invariant digest:
   full-scan currentness oracle while touching only the requested global-sequence range.
 - `INV-LOWER-24`: Dry-run policy probes and recursion seed hydration MUST use the same deterministic source access-path selection as ordinary one-shot reads, with equivalence to the full-scan path and counters proving the selected path.
 - `INV-LOWER-25`: A lens-projected maintained source MUST emit the same net weighted current-row and witness deltas as applying the selected natural lens path to the authoritative source.
+- `INV-LOWER-26`: A structured query MUST expose one authoritative terminal output relation. Groove MUST assemble nested paths into that terminal; a child change semantically replaces or patches its owning root output, and public carriers MUST NOT require a second relation-edge delta stream.
 
 ## Details
 
@@ -270,6 +271,31 @@ create a second query algebra. `INV-LOWER-11` — prepared lowering rejects `!=`
 parameter predicates until supported.
 
 ### 14.5 Sync views & exclusive validation → groove
+
+#### Structured app-output terminal
+
+Nested query output is a terminal responsibility of the lowered Groove graph,
+not a reconstruction responsibility of a Jazz, NAPI/WASM, or TypeScript
+adapter (`INV-LOWER-26`). `CollectBy`/`CollectByTree` consumes the flat
+authorized path facts and emits one fixed-descriptor output relation. Each
+output occurrence is keyed by its public `ResultKey`: a single-source root uses
+its `ObjectId`, while a flat join uses the ordered source tuple. Empty optional
+collections are encoded in the root record, so a root with no children remains
+an ordinary terminal row.
+
+A nested child insertion, update, removal, authorization transition, or order
+change therefore changes the owning terminal root. The canonical semantic
+delta is a root addition, retraction, or replacement. A carrier may encode a
+replacement as a structural nested patch when that is measurably useful, but
+the patch is subordinate to the root occurrence and must reduce to the same
+terminal relation. It must not create a separately authoritative
+`relation_delta`, row/edge snapshot, or high-level assembler state.
+
+During migration, relation facts remain permitted as internal sync coverage and
+authorization evidence. They are not public query output and consumers must
+not combine them with a root-row delta to reconstruct application values. A
+protocol revision that carries terminal rows advertises that output mode
+explicitly; receivers must not infer it from query syntax or descriptor shape.
 
 Sync view maintenance shares the same lowered query machinery as ordinary reads.
 The target peer-serving path consumes maintained terminal facts for result

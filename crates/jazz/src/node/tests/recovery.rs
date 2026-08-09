@@ -44,6 +44,68 @@ fn opening_existing_storage_recovers_mirrors_and_high_water_marks() {
     assert_eq!(next_tx.time, TxTime::from(11));
 }
 
+#[cfg(feature = "testing")]
+#[test]
+fn open_receipt_counts_physical_recovery_scans_exactly() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        for (id, time) in [(1, 10), (2, 11)] {
+            node.commit_mergeable(
+                MergeableCommit::new("todos", row(id), time).cells(title_cells("persisted")),
+            )
+            .unwrap();
+        }
+        node.database.close().unwrap();
+    }
+
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    let (_reopened, receipt) = NodeState::new_with_open_receipt_for_test(
+        node(1),
+        schema,
+        storage,
+        false,
+        LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    )
+    .unwrap();
+
+    // The nullable global-sequence index is the actual physical access path:
+    // local pending transactions remain in its `None` bucket and must not be
+    // decoded by bounded `Some`-range recovery.
+    assert_eq!(receipt.global_sequence_records_scanned, 0);
+    assert_eq!(receipt.accepted_global_sequences, 0);
+    assert_eq!(receipt.ahead_current_entries, 2);
+}
+
+#[cfg(feature = "testing")]
+#[test]
+fn open_receipt_attributes_catalogue_finalization_when_aliases_are_first_persisted() {
+    // A fresh store plants the finalization work: both aliases are absent and
+    // must be inserted after recovery. This catches an exported receipt phase
+    // that is left at its Default::default() value.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    let (_node, receipt) = NodeState::new_with_open_receipt_for_test(
+        node(1),
+        schema,
+        storage,
+        false,
+        LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    )
+    .unwrap();
+
+    assert!(
+        !receipt.finalize_catalogue.is_zero(),
+        "first-open alias persistence must be attributed to catalogue finalization"
+    );
+}
+
 #[test]
 fn opening_defers_malformed_current_row_to_read() {
     // This is necessarily an internal regression test: planting malformed
@@ -311,7 +373,8 @@ fn recovery_rebuilds_only_pending_parent_edges_and_prunes_on_acceptance() {
     let child;
     {
         let mut node = open_node_at(&temp_dir, schema.clone());
-        let tx = node.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        node.open_exclusive(tx).unwrap();
         node.tx_write(tx, "todos", row(1), title_cells("parent"), None)
             .unwrap();
         let (parent_tx, _unit) = node.commit_exclusive(tx, AuthorId::SYSTEM, 10).unwrap();
@@ -680,7 +743,8 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    let parent_tx = core.open_exclusive().unwrap();
+    let parent_tx = OpenBatchId::new();
+    core.open_exclusive(parent_tx).unwrap();
     core.tx_write(parent_tx, "todos", row(1), title_cells("parent"), None)
         .unwrap();
     let (parent, _unit) = core
@@ -907,7 +971,8 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
         MergeableCommit::new("todos", row, 21).deletion(DeletionEvent::Restored),
     );
 
-    let tx_id = core.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    core.open_exclusive(tx_id).unwrap();
     core.tx_read(tx_id, "todos", row).unwrap();
     core.tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
         .unwrap();
@@ -922,7 +987,8 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
     .unwrap();
 
     sync_current_rows_to(&mut core, &mut writer_b, 43);
-    let rejected_tx = writer_b.open_exclusive().unwrap();
+    let rejected_tx = OpenBatchId::new();
+    writer_b.open_exclusive(rejected_tx).unwrap();
     writer_b.tx_read(rejected_tx, "todos", row).unwrap();
     commit_mergeable_global(
         &mut writer_a,
@@ -1012,7 +1078,8 @@ fn transaction_metadata_round_trips_through_recovery() {
         )
         .unwrap();
 
-    let tx_id = local_node.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    local_node.open_exclusive(tx_id).unwrap();
     local_node
         .tx_set_metadata(tx_id, r#"{"source":"exclusive"}"#.to_owned())
         .unwrap();

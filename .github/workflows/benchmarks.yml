@@ -121,10 +121,10 @@ jobs:
       - name: Build native benchmark binaries
         run: |
           set -euo pipefail
-          cargo build --release -p jazz-tools --features client,rocksdb --example realistic_bench
-          cargo build --release -p jazz-tools --features client,sqlite --example realistic_bench
-          cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 --no-run
-          cargo bench -p jazz-tools --features sqlite --bench realistic_phase1 --no-run
+          cargo build --release -p jazz --features client,rocksdb --example realistic_bench
+          cargo build --release -p jazz --features client,sqlite --example realistic_bench
+          cargo bench -p jazz --features rocksdb --bench realistic_phase1 --no-run
+          cargo bench -p jazz --features sqlite --bench realistic_phase1 --no-run
           cargo bench -p jazz-sim --bench s2_canvas --no-run
 
       - name: Run native benchmark suite
@@ -349,7 +349,7 @@ jobs:
           uname -a > bench-out/browser/uname.txt
 
       - name: Build jazz-tools server binary
-        run: cargo build -p jazz-tools --features cli
+        run: cargo build -p jazz --features cli
 
       - name: Build jazz-napi package
         run: pnpm --dir crates/jazz-napi run build

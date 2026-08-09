@@ -600,6 +600,31 @@ impl GraphBuilder {
         parent_fields: impl IntoIterator<Item = CollectByField>,
         slots: impl IntoIterator<Item = CollectBySlotBuilder>,
     ) -> Self {
+        Self::collect_by_tree_ordered(
+            input,
+            group_cols,
+            parent_fields,
+            slots,
+            Vec::<TopByOrder>::new(),
+            Vec::<String>::new(),
+            0,
+            TopByLimit::Unbounded,
+        )
+    }
+
+    /// Render a tree terminal whose roots also have an explicit public order
+    /// and window.
+    #[allow(clippy::too_many_arguments)]
+    pub fn collect_by_tree_ordered(
+        input: GraphBuilder,
+        group_cols: impl IntoIterator<Item = impl Into<String>>,
+        parent_fields: impl IntoIterator<Item = CollectByField>,
+        slots: impl IntoIterator<Item = CollectBySlotBuilder>,
+        order_cols: impl IntoIterator<Item = TopByOrder>,
+        tie_cols: impl IntoIterator<Item = impl Into<String>>,
+        offset: u64,
+        limit: TopByLimit,
+    ) -> Self {
         Self::CollectBy {
             input: Box::new(input),
             collect: Box::new(CollectByBuilder {
@@ -611,10 +636,40 @@ impl GraphBuilder {
                 slots: slots.into_iter().collect(),
                 tuple_fields: Vec::new(),
                 occurrence_id_cols: Vec::new(),
-                order_cols: Vec::new(),
-                tie_cols: Vec::new(),
-                offset: 0,
-                limit: TopByLimit::Finite(0),
+                order_cols: order_cols.into_iter().collect(),
+                tie_cols: tie_cols.into_iter().map(FieldRef::name).collect(),
+                offset,
+                limit,
+            }),
+        }
+    }
+
+    /// Render one public root record without child collection slots.
+    #[allow(clippy::too_many_arguments)]
+    pub fn collect_root_ordered(
+        input: GraphBuilder,
+        group_cols: impl IntoIterator<Item = impl Into<String>>,
+        parent_fields: impl IntoIterator<Item = CollectByField>,
+        order_cols: impl IntoIterator<Item = TopByOrder>,
+        tie_cols: impl IntoIterator<Item = impl Into<String>>,
+        offset: u64,
+        limit: TopByLimit,
+    ) -> Self {
+        Self::CollectBy {
+            input: Box::new(input),
+            collect: Box::new(CollectByBuilder {
+                mode: CollectByMode::Root,
+                group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
+                parent_fields: parent_fields.into_iter().collect(),
+                child_fields: Vec::new(),
+                collection_field: String::new(),
+                slots: Vec::new(),
+                tuple_fields: Vec::new(),
+                occurrence_id_cols: Vec::new(),
+                order_cols: order_cols.into_iter().collect(),
+                tie_cols: tie_cols.into_iter().map(FieldRef::name).collect(),
+                offset,
+                limit,
             }),
         }
     }
@@ -859,6 +914,10 @@ pub struct TopByOrder {
 pub struct CollectByField {
     pub field: FieldRef,
     pub output_name: String,
+    /// Remove at most one nullable wrapper while rendering the terminal field.
+    /// This is useful when a flat union makes an otherwise required field
+    /// nullable solely to represent an absent child row.
+    pub unwrap_nullable: bool,
 }
 
 impl CollectByField {
@@ -867,6 +926,7 @@ impl CollectByField {
         Self {
             field: FieldRef::name(field.clone()),
             output_name: field,
+            unwrap_nullable: false,
         }
     }
 
@@ -874,6 +934,18 @@ impl CollectByField {
         Self {
             field: FieldRef::name(field),
             output_name: output_name.into(),
+            unwrap_nullable: false,
+        }
+    }
+
+    pub fn renamed_unwrap_nullable(
+        field: impl Into<String>,
+        output_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            field: FieldRef::name(field),
+            output_name: output_name.into(),
+            unwrap_nullable: true,
         }
     }
 }
@@ -891,6 +963,19 @@ impl TopByOrder {
             field: FieldRef::name(field),
             direction: TopByDirection::Desc,
         }
+    }
+}
+
+fn collect_projection_output_type(
+    input: &ValueType,
+    projection: &CollectByProjection,
+) -> Option<ValueType> {
+    if !projection.unwrap_nullable {
+        return Some(input.clone());
+    }
+    match input {
+        ValueType::Nullable(inner) => Some((**inner).clone()),
+        other => Some(other.clone()),
     }
 }
 
@@ -942,11 +1027,17 @@ impl IvmGraph {
             .filter_map(|input| self.nodes.get(input).map(|node| node.descriptor.output))
             .collect::<Vec<_>>();
         descriptor.validate(&input_outputs)?;
-        if descriptor.inputs.iter().any(|input| {
+        let consumes_collect_by = descriptor.inputs.iter().any(|input| {
             self.nodes
                 .get(input)
                 .is_some_and(|node| matches!(node.descriptor.operator, OpType::CollectBy(_)))
-        }) {
+        });
+        if consumes_collect_by
+            && !matches!(
+                descriptor.operator,
+                OpType::Filter(_) | OpType::MapProject(_)
+            )
+        {
             return Err(GraphValidationError::CollectByInputIsTerminal);
         }
         Ok(())
@@ -1156,7 +1247,9 @@ impl NodeDescriptor {
                     {
                         let input_field = &input_outputs[0].fields()[projection.field_idx];
                         if output_field.name.as_deref() != Some(projection.output_name.as_str())
-                            || output_field.value_type != input_field.value_type
+                            || collect_projection_output_type(&input_field.value_type, projection)
+                                .as_ref()
+                                != Some(&output_field.value_type)
                         {
                             return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
                         }
@@ -1168,22 +1261,59 @@ impl NodeDescriptor {
                         .chain(&collect_by.occurrence_id_field_indices)
                     {
                         let value_type = &input_outputs[0].fields()[field_idx].value_type;
-                        let scalar = matches!(
-                            value_type,
-                            ValueType::U8
-                                | ValueType::U16
-                                | ValueType::U32
-                                | ValueType::U64
-                                | ValueType::I32
-                                | ValueType::I64
-                                | ValueType::F64
-                                | ValueType::Bool
-                                | ValueType::String
-                                | ValueType::Bytes
-                                | ValueType::Uuid
-                                | ValueType::Enum(_)
-                        );
+                        let scalar = collect_by_ordered_scalar(value_type);
                         if !scalar || value_type.contains_record() {
+                            return Err(GraphValidationError::CollectByKeyFieldMustBeScalar);
+                        }
+                    }
+                    return Ok(());
+                }
+                if collect_by.mode == CollectByMode::Root {
+                    if !collect_by.slots.is_empty()
+                        || !collect_by.child_fields.is_empty()
+                        || !collect_by.collection_field.is_empty()
+                        || self.output.fields().len() != collect_by.parent_fields.len()
+                        || collect_by.sort_field_indices.len() != collect_by.sort_directions.len()
+                        || collect_by.sort_field_indices.len()
+                            != collect_by.order_fields.len() + collect_by.tie_fields.len()
+                        || collect_by.order_fields.is_empty()
+                        || collect_by.tie_fields.is_empty()
+                    {
+                        return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
+                    }
+                    for (output_field, projection) in
+                        self.output.fields().iter().zip(&collect_by.parent_fields)
+                    {
+                        let input_field = input_outputs[0]
+                            .fields()
+                            .get(projection.field_idx)
+                            .ok_or(GraphValidationError::FieldIndexOutOfBounds {
+                                index: projection.field_idx,
+                                len: input_outputs[0].fields().len(),
+                            })?;
+                        if output_field.name.as_deref() != Some(projection.output_name.as_str())
+                            || collect_projection_output_type(&input_field.value_type, projection)
+                                .as_ref()
+                                != Some(&output_field.value_type)
+                        {
+                            return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
+                        }
+                    }
+                    for &field_idx in collect_by
+                        .group_field_indices
+                        .iter()
+                        .chain(&collect_by.sort_field_indices)
+                    {
+                        let value_type = input_outputs[0]
+                            .fields()
+                            .get(field_idx)
+                            .ok_or(GraphValidationError::FieldIndexOutOfBounds {
+                                index: field_idx,
+                                len: input_outputs[0].fields().len(),
+                            })?
+                            .value_type
+                            .clone();
+                        if !collect_by_ordered_scalar(&value_type) || value_type.contains_record() {
                             return Err(GraphValidationError::CollectByKeyFieldMustBeScalar);
                         }
                     }
@@ -1210,7 +1340,9 @@ impl NodeDescriptor {
                                 len: input_outputs[0].fields().len(),
                             })?;
                         if output_field.name.as_deref() != Some(projection.output_name.as_str())
-                            || output_field.value_type != input_field.value_type
+                            || collect_projection_output_type(&input_field.value_type, projection)
+                                .as_ref()
+                                != Some(&output_field.value_type)
                         {
                             return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
                         }
@@ -1293,7 +1425,9 @@ impl NodeDescriptor {
                 {
                     let input_field = &input_outputs[0].fields()[projection.field_idx];
                     if output_field.name.as_deref() != Some(projection.output_name.as_str())
-                        || output_field.value_type != input_field.value_type
+                        || collect_projection_output_type(&input_field.value_type, projection)
+                            .as_ref()
+                            != Some(&output_field.value_type)
                     {
                         return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
                     }
@@ -1306,7 +1440,9 @@ impl NodeDescriptor {
                 {
                     let input_field = &input_outputs[0].fields()[projection.field_idx];
                     if child_field.name.as_deref() != Some(projection.output_name.as_str())
-                        || child_field.value_type != input_field.value_type
+                        || collect_projection_output_type(&input_field.value_type, projection)
+                            .as_ref()
+                            != Some(&child_field.value_type)
                     {
                         return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
                     }
@@ -1317,21 +1453,7 @@ impl NodeDescriptor {
                     .chain(&collect_by.sort_field_indices)
                 {
                     let value_type = &input_outputs[0].fields()[field_idx].value_type;
-                    let scalar = matches!(
-                        value_type,
-                        ValueType::U8
-                            | ValueType::U16
-                            | ValueType::U32
-                            | ValueType::U64
-                            | ValueType::I32
-                            | ValueType::I64
-                            | ValueType::F64
-                            | ValueType::Bool
-                            | ValueType::String
-                            | ValueType::Bytes
-                            | ValueType::Uuid
-                            | ValueType::Enum(_)
-                    );
+                    let scalar = collect_by_ordered_scalar(value_type);
                     if !scalar || value_type.contains_record() {
                         return Err(GraphValidationError::CollectByKeyFieldMustBeScalar);
                     }
@@ -1473,6 +1595,25 @@ fn expect_same_output(
         Ok(())
     } else {
         Err(GraphValidationError::OutputDescriptorMismatch)
+    }
+}
+
+fn collect_by_ordered_scalar(value_type: &ValueType) -> bool {
+    match value_type {
+        ValueType::Nullable(inner) => collect_by_ordered_scalar(inner),
+        ValueType::U8
+        | ValueType::U16
+        | ValueType::U32
+        | ValueType::U64
+        | ValueType::I32
+        | ValueType::I64
+        | ValueType::F64
+        | ValueType::Bool
+        | ValueType::String
+        | ValueType::Bytes
+        | ValueType::Uuid
+        | ValueType::Enum(_) => true,
+        _ => false,
     }
 }
 
@@ -1831,10 +1972,10 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_a_direct_descriptor_consumer_of_collect_by() {
-        // This intentionally stays internal: public GraphBuilder attempts are
-        // covered at the database boundary, while this exercises the one
-        // descriptor-level route available to low-level graph embedders.
+    fn validation_allows_terminal_route_filter_over_collect_by() {
+        // Prepared terminals use this narrow consumer to route one already
+        // assembled terminal value to its binding. It must not reopen nested
+        // assembly or feed arbitrary relational operators.
         let mut graph = IvmGraph::new();
         let source = graph.dedup_node(
             NodeDescriptor::new(
@@ -1866,11 +2007,13 @@ mod tests {
                         field: "f0".to_owned(),
                         field_idx: 0,
                         output_name: "f0".to_owned(),
+                        unwrap_nullable: false,
                     }],
                     child_fields: vec![CollectByProjection {
                         field: "f0".to_owned(),
                         field_idx: 0,
                         output_name: "f0".to_owned(),
+                        unwrap_nullable: false,
                     }],
                     child_descriptor: child,
                     collection_field: "children".to_owned(),
@@ -1902,9 +2045,6 @@ mod tests {
             [collector],
             collected_output,
         );
-        assert_eq!(
-            graph.validate_node(&consumer),
-            Err(GraphValidationError::CollectByInputIsTerminal)
-        );
+        assert_eq!(graph.validate_node(&consumer), Ok(()));
     }
 }
