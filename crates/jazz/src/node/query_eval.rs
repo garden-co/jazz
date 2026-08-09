@@ -272,10 +272,27 @@ fn lowered_app_rows_graph(program: &QueryProgram) -> Result<GraphBuilder, Error>
 }
 
 fn lowered_materialization_app_rows_graph(program: &QueryProgram) -> Result<GraphBuilder, Error> {
-    if matches!(
+    let publishes_structured_tree = matches!(
         program.request.output.app_rows.as_ref().map(|rows| &rows.projection),
         Some(PayloadProjection::Tree(tree)) if !tree.paths.is_empty()
-    ) {
+    );
+    let public_root_owns_membership =
+        program
+            .request
+            .input
+            .shape
+            .closure_paths
+            .iter()
+            .any(|path| {
+                matches!(
+                    path,
+                    ClosurePath::ExplicitInclude {
+                        root_gate: Some(_),
+                        ..
+                    }
+                )
+            });
+    if publishes_structured_tree || public_root_owns_membership {
         return lowered_app_rows_graph(program);
     }
     program

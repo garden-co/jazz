@@ -13069,6 +13069,11 @@ fn db_query_builder_expresses_s1_shaped_filters_and_include_modes() {
             .require_includes(),
     );
     assert_eq!(row_ids(&prepared_read(&db, &require_query)), vec![row(1)]);
+    assert_eq!(
+        row_ids(&prepared_all(&db, &require_query, ReadOpts::default())),
+        vec![row(1)],
+        "required scalar includes must retain public Root membership gating"
+    );
 
     let paged = db
         .table("issues")
