@@ -129,18 +129,6 @@ where
     where
         S: ReopenableStorage,
     {
-        self.apply_sync_message_with_ingest_context_and_encoded_len(message, ingest_context, None)
-    }
-
-    pub(crate) fn apply_sync_message_with_ingest_context_and_encoded_len(
-        &mut self,
-        message: SyncMessage,
-        ingest_context: Option<CommitUnitIngestContext>,
-        encoded_len: Option<usize>,
-    ) -> Result<Vec<SyncMessage>, Error>
-    where
-        S: ReopenableStorage,
-    {
         let message = message
             .expand_version_carriers_for_receive()
             .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
@@ -165,7 +153,6 @@ where
                 versions,
                 u64::MAX - SKEW_TOLERANCE_MS,
                 ingest_context,
-                encoded_len,
             ),
             SyncMessage::FateUpdate {
                 tx_id,
@@ -193,35 +180,6 @@ where
                     subscription,
                     settled_through,
                     defer_settlement: false,
-                    reset_result_set,
-                    version_carriers,
-                    version_bundles,
-                    peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
-                    authorization_progress: peer_payload_inventory.authorization_progress,
-                    result_member_adds,
-                    result_member_removes,
-                    program_fact_adds,
-                    program_fact_removes,
-                })?;
-                Ok(Vec::new())
-            }
-            SyncMessage::ViewUpdateChunk {
-                subscription,
-                settled_through,
-                reset_result_set,
-                final_chunk,
-                version_carriers,
-                version_bundles,
-                peer_payload_inventory,
-                result_member_adds,
-                result_member_removes,
-                program_fact_adds,
-                program_fact_removes,
-            } => {
-                self.apply_view_update(ViewUpdateParts {
-                    subscription,
-                    settled_through,
-                    defer_settlement: !final_chunk,
                     reset_result_set,
                     version_carriers,
                     version_bundles,
@@ -573,7 +531,7 @@ where
     where
         S: ReopenableStorage,
     {
-        self.ingest_commit_unit_with_context(tx, versions, now_ms, None, None)
+        self.ingest_commit_unit_with_context(tx, versions, now_ms, None)
     }
 
     /// Ingest a commit unit as fate authority with an optional authenticated
@@ -585,12 +543,11 @@ where
         versions: Vec<VersionRecord>,
         now_ms: u64,
         ingest_context: Option<CommitUnitIngestContext>,
-        encoded_len: Option<usize>,
     ) -> Result<Vec<SyncMessage>, Error>
     where
         S: ReopenableStorage,
     {
-        if let Some(reason) = commit_unit_limit_violation(&tx, &versions, encoded_len) {
+        if let Some(reason) = commit_unit_limit_violation(&versions) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
             self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
             let mut updates = vec![SyncMessage::FateUpdate {
@@ -622,7 +579,7 @@ where
     where
         S: ReopenableStorage,
     {
-        if commit_unit_limit_violation(&tx, &versions, None).is_none()
+        if commit_unit_limit_violation(&versions).is_none()
             && commit_unit_write_count_matches(&tx, versions.len())
         {
             self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
@@ -645,7 +602,7 @@ where
     where
         S: ReopenableStorage,
     {
-        if commit_unit_limit_violation(&tx, &versions, None).is_none()
+        if commit_unit_limit_violation(&versions).is_none()
             && commit_unit_write_count_matches(&tx, versions.len())
         {
             self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
@@ -785,7 +742,7 @@ where
                 "edge-accepted finalization is mergeable-only",
             ));
         }
-        if let Some(reason) = commit_unit_limit_violation(&tx, &versions, None) {
+        if let Some(reason) = commit_unit_limit_violation(&versions) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
             self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
             let mut updates = vec![SyncMessage::FateUpdate {
@@ -974,7 +931,7 @@ where
     where
         S: ReopenableStorage,
     {
-        if commit_unit_limit_violation(&tx, &versions, None).is_some()
+        if commit_unit_limit_violation(&versions).is_some()
             || !commit_unit_write_count_matches(&tx, versions.len())
         {
             return Err(Error::UnsupportedCommitUnit("malformed relay commit unit"));
@@ -1288,7 +1245,7 @@ where
                 "edge authority only supports mergeable commit units",
             ));
         }
-        if let Some(reason) = commit_unit_limit_violation(&tx, &versions, None) {
+        if let Some(reason) = commit_unit_limit_violation(&versions) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
             self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
             let mut updates = vec![SyncMessage::FateUpdate {
@@ -2649,11 +2606,6 @@ where
                 self.content_refs_in_version_records(versions)
             }
             SyncMessage::ViewUpdate {
-                version_carriers,
-                version_bundles,
-                ..
-            }
-            | SyncMessage::ViewUpdateChunk {
                 version_carriers,
                 version_bundles,
                 ..

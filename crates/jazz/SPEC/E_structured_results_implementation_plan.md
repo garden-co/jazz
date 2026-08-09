@@ -139,7 +139,7 @@ terminal evaluator, and recursion-boundary anchors.
 runtime state, and black-box database tests. Focused: `cargo test -p groove`.
 Landing: full canonical set plus `dev/benchmarks/smoke.sh` (engine work).
 
-### PR 3 — Canonical `ResultTree`, explicit array boundedness, and Jazz terminal lowering
+### PR 3 — Canonical `ResultTree`, array windowing, and Jazz terminal lowering
 
 **Depends on:** PR 2 and #1250.
 
@@ -151,19 +151,17 @@ for a reset snapshot and a whole-parent replacement, but do not leave a second
 facade-side tree materializer.
 
 Extend `ArraySubquery` and every public builder/normalizer/shape identity with
-the normative child `offset`; require an explicit recursive boundedness
-declaration during query validation: either `limit: Some(_)` (zero is valid and
-renders `[]`) or `unbounded()`. Preserve explicit child
+the normative child `offset`; allow an optional finite `limit` (zero is valid
+and renders `[]`) while omission selects the complete ordered suffix. Preserve child
 `order_by`, default row-id order and tie-break, filters, requirements, and
 nested arrays in the descriptor-complete lowering. Lower flat parent/child
 association facts into the PR 2 terminal collector tree only at the serving
-output boundary. Add the named parent-too-large error, carrying source parent,
-relation path/name, rendered byte count, and configured limit; fail before a
-partial replacement is admitted. This PR may prepare the v4 structured
+output boundary. Large logical replacements are decomposed and reassembled by
+the transport; a partial replacement must never be admitted. This PR may prepare the v4 structured
 payload types but does not change wire protocol version or delete v3 carriers.
 
-**Invariant put in force.** `INV-QUERY-29` (explicit recursive boundedness and
-the no-truncation size backstop). `INV-QUERY-22` remains target until the next
+**Invariant put in force.** `INV-QUERY-29` (optional finite windows and
+atomic large-message transport). `INV-QUERY-22` remains target until the next
 PR proves this terminal is what remote snapshots and deltas actually deliver.
 
 **Enforcing tests.** At the Jazz public API boundary:
@@ -172,14 +170,11 @@ PR proves this terminal is what remote snapshots and deltas actually deliver.
   order, offset, and finite limits; assert `Db::all` returns the canonical tree
   with child ids as projected fields, ordered arrays, an empty `limit(0)` array,
   and the same order after a one-shot and a local maintained subscription reset;
-- try root and nested array subqueries declaring neither `limit` nor
-  `unbounded()`; assert public query preparation/read/subscription fails with
-  the named unbounded-array validation error, while `limit(0)` and
-  `unbounded()` succeed;
-- insert individually large but finitely limited children so one parent exceeds
-  `MAX_WIRE_FRAME_BYTES`; assert the public operation fails with the named
-  error containing parent, relation, rendered size, and limit, emits no
-  subscription replacement, and does not return a truncated array.
+- try root and nested array subqueries with no `limit`; assert public query
+  preparation/read/subscription treats both as unbounded, while `limit(0)`
+  renders an empty child array;
+- insert enough children that one logical parent exceeds a transport frame;
+  assert the public operation returns the complete array atomically.
 
 **Registry change.** In `crates/jazz/SPEC/INVARIANTS.md`, flip
 `INV-QUERY-29` from `target`/`untested` to `now`/`✓`, citing these public
@@ -190,22 +185,21 @@ validation/over-size tests and the query validator/terminal size-check anchors.
 Landing: full canonical set and smoke (public query/engine work); build the full
 workspace because this introduces public Jazz result types.
 
-### PR 4 — Atomic structured delivery on v4
+### PR 4 — Atomic structured delivery on v5
 
 **Depends on:** PR 3 and #1250. This is the first PR allowed to make structured
 results remotely observable.
 
-**Implementation.** Extend the v4 protocol cut already made on #1259; do not
-bump again to v5. Replace the v3 `RelationSnapshot`/`RelationEdge` delivery
+**Implementation.** Extend the protocol cut with generic logical-message
+fragmentation. Replace the prior `RelationSnapshot`/`RelationEdge` delivery
 family with the one `ResultTree` vocabulary. Update postcard enums,
-`SyncMessage::ViewUpdate`, `ViewUpdateChunk`, server/peer/receiver reduction,
+`SyncMessage::ViewUpdate`, transport fragmentation, server/peer/receiver reduction,
 WASM, N-API, native runtime, and cross-language fixtures within v4. A reset
 carries an ordered recursive snapshot. An incremental item is an extensible
 tagged whole-parent replacement keyed by #1250's occurrence id; v4 must not
 interpret it as a child delta.
 
-Chunk assembly stores structured pieces but publishes neither a snapshot nor a
-replacement until the final chunk. Add
+Transport reassembly admits the complete structured message atomically. Add
 `MAX_STRUCTURED_RESULT_DEPTH` and `MAX_STRUCTURED_RESULT_WIDTH` validation at
 the untrusted receive boundary, before recursive semantic application or
 unbounded allocation, for complete updates and chunk accumulation. Reject v3

@@ -1355,7 +1355,7 @@ mod tests {
                         SyncMessage::FateUpdate { tx_id, .. } => Some(tx_id),
                         _ => None,
                     }),
-                WireFrame::Hello(_) | WireFrame::Error(_) => None,
+                WireFrame::Hello(_) | WireFrame::Error(_) | WireFrame::MessageFragment(_) => None,
             })
             .collect()
     }

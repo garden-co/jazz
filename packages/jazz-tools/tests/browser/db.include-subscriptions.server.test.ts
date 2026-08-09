@@ -93,12 +93,9 @@ describe("websocket include subscriptions", () => {
     const snapshots: OrgWithDeepIncludes[][] = [];
     const selectedIncludeQuery = app.orgs
       .include({
-        todosViaOrg: app.todos
-          .select("title")
-          .include({
-            user_checksViaTodo: { check_notesViaUser_check: true },
-          })
-          .unbounded(),
+        todosViaOrg: app.todos.select("title").include({
+          user_checksViaTodo: { check_notesViaUser_check: true },
+        }),
       })
       .requireIncludes();
     const unsubscribe = ctx.trackSubscription(

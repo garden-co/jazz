@@ -213,26 +213,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             },
         ),
         (
-            "view_update_chunk_final_with_row_add",
-            "ViewUpdateChunk",
-            SyncMessage::ViewUpdateChunk {
-                subscription,
-                settled_through: GlobalSeq(7),
-                reset_result_set: true,
-                final_chunk: true,
-                version_carriers: Vec::new(),
-                version_bundles: Vec::new(),
-                peer_payload_inventory: PeerPayloadInventory {
-                    complete_tx_payloads: vec![tx_id],
-                    authorization_progress: Some(9),
-                },
-                result_member_adds: vec![result_row_entry(tx_id).into()],
-                result_member_removes: Vec::new(),
-                program_fact_adds: Vec::new(),
-                program_fact_removes: Vec::new(),
-            },
-        ),
-        (
             "view_update_mixed_version_carrier_runs",
             "ViewUpdate",
             SyncMessage::ViewUpdate {
@@ -720,11 +700,9 @@ fn native_query_codec_cases() -> Vec<(&'static str, Query)> {
     );
 
     let mut unbounded = Query::from("teams");
-    unbounded.array_subqueries.push(
-        ArraySubquery::new("participants", "participants", "team_id", "id")
-            .unbounded()
-            .offset(2),
-    );
+    unbounded
+        .array_subqueries
+        .push(ArraySubquery::new("participants", "participants", "team_id", "id").offset(2));
 
     vec![
         ("forward_include_projected_optional", forward),

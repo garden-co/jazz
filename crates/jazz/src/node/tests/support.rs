@@ -13,11 +13,6 @@ fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
             version_carriers,
             version_bundles,
             ..
-        }
-        | SyncMessage::ViewUpdateChunk {
-            version_carriers,
-            version_bundles,
-            ..
         } => {
             let mut bundles = version_bundles.clone();
             bundles.extend(

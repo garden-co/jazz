@@ -534,10 +534,7 @@ struct ClientTransportCounters {
 impl Transport for QueueTransport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         self.metrics.messages.set(self.metrics.messages.get() + 1);
-        if matches!(
-            message,
-            SyncMessage::ViewUpdate { .. } | SyncMessage::ViewUpdateChunk { .. }
-        ) {
+        if matches!(message, SyncMessage::ViewUpdate { .. }) {
             self.metrics
                 .view_updates
                 .set(self.metrics.view_updates.get() + 1);
