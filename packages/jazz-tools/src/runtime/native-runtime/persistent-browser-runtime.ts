@@ -400,7 +400,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   disconnect(options?: { rejectWaiters?: boolean }): Promise<void> {
-    this.connectionReady = connectionGate();
+    if (!this.waitingForReconnect) this.connectionReady = connectionGate();
     this.waitingForReconnect = true;
     if (this.closed) return Promise.resolve();
     return this.opened

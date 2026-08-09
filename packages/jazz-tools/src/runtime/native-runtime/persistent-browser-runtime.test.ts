@@ -250,6 +250,70 @@ describe("PersistentBrowserOpfsRuntime", () => {
     await waitRejection;
   });
 
+  it.each(["reconnect", "close"] as const)(
+    "preserves parked server-tier work across repeated disconnects until %s",
+    async (outcome) => {
+      vi.stubGlobal("Worker", FakeWorker);
+
+      const runtime = new PersistentBrowserOpfsRuntime(
+        undefined,
+        schema,
+        `persistent-browser-runtime-repeat-disconnect-${outcome}-test`,
+        new Uint8Array(16),
+        new Uint8Array(16),
+      );
+      const worker = FakeWorker.instances[0];
+
+      const firstDisconnect = runtime.disconnect({ rejectWaiters: false });
+      await vi.waitFor(() => {
+        expect(worker.messages.filter((message) => message.method === "disconnect")).toHaveLength(
+          1,
+        );
+      });
+      worker.respond(
+        worker.messages.find((message) => message.method === "disconnect")!.id,
+        undefined,
+      );
+      await firstDisconnect;
+
+      const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null);
+      const secondDisconnect = runtime.disconnect({ rejectWaiters: false });
+      await vi.waitFor(() => {
+        expect(worker.messages.filter((message) => message.method === "disconnect")).toHaveLength(
+          2,
+        );
+      });
+      worker.respond(
+        worker.messages.filter((message) => message.method === "disconnect")[1]!.id,
+        undefined,
+      );
+      await secondDisconnect;
+
+      if (outcome === "reconnect") {
+        runtime.connect("ws://127.0.0.1:4200/apps/app/ws", "{}");
+        await vi.waitFor(() => {
+          expect(worker.messages.some((message) => message.method === "connect")).toBe(true);
+        });
+        worker.respond(
+          worker.messages.find((message) => message.method === "connect")!.id,
+          undefined,
+        );
+        await vi.waitFor(() => {
+          expect(worker.messages.some((message) => message.method === "query")).toBe(true);
+        });
+        worker.respond(worker.messages.find((message) => message.method === "query")!.id, []);
+        await expect(query).resolves.toEqual([]);
+        await runtime.close();
+      } else {
+        const rejection = expect(query).rejects.toThrow(
+          "Persistent browser native runtime is closed",
+        );
+        await runtime.close();
+        await rejection;
+      }
+    },
+  );
+
   it("returns a pending write handle and waits on the worker transaction id", async () => {
     vi.stubGlobal("Worker", FakeWorker);
 
