@@ -228,3 +228,34 @@ fn ordinary_view_write_does_not_enter_open_owner_snapshot() {
     owner.abandon_exclusive_handle(batch).unwrap();
     assert_eq!(view.read(&prepared).unwrap().len(), 1);
 }
+
+/// Local-only runtimes enforce the same exclusive parent invariant before a
+/// commit can resolve at Local durability; no remote authority is required.
+#[test]
+fn exclusive_view_commit_rejects_concurrent_local_row_change() {
+    let owner = open_owner(JazzSchema::new([]));
+    let view = owner.register_schema_view(schema("base")).unwrap();
+    let row = RowUuid::from_bytes([8; 16]);
+    view.insert_with_id("items", row, Default::default())
+        .unwrap();
+
+    let batch = OpenBatchId::new();
+    owner.begin_exclusive(batch).unwrap();
+    let tx = view.exclusive_tx_ref(batch);
+    assert!(tx.read("items", row).unwrap().is_some());
+    view.update(
+        "items",
+        row,
+        [("label".to_owned(), Value::String("alice".to_owned()))].into(),
+    )
+    .unwrap();
+    tx.update(
+        "items",
+        row,
+        [("label".to_owned(), Value::String("bob".to_owned()))].into(),
+    )
+    .unwrap();
+
+    let error = owner.commit_exclusive_handle(batch).unwrap_err();
+    assert!(error.message.contains("conflicts with local changes"));
+}

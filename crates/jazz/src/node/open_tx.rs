@@ -500,6 +500,11 @@ where
                 "open transaction is not exclusive",
             ));
         }
+        if !self.open_exclusive_is_locally_serializable(open_batch_id)? {
+            return Err(Error::InvalidMergeableCommit(
+                "exclusive transaction conflicts with local changes after its snapshot",
+            ));
+        }
         let open_tx = self
             .open_tx
             .open_transactions
@@ -563,6 +568,46 @@ where
         self.open_tx.open_transactions.remove(&open_batch_id);
         self.open_tx.closed_batches.insert(open_batch_id);
         Ok((tx_id, SyncMessage::CommitUnit { tx, versions }))
+    }
+
+    fn open_exclusive_is_locally_serializable(
+        &mut self,
+        open_batch_id: OpenBatchId,
+    ) -> Result<bool, Error> {
+        let open_tx = self.open_tx(open_batch_id)?.clone();
+        for read in &open_tx.row_reads {
+            if self.local_content_winner_tx_id(&read.table, read.row_uuid)? != Some(read.version) {
+                return Ok(false);
+            }
+        }
+        for absent in &open_tx.absent_reads {
+            if self
+                .local_content_winner_tx_id(&absent.table, absent.row_uuid)?
+                .is_some()
+            {
+                return Ok(false);
+            }
+        }
+        for write in &open_tx.writes {
+            let current = self.local_content_winner_tx_id(&write.table, write.row_uuid)?;
+            let parent = match write.parents.as_slice() {
+                [] => None,
+                [parent] => Some(*parent),
+                _ => return Ok(false),
+            };
+            if current != parent {
+                return Ok(false);
+            }
+        }
+        for predicate in &open_tx.predicate_reads {
+            for version in self.query_table_versions(&predicate.table)? {
+                let tx_id = self.version_tx_id(&version)?;
+                if tx_id.node == self.node_uuid && tx_id.time > open_tx.base_snapshot.local_base {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
     }
 
     /// Commit a mergeable open transaction through the ordinary mergeable batch path.
