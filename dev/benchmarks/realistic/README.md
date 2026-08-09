@@ -107,6 +107,28 @@ eviction is outside the measured window and does not drop the machine-wide page
 cache. Both modes are process-cold. The M fixture is intentionally opt-in
 because its public-API seed takes several minutes.
 
+To attribute Jazz's internal open work, enable the test/bench-only diagnostic
+feature:
+
+```bash
+JAZZ_R3_PROFILES=m \
+JAZZ_R3_CACHE_MODES=warm \
+JAZZ_R3_CLOSE_MODES=clean,unclean \
+JAZZ_R3_PHASE_SAMPLES=3 \
+JAZZ_R3_PHASE_ONLY=1 \
+  cargo bench -p jazz --features r3-open-attribution \
+    --bench realistic_phase1 -- realistic_phase1/r3_rocksdb_cold_load
+```
+
+This adds timings and work counts for catalogue recovery, full database open,
+global-sequence recovery, known-state recovery, ahead-current index
+reconstruction, and final catalogue persistence. The retained legacy
+current-row-validation fields report zero now that startup uses bounded recovery. `clean`
+calls `Db::close` after seeding and after every measured read; `unclean` drops
+the database without closing. Lifecycle setup and close happen outside the
+measured window. The default remains `unclean`. See
+`dev/benchmarks/R3_JAZZ_OPEN_ATTRIBUTION.md` for the initial local receipt.
+
 Export consolidated Criterion artifacts (JSON + markdown summary) from `target/criterion`:
 
 ```bash
