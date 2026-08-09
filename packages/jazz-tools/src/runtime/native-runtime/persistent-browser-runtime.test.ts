@@ -1330,9 +1330,13 @@ describe("PersistentBrowserOpfsRuntime", () => {
     await vi.waitFor(() =>
       expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true),
     );
+    const laterWrite = committed(
+      runtime.insert("todos", { title: { type: "Text", value: "queued behind wait" } }),
+    );
 
     await expect(runtime.close()).resolves.toBeUndefined();
     await expect(wait).rejects.toThrow("closed");
+    await expect(laterWrite.batchId).rejects.toThrow("closed");
     expect(worker.messages.map((message) => message.method)).toContain("close");
     expect(worker.terminated).toBe(true);
   });

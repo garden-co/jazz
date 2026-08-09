@@ -697,10 +697,12 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!pending) {
       throw new Error(commitTransactionMessage(openBatchId, this.completedTxs));
     }
-    pending.tx ??=
-      pending.kind === "exclusive"
-        ? this.exclusiveTx(openBatchId)
-        : this.db.mergeableTx(openBatchId);
+    if (!pending.tx && pending.kind === "mergeable") {
+      throw new Error(
+        "Commit transaction failed: empty mergeable batch has no committed unit; roll it back instead",
+      );
+    }
+    pending.tx ??= this.exclusiveTx(openBatchId);
     this.rejectMovedExclusiveParents(pending);
     const write = pending.tx.commit();
     this.pendingTxs.delete(openBatchId);
@@ -2509,14 +2511,14 @@ function isPendingCoverageError(error: unknown): boolean {
 }
 
 function rejectedWaitError(
-  transactionId: string,
+  batchId: BatchId,
   error: unknown,
-): { kind: "rejected"; transactionId: string; code: string; reason: string } | null {
+): { kind: "rejected"; batchId: BatchId; code: string; reason: string } | null {
   const message = errorMessage(error);
   if (!message.includes("WriteRejected")) return null;
   return {
     kind: "rejected",
-    transactionId,
+    batchId,
     code: rejectionCode(message),
     reason: rejectionReason(message),
   };

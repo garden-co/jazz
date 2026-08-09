@@ -363,7 +363,6 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     this.rejectConnectionWaiters();
     try {
       await this.opened;
-      await Promise.allSettled(this.pendingWrites);
       await this.send("close", []);
     } finally {
       this.closed = true;
@@ -382,7 +381,6 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     let namespace = this.dbName;
     try {
       await this.opened;
-      await Promise.allSettled(this.pendingWrites);
       namespace = (await this.send("closeForStorageClear", [])) as string;
     } catch (error) {
       if (!isExpectedShutdownError(error)) throw error;

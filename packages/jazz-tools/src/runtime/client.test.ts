@@ -360,7 +360,7 @@ describe("JazzClient runtime transaction waits", () => {
 
     rejectWait({
       kind: "rejected",
-      transactionId: batchId,
+      batchId,
       code: "permission_denied",
       reason: "write rejected by policy",
     });

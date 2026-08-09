@@ -77,6 +77,12 @@ successful commit. A worker command queue therefore carries complete commands
 with the caller's `OpenBatchId`; it does not allocate or translate a second
 worker-local handle.
 
+An empty exclusive batch is a valid atomic commit and therefore produces a
+`BatchId`. An empty mergeable batch has no committed unit in the mergeable
+history representation, so commit rejects it explicitly and leaves the
+`OpenBatchId` open for rollback; callers must not receive a fabricated
+`BatchId` for that no-op.
+
 The word "atomic" has two relevant meanings here, and the distinction matters.
 Upstream, the commit is atomic because it syncs as one idempotent message and the
 authority decides the unit as a whole. Downstream, visibility depends on the
