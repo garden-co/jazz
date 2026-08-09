@@ -479,6 +479,33 @@ describe("SubscriptionManager", () => {
     ).toThrow(/does not match addressed key/);
     expect(manager.all()).toEqual(result.all);
 
+    const nestedUpdate = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: rootKey,
+            path: [{ Collection: "__jazz_include_project" }, { Key: childKey }],
+            edit: {
+              Update: {
+                key: childKey,
+                value: [...terminalTextChild(childId, "Updated announcements")],
+              },
+            },
+          },
+        ],
+      },
+      transformIncluded,
+      rootColumns,
+    );
+    expect(nestedUpdate.all?.[0]?.project?.name).toBe("Updated announcements");
+
     const removed = manager.handleDelta(
       {
         __jazzNativeRowDelta: true,
