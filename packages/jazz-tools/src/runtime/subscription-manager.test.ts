@@ -69,6 +69,23 @@ function nativeRowData(name: string, count: number): Uint8Array {
   return data;
 }
 
+function terminalRowData(id: string, name: string, count: number): Uint8Array {
+  return Uint8Array.from([...uuidBytes(id), ...nativeRowData(name, count)]);
+}
+
+function terminalRootWithEmptyChildren(id: string, title: string): Uint8Array {
+  const text = new TextEncoder().encode(title);
+  const bytes: number[] = [...uuidBytes(id)];
+  pushU32(bytes, 20 + text.byteLength);
+  bytes.push(...text);
+  pushU32(bytes, 0);
+  return Uint8Array.from(bytes);
+}
+
+function terminalTextChild(id: string, name: string): Uint8Array {
+  return Uint8Array.from([...uuidBytes(id), ...new TextEncoder().encode(name)]);
+}
+
 function nativeAddedRecord(id: string, index: number, name: string, count: number): Uint8Array {
   const data = nativeRowData(name, count);
   const bytes: number[] = [...uuidBytes(id)];
@@ -164,7 +181,7 @@ describe("SubscriptionManager", () => {
           {
             root_key: key,
             path: [],
-            edit: { Update: { key, value: [...nativeRowData("after", 2)] } },
+            edit: { Update: { key, value: [...terminalRowData(id, "after", 2)] } },
           },
         ],
       },
@@ -176,6 +193,87 @@ describe("SubscriptionManager", () => {
       { kind: 2, id, index: 0, item: { id, name: "after", count: 2 } },
     ]);
     expect(result.all).toEqual([{ id, name: "after", count: 2 }]);
+  });
+
+  it("reduces keyed root and hidden child terminal inserts before publishing", () => {
+    type IncludedRoot = { id: string; title: string; project: { id: string; name: string } | null };
+    const manager = new SubscriptionManager<IncludedRoot>();
+    const rootId = "00000000-0000-4000-8000-000000000001";
+    const childId = "00000000-0000-4000-8000-000000000002";
+    const rootKey = [10, ...uuidBytes(rootId)];
+    const childKey = [10, ...uuidBytes(childId)];
+    const childColumns: ColumnDescriptor[] = [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+    ];
+    const rootColumns: ColumnDescriptor[] = [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      {
+        name: "project",
+        column_type: { type: "Array", element: { type: "Row", columns: childColumns } },
+        nullable: false,
+      },
+    ];
+    const transformIncluded = (row: WasmRow): IncludedRoot => {
+      const projects = row.values[1];
+      const project = projects?.type === "Array" ? projects.value[0] : undefined;
+      return {
+        id: row.id,
+        title: (row.values[0] as { type: "Text"; value: string }).value,
+        project:
+          project?.type === "Row"
+            ? {
+                id: project.value.id!,
+                name: (project.value.values[0] as { type: "Text"; value: string }).value,
+              }
+            : null,
+      };
+    };
+
+    const result = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: rootKey,
+            path: [],
+            edit: {
+              Insert: {
+                index: 0,
+                key: rootKey,
+                value: [...terminalRootWithEmptyChildren(rootId, "Watch subscription")],
+              },
+            },
+          },
+          {
+            root_key: rootKey,
+            path: [{ Collection: "__jazz_include_project" }],
+            edit: {
+              Insert: {
+                index: 0,
+                key: childKey,
+                value: [...terminalTextChild(childId, "Announcements")],
+              },
+            },
+          },
+        ],
+      },
+      transformIncluded,
+      rootColumns,
+    );
+
+    expect(result.all).toEqual([
+      {
+        id: rootId,
+        title: "Watch subscription",
+        project: { id: childId, name: "Announcements" },
+      },
+    ]);
   });
 
   it("clears tracked state before applying native reset frames", () => {

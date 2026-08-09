@@ -262,6 +262,30 @@ export function decodeNativeRow(
   return row;
 }
 
+const terminalRowKeyColumn: ColumnDescriptor = {
+  name: "__jazz_terminal_row_key",
+  column_type: { type: "Uuid" },
+  nullable: false,
+};
+
+/** Decode a Groove terminal record, whose first physical field is its row key. */
+export function decodeNativeTerminalRow(
+  id: string,
+  columns: readonly ColumnDescriptor[],
+  raw: Uint8Array,
+): WasmRow {
+  const terminalColumns = [terminalRowKeyColumn, ...columns];
+  const values = decodeNativeRowValues(terminalColumns, raw).slice(1);
+  const valuesByColumn = new Map(columns.map((column, index) => [column.name, values[index]!]));
+  const row = { id, values };
+  Object.defineProperty(row, "valuesByColumn", {
+    value: valuesByColumn,
+    enumerable: false,
+    configurable: true,
+  });
+  return row;
+}
+
 export function encodeNativeRowValues(
   columns: readonly ColumnDescriptor[],
   values: readonly Value[],

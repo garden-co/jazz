@@ -10,10 +10,12 @@ import type {
   NativeRowDelta,
   NativeTerminalOperation,
   SubscriptionWireDelta,
+  Value,
   WasmRow,
   RowDelta as WireRowDelta,
 } from "../drivers/types.js";
-import { decodeNativeRow, decodeNativeRowObject } from "./native-runtime/native-row-codec.js";
+import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "./select-projection.js";
+import { decodeNativeRow, decodeNativeTerminalRow } from "./native-runtime/native-row-codec.js";
 
 export const RowChangeKind = {
   Added: 0 as const,
@@ -201,6 +203,7 @@ function removeById<T extends { id: string }>(current: T[], id: string): void {
  */
 export class SubscriptionManager<T extends { id: string }> {
   private currentResults = new Map<string, T>();
+  private terminalRows = new Map<string, WasmRow>();
   private orderedIds: string[] = [];
   private orderedIdIndex = new Map<string, number>();
 
@@ -245,13 +248,17 @@ export class SubscriptionManager<T extends { id: string }> {
         this.clear();
       }
       if (delta.terminalOperations && delta.terminalOperations.length > 0 && !reset) {
-        return this.handleTerminalOperations(
-          delta.terminalOperations,
-          transform,
-          nativeColumns,
-        );
+        return this.handleTerminalOperations(delta.terminalOperations, transform, nativeColumns);
       }
-      return this.handleWireDelta(decodeNativeDelta(delta, nativeColumns), transform, reset);
+      const decoded = decodeNativeDelta(delta, nativeColumns);
+      for (const change of decoded) {
+        if (change.kind === RowChangeKind.Removed) {
+          this.terminalRows.delete(change.id);
+        } else if (change.row) {
+          this.terminalRows.set(change.id, change.row);
+        }
+      }
+      return this.handleWireDelta(decoded, transform, reset);
     }
 
     return this.handleWireDelta(delta, transform);
@@ -268,18 +275,19 @@ export class SubscriptionManager<T extends { id: string }> {
       const edit = operation.edit;
       if (operation.path.length === 0) {
         if ("Insert" in edit) {
-          const item = transform(
-            decodeNativeRow(rootId, rootColumns, Uint8Array.from(edit.Insert.value)),
+          this.terminalRows.set(
+            rootId,
+            decodeNativeTerminalRow(rootId, rootColumns, Uint8Array.from(edit.Insert.value)),
           );
-          this.currentResults.set(rootId, item);
           this.removeId(rootId);
           this.insertIdAt(rootId, edit.Insert.index);
         } else if ("Update" in edit) {
-          const item = transform(
-            decodeNativeRow(rootId, rootColumns, Uint8Array.from(edit.Update.value)),
+          this.terminalRows.set(
+            rootId,
+            decodeNativeTerminalRow(rootId, rootColumns, Uint8Array.from(edit.Update.value)),
           );
-          this.currentResults.set(rootId, item);
         } else if ("Remove" in edit) {
+          this.terminalRows.delete(rootId);
           this.currentResults.delete(rootId);
           this.removeId(rootId);
         } else if ("Move" in edit) {
@@ -290,29 +298,23 @@ export class SubscriptionManager<T extends { id: string }> {
         continue;
       }
 
-      const root = this.currentResults.get(rootId) as Record<string, unknown> | undefined;
+      const root = this.terminalRows.get(rootId);
       if (!root) continue;
       const target = terminalCollection(root, rootColumns, operation.path);
       if (!target) continue;
       const { values, columns } = target;
       if ("Insert" in edit) {
         const id = terminalKeyId(edit.Insert.key);
-        const value = decodeNativeRowObject(
-          id,
-          columns,
-          Uint8Array.from(edit.Insert.value),
-        );
+        const row = decodeNativeTerminalRow(id, columns, Uint8Array.from(edit.Insert.value));
+        const value: Value = { type: "Row", value: { id, values: row.values } };
         removeTerminalValue(values, id);
         values.splice(Math.max(0, Math.min(edit.Insert.index, values.length)), 0, value);
       } else if ("Update" in edit) {
         const id = terminalKeyId(edit.Update.key);
         const index = terminalValueIndex(values, id);
         if (index !== -1) {
-          values[index] = decodeNativeRowObject(
-            id,
-            columns,
-            Uint8Array.from(edit.Update.value),
-          );
+          const row = decodeNativeTerminalRow(id, columns, Uint8Array.from(edit.Update.value));
+          values[index] = { type: "Row", value: { id, values: row.values } };
         }
       } else if ("Remove" in edit) {
         removeTerminalValue(values, terminalKeyId(edit.Remove.key));
@@ -329,8 +331,10 @@ export class SubscriptionManager<T extends { id: string }> {
 
     const delta = Array.from(changedRoots).flatMap<RowDelta<T>>((id) => {
       const index = this.orderedIdIndex.get(id);
-      const item = this.currentResults.get(id);
-      if (index === undefined || item === undefined) return [];
+      const row = this.terminalRows.get(id);
+      if (index === undefined || row === undefined) return [];
+      const item = transform(row);
+      this.currentResults.set(id, item);
       return [{ kind: RowChangeKind.Updated, id, index, item }];
     });
     return { delta, all: this.all() } as SubscriptionDelta<T>;
@@ -486,6 +490,7 @@ export class SubscriptionManager<T extends { id: string }> {
    */
   clear(): void {
     this.currentResults.clear();
+    this.terminalRows.clear();
     this.orderedIds = [];
     this.orderedIdIndex.clear();
   }
@@ -516,43 +521,43 @@ function terminalKeyId(encoded: readonly number[]): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function terminalValueIndex(values: unknown[], id: string): number {
-  return values.findIndex(
-    (value) => !!value && typeof value === "object" && (value as { id?: unknown }).id === id,
-  );
+function terminalValueIndex(values: Value[], id: string): number {
+  return values.findIndex((value) => value.type === "Row" && value.value.id === id);
 }
 
-function removeTerminalValue(values: unknown[], id: string): void {
+function removeTerminalValue(values: Value[], id: string): void {
   const index = terminalValueIndex(values, id);
   if (index !== -1) values.splice(index, 1);
 }
 
 function terminalCollection(
-  root: Record<string, unknown>,
+  root: WasmRow,
   rootColumns: readonly ColumnDescriptor[],
   path: NativeTerminalOperation["path"],
-): { values: unknown[]; columns: readonly ColumnDescriptor[] } | undefined {
-  let owner = root;
+): { values: Value[]; columns: readonly ColumnDescriptor[] } | undefined {
+  let ownerValues = root.values;
   let columns = rootColumns;
   for (let index = 0; index < path.length; index += 1) {
     const segment = path[index]!;
     if (!("Collection" in segment)) return undefined;
-    const column = columns.find((candidate) => candidate.name === segment.Collection);
+    const collectionName = segment.Collection.startsWith(HIDDEN_INCLUDE_COLUMN_PREFIX)
+      ? segment.Collection.slice(HIDDEN_INCLUDE_COLUMN_PREFIX.length)
+      : segment.Collection;
+    const columnIndex = columns.findIndex((candidate) => candidate.name === collectionName);
+    const column = columns[columnIndex];
     const columnType = column?.column_type;
     if (columnType?.type !== "Array" || columnType.element.type !== "Row") return undefined;
-    const values = owner[segment.Collection];
-    if (!Array.isArray(values)) return undefined;
+    const collection = ownerValues[columnIndex];
+    if (collection?.type !== "Array") return undefined;
+    const values = collection.value;
     const childColumns = columnType.element.columns;
     if (index === path.length - 1) return { values, columns: childColumns };
     const keySegment = path[++index];
     if (!keySegment || !("Key" in keySegment)) return undefined;
     const childId = terminalKeyId(keySegment.Key);
-    const child = values.find(
-      (value) =>
-        !!value && typeof value === "object" && (value as { id?: unknown }).id === childId,
-    );
-    if (!child || typeof child !== "object") return undefined;
-    owner = child as Record<string, unknown>;
+    const child = values.find((value) => value.type === "Row" && value.value.id === childId);
+    if (child?.type !== "Row") return undefined;
+    ownerValues = child.value.values;
     columns = childColumns;
   }
   return undefined;
