@@ -891,6 +891,69 @@ mod tests {
     }
 
     #[test]
+    fn admin_draft_does_not_replace_explicitly_bootstrapped_runtime_schema() {
+        let active_json = json!({
+            "tables": [
+                {
+                    "name": "todos",
+                    "columns": [
+                        { "name": "title", "type": "string" }
+                    ]
+                }
+            ]
+        });
+        let active_schema = convert_admin_schema(&active_json).expect("active schema converts");
+        let active_schema_id = active_schema.version_id();
+        let config = InMemoryServerShellConfig::new(
+            active_schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x5f; 16]),
+                author: AuthorId::SYSTEM,
+            },
+        )
+        .with_runtime_schema_bootstrap();
+        let mut state = LoopbackState {
+            shell: InMemoryServerShell::start(config).expect("start bootstrapped shell"),
+            sessions: HashMap::new(),
+            next_session_id: 1,
+            admin_secret: Some("secret".to_owned()),
+            schema_store_path: None,
+            schemas: HashMap::new(),
+        };
+        assert_eq!(
+            state.shell.last_published_runtime_schema(),
+            Some(active_schema_id)
+        );
+
+        let request = HttpRequest {
+            method: "POST".to_owned(),
+            path: "/apps/app-a/admin/schemas".to_owned(),
+            headers: HashMap::from([("x-jazz-admin-secret".to_owned(), "secret".to_owned())]),
+            body: serde_json::to_vec(&json!({
+                "schema": {
+                    "tables": [
+                        {
+                            "name": "notes",
+                            "columns": [
+                                { "name": "body", "type": "string" }
+                            ]
+                        }
+                    ]
+                }
+            }))
+            .expect("request json"),
+        };
+
+        let response = handle_admin_publish_schema(&request.path, &request, &mut state);
+        assert_eq!(response_status(&response), 201);
+        assert_eq!(
+            state.shell.last_published_runtime_schema(),
+            Some(active_schema_id)
+        );
+        assert_eq!(state.shell.runtime_write_schema_revision(), 1);
+    }
+
+    #[test]
     fn admin_schema_store_reload_validates_drafts_without_runtime_activation() {
         let schemas = HashMap::from([(
             "app-a".to_owned(),
