@@ -751,14 +751,13 @@ where
             .node
             .table_in_schema_or_branch_metadata(&request.source.table, self.read_view.read_schema)
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-        // A public membership table contributes directly to the proof. Avoid
-        // wrapping it in another trivial authorization graph, which keeps deep
-        // (but acyclic) policy chains bounded on the Rust stack.
+        // Policy-proof dependencies are raw evidence for the outer policy.
+        // Re-applying their own read policy recursively both changes the
+        // outer predicate's meaning and can manufacture a proof cycle.
         let authorization = if matches!(
             request.authorization,
             SourceAuthorizationRequest::PolicyProof { .. }
-        ) && table.read_policy.is_none()
-        {
+        ) {
             SourceAuthorizationRequest::System
         } else {
             request.authorization.clone()
