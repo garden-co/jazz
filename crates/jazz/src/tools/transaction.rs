@@ -10,25 +10,11 @@ macro_rules! batch_id {
     ($name:ident, $kind:literal, $doc:literal) => {
         #[doc = $doc]
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-        pub struct $name(pub [u8; 16]);
+        pub struct $name(pub(crate) [u8; 16]);
 
         impl $name {
-            pub fn new() -> Self {
-                Self::from_uuid(Uuid::now_v7())
-            }
-
-            pub fn from_uuid(uuid: Uuid) -> Self {
-                Self(*uuid.as_bytes())
-            }
-
             pub fn as_bytes(&self) -> &[u8; 16] {
                 &self.0
-            }
-        }
-
-        impl Default for $name {
-            fn default() -> Self {
-                Self::new()
             }
         }
 
@@ -86,5 +72,18 @@ batch_id!(
     "open batch id",
     "Coordination-free identity for mutable, runtime-local work before commit."
 );
+
+impl OpenBatchId {
+    /// Mint an open-batch identity without coordinating with a runtime.
+    pub fn new() -> Self {
+        Self(*Uuid::now_v7().as_bytes())
+    }
+}
+
+impl Default for OpenBatchId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 batch_id!(BatchId, "batch id", "Identity of an immutable committed batch.");

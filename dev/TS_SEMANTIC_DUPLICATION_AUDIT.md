@@ -41,7 +41,7 @@ So the shortest path is not just "pass `read_view` through wasm." Core has an op
 
 ### Shortest viable implementation path
 
-1. **Plumb an open transaction handle through wasm/napi.** Add a wasm transaction mode that opens a real core exclusive transaction immediately, keeps its `OpenTxId`/public tx id accessible, and applies each transactional write into core staging as it occurs. File-level targets: `crates/jazz-wasm/src/lib.rs` transaction constructors and `WasmTx` methods; matching napi/native runtime types if a node path exists outside wasm.
+1. **Plumb an open transaction handle through wasm/napi.** Add a wasm transaction mode that opens a real core exclusive transaction immediately, keeps its `OpenBatchId`/public tx id accessible, and applies each transactional write into core staging as it occurs. File-level targets: `crates/jazz-wasm/src/lib.rs` transaction constructors and `WasmTx` methods; matching napi/native runtime types if a node path exists outside wasm.
 
 2. **Expose one-shot reads against that open transaction.** Add a wasm read method such as `allInTransaction(prepared, txHandle, opts)` or support a `read_view` with `OpenTransaction` only when it resolves to an open local tx. Internally call the existing core `tx_query` path for exclusive transactions rather than `Db::all` plus TS overlay. File-level targets: wasm read methods at `crates/jazz-wasm/src/lib.rs:1111`-`1124` and core `NodeState::tx_query` at `crates/jazz/src/node/query_eval.rs:7727`-`7760`.
 
