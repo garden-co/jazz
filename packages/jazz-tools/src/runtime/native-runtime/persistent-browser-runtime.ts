@@ -62,7 +62,11 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   // Server-tier operations capture this gate while intentionally disconnected.
   // Reconnect resolves that same gate, so outstanding operations survive instead
   // of observing a replacement promise that can never settle.
-  private connectionReady = connectionGate();
+  // Before an explicit disconnect there is no reconnect barrier. This preserves
+  // local-only runtimes, which never call connect(), while disconnect() below
+  // installs the unresolved gate that server-tier work must await.
+  private connectionReady = connectionGate(true);
+  private waitingForReconnect = false;
   private pagehideAbort: AbortController | null = null;
   private nextCallId = 1;
   private nextSubscriptionId = 1;
@@ -338,6 +342,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closing = true;
+    this.rejectConnectionWaiters();
     try {
       await this.opened;
       await Promise.allSettled(this.writes.values());
@@ -355,6 +360,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   async clearClientStorage(): Promise<void> {
     if (this.closed) return;
     this.closing = true;
+    this.rejectConnectionWaiters();
     let namespace = this.dbName;
     try {
       await this.opened;
@@ -374,18 +380,30 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   connect(url: string, authJson: string): void {
-    const gate = this.connectionReady;
+    if (this.closing || this.closed) return;
+    const gate = this.waitingForReconnect ? this.connectionReady : connectionGate();
+    this.connectionReady = gate;
     const connected = this.opened.then(() => {
       if (this.closed) return undefined;
       return this.send("connect", [url, authJson]);
     });
-    void connected.then(gate.resolve, gate.reject);
+    void connected.then(
+      () => {
+        if (this.connectionReady === gate) this.waitingForReconnect = false;
+        gate.resolve();
+      },
+      (error) => {
+        if (this.connectionReady === gate) this.waitingForReconnect = false;
+        gate.reject(error);
+      },
+    );
     void connected.catch(ignoreExpectedShutdown);
   }
 
   disconnect(options?: { rejectWaiters?: boolean }): Promise<void> {
-    this.connectionReady = connectionGate();
-    if (this.closed) return Promise.resolve();
+    if (this.closing || this.closed) return Promise.resolve();
+    if (!this.waitingForReconnect) this.connectionReady = connectionGate();
+    this.waitingForReconnect = true;
     return this.opened
       .then(() => {
         if (this.closed) return undefined;
@@ -395,17 +413,38 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   updateAuth(authJson: string): void {
-    const gate = this.connectionReady;
+    if (this.closing || this.closed) return;
+    // Updating credentials cannot reconnect an explicitly disconnected worker:
+    // without a server endpoint the worker treats updateAuth as a no-op. Keep the
+    // reconnect gate parked until connect() supplies an endpoint.
+    const gate = this.waitingForReconnect ? undefined : connectionGate();
+    if (gate) this.connectionReady = gate;
     const updated = this.opened.then(() => {
       if (this.closed) return undefined;
       return this.send("updateAuth", [authJson]);
     });
-    void updated.then(gate.resolve, gate.reject);
+    if (gate) {
+      void updated.then(
+        () => {
+          if (this.connectionReady === gate) this.waitingForReconnect = false;
+          gate.resolve();
+        },
+        (error) => {
+          if (this.connectionReady === gate) this.waitingForReconnect = false;
+          gate.reject(error);
+        },
+      );
+    }
     void updated.catch(ignoreExpectedShutdown);
   }
 
   onAuthFailure(callback: (reason: string) => void): void {
     this.authFailureCallback = callback;
+  }
+
+  private rejectConnectionWaiters(): void {
+    this.waitingForReconnect = false;
+    this.connectionReady.reject(new Error("Persistent browser native runtime is closed"));
   }
 
   private writeId(): string {
@@ -715,13 +754,17 @@ function destroyBrowserStorage(
   });
 }
 
-function connectionGate(): ConnectionGate {
+function connectionGate(resolved = false): ConnectionGate {
   let resolve!: () => void;
   let reject!: (error: unknown) => void;
   const promise = new Promise<void>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
     reject = rejectPromise;
   });
+  // A gate may have no current consumers (for example, connect/updateAuth). Mark
+  // its rejection handled without changing the promise observed by later waiters.
+  void promise.catch(() => undefined);
+  if (resolved) resolve();
   return { promise, resolve, reject };
 }
 
