@@ -103,7 +103,10 @@ async fn insert_visible_todo(client: &JazzClient, title: &str, completed: bool) 
         )
         .expect("insert visible todo");
     client
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("visible todo settles at edge");
     todo_id
@@ -126,7 +129,7 @@ async fn transaction_stages_writes_and_can_commit() {
     let tx = client
         .begin_transaction()
         .expect("begin transaction through client API");
-    let batch_id = tx.batch_id();
+    let batch_id = tx.open_batch_id();
 
     let (todo_id, inserted_values, write_batch_id) = tx
         .insert(
@@ -160,7 +163,7 @@ async fn transaction_can_be_rolled_back() {
     let tx = client
         .begin_transaction()
         .expect("begin transaction through client API");
-    let batch_id = tx.batch_id();
+    let batch_id = tx.open_batch_id();
 
     let (todo_id, inserted_values, _) = tx
         .insert(
@@ -193,7 +196,7 @@ async fn committed_transaction_rejects_later_handle_operations() {
     let tx = client
         .begin_transaction()
         .expect("begin transaction through client API");
-    let batch_id = tx.batch_id();
+    let batch_id = tx.open_batch_id();
 
     let (todo_id, _, _) = tx
         .insert(
@@ -274,7 +277,7 @@ async fn rolled_back_transaction_rejects_later_handle_operations() {
     let tx = client
         .begin_transaction()
         .expect("begin transaction through client API");
-    let batch_id = tx.batch_id();
+    let batch_id = tx.open_batch_id();
 
     let (todo_id, _, _) = tx
         .insert(
@@ -358,7 +361,7 @@ async fn transaction_insert_is_visible_only_after_commit_settles() {
     let tx = alice
         .begin_transaction()
         .expect("begin transaction through client API");
-    let batch_id = tx.batch_id();
+    let batch_id = tx.open_batch_id();
     let (todo_id, expected_values, write_batch_id) = tx
         .insert(
             "todos",
@@ -429,7 +432,7 @@ async fn transaction_update_can_modify_row_inserted_earlier_in_same_transaction(
     let tx = client
         .begin_transaction()
         .expect("begin transaction through client API");
-    let batch_id = tx.batch_id();
+    let batch_id = tx.open_batch_id();
     let (todo_id, _, insert_batch_id) = tx
         .insert(
             "todos",
@@ -483,7 +486,7 @@ async fn multiple_updates_to_same_row_in_transaction_compose() {
     let tx = client
         .begin_transaction()
         .expect("begin transaction through client API");
-    let batch_id = tx.batch_id();
+    let batch_id = tx.open_batch_id();
     assert_eq!(
         tx.update(
             todo_id,
@@ -536,7 +539,7 @@ async fn multiple_writes_in_one_transaction_settle_as_one_batch() {
     let tx = client
         .begin_transaction()
         .expect("begin transaction through client API");
-    let batch_id = tx.batch_id();
+    let batch_id = tx.open_batch_id();
 
     let (first_id, first_values, first_batch_id) = tx
         .insert(
@@ -615,10 +618,10 @@ async fn transaction_staged_before_receiving_concurrent_commit_is_rejected() {
 
     assert_eq!(
         alice_tx.commit().expect("commit alice transaction"),
-        alice_batch_id
+        alice_batch_id.expect("ordinary mutation commits immediately")
     );
     alice
-        .wait_for_batch(alice_batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(alice_batch_id.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
         .await
         .expect("alice transaction accepted");
     wait_for_todos(
@@ -631,10 +634,10 @@ async fn transaction_staged_before_receiving_concurrent_commit_is_rejected() {
 
     assert_eq!(
         bob_tx.commit().expect("commit bob transaction"),
-        bob_batch_id
+        bob_batch_id.expect("ordinary mutation commits immediately")
     );
     let rejection = bob
-        .wait_for_batch(bob_batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(bob_batch_id.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
         .await
         .expect_err("bob transaction staged from stale base should be rejected")
         .to_string();
@@ -682,10 +685,10 @@ async fn transaction_staged_after_receiving_concurrent_commit_is_accepted() {
         .expect("alice stages update");
     assert_eq!(
         alice_tx.commit().expect("commit alice transaction"),
-        alice_batch_id
+        alice_batch_id.expect("ordinary mutation commits immediately")
     );
     alice
-        .wait_for_batch(alice_batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(alice_batch_id.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
         .await
         .expect("alice transaction accepted");
     wait_for_todos(
@@ -705,9 +708,9 @@ async fn transaction_staged_after_receiving_concurrent_commit_is_accepted() {
         .expect("bob stages update from latest visible row");
     assert_eq!(
         bob_tx.commit().expect("commit bob transaction"),
-        bob_batch_id
+        bob_batch_id.expect("ordinary mutation commits immediately")
     );
-    bob.wait_for_batch(bob_batch_id, DurabilityTier::EdgeServer)
+    bob.wait_for_batch(bob_batch_id.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
         .await
         .expect("bob transaction based on latest row should be accepted");
 
@@ -738,13 +741,13 @@ async fn wait_for_batch_errors_for_unattainable_durability_tier() {
 
     assert!(
         client
-            .wait_for_batch(batch_id, DurabilityTier::GlobalServer)
+            .wait_for_batch(batch_id.expect("ordinary mutation commits immediately"), DurabilityTier::GlobalServer)
             .await
             .is_err(),
         "serverless test client cannot reach GlobalServer durability"
     );
     client
-        .wait_for_batch(batch_id, DurabilityTier::Local)
+        .wait_for_batch(batch_id.expect("ordinary mutation commits immediately"), DurabilityTier::Local)
         .await
         .expect("local durability should be reachable");
 }
@@ -781,13 +784,13 @@ async fn global_wait_after_over_one_mib_websocket_import_settles() {
         .expect("update target row after import");
 
     client
-        .wait_for_batch(target_batch, DurabilityTier::Local)
+        .wait_for_batch(target_batch.expect("ordinary mutation commits immediately"), DurabilityTier::Local)
         .await
         .expect("target update should settle locally without draining the import backlog");
 
     tokio::time::timeout(
         Duration::from_secs(30),
-        client.wait_for_batch(target_batch, DurabilityTier::GlobalServer),
+        client.wait_for_batch(target_batch.expect("ordinary mutation commits immediately"), DurabilityTier::GlobalServer),
     )
     .await
     .expect("global wait should settle after import backlog")

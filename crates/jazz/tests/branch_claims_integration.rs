@@ -156,7 +156,10 @@ async fn query_applies_claims_select_policy() {
                 )
                 .expect("admin creates claims-gated room");
             admin
-                .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("room reaches edge");
 
@@ -249,7 +252,10 @@ async fn numeric_claims_match_integer_columns_across_core_widths() {
                 )
                 .expect("admin creates integer claims row");
             admin
-                .wait_for_batch(integer_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    integer_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("integer row reaches edge");
             let (bigint_row_id, _, bigint_batch) = admin
@@ -259,7 +265,10 @@ async fn numeric_claims_match_integer_columns_across_core_widths() {
                 )
                 .expect("admin creates bigint claims row");
             admin
-                .wait_for_batch(bigint_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    bigint_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("bigint row reaches edge");
 
@@ -343,14 +352,20 @@ async fn session_role_in_list_matches_equivalent_or_policy() {
                 .insert("role_in_list_rooms", row_input!("name" => "in-list room"))
                 .expect("admin creates in-list room");
             admin
-                .wait_for_batch(in_list_batch_id, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    in_list_batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("in-list room reaches edge");
             let (or_row_id, _, or_batch_id) = admin
                 .insert("role_or_rooms", row_input!("name" => "or room"))
                 .expect("admin creates or room");
             admin
-                .wait_for_batch(or_batch_id, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    or_batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("or room reaches edge");
 
@@ -473,7 +488,10 @@ async fn subscription_matches_claims_select_query() {
                 )
                 .expect("admin creates claims-gated room");
             admin
-                .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("room reaches edge");
 
@@ -621,7 +639,7 @@ async fn claim_revocation_stops_existing_subscription_from_serving_future_rows()
                 )
                 .expect("writer inserts initially visible room");
             writer
-                .wait_for_batch(initial_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(initial_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
                 .await
                 .expect("initial room reaches edge");
 
@@ -673,7 +691,7 @@ async fn claim_revocation_stops_existing_subscription_from_serving_future_rows()
                 .insert("admin_rooms", row_input!("name" => "must remain private"))
                 .expect("writer inserts post-revocation room");
             writer
-                .wait_for_batch(future_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(future_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
                 .await
                 .expect("post-revocation room reaches edge");
             let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
@@ -710,7 +728,7 @@ async fn claim_revocation_stops_existing_subscription_from_serving_future_rows()
                 )
                 .expect("writer inserts post-restoration room");
             writer
-                .wait_for_batch(restored_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(restored_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
                 .await
                 .expect("post-restoration room reaches edge");
             wait_for_subscription_update(
@@ -757,7 +775,10 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
                 )
                 .expect("admin creates alpha room");
             admin
-                .wait_for_batch(alpha_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    alpha_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("alpha room reaches edge");
             let (beta_id, _, beta_batch) = admin
@@ -767,7 +788,10 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
                 )
                 .expect("admin creates beta room");
             admin
-                .wait_for_batch(beta_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    beta_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("beta room reaches edge");
 
@@ -1014,7 +1038,10 @@ async fn numeric_claims_authorize_writes_across_core_widths() {
                 )
                 .expect("I64 claim creates I32 row");
             bigint_claim_user
-                .wait_for_batch(integer_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    integer_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("I64 claim matches I32 write policy");
 
@@ -1034,7 +1061,10 @@ async fn numeric_claims_authorize_writes_across_core_widths() {
                 )
                 .expect("U32 claim creates I64 row");
             integer_claim_user
-                .wait_for_batch(bigint_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    bigint_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("U32 claim matches I64 write policy");
 

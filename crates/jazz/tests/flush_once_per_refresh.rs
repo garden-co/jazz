@@ -45,7 +45,10 @@ async fn measure_unrelated_route_refresh(route_count: usize) -> Duration {
         )
         .expect("write unrelated row");
     client
-        .wait_for_batch(batch, DurabilityTier::Local)
+        .wait_for_batch(
+            batch.expect("ordinary mutation commits immediately"),
+            DurabilityTier::Local,
+        )
         .await
         .expect("settle unrelated row");
     let elapsed = start.elapsed();

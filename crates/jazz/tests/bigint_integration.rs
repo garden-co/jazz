@@ -51,7 +51,10 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
                     .insert("metrics", row_input!("label" => label, "amount" => amount))
                     .expect("insert bigint row");
                 client
-                    .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+                    .wait_for_batch(
+                        batch_id.expect("ordinary mutation commits immediately"),
+                        DurabilityTier::EdgeServer,
+                    )
                     .await
                     .expect("bigint row settles");
             }
@@ -134,7 +137,10 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
                 )
                 .expect("insert subscribed bigint row");
             client
-                .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("subscribed bigint row settles");
 

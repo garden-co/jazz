@@ -180,7 +180,7 @@ async fn staged_insert_and_update_read_back_non_null_values_in_nullable_columns_
     let batch_id = client
         .begin_transaction()
         .expect("begin transaction")
-        .batch_id();
+        .open_batch_id();
     let tx = client.with_write_context(WriteContext::default().with_batch_id(batch_id));
     let manager_id = ObjectId::new();
     let expected = full_values(manager_id, "staged updated", 46);
@@ -221,7 +221,7 @@ async fn staged_upsert_reads_back_non_null_values_in_nullable_columns_after_comm
     let batch_id = client
         .begin_transaction()
         .expect("begin transaction")
-        .batch_id();
+        .open_batch_id();
     let tx = client.with_write_context(WriteContext::default().with_batch_id(batch_id));
     let row_uuid = Uuid::now_v7();
     let row_id = ObjectId::from_uuid(row_uuid);
