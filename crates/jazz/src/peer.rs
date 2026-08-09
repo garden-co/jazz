@@ -668,6 +668,8 @@ impl PeerState {
         let ResultTransitions {
             adds: result_member_adds,
             removes: mut result_member_removes,
+            evidence_adds,
+            evidence_removes: _,
             result_payload_adds: _,
             result_payload_removes: _,
             program_fact_adds,
@@ -738,6 +740,7 @@ impl PeerState {
             .collect();
         if result_member_adds.is_empty()
             && result_member_removes.is_empty()
+            && evidence_adds.is_empty()
             && program_fact_adds.is_empty()
             && program_fact_removes.is_empty()
         {
@@ -794,6 +797,7 @@ impl PeerState {
                     previous_result_set: previous_result_tx_ids,
                     result_member_adds,
                     result_member_removes,
+                    evidence_member_adds: evidence_adds,
                     program_fact_adds,
                     program_fact_removes,
                     identity: self.identity(),
@@ -877,6 +881,8 @@ impl PeerState {
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
         let mut program_fact_adds = Vec::new();
         let mut program_fact_removes = Vec::new();
+        let mut evidence_adds = Vec::new();
+        let mut evidence_removes = Vec::new();
         let mut allow_storage_witness_fallback = false;
         let mut observed_delta_batches = 0_usize;
         let mut observed_result_delta_batches = 0_usize;
@@ -902,6 +908,8 @@ impl PeerState {
                                 &node.node_aliases,
                             )?;
                         observed_result_delta_batches += transitions.observed_result_delta_batches;
+                        evidence_adds.extend(transitions.evidence_adds);
+                        evidence_removes.extend(transitions.evidence_removes);
                         program_fact_adds.extend(filter_program_facts_for_result_table(
                             transitions.program_fact_adds,
                             result_table_filter,
@@ -984,6 +992,8 @@ impl PeerState {
         Ok(ResultTransitions {
             adds: result_member_adds,
             removes: result_member_removes,
+            evidence_adds,
+            evidence_removes,
             result_payload_adds: Vec::new(),
             result_payload_removes: Vec::new(),
             program_fact_adds,
@@ -1140,6 +1150,7 @@ impl PeerState {
                 previous_result_set: BTreeSet::new(),
                 result_member_adds,
                 result_member_removes,
+                evidence_member_adds: transitions.evidence_adds,
                 program_fact_adds,
                 program_fact_removes,
                 identity: self.identity(),
@@ -1323,6 +1334,8 @@ impl PeerState {
         let ResultTransitions {
             adds: source_adds,
             removes: source_removes,
+            evidence_adds: source_evidence_adds,
+            evidence_removes: _,
             result_payload_adds: _,
             result_payload_removes: _,
             program_fact_adds: source_program_fact_adds,
@@ -1334,6 +1347,7 @@ impl PeerState {
         } = source_transitions;
         if !source_adds.is_empty()
             || !source_removes.is_empty()
+            || !source_evidence_adds.is_empty()
             || !source_program_fact_adds.is_empty()
             || !source_program_fact_removes.is_empty()
         {
@@ -1408,6 +1422,7 @@ impl PeerState {
                     previous_result_set: BTreeSet::new(),
                     result_member_adds,
                     result_member_removes: Vec::new(),
+                    evidence_member_adds: source_evidence_adds,
                     program_fact_adds: Vec::new(),
                     program_fact_removes: Vec::new(),
                     identity: self.identity(),
@@ -5081,12 +5096,21 @@ mod tests {
         );
         assert!(result_member_removes.is_empty());
         assert!(complete_tx_payload_refs.is_empty());
-        assert_eq!(version_bundles.len(), 1);
-        assert_eq!(version_bundles[0].tx.tx_id, docs_tx);
-        assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
-        assert!(version_bundles[0].tx.n_total_writes > version_bundles[0].versions.len() as u32);
-        assert_eq!(version_bundles[0].versions.len(), 1);
-        assert_eq!(version_bundles[0].versions[0].row_uuid(), doc_a);
+        assert_eq!(version_bundles.len(), 2);
+        let docs_bundle = version_bundles
+            .iter()
+            .find(|bundle| bundle.tx.tx_id == docs_tx)
+            .expect("result transaction must ship");
+        assert_eq!(docs_bundle.tx.kind, TxKind::Exclusive);
+        assert!(docs_bundle.tx.n_total_writes > docs_bundle.versions.len() as u32);
+        assert_eq!(docs_bundle.versions.len(), 1);
+        assert_eq!(docs_bundle.versions[0].row_uuid(), doc_a);
+        let evidence_bundle = version_bundles
+            .iter()
+            .find(|bundle| bundle.tx.tx_id == grant_a)
+            .expect("authorized policy contributor must ship as evidence");
+        assert_eq!(evidence_bundle.versions.len(), 1);
+        assert_eq!(evidence_bundle.versions[0].row_uuid(), row(0x84));
         assert!(peer.shipped_complete_tx_payloads().is_empty());
         let read_metrics = core.query_engine_read_metrics();
         assert!(read_metrics.policy_authorization_graphs > 0);
@@ -5360,11 +5384,19 @@ mod tests {
             result_member_adds,
             &vec![("docs".to_owned().into(), doc_one, docs_tx)]
         );
-        assert_eq!(version_bundles.len(), 1);
-        assert_eq!(version_bundles[0].tx.tx_id, docs_tx);
-        assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
-        assert_eq!(version_bundles[0].versions.len(), 1);
-        assert_eq!(version_bundles[0].versions[0].row_uuid(), doc_one);
+        assert_eq!(version_bundles.len(), 2);
+        let docs_bundle = version_bundles
+            .iter()
+            .find(|bundle| bundle.tx.tx_id == docs_tx)
+            .expect("result transaction must ship");
+        assert_eq!(docs_bundle.tx.kind, TxKind::Exclusive);
+        assert_eq!(docs_bundle.versions.len(), 1);
+        assert_eq!(docs_bundle.versions[0].row_uuid(), doc_one);
+        assert!(
+            version_bundles
+                .iter()
+                .any(|bundle| bundle.tx.tx_id == first_grant)
+        );
         assert!(peer.shipped_complete_tx_payloads().is_empty());
         reader.apply_sync_message(first_update).unwrap();
         assert_eq!(
@@ -5405,11 +5437,19 @@ mod tests {
             result_member_adds,
             &vec![("docs".to_owned().into(), doc_two, docs_tx),]
         );
-        assert_eq!(version_bundles.len(), 1);
-        assert_eq!(version_bundles[0].tx.tx_id, docs_tx);
-        assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
-        assert_eq!(version_bundles[0].versions.len(), 1);
-        assert_eq!(version_bundles[0].versions[0].row_uuid(), doc_two);
+        assert_eq!(version_bundles.len(), 2);
+        let docs_bundle = version_bundles
+            .iter()
+            .find(|bundle| bundle.tx.tx_id == docs_tx)
+            .expect("newly visible result transaction must ship");
+        assert_eq!(docs_bundle.tx.kind, TxKind::Exclusive);
+        assert_eq!(docs_bundle.versions.len(), 1);
+        assert_eq!(docs_bundle.versions[0].row_uuid(), doc_two);
+        assert!(
+            version_bundles
+                .iter()
+                .any(|bundle| bundle.tx.tx_id == second_grant)
+        );
 
         reader.apply_sync_message(grant_update).unwrap();
         assert_eq!(

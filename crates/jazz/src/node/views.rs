@@ -163,6 +163,7 @@ pub(crate) struct MaintainedViewBundleInputs<'a> {
     pub(crate) previous_result_set: BTreeSet<TxId>,
     pub(crate) result_member_adds: Vec<ResultMemberEntry>,
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
+    pub(crate) evidence_member_adds: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
     pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
     pub(crate) identity: AuthorId,
@@ -330,6 +331,7 @@ where
             subscription,
             result_member_adds,
             result_member_removes,
+            evidence_member_adds: transitions.evidence_adds,
             program_fact_adds: transitions.program_fact_adds,
             program_fact_removes: transitions.program_fact_removes,
             peer_complete_tx_payloads,
@@ -357,6 +359,7 @@ where
             previous_result_set: _previous_result_set,
             result_member_adds,
             result_member_removes,
+            evidence_member_adds,
             mut program_fact_adds,
             program_fact_removes,
             identity: _identity,
@@ -379,6 +382,10 @@ where
         let row_result_adds = content_row_members_for_bundle(
             &result_member_adds,
             "real row result member is missing content transaction for bundle shipping",
+        )?;
+        let evidence_row_adds = content_row_members_for_bundle(
+            &evidence_member_adds,
+            "policy evidence member is missing content transaction for bundle shipping",
         )?;
         let row_result_removes = content_row_members_for_bundle(
             &result_member_removes,
@@ -426,6 +433,11 @@ where
         let wanted_add_rows_by_tx = row_result_adds
             .iter()
             .map(|(table, row_uuid, tx_id)| (table.to_string(), *row_uuid, *tx_id))
+            .chain(
+                evidence_row_adds
+                    .iter()
+                    .map(|(table, row_uuid, tx_id)| (table.to_string(), *row_uuid, *tx_id)),
+            )
             .chain(relation_edge_add_rows)
             .fold(
                 BTreeMap::<TxId, BTreeSet<(String, RowUuid)>>::new(),

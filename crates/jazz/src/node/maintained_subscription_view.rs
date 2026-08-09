@@ -45,6 +45,7 @@ struct VersionDecodePlan {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MaintainedSubscriptionView {
     result_weights: BTreeMap<ResultMemberEntry, i64>,
+    evidence_weights: BTreeMap<ResultMemberEntry, i64>,
     result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     /// Incrementally maintained collector output. The key is the root row and
     /// the encoded tree so a -/+ replacement for one root never requires
@@ -118,6 +119,8 @@ struct ReplacementKey {
 pub(crate) struct ResultTransitions {
     pub(crate) adds: Vec<ResultMemberEntry>,
     pub(crate) removes: Vec<ResultMemberEntry>,
+    pub(crate) evidence_adds: Vec<ResultMemberEntry>,
+    pub(crate) evidence_removes: Vec<ResultMemberEntry>,
     pub(crate) result_payload_adds: Vec<(ResultMemberEntry, ResultMemberPayloadEntry)>,
     pub(crate) result_payload_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
@@ -135,6 +138,9 @@ pub(crate) enum DecodedMaintainedEvent {
     ResultCurrent {
         member: ResultMemberEntry,
         payload: ResultMemberPayloadEntry,
+    },
+    EvidenceCurrent {
+        member: ResultMemberEntry,
     },
     AggregateResult {
         member: ResultMemberEntry,
@@ -161,6 +167,7 @@ pub(crate) struct MaintainedTerminalSchemas {
 #[derive(Clone, Debug)]
 enum MaintainedTerminalKind {
     ResultCurrent(ResultMembershipSchema),
+    EvidenceCurrent(ResultMembershipSchema),
     AggregateResult(AggregateResultSchema),
     VersionContent(VersionWitnessSchema),
     VersionDeletion(VersionWitnessSchema),
@@ -173,6 +180,7 @@ enum MaintainedTerminalKind {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum EventIdentity {
     Result(ResultMemberEntry),
+    Evidence(ResultMemberEntry),
     Version(VersionIdentity),
     Replacement(ReplacementKey, VersionIdentity),
     ProgramFact(ProgramFactEntry),
@@ -182,6 +190,7 @@ enum EventIdentity {
 #[derive(Clone, Debug)]
 enum NetEvent {
     Result(ResultMemberEntry, ResultMemberPayloadEntry),
+    Evidence(ResultMemberEntry),
     AggregateResult(
         ResultMemberEntry,
         ResultMemberPayloadEntry,
@@ -246,6 +255,12 @@ impl MaintainedSubscriptionView {
             transitions.adds.extend(delta_transitions.adds);
             transitions.removes.extend(delta_transitions.removes);
             transitions
+                .evidence_adds
+                .extend(delta_transitions.evidence_adds);
+            transitions
+                .evidence_removes
+                .extend(delta_transitions.evidence_removes);
+            transitions
                 .program_fact_adds
                 .extend(delta_transitions.program_fact_adds);
             transitions
@@ -277,6 +292,7 @@ impl MaintainedSubscriptionView {
                 DecodedMaintainedEvent::ResultCurrent { member, payload } => {
                     NetEvent::Result(member, payload)
                 }
+                DecodedMaintainedEvent::EvidenceCurrent { member } => NetEvent::Evidence(member),
                 DecodedMaintainedEvent::AggregateResult {
                     member,
                     payload,
@@ -319,6 +335,21 @@ impl MaintainedSubscriptionView {
             match event {
                 NetEvent::Result(entry, payload) => {
                     self.apply_result_delta(entry, payload, weight, &mut transitions);
+                }
+                NetEvent::Evidence(entry) => {
+                    let old = self.evidence_weights.get(&entry).copied().unwrap_or(0);
+                    let new = old + weight;
+                    if old <= 0 && new > 0 {
+                        transitions.evidence_adds.push(entry.clone());
+                    }
+                    if old > 0 && new <= 0 {
+                        transitions.evidence_removes.push(entry.clone());
+                    }
+                    if new == 0 {
+                        self.evidence_weights.remove(&entry);
+                    } else {
+                        self.evidence_weights.insert(entry, new);
+                    }
                 }
                 NetEvent::AggregateResult(member, payload, synthetic, value_fields) => {
                     self.apply_aggregate_result_delta(
@@ -690,6 +721,16 @@ impl MaintainedTerminalSchemas {
                 _ => None,
             };
             if let Some(kind) = kind {
+                let kind = if terminal.sink.starts_with("policy_evidence:") {
+                    match kind {
+                        MaintainedTerminalKind::ResultCurrent(schema) => {
+                            MaintainedTerminalKind::EvidenceCurrent(schema)
+                        }
+                        other => other,
+                    }
+                } else {
+                    kind
+                };
                 sinks.insert(terminal.sink.clone(), kind);
             }
         }
@@ -727,7 +768,8 @@ fn decode_typed_terminal_record(
     decode_plan_cache: &mut VersionDecodePlanCache,
 ) -> Result<DecodedMaintainedEvent, super::Error> {
     match kind {
-        MaintainedTerminalKind::ResultCurrent(schema) => {
+        MaintainedTerminalKind::ResultCurrent(schema)
+        | MaintainedTerminalKind::EvidenceCurrent(schema) => {
             let table_name = match record.get_idx(field_idx(record, &schema.table_field)?)? {
                 Value::String(value) => value,
                 _ => {
@@ -817,7 +859,11 @@ fn decode_typed_terminal_record(
                 descriptor: encode_record_descriptor(&record.descriptor())?,
                 record: record.raw().to_vec(),
             };
-            Ok(DecodedMaintainedEvent::ResultCurrent { member, payload })
+            if matches!(kind, MaintainedTerminalKind::EvidenceCurrent(_)) {
+                Ok(DecodedMaintainedEvent::EvidenceCurrent { member })
+            } else {
+                Ok(DecodedMaintainedEvent::ResultCurrent { member, payload })
+            }
         }
         MaintainedTerminalKind::AggregateResult(schema) => {
             let table = match record.get_idx(field_idx(record, &schema.synthetic.table_field)?)? {
@@ -1540,6 +1586,7 @@ impl NetEvent {
     fn identity(&self) -> EventIdentity {
         match self {
             Self::Result(entry, _) => EventIdentity::Result(entry.clone()),
+            Self::Evidence(entry) => EventIdentity::Evidence(entry.clone()),
             Self::AggregateResult(member, ..) => EventIdentity::Result(member.clone()),
             Self::Version(identity, _) => EventIdentity::Version(identity.clone()),
             Self::Replacement(key, identity, _) => {

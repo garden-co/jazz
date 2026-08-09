@@ -3832,6 +3832,11 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
             Vec::new()
         )
     );
+    let shipped_rows = version_bundles_for_update(&initial)
+        .iter()
+        .flat_map(|bundle| bundle.versions.iter().map(|version| version.row_uuid()))
+        .collect::<BTreeSet<_>>();
+    assert!(shipped_rows.contains(&container));
     let _stable = peer.query_update(&mut core, &shape, &binding).unwrap();
 
     accept_global(
@@ -5016,6 +5021,7 @@ fn reverse_referencing_select_policy_allows_root_row_through_source_row() {
     let bob = user(0xb2);
     let alice_file = row(0xf1);
     let unlinked_file = row(0xf2);
+    let attachment = row(0xa7);
 
     for (file, name) in [(alice_file, "alice"), (unlinked_file, "unlinked")] {
         accept_global(
@@ -5028,7 +5034,7 @@ fn reverse_referencing_select_policy_allows_root_row_through_source_row() {
     }
     accept_global(
         &mut core,
-        MergeableCommit::new("attachments", row(0xa7), 20).cells(BTreeMap::from([
+        MergeableCommit::new("attachments", attachment, 20).cells(BTreeMap::from([
             ("fileId".to_owned(), Value::Uuid(alice_file.0)),
             ("ownerId".to_owned(), Value::String(alice.0.to_string())),
         ])),
@@ -5047,6 +5053,29 @@ fn reverse_referencing_select_policy_allows_root_row_through_source_row() {
         !core
             .dry_run_read_current_allows("files", unlinked_file, alice)
             .unwrap()
+    );
+
+    let shape = Query::from("files").validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut peer = PeerState::client_link(alice);
+    let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let SyncMessage::ViewUpdate {
+        result_member_adds, ..
+    } = &update
+    else {
+        panic!("expected maintained file view update");
+    };
+    assert!(result_member_adds.iter().all(|member| !matches!(
+        member.as_row(),
+        Some((ref table, _, _)) if table.as_str() == "attachments"
+    )));
+    let shipped_rows = version_bundles_for_update(&update)
+        .iter()
+        .flat_map(|bundle| bundle.versions.iter().map(|version| version.row_uuid()))
+        .collect::<BTreeSet<_>>();
+    assert!(
+        shipped_rows.contains(&attachment),
+        "expected attachment evidence, shipped {shipped_rows:?}"
     );
 }
 

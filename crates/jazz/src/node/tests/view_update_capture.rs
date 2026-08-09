@@ -451,6 +451,7 @@ impl MaintainedSubscriptionViewSubscription {
                     .into_iter()
                     .map(crate::protocol::ResultMemberEntry::from)
                     .collect(),
+                evidence_member_adds: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
                 identity,

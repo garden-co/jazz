@@ -27,7 +27,7 @@ use super::query_engine::{
     ClosurePathSegment, ClosureRootGate, ComparisonOp as NormalizedComparisonOp,
     ContentVersionSource, CorrelationRequirement, DataSource, DeletionRegisterSource,
     FieldProjection, FrontierId, JoinContribution, JoinMode as NormalizedJoinMode, LensSelection,
-    NormalizedRowSetShape, NormalizedShapeIdentity, NormalizedValueRef,
+    LoweredTerminal, NormalizedRowSetShape, NormalizedShapeIdentity, NormalizedValueRef,
     OrderKey as NormalizedOrderKey, OutputTerminalSchema, OverlayRef, OverlayStack,
     PathCardinality, PathHolePolicy, PayloadProjection, PolicyContext, PolicyDecisionRole,
     PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr, ProgramBinding,
@@ -462,6 +462,8 @@ fn fact_public_fields(
 pub(super) struct PolicyAuthorizationGraph {
     graph: GraphBuilder,
     route_fields: BTreeSet<String>,
+    evidence_terminals: Vec<LoweredTerminal>,
+    evidence_tables: BTreeMap<String, TableSchema>,
 }
 
 fn policy_authorization_graph_cache_key(request: &QueryProgramRequest) -> String {
@@ -598,6 +600,9 @@ struct CurrentQuerySourceResolver<'a, S> {
     read_view: &'a ReadView<RequestedSourceStage>,
     inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
     access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+    collect_policy_evidence: bool,
+    policy_evidence_terminals: Vec<LoweredTerminal>,
+    policy_evidence_tables: BTreeMap<String, TableSchema>,
 }
 
 struct CurrentSourceGraph {
@@ -787,221 +792,163 @@ where
                 deletion_register: None,
             });
         }
-        let (graph, descriptor, metadata, routing_fields) = if table.name == "jazz_branches"
-            && history_position.is_none()
-            && open_tx_overlay.is_none()
-        {
-            if request.visibility != RowVisibility::Visible {
-                return Err(source_resolution_error(
-                    request,
-                    SourceGap::SchemaProjection,
-                ));
-            }
-            let rows = self
-                .node
-                .branch_metadata_current_rows()
-                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let base = inline_current_graph(&table, rows)
-                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let descriptor = current_row_descriptor(&table);
-            (base, descriptor, BTreeMap::new(), BTreeSet::new())
-        } else if let Some(position) = history_position {
-            if request.visibility != RowVisibility::Visible {
-                return Err(source_resolution_error(
-                    request,
-                    SourceGap::HistoricalStorageCut,
-                ));
-            }
-            let needs_settle_position = request
-                .requirements
-                .metadata
-                .contains(&SourceMetadataRequirement::SettlePosition);
-            let mut metadata = BTreeMap::new();
-            if needs_settle_position {
-                metadata.insert(
-                    SourceMetadataRequirement::SettlePosition,
-                    SourceMetadataFields::SettlePosition {
-                        settle_position_field: "settle_position".to_owned(),
-                    },
-                );
-            }
-            let descriptor = current_row_descriptor_with_hidden_source_fields(&table, &metadata);
-            let base = self.projected_historical_source_graph(request, &table, position)?;
-            let base = if needs_settle_position {
-                base.project_fields(
-                    current_row_fields(&table)
-                        .into_iter()
-                        .map(ProjectField::named)
-                        .chain([ProjectField::null_typed(
-                            "settle_position",
-                            ValueType::Nullable(Box::new(ValueType::U64)),
-                        )])
-                        .collect::<Vec<_>>(),
+        let (graph, descriptor, metadata, routing_fields, evidence_terminals, evidence_tables) =
+            if table.name == "jazz_branches"
+                && history_position.is_none()
+                && open_tx_overlay.is_none()
+            {
+                if request.visibility != RowVisibility::Visible {
+                    return Err(source_resolution_error(
+                        request,
+                        SourceGap::SchemaProjection,
+                    ));
+                }
+                let rows = self
+                    .node
+                    .branch_metadata_current_rows()
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let base = inline_current_graph(&table, rows)
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let descriptor = current_row_descriptor(&table);
+                (
+                    base,
+                    descriptor,
+                    BTreeMap::new(),
+                    BTreeSet::new(),
+                    Vec::new(),
+                    BTreeMap::new(),
                 )
-            } else {
-                base
-            };
-            let graph = match &authorization {
-                SourceAuthorizationRequest::System => base,
-                SourceAuthorizationRequest::PolicyFiltered {
-                    permission_subject,
-                    plan,
+            } else if let Some(position) = history_position {
+                if request.visibility != RowVisibility::Visible {
+                    return Err(source_resolution_error(
+                        request,
+                        SourceGap::HistoricalStorageCut,
+                    ));
                 }
-                | SourceAuthorizationRequest::PolicyProof {
-                    permission_subject,
-                    plan,
-                } => {
-                    if plan.protected_source.table != table.name
-                        || plan.role != PolicyDecisionRole::Read
-                        || plan.protected_row_field != "row_uuid"
-                    {
-                        return Err(source_resolution_error(
-                            request,
-                            SourceGap::HistoricalStorageCut,
-                        ));
-                    }
-                    let policy_request = self
-                        .node
-                        .table_read_policy_authorization_request_at(
-                            self.read_view.policy_schema,
-                            &table.name,
-                            *permission_subject,
-                            ParamBindingMode::InlineAllReachableSeeds,
-                            position,
-                            plan.binding_source_shape.clone(),
-                            plan.binding_user_params.clone(),
-                        )
-                        .map_err(|_| {
-                            source_resolution_error(request, SourceGap::HistoricalStorageCut)
-                        })?;
-                    self.node
-                        .policy_filtered_current_source_graph_via_query_engine(
-                            policy_request,
-                            base,
-                            &descriptor_field_names(&descriptor).map_err(|_| {
-                                source_resolution_error(request, SourceGap::HistoricalStorageCut)
-                            })?,
-                        )
-                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
-                        .graph
+                let needs_settle_position = request
+                    .requirements
+                    .metadata
+                    .contains(&SourceMetadataRequirement::SettlePosition);
+                let mut metadata = BTreeMap::new();
+                if needs_settle_position {
+                    metadata.insert(
+                        SourceMetadataRequirement::SettlePosition,
+                        SourceMetadataFields::SettlePosition {
+                            settle_position_field: "settle_position".to_owned(),
+                        },
+                    );
                 }
-            };
-            (graph, descriptor, metadata, BTreeSet::new())
-        } else if let Some(branch_id) = branch_data {
-            if request.visibility != RowVisibility::Visible {
-                return Err(source_resolution_error(
-                    request,
-                    SourceGap::SchemaProjection,
-                ));
-            }
-            let branch = self
-                .node
-                .branches
-                .branches
-                .get(&branch_id)
-                .cloned()
-                .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
-            let rows = self
-                .node
-                .branch_current_rows_for_schema(
-                    &request.source.table,
-                    &branch,
-                    self.read_view.read_schema,
-                )
-                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let schema_version_alias = self
-                .node
-                .ensure_schema_version_alias(self.read_view.read_schema)
-                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let (base, descriptor, metadata) = inline_branch_current_graph(
-                &table,
-                rows,
-                schema_version_alias,
-                branch_id,
-                &request.requirements,
-            )
-            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let graph = match &authorization {
-                SourceAuthorizationRequest::System => base,
-                SourceAuthorizationRequest::PolicyFiltered {
-                    permission_subject,
-                    plan,
-                }
-                | SourceAuthorizationRequest::PolicyProof {
-                    permission_subject,
-                    plan,
-                } => {
-                    if plan.protected_source.table != table.name
-                        || plan.role != PolicyDecisionRole::Read
-                        || plan.protected_row_field != "row_uuid"
-                    {
-                        return Err(source_resolution_error(request, SourceGap::Coverage));
-                    }
-                    let policy_request = self
-                        .node
-                        .branch_table_read_policy_authorization_request(
-                            branch_id,
-                            &table,
-                            *permission_subject,
-                            plan.binding_source_shape.clone(),
-                            plan.binding_user_params.clone(),
-                        )
-                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                    let output_fields = descriptor_field_names(&descriptor)
-                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                    self.node
-                        .policy_filtered_current_source_graph_via_query_engine(
-                            policy_request,
-                            base,
-                            &output_fields,
-                        )
-                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
-                        .graph
-                }
-            };
-            (graph, descriptor, metadata, BTreeSet::new())
-        } else if let Some(tx_id) = open_tx_overlay {
-            if request.visibility != RowVisibility::Visible {
-                return Err(source_resolution_error(
-                    request,
-                    SourceGap::TransactionReadOverlay,
-                ));
-            }
-            let rows = self
-                .node
-                .tx_current_rows(tx_id, &request.source.table)
-                .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
-            let graph = inline_current_graph(&table, rows)
-                .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
-            let descriptor = current_row_descriptor(&table);
-            (graph, descriptor, BTreeMap::new(), BTreeSet::new())
-        } else if request.visibility == RowVisibility::Visible
-            && self.needs_projected_current_source(&request.source.table)
-        {
-            if !request.requirements.metadata.is_empty() {
-                let source = self.projected_maintained_visible_current_source_graph(
-                    request,
-                    &table,
-                    graph_tier.expect("visible current source has a tier"),
-                )?;
-                resolved_current_source_graph(
-                    self.node,
-                    &table,
-                    graph_tier.expect("visible current source has a tier"),
-                    &request.requirements,
-                    &authorization,
-                    self.read_view.policy_schema,
-                    Some(source.graph),
-                )
-                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
-            } else {
-                let source = self.projected_visible_current_source_graph(
-                    request,
-                    &table,
-                    graph_tier.expect("visible current source has a tier"),
-                )?;
+                let descriptor =
+                    current_row_descriptor_with_hidden_source_fields(&table, &metadata);
+                let base = self.projected_historical_source_graph(request, &table, position)?;
+                let base = if needs_settle_position {
+                    base.project_fields(
+                        current_row_fields(&table)
+                            .into_iter()
+                            .map(ProjectField::named)
+                            .chain([ProjectField::null_typed(
+                                "settle_position",
+                                ValueType::Nullable(Box::new(ValueType::U64)),
+                            )])
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    base
+                };
                 let graph = match &authorization {
-                    SourceAuthorizationRequest::System => source.graph,
+                    SourceAuthorizationRequest::System => base,
+                    SourceAuthorizationRequest::PolicyFiltered {
+                        permission_subject,
+                        plan,
+                    }
+                    | SourceAuthorizationRequest::PolicyProof {
+                        permission_subject,
+                        plan,
+                    } => {
+                        if plan.protected_source.table != table.name
+                            || plan.role != PolicyDecisionRole::Read
+                            || plan.protected_row_field != "row_uuid"
+                        {
+                            return Err(source_resolution_error(
+                                request,
+                                SourceGap::HistoricalStorageCut,
+                            ));
+                        }
+                        let policy_request = self
+                            .node
+                            .table_read_policy_authorization_request_at(
+                                self.read_view.policy_schema,
+                                &table.name,
+                                *permission_subject,
+                                ParamBindingMode::InlineAllReachableSeeds,
+                                position,
+                                plan.binding_source_shape.clone(),
+                                plan.binding_user_params.clone(),
+                            )
+                            .map_err(|_| {
+                                source_resolution_error(request, SourceGap::HistoricalStorageCut)
+                            })?;
+                        self.node
+                            .policy_filtered_current_source_graph_via_query_engine(
+                                policy_request,
+                                base,
+                                &descriptor_field_names(&descriptor).map_err(|_| {
+                                    source_resolution_error(
+                                        request,
+                                        SourceGap::HistoricalStorageCut,
+                                    )
+                                })?,
+                            )
+                            .map_err(|error| {
+                                source_resolution_error_from_policy_proof(request, error)
+                            })?
+                            .graph
+                    }
+                };
+                (
+                    graph,
+                    descriptor,
+                    metadata,
+                    BTreeSet::new(),
+                    Vec::new(),
+                    BTreeMap::new(),
+                )
+            } else if let Some(branch_id) = branch_data {
+                if request.visibility != RowVisibility::Visible {
+                    return Err(source_resolution_error(
+                        request,
+                        SourceGap::SchemaProjection,
+                    ));
+                }
+                let branch = self
+                    .node
+                    .branches
+                    .branches
+                    .get(&branch_id)
+                    .cloned()
+                    .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
+                let rows = self
+                    .node
+                    .branch_current_rows_for_schema(
+                        &request.source.table,
+                        &branch,
+                        self.read_view.read_schema,
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let schema_version_alias = self
+                    .node
+                    .ensure_schema_version_alias(self.read_view.read_schema)
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let (base, descriptor, metadata) = inline_branch_current_graph(
+                    &table,
+                    rows,
+                    schema_version_alias,
+                    branch_id,
+                    &request.requirements,
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let graph = match &authorization {
+                    SourceAuthorizationRequest::System => base,
                     SourceAuthorizationRequest::PolicyFiltered {
                         permission_subject,
                         plan,
@@ -1018,21 +965,21 @@ where
                         }
                         let policy_request = self
                             .node
-                            .table_read_policy_authorization_request(
-                                self.read_view.policy_schema,
-                                &table.name,
+                            .branch_table_read_policy_authorization_request(
+                                branch_id,
+                                &table,
                                 *permission_subject,
-                                ParamBindingMode::InlineAllReachableSeeds,
-                                graph_tier.expect("visible current source has a tier"),
                                 plan.binding_source_shape.clone(),
                                 plan.binding_user_params.clone(),
                             )
                             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                        let output_fields = descriptor_field_names(&descriptor)
+                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                         self.node
                             .policy_filtered_current_source_graph_via_query_engine(
                                 policy_request,
-                                source.graph,
-                                &current_row_fields(&table),
+                                base,
+                                &output_fields,
                             )
                             .map_err(|error| {
                                 source_resolution_error_from_policy_proof(request, error)
@@ -1040,135 +987,254 @@ where
                             .graph
                     }
                 };
-                (graph, source.descriptor, source.metadata, BTreeSet::new())
-            }
-        } else if request.visibility == RowVisibility::IncludeDeleted
-            && self.needs_projected_current_source(&request.source.table)
-        {
-            let tier = graph_tier.expect("visible current source has a tier");
-            let rows = self
-                .node
-                .include_deleted_current_rows_for_schema(
-                    &request.source.table,
-                    self.read_view.read_schema,
-                    tier,
+                (
+                    graph,
+                    descriptor,
+                    metadata,
+                    BTreeSet::new(),
+                    Vec::new(),
+                    BTreeMap::new(),
                 )
-                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-            let base = inline_include_deleted_current_graph(&table, rows)
-                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let graph = match &authorization {
-                SourceAuthorizationRequest::System => base.clone(),
-                SourceAuthorizationRequest::PolicyFiltered {
-                    permission_subject,
-                    plan,
+            } else if let Some(tx_id) = open_tx_overlay {
+                if request.visibility != RowVisibility::Visible {
+                    return Err(source_resolution_error(
+                        request,
+                        SourceGap::TransactionReadOverlay,
+                    ));
                 }
-                | SourceAuthorizationRequest::PolicyProof {
-                    permission_subject,
-                    plan,
-                } => {
-                    if plan.protected_source.table != table.name
-                        || plan.role != PolicyDecisionRole::Read
-                        || plan.protected_row_field != "row_uuid"
-                    {
-                        return Err(source_resolution_error(request, SourceGap::Coverage));
+                let rows = self
+                    .node
+                    .tx_current_rows(tx_id, &request.source.table)
+                    .map_err(|_| {
+                        source_resolution_error(request, SourceGap::TransactionReadOverlay)
+                    })?;
+                let graph = inline_current_graph(&table, rows).map_err(|_| {
+                    source_resolution_error(request, SourceGap::TransactionReadOverlay)
+                })?;
+                let descriptor = current_row_descriptor(&table);
+                (
+                    graph,
+                    descriptor,
+                    BTreeMap::new(),
+                    BTreeSet::new(),
+                    Vec::new(),
+                    BTreeMap::new(),
+                )
+            } else if request.visibility == RowVisibility::Visible
+                && self.needs_projected_current_source(&request.source.table)
+            {
+                if !request.requirements.metadata.is_empty() {
+                    let source = self.projected_maintained_visible_current_source_graph(
+                        request,
+                        &table,
+                        graph_tier.expect("visible current source has a tier"),
+                    )?;
+                    resolved_current_source_graph(
+                        self.node,
+                        &table,
+                        graph_tier.expect("visible current source has a tier"),
+                        &request.requirements,
+                        &authorization,
+                        self.read_view.policy_schema,
+                        Some(source.graph),
+                        self.collect_policy_evidence,
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                } else {
+                    let source = self.projected_visible_current_source_graph(
+                        request,
+                        &table,
+                        graph_tier.expect("visible current source has a tier"),
+                    )?;
+                    let graph = match &authorization {
+                        SourceAuthorizationRequest::System => source.graph,
+                        SourceAuthorizationRequest::PolicyFiltered {
+                            permission_subject,
+                            plan,
+                        }
+                        | SourceAuthorizationRequest::PolicyProof {
+                            permission_subject,
+                            plan,
+                        } => {
+                            if plan.protected_source.table != table.name
+                                || plan.role != PolicyDecisionRole::Read
+                                || plan.protected_row_field != "row_uuid"
+                            {
+                                return Err(source_resolution_error(request, SourceGap::Coverage));
+                            }
+                            let policy_request = self
+                                .node
+                                .table_read_policy_authorization_request(
+                                    self.read_view.policy_schema,
+                                    &table.name,
+                                    *permission_subject,
+                                    ParamBindingMode::InlineAllReachableSeeds,
+                                    graph_tier.expect("visible current source has a tier"),
+                                    plan.binding_source_shape.clone(),
+                                    plan.binding_user_params.clone(),
+                                )
+                                .map_err(|_| {
+                                    source_resolution_error(request, SourceGap::Coverage)
+                                })?;
+                            self.node
+                                .policy_filtered_current_source_graph_via_query_engine(
+                                    policy_request,
+                                    source.graph,
+                                    &current_row_fields(&table),
+                                )
+                                .map_err(|error| {
+                                    source_resolution_error_from_policy_proof(request, error)
+                                })?
+                                .graph
+                        }
+                    };
+                    (
+                        graph,
+                        source.descriptor,
+                        source.metadata,
+                        BTreeSet::new(),
+                        Vec::new(),
+                        BTreeMap::new(),
+                    )
+                }
+            } else if request.visibility == RowVisibility::IncludeDeleted
+                && self.needs_projected_current_source(&request.source.table)
+            {
+                let tier = graph_tier.expect("visible current source has a tier");
+                let rows = self
+                    .node
+                    .include_deleted_current_rows_for_schema(
+                        &request.source.table,
+                        self.read_view.read_schema,
+                        tier,
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+                let base = inline_include_deleted_current_graph(&table, rows)
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let graph = match &authorization {
+                    SourceAuthorizationRequest::System => base.clone(),
+                    SourceAuthorizationRequest::PolicyFiltered {
+                        permission_subject,
+                        plan,
                     }
-                    let policy_request = self
-                        .node
-                        .table_read_policy_authorization_request_for_include_deleted(
-                            self.read_view.policy_schema,
-                            &table.name,
-                            *permission_subject,
-                            tier,
-                            plan.binding_source_shape.clone(),
-                            plan.binding_user_params.clone(),
-                        )
-                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                    let mut output_fields = current_row_fields(&table);
-                    output_fields.push("__jazz_deleted".to_owned());
-                    self.node
-                        .policy_filtered_current_source_graph_via_query_engine(
-                            policy_request,
-                            base.clone(),
-                            &output_fields,
-                        )
-                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
-                        .graph
-                }
-            };
-            (
-                graph,
-                include_deleted_current_row_descriptor(&table),
-                BTreeMap::new(),
-                BTreeSet::new(),
-            )
-        } else if request.visibility == RowVisibility::IncludeDeleted {
-            let tier = graph_tier.expect("visible current source has a tier");
-            let base = include_deleted_current_graph(&table, tier);
-            let graph = match &authorization {
-                SourceAuthorizationRequest::System => base,
-                SourceAuthorizationRequest::PolicyFiltered {
-                    permission_subject,
-                    plan,
-                }
-                | SourceAuthorizationRequest::PolicyProof {
-                    permission_subject,
-                    plan,
-                } => {
-                    if plan.protected_source.table != table.name
-                        || plan.role != PolicyDecisionRole::Read
-                        || plan.protected_row_field != "row_uuid"
-                    {
-                        return Err(source_resolution_error(request, SourceGap::Coverage));
+                    | SourceAuthorizationRequest::PolicyProof {
+                        permission_subject,
+                        plan,
+                    } => {
+                        if plan.protected_source.table != table.name
+                            || plan.role != PolicyDecisionRole::Read
+                            || plan.protected_row_field != "row_uuid"
+                        {
+                            return Err(source_resolution_error(request, SourceGap::Coverage));
+                        }
+                        let policy_request = self
+                            .node
+                            .table_read_policy_authorization_request_for_include_deleted(
+                                self.read_view.policy_schema,
+                                &table.name,
+                                *permission_subject,
+                                tier,
+                                plan.binding_source_shape.clone(),
+                                plan.binding_user_params.clone(),
+                            )
+                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                        let mut output_fields = current_row_fields(&table);
+                        output_fields.push("__jazz_deleted".to_owned());
+                        self.node
+                            .policy_filtered_current_source_graph_via_query_engine(
+                                policy_request,
+                                base.clone(),
+                                &output_fields,
+                            )
+                            .map_err(|error| {
+                                source_resolution_error_from_policy_proof(request, error)
+                            })?
+                            .graph
                     }
-                    let policy_request = self
-                        .node
-                        .table_read_policy_authorization_request_for_include_deleted(
-                            self.read_view.policy_schema,
-                            &table.name,
-                            *permission_subject,
-                            tier,
-                            plan.binding_source_shape.clone(),
-                            plan.binding_user_params.clone(),
-                        )
-                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                    let mut output_fields = current_row_fields(&table);
-                    output_fields.push("__jazz_deleted".to_owned());
-                    self.node
-                        .policy_filtered_current_source_graph_via_query_engine(
-                            policy_request,
-                            base,
-                            &output_fields,
-                        )
-                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
-                        .graph
+                };
+                (
+                    graph,
+                    include_deleted_current_row_descriptor(&table),
+                    BTreeMap::new(),
+                    BTreeSet::new(),
+                    Vec::new(),
+                    BTreeMap::new(),
+                )
+            } else if request.visibility == RowVisibility::IncludeDeleted {
+                let tier = graph_tier.expect("visible current source has a tier");
+                let base = include_deleted_current_graph(&table, tier);
+                let graph = match &authorization {
+                    SourceAuthorizationRequest::System => base,
+                    SourceAuthorizationRequest::PolicyFiltered {
+                        permission_subject,
+                        plan,
+                    }
+                    | SourceAuthorizationRequest::PolicyProof {
+                        permission_subject,
+                        plan,
+                    } => {
+                        if plan.protected_source.table != table.name
+                            || plan.role != PolicyDecisionRole::Read
+                            || plan.protected_row_field != "row_uuid"
+                        {
+                            return Err(source_resolution_error(request, SourceGap::Coverage));
+                        }
+                        let policy_request = self
+                            .node
+                            .table_read_policy_authorization_request_for_include_deleted(
+                                self.read_view.policy_schema,
+                                &table.name,
+                                *permission_subject,
+                                tier,
+                                plan.binding_source_shape.clone(),
+                                plan.binding_user_params.clone(),
+                            )
+                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                        let mut output_fields = current_row_fields(&table);
+                        output_fields.push("__jazz_deleted".to_owned());
+                        self.node
+                            .policy_filtered_current_source_graph_via_query_engine(
+                                policy_request,
+                                base,
+                                &output_fields,
+                            )
+                            .map_err(|error| {
+                                source_resolution_error_from_policy_proof(request, error)
+                            })?
+                            .graph
+                    }
+                };
+                (
+                    graph,
+                    include_deleted_current_row_descriptor(&table),
+                    BTreeMap::new(),
+                    BTreeSet::new(),
+                    Vec::new(),
+                    BTreeMap::new(),
+                )
+            } else {
+                let selected_base = self.selected_global_current_source_graph(
+                    request,
+                    &table,
+                    graph_tier.expect("visible current source has a tier"),
+                )?;
+                if selected_base.is_none() {
+                    self.node.query_engine_read_metrics.source_full_scans += 1;
                 }
+                resolved_current_source_graph(
+                    self.node,
+                    &table,
+                    graph_tier.expect("visible current source has a tier"),
+                    &request.requirements,
+                    &authorization,
+                    self.read_view.policy_schema,
+                    selected_base,
+                    self.collect_policy_evidence,
+                )
+                .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
             };
-            (
-                graph,
-                include_deleted_current_row_descriptor(&table),
-                BTreeMap::new(),
-                BTreeSet::new(),
-            )
-        } else {
-            let selected_base = self.selected_global_current_source_graph(
-                request,
-                &table,
-                graph_tier.expect("visible current source has a tier"),
-            )?;
-            if selected_base.is_none() {
-                self.node.query_engine_read_metrics.source_full_scans += 1;
-            }
-            resolved_current_source_graph(
-                self.node,
-                &table,
-                graph_tier.expect("visible current source has a tier"),
-                &request.requirements,
-                &authorization,
-                self.read_view.policy_schema,
-                selected_base,
-            )
-            .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
-        };
+        self.policy_evidence_terminals.extend(evidence_terminals);
+        self.policy_evidence_tables.extend(evidence_tables);
         let deletion_register = self.deletion_register_source_for_request(
             request,
             &table,
@@ -1922,12 +1988,15 @@ fn resolved_current_source_graph<S>(
     authorization: &SourceAuthorizationRequest,
     policy_schema: SchemaVersionId,
     selected_base: Option<GraphBuilder>,
+    collect_policy_evidence: bool,
 ) -> Result<
     (
         GraphBuilder,
         RecordDescriptor,
         BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
         BTreeSet<String>,
+        Vec<LoweredTerminal>,
+        BTreeMap<String, TableSchema>,
     ),
     Error,
 >
@@ -2004,7 +2073,7 @@ where
     }
 
     let descriptor = current_row_descriptor_with_hidden_source_fields(table, &metadata);
-    let (base, routing_fields) = match authorization {
+    let (base, routing_fields, evidence_terminals, evidence_tables) = match authorization {
         SourceAuthorizationRequest::System => {
             let graph = if let Some(selected_base) = selected_base.clone() {
                 selected_base.project_fields(storage_to_canonical_current_source_fields(
@@ -2023,7 +2092,7 @@ where
                 visible_current_graph(table, tier)
                     .project_fields(canonical_current_source_fields(table, false))
             };
-            (graph, BTreeSet::new())
+            (graph, BTreeSet::new(), Vec::new(), BTreeMap::new())
         }
         SourceAuthorizationRequest::PolicyFiltered {
             permission_subject,
@@ -2048,7 +2117,7 @@ where
             } else {
                 ParamBindingMode::InlineAllReachableSeeds
             };
-            let policy_request = node.table_read_policy_authorization_request(
+            let mut policy_request = node.table_read_policy_authorization_request(
                 policy_schema,
                 &table.name,
                 *permission_subject,
@@ -2057,6 +2126,16 @@ where
                 binding_source_shape.clone(),
                 binding_user_params.clone(),
             )?;
+            if collect_policy_evidence {
+                policy_request
+                    .output
+                    .facts
+                    .insert(ProgramFactKey::VersionWitnesses);
+                policy_request
+                    .output
+                    .facts
+                    .insert(ProgramFactKey::ResultMembership);
+            }
             let output_fields = global_current_storage_fields(
                 table,
                 needs_version_witnesses,
@@ -2085,6 +2164,8 @@ where
             (
                 storage_graph.graph.project_fields(canonical_fields),
                 storage_graph.route_fields,
+                storage_graph.evidence_terminals,
+                storage_graph.evidence_tables,
             )
         }
     };
@@ -2098,7 +2179,14 @@ where
     } else {
         base.project_fields(fields)
     };
-    Ok((graph, descriptor, metadata, routing_fields))
+    Ok((
+        graph,
+        descriptor,
+        metadata,
+        routing_fields,
+        evidence_terminals,
+        evidence_tables,
+    ))
 }
 
 fn canonical_current_source_fields(
@@ -5009,6 +5097,8 @@ where
             super::maintained_subscription_view::ResultTransitions {
                 adds: current.difference(&previous).cloned().collect(),
                 removes: previous.difference(&current).cloned().collect(),
+                evidence_adds: Vec::new(),
+                evidence_removes: Vec::new(),
                 result_payload_adds,
                 result_payload_removes,
                 program_fact_adds,
@@ -5840,16 +5930,47 @@ where
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
     ) -> Result<QueryProgram, Error> {
         let trace_request = capability_trace_enabled().then(|| request.clone());
+        let collect_policy_evidence = request
+            .output
+            .facts
+            .contains(&ProgramFactKey::ResultMembership);
         let read_view = request.reads.primary.clone();
         let mut resolver = CurrentQuerySourceResolver {
             node: self,
             read_view: &read_view,
             inline_sources,
             access_paths,
+            collect_policy_evidence,
+            policy_evidence_terminals: Vec::new(),
+            policy_evidence_tables: BTreeMap::new(),
         };
         let node_uuid = resolver.node.node_uuid;
         let node_alias = resolver.node.self_node_alias;
-        let result = lower_query_program(request, &mut resolver);
+        let mut result = lower_query_program(request, &mut resolver);
+        if let Ok(program) = &mut result {
+            let mut evidence_by_sink = BTreeMap::new();
+            for terminal in resolver.policy_evidence_terminals.drain(..) {
+                evidence_by_sink
+                    .entry(terminal.sink.clone())
+                    .or_insert(terminal);
+            }
+            program
+                .lowered
+                .terminals
+                .extend(evidence_by_sink.into_values());
+            program
+                .lowered
+                .maintained_terminal_tables
+                .append(&mut resolver.policy_evidence_tables);
+            program.lowered.output = ProgramOutputSchemas::RowSet(
+                program
+                    .lowered
+                    .terminals
+                    .iter()
+                    .map(|terminal| terminal.output.clone())
+                    .collect(),
+            );
+        }
         if let Some(request) = trace_request {
             trace_capability_compile(
                 node_uuid,
@@ -5892,6 +6013,8 @@ where
             self.query.policy_proof_stack.push(table.clone());
         }
 
+        let evidence_namespace = format!("{:?}", request.input.shape.identity);
+        let protected_table = proof_table.clone();
         let result = (|| {
             let program = self.compile_query_program_request(request)?;
             let graph = lowered_terminal_graph(&program, "policy.authorized_rows")?;
@@ -5908,9 +6031,37 @@ where
                     })
                 })
                 .unwrap_or_default();
+            let evidence_terminals = program
+                .lowered
+                .terminals
+                .iter()
+                .filter(|terminal| {
+                    matches!(
+                        &terminal.output,
+                        OutputTerminalSchema::Fact(output)
+                            if (matches!(output.schema, super::query_engine::ProgramFactSchema::VersionWitnesses(_))
+                                && protected_table.as_ref().is_none_or(|table| {
+                                    !terminal.sink.contains(&format!(".{table}."))
+                                }))
+                                || (matches!(output.schema, super::query_engine::ProgramFactSchema::ResultMembership(_))
+                                    && terminal.sink != "maintained.result_current")
+                    )
+                })
+                .cloned()
+                .map(|mut terminal| {
+                    terminal.sink = format!(
+                        "policy_evidence:{evidence_namespace}:{}",
+                        terminal.sink
+                    );
+                    terminal
+                })
+                .collect();
+            let evidence_tables = program.lowered.maintained_terminal_tables.clone();
             let graph = PolicyAuthorizationGraph {
                 graph,
                 route_fields,
+                evidence_terminals,
+                evidence_tables,
             };
             self.query
                 .policy_authorization_graph_cache
@@ -7831,6 +7982,8 @@ where
                         .difference(&visible_members)
                         .cloned()
                         .collect(),
+                    evidence_adds: Vec::new(),
+                    evidence_removes: Vec::new(),
                     program_fact_adds: visible_facts
                         .difference(&local.program_facts)
                         .cloned()
@@ -9656,6 +9809,12 @@ where
         transitions.adds.extend(snapshot_transitions.adds);
         transitions.removes.extend(snapshot_transitions.removes);
         transitions
+            .evidence_adds
+            .extend(snapshot_transitions.evidence_adds);
+        transitions
+            .evidence_removes
+            .extend(snapshot_transitions.evidence_removes);
+        transitions
             .result_payload_adds
             .extend(snapshot_transitions.result_payload_adds);
         transitions
@@ -9681,6 +9840,12 @@ where
                     )?;
                     transitions.adds.extend(delta_transitions.adds);
                     transitions.removes.extend(delta_transitions.removes);
+                    transitions
+                        .evidence_adds
+                        .extend(delta_transitions.evidence_adds);
+                    transitions
+                        .evidence_removes
+                        .extend(delta_transitions.evidence_removes);
                     transitions
                         .result_payload_adds
                         .extend(delta_transitions.result_payload_adds);
@@ -9801,6 +9966,8 @@ where
             Err(Error::QueryCapability(_err)) => PolicyAuthorizationGraph {
                 graph: empty_authorized_row_id_graph(),
                 route_fields: BTreeSet::new(),
+                evidence_terminals: Vec::new(),
+                evidence_tables: BTreeMap::new(),
             },
             Err(err) => return Err(err),
         };
@@ -9827,6 +9994,8 @@ where
                 graph: GraphBuilder::join(base, authorized_graph, ["row_uuid"], ["row_uuid"])
                     .project_fields(fields),
                 route_fields: authorized.route_fields,
+                evidence_terminals: authorized.evidence_terminals,
+                evidence_tables: authorized.evidence_tables,
             });
         }
         let mut fields = output_fields
@@ -9843,6 +10012,8 @@ where
             graph: GraphBuilder::join(base, authorized_graph, ["row_uuid"], ["row_uuid"])
                 .project_fields(fields),
             route_fields: authorized.route_fields,
+            evidence_terminals: authorized.evidence_terminals,
+            evidence_tables: authorized.evidence_tables,
         })
     }
 
@@ -12851,6 +13022,9 @@ mod tests {
             read_view: &read_view,
             inline_sources: BTreeMap::new(),
             access_paths: BTreeMap::new(),
+            collect_policy_evidence: false,
+            policy_evidence_terminals: Vec::new(),
+            policy_evidence_tables: BTreeMap::new(),
         };
 
         assert!(resolver.needs_projected_current_source("users"));
