@@ -1829,7 +1829,8 @@ where
             .node
             .node
             .borrow_mut()
-            .dry_run_insert_allows(
+            .dry_run_mergeable_write_allows_for_view(
+                &self.schema,
                 MergeableCommit::new(table, row, self.next_now_ms())
                     .made_by(identity)
                     .permission_subject(identity)
@@ -1868,7 +1869,8 @@ where
             .node
             .node
             .borrow_mut()
-            .dry_run_insert_allows(
+            .dry_run_mergeable_write_allows_for_view(
+                &self.schema,
                 MergeableCommit::new(table, row, now_ms)
                     .made_by(identity)
                     .permission_subject(identity)
@@ -1916,7 +1918,8 @@ where
         self.node
             .node
             .borrow_mut()
-            .dry_run_insert_allows(
+            .dry_run_mergeable_write_allows_for_view(
+                &self.schema,
                 MergeableCommit::new(table, RowUuid::from_bytes([0; 16]), 0)
                     .made_by(identity)
                     .permission_subject(identity)
@@ -2041,7 +2044,7 @@ where
             .node
             .node
             .borrow_mut()
-            .dry_run_mergeable_write_allows(dry_run)
+            .dry_run_mergeable_write_allows_for_view(&self.schema, dry_run)
             .map_err(Error::from)?;
         if !allowed {
             return Err(Error::new(
@@ -2085,7 +2088,7 @@ where
             .node
             .node
             .borrow_mut()
-            .dry_run_mergeable_write_allows(dry_run)
+            .dry_run_mergeable_write_allows_for_view(&self.schema, dry_run)
             .map_err(Error::from)?;
         if !allowed {
             return Err(Error::new(
@@ -3288,7 +3291,7 @@ where
             .node
             .node
             .borrow_mut()
-            .dry_run_mergeable_write_allows_in_schema(self.schema_version_id, commit.clone())
+            .dry_run_mergeable_write_allows_for_view(&self.schema, commit.clone())
             .map_err(Error::from)?;
         if !allowed {
             return Err(Error::new(

@@ -21,11 +21,39 @@ where
         version: &VersionRecord,
         author: AuthorId,
     ) -> Result<bool, Error> {
+        self.write_policy_allows_version_record_for_view(version, author, None)
+    }
+
+    fn write_policy_allows_version_record_for_view(
+        &mut self,
+        version: &VersionRecord,
+        author: AuthorId,
+        exact_view: Option<&JazzSchema>,
+    ) -> Result<bool, Error> {
         if author == AuthorId::SYSTEM {
             return Ok(true);
         }
-        let (policy_schema_version, table, cells) =
-            self.policy_projection_for_version_record(version)?;
+        let (policy_schema_version, table, cells) = if let Some(schema) = exact_view {
+            let table = schema
+                .tables
+                .iter()
+                .find(|table| table.name == version.table())
+                .cloned()
+                .ok_or_else(|| Error::TableNotFound(version.table().to_owned()))?;
+            let cells = table
+                .columns
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, column)| {
+                    version
+                        .optional_cell_at(idx)
+                        .map(|value| (column.name.clone(), value))
+                })
+                .collect();
+            (version.schema_version(), table, cells)
+        } else {
+            self.policy_projection_for_version_record(version)?
+        };
         if version.deletion() == Some(DeletionEvent::Deleted) {
             let Some(policy) = table.write_policies.delete_using.clone() else {
                 return Ok(true);
@@ -118,6 +146,7 @@ where
         )
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn dry_run_insert_allows(&mut self, commit: MergeableCommit) -> Result<bool, Error> {
         let write_schema_version = self.catalogue.current_write_schema.schema;
         let table = self.table_in_schema(&commit.table, write_schema_version)?;
@@ -125,6 +154,7 @@ where
         self.write_policy_allows_version_record(&version, commit.effective_permission_subject())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn dry_run_mergeable_write_allows(
         &mut self,
         commit: MergeableCommit,
@@ -135,6 +165,7 @@ where
         )
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn dry_run_mergeable_write_allows_in_schema(
         &mut self,
         write_schema_version: SchemaVersionId,
@@ -143,6 +174,25 @@ where
         let table = self.table_in_schema(&commit.table, write_schema_version)?;
         let version = VersionRecord::from_commit(&commit, &table, write_schema_version)?;
         self.write_policy_allows_version_record(&version, commit.effective_permission_subject())
+    }
+
+    pub(crate) fn dry_run_mergeable_write_allows_for_view(
+        &mut self,
+        exact_view: &JazzSchema,
+        commit: MergeableCommit,
+    ) -> Result<bool, Error> {
+        let write_schema_version = exact_view.version_id();
+        let table = exact_view
+            .tables
+            .iter()
+            .find(|table| table.name == commit.table)
+            .ok_or_else(|| Error::TableNotFound(commit.table.clone()))?;
+        let version = VersionRecord::from_commit(&commit, table, write_schema_version)?;
+        self.write_policy_allows_version_record_for_view(
+            &version,
+            commit.effective_permission_subject(),
+            Some(exact_view),
+        )
     }
 
     pub(crate) fn dry_run_read_current_allows(
