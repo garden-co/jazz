@@ -98,6 +98,118 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
     );
 }
 
+fn catalogue_snapshot_fixture() -> crate::protocol::CatalogueSnapshot {
+    let base = schema();
+    let evolved = SchemaVersion::new(catalogue_evolved_schema());
+    let publication = SchemaLineagePublication::new(
+        evolved.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: v(""),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    crate::protocol::CatalogueSnapshot {
+        schemas: vec![SchemaVersion::new(base), evolved.clone()],
+        lineages: vec![(1, publication)],
+        current_write_schema: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
+        },
+    }
+}
+
+#[test]
+fn trusted_catalogue_snapshot_rejects_invalid_later_lineage_without_prefix_activation() {
+    let base = schema();
+    let (dir, mut core) = open_node_with_schema(node(0x38), base.clone());
+    let mut snapshot = catalogue_snapshot_fixture();
+    snapshot.lineages.push((2, snapshot.lineages[0].1.clone()));
+
+    assert!(matches!(
+        core.apply_trusted_catalogue_snapshot(snapshot),
+        Err(Error::InvalidCatalogueUpdate(_))
+    ));
+    assert_eq!(core.active_catalogue_seq(), 0);
+    assert_eq!(core.catalogue_schemas().len(), 1);
+    assert_eq!(core.current_write_schema().revision, 0);
+    drop(core);
+
+    let reopened = reopen_node_at(&dir, node(0x38), base);
+    assert_eq!(reopened.active_catalogue_seq(), 0);
+    assert_eq!(reopened.catalogue_schemas().len(), 1);
+    assert_eq!(reopened.current_write_schema().revision, 0);
+}
+
+#[test]
+fn trusted_catalogue_snapshot_rejects_pointer_conflict_without_lineage_activation() {
+    let base = schema();
+    let (dir, mut core) = open_node_with_schema(node(0x39), base.clone());
+    let mut snapshot = catalogue_snapshot_fixture();
+    snapshot.current_write_schema.revision = 0;
+
+    assert!(matches!(
+        core.apply_trusted_catalogue_snapshot(snapshot),
+        Err(Error::InvalidCatalogueUpdate(_))
+    ));
+    assert_eq!(core.active_catalogue_seq(), 0);
+    assert_eq!(core.catalogue_schemas().len(), 1);
+    drop(core);
+
+    let reopened = reopen_node_at(&dir, node(0x39), base);
+    assert_eq!(reopened.active_catalogue_seq(), 0);
+    assert_eq!(reopened.catalogue_schemas().len(), 1);
+    assert_eq!(reopened.current_write_schema().revision, 0);
+}
+
+#[test]
+fn trusted_catalogue_snapshot_activation_failure_never_exposes_a_prefix_and_reopens_old() {
+    let base = schema();
+    let (dir, mut core) = open_node_with_schema(node(0x3a), base.clone());
+    core.set_catalogue_activation_failpoint(
+        CatalogueActivationFailpoint::BeforeSnapshotActivationCommit,
+    );
+
+    assert!(matches!(
+        core.apply_trusted_catalogue_snapshot(catalogue_snapshot_fixture()),
+        Err(Error::CatalogueActivationFailed)
+    ));
+    assert_eq!(core.active_catalogue_seq(), 0);
+    assert_eq!(core.catalogue_schemas().len(), 1);
+    assert_eq!(core.current_write_schema().revision, 0);
+    assert!(matches!(
+        core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: base.version_id(),
+            },
+        }),
+        Err(Error::CatalogueActivationFailed)
+    ));
+    drop(core);
+
+    let mut reopened = reopen_node_at(&dir, node(0x3a), base);
+    assert_eq!(reopened.active_catalogue_seq(), 0);
+    assert_eq!(reopened.catalogue_schemas().len(), 1);
+    assert_eq!(reopened.current_write_schema().revision, 0);
+    reopened
+        .apply_trusted_catalogue_snapshot(catalogue_snapshot_fixture())
+        .unwrap();
+    assert_eq!(reopened.active_catalogue_seq(), 1);
+    assert_eq!(reopened.catalogue_schemas().len(), 2);
+    assert_eq!(reopened.current_write_schema().revision, 1);
+}
+
 #[test]
 fn physical_identity_mapping_and_live_id_recovery_are_durable_catalogue_metadata() {
     // Physical topology is intentionally not public API, so this internal test

@@ -4016,20 +4016,32 @@ where
     }
 
     fn reconcile_physical_mapping_for_lens_payload(
-        &mut self,
+        &self,
         lens: &MigrationLens,
         target_schema_version: &SchemaVersion,
         provisional_target_mapping: &SchemaPhysicalMapping,
     ) -> Result<SchemaPhysicalMapping, Error> {
-        let source_mapping = self
-            .catalogue
+        Self::reconcile_physical_mapping_for_lens_payload_in_catalogue(
+            &self.catalogue,
+            lens,
+            target_schema_version,
+            provisional_target_mapping,
+        )
+    }
+
+    fn reconcile_physical_mapping_for_lens_payload_in_catalogue(
+        catalogue: &SchemaCatalogue,
+        lens: &MigrationLens,
+        target_schema_version: &SchemaVersion,
+        provisional_target_mapping: &SchemaPhysicalMapping,
+    ) -> Result<SchemaPhysicalMapping, Error> {
+        let source_mapping = catalogue
             .physical_mappings
             .get(&lens.source)
             .ok_or(Error::InvalidStoredValue("source physical mapping missing"))?
             .clone();
         let mut target_mapping = provisional_target_mapping.clone();
-        let source_schema = self
-            .catalogue
+        let source_schema = catalogue
             .catalogue_schemas
             .get(&lens.source)
             .ok_or(Error::InvalidStoredValue(
@@ -5670,6 +5682,7 @@ struct SchemaLineageActivation {
 enum CatalogueActivationFailpoint {
     AfterStaged,
     AfterRegistration,
+    BeforeSnapshotActivationCommit,
 }
 
 struct DatabaseSlot<S> {
