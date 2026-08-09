@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { WebSocket as UndiciWebSocket } from "undici";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
-import { type Row } from "./client.js";
+import { type BatchId, type Row } from "./client.js";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
@@ -17,8 +17,9 @@ import {
   loadNapiModule,
 } from "./testing/napi-runtime-test-utils.js";
 
-type RuntimeRowWithTransactionId = Row & {
-  transactionId: string;
+type RuntimeCommittedRow = Row & {
+  kind: "committed";
+  batchId: BatchId | Promise<BatchId>;
 };
 
 type TestRuntimeWithTransport = {
@@ -459,12 +460,12 @@ describe("NAPI integration", () => {
       env: "test",
       userBranch: "main",
     })) as unknown as {
-      insert(table: string, values: unknown): RuntimeRowWithTransactionId;
+      insert(table: string, values: unknown): RuntimeCommittedRow;
       update(
         table: string,
         objectId: string,
         updates: Record<string, unknown>,
-      ): { transactionId: string };
+      ): { kind: "committed"; batchId: BatchId | Promise<BatchId> };
       query(queryJson: string): Promise<Row[]>;
       close(): void;
     };
@@ -478,7 +479,7 @@ describe("NAPI integration", () => {
         title: { type: "Text", value: oversizedTitle },
         done: { type: "Boolean", value: false },
       });
-      expect(insertedRow.transactionId).toEqual(expect.any(String));
+      expect(await insertedRow.batchId).toEqual(expect.any(String));
 
       let rows = await runtime.query(queryJson);
       expect(rows).toHaveLength(1);
@@ -490,12 +491,12 @@ describe("NAPI integration", () => {
         title: { type: "Text", value: "kept title" },
         done: { type: "Boolean", value: false },
       });
-      expect(secondRow.transactionId).toEqual(expect.any(String));
+      expect(await secondRow.batchId).toEqual(expect.any(String));
 
       const updateResult = runtime.update("todos", secondRow.id, {
         title: { type: "Text", value: updatedOversizedTitle },
       });
-      expect(updateResult.transactionId).toEqual(expect.any(String));
+      expect(await updateResult.batchId).toEqual(expect.any(String));
 
       rows = await runtime.query(queryJson);
       expect(rows).toHaveLength(2);
