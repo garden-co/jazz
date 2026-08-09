@@ -154,10 +154,24 @@ where
         let mut accepted_global_seqs = Vec::new();
         #[cfg(feature = "testing")]
         let mut global_sequence_records_scanned = 0usize;
-        for raw in self
-            .database
-            .index_scan_raw("jazz_transactions", "by_global_seq", &[])?
-        {
+        // Nullable index keys order `None` before `Some`. Range over only the
+        // `Some` bucket so local pending/rejected transactions cannot make
+        // recovery O(total transactions). The range end is exclusive, hence
+        // the separate exact lookup preserves the prior u64::MAX behavior.
+        let first_global_seq = Value::Nullable(Some(Box::new(Value::U64(0))));
+        let last_global_seq = Value::Nullable(Some(Box::new(Value::U64(u64::MAX))));
+        let mut sequenced_transactions = self.database.index_scan_range_raw(
+            "jazz_transactions",
+            "by_global_seq",
+            std::slice::from_ref(&first_global_seq),
+            std::slice::from_ref(&last_global_seq),
+        )?;
+        sequenced_transactions.extend(self.database.index_scan_raw(
+            "jazz_transactions",
+            "by_global_seq",
+            std::slice::from_ref(&last_global_seq),
+        )?);
+        for raw in sequenced_transactions {
             #[cfg(feature = "testing")]
             {
                 global_sequence_records_scanned += 1;
