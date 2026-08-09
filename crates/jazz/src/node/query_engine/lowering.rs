@@ -471,7 +471,6 @@ fn parameter_domain_for_request(
     for (name, claim) in pre_retarget_claims {
         domain.user_params.remove(&name);
         domain.claim_params.insert(name.clone(), claim);
-        domain.routing_params.insert(name.clone());
     }
     Ok(domain)
 }

@@ -6122,11 +6122,21 @@ where
             let mut query = authorization_query_from_read_policy(table);
             let mut values = BTreeMap::new();
             bind_scope_claim_operands(&mut query, claims, &mut values);
-            params.extend(disambiguate_policy_claim_params(
-                &mut query,
-                schema,
-                &mut values,
-            )?);
+            for (name, claim) in
+                disambiguate_policy_claim_params(&mut query, schema, &mut values)?
+            {
+                // The root policy may rediscover the same claim slot while
+                // walking its source tables. Keep the already-lowered slot in
+                // that case; a typed alias is only needed when the same claim
+                // path is required at a genuinely different schema type.
+                if params
+                    .values()
+                    .any(|existing| existing.path == claim.path && existing.ty == claim.ty)
+                {
+                    continue;
+                }
+                params.insert(name, claim);
+            }
         }
         Ok(())
     }
