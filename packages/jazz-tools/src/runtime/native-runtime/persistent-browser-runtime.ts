@@ -683,6 +683,7 @@ function nativeDeltaFromFrame(
     addedCount: message.frame.addedCount,
     removedCount: message.frame.removedCount,
     updatedCount: message.frame.updatedCount,
+    terminalOperations: message.frame.terminalOperations,
   };
 }
 

@@ -2420,6 +2420,7 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             added,
             updated,
             removed,
+            terminal_operations,
             settled,
             tier,
             ..
@@ -2427,14 +2428,21 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             // The current native wire remains source-row addressed. Occurrence
             // identity is maintained in the Rust subscription boundary until a
             // later wire-format revision carries it explicitly.
-            let added = added
-                .into_iter()
-                .map(|output| output.row)
-                .collect::<Vec<_>>();
-            let updated = updated
-                .into_iter()
-                .map(|output| output.row)
-                .collect::<Vec<_>>();
+            let (added, updated, removed) = if terminal_operations.is_empty() {
+                (
+                    added
+                        .into_iter()
+                        .map(|output| output.row)
+                        .collect::<Vec<_>>(),
+                    updated
+                        .into_iter()
+                        .map(|output| output.row)
+                        .collect::<Vec<_>>(),
+                    removed,
+                )
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
             let delta =
                 encode_subscription_delta(&added, &updated, &removed).map_err(to_js_error)?;
             set_prop(&object, "type", JsValue::from_str("delta"))?;
@@ -2442,6 +2450,11 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
                 &object,
                 "delta",
                 js_sys::Uint8Array::from(delta.as_slice()).into(),
+            )?;
+            set_prop(
+                &object,
+                "terminalOperations",
+                serde_wasm_bindgen::to_value(&terminal_operations).map_err(to_js_error)?,
             )?;
             set_prop(&object, "reset", JsValue::from_bool(reset))?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;

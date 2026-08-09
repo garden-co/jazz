@@ -1929,26 +1929,41 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
             added,
             updated,
             removed,
+            terminal_operations,
             settled,
             tier,
             ..
         } => {
             // Keep the current native wire source-row addressed until a later
             // revision carries occurrence identity explicitly.
-            let added = added
-                .iter()
-                .map(|output| output.row.clone())
-                .collect::<Vec<_>>();
-            let updated = updated
-                .iter()
-                .map(|output| output.row.clone())
-                .collect::<Vec<_>>();
-            let delta = encode_core_subscription_delta(&added, &updated, removed)
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            let added = terminal_operations.is_empty().then(|| {
+                added
+                    .iter()
+                    .map(|output| output.row.clone())
+                    .collect::<Vec<_>>()
+            });
+            let updated = terminal_operations.is_empty().then(|| {
+                updated
+                    .iter()
+                    .map(|output| output.row.clone())
+                    .collect::<Vec<_>>()
+            });
+            let empty_removed = Vec::new();
+            let delta = encode_core_subscription_delta(
+                added.as_deref().unwrap_or_default(),
+                updated.as_deref().unwrap_or_default(),
+                if terminal_operations.is_empty() {
+                    removed
+                } else {
+                    &empty_removed
+                },
+            )
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
             let payload = serde_json::json!({
                 "type": "delta",
                 "reset": reset,
                 "delta": delta,
+                "terminalOperations": terminal_operations,
                 "settled": settled,
                 "tier": format!("{tier:?}"),
             });

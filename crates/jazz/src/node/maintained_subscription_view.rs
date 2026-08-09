@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 
-use groove::ivm::{MultisinkDeltas, RecordDeltas};
+use groove::ivm::{MultisinkDeltas, RecordDeltas, TerminalOperation};
 use groove::records::{BorrowedRecord, OwnedRecord, RecordDescriptor, RecordProjector, Value};
 
 use super::codec::{
@@ -125,6 +125,9 @@ pub(crate) struct ResultTransitions {
     /// Root occurrences whose retained collector record changed in this tick.
     /// The future structured carrier can render exactly these parents.
     pub(crate) structured_app_row_changes: BTreeSet<RowUuid>,
+    /// Generic Groove terminal patches. These bypass relation/result assembly
+    /// and are forwarded unchanged to the subscription boundary.
+    pub(crate) terminal_operations: Vec<TerminalOperation>,
     pub(crate) allow_storage_witness_fallback: bool,
     pub(crate) observed_delta_batches: usize,
     pub(crate) observed_result_delta_batches: usize,
@@ -240,6 +243,12 @@ impl MaintainedSubscriptionView {
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     ) -> Result<ResultTransitions, super::Error> {
         let mut transitions = ResultTransitions::default();
+        transitions.terminal_operations.extend(
+            deltas
+                .terminal_sinks
+                .values()
+                .flat_map(|deltas| deltas.operations.iter().cloned()),
+        );
         for (sink, deltas) in deltas.sinks {
             let delta_transitions =
                 self.apply_typed_deltas(&sink, &deltas, schemas, tables, node_aliases)?;

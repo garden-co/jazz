@@ -3,6 +3,7 @@ import type {
   ColumnType,
   InsertValues,
   NativeRowDelta,
+  NativeTerminalOperation,
   TablePolicies,
   Value,
   WasmSchema,
@@ -1571,6 +1572,7 @@ export class NativeRuntimeAdapter implements Runtime {
         subscription.rows = applied.rows;
         subscription.rowIndexByKey = applied.rowIndexByKey;
         subscription.opened = true;
+        applied.wireDelta.terminalOperations = chunk.terminalOperations;
         this.publishSubscriptionRows(
           subscription,
           applied.wireDelta,
@@ -3712,6 +3714,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
       type: "delta";
       reset?: boolean;
       delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] };
+      terminalOperations?: NativeTerminalOperation[];
       settled?: boolean;
     }
   | {
@@ -3730,6 +3733,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
     reason?: unknown;
     reset?: unknown;
     settled?: unknown;
+    terminalOperations?: unknown;
   };
   if (record.type === "closed" || record.type === "Closed") {
     return { type: "closed" };
@@ -3748,6 +3752,9 @@ function normalizeSubscriptionChunk(chunk: unknown):
       delta: readNativeSubscriptionDelta(
         new PostcardReader(assertBytes(record.delta, "subscription delta")),
       ),
+      terminalOperations: Array.isArray(record.terminalOperations)
+        ? (record.terminalOperations as NativeTerminalOperation[])
+        : undefined,
       settled: typeof record.settled === "boolean" ? record.settled : undefined,
     };
   }

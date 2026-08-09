@@ -3673,6 +3673,7 @@ fn encode_subscription_reset_frame_for_size(
         added: size_row_batches(&snapshot.rows),
         updated: Vec::new(),
         removed: Vec::new(),
+        terminal_operations: Vec::new(),
     })
 }
 
@@ -8571,6 +8572,8 @@ pub enum SubscriptionEvent {
         updated: Vec<SubscriptionOutputRow>,
         /// Rows no longer visible to the subscription.
         removed: Vec<RemovedRow>,
+        /// Typed structural edits to already hydrated terminal rows.
+        terminal_operations: Vec<groove::ivm::TerminalOperation>,
         /// Whether the result is complete at the requested read tier.
         settled: bool,
         /// Read tier used to materialize the rows.
@@ -8710,6 +8713,7 @@ fn subscription_reset_event(
             .collect(),
         updated: Vec::new(),
         removed: Vec::new(),
+        terminal_operations: Vec::new(),
         settled,
         tier,
     }
@@ -8763,6 +8767,7 @@ fn subscription_terminal_delta_event(
         added,
         updated,
         removed,
+        terminal_operations: Vec::new(),
         settled,
         tier,
     }
@@ -8815,6 +8820,7 @@ fn subscription_delta_event_with_reset(
         added,
         updated,
         removed,
+        terminal_operations: Vec::new(),
         settled,
         tier,
     }
@@ -8833,6 +8839,7 @@ fn apply_maintained_update_to_snapshot(
         removed: update_removed,
         added_edges: update_added_edges,
         removed_edges: update_removed_edges,
+        terminal_operations,
     } = update;
 
     if snapshot.rows.is_empty()
@@ -8854,6 +8861,7 @@ fn apply_maintained_update_to_snapshot(
                     .collect(),
                 updated: Vec::new(),
                 removed: Vec::new(),
+                terminal_operations: terminal_operations.clone(),
                 settled,
                 tier,
             };
@@ -8897,6 +8905,7 @@ fn apply_maintained_update_to_snapshot(
                 .collect(),
             updated: Vec::new(),
             removed: Vec::new(),
+            terminal_operations: terminal_operations.clone(),
             settled,
             tier,
         };
@@ -9012,6 +9021,7 @@ fn apply_maintained_update_to_snapshot(
         added,
         updated,
         removed,
+        terminal_operations,
         settled,
         tier,
     }

@@ -558,6 +558,7 @@ pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
     pub(crate) removed: Vec<OutputOccurrenceId>,
     pub(crate) added_edges: Vec<(RelationEdge, Option<CurrentRow>)>,
     pub(crate) removed_edges: Vec<RelationEdge>,
+    pub(crate) terminal_operations: Vec<groove::ivm::TerminalOperation>,
 }
 
 enum CurrentQueryProgramOutput {
@@ -4984,6 +4985,7 @@ where
                 allow_storage_witness_fallback: true,
                 observed_delta_batches: 0,
                 observed_result_delta_batches: 0,
+                terminal_operations: Vec::new(),
             },
         ))
     }
@@ -7724,6 +7726,7 @@ where
         >::new();
         let mut fact_states = BTreeMap::<ProgramFactEntry, (bool, bool)>::new();
         let mut structured_app_row_changes = BTreeSet::new();
+        let mut terminal_operations = Vec::new();
         loop {
             match local.subscription.try_recv() {
                 Ok(deltas) => {
@@ -7734,6 +7737,7 @@ where
                         &self.node_aliases,
                     )?;
                     structured_app_row_changes.extend(transitions.structured_app_row_changes);
+                    terminal_operations.extend(transitions.terminal_operations);
                     for entry in transitions.adds {
                         let before = local.result_set.contains(&entry);
                         states
@@ -7787,11 +7791,13 @@ where
             && payload_states.is_empty()
             && fact_states.is_empty()
             && structured_app_row_changes.is_empty()
+            && terminal_operations.is_empty()
         {
             return Ok(None);
         }
         let mut transitions = super::maintained_subscription_view::ResultTransitions {
             structured_app_row_changes,
+            terminal_operations,
             ..Default::default()
         };
         for (entry, (before, after)) in states {
@@ -7862,6 +7868,7 @@ where
     ) -> Result<LocalMaintainedViewSubscriptionUpdate, Error> {
         let structured_output = !local.result_query.array_subqueries.is_empty();
         let structured_app_row_changes = transitions.structured_app_row_changes.clone();
+        let terminal_operations = transitions.terminal_operations.clone();
         let aggregate_replacements = transitions
             .adds
             .iter()
@@ -8002,6 +8009,7 @@ where
             removed,
             added_edges,
             removed_edges,
+            terminal_operations,
         })
     }
 

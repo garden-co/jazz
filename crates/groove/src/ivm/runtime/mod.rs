@@ -3872,7 +3872,7 @@ impl MultisinkDeltas {
 
 /// Incremental edits to a materialized terminal tree. Paths alternate public
 /// collection fields and stable descendant keys, starting below `root_key`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct TerminalDeltas {
     pub operations: Vec<TerminalOperation>,
 }
@@ -3883,35 +3883,35 @@ impl TerminalDeltas {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct TerminalOperation {
-    pub root_key: Bytes,
+    pub root_key: Vec<u8>,
     pub path: Vec<TerminalPathSegment>,
     pub edit: TerminalEdit,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum TerminalPathSegment {
     Collection(String),
-    Key(Bytes),
+    Key(Vec<u8>),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum TerminalEdit {
     Insert {
         index: usize,
-        key: Bytes,
-        value: Bytes,
+        key: Vec<u8>,
+        value: Vec<u8>,
     },
     Update {
-        key: Bytes,
-        value: Bytes,
+        key: Vec<u8>,
+        value: Vec<u8>,
     },
     Remove {
-        key: Bytes,
+        key: Vec<u8>,
     },
     Move {
-        key: Bytes,
+        key: Vec<u8>,
         index: usize,
     },
 }

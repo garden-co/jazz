@@ -8,11 +8,12 @@
 import type {
   ColumnDescriptor,
   NativeRowDelta,
+  NativeTerminalOperation,
   SubscriptionWireDelta,
   WasmRow,
   RowDelta as WireRowDelta,
 } from "../drivers/types.js";
-import { decodeNativeRow } from "./native-runtime/native-row-codec.js";
+import { decodeNativeRow, decodeNativeRowObject } from "./native-runtime/native-row-codec.js";
 
 export const RowChangeKind = {
   Added: 0 as const,
@@ -243,10 +244,96 @@ export class SubscriptionManager<T extends { id: string }> {
       if (reset) {
         this.clear();
       }
+      if (delta.terminalOperations && delta.terminalOperations.length > 0 && !reset) {
+        return this.handleTerminalOperations(
+          delta.terminalOperations,
+          transform,
+          nativeColumns,
+        );
+      }
       return this.handleWireDelta(decodeNativeDelta(delta, nativeColumns), transform, reset);
     }
 
     return this.handleWireDelta(delta, transform);
+  }
+
+  private handleTerminalOperations(
+    operations: NativeTerminalOperation[],
+    transform: (row: WasmRow) => T,
+    rootColumns: readonly ColumnDescriptor[],
+  ): SubscriptionDelta<T> {
+    const changedRoots = new Set<string>();
+    for (const operation of operations) {
+      const rootId = terminalKeyId(operation.root_key);
+      const edit = operation.edit;
+      if (operation.path.length === 0) {
+        if ("Insert" in edit) {
+          const item = transform(
+            decodeNativeRow(rootId, rootColumns, Uint8Array.from(edit.Insert.value)),
+          );
+          this.currentResults.set(rootId, item);
+          this.removeId(rootId);
+          this.insertIdAt(rootId, edit.Insert.index);
+        } else if ("Update" in edit) {
+          const item = transform(
+            decodeNativeRow(rootId, rootColumns, Uint8Array.from(edit.Update.value)),
+          );
+          this.currentResults.set(rootId, item);
+        } else if ("Remove" in edit) {
+          this.currentResults.delete(rootId);
+          this.removeId(rootId);
+        } else if ("Move" in edit) {
+          this.removeId(rootId);
+          this.insertIdAt(rootId, edit.Move.index);
+        }
+        changedRoots.add(rootId);
+        continue;
+      }
+
+      const root = this.currentResults.get(rootId) as Record<string, unknown> | undefined;
+      if (!root) continue;
+      const target = terminalCollection(root, rootColumns, operation.path);
+      if (!target) continue;
+      const { values, columns } = target;
+      if ("Insert" in edit) {
+        const id = terminalKeyId(edit.Insert.key);
+        const value = decodeNativeRowObject(
+          id,
+          columns,
+          Uint8Array.from(edit.Insert.value),
+        );
+        removeTerminalValue(values, id);
+        values.splice(Math.max(0, Math.min(edit.Insert.index, values.length)), 0, value);
+      } else if ("Update" in edit) {
+        const id = terminalKeyId(edit.Update.key);
+        const index = terminalValueIndex(values, id);
+        if (index !== -1) {
+          values[index] = decodeNativeRowObject(
+            id,
+            columns,
+            Uint8Array.from(edit.Update.value),
+          );
+        }
+      } else if ("Remove" in edit) {
+        removeTerminalValue(values, terminalKeyId(edit.Remove.key));
+      } else if ("Move" in edit) {
+        const id = terminalKeyId(edit.Move.key);
+        const index = terminalValueIndex(values, id);
+        if (index !== -1) {
+          const [value] = values.splice(index, 1);
+          values.splice(Math.max(0, Math.min(edit.Move.index, values.length)), 0, value);
+        }
+      }
+      changedRoots.add(rootId);
+    }
+
+    const delta = Array.from(changedRoots).flatMap<RowDelta<T>>((id) => {
+      const index = this.orderedIdIndex.get(id);
+      const item = this.currentResults.get(id);
+      if (index === undefined || item === undefined) return [];
+      return [{ kind: RowChangeKind.Updated, id, index, item }];
+    });
+    return { delta, all: this.all() } as SubscriptionDelta<T>;
   }
 
   seed(rows: T[]): SubscriptionDelta<T> {
@@ -419,6 +506,56 @@ export class SubscriptionManager<T extends { id: string }> {
 
 export function isNativeRowDelta(delta: SubscriptionWireDelta): delta is NativeRowDelta {
   return !Array.isArray(delta) && delta.__jazzNativeRowDelta === true;
+}
+
+function terminalKeyId(encoded: readonly number[]): string {
+  const bytes = Uint8Array.from(encoded);
+  if (bytes.length === 17 && bytes[0] === 10) {
+    return readUuid(bytes, 1);
+  }
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function terminalValueIndex(values: unknown[], id: string): number {
+  return values.findIndex(
+    (value) => !!value && typeof value === "object" && (value as { id?: unknown }).id === id,
+  );
+}
+
+function removeTerminalValue(values: unknown[], id: string): void {
+  const index = terminalValueIndex(values, id);
+  if (index !== -1) values.splice(index, 1);
+}
+
+function terminalCollection(
+  root: Record<string, unknown>,
+  rootColumns: readonly ColumnDescriptor[],
+  path: NativeTerminalOperation["path"],
+): { values: unknown[]; columns: readonly ColumnDescriptor[] } | undefined {
+  let owner = root;
+  let columns = rootColumns;
+  for (let index = 0; index < path.length; index += 1) {
+    const segment = path[index]!;
+    if (!("Collection" in segment)) return undefined;
+    const column = columns.find((candidate) => candidate.name === segment.Collection);
+    const columnType = column?.column_type;
+    if (columnType?.type !== "Array" || columnType.element.type !== "Row") return undefined;
+    const values = owner[segment.Collection];
+    if (!Array.isArray(values)) return undefined;
+    const childColumns = columnType.element.columns;
+    if (index === path.length - 1) return { values, columns: childColumns };
+    const keySegment = path[++index];
+    if (!keySegment || !("Key" in keySegment)) return undefined;
+    const childId = terminalKeyId(keySegment.Key);
+    const child = values.find(
+      (value) =>
+        !!value && typeof value === "object" && (value as { id?: unknown }).id === childId,
+    );
+    if (!child || typeof child !== "object") return undefined;
+    owner = child as Record<string, unknown>;
+    columns = childColumns;
+  }
+  return undefined;
 }
 
 function readUuid(bytes: Uint8Array, offset: number): string {

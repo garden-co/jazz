@@ -676,6 +676,7 @@ impl PeerState {
             allow_storage_witness_fallback,
             observed_delta_batches: _,
             observed_result_delta_batches,
+            terminal_operations: _,
         } = transitions;
         let result_add_count = result_member_adds.len();
         let result_remove_count = result_member_removes.len();
@@ -992,6 +993,7 @@ impl PeerState {
             allow_storage_witness_fallback,
             observed_delta_batches,
             observed_result_delta_batches,
+            terminal_operations: Vec::new(),
         })
     }
 
@@ -1331,6 +1333,7 @@ impl PeerState {
             allow_storage_witness_fallback: source_allow_storage_witness_fallback,
             observed_delta_batches: _,
             observed_result_delta_batches: _,
+            terminal_operations: _,
         } = source_transitions;
         if !source_adds.is_empty()
             || !source_removes.is_empty()

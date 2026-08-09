@@ -133,6 +133,51 @@ describe("SubscriptionManager", () => {
     ]);
   });
 
+  it("applies typed terminal patches without a replacement row delta", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const id = "00000000-0000-4000-8000-000000000001";
+    manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: nativeAddedRecord(id, 0, "before", 1),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 1,
+        removedCount: 0,
+        updatedCount: 0,
+      },
+      transform,
+      nativeColumns,
+    );
+
+    const key = [10, ...uuidBytes(id)];
+    const result = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: key,
+            path: [],
+            edit: { Update: { key, value: [...nativeRowData("after", 2)] } },
+          },
+        ],
+      },
+      transform,
+      nativeColumns,
+    );
+
+    expect(result.delta).toEqual([
+      { kind: 2, id, index: 0, item: { id, name: "after", count: 2 } },
+    ]);
+    expect(result.all).toEqual([{ id, name: "after", count: 2 }]);
+  });
+
   it("clears tracked state before applying native reset frames", () => {
     const manager = new SubscriptionManager<TestItem>();
     const first = "00000000-0000-4000-8000-000000000001";
