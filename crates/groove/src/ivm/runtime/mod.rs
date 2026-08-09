@@ -11090,9 +11090,9 @@ fn collect_by_expanded_window(
     for (record, copies) in window {
         let occurrence =
             encoded_record_key_part(input_desc, &record, &collect_by.occurrence_id_field_indices)?;
-        // A weighted duplicate or two different source rows that map to the
-        // same vector cannot be addressed by OutputOccurrenceId yet. Do not
-        // silently turn that ambiguity into one row.
+        // The complete typed occurrence carrier must distinguish every
+        // derivation. A residual weighted duplicate is therefore malformed;
+        // do not silently turn that ambiguity into one row.
         if copies != 1 || expanded.contains_key(&occurrence) {
             return Err(IvmRuntimeError::DuplicateCollectByOccurrenceId);
         }

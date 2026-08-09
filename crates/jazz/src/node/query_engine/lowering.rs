@@ -709,6 +709,7 @@ impl UnionPlan {
 
 #[derive(Clone, Debug)]
 struct UnionBranchPlan {
+    label: String,
     plan: RelationInputPlan,
 }
 
@@ -1693,7 +1694,10 @@ fn analyze_union(
     let mut branches = Vec::new();
     for input in inputs {
         let plan = analyze_relation_input_node(&input.node, nodes, visited)?;
-        branches.push(UnionBranchPlan { plan });
+        branches.push(UnionBranchPlan {
+            label: input.label.clone(),
+            plan,
+        });
     }
     Ok(UnionPlan { branches })
 }
@@ -2336,6 +2340,7 @@ fn lower_correlated_path_plan(
             fields: source_fields(root_source).collect(),
             nullable_fields: source_nullable_fields(root_source),
             nullable_field_depths: source_nullable_field_depths(root_source),
+            union_occurrence_carrier: None,
         }),
         CorrelationRequirement::AtLeastOne => {
             let parent = unwrap_join_key_if_nullable(
@@ -2357,6 +2362,7 @@ fn lower_correlated_path_plan(
                 fields: source_fields(root_source).collect(),
                 nullable_fields: source_nullable_fields(root_source),
                 nullable_field_depths: source_nullable_field_depths(root_source),
+                union_occurrence_carrier: None,
             })
         }
         CorrelationRequirement::MatchCorrelationCardinality => {
@@ -2378,6 +2384,7 @@ fn lower_correlated_path_plan(
                 fields: source_fields(root_source).collect(),
                 nullable_fields: source_nullable_fields(root_source),
                 nullable_field_depths: source_nullable_field_depths(root_source),
+                union_occurrence_carrier: None,
             })
         }
     }
@@ -2571,6 +2578,7 @@ fn lower_correlated_path_relation_graph_from_parent(
         fields: BTreeSet::new(),
         nullable_fields: BTreeSet::new(),
         nullable_field_depths: BTreeMap::new(),
+        union_occurrence_carrier: None,
     })
 }
 
@@ -2617,6 +2625,9 @@ struct LoweredRelationInput {
     fields: BTreeSet<String>,
     nullable_fields: BTreeSet<String>,
     nullable_field_depths: BTreeMap<String, usize>,
+    /// Hidden `(stable union-arm label, source row UUID)` identity retained by
+    /// UNION ALL relation inputs for occurrence-addressed public output.
+    union_occurrence_carrier: Option<(String, String)>,
 }
 
 fn lower_relation_input(
@@ -2667,11 +2678,66 @@ fn lower_union_relation_input(
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     let mut lowered = Vec::new();
     for branch in &union.branches {
-        lowered.push(lower_relation_input(
-            &branch.plan,
+        let RelationInputPlan::Linear(linear) = &branch.plan else {
+            return Err(UnsupportedReason::Operator(
+                "UNION ALL join occurrence identity requires source-rooted linear arms".to_owned(),
+            ));
+        };
+        let source_id = linear.root.source().ok_or_else(|| {
+            UnsupportedReason::Operator(
+                "UNION ALL join occurrence identity requires a stable source row".to_owned(),
+            )
+        })?;
+        let source = resolved_sources.get(source_id).ok_or_else(|| {
+            UnsupportedReason::Runtime(format!("union source {source_id:?} was not resolved"))
+        })?;
+        let mut retained = linear.clone();
+        if let Some(LinearStep::Project(columns)) = retained.steps.last_mut() {
+            columns.push(RowProjection {
+                output: TypedOutputField {
+                    name: "__union_occurrence_row".to_owned(),
+                    ty: ColumnType::Uuid,
+                },
+                value: NormalizedValueRef::RowId(RowIdRef::Source(source_id.clone())),
+            });
+        }
+        let mut output = lower_linear_plan_steps(
+            source.graph.clone(),
+            &retained,
+            source,
             resolved_sources,
             request,
-        )?);
+        )?;
+        if !output.fields.contains("__union_occurrence_row") {
+            let row_field = &source.row_shape.row_uuid_field;
+            if !output.fields.contains(row_field) {
+                return Err(UnsupportedReason::Operator(
+                    "UNION ALL arm projection discarded its stable source row identity".to_owned(),
+                ));
+            }
+            output.graph =
+                output
+                    .graph
+                    .project_fields(output.fields.iter().map(ProjectField::named).chain(
+                        std::iter::once(ProjectField::renamed(row_field, "__union_occurrence_row")),
+                    ));
+            output.fields.insert("__union_occurrence_row".to_owned());
+        }
+        output.graph =
+            output
+                .graph
+                .project_fields(output.fields.iter().map(ProjectField::named).chain(
+                    std::iter::once(ProjectField::literal(
+                        "__union_occurrence_arm",
+                        Value::String(branch.label.clone()),
+                    )),
+                ));
+        output.fields.insert("__union_occurrence_arm".to_owned());
+        output.union_occurrence_carrier = Some((
+            "__union_occurrence_arm".to_owned(),
+            "__union_occurrence_row".to_owned(),
+        ));
+        lowered.push(output);
     }
     lower_union_inputs(lowered, request)
 }
@@ -2738,6 +2804,7 @@ fn lower_union_inputs(
     let first = lowered.next().ok_or_else(|| {
         UnsupportedReason::Operator("union row-set nodes require at least one input".to_owned())
     })?;
+    let union_occurrence_carrier = first.union_occurrence_carrier.clone();
     let mut graphs = vec![first.graph];
     let mut root_source = first.root_source;
     let fields = first.fields;
@@ -2747,6 +2814,11 @@ fn lower_union_inputs(
         if branch.fields != fields {
             return Err(UnsupportedReason::Operator(
                 "union branches must output the same fields".to_owned(),
+            ));
+        }
+        if branch.union_occurrence_carrier != union_occurrence_carrier {
+            return Err(UnsupportedReason::Operator(
+                "union branches must use the same typed occurrence carrier".to_owned(),
             ));
         }
         nullable_fields.extend(branch.nullable_fields);
@@ -2772,6 +2844,7 @@ fn lower_union_inputs(
         fields,
         nullable_fields,
         nullable_field_depths,
+        union_occurrence_carrier,
     })
 }
 
@@ -2910,6 +2983,7 @@ fn lower_recursive_relation(
         fields,
         nullable_fields: BTreeSet::new(),
         nullable_field_depths: BTreeMap::new(),
+        union_occurrence_carrier: None,
     })
 }
 
@@ -3201,11 +3275,21 @@ fn lower_linear_plan_steps(
                                 ));
                                 occurrence_fields.insert(output);
                             }
-                        } else if matches!(right.as_ref(), RelationInputPlan::Union(_)) {
-                            return Err(UnsupportedReason::Operator(
-                                "UNION ALL join output requires a typed arm-and-row occurrence identity"
-                                    .to_owned(),
+                        } else if let Some((arm_field, row_field)) =
+                            &lowered_right.union_occurrence_carrier
+                        {
+                            let arm_output = format!("__root_join_arm_{step_index}");
+                            let row_output = format!("__root_join_row_{step_index}");
+                            projection.push(ProjectField::renamed(
+                                right_field(arm_field),
+                                arm_output.clone(),
                             ));
+                            projection.push(ProjectField::renamed(
+                                right_field(row_field),
+                                row_output.clone(),
+                            ));
+                            occurrence_fields.insert(arm_output);
+                            occurrence_fields.insert(row_output);
                         }
                     }
                     graph = graph.project_fields(projection);
@@ -3372,6 +3456,7 @@ fn lower_linear_plan_steps(
         fields,
         nullable_fields,
         nullable_field_depths,
+        union_occurrence_carrier: None,
     })
 }
 
@@ -4496,6 +4581,7 @@ fn lower_aggregate(
         fields,
         nullable_fields: BTreeSet::new(),
         nullable_field_depths: BTreeMap::new(),
+        union_occurrence_carrier: None,
     })
 }
 
@@ -5849,6 +5935,11 @@ fn root_join_occurrence_fields(
         if matches!(steps.get(step_index + 1), Some(LinearStep::Project(_))) {
             continue;
         }
+        if matches!(right.as_ref(), RelationInputPlan::Union(_)) {
+            fields.push((format!("__root_join_arm_{step_index}"), ValueType::String));
+            fields.push((format!("__root_join_row_{step_index}"), ValueType::Uuid));
+            continue;
+        }
         let Some(source_id) = right.root_source() else {
             continue;
         };
@@ -7084,6 +7175,8 @@ fn fact_output_with_terminal(
             }
             let version = version_witness_fields(&source.row_shape)?;
             let occurrence_id_fields = result_occurrence_id_fields(plan, source, resolved_sources)?;
+            let occurrence_union_arm_fields =
+                result_occurrence_union_arm_fields(plan, source, resolved_sources)?;
             let payload_fields = flat_join_payload_fields(plan);
             let settle_position_field = payload_fields
                 .is_empty()
@@ -7093,6 +7186,7 @@ fn fact_output_with_terminal(
                 table_field: "table_name".to_owned(),
                 row_field: source.row_shape.row_uuid_field.clone(),
                 occurrence_id_fields,
+                occurrence_union_arm_fields,
                 payload_fields,
                 branch_or_prefix_field: version.branch_or_prefix_field.clone(),
                 version: ResultMembershipVersionSchema::Content(ContentVersionFields {
@@ -7178,10 +7272,37 @@ fn result_occurrence_id_fields(
         fields.extend(
             root_join_occurrence_fields(plan, resolved_sources)?
                 .into_iter()
-                .map(|(name, _)| name),
+                .filter_map(|(name, value_type)| (value_type == ValueType::Uuid).then_some(name)),
         );
     }
     Ok(fields)
+}
+
+fn result_occurrence_union_arm_fields(
+    plan: &AnalyzedQueryPlan,
+    source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+) -> CapabilityResult<BTreeMap<usize, String>> {
+    if &source.row_shape.source != plan.root_source() {
+        return Ok(BTreeMap::new());
+    }
+    let fields = root_join_occurrence_fields(plan, resolved_sources)?;
+    let mut joined_position = 0usize;
+    let mut pending_arm = None;
+    let mut arms = BTreeMap::new();
+    for (name, value_type) in fields {
+        match value_type {
+            ValueType::String => pending_arm = Some(name),
+            ValueType::Uuid => {
+                if let Some(arm) = pending_arm.take() {
+                    arms.insert(joined_position, arm);
+                }
+                joined_position += 1;
+            }
+            _ => {}
+        }
+    }
+    Ok(arms)
 }
 
 fn flat_join_payload_fields(plan: &AnalyzedQueryPlan) -> Vec<TypedOutputField> {
@@ -7338,11 +7459,16 @@ fn fact_terminal_graph(
                     routing_param_fields,
                 )?));
             }
+            let mut occurrence_fields =
+                result_occurrence_id_fields(plan, source, resolved_sources)?;
+            occurrence_fields.extend(
+                result_occurrence_union_arm_fields(plan, source, resolved_sources)?.into_values(),
+            );
             Ok(graph.project_fields(result_membership_fields(
                 source,
                 routing_param_fields,
                 &flat_join_payload_fields(plan),
-                &result_occurrence_id_fields(plan, source, resolved_sources)?,
+                &occurrence_fields,
                 flat_join_payload_fields(plan).is_empty(),
             )?))
         }

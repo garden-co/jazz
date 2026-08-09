@@ -140,7 +140,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 "result keys retain their complete opaque identity through serialization"
             );
             let mut unsupported = wire;
-            unsupported[0] = 2;
+            unsupported[0] = 3;
             assert!(
                 serde_json::from_value::<ResultKey>(serde_json::json!(unsupported)).is_err(),
                 "unknown ResultKey wire versions fail closed"

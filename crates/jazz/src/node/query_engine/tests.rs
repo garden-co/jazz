@@ -1498,15 +1498,63 @@ fn current_join_via_can_use_union_relation_input() {
                 values: BTreeMap::new(),
             },
         },
-        output: row_set_output(BTreeSet::new()),
+        output: row_set_output(BTreeSet::from([ProgramFactKey::ResultMembership])),
     };
 
-    let error = lower_query_program(request, &mut FakeSourceResolver::default())
-        .expect_err("UNION ALL output must not silently collapse equal arm occurrences");
-    assert!(error.gaps.iter().any(|gap| matches!(
-        gap,
-        UnsupportedReason::Operator(reason)
-            if reason.contains("typed arm-and-row occurrence identity")
+    let program = lower_query_program(request, &mut FakeSourceResolver::default())
+        .expect("union relation input should lower");
+    let app_rows = &program
+        .lowered
+        .terminals
+        .first()
+        .expect("lowered terminal")
+        .graph;
+    assert_public_root_terminal(app_rows);
+    assert!(graph_any(app_rows, &|graph| matches!(
+        graph,
+        GraphBuilder::Project { input, fields }
+            if fields.iter().any(|field| field.output_name == "__root_join_arm_0")
+                && fields.iter().any(|field| field.output_name == "__root_join_row_0")
+                && matches!(
+                    input.as_ref(),
+                    GraphBuilder::Join { right, right_on, .. }
+                        if matches!(right.as_ref(), GraphBuilder::Union { inputs } if inputs.len() == 2)
+                            && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "todo")
+                )
+    )));
+    let membership = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "maintained.result_current")
+        .expect("result-membership terminal");
+    let ProgramOutputSchemas::RowSet(outputs) = &program.lowered.output;
+    let schema = outputs
+        .iter()
+        .find_map(|output| match output {
+            OutputTerminalSchema::Fact(ProgramFactOutput {
+                schema: ProgramFactSchema::ResultMembership(schema),
+                ..
+            }) => Some(schema),
+            _ => None,
+        })
+        .expect("result-membership schema");
+    assert_eq!(
+        schema.occurrence_id_fields,
+        ["row_uuid", "__root_join_row_0"]
+    );
+    assert_eq!(
+        schema
+            .occurrence_union_arm_fields
+            .get(&0)
+            .map(String::as_str),
+        Some("__root_join_arm_0")
+    );
+    assert!(graph_any(&membership.graph, &|graph| matches!(
+        graph,
+        GraphBuilder::Project { fields, .. }
+            if fields.iter().any(|field| field.output_name == "__root_join_arm_0")
+                && fields.iter().any(|field| field.output_name == "__root_join_row_0")
     )));
 }
 

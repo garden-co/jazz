@@ -431,19 +431,16 @@ joined row can occur under multiple roots, and a root can occur in multiple
 joined tuples.
 
 **Multiplicity boundary.** Groove joins are weighted
-(`groove/SPEC/INVARIANTS.md::INV-QUERY-9`). The stated flat-join surface admits
-exactly one current-row occurrence for each declared source alias, so its
-ordered source-id vector is unique. It MUST reject a bag or multi-path input
-whose two visible copies have the same source-id vector. If that surface is ever
-admitted, the producing graph MUST carry a stable, canonical occurrence or
-derivation discriminator and `OutputOccurrenceId` MUST be extended to include
-it; delivery, cache, reset, and consolidation semantics MUST then be revised
-together. Collapsing copies under the current vector is forbidden.
-
-🔶 **Open question: bag occurrence discriminator.** A path label and an
-upstream per-copy identity are both plausible sources, but neither is defined
-for arbitrary weighted Groove input today. Bag support remains rejected until a
-stable discriminator is chosen and propagated below the terminal.
+(`groove/SPEC/INVARIANTS.md::INV-QUERY-9`). Ordinary flat joins use the ordered
+source-id vector above. A `UNION ALL` relation arm additionally contributes its
+stable normalized arm label immediately before that arm's source-row id. This
+typed `(arm-label, row-id)` carrier is retained below the public projection and
+is used by Root grouping, maintained membership, reset snapshots, and
+`ResultKey`. Row-only keys retain the version-1 UUID-vector encoding byte for
+byte; keys with derivation discriminators use the version-2 typed encoding.
+Empty, duplicate-position, or out-of-range discriminators are malformed. A
+nested or recursive bag input without a stable labeled source-row carrier MUST
+still fail lowering rather than collapse copies.
 
 Maintained flat-join additions, removals, updates, reset snapshots, and the
 subscriber cache MUST be keyed by `OutputOccurrenceId`; the root `ObjectId`

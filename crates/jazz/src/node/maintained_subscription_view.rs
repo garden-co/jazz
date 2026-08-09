@@ -787,7 +787,26 @@ fn decode_typed_terminal_record(
                     "maintained result membership occurrence must include its root row",
                 ));
             };
-            let occurrence_id = OutputOccurrenceId::new(*root, joined.iter().copied());
+            let union_arms = schema
+                .occurrence_union_arm_fields
+                .iter()
+                .map(|(position, field)| {
+                    let label = match record.get_idx(field_idx(record, field)?)? {
+                        Value::String(label) if !label.is_empty() => label.clone(),
+                        _ => {
+                            return Err(super::Error::InvalidStoredValue(
+                                "maintained result union arm must be a non-empty string",
+                            ));
+                        }
+                    };
+                    Ok((*position, label))
+                })
+                .collect::<Result<Vec<_>, super::Error>>()?;
+            let occurrence_id =
+                OutputOccurrenceId::with_union_arms(*root, joined.iter().copied(), union_arms)
+                    .ok_or(super::Error::InvalidStoredValue(
+                        "maintained result union occurrence carrier is malformed",
+                    ))?;
             let (tx_time_field, tx_node_field) = match &schema.version {
                 super::query_engine::ResultMembershipVersionSchema::Content(content) => {
                     (&content.tx_time_field, &content.tx_node_field)
