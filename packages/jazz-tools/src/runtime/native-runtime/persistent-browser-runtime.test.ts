@@ -796,16 +796,16 @@ describe("PersistentBrowserOpfsRuntime", () => {
     });
     worker.respond(worker.messages.find((message) => message.method === "connect")!.id, undefined);
     await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "query")).toBe(true);
+    });
+    worker.respond(worker.messages.find((message) => message.method === "query")!.id, []);
+    await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
     });
     worker.respond(
       worker.messages.find((message) => message.method === "waitForTransaction")!.id,
       undefined,
     );
-    await vi.waitFor(() => {
-      expect(worker.messages.some((message) => message.method === "query")).toBe(true);
-    });
-    worker.respond(worker.messages.find((message) => message.method === "query")!.id, []);
 
     await expect(query).resolves.toEqual([]);
     await expect(wait).resolves.toBeUndefined();

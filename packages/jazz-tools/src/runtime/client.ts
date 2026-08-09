@@ -66,7 +66,7 @@ export interface Runtime {
     session?: Session,
   ): boolean;
   canDelete?(table: string, objectId: string, session?: Session): boolean;
-  waitForTransaction(batchId: BatchId, tier: string): Promise<void>;
+  waitForTransaction(batchId: BatchId | Promise<BatchId>, tier: string): Promise<void>;
   query(
     query_json: string,
     session_json?: string | null,
@@ -483,7 +483,7 @@ export class WriteHandle<T = void> {
    * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    */
   async wait(options: { tier: DurabilityTier }): Promise<T> {
-    return this.#client.waitForTransaction(await this.batchId, options.tier) as Promise<T>;
+    return this.#client.waitForTransaction(this.batchId, options.tier) as Promise<T>;
   }
 
   protected client(): JazzClient {
@@ -1086,7 +1086,10 @@ export class JazzClient {
     return normalizeRuntimeSchema(this.context.schema);
   }
 
-  async waitForTransaction(batchId: BatchId, tier: DurabilityTier): Promise<void> {
+  async waitForTransaction(
+    batchId: BatchId | Promise<BatchId>,
+    tier: DurabilityTier,
+  ): Promise<void> {
     try {
       await this.runtime.waitForTransaction(batchId, tier);
     } catch (error) {

@@ -61,6 +61,7 @@ type PersistentRuntimeShared = {
   nextCallId: number;
   nextSubscriptionId: number;
   commandTail: Promise<void>;
+  blockingServerCommands: number;
 };
 
 export type { PersistentBrowserOpfsOwnerRequest } from "./persistent-browser-protocol.js";
@@ -170,6 +171,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       nextCallId: 1,
       nextSubscriptionId: 1,
       commandTail: Promise.resolve(),
+      blockingServerCommands: 0,
     };
     this.viewId = Promise.resolve(undefined);
     worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
@@ -281,19 +283,28 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     return this.queueWrite("delete", table, objectId, writeContext);
   }
 
-  waitForTransaction(batchId: BatchId, tier: string): Promise<void> {
+  waitForTransaction(batchId: BatchId | Promise<BatchId>, tier: string): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.waitForTransaction(batchId, tier);
-    const wait = (async () => {
+    const blocksOnServer = tier === "edge" || tier === "global";
+    if (blocksOnServer) this.shared.blockingServerCommands += 1;
+    const wait = this.enqueueCommand(async () => {
+      const resolvedBatchId = await batchId;
       await this.opened;
-      if (tier === "edge" || tier === "global") await this.connectionReady.promise;
-      await this.send("waitForTransaction", [batchId, tier]);
-    })();
-    let waits = this.settledWrites.get(batchId);
-    if (!waits) {
-      waits = new Map();
-      this.settledWrites.set(batchId, waits);
-    }
-    waits.set(tier, wait);
+      if (blocksOnServer) await this.connectionReady.promise;
+      await this.send("waitForTransaction", [resolvedBatchId, tier]);
+    }).finally(() => {
+      if (blocksOnServer) this.shared.blockingServerCommands -= 1;
+    });
+    void Promise.resolve(batchId)
+      .then((resolvedBatchId) => {
+        let waits = this.settledWrites.get(resolvedBatchId);
+        if (!waits) {
+          waits = new Map();
+          this.settledWrites.set(resolvedBatchId, waits);
+        }
+        waits.set(tier, wait);
+      })
+      .catch(() => undefined);
     return wait;
   }
 
@@ -397,17 +408,22 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     optionsJson?: string | null,
   ): Promise<unknown> {
     const readFence = this.captureReadFence(optionsJson);
-    return (async () => {
+    const blocksOnServer = requiresServerPropagation(tier, optionsJson);
+    const serverWaitFence = this.captureServerWaitsForRead(tier);
+    if (blocksOnServer) this.shared.blockingServerCommands += 1;
+    return this.enqueueCommand(async () => {
       await this.opened;
       await this.awaitReadBatchBegin(optionsJson);
       this.assertReadTransactionOpen(optionsJson);
       await this.settleReadFence(readFence);
-      if (requiresServerPropagation(tier, optionsJson)) {
+      if (blocksOnServer) {
         await this.connectionReady.promise;
-        await this.settleServerWaitsForRead(tier);
+        await Promise.all(serverWaitFence);
       }
       return this.send("query", [queryJson, sessionJson, tier, optionsJson]);
-    })();
+    }).finally(() => {
+      if (blocksOnServer) this.shared.blockingServerCommands -= 1;
+    });
   }
 
   createSubscription(
@@ -418,6 +434,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   ): number {
     const localHandle = this.nextSubscriptionId++;
     const readFence = this.captureReadFence(optionsJson);
+    const serverWaitFence = this.captureServerWaitsForRead(tier);
     const remoteHandle = this.enqueueCommand(async () => {
       await this.opened;
       await this.awaitReadBatchBegin(optionsJson);
@@ -425,7 +442,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       await this.settleReadFence(readFence);
       if (requiresServerPropagation(tier, optionsJson)) {
         await this.connectionReady.promise;
-        await this.settleServerWaitsForRead(tier);
+        await Promise.all(serverWaitFence);
       }
       return this.send(
         "createExecutedSubscription",
@@ -464,9 +481,9 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     this.rejectConnectionWaiters();
     try {
       await this.opened;
-      const durabilityWaitIsExecuting = Array.from(this.pending.values()).some(
-        (call) => call.method === "waitForTransaction",
-      );
+      const durabilityWaitIsExecuting =
+        this.shared.blockingServerCommands > 0 ||
+        Array.from(this.pending.values()).some((call) => call.method === "waitForTransaction");
       if (!durabilityWaitIsExecuting) await this.shared.commandTail;
       await this.send("close", []);
     } finally {
@@ -730,8 +747,8 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     await Promise.all(fence);
   }
 
-  private async settleServerWaitsForRead(tier: string | null | undefined): Promise<void> {
-    if (tier !== "edge" && tier !== "global") return;
+  private captureServerWaitsForRead(tier: string | null | undefined): readonly Promise<void>[] {
+    if (tier !== "edge" && tier !== "global") return [];
     const waits: Promise<void>[] = [];
     for (const writeWaits of this.settledWrites.values()) {
       const globalWait = writeWaits.get("global");
@@ -742,7 +759,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       const edgeWait = writeWaits.get("edge");
       if (edgeWait) waits.push(edgeWait);
     }
-    await Promise.all(waits);
+    return waits;
   }
 
   private assertReadTransactionOpen(optionsJson: string | null | undefined): void {
