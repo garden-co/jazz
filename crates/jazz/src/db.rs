@@ -46,10 +46,10 @@ use crate::peer::{PeerRole, PeerState};
 #[cfg(feature = "sync-autopsy")]
 use crate::protocol::expand_version_carriers;
 use crate::protocol::{
-    BindingViewKey, ContentExtent, CoverageKey, CurrentWriteSchema, LargeValueOwnerRef,
+    BindingViewKey, ContentExtent, CoverageKey, CurrentWriteSchema, LargeValueOwnerRef, LensOp,
     MigrationLens, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
     SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
-    SubscribeServerFailureCode, SubscriptionKey, SyncMessage,
+    SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens,
 };
 use crate::protocol_limits::{
     MAX_FETCH_BRANCH_METADATA, MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES, MAX_INFLIGHT_LOGICAL_MESSAGES,
@@ -253,6 +253,100 @@ fn default_cell_for_column_type(column_type: &GrooveColumnType, default: &Value)
         }
         _ => default.clone(),
     }
+}
+
+fn schema_view_column_default(column: &crate::schema::ColumnSchema) -> Result<Value, Error> {
+    if let Some(default) = &column.default {
+        return Ok(default.clone());
+    }
+    if matches!(column.column_type, GrooveColumnType::Nullable(_)) {
+        return Ok(Value::Nullable(None));
+    }
+    Err(Error::new(
+        ErrorCode::Schema,
+        format!(
+            "schema view column {} requires a migration default",
+            column.name
+        ),
+    ))
+}
+
+fn direct_schema_view_lens(
+    source: &JazzSchema,
+    target: &JazzSchema,
+) -> Result<(MigrationLens, Vec<String>, Vec<String>), Error> {
+    let source_id = source.version_id();
+    let target_id = target.version_id();
+    let mut table_lenses = Vec::new();
+    for source_table in &source.tables {
+        let Some(target_table) = target
+            .tables
+            .iter()
+            .find(|table| table.name == source_table.name)
+        else {
+            continue;
+        };
+        let mut ops = Vec::new();
+        for target_column in &target_table.columns {
+            match source_table
+                .columns
+                .iter()
+                .find(|column| column.name == target_column.name)
+            {
+                Some(source_column)
+                    if source_column.column_type == target_column.column_type
+                        && source_column.large_value == target_column.large_value
+                        && source_column.text_merge_spec == target_column.text_merge_spec => {}
+                Some(_) => {
+                    return Err(Error::new(
+                        ErrorCode::Schema,
+                        format!(
+                            "schema view changes type of {}.{} without an explicit lens",
+                            target_table.name, target_column.name
+                        ),
+                    ));
+                }
+                None => ops.push(LensOp::AddColumn {
+                    column: target_column.name.clone(),
+                    default: schema_view_column_default(target_column)?,
+                }),
+            }
+        }
+        for source_column in &source_table.columns {
+            if target_table
+                .columns
+                .iter()
+                .all(|column| column.name != source_column.name)
+            {
+                ops.push(LensOp::DropColumn {
+                    column: source_column.name.clone(),
+                    backwards_default: schema_view_column_default(source_column)?,
+                });
+            }
+        }
+        table_lenses.push(TableLens {
+            source_table: source_table.name.clone(),
+            target_table: target_table.name.clone(),
+            ops,
+        });
+    }
+    let new_tables = target
+        .tables
+        .iter()
+        .filter(|table| source.tables.iter().all(|source| source.name != table.name))
+        .map(|table| table.name.clone())
+        .collect::<Vec<_>>();
+    let dropped_tables = source
+        .tables
+        .iter()
+        .filter(|table| target.tables.iter().all(|target| target.name != table.name))
+        .map(|table| table.name.clone())
+        .collect::<Vec<_>>();
+    Ok((
+        MigrationLens::new(source_id, target_id, table_lenses),
+        new_tables,
+        dropped_tables,
+    ))
 }
 
 struct WriteStateWaiter {
@@ -493,7 +587,7 @@ where
     pub fn register_schema_view(&self, schema: JazzSchema) -> Result<Self, Error> {
         let schema_version_id = schema.version_id();
         let schema_view_id = SchemaViewId::for_schema(&schema);
-        self.bootstrap_first_runtime_schema_if_needed(&schema)?;
+        self.admit_local_schema_view_if_needed(&schema)?;
         let mut views = self.schema_views.borrow_mut();
         if let Some(existing) = views.get(&schema_view_id) {
             if existing != &schema {
@@ -543,48 +637,49 @@ where
     /// with the empty schema. This is the local-first bootstrap equivalent of
     /// having opened the runtime with that schema originally; later schemas
     /// still arrive through ordinary catalogue lineage publication.
-    fn bootstrap_first_runtime_schema_if_needed(&self, schema: &JazzSchema) -> Result<(), Error> {
+    fn admit_local_schema_view_if_needed(&self, schema: &JazzSchema) -> Result<(), Error> {
         let empty_schema = JazzSchema::new([]);
         let empty_id = empty_schema.version_id();
         let target_id = schema.version_id();
-        if target_id == empty_id {
-            return Ok(());
-        }
-        let should_bootstrap = {
+        let (source, catalogue_seq, bootstrap_current) = {
             let node = self.node.node.borrow();
-            node.current_write_schema().schema == empty_id
-                && node.catalogue_schemas().len() == 1
-                && node.catalogue_schemas().contains_key(&empty_id)
-                && !node.catalogue_schemas().contains_key(&target_id)
+            if node.catalogue_schemas().contains_key(&target_id) {
+                return Ok(());
+            }
+            let current = node.current_write_schema();
+            let source = node
+                .catalogue_schemas()
+                .get(&current.schema)
+                .map(|version| version.schema.clone())
+                .ok_or_else(|| Error::new(ErrorCode::Schema, "current schema view is missing"))?;
+            (
+                source,
+                node.active_catalogue_seq().saturating_add(1),
+                current.schema == empty_id && node.catalogue_schemas().len() == 1,
+            )
         };
-        if !should_bootstrap {
-            return Ok(());
-        }
-
-        let new_tables = schema
-            .tables
-            .iter()
-            .map(|table| table.name.clone())
-            .collect::<Vec<_>>();
+        let (lens, new_tables, dropped_tables) = direct_schema_view_lens(&source, schema)?;
         let publication = SchemaLineagePublication::new(
             SchemaVersion::new(schema.clone()),
-            MigrationLens::new(empty_id, target_id, Vec::new()),
+            lens,
             new_tables,
-            Vec::<String>::new(),
+            dropped_tables,
         );
         let mut node = self.node.node.borrow_mut();
         node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
-            catalogue_seq: 1,
+            catalogue_seq,
             publication: Box::new(publication),
         })?;
-        node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorId::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: target_id,
-            },
-        })?;
+        if bootstrap_current {
+            node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+                author: AuthorId::SYSTEM,
+                pointer: CurrentWriteSchema {
+                    revision: 1,
+                    schema: target_id,
+                },
+            })?;
+        }
         Ok(())
     }
 
@@ -2553,7 +2648,17 @@ where
         self.node
             .node
             .borrow_mut()
-            .tx_write_mergeable(tx_id, table, row, cells, None, Vec::new(), now_ms, false)
+            .tx_write_mergeable_in_schema(
+                tx_id,
+                self.schema_version_id,
+                table,
+                row,
+                cells,
+                None,
+                Vec::new(),
+                now_ms,
+                false,
+            )
             .map_err(Into::into)
     }
 
@@ -2568,7 +2673,7 @@ where
         self.node
             .node
             .borrow_mut()
-            .tx_patch_mergeable(tx_id, table, row, patch, now_ms)
+            .tx_patch_mergeable_in_schema(tx_id, self.schema_version_id, table, row, patch, now_ms)
             .map_err(Into::into)
     }
 
@@ -2582,8 +2687,9 @@ where
         self.node
             .node
             .borrow_mut()
-            .tx_write_mergeable(
+            .tx_write_mergeable_in_schema(
                 tx_id,
+                self.schema_version_id,
                 table,
                 row,
                 BTreeMap::new(),
@@ -2613,8 +2719,9 @@ where
             .local_deletion_winner_tx_id(table, row)?
             .into_iter()
             .collect();
-        node.tx_write_mergeable(
+        node.tx_write_mergeable_in_schema(
             tx_id,
+            self.schema_version_id,
             table,
             row,
             cells,
@@ -2623,8 +2730,9 @@ where
             now_ms,
             true,
         )?;
-        node.tx_write_mergeable(
+        node.tx_write_mergeable_in_schema(
             tx_id,
+            self.schema_version_id,
             table,
             row,
             BTreeMap::new(),
@@ -2738,7 +2846,7 @@ where
         self.node
             .node
             .borrow_mut()
-            .tx_write(tx_id, table, row, cells, None)
+            .tx_write_in_schema(tx_id, self.schema_version_id, table, row, cells, None)
             .map_err(Into::into)
     }
 
@@ -2751,8 +2859,9 @@ where
         self.node
             .node
             .borrow_mut()
-            .tx_write(
+            .tx_write_in_schema(
                 tx_id,
+                self.schema_version_id,
                 table,
                 row,
                 BTreeMap::<String, Value>::new(),
@@ -2774,9 +2883,10 @@ where
         // `tx_write` rejects a version carrying both. The layers have separate
         // winners and parent chains; see `restore`'s `local_*_winner_tx_id` pair.
         // Keep this staged form aligned with the committed restore path.
-        node.tx_write(tx_id, table, row, cells, None)?;
-        node.tx_write(
+        node.tx_write_in_schema(tx_id, self.schema_version_id, table, row, cells, None)?;
+        node.tx_write_in_schema(
             tx_id,
+            self.schema_version_id,
             table,
             row,
             BTreeMap::<String, Value>::new(),

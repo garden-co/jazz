@@ -523,6 +523,25 @@ impl WasmDbInner {
         with_wasm_db!(self, |db| db.exclusive_tx_ref(tx_id).all_prepared(query))
     }
 
+    fn mergeable_all_for_identity(
+        &self,
+        tx_id: OpenBatchId,
+        query: &PreparedQuery,
+        author: AuthorId,
+    ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
+        with_wasm_db!(self, |db| db
+            .mergeable_tx_ref(tx_id)
+            .all_prepared_for_identity(query, author))
+    }
+
+    fn mergeable_all(
+        &self,
+        tx_id: OpenBatchId,
+        query: &PreparedQuery,
+    ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
+        with_wasm_db!(self, |db| db.mergeable_tx_ref(tx_id).all_prepared(query))
+    }
+
     fn abandon_transaction(&self, tx_id: OpenBatchId) -> Result<(), jazz::db::Error> {
         with_wasm_db!(self, |db| db.abandon_transaction_handle(tx_id))
     }
@@ -1348,10 +1367,11 @@ impl WasmDb {
     ) -> Result<Vec<u8>, JsValue> {
         let _opts = read_opts_from_js(opts)?;
         let tx_id = tx.open_tx_for_read()?;
-        let rows = self
-            .inner
-            .exclusive_all(tx_id, &query.inner)
-            .map_err(to_js_error)?;
+        let rows = match tx.kind {
+            WasmTxKind::Mergeable => self.inner.mergeable_all(tx_id, &query.inner),
+            WasmTxKind::Exclusive => self.inner.exclusive_all(tx_id, &query.inner),
+        }
+        .map_err(to_js_error)?;
         encode_rows(&rows).map_err(to_js_error)
     }
 
@@ -1366,10 +1386,17 @@ impl WasmDb {
         let _opts = read_opts_from_js(opts)?;
         let author = author_id_from_bytes(&author)?;
         let tx_id = tx.open_tx_for_read()?;
-        let rows = self
-            .inner
-            .exclusive_all_for_identity(tx_id, &query.inner, author)
-            .map_err(to_js_error)?;
+        let rows = match tx.kind {
+            WasmTxKind::Mergeable => {
+                self.inner
+                    .mergeable_all_for_identity(tx_id, &query.inner, author)
+            }
+            WasmTxKind::Exclusive => {
+                self.inner
+                    .exclusive_all_for_identity(tx_id, &query.inner, author)
+            }
+        }
+        .map_err(to_js_error)?;
         encode_rows(&rows).map_err(to_js_error)
     }
 
@@ -2212,11 +2239,15 @@ fn read_rows_for_transaction(
 ) -> Result<Vec<jazz::node::CurrentRow>, JsValue> {
     let _opts = read_opts_from_js(opts)?;
     let tx_id = tx.open_tx_for_read()?;
-    match author {
-        Some(author) => db
+    match (tx.kind, author) {
+        (WasmTxKind::Mergeable, Some(author)) => db
+            .mergeable_all_for_identity(tx_id, &query.inner, author)
+            .map_err(to_js_error),
+        (WasmTxKind::Mergeable, None) => db.mergeable_all(tx_id, &query.inner).map_err(to_js_error),
+        (WasmTxKind::Exclusive, Some(author)) => db
             .exclusive_all_for_identity(tx_id, &query.inner, author)
             .map_err(to_js_error),
-        None => db.exclusive_all(tx_id, &query.inner).map_err(to_js_error),
+        (WasmTxKind::Exclusive, None) => db.exclusive_all(tx_id, &query.inner).map_err(to_js_error),
     }
 }
 
@@ -2848,6 +2879,11 @@ mod dynamic_schema_view_tests {
                 BTreeMap::from([("label".to_owned(), Value::String("kept".to_owned()))]),
             )
             .unwrap();
+        let prepared = view.prepare_query(&view.table("items")).unwrap();
+        let rows = WasmDbInner::Memory(Rc::clone(&view))
+            .mergeable_all(batch, &prepared)
+            .unwrap();
+        assert_eq!(rows.len(), 1, "the attached view reads staged rows");
         owner.commit_mergeable_handle(batch).unwrap();
 
         let exclusive = OpenBatchId::new();

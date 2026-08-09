@@ -230,12 +230,31 @@ where
         cells: BTreeMap<String, V>,
         deletion: Option<DeletionEvent>,
     ) -> Result<(), Error> {
+        self.tx_write_in_schema(
+            tx_id,
+            self.catalogue.current_write_schema.schema,
+            table,
+            row_uuid,
+            cells,
+            deletion,
+        )
+    }
+
+    /// Stage a row write through an explicit registered schema view.
+    pub fn tx_write_in_schema<V: Into<Value>>(
+        &mut self,
+        tx_id: OpenBatchId,
+        write_schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        cells: BTreeMap<String, V>,
+        deletion: Option<DeletionEvent>,
+    ) -> Result<(), Error> {
         if !matches!(self.open_tx(tx_id)?.kind, OpenTransactionKind::Exclusive) {
             return Err(Error::InvalidMergeableCommit(
                 "open transaction is not exclusive",
             ));
         }
-        let write_schema_version = self.catalogue.current_write_schema.schema;
         let table_schema = self.table_in_schema(table, write_schema_version)?;
         let cells = cells
             .into_iter()
@@ -284,9 +303,35 @@ where
         Ok(())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn tx_write_mergeable(
         &mut self,
         tx_id: OpenBatchId,
+        table: &str,
+        row_uuid: RowUuid,
+        cells: BTreeMap<String, Value>,
+        deletion: Option<DeletionEvent>,
+        parents: Vec<TxId>,
+        now_ms: Option<u64>,
+        refresh_parents_at_commit: bool,
+    ) -> Result<(), Error> {
+        self.tx_write_mergeable_in_schema(
+            tx_id,
+            self.catalogue.current_write_schema.schema,
+            table,
+            row_uuid,
+            cells,
+            deletion,
+            parents,
+            now_ms,
+            refresh_parents_at_commit,
+        )
+    }
+
+    pub(crate) fn tx_write_mergeable_in_schema(
+        &mut self,
+        tx_id: OpenBatchId,
+        write_schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
         cells: BTreeMap<String, Value>,
@@ -304,7 +349,6 @@ where
             ));
         }
         validate_mergeable_write_shape(cells.is_empty(), deletion.is_some())?;
-        let write_schema_version = self.catalogue.current_write_schema.schema;
         let table_schema = self.table_in_schema(table, write_schema_version)?;
         positional_cells_from_map(&table_schema, &cells)?;
         self.stage_mergeable_write(
@@ -322,9 +366,29 @@ where
         )
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn tx_patch_mergeable(
         &mut self,
         tx_id: OpenBatchId,
+        table: &str,
+        row_uuid: RowUuid,
+        patch: BTreeMap<String, Value>,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.tx_patch_mergeable_in_schema(
+            tx_id,
+            self.catalogue.current_write_schema.schema,
+            table,
+            row_uuid,
+            patch,
+            now_ms,
+        )
+    }
+
+    pub(crate) fn tx_patch_mergeable_in_schema(
+        &mut self,
+        tx_id: OpenBatchId,
+        write_schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
         patch: BTreeMap<String, Value>,
@@ -338,10 +402,11 @@ where
                 "open transaction is not mergeable",
             ));
         }
-        let mut staged_cells = self.tx_read(tx_id, table, row_uuid)?.unwrap_or_default();
+        let mut staged_cells = self
+            .tx_read_in_schema(tx_id, write_schema_version, table, row_uuid)?
+            .unwrap_or_default();
         staged_cells.extend(patch.clone());
         validate_mergeable_write_shape(staged_cells.is_empty(), false)?;
-        let write_schema_version = self.catalogue.current_write_schema.schema;
         let table_schema = self.table_in_schema(table, write_schema_version)?;
         positional_cells_from_map(&table_schema, &patch)?;
         self.stage_mergeable_write(
