@@ -21,6 +21,11 @@ type SeedWrite<T> = {
   wait(options: { tier: "local" }): Promise<T>;
 };
 
+/** @internal */
+export async function settlePolicySeed<T>(write: SeedWrite<T>): Promise<T> {
+  return write.wait({ tier: "local" });
+}
+
 /**
  * Db used for testing permissions.
  * Supports all {@link Db} operations plus the {@link TestDb.expectAllowed} and {@link TestDb.expectDenied}
@@ -83,7 +88,7 @@ export class PolicyTestApp {
    */
   async seed<T>(callback: (db: Db) => SeedWrite<T>): Promise<T> {
     const db = this.jazzContext.asBackend();
-    return callback(db).wait({ tier: "local" });
+    return settlePolicySeed(callback(db));
   }
 
   /**
