@@ -661,18 +661,17 @@ where
                 PendingCells::Patch(patch) => {
                     let table_schema = self.table_in_schema(&write.table, write.schema_version)?;
                     let mut cells = BTreeMap::new();
-                    let snapshot = self.open_tx(open_batch_id)?.base_snapshot.clone();
                     if let Some(existing) = self
-                        .snapshot_row_in_schema(
-                            write.schema_version,
+                        .current_rows_for_schema(
                             &write.table,
-                            write.row_uuid,
-                            &snapshot,
+                            write.schema_version,
+                            DurabilityTier::Local,
                         )?
-                        .content_cells
+                        .into_iter()
+                        .find(|row| row.row_uuid() == write.row_uuid)
                     {
-                        for (column, value) in table_schema.columns.iter().zip(existing) {
-                            if let Some(value) = value {
+                        for column in &table_schema.columns {
+                            if let Some(value) = existing.cell(&table_schema, &column.name) {
                                 cells.insert(column.name.clone(), value);
                             }
                         }
