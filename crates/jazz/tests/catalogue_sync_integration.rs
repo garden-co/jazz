@@ -2648,7 +2648,10 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         )
         .expect("admin creates current-schema post");
     current_admin
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("current-schema post reaches edge");
 
@@ -2712,9 +2715,12 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
             vec![("viewer_name".to_owned(), Value::Text(test_user_id("alice")))],
         )
         .expect("move one joined occurrence to Alice's policy scope");
-    bob.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
-        .await
-        .expect("selective policy update reaches edge");
+    bob.wait_for_batch(
+        batch_id.expect("ordinary mutation commits immediately"),
+        DurabilityTier::EdgeServer,
+    )
+    .await
+    .expect("selective policy update reaches edge");
 
     let retained_bob_rows = wait_for_query_results(
         &bob,
