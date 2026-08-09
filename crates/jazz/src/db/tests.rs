@@ -3012,6 +3012,51 @@ fn include_deleted_fails_closed_on_live_subscription_apis() {
 }
 
 #[test]
+fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
+    let empty = JazzSchema::new([]);
+    let refs = empty.column_families();
+    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+    let owner = block_on(Db::open(DbConfig {
+        schema: empty,
+        storage: doctest_support::MemoryStorage::new(&refs),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0x91; 16]),
+            author: AuthorId::from_bytes([0x92; 16]),
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(91))),
+        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    }))
+    .unwrap();
+    let schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("done", ColumnType::Bool),
+        ],
+    )]);
+    let view = owner.register_schema_view(schema).unwrap();
+    let open = OpenBatchId::new();
+    owner.begin_mergeable(open).unwrap();
+    let inserted = row(0x91);
+    view.mergeable_tx_ref(open)
+        .insert_with_id_at_ms(
+            "todos",
+            inserted,
+            doctest_support::todo_cells("attached", false),
+            1_704_067_200_123,
+        )
+        .unwrap();
+    owner.commit_mergeable_handle(open).unwrap();
+
+    let prepared = view
+        .prepare_query(&view.table("todos").select(["title", "$updatedAt"]))
+        .unwrap();
+    let rows = block_on(view.all(&prepared, ReadOpts::default())).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), inserted);
+}
+
+#[test]
 fn array_subquery_live_subscription_tracks_child_edges() {
     let schema = relation_schema();
     let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
