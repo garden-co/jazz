@@ -21,6 +21,14 @@
       "decoded_debug": "FetchBranchMetadata { branches: [BranchId(42424242-4242-4242-4242-424242424242)] }"
     },
     {
+      "name": "session_claims_role_editor",
+      "message_family": "SessionClaims",
+      "frame_hex": "01040100200210555555555555555555555555555555550104726f6c650606656469746f72",
+      "frame_base64": "AQQBACACEFVVVVVVVVVVVVVVVVVVVVUBBHJvbGUGBmVkaXRvcg==",
+      "payload_hex": "0210555555555555555555555555555555550104726f6c650606656469746f72",
+      "decoded_debug": "SessionClaims { identity: AuthorId(55555555-5555-5555-5555-555555555555), claims: {\"role\": String(\"editor\")} }"
+    },
+    {
       "name": "fate_update_accepted_global",
       "message_family": "FateUpdate",
       "frame_hex": "0104010018040c10111111111111111111111111111111110101070103",
@@ -51,6 +59,14 @@
       "frame_base64": "AQQBAEsGECIiIiIiIiIiIiIiIiIiIiIQIiIiIiIiIiIiIiIiIiIiIhAzMzMzMzMzMzMzMzMzMzMzEAAAAAAAAAAAAAAAAAAAAAAAAQEABwk=",
       "payload_hex": "061022222222222222222222222222222222102222222222222222222222222222222210333333333333333333333333333333331000000000000000000000000000000000000101000709",
       "decoded_debug": "Subscribe(Subscribe { shape_id: ShapeId(22222222-2222-2222-2222-222222222222), subscription: SubscriptionKey { shape_id: ShapeId(22222222-2222-2222-2222-222222222222), binding_id: BindingId(33333333-3333-3333-3333-333333333333), read_view: ReadViewKey { id: 00000000-0000-0000-0000-000000000000 } }, values: [], known_state: Some(FastWithAuthorizationProgress { completeness: FastCurrentMembership, position: GlobalSeq(7), authorization_progress: 9 }) })"
+    },
+    {
+      "name": "unsubscribe_todos_binding",
+      "message_family": "Unsubscribe",
+      "frame_hex": "010401003408102222222222222222222222222222222210333333333333333333333333333333331000000000000000000000000000000000",
+      "frame_base64": "AQQBADQIECIiIiIiIiIiIiIiIiIiIiIQMzMzMzMzMzMzMzMzMzMzMxAAAAAAAAAAAAAAAAAAAAAA",
+      "payload_hex": "08102222222222222222222222222222222210333333333333333333333333333333331000000000000000000000000000000000",
+      "decoded_debug": "Unsubscribe { subscription: SubscriptionKey { shape_id: ShapeId(22222222-2222-2222-2222-222222222222), binding_id: BindingId(33333333-3333-3333-3333-333333333333), read_view: ReadViewKey { id: 00000000-0000-0000-0000-000000000000 } } }"
     },
     {
       "name": "subscribe_rejected_unsupported_shape",
@@ -125,6 +141,14 @@
       "decoded_debug": "PublishLens { author: AuthorId(55555555-5555-5555-5555-555555555555), lens: MigrationLens { id: MigrationLensId(67040a1f-0258-50ff-a931-e97d71aaffec), source: SchemaVersionId(44444444-4444-4444-4444-444444444444), target: SchemaVersionId(45454545-4545-4545-4545-454545454545), table_lenses: [TableLens { source_table: \"todos\", target_table: \"todos\", ops: [CopyColumn { from: \"title\", to: \"title\" }, AddColumn { column: \"body\", default: Bytes([]) }] }] } }"
     },
     {
+      "name": "publish_schema_with_lens_todos_body",
+      "message_family": "PublishSchemaWithLens",
+      "frame_hex": "01040100b3010a1055555555555555555555555555555555091000d582c4b100595c8ccea71c2111b5af10dc9d7b96b2df59eea5c07329f77351fe0105746f646f7302057469746c650800000004626f647909010000000000000000000000000010d1056bb0d96c544e906c30b8358bc84210a939da06d5b95d998c9da3e832b78d4d10dc9d7b96b2df59eea5c07329f77351fe0105746f646f7305746f646f730202057469746c65057469746c650304626f647907000000",
+      "frame_base64": "AQQBALMBChBVVVVVVVVVVVVVVVVVVVVVCRAA1YLEsQBZXIzOpxwhEbWvENyde5ay31nupcBzKfdzUf4BBXRvZG9zAgV0aXRsZQgAAAAEYm9keQkBAAAAAAAAAAAAAAAAABDRBWuw2WxUTpBsMLg1i8hCEKk52gbVuV2ZjJ2j6DK3jU0Q3J17lrLfWe6lwHMp93NR/gEFdG9kb3MFdG9kb3MCAgV0aXRsZQV0aXRsZQMEYm9keQcAAAA=",
+      "payload_hex": "0a1055555555555555555555555555555555091000d582c4b100595c8ccea71c2111b5af10dc9d7b96b2df59eea5c07329f77351fe0105746f646f7302057469746c650800000004626f647909010000000000000000000000000010d1056bb0d96c544e906c30b8358bc84210a939da06d5b95d998c9da3e832b78d4d10dc9d7b96b2df59eea5c07329f77351fe0105746f646f7305746f646f730202057469746c65057469746c650304626f647907000000",
+      "decoded_debug": "PublishSchemaWithLens { author: AuthorId(55555555-5555-5555-5555-555555555555), catalogue_seq: 9, publication: SchemaLineagePublication { id: SchemaLineagePublicationId(00d582c4-b100-595c-8cce-a71c2111b5af), schema: SchemaVersion { id: SchemaVersionId(dc9d7b96-b2df-59ee-a5c0-7329f77351fe), schema: JazzSchema { tables: [TableSchema { name: \"todos\", columns: [ColumnSchema { name: \"title\", column_type: String, large_value: None, text_merge_spec: None, default: None }, ColumnSchema { name: \"body\", column_type: Bytes, large_value: Some(Text), text_merge_spec: None, default: None }], references: {}, read_policy: None, write_policies: WritePolicies { insert_check: None, update_using: None, update_check: None, delete_using: None }, indexed_columns: {}, merge_strategies: {} }], branch_read_policy: None, branch_write_policy: None } }, lens: MigrationLens { id: MigrationLensId(d1056bb0-d96c-544e-906c-30b8358bc842), source: SchemaVersionId(a939da06-d5b9-5d99-8c9d-a3e832b78d4d), target: SchemaVersionId(dc9d7b96-b2df-59ee-a5c0-7329f77351fe), table_lenses: [TableLens { source_table: \"todos\", target_table: \"todos\", ops: [CopyColumn { from: \"title\", to: \"title\" }, AddColumn { column: \"body\", default: Bytes([]) }] }] }, new_tables: [], dropped_tables: [] } }"
+    },
+    {
       "name": "set_current_write_schema_revision",
       "message_family": "SetCurrentWriteSchema",
       "frame_hex": "01040100240c1055555555555555555555555555555555091045454545454545454545454545454545",
@@ -147,6 +171,14 @@
       "frame_base64": "AQQBAGQQABB3d3d3d3d3d3d3d3d3d3d3ABAAAAAAAAAAAAAAAAAAAAAAEEREREREREREREREREREREQEZG9jcxBVVVVVVVVVVVVVVVVVVVVVEHd3d3d3d3d3d3d3d3d3d3cEYm9keRAM",
       "payload_hex": "10001077777777777777777777777777777777001000000000000000000000000000000000104444444444444444444444444444444404646f63731055555555555555555555555555555555107777777777777777777777777777777704626f6479100c",
       "decoded_debug": "FetchContentExtent { owner: LargeValueOwnerRef { table: None, row: RowUuid(77777777-7777-7777-7777-777777777777), version: CurrentVisible, read_view: ReadViewKey { id: 00000000-0000-0000-0000-000000000000 } }, extent: Extent { schema: SchemaVersionId(44444444-4444-4444-4444-444444444444), table: \"docs\", writer: AuthorId(55555555-5555-5555-5555-555555555555), row: RowUuid(77777777-7777-7777-7777-777777777777), column: \"body\", offset: 16, len: 12 } }"
+    },
+    {
+      "name": "catalogue_snapshot_todos_lineage",
+      "message_family": "CatalogueSnapshot",
+      "frame_hex": "010401009a02140210a939da06d5b95d998c9da3e832b78d4d0105746f646f7301057469746c65080000000000000000000000000010dc9d7b96b2df59eea5c07329f77351fe0105746f646f7302057469746c650800000004626f647909010000000000000000000000000001091000d582c4b100595c8ccea71c2111b5af10dc9d7b96b2df59eea5c07329f77351fe0105746f646f7302057469746c650800000004626f647909010000000000000000000000000010d1056bb0d96c544e906c30b8358bc84210a939da06d5b95d998c9da3e832b78d4d10dc9d7b96b2df59eea5c07329f77351fe0105746f646f7305746f646f730202057469746c65057469746c650304626f6479070000000910dc9d7b96b2df59eea5c07329f77351fe",
+      "frame_base64": "AQQBAJoCFAIQqTnaBtW5XZmMnaPoMreNTQEFdG9kb3MBBXRpdGxlCAAAAAAAAAAAAAAAAAAQ3J17lrLfWe6lwHMp93NR/gEFdG9kb3MCBXRpdGxlCAAAAARib2R5CQEAAAAAAAAAAAAAAAAAAQkQANWCxLEAWVyMzqccIRG1rxDcnXuWst9Z7qXAcyn3c1H+AQV0b2RvcwIFdGl0bGUIAAAABGJvZHkJAQAAAAAAAAAAAAAAAAAQ0QVrsNlsVE6QbDC4NYvIQhCpOdoG1bldmYydo+gyt41NENyde5ay31nupcBzKfdzUf4BBXRvZG9zBXRvZG9zAgIFdGl0bGUFdGl0bGUDBGJvZHkHAAAACRDcnXuWst9Z7qXAcyn3c1H+",
+      "payload_hex": "140210a939da06d5b95d998c9da3e832b78d4d0105746f646f7301057469746c65080000000000000000000000000010dc9d7b96b2df59eea5c07329f77351fe0105746f646f7302057469746c650800000004626f647909010000000000000000000000000001091000d582c4b100595c8ccea71c2111b5af10dc9d7b96b2df59eea5c07329f77351fe0105746f646f7302057469746c650800000004626f647909010000000000000000000000000010d1056bb0d96c544e906c30b8358bc84210a939da06d5b95d998c9da3e832b78d4d10dc9d7b96b2df59eea5c07329f77351fe0105746f646f7305746f646f730202057469746c65057469746c650304626f6479070000000910dc9d7b96b2df59eea5c07329f77351fe",
+      "decoded_debug": "CatalogueSnapshot(CatalogueSnapshot { schemas: [SchemaVersion { id: SchemaVersionId(a939da06-d5b9-5d99-8c9d-a3e832b78d4d), schema: JazzSchema { tables: [TableSchema { name: \"todos\", columns: [ColumnSchema { name: \"title\", column_type: String, large_value: None, text_merge_spec: None, default: None }], references: {}, read_policy: None, write_policies: WritePolicies { insert_check: None, update_using: None, update_check: None, delete_using: None }, indexed_columns: {}, merge_strategies: {} }], branch_read_policy: None, branch_write_policy: None } }, SchemaVersion { id: SchemaVersionId(dc9d7b96-b2df-59ee-a5c0-7329f77351fe), schema: JazzSchema { tables: [TableSchema { name: \"todos\", columns: [ColumnSchema { name: \"title\", column_type: String, large_value: None, text_merge_spec: None, default: None }, ColumnSchema { name: \"body\", column_type: Bytes, large_value: Some(Text), text_merge_spec: None, default: None }], references: {}, read_policy: None, write_policies: WritePolicies { insert_check: None, update_using: None, update_check: None, delete_using: None }, indexed_columns: {}, merge_strategies: {} }], branch_read_policy: None, branch_write_policy: None } }], lineages: [(9, SchemaLineagePublication { id: SchemaLineagePublicationId(00d582c4-b100-595c-8cce-a71c2111b5af), schema: SchemaVersion { id: SchemaVersionId(dc9d7b96-b2df-59ee-a5c0-7329f77351fe), schema: JazzSchema { tables: [TableSchema { name: \"todos\", columns: [ColumnSchema { name: \"title\", column_type: String, large_value: None, text_merge_spec: None, default: None }, ColumnSchema { name: \"body\", column_type: Bytes, large_value: Some(Text), text_merge_spec: None, default: None }], references: {}, read_policy: None, write_policies: WritePolicies { insert_check: None, update_using: None, update_check: None, delete_using: None }, indexed_columns: {}, merge_strategies: {} }], branch_read_policy: None, branch_write_policy: None } }, lens: MigrationLens { id: MigrationLensId(d1056bb0-d96c-544e-906c-30b8358bc842), source: SchemaVersionId(a939da06-d5b9-5d99-8c9d-a3e832b78d4d), target: SchemaVersionId(dc9d7b96-b2df-59ee-a5c0-7329f77351fe), table_lenses: [TableLens { source_table: \"todos\", target_table: \"todos\", ops: [CopyColumn { from: \"title\", to: \"title\" }, AddColumn { column: \"body\", default: Bytes([]) }] }] }, new_tables: [], dropped_tables: [] })], current_write_schema: CurrentWriteSchema { revision: 9, schema: SchemaVersionId(dc9d7b96-b2df-59ee-a5c0-7329f77351fe) } })"
     },
     {
       "name": "content_extents_body_bytes",

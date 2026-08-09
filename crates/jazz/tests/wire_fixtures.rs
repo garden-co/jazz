@@ -5,11 +5,11 @@ use groove::schema::ColumnType;
 use jazz::ids::{AuthorId, BranchId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
 use jazz::node::content_store::Extent;
 use jazz::protocol::{
-    BranchMetadata, CatalogueAck, ContentExtent, CurrentWriteSchema, LargeValueOwnerRef, LensOp,
-    MigrationLens, PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, RowVersionRef,
-    SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
-    SubscriptionKey, SyncMessage, TableLens, VersionBundle, VersionCarrier, VersionRecord,
-    build_version_bundle_runs_from_singletons,
+    BranchMetadata, CatalogueAck, CatalogueSnapshot, ContentExtent, CurrentWriteSchema,
+    LargeValueOwnerRef, LensOp, MigrationLens, PeerPayloadInventory, RegisterShapeOptions,
+    ResultRowEntry, RowVersionRef, SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe,
+    SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens,
+    VersionBundle, VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
 };
 use jazz::query::{
     ArraySubquery, ArraySubqueryRequirement, BindingId, OrderDirection, Query, ShapeId, col, eq,
@@ -110,6 +110,42 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         offset: 16,
         len: 12,
     };
+    let lineage_source = SchemaVersion::new(JazzSchema::new([TableSchema::new(
+        "todos",
+        [ColumnSchema::new("title", ColumnType::String)],
+    )]));
+    let lineage_target = SchemaVersion::new(JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::text("body"),
+        ],
+    )]));
+    let lineage_target_id = lineage_target.id;
+    let lineage_lens = MigrationLens::new(
+        lineage_source.id,
+        lineage_target.id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![
+                LensOp::CopyColumn {
+                    from: "title".to_owned(),
+                    to: "title".to_owned(),
+                },
+                LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::Bytes(Vec::new()),
+                },
+            ],
+        }],
+    );
+    let lineage_publication = SchemaLineagePublication::new(
+        lineage_target.clone(),
+        lineage_lens,
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
 
     vec![
         (
@@ -128,6 +164,14 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             "FetchBranchMetadata",
             SyncMessage::FetchBranchMetadata {
                 branches: vec![BranchId::from_bytes([0x42; 16])],
+            },
+        ),
+        (
+            "session_claims_role_editor",
+            "SessionClaims",
+            SyncMessage::SessionClaims {
+                identity: author,
+                claims: BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
             },
         ),
         (
@@ -174,6 +218,11 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                     },
                 ),
             }),
+        ),
+        (
+            "unsubscribe_todos_binding",
+            "Unsubscribe",
+            SyncMessage::Unsubscribe { subscription },
         ),
         (
             "subscribe_rejected_unsupported_shape",
@@ -336,6 +385,15 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             },
         ),
         (
+            "publish_schema_with_lens_todos_body",
+            "PublishSchemaWithLens",
+            SyncMessage::PublishSchemaWithLens {
+                author,
+                catalogue_seq: 9,
+                publication: Box::new(lineage_publication.clone()),
+            },
+        ),
+        (
             "set_current_write_schema_revision",
             "SetCurrentWriteSchema",
             SyncMessage::SetCurrentWriteSchema {
@@ -363,6 +421,18 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 owner: LargeValueOwnerRef::current_row(row),
                 extent: content_extent.clone(),
             },
+        ),
+        (
+            "catalogue_snapshot_todos_lineage",
+            "CatalogueSnapshot",
+            SyncMessage::CatalogueSnapshot(Box::new(CatalogueSnapshot {
+                schemas: vec![lineage_source, lineage_target],
+                lineages: vec![(9, lineage_publication)],
+                current_write_schema: CurrentWriteSchema {
+                    revision: 9,
+                    schema: lineage_target_id,
+                },
+            })),
         ),
         (
             "content_extents_body_bytes",

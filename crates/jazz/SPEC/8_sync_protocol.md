@@ -320,6 +320,13 @@ Protocol size limits are enforced at the layer that can recover correctly:
   `WireError { code: MalformedFrame, retry: Never, ... }`. The connection-level
   admission failure closes or resumes according to the binding's normal
   structured-error handling; no semantic message is applied.
+  A logical `CatalogueSnapshot` can legitimately exceed this framing cap as
+  catalogue history grows. It is therefore an explicit consumer of the
+  planned generic transport fragmentation/reassembly layer, which must retain
+  atomic logical-message delivery across fragment loss, duplication, and
+  reordering. The catalogue protocol must not grow a bespoke chunk format;
+  until generic fragmentation lands, oversized snapshots cannot traverse the
+  current wire transport.
 - A `RegisterShape` AST is capped at 64 KiB encoded. This is a semantic
   admission limit for the shape-registration request; the connection may
   continue after the rejected request. Server shells may expose this as
