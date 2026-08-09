@@ -199,6 +199,7 @@ type Subscription = {
 };
 
 type Write = {
+  readonly batchId: string;
   payload: Uint8Array;
   wait(tier: string): void;
   writeState(): unknown;
@@ -378,7 +379,6 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverPumpScheduled = false;
   private serverPumpAgain = false;
   private closed = false;
-  private nextTransactionId = 1;
   private nextSubscriptionId = 1;
 
   static fromDb(
@@ -485,7 +485,8 @@ export class NativeRuntimeAdapter implements Runtime {
       return {
         id: row.id,
         values: row.values,
-        transactionId: txIdFromContext(_writeContext)!,
+        kind: "staged",
+        openBatchId: txIdFromContext(_writeContext)!,
       };
     }
     const write = writeOrNormalizeRejection("Insert", () =>
@@ -514,7 +515,12 @@ export class NativeRuntimeAdapter implements Runtime {
       this.txForWrite(tx, writeIdentity).restoreEncoded(table, rowId, cells, updatedAtMs);
       const row = this.rowStateFromValues(table, rowId, values);
       tx.writes.push({ table, rowId, baseRow, row });
-      return { id: row.id, values: row.values, transactionId: txIdFromContext(writeContext)! };
+      return {
+        id: row.id,
+        values: row.values,
+        kind: "staged",
+        openBatchId: txIdFromContext(writeContext)!,
+      };
     }
     const write = writeOrNormalizeRejection("Restore", () =>
       writeIdentity
@@ -546,7 +552,7 @@ export class NativeRuntimeAdapter implements Runtime {
         baseRow,
         row: this.mergeRowState(table, rowId, values, tx, writeIdentity),
       });
-      return { transactionId: txIdFromContext(writeContext)! };
+      return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Update", () =>
       writeIdentity
@@ -591,7 +597,7 @@ export class NativeRuntimeAdapter implements Runtime {
           ? this.mergeRowState(table, rowId, values, tx, writeIdentity)
           : this.rowStateFromValues(table, rowId, values),
       });
-      return { transactionId: txIdFromContext(writeContext)! };
+      return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Upsert", () =>
       writeIdentity
@@ -613,7 +619,7 @@ export class NativeRuntimeAdapter implements Runtime {
       const baseRow = this.baseRowForExclusiveWrite(tx, table, rowId, writeIdentity);
       this.txForWrite(tx, writeIdentity).delete(table, rowId, updatedAtMs);
       tx.writes.push({ table, rowId, baseRow, deleted: true });
-      return { transactionId: txIdFromContext(writeContext)! };
+      return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Delete", () =>
       writeIdentity
@@ -697,7 +703,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.completedTxs.set(transactionId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
     this.observeWriteForBoundaryEffects(write);
-    return Promise.resolve(writeId(write, this.writes));
+    return Promise.resolve(recordWrite(write, this.writes));
   }
 
   async waitForTransaction(transactionId: BatchId, tier: string): Promise<void> {
@@ -740,7 +746,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  rollbackTransaction(transactionId: OpenBatchId): boolean {
+  rollbackTransaction(transactionId: OpenBatchId): Promise<boolean> {
     const pending = this.pendingTxs.get(transactionId);
     if (!pending) {
       throw new Error(rollbackTransactionMessage(transactionId, this.completedTxs));
@@ -748,7 +754,7 @@ export class NativeRuntimeAdapter implements Runtime {
     pending.tx?.rollback();
     this.pendingTxs.delete(transactionId);
     this.completedTxs.set(transactionId, { kind: pending.kind, state: "rolled_back" });
-    return true;
+    return Promise.resolve(true);
   }
 
   async query(
@@ -1002,18 +1008,18 @@ export class NativeRuntimeAdapter implements Runtime {
     values: InsertValues,
     write: Write,
   ): InsertResult {
-    const transactionId = writeId(write, this.writes);
+    const batchId = recordWrite(write, this.writes);
     this.pumpSubscriptions();
     this.observeWriteForBoundaryEffects(write);
     const row = this.rowStateFromValues(table, rowId, values);
-    return { id: row.id, values: row.values, transactionId };
+    return { id: row.id, values: row.values, kind: "committed", batchId };
   }
 
   private finishMutation(write: Write): MutationResult {
-    const transactionId = writeId(write, this.writes);
+    const batchId = recordWrite(write, this.writes);
     this.pumpSubscriptions();
     this.observeWriteForBoundaryEffects(write);
-    return { transactionId };
+    return { kind: "committed", batchId };
   }
 
   private observeWriteForBoundaryEffects(write: Write): void {
@@ -1075,11 +1081,11 @@ export class NativeRuntimeAdapter implements Runtime {
   private resultForRow(
     table: string,
     rowId: Uint8Array,
-    transactionId: BatchId | OpenBatchId,
+    receipt: { kind: "committed"; batchId: BatchId } | { kind: "staged"; openBatchId: OpenBatchId },
     identity?: Uint8Array,
   ): InsertResult {
     const row = this.readRow(table, rowId, identity);
-    return { id: formatUuid(rowId), values: row?.values ?? [], transactionId };
+    return { id: formatUuid(rowId), values: row?.values ?? [], ...receipt };
   }
 
   private readRow(table: string, rowId: Uint8Array, identity?: Uint8Array): RowState | undefined {
@@ -1984,8 +1990,8 @@ function normalizeTransportFrames(frames: unknown[]): Uint8Array[] {
   );
 }
 
-function writeId(write: Write, writes: Map<string, Write>): BatchId {
-  const id = `tx-${writes.size + 1}`;
+function recordWrite(write: Write, writes: Map<string, Write>): BatchId {
+  const id = write.batchId as BatchId;
   writes.set(id, write);
   return id as BatchId;
 }
