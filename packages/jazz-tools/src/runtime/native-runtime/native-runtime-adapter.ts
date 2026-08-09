@@ -17,13 +17,10 @@ import {
   openConfig,
   queryWithPredicates,
   readNativeRowBatch,
-  readNativeRelationSubscriptionDelta,
   readNativeRelationSubscriptionSnapshot,
   readNativeSubscriptionDelta,
   type NativeSubscriptionDelta,
   type NativeRelationSubscriptionSnapshot,
-  type NativeRelationSubscriptionDelta,
-  type NativeRelationSubscriptionEdge,
   type NativeRowBatch,
   type NativeRemovedRow,
   type QueryArraySubquery,
@@ -280,12 +277,7 @@ type SubscriptionState = {
   packedResetRows: NativeRowDelta | null;
   visibleRows: RowState[];
   visiblePackedResetRows: NativeRowDelta | null;
-  relationRows: RowState[];
-  relationRootCount: number;
-  relationEdges: NativeRelationSubscriptionEdge[];
-  relationMaterialization: RelationMaterializationSpec;
   outputColumns: SubscriptionOutputColumns | null;
-  snapshotRefresh: boolean;
   session: RuntimeSession | null;
   opts: unknown;
   opened: boolean;
@@ -299,13 +291,6 @@ type SubscriptionState = {
 type SubscriptionOutputColumns = {
   rootTable: string;
   rootColumns: readonly ColumnDescriptor[];
-};
-
-type RelationMaterializationSpec = {
-  rootTable: string | null;
-  arraySubqueries: QueryArraySubquery[];
-  clientLimit: number | null;
-  clientOffset: number;
 };
 
 type SubscriptionSourceState = {
@@ -706,7 +691,6 @@ export class NativeRuntimeAdapter implements Runtime {
         this.throwServerTransportErrorForTier(tier);
         write.wait(tier);
         this.pumpSubscriptions();
-        this.refreshOpenedPlainSubscriptions();
         return;
       } catch (error) {
         const rejected = rejectedWaitError(transactionId, error);
@@ -719,7 +703,6 @@ export class NativeRuntimeAdapter implements Runtime {
           this.throwServerTransportErrorForTier(tier);
           write.wait(tier);
           this.pumpSubscriptions();
-          this.refreshOpenedPlainSubscriptions();
           return;
         } catch (secondError) {
           const secondRejected = rejectedWaitError(transactionId, secondError);
@@ -787,7 +770,7 @@ export class NativeRuntimeAdapter implements Runtime {
           return rowsFromRelationSnapshot(
             readRelationSnapshot(payload),
             this.schema,
-            relationMaterializationSpec(coreQueryJson, this.schema),
+            subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
           );
         }
         if (!this.db.allRelationSnapshot) {
@@ -797,7 +780,7 @@ export class NativeRuntimeAdapter implements Runtime {
         return rowsFromRelationSnapshot(
           readRelationSnapshot(payload),
           this.schema,
-          relationMaterializationSpec(coreQueryJson, this.schema),
+          subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
         );
       }
       const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
@@ -866,7 +849,6 @@ export class NativeRuntimeAdapter implements Runtime {
         `Core subscribe failed for ${queryJson}: ${errorMessage(error)}${nativeStack ? `\n${nativeStack}` : ""}`,
       );
     }
-    const snapshotRefresh = !usesNativeRelationApi && typeof this.db.all === "function";
     this.subscriptions.set(handle, {
       sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
       queryJson,
@@ -878,16 +860,9 @@ export class NativeRuntimeAdapter implements Runtime {
       packedResetRows: null,
       visibleRows: [],
       visiblePackedResetRows: null,
-      relationRows: [],
-      relationRootCount: 0,
-      relationEdges: [],
-      relationMaterialization: usesNativeRelationApi
-        ? emptyRelationMaterializationSpec()
-        : relationMaterializationSpec(queryJson, this.schema),
       outputColumns: usesNativeRelationApi
         ? null
         : subscriptionOutputColumns(queryJson, this.schema),
-      snapshotRefresh,
       session,
       opts,
       opened: false,
@@ -954,7 +929,6 @@ export class NativeRuntimeAdapter implements Runtime {
       this.flushQueuedServerFrames(carrier);
       this.pumpServerTransport();
       this.pumpSubscriptions();
-      this.refreshOpenedPlainSubscriptions();
       return carrier;
     });
     this.serverCarrierPromise.catch((error) => {
@@ -1023,7 +997,6 @@ export class NativeRuntimeAdapter implements Runtime {
         try {
           write.wait("local");
           this.pumpSubscriptions();
-          this.refreshOpenedPlainSubscriptions();
           return;
         } catch (error) {
           if (!isPendingWaitError(error)) return;
@@ -1059,7 +1032,6 @@ export class NativeRuntimeAdapter implements Runtime {
         // the write handle. Keep subscription pumping paired with the server
         // pump here so write acks are not the only path that drains changes.
         this.pumpSubscriptions();
-        this.refreshOpenedPlainSubscriptions();
         this.scheduleServerPump();
       }
     };
@@ -1184,38 +1156,6 @@ export class NativeRuntimeAdapter implements Runtime {
     return undefined;
   }
 
-  private refreshOpenedPlainSubscriptions(): void {
-    for (const subscription of this.subscriptions.values()) {
-      if (subscription.cancelled || !subscription.opened || !subscription.callback) continue;
-
-      const previousRows = subscription.rows;
-      const nextRows =
-        subscription.query === null
-          ? this.refreshNativeRelationSubscriptionRows(subscription)
-          : subscription.relationMaterialization.arraySubqueries.length > 0
-            ? this.refreshRelationSubscriptionRows(subscription)
-            : this.refreshPlainSubscriptionRows(subscription);
-      const delta = nativeDeltaFromRows(
-        nextRows,
-        previousRows,
-        this.schema,
-        subscription.outputColumns,
-      );
-      if (!nativeDeltaHasChanges(delta)) continue;
-      subscription.rows = nextRows;
-      subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
-      subscription.callback(delta);
-    }
-  }
-
-  private refreshPlainSubscriptionRows(subscription: SubscriptionState): RowState[] {
-    if (!subscription.query) return [];
-    const rowsBytes = subscription.identity
-      ? this.db.allForIdentity(subscription.query, subscription.identity, subscription.opts)
-      : this.db.all(subscription.query, subscription.opts);
-    return rowsFromBatches(readRowBatches(rowsBytes), this.schema);
-  }
-
   private warnedOnce = new Set<string>();
   private warnOnce(key: string, message: string): void {
     if (this.warnedOnce.has(key)) return;
@@ -1252,50 +1192,6 @@ export class NativeRuntimeAdapter implements Runtime {
         if (attachment !== undefined) this.db.detachQuery?.(attachment);
       }
     }
-  }
-
-  private refreshNativeRelationSubscriptionRows(subscription: SubscriptionState): RowState[] {
-    if (
-      !this.db.allRelationQuery ||
-      (subscription.identity && !this.db.allRelationQueryForIdentity)
-    ) {
-      return [];
-    }
-    const rowsBytes = subscription.identity
-      ? this.db.allRelationQueryForIdentity!(
-          subscription.queryJson,
-          subscription.identity,
-          subscription.opts,
-        )
-      : this.db.allRelationQuery(subscription.queryJson, subscription.opts);
-    return rowsFromBatches(readRowBatches(rowsBytes), this.schema);
-  }
-
-  private refreshRelationSubscriptionRows(subscription: SubscriptionState): RowState[] {
-    if (!subscription.query) return [];
-    if (
-      !this.db.allRelationSnapshot ||
-      (subscription.identity && !this.db.allRelationSnapshotForIdentity)
-    ) {
-      return this.refreshPlainSubscriptionRows(subscription);
-    }
-    const payload = subscription.identity
-      ? this.db.allRelationSnapshotForIdentity!(
-          subscription.query,
-          subscription.identity,
-          subscription.opts,
-        )
-      : this.db.allRelationSnapshot(subscription.query, subscription.opts);
-    const snapshot = readRelationSnapshot(payload);
-    subscription.relationRows = rowsFromBatches(snapshot.rows, this.schema);
-    subscription.relationRootCount = snapshot.rootCount;
-    subscription.relationEdges = snapshot.edges;
-    return materializeRelationRows(
-      subscription.relationRows,
-      subscription.relationEdges,
-      subscription.relationRootCount,
-      subscription.relationMaterialization,
-    );
   }
 
   private prepareQuery(queryJson: string): PreparedQuery {
@@ -1625,14 +1521,10 @@ export class NativeRuntimeAdapter implements Runtime {
     if (chunk.type === "snapshot") {
       const previousRows = subscription.rows;
       const wasOpened = subscription.opened;
-      subscription.relationRows = rowsFromBatches(chunk.snapshot.rows, this.schema);
-      subscription.relationRootCount = chunk.snapshot.rootCount;
-      subscription.relationEdges = chunk.snapshot.edges;
-      subscription.rows = materializeRelationRows(
-        subscription.relationRows,
-        subscription.relationEdges,
-        subscription.relationRootCount,
-        subscription.relationMaterialization,
+      subscription.rows = rowsFromRelationSnapshot(
+        chunk.snapshot,
+        this.schema,
+        subscription.outputColumns?.rootColumns,
       );
       subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
       subscription.opened = true;
@@ -1649,32 +1541,6 @@ export class NativeRuntimeAdapter implements Runtime {
         chunk.settled,
         !wasOpened,
       );
-    } else if (
-      chunk.relationSnapshot &&
-      subscription.relationMaterialization.arraySubqueries.length > 0
-    ) {
-      const previousRows = subscription.rows;
-      subscription.relationRows = rowsFromBatches(chunk.relationSnapshot.rows, this.schema);
-      subscription.relationRootCount = chunk.relationSnapshot.rootCount;
-      subscription.relationEdges = chunk.relationSnapshot.edges;
-      subscription.rows = materializeRelationRows(
-        subscription.relationRows,
-        subscription.relationEdges,
-        subscription.relationRootCount,
-        subscription.relationMaterialization,
-      );
-      subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
-      this.publishSubscriptionRows(
-        subscription,
-        nativeDeltaFromRows(
-          subscription.rows,
-          previousRows,
-          this.schema,
-          subscription.outputColumns,
-        ),
-        chunk.settled,
-        false,
-      );
     } else {
       if (chunk.reset) {
         subscription.rows = [];
@@ -1682,38 +1548,7 @@ export class NativeRuntimeAdapter implements Runtime {
         subscription.packedResetBatches = null;
         subscription.packedResetRows = null;
       }
-      if (
-        chunk.relationDelta &&
-        !chunk.terminalRows &&
-        (subscription.query === null ||
-          subscription.relationMaterialization.arraySubqueries.length > 0)
-      ) {
-        const previousRows = subscription.rows;
-        applyRelationSubscriptionDelta(
-          subscription,
-          chunk.delta,
-          chunk.relationDelta,
-          this.schema,
-          chunk.reset === true,
-        );
-        subscription.rows = materializeRelationRows(
-          subscription.relationRows,
-          subscription.relationEdges,
-          subscription.relationRootCount,
-          subscription.relationMaterialization,
-        );
-        subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
-        subscription.opened = true;
-        const wireDelta = chunk.reset
-          ? nativeResetDeltaFromRows(subscription.rows, this.schema, subscription.outputColumns)
-          : nativeDeltaFromRows(
-              subscription.rows,
-              previousRows,
-              this.schema,
-              subscription.outputColumns,
-            );
-        this.publishSubscriptionRows(subscription, wireDelta, chunk.settled, chunk.reset === true);
-      } else if (plainResetChunkCanStayPacked(subscription, chunk, this.schema)) {
+      if (plainResetChunkCanStayPacked(subscription, chunk, this.schema)) {
         const packedResetRows = nativeResetDeltaFromBatches(
           chunk.delta.added,
           subscription.outputColumns,
@@ -1724,44 +1559,6 @@ export class NativeRuntimeAdapter implements Runtime {
         subscription.packedResetRows = packedResetRows;
         subscription.opened = true;
         this.publishSubscriptionRows(subscription, packedResetRows, chunk.settled, true);
-      } else if (subscription.snapshotRefresh && !chunk.terminalRows) {
-        materializePackedResetRows(subscription, this.schema);
-        const previousRows = subscription.rows;
-        // Guarded so the argument never evaluates without a server transport:
-        // memory-backed chunks carry a different updated-payload shape and the
-        // callers swallow rejections, which silently killed delivery. The
-        // refresh is an optimization: any failure (including payload-shape
-        // decode errors on individual subscriptions) must degrade to a plain
-        // snapshot refresh, never kill delivery for that subscription.
-        // Scope: post-open update convergence only. During initial ingest
-        // (reset chunks / not-yet-opened subscriptions) the refresh would fire
-        // per-row edge queries across the whole snapshot — a multi-second cold
-        // open tax with no correctness benefit.
-        if (this.serverTransport && subscription.opened && !chunk.reset) {
-          try {
-            await this.refreshRowsFromEdge(
-              subscription.session,
-              rowsFromBatches(chunk.delta.updated, this.schema),
-            );
-          } catch (error) {
-            this.warnOnce(
-              "edge-refresh-decode",
-              `edge refresh skipped for a subscription chunk: ${String(error)}`,
-            );
-          }
-        }
-        subscription.rows = this.refreshPlainSubscriptionRows(subscription);
-        subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
-        subscription.opened = true;
-        const wireDelta = chunk.reset
-          ? nativeResetDeltaFromRows(subscription.rows, this.schema, subscription.outputColumns)
-          : nativeDeltaFromRows(
-              subscription.rows,
-              previousRows,
-              this.schema,
-              subscription.outputColumns,
-            );
-        this.publishSubscriptionRows(subscription, wireDelta, chunk.settled, chunk.reset === true);
       } else {
         materializePackedResetRows(subscription, this.schema);
         const applied = applySubscriptionDeltaWithWireDelta(
@@ -1770,7 +1567,7 @@ export class NativeRuntimeAdapter implements Runtime {
           chunk.delta,
           this.schema,
           chunk.reset === true,
-          chunk.terminalRows ? subscription.outputColumns : null,
+          subscription.outputColumns,
         );
         subscription.rows = applied.rows;
         subscription.rowIndexByKey = applied.rowIndexByKey;
@@ -2357,36 +2154,6 @@ function arrayFiltersContainPermissionIntrospection(value: unknown): boolean {
 
 function unqualifiedColumn(column: string): string {
   return column.split(".").at(-1) ?? column;
-}
-
-function emptyRelationMaterializationSpec(): RelationMaterializationSpec {
-  return {
-    rootTable: null,
-    arraySubqueries: [],
-    clientLimit: null,
-    clientOffset: 0,
-  };
-}
-
-function relationMaterializationSpec(
-  queryJson: string,
-  schema: WasmSchema,
-): RelationMaterializationSpec {
-  const parsed = JSON.parse(queryJson) as {
-    table?: unknown;
-    array_subqueries?: unknown;
-    __jazz_client_limit?: unknown;
-    __jazz_client_offset?: unknown;
-  };
-  if (typeof parsed.table !== "string") {
-    return emptyRelationMaterializationSpec();
-  }
-  return {
-    rootTable: parsed.table,
-    arraySubqueries: readQueryArraySubqueries(parsed.array_subqueries, parsed.table, schema) ?? [],
-    clientLimit: parsed.__jazz_client_limit == null ? null : readLimit(parsed.__jazz_client_limit),
-    clientOffset: parsed.__jazz_client_offset == null ? 0 : readOffset(parsed.__jazz_client_offset),
-  };
 }
 
 function subscriptionOutputColumns(
@@ -3663,30 +3430,13 @@ function valueTypeCacheKey(type: ValueType): string {
 function rowsFromRelationSnapshot(
   snapshot: NativeRelationSubscriptionSnapshot,
   schema: WasmSchema,
-  materialization: RelationMaterializationSpec,
+  projectedColumns?: readonly ColumnDescriptor[],
 ): RowState[] {
-  const projectedColumns = materialization.rootTable
-    ? outputColumnsForTable(
-        materialization.rootTable,
-        schema,
-        undefined,
-        materialization.arraySubqueries,
-      )
-    : undefined;
   const rows = stripRelationSnapshotMetadata(
     rowsFromBatches(snapshot.rows, schema, projectedColumns),
     schema,
   );
-  const roots = rows.slice(0, snapshot.rootCount);
-  const isTerminalSnapshot =
-    materialization.arraySubqueries.length > 0 &&
-    roots.every((row) =>
-      materialization.arraySubqueries.every((subquery) =>
-        row.valuesByColumn?.has(subquery.columnName),
-      ),
-    );
-  if (isTerminalSnapshot) return roots;
-  return materializeRelationRows(rows, snapshot.edges, snapshot.rootCount, materialization);
+  return rows.slice(0, snapshot.rootCount);
 }
 
 const RELATION_SNAPSHOT_METADATA_FIELDS = new Set([
@@ -3722,172 +3472,6 @@ function stripRelationSnapshotMetadata(rows: RowState[], schema: WasmSchema): Ro
       valuesByColumn,
     );
   });
-}
-
-function materializeRelationRows(
-  rows: RowState[],
-  edges: NativeRelationSubscriptionEdge[],
-  rootCount: number,
-  materialization: RelationMaterializationSpec,
-): RowState[] {
-  const rowsByKey = new Map(rows.map((row) => [rowKey(row.table, row.id), row]));
-  const childRowsBySourceAndRelation = new Map<string, RowState[]>();
-  for (const edge of edges) {
-    const targetKey = rowKey(edge.targetTable, formatUuid(edge.targetRowId));
-    const child = rowsByKey.get(targetKey);
-    if (!child) continue;
-    const key = relationKey(edge.sourceTable, formatUuid(edge.sourceRowId), edge.relation);
-    const children = childRowsBySourceAndRelation.get(key) ?? [];
-    children.push(child);
-    childRowsBySourceAndRelation.set(key, children);
-  }
-  const materialized = new Map<string, RowState>();
-  const rootCandidates =
-    materialization.rootTable === null
-      ? rows.slice(0, rootCount)
-      : rows.filter((row) => row.table === materialization.rootTable).slice(0, rootCount);
-  let roots = rootCandidates
-    .map((row) =>
-      materializeRelationRow(
-        row,
-        materialization.arraySubqueries,
-        childRowsBySourceAndRelation,
-        materialized,
-      ),
-    )
-    .filter((result) => result.satisfiesRequirements)
-    .map((result) => result.row);
-  if (materialization.clientOffset > 0 || materialization.clientLimit !== null) {
-    const offset = materialization.clientOffset;
-    const limit = materialization.clientLimit ?? roots.length;
-    roots = roots.slice(offset, offset + limit);
-  }
-  return roots;
-}
-
-function materializeRelationRow(
-  row: RowState,
-  subqueries: readonly QueryArraySubquery[],
-  childRowsBySourceAndRelation: Map<string, RowState[]>,
-  materialized: Map<string, RowState>,
-): { row: RowState; satisfiesRequirements: boolean } {
-  const rowKeyValue = rowKey(row.table, row.id);
-  const cached = materialized.get(rowKeyValue);
-  if (cached) return { row: cached, satisfiesRequirements: true };
-  materialized.set(rowKeyValue, row);
-  const valuesByColumn = new Map(row.valuesByColumn ?? []);
-  const relationValues: Value[] = [];
-  const relationPayloadValues = new Set<Value>();
-  let satisfiesRequirements = true;
-  for (const subquery of subqueries) {
-    const key = relationKey(row.table, row.id, subquery.columnName);
-    const children = childRowsBySourceAndRelation.get(key) ?? [];
-    const childResults = children.map((child) =>
-      materializeRelationRow(
-        child,
-        subquery.nestedArrays ?? [],
-        childRowsBySourceAndRelation,
-        materialized,
-      ),
-    );
-    const materializedChildren = childResults
-      .filter((child) => child.satisfiesRequirements)
-      .map((child) => child.row);
-    if (!arraySubqueryRequirementSatisfied(row, subquery, materializedChildren.length)) {
-      satisfiesRequirements = false;
-    }
-    const value: Value = {
-      type: "Array",
-      value: materializedChildren.map((child) => ({
-        type: "Row",
-        value: rowValueWithValuesByColumn(child),
-      })),
-    } as Value;
-    const publicRelation = publicIncludeRelationName(subquery.columnName);
-    const hiddenRelation = hiddenIncludeColumnName(publicRelation);
-    for (const name of [subquery.columnName, publicRelation, hiddenRelation]) {
-      const payload = valuesByColumn.get(name);
-      if (payload) relationPayloadValues.add(payload);
-    }
-    valuesByColumn.set(subquery.columnName, value);
-    if (publicRelation !== subquery.columnName) {
-      valuesByColumn.set(publicRelation, value);
-    }
-    valuesByColumn.set(hiddenRelation, value);
-    relationValues.push(value);
-  }
-  const baseValues =
-    relationPayloadValues.size === 0
-      ? row.values
-      : row.values.filter((value) => !relationPayloadValues.has(value));
-  const next = withValuesByColumn(
-    {
-      ...row,
-      values: baseValues.concat(relationValues),
-    },
-    valuesByColumn,
-  );
-  materialized.set(rowKeyValue, next);
-  return { row: next, satisfiesRequirements };
-}
-
-function arraySubqueryRequirementSatisfied(
-  row: RowState,
-  subquery: QueryArraySubquery,
-  childCount: number,
-): boolean {
-  switch (subquery.requirement ?? "Optional") {
-    case "Optional":
-      return true;
-    case "AtLeastOne":
-      return childCount > 0;
-    case "MatchCorrelationCardinality":
-      return childCount === correlationCardinality(row, subquery.outerColumn);
-  }
-}
-
-function correlationCardinality(row: RowState, column: string): number {
-  const valuesByColumn = row.valuesByColumn ?? new Map<string, Value>();
-  const value = valuesByColumn.get(stripParentQualifier(column, row.table));
-  if (!value) return 0;
-  if (value.type === "Array") return value.value.length;
-  if (value.type === "Null") return 0;
-  return 1;
-}
-
-function publicIncludeRelationName(relation: string): string {
-  return relation.startsWith(HIDDEN_INCLUDE_COLUMN_PREFIX)
-    ? relation.slice(HIDDEN_INCLUDE_COLUMN_PREFIX.length)
-    : relation;
-}
-
-function rowValueWithValuesByColumn(row: RowState): {
-  id: string;
-  values: Value[];
-  valuesByColumn?: Map<string, Value>;
-} {
-  const value: {
-    id: string;
-    values: Value[];
-    valuesByColumn?: Map<string, Value>;
-    table?: string;
-  } = {
-    id: row.id,
-    values: row.values,
-  };
-  Object.defineProperty(value, "table", {
-    value: row.table,
-    enumerable: false,
-    configurable: true,
-  });
-  if (row.valuesByColumn) {
-    Object.defineProperty(value, "valuesByColumn", {
-      value: row.valuesByColumn,
-      enumerable: false,
-      configurable: true,
-    });
-  }
-  return value;
 }
 
 function withValuesByColumn(row: RowState, valuesByColumn: Map<string, Value>): RowState {
@@ -3945,112 +3529,6 @@ function applySubscriptionDeltaWithWireDelta(
   };
 }
 
-function applyRelationSubscriptionDelta(
-  subscription: SubscriptionState,
-  rootDelta: NativeSubscriptionDelta,
-  relationDelta: NativeRelationSubscriptionDelta,
-  schema: WasmSchema,
-  reset: boolean,
-): void {
-  if (reset) {
-    subscription.relationRows = [];
-    subscription.relationEdges = [];
-    subscription.relationRootCount = 0;
-  }
-
-  const rootRemoved = new Set(
-    rootDelta.removed.map((row) => rowKey(row.table, formatUuid(row.rowId))),
-  );
-  if (rootRemoved.size > 0) {
-    let index = 0;
-    while (index < subscription.relationRootCount) {
-      const row = subscription.relationRows[index];
-      if (row && rootRemoved.has(rowKey(row.table, row.id))) {
-        subscription.relationRows.splice(index, 1);
-        subscription.relationRootCount -= 1;
-      } else {
-        index += 1;
-      }
-    }
-  }
-
-  const relatedRemoved = new Set(
-    relationDelta.removed.map((row) => rowKey(row.table, formatUuid(row.rowId))),
-  );
-  if (relatedRemoved.size > 0) {
-    subscription.relationRows = subscription.relationRows.filter((row, index) => {
-      if (index < subscription.relationRootCount) return true;
-      return !relatedRemoved.has(rowKey(row.table, row.id));
-    });
-  }
-
-  const rootUpdates = rowsFromBatches(rootDelta.updated, schema);
-  for (const row of rootUpdates) {
-    const position = subscription.relationRows
-      .slice(0, subscription.relationRootCount)
-      .findIndex((current) => rowKey(current.table, current.id) === rowKey(row.table, row.id));
-    if (position >= 0) {
-      subscription.relationRows[position] = row;
-    }
-  }
-
-  const rootAdds = rowsFromBatches(rootDelta.added, schema);
-  for (const row of rootAdds) {
-    const existing = subscription.relationRows
-      .slice(0, subscription.relationRootCount)
-      .findIndex((current) => rowKey(current.table, current.id) === rowKey(row.table, row.id));
-    if (existing >= 0) {
-      subscription.relationRows[existing] = row;
-    } else {
-      subscription.relationRows.splice(subscription.relationRootCount, 0, row);
-      subscription.relationRootCount += 1;
-    }
-  }
-
-  const relationRows = rowsFromBatches(relationDelta.added, schema).concat(
-    rowsFromBatches(relationDelta.updated, schema),
-  );
-  for (const row of relationRows) {
-    const key = rowKey(row.table, row.id);
-    const rootPosition = subscription.relationRows
-      .slice(0, subscription.relationRootCount)
-      .findIndex((current) => rowKey(current.table, current.id) === key);
-    if (rootPosition >= 0) {
-      subscription.relationRows[rootPosition] = row;
-      continue;
-    }
-    const relatedPosition = subscription.relationRows
-      .slice(subscription.relationRootCount)
-      .findIndex((current) => rowKey(current.table, current.id) === key);
-    if (relatedPosition >= 0) {
-      subscription.relationRows[subscription.relationRootCount + relatedPosition] = row;
-    } else {
-      subscription.relationRows.push(row);
-    }
-  }
-
-  const removedEdges = new Set(relationDelta.removedEdges.map(relationEdgeKey));
-  subscription.relationEdges = subscription.relationEdges.filter(
-    (edge) => !removedEdges.has(relationEdgeKey(edge)),
-  );
-  for (const edge of relationDelta.addedEdges) {
-    const key = relationEdgeKey(edge);
-    if (!subscription.relationEdges.some((current) => relationEdgeKey(current) === key)) {
-      subscription.relationEdges.push(edge);
-    }
-  }
-
-  const referenced = new Set(
-    subscription.relationEdges.map((edge) =>
-      rowKey(edge.targetTable, formatUuid(edge.targetRowId)),
-    ),
-  );
-  subscription.relationRows = subscription.relationRows.filter((row, index) => {
-    if (index < subscription.relationRootCount) return true;
-    return referenced.has(rowKey(row.table, row.id));
-  });
-}
-
 function indexRowsByKey(rows: RowState[]): Map<string, number> {
   const index = new Map<string, number>();
   rows.forEach((row, rowIndex) => {
@@ -4061,14 +3539,6 @@ function indexRowsByKey(rows: RowState[]): Map<string, number> {
 
 function rowKey(table: string, id: string): string {
   return `${table}\0${id}`;
-}
-
-function relationKey(table: string, id: string, relation: string): string {
-  return `${table}\0${id}\0${relation}`;
-}
-
-function relationEdgeKey(edge: NativeRelationSubscriptionEdge): string {
-  return `${edge.sourceTable}\0${formatUuid(edge.sourceRowId)}\0${edge.relation}\0${edge.targetTable}\0${formatUuid(edge.targetRowId)}`;
 }
 
 function decodePlannedField(
@@ -4153,7 +3623,7 @@ function decodeNestedRowBytes(
           : decodeBytes(column.column_type, valueBytes, name, descriptor[index]?.valueType),
       );
     }
-    return {
+    const row: { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } = {
       id,
       values: columns.map(
         (column) =>
@@ -4162,8 +3632,13 @@ function decodeNestedRowBytes(
             ? ({ type: "Array", value: [] } satisfies Value)
             : ({ type: "Null" } satisfies Value)),
       ),
-      valuesByColumn,
     };
+    Object.defineProperty(row, "valuesByColumn", {
+      value: valuesByColumn,
+      enumerable: false,
+      configurable: true,
+    });
+    return row;
   }
   if (bytes.byteLength < 5) throw new Error("invalid nested row value");
   const hasId = bytes[0] === 1;
@@ -4238,9 +3713,6 @@ function normalizeSubscriptionChunk(chunk: unknown):
       type: "delta";
       reset?: boolean;
       delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] };
-      relationDelta?: NativeRelationSubscriptionDelta;
-      relationSnapshot?: NativeRelationSubscriptionSnapshot;
-      terminalRows: boolean;
       settled?: boolean;
     }
   | {
@@ -4256,9 +3728,6 @@ function normalizeSubscriptionChunk(chunk: unknown):
     type?: unknown;
     rows?: unknown;
     delta?: unknown;
-    relation_delta?: unknown;
-    relation_snapshot?: unknown;
-    output_mode?: unknown;
     reason?: unknown;
     reset?: unknown;
     settled?: unknown;
@@ -4280,19 +3749,6 @@ function normalizeSubscriptionChunk(chunk: unknown):
       delta: readNativeSubscriptionDelta(
         new PostcardReader(assertBytes(record.delta, "subscription delta")),
       ),
-      relationDelta:
-        record.relation_delta === undefined
-          ? undefined
-          : readNativeRelationSubscriptionDelta(
-              new PostcardReader(assertBytes(record.relation_delta, "relation subscription delta")),
-            ),
-      relationSnapshot:
-        record.relation_snapshot === undefined
-          ? undefined
-          : readRelationSnapshot(
-              assertBytes(record.relation_snapshot, "relation subscription snapshot"),
-            ),
-      terminalRows: record.output_mode === "terminal_rows",
       settled: typeof record.settled === "boolean" ? record.settled : undefined,
     };
   }
@@ -4441,29 +3897,17 @@ function plainResetChunkCanStayPacked(
   chunk: {
     reset?: boolean;
     delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] };
-    relationDelta?: NativeRelationSubscriptionDelta;
-    relationSnapshot?: NativeRelationSubscriptionSnapshot;
   },
   schema: WasmSchema,
 ): boolean {
   const reset = chunk.reset === true;
   const noUpdated = chunk.delta.updated.length === 0;
   const noRemoved = chunk.delta.removed.length === 0;
-  const noArraySubqueries = subscription.relationMaterialization.arraySubqueries.length === 0;
-  const noRelevantRelationDelta = !chunk.relationDelta || noArraySubqueries;
-  const noRelationSnapshot = !chunk.relationSnapshot;
   const identityProjection = subscriptionOutputColumnsAreIdentityProjection(
     subscription.outputColumns,
     schema,
   );
-  const canStayPacked =
-    reset &&
-    noUpdated &&
-    noRemoved &&
-    noRelevantRelationDelta &&
-    noRelationSnapshot &&
-    noArraySubqueries &&
-    identityProjection;
+  const canStayPacked = reset && noUpdated && noRemoved && identityProjection;
   return canStayPacked;
 }
 

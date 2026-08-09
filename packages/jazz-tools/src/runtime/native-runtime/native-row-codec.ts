@@ -682,11 +682,16 @@ function decodeRowValue(
   offset += 4;
   const raw = bytes.subarray(offset, offset + len);
   if (raw.byteLength !== len) throw new Error("invalid nested row value length");
-  return {
+  const row: { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } = {
     id,
     values: decodeNativeRowValues(columns, raw),
-    valuesByColumn: decodeNativeRowValuesByColumn(columns, raw),
   };
+  Object.defineProperty(row, "valuesByColumn", {
+    value: decodeNativeRowValuesByColumn(columns, raw),
+    enumerable: false,
+    configurable: true,
+  });
+  return row;
 }
 
 function decodePlainValue(type: ColumnType, bytes: Uint8Array, columnName?: string): unknown {

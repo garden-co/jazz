@@ -22,6 +22,7 @@ import { decodeNativeDelta } from "../subscription-manager.js";
 import { definePermissions } from "../../permissions/index.js";
 import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
+import { storageColumnValueType } from "./native-row-codec.js";
 
 const previousWebSocket = globalThis.WebSocket;
 
@@ -1833,30 +1834,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
     controller!.enqueue({
       type: "snapshot",
-      rows: encodeRelationSnapshot(
-        [
-          {
-            table: "users",
-            rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-            title: "Ada",
-          },
-          {
-            table: "todos",
-            rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
-            title: "Ship relation reads",
-          },
-        ],
-        [
-          {
-            sourceTable: "users",
-            sourceRowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-            relation: "todosViaOwner",
-            targetTable: "todos",
-            targetRowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
-          },
-        ],
-        1,
-      ),
+      rows: encodeTerminalRelationSnapshot(relationSchema),
     });
     await Promise.resolve();
 
@@ -1921,30 +1899,7 @@ describe("NativeRuntimeAdapter server transport", () => {
             },
             allRelationSnapshot: () => {
               calls.push("allRelationSnapshot");
-              return encodeRelationSnapshot(
-                [
-                  {
-                    table: "users",
-                    rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-                    title: "Ada",
-                  },
-                  {
-                    table: "todos",
-                    rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
-                    title: "Ship relation reads",
-                  },
-                ],
-                [
-                  {
-                    sourceTable: "users",
-                    sourceRowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-                    relation: "todosViaOwner",
-                    targetTable: "todos",
-                    targetRowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
-                  },
-                ],
-                1,
-              );
+              return encodeTerminalRelationSnapshot(relationSchema);
             },
             all: () => {
               calls.push("all");
@@ -3395,10 +3350,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         relationAdded: [{ table: "todos", rowId: first, title: "first" }],
       }),
       relationSubscriptionChunk({
-        // Relation snapshots carry the authoritative rendered row. The root
-        // delta can be stale/partial while that snapshot advances.
-        rootUpdated: [{ table: "todos", rowId: first, title: "stale root" }],
-        relationUpdated: [{ table: "todos", rowId: first, title: "first updated" }],
+        rootUpdated: [{ table: "todos", rowId: first, title: "first updated" }],
       }),
       relationSubscriptionChunk({
         rootRemoved: [{ table: "todos", rowId: first }],
@@ -5898,6 +5850,50 @@ function encodeRelationSnapshot(
     edge.string(source.targetTable);
     edge.bytes(source.targetRowId);
   }, edges.length);
+  return writer.finish();
+}
+
+function encodeTerminalRelationSnapshot(schema: WasmSchema): Uint8Array {
+  const childColumns = schema.todos!.columns;
+  const rootColumns: ColumnDescriptor[] = [
+    schema.users!.columns[0]!,
+    {
+      name: "todosViaOwner",
+      column_type: { type: "Array", element: { type: "Row", columns: childColumns } },
+      nullable: false,
+    },
+  ];
+  const childDescriptor = [
+    { name: "row_uuid", valueType: { tag: 10 } },
+    { name: "title", valueType: storageColumnValueType(childColumns[0]!) },
+  ];
+  const descriptor = [
+    { name: "title", valueType: storageColumnValueType(rootColumns[0]!) },
+    {
+      name: "todosViaOwner",
+      valueType: { tag: 13, inner: { tag: 15, record: childDescriptor } },
+    },
+  ];
+  const childRecord = createRecord(childDescriptor, [
+    uuidBytes("00000000-0000-0000-0000-000000000002"),
+    new TextEncoder().encode("Ship relation reads"),
+  ]);
+  const nestedRowsHeader = new Uint8Array(4);
+  new DataView(nestedRowsHeader.buffer).setUint32(0, 1, true);
+  const nestedRows = concatBytes([nestedRowsHeader, childRecord]);
+  const writer = new PostcardWriter();
+  writer.u64(0);
+  writer.u64(1);
+  writer.vec((batch) => {
+    batch.string("users");
+    writeDescriptor(batch, descriptor);
+    batch.vec((row) => {
+      row.bytes(uuidBytes("00000000-0000-0000-0000-000000000001"));
+      row.bool(false);
+      row.bytes(createRecord(descriptor, [new TextEncoder().encode("Ada"), nestedRows]));
+    }, 1);
+  }, 1);
+  writer.vec(() => undefined, 0);
   return writer.finish();
 }
 
