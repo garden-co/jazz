@@ -1736,7 +1736,7 @@ where
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
         let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
-        self.write_mergeable_at_ms_with_authored_columns(
+        self.write_mergeable_at_ms_with_authorship(
             self.identity.author,
             None,
             table,
@@ -1744,7 +1744,7 @@ where
             cells,
             parent.into_iter().collect(),
             None,
-            authored_columns,
+            Some(authored_columns),
             now_ms,
         )
     }
@@ -1840,7 +1840,7 @@ where
                 format!("policy denied UPDATE on table {table}"),
             ));
         }
-        self.write_mergeable_at_ms_with_authored_columns(
+        self.write_mergeable_at_ms_with_authorship(
             identity,
             Some(identity),
             table,
@@ -1848,7 +1848,7 @@ where
             cells,
             parents,
             None,
-            authored_columns,
+            Some(authored_columns),
             now_ms,
         )
     }
@@ -1920,7 +1920,7 @@ where
         } else {
             (cells, Vec::new(), None)
         };
-        self.write_mergeable_with_authored_columns(
+        self.write_mergeable_at_ms_with_authorship(
             self.identity.author,
             None,
             table,
@@ -1928,7 +1928,8 @@ where
             cells,
             parents,
             None,
-            authored_columns.unwrap_or_default(),
+            authored_columns,
+            self.next_now_ms(),
         )
     }
 
@@ -1950,7 +1951,7 @@ where
         } else {
             (cells, Vec::new(), None)
         };
-        self.write_mergeable_at_ms_with_authored_columns(
+        self.write_mergeable_at_ms_with_authorship(
             self.identity.author,
             None,
             table,
@@ -1958,7 +1959,7 @@ where
             cells,
             parents,
             None,
-            authored_columns.unwrap_or_default(),
+            authored_columns,
             now_ms,
         )
     }
@@ -1982,7 +1983,7 @@ where
         } else {
             (cells, Vec::new(), None)
         };
-        self.write_mergeable_with_authored_columns(
+        self.write_mergeable_at_ms_with_authorship(
             identity,
             Some(identity),
             table,
@@ -1990,7 +1991,8 @@ where
             cells,
             parents,
             None,
-            authored_columns.unwrap_or_default(),
+            authored_columns,
+            self.next_now_ms(),
         )
     }
 
@@ -2014,7 +2016,7 @@ where
         } else {
             (cells, Vec::new(), None)
         };
-        self.write_mergeable_at_ms_with_authored_columns(
+        self.write_mergeable_at_ms_with_authorship(
             identity,
             Some(identity),
             table,
@@ -2022,7 +2024,7 @@ where
             cells,
             parents,
             None,
-            authored_columns.unwrap_or_default(),
+            authored_columns,
             now_ms,
         )
     }
@@ -2931,7 +2933,7 @@ where
         deletion: Option<DeletionEvent>,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
-        self.write_mergeable_at_ms_with_authored_columns(
+        self.write_mergeable_at_ms_with_authorship(
             made_by,
             permission_subject,
             table,
@@ -2939,7 +2941,7 @@ where
             cells,
             parents,
             deletion,
-            BTreeSet::new(),
+            None,
             now_ms,
         )
     }
@@ -2955,7 +2957,7 @@ where
         deletion: Option<DeletionEvent>,
         authored_columns: BTreeSet<String>,
     ) -> Result<WriteHandle<S>, Error> {
-        self.write_mergeable_at_ms_with_authored_columns(
+        self.write_mergeable_at_ms_with_authorship(
             made_by,
             permission_subject,
             table,
@@ -2963,12 +2965,12 @@ where
             cells,
             parents,
             deletion,
-            authored_columns,
+            Some(authored_columns),
             self.next_now_ms(),
         )
     }
 
-    fn write_mergeable_at_ms_with_authored_columns(
+    fn write_mergeable_at_ms_with_authorship(
         &self,
         made_by: AuthorId,
         permission_subject: Option<AuthorId>,
@@ -2977,7 +2979,7 @@ where
         cells: RowCells,
         parents: Vec<TxId>,
         deletion: Option<DeletionEvent>,
-        authored_columns: BTreeSet<String>,
+        authored_columns: Option<BTreeSet<String>>,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
         let operation = if deletion == Some(DeletionEvent::Deleted) {
@@ -2996,7 +2998,7 @@ where
             .made_by(made_by)
             .parents(parents)
             .cells(cells);
-        if !authored_columns.is_empty() {
+        if let Some(authored_columns) = authored_columns {
             commit = commit.authored_columns(authored_columns);
         }
         if let Some(subject) = permission_subject {
@@ -3124,11 +3126,19 @@ where
         identity: AuthorId,
     ) -> Result<Option<CurrentRow>, Error> {
         let target = self.local_row_for_identity(table, row, identity)?;
-        if target.is_some()
-            || identity == AuthorId::SYSTEM
-            || self.table_schema(table)?.read_policy.is_none()
-        {
+        if target.is_some() {
             return Ok(target);
+        }
+        // A policy-filtered point read cannot by itself distinguish an absent
+        // row from an existing row hidden from this identity. Upsert needs
+        // exactly that distinction: a genuinely absent target follows INSERT
+        // policy and does not require read permission, while merging into an
+        // existing target must not expose or copy hidden cells.
+        if self.local_current_row(table, row)?.is_none() {
+            return Ok(None);
+        }
+        if identity == AuthorId::SYSTEM || self.table_schema(table)?.read_policy.is_none() {
+            return Ok(None);
         }
         Err(read_for_write_denied("UPSERT", table))
     }
@@ -3265,12 +3275,6 @@ where
         patch: RowCells,
         identity: AuthorId,
     ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
-        if patch.is_empty() {
-            return Err(crate::node::Error::InvalidMergeableCommit(
-                "partial UPDATE requires at least one cell",
-            )
-            .into());
-        }
         let table_schema = self.table_schema(table)?;
         self.ensure_row_not_deleted(table, row)?;
         if table_schema

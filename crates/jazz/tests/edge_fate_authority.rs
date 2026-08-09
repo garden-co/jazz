@@ -274,14 +274,12 @@ fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
     pump_client_edge(&bob, &bob_wire, &mut core, bob_session);
     pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
 
-    // An empty partial update has no authored cells and is rejected rather
-    // than becoming a legacy "all materialized cells authored" write. Planted
-    // positive: remove the empty-patch guard in `merge_existing_cells`; this
-    // assertion succeeds and such a concurrent no-op can clobber Alice.
-    assert!(
-        bob.update_at_ms("todos", row, BTreeMap::new(), 250)
-            .is_err()
-    );
+    // An empty partial update is a real provenance event with an explicitly
+    // empty authored-column set. It must not become a legacy "all materialized
+    // cells authored" write. Planted positive: omit that empty set from the
+    // commit and this newer event incorrectly claims/clobbers Alice's cells.
+    bob.update_at_ms("todos", row, BTreeMap::new(), 250)
+        .expect("empty patch remains a safe no-op");
 
     // Neither client is pumped after these writes until both heads exist, so
     // they remain concurrent children of the shared t=100 base.
