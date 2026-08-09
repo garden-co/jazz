@@ -43,18 +43,9 @@ where
             return Err(Error::DuplicateOpenBatch(id));
         }
         let local_base = self.clock.tx_time;
-        let mut dots = Vec::new();
-        for tx_id in self.transaction_ids()? {
-            let Some(stored) = self.query_transaction(tx_id)? else {
-                continue;
-            };
-            if !matches!(stored.fate, Fate::Rejected(_))
-                && stored
-                    .global_seq
-                    .is_some_and(|global_seq| global_seq > self.clock.applied_global_watermark)
-            {
-                dots.push(tx_id);
-            }
+        let mut dots = Vec::with_capacity(self.clock.applied_global_above_watermark.len());
+        for global_seq in self.clock.applied_global_above_watermark.clone() {
+            dots.extend(self.transaction_ids_for_global_seq(global_seq)?);
         }
         let base_snapshot = Snapshot::exclusive_base(
             self.node_uuid,
@@ -789,6 +780,31 @@ where
             advanced.push(next);
         }
         advanced
+    }
+
+    fn transaction_ids_for_global_seq(
+        &mut self,
+        global_seq: GlobalSeq,
+    ) -> Result<Vec<TxId>, Error> {
+        let mut tx_ids = Vec::new();
+        for raw in self.database.index_scan_raw(
+            "jazz_transactions",
+            "by_global_seq",
+            &[Value::Nullable(Some(Box::new(Value::U64(global_seq.0))))],
+        )? {
+            let record = raw.record();
+            let node_alias = NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
+            let node = self
+                .node_for_alias(node_alias)
+                .ok_or(Error::InvalidStoredValue(
+                    "transaction node alias must exist",
+                ))?;
+            tx_ids.push(TxId::new(
+                TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?),
+                node,
+            ));
+        }
+        Ok(tx_ids)
     }
 
     pub(super) fn snapshot_covers(&mut self, tx_id: TxId, snapshot: &Snapshot) -> bool {
