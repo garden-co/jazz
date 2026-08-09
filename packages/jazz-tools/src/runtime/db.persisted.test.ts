@@ -5,6 +5,7 @@ import {
   WriteResult,
   WriteHandle,
   type JazzClient,
+  type BatchId,
   type LocalTransactionRecord,
   type Row,
 } from "./client.js";
@@ -67,7 +68,7 @@ function todoTable() {
 
 function makeLocalTransactionRecord(transactionId: string): LocalTransactionRecord {
   return {
-    transactionId,
+    batchId: transactionId as BatchId,
     kind: "mergeable",
     sealed: true,
     latestSettlement: null,
@@ -88,7 +89,7 @@ function makeWriteResult(
 ) {
   const client = makeHandleClient(localTransactionRecord);
   return {
-    handle: new WriteResult(value, transactionId, client as unknown as JazzClient),
+    handle: new WriteResult(value, transactionId as BatchId, client as unknown as JazzClient),
     client,
   };
 }
@@ -99,7 +100,7 @@ function makeWriteHandle(
 ) {
   const client = makeHandleClient(localTransactionRecord);
   return {
-    handle: new WriteHandle(transactionId, client as unknown as JazzClient),
+    handle: new WriteHandle(transactionId as BatchId, client as unknown as JazzClient),
     client,
   };
 }
@@ -137,7 +138,7 @@ describe("Db write handles", () => {
       undefined,
       undefined,
     );
-    expect(pending.transactionId).toBe("transaction-insert");
+    await expect(pending.batchId).resolves.toBe("transaction-insert");
     expect(pending.value).toEqual({
       id: "todo-1",
       title: "Buy milk",

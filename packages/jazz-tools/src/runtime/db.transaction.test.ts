@@ -91,7 +91,7 @@ describe("Db transactions", () => {
   });
 
   it("uses mergeable callback transactions by default", async () => {
-    const result = db.transaction((tx) => {
+    const result = await db.transaction((tx) => {
       expect(tx.kind).toBe("mergeable");
       tx.insert(app.todos, { title: "Rejected callback transaction", done: false });
       return tx.kind;
@@ -260,15 +260,15 @@ describe("Db transactions", () => {
     }
   });
 
-  it("types exclusive transaction waits without durability options", () => {
+  it("types exclusive transaction waits without durability options", async () => {
     if (false) {
-      const result = db.exclusiveTransaction((tx) => tx.kind);
+      const result = await db.exclusiveTransaction((tx) => tx.kind);
       void result.wait();
       // @ts-expect-error - exclusive transactions are confirmed by the global authority.
       void result.wait({ tier: "global" });
 
       const tx = db.beginExclusiveTransaction();
-      const committed = tx.commit();
+      const committed = await tx.commit();
       void committed.wait();
       // @ts-expect-error - exclusive transactions are confirmed by the global authority.
       void committed.wait({ tier: "global" });
@@ -286,9 +286,9 @@ describe("Db transactions", () => {
   it("rejects exclusive transaction operations after commit", async () => {
     const tx = db.beginExclusiveTransaction();
     tx.insert(app.todos, { title: "Committed transaction", done: false });
-    const transactionId = tx.transactionId();
+    const transactionId = tx.openBatchId();
 
-    tx.commit();
+    await tx.commit();
 
     const coreError = `transaction ${transactionId} is already committed`;
     expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
@@ -304,9 +304,9 @@ describe("Db transactions", () => {
   it("rejects exclusive transaction operations after rollback", async () => {
     const tx = db.beginExclusiveTransaction();
     tx.insert(app.todos, { title: "Rolled-back transaction", done: false });
-    const transactionId = tx.transactionId();
+    const transactionId = tx.openBatchId();
 
-    tx.rollback();
+    await tx.rollback();
 
     const coreError = `transaction ${transactionId} has already been completed or was never opened`;
     expect(() => tx.commit()).toThrow(`Commit transaction failed: Write error: ${coreError}`);
@@ -341,9 +341,9 @@ describe("Db mergeable transactions", () => {
   it("rejects mergeable transaction operations after commit", async () => {
     const tx = db.beginTransaction();
     tx.insert(app.todos, { title: "Committed transaction", done: false });
-    const transactionId = tx.transactionId();
+    const transactionId = tx.openBatchId();
 
-    tx.commit();
+    await tx.commit();
 
     const coreError = `transaction ${transactionId} is already committed`;
     expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
@@ -359,9 +359,9 @@ describe("Db mergeable transactions", () => {
   it("rejects mergeable transaction operations after rollback", async () => {
     const tx = db.beginTransaction();
     tx.insert(app.todos, { title: "Rolled-back transaction", done: false });
-    const transactionId = tx.transactionId();
+    const transactionId = tx.openBatchId();
 
-    tx.rollback();
+    await tx.rollback();
 
     const coreError = `transaction ${transactionId} has already been completed or was never opened`;
     expect(() => tx.commit()).toThrow(`Commit transaction failed: Write error: ${coreError}`);
@@ -377,12 +377,12 @@ describe("Db mergeable transactions", () => {
   it("rolls back a callback mergeable transaction when the callback throws after a write", async () => {
     const error = new Error("callback failed");
 
-    expect(() =>
+    await expect(
       db.transaction((tx) => {
         tx.insert(app.todos, { title: "Thrown callback transaction", done: false });
         throw error;
       }),
-    ).toThrow(error);
+    ).rejects.toThrow(error);
 
     await expect(allTodos()).resolves.toEqual([]);
   });
@@ -397,7 +397,7 @@ describe("Db mergeable transactions", () => {
     try {
       const tx = sessionDb.beginTransaction();
       tx.insert(app.todos, { title: "Session-scoped transaction", done: false });
-      tx.commit();
+      await tx.commit();
       await expect(sessionDb.all(app.todos.where({}), { tier: "local" })).resolves.toEqual([
         { id: expect.any(String), title: "Session-scoped transaction", done: false },
       ]);
@@ -424,7 +424,7 @@ describe("Db mergeable transactions", () => {
     expect(db.canUpdate(app.todos, staged.id, { done: true })).toBe(false);
     expect(tx.kind).toBe("mergeable");
 
-    tx.rollback();
+    await tx.rollback();
     await expect(allTodos()).resolves.toEqual([]);
   });
 });

@@ -5,7 +5,7 @@ import {
   type FileStorageDb,
 } from "./file-storage.js";
 import { QueryBuilder, QueryOptions, TableProxy } from "./db.js";
-import { WriteResult, JazzClient } from "./client.js";
+import { WriteResult, JazzClient, type BatchId } from "./client.js";
 
 interface StoredFile {
   id: string;
@@ -90,7 +90,7 @@ class FakeDb implements FileStorageDb {
       },
     } as unknown as JazzClient;
 
-    return new WriteResult(row as T, transactionId, client);
+    return new WriteResult(row as T, transactionId as BatchId, client);
   }
 
   async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
