@@ -33,20 +33,20 @@ variant.
 
 ## Status (2026-08-06)
 
-| stage | state |
-|---|---|
-| PR 1 — durable-key rejection | **merged** (#1260); `INV-STORAGE-27` now/✓ |
-| PR 2 — Groove `CollectBy` terminal | **merged** (#1263); `INV-QUERY-27`, `INV-QUERY-28`, `G-INV-REC-16` now/✓ |
-| PR 3 — canonical `ResultTree`, explicit boundedness | **merged** (#1282); `INV-QUERY-29` now/✓ |
-| PR 3.5 — terminal integration | **blocked**, see _Terminal integration blocker_ below |
-| PR 4 — atomic structured delivery on v4 | **blocked** on the same question |
-| PR 5 — structured differential oracle | not started; `INV-TEST-5` target |
+| stage                                               | state                                                                    |
+| --------------------------------------------------- | ------------------------------------------------------------------------ |
+| PR 1 — durable-key rejection                        | **merged** (#1260); `INV-STORAGE-27` now/✓                               |
+| PR 2 — Groove `CollectBy` terminal                  | **merged** (#1263); `INV-QUERY-27`, `INV-QUERY-28`, `G-INV-REC-16` now/✓ |
+| PR 3 — canonical `ResultTree`, explicit boundedness | **merged** (#1282); `INV-QUERY-29` now/✓                                 |
+| PR 3.5 — terminal integration                       | **blocked**, see _Terminal integration blocker_ below                    |
+| PR 4 — atomic structured delivery on v4             | **blocked** on the same question                                         |
+| PR 5 — structured differential oracle               | not started; `INV-TEST-5` target                                         |
 
 Two decisions taken after this plan was written, and not part of its original
 five stages:
 
-- **Explicit boundedness.** `INV-QUERY-29` means *boundedness must be declared*,
-  not *a finite limit must be present*. An array subquery declares `limit(n)`
+- **Explicit boundedness.** `INV-QUERY-29` means _boundedness must be declared_,
+  not _a finite limit must be present_. An array subquery declares `limit(n)`
   (zero valid, rendering `[]`) or `unbounded()`; declaring neither is a
   validation error. `unbounded()` is a first-class supported mode — three
   correctness gates use it deliberately, so a literal ban would have forced them
@@ -63,10 +63,10 @@ stopped before mutating anything. The reasons compose into one question.
 
 **`CollectBy` renders one collection slot.** `CollectByOp` carries a single
 `collection_field` and produces one parent with one `Array<Record>`.
-`ResultTree` requires *named ordered child arrays* — sibling relations — and
+`ResultTree` requires _named ordered child arrays_ — sibling relations — and
 recursion through parent → child → grandchild. The obvious bridge is composing
 collectors, but `INV-QUERY-27` forbids precisely that: a collector may not be
-an input to any graph node, *including another collector*. The rule that makes
+an input to any graph node, _including another collector_. The rule that makes
 the terminal clean is the rule that prevents composing one into a tree.
 
 **The carrier forces flattening.** The only public maintained carrier is
@@ -75,7 +75,7 @@ deltas (`crates/jazz/src/db.rs:8128`); the remote carrier encodes
 `RelationEdgeEntry` (`crates/jazz/src/protocol.rs:1890`). A structured terminal
 result cannot traverse either without flattening back into rows and edges —
 which is the facade-side reconstruction the design forbids. So over the
-retained v3 path a changed child *cannot* be delivered as a whole-parent
+retained v3 path a changed child _cannot_ be delivered as a whole-parent
 replacement.
 
 Together these mean terminal integration and the wire cut cannot be separated

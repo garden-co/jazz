@@ -11,6 +11,7 @@ use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::protocol::{SyncMessage, VersionRecord};
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::time::TxTime;
+use jazz::tools::OpenBatchId;
 use jazz::tx::{BranchLineage, DeletionEvent, DurabilityTier, Fate, Transaction};
 use jazz_sim::{emit_json_line, metadata_fields};
 use serde_json::{Map, Value as JsonValue, json};
@@ -286,7 +287,8 @@ fn run_read_set_capture(config: &Config) {
     seed_local_rows(&mut node_, 64);
 
     let mut row_hist = NsHist::new();
-    let tx = node_.open_exclusive().expect("open tx");
+    let tx = OpenBatchId::new();
+    node_.open_exclusive(tx).expect("open tx");
     for idx in 0..config.iterations {
         let start = Instant::now();
         let _ = node_
@@ -299,7 +301,8 @@ fn run_read_set_capture(config: &Config) {
 
     let mut predicate_hist = NsHist::new();
     for _ in 0..config.iterations {
-        let tx = node_.open_exclusive().expect("open tx");
+        let tx = OpenBatchId::new();
+        node_.open_exclusive(tx).expect("open tx");
         let start = Instant::now();
         let rows = node_
             .tx_current_rows(tx, TABLE)
@@ -330,7 +333,8 @@ fn run_validation_entries(config: &Config) {
 
     let mut row_hist = NsHist::new();
     for idx in 0..config.iterations {
-        let tx = client.open_exclusive().expect("open tx");
+        let tx = OpenBatchId::new();
+        client.open_exclusive(tx).expect("open tx");
         let _ = client.tx_read(tx, TABLE, row(idx % 64)).expect("tx read");
         client
             .tx_write(
@@ -364,7 +368,8 @@ fn run_validation_entries(config: &Config) {
 
     let mut predicate_hist = NsHist::new();
     for idx in 0..config.iterations {
-        let tx = client.open_exclusive().expect("open tx");
+        let tx = OpenBatchId::new();
+        client.open_exclusive(tx).expect("open tx");
         let _ = client.tx_current_rows(tx, TABLE).expect("tx current rows");
         client
             .tx_write(
