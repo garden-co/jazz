@@ -550,6 +550,7 @@ describe("db.all browser integration", () => {
               table: "todos",
               inner_column: "owner_id",
               outer_column: "users.id",
+              unbounded: true,
             },
           ],
         }),

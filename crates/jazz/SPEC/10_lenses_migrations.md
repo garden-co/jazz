@@ -235,3 +235,11 @@ change future merge behavior.
 - 🔶 **Lens hardening.** Preserve hidden newer fields under old-client writes,
   make lens-path selection ambiguity-aware, allow corrected or asymmetric
   migrations where safe, and define type-changing migrations.
+- 🔶 **Authored-column presence through lenses.** `INV-HIST-8` distinguishes an
+  explicitly authored unchanged cell from materialized inherited context, while
+  `INV-LENS-11`/`INV-LENS-14` require old-schema deltas to translate through
+  lens paths. Define how authored presence propagates through `RenameColumn`,
+  `CopyColumn`, `AddColumn`, `DropColumn`, and `TransformColumn`. Until that
+  contract exists, a lens-translated version deliberately marks presence
+  unavailable and conservatively treats every present translated payload cell
+  as authored; this is not a claim of per-column LWW fidelity across a lens.

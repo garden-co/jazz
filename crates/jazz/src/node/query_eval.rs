@@ -477,6 +477,7 @@ fn version_witness_public_fields(
         schema.identity.tx_node_field.clone(),
         schema.identity.schema_field.clone(),
         schema.parents_field.clone(),
+        schema.authored_columns_field.clone(),
         schema.created_by_field.clone(),
         schema.created_at_field.clone(),
         schema.updated_by_field.clone(),
@@ -1639,7 +1640,12 @@ fn selected_visible_current_primary_key_graph(
         .iter()
         .map(|column| user_column_field(&column.name))
         .collect::<Vec<_>>();
-    let mut content_fields = vec!["row_uuid".to_owned()];
+    let mut content_fields = vec![
+        "row_uuid".to_owned(),
+        "schema_version".to_owned(),
+        "parents".to_owned(),
+        "authored_columns".to_owned(),
+    ];
     content_fields.extend(user_fields.iter().cloned());
     content_fields.extend([
         "created_by".to_owned(),
@@ -1914,6 +1920,7 @@ where
             ProjectField::literal("layer", Value::String("content".to_owned())),
             ProjectField::named("schema_version"),
             ProjectField::named("parents"),
+            ProjectField::named("authored_columns"),
             ProjectField::renamed("$createdBy", "created_by"),
             ProjectField::renamed("$createdAt", "created_at"),
             ProjectField::renamed("$updatedBy", "updated_by"),
@@ -2081,6 +2088,7 @@ fn canonical_current_source_fields(
         fields.extend([
             ProjectField::named("schema_version"),
             ProjectField::named("parents"),
+            ProjectField::named("authored_columns"),
         ]);
     }
     fields
@@ -2120,6 +2128,7 @@ fn storage_to_canonical_current_source_fields(
         fields.extend([
             ProjectField::named("schema_version"),
             ProjectField::named("parents"),
+            ProjectField::named("authored_columns"),
         ]);
     }
     if include_settle_position {
@@ -2149,6 +2158,10 @@ fn current_row_descriptor_with_hidden_source_fields(
             ("created_at".to_owned(), ValueType::U64),
             ("updated_by".to_owned(), ValueType::Uuid),
             ("updated_at".to_owned(), ValueType::U64),
+            (
+                "authored_columns".to_owned(),
+                ValueType::Nullable(Box::new(ValueType::Bytes)),
+            ),
         ]);
         if let Some(SourceMetadataFields::VersionWitnesses {
             branch_or_prefix_field: Some(field),
@@ -3244,7 +3257,6 @@ fn normalize_reachable(
         binding_source_shape,
         param_types,
     )?;
-
     let frontier_node = RowSetNodeId(format!("{reachable_id}:frontier"));
     nodes.insert(
         frontier_node.clone(),
@@ -3581,7 +3593,13 @@ fn normalize_reachable_seed(
             ));
         }
         let seed_source = reachable_seed_source_id(seed, reachable_id);
-        let columns = reachable_seed_frontier_columns(schema, &seed_source, seed)?;
+        let mut columns = reachable_seed_frontier_columns(schema, &seed_source, seed)?;
+        let edge_route_columns = reachable_edge_route_columns(reachable, param_types)?;
+        for column in &edge_route_columns {
+            if !columns.iter().any(|existing| existing.name == column.name) {
+                columns.push(column.clone());
+            }
+        }
         let user_column_ty = seed
             .user_column
             .as_ref()
@@ -3665,6 +3683,10 @@ fn normalize_reachable_seed(
                 value: NormalizedValueRef::Param(claim_field.clone()),
             });
         }
+        seed_columns.extend(edge_route_columns.into_iter().map(|column| RowProjection {
+            output: typed_output_field(&column.name, column.ty),
+            value: column.value,
+        }));
         nodes.insert(
             seed_project_node.clone(),
             RowSetExpr::Project {
@@ -3675,7 +3697,12 @@ fn normalize_reachable_seed(
         return Ok((seed_project_node, columns));
     }
 
-    let columns = reachable_frontier_columns(&reachable.from, param_types)?;
+    let mut columns = reachable_frontier_columns(&reachable.from, param_types)?;
+    for column in reachable_edge_route_columns(reachable, param_types)? {
+        if !columns.iter().any(|existing| existing.name == column.name) {
+            columns.push(column);
+        }
+    }
     let seed_node = RowSetNodeId(format!("{reachable_id}:seed"));
     nodes.insert(
         seed_node.clone(),
@@ -3686,6 +3713,25 @@ fn normalize_reachable_seed(
         },
     );
     Ok((seed_node, columns))
+}
+
+fn reachable_edge_route_columns(
+    reachable: &crate::query::ReachableVia,
+    param_types: &BTreeMap<String, ColumnType>,
+) -> Result<Vec<ValueSourceColumn>, Error> {
+    predicate_params(&reachable.edge_filters)
+        .into_iter()
+        .map(|param| {
+            let ty = param_types.get(&param).cloned().ok_or_else(|| {
+                Error::QueryLowering(format!("unknown reachable edge parameter {param}"))
+            })?;
+            Ok(ValueSourceColumn {
+                name: route_param_field(&param),
+                value: NormalizedValueRef::Param(param),
+                ty,
+            })
+        })
+        .collect()
 }
 
 fn reachable_seed_frontier_columns(
@@ -6913,7 +6959,9 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<Option<BindingViewKey>, Error> {
-        if !self.can_use_prepared_current_query_plan(shape) {
+        if !self.can_use_prepared_current_query_plan(shape)
+            || self.query_uses_heterogeneous_physical_lineage(shape)
+        {
             return Ok(None);
         }
         let binding_view_key = BindingViewKey::new(
@@ -6930,6 +6978,74 @@ where
 
     fn can_use_prepared_current_query_plan(&self, shape: &ValidatedQuery) -> bool {
         shape.schema_version() == self.catalogue.current_schema_version_id
+    }
+
+    fn query_uses_heterogeneous_physical_lineage(&self, shape: &ValidatedQuery) -> bool {
+        let Some(tables) = self.query_storage_read_tables(shape) else {
+            return true;
+        };
+        tables.into_iter().any(|logical_table| {
+            let Ok(table_id) =
+                self.physical_table_id_for_schema(shape.schema_version(), &logical_table)
+            else {
+                return true;
+            };
+            self.catalogue
+                .physical_mappings
+                .iter()
+                .any(|(schema_version, mapping)| {
+                    *schema_version != shape.schema_version()
+                        && mapping
+                            .tables
+                            .values()
+                            .any(|table| table.table_id == table_id)
+                })
+        })
+    }
+
+    fn query_storage_read_tables(&self, shape: &ValidatedQuery) -> Option<BTreeSet<String>> {
+        let query = shape.query();
+        let read_schema_version = shape.schema_version();
+        let mut tables = BTreeSet::from([query.table.clone()]);
+        tables.extend(query.joins.iter().map(|join| join.table.clone()));
+        for reachable in &query.reachable {
+            tables.insert(reachable.access_table.clone());
+            tables.insert(reachable.edge_table.clone());
+            if let Some(seed) = &reachable.seed {
+                tables.insert(seed.table.clone());
+            }
+        }
+        self.collect_include_read_tables(
+            &query.table,
+            read_schema_version,
+            &query.includes,
+            &mut tables,
+        )?;
+        Some(tables)
+    }
+
+    fn collect_include_read_tables(
+        &self,
+        root_table: &str,
+        read_schema_version: SchemaVersionId,
+        includes: &[Include],
+        tables: &mut BTreeSet<String>,
+    ) -> Option<()> {
+        for include in includes {
+            if !include.require && include.join_mode != crate::query::JoinMode::Inner {
+                continue;
+            }
+            let mut current_table_name = root_table.to_owned();
+            for segment in include.path.split('.') {
+                let current_table = self
+                    .table_in_schema(&current_table_name, read_schema_version)
+                    .ok()?;
+                let target_table = current_table.references.get(segment)?.clone();
+                tables.insert(target_table.clone());
+                current_table_name = target_table;
+            }
+        }
+        Some(())
     }
 
     fn settled_binding_view_source_rows(
@@ -11140,7 +11256,11 @@ fn global_current_storage_fields(
 ) -> Vec<String> {
     let mut fields = vec!["row_uuid".to_owned()];
     if include_version {
-        fields.extend(["schema_version".to_owned(), "parents".to_owned()]);
+        fields.extend([
+            "schema_version".to_owned(),
+            "parents".to_owned(),
+            "authored_columns".to_owned(),
+        ]);
     }
     fields.extend(
         table
@@ -11348,6 +11468,7 @@ fn inline_current_record_with_source_metadata(
             Value::U64(provenance.created_at.0),
             Value::Uuid(provenance.updated_by.0),
             Value::U64(provenance.updated_at.0),
+            Value::Nullable(None),
         ]);
     }
     if descriptor.field_index("coverage").is_some() {
@@ -11506,6 +11627,7 @@ fn inline_branch_current_record(
             Value::U64(provenance.created_at.0),
             Value::Uuid(provenance.updated_by.0),
             Value::U64(provenance.updated_at.0),
+            Value::Nullable(None),
         ]);
         if descriptor.field_index("branch_id").is_some() {
             values.push(Value::Uuid(branch_id.0));
@@ -11654,7 +11776,12 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
         .iter()
         .map(|column| user_column_field(&column.name))
         .collect::<Vec<_>>();
-    let mut content_storage_fields = vec!["row_uuid".to_owned()];
+    let mut content_storage_fields = vec![
+        "row_uuid".to_owned(),
+        "schema_version".to_owned(),
+        "parents".to_owned(),
+        "authored_columns".to_owned(),
+    ];
     content_storage_fields.extend(user_fields.iter().cloned());
     content_storage_fields.push("created_by".to_owned());
     content_storage_fields.push("created_at".to_owned());
@@ -11819,6 +11946,7 @@ fn maintained_view_history_storage_field_names(table: &TableSchema) -> Vec<Strin
             .iter()
             .map(|column| user_column_field(&column.name)),
     );
+    fields.push("authored_columns".to_owned());
     fields
 }
 

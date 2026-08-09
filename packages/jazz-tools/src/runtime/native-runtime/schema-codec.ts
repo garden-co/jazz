@@ -159,14 +159,14 @@ function writeDefaultValue(writer: PostcardWriter, columnType: ColumnType, value
       return;
     case "Integer":
       writer.u64(14); // groove::records::Value::I32
-      writer.i64(encodeSignedI32DefaultForStorage(expectI32(value, "Integer")));
+      writer.i64(expectI32(value, "Integer"));
       return;
     case "BigInt":
       if (value.type !== "BigInt" && value.type !== "Integer") {
         throw new Error("expected BigInt default");
       }
       writer.u64(13); // groove::records::Value::I64
-      writer.i64(encodeSignedI64DefaultForStorage(BigInt(value.value)));
+      writer.i64(expectI64(value, "BigInt"));
       return;
     case "Timestamp":
       if (value.type !== "Timestamp") throw new Error("expected Timestamp default");
@@ -208,14 +208,6 @@ function writeDefaultValue(writer: PostcardWriter, columnType: ColumnType, value
     case "Row":
       throw new Error("Core runtime schema defaults do not support Row values yet");
   }
-}
-
-function encodeSignedI32DefaultForStorage(value: number): number {
-  return (value ^ 0x8000_0000) | 0;
-}
-
-function encodeSignedI64DefaultForStorage(value: bigint): bigint {
-  return BigInt.asIntN(64, BigInt.asUintN(64, value) ^ (1n << 63n));
 }
 
 function writeIndexedColumns(writer: PostcardWriter, indexedColumns: string[] | undefined): void {
@@ -428,12 +420,12 @@ function writePolicyLiteral(writer: PostcardWriter, value: Value): void {
       writer.bool(value.value);
       return;
     case "Integer":
-      writer.u64(2); // groove::records::Value::U32
-      writer.u64(value.value);
+      writer.u64(14); // groove::records::Value::I32
+      writer.i64(expectI32(value, "Integer policy literal"));
       return;
     case "BigInt":
       writer.u64(13); // groove::records::Value::I64
-      writer.i64(value.value);
+      writer.i64(expectI64(value, "BigInt policy literal"));
       return;
     case "Timestamp":
       writer.u64(3); // groove::records::Value::U64
@@ -1476,6 +1468,17 @@ function expectI32(value: Value, type: string): number {
   const number = Number(value.value);
   if (!Number.isSafeInteger(number) || number < -0x80000000 || number > 0x7fffffff) {
     throw new Error(`${type} default must be a signed 32-bit integer`);
+  }
+  return number;
+}
+
+function expectI64(value: Value, type: string): bigint {
+  if (value.type !== "Integer" && value.type !== "BigInt") {
+    throw new Error(`expected ${type}`);
+  }
+  const number = BigInt(value.value);
+  if (number < -(1n << 63n) || number > (1n << 63n) - 1n) {
+    throw new Error(`${type} must be a signed 64-bit integer`);
   }
   return number;
 }

@@ -980,6 +980,21 @@ where
                 )),
             }
         }
+        fields.extend(
+            target_storage
+                .record_schema()
+                .fields()
+                .iter()
+                .skip(user_cells + target_table.columns.len())
+                .map(|field| {
+                    ProjectField::named(
+                        field
+                            .name
+                            .clone()
+                            .expect("Jazz trailing storage fields are named"),
+                    )
+                }),
+        );
         Ok(Some(fields))
     }
 
@@ -1128,6 +1143,12 @@ pub(super) fn physical_version_storage_tables(
             .take(HistoryRowRecord::USER_CELLS)
             .cloned()
             .collect::<Vec<_>>();
+        let trailing_history_columns = template
+            .columns
+            .iter()
+            .skip(HistoryRowRecord::USER_CELLS + template_table.columns.len())
+            .cloned()
+            .collect::<Vec<_>>();
         let mut physical_columns = BTreeMap::new();
         for (_, logical_table, mapping) in &variants {
             for column in &logical_table.columns {
@@ -1153,7 +1174,8 @@ pub(super) fn physical_version_storage_tables(
             .into_iter()
             .chain(physical_columns.iter().map(|(column_id, column_type)| {
                 GrooveColumnSchema::new(physical_user_column_field(*column_id), column_type.clone())
-            }));
+            }))
+            .chain(trailing_history_columns);
         let mut physical = GrooveTableSchema::new(physical_history_table_name(table_id), columns);
         physical.primary_key = template.primary_key.clone();
         physical.indices = template.indices.clone();
@@ -1167,6 +1189,12 @@ pub(super) fn physical_version_storage_tables(
             .take(GlobalCurrentRowRecord::USER_CELLS)
             .cloned()
             .collect::<Vec<_>>();
+        let current_trailing_columns = logical_global_tables[0]
+            .columns
+            .iter()
+            .skip(GlobalCurrentRowRecord::USER_CELLS + template_table.columns.len())
+            .cloned()
+            .collect::<Vec<_>>();
         let current_columns = || {
             current_system_columns
                 .iter()
@@ -1177,6 +1205,7 @@ pub(super) fn physical_version_storage_tables(
                         column_type.clone(),
                     )
                 }))
+                .chain(current_trailing_columns.iter().cloned())
         };
         let mut physical_global = GrooveTableSchema::new(
             physical_global_current_table_name(table_id),
@@ -1376,6 +1405,18 @@ fn physical_history_field_names(
                 ))?;
         fields.push(physical_user_column_field(column_id));
     }
+    fields.extend(
+        logical_descriptor
+            .fields()
+            .iter()
+            .skip(HistoryRowRecord::USER_CELLS + table.columns.len())
+            .map(|field| {
+                field.name.clone().ok_or(Error::InvalidStoredValue(
+                    "physical history trailing field unnamed",
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    );
     Ok(fields)
 }
 
@@ -1405,6 +1446,18 @@ fn physical_current_field_names(
                 ))?;
         fields.push(physical_user_column_field(column_id));
     }
+    fields.extend(
+        logical_descriptor
+            .fields()
+            .iter()
+            .skip(GlobalCurrentRowRecord::USER_CELLS + table.columns.len())
+            .map(|field| {
+                field.name.clone().ok_or(Error::InvalidStoredValue(
+                    "physical current trailing field unnamed",
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    );
     Ok(fields)
 }
 

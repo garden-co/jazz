@@ -1191,11 +1191,18 @@ async fn persistent_peer_reloads_synced_state_before_offline_editing_impl() {
 /// baseline: create → alice-v1 ──► bob syncs, persists v1 locally
 /// bob.shutdown()
 ///
-/// alice (online):  v1 → alice-v2 → alice-v3 → alice-v4
+/// alice (online):  v1 → alice-v2 → alice-v3 → alice-v4 + completed
 /// bob   (offline): v1 → bob-offline-edit
+///                     (only `title` is authored; stale `completed=false` is inherited)
+/// bob   (reopen): reloads that immutable version and uploads it over sync
 ///
 /// bob reconnects online
-/// both should converge to bob-offline-edit
+/// both should converge to bob-offline-edit + completed=true
+///
+/// Planted positive for authored-column persistence: dropping the trailing
+/// `authored_columns` field while projecting stored history back to a wire
+/// `VersionRecord` makes Bob's later materialized snapshot claim its inherited
+/// `completed=false`; the final `completed=true` assertions then fail.
 /// ```
 #[tokio::test]
 async fn offline_reconnect_replays_local_edit_after_rejoin() {
@@ -1225,6 +1232,12 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
             )
             .expect("alice update while bob offline");
     }
+    alice
+        .update(
+            todo_id,
+            vec![("completed".to_string(), Value::Boolean(true))],
+        )
+        .expect("alice completes todo while bob offline");
 
     wait_for_query(
         &alice,
@@ -1233,7 +1246,10 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
         QUERY_TIMEOUT,
         "alice sees v4 at edge",
         |rows| {
-            (rows.len() == 1 && rows[0].1[0] == Value::Text("alice-v4".to_string())).then_some(())
+            (rows.len() == 1
+                && rows[0].1[0] == Value::Text("alice-v4".to_string())
+                && rows[0].1[1] == Value::Boolean(true))
+            .then_some(())
         },
     )
     .await;
@@ -1299,12 +1315,14 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
                 .await
                 .ok()?;
 
-            if alice_rows.len() == 1 && bob_rows.len() == 1 {
-                if let (Value::Text(a), Value::Text(b)) = (&alice_rows[0].1[0], &bob_rows[0].1[0]) {
-                    if a == b && a != "create" {
-                        return Some(a.clone());
-                    }
-                }
+            if alice_rows.len() == 1
+                && bob_rows.len() == 1
+                && alice_rows[0].1[0] == Value::Text("bob-offline-edit".to_string())
+                && bob_rows[0].1[0] == Value::Text("bob-offline-edit".to_string())
+                && alice_rows[0].1[1] == Value::Boolean(true)
+                && bob_rows[0].1[1] == Value::Boolean(true)
+            {
+                return Some("bob-offline-edit".to_string());
             }
             None
         }

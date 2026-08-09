@@ -102,6 +102,14 @@ maintained-subscription semantics. `array_subqueries` are
 canonicalized into shape identity separately from includes; sibling ordering is
 not semantic, but duplicate sibling `column_name`s are rejected.
 
+Every binding layer MUST preserve the explicit boundedness choice across its
+builder, normalized JSON, worker, and native-codec boundaries. Absence is not
+an unbounded declaration and MUST remain invalid rather than being inferred as
+unbounded during lowering. In the TypeScript DSL, `include({ relation: true })`
+and nested object shorthand explicitly request the complete relation and are
+therefore sugar for an unbounded array subquery; an included query builder MUST
+instead call either `.limit(n)` or `.unbounded()`.
+
 `JoinVia` is an existential reference/junction traversal: it constrains root
 membership and supplies join witnesses; it is not a general relational join
 whose record is publicly returned. Flat joined output is a separate target AST
@@ -349,10 +357,11 @@ within one parent's array unless the query shape guarantees it.
 **Decision, Anselm 2026-08-04 — bounded arrays are enforced, with a runtime
 over-size error as backstop.** Two mechanisms, both required:
 
-1. **Validation enforces the bound.** An array subquery MUST carry a finite
-   child limit; query validation MUST reject an unbounded array subquery in a
-   structured result. This makes the size bound a property of the query rather
-   than of the data.
+1. **Validation enforces an explicit boundedness choice.** An array subquery
+   MUST carry either a finite child limit or an explicit unbounded declaration;
+   query validation MUST reject an undeclared choice. This makes intentional
+   unboundedness (and the common finite bound) a property of the query rather
+   than an accidental consequence of omitted data.
 2. **A runtime over-size error backstops it.** A bounded array can still render
    a parent larger than `MAX_WIRE_FRAME_BYTES` (2 MiB;
    `crates/jazz/src/protocol_limits.rs:16`) when individual children are large.

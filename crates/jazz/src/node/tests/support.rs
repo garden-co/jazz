@@ -1126,6 +1126,7 @@ fn ingest_relay_version(
     assert_eq!(tx_id.time, made_at);
     node.ingest_relay_commit_unit(
         Transaction {
+            target_lineage: crate::tx::BranchLineage::Root,
             tx_id,
             kind: TxKind::Mergeable,
             n_total_writes: 1,
@@ -1136,7 +1137,7 @@ fn ingest_relay_version(
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json: None,
-            source_branch: None,
+            branch_merge: None,
             merge_strategy: None,
         },
         vec![version_record(

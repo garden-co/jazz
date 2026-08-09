@@ -6,6 +6,8 @@
 //! node-level read layer over groove tables.
 
 use super::*;
+use crate::tx::BranchLineage;
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -182,7 +184,13 @@ where
         let mut versions = Vec::new();
         let mut scanned_sources = BTreeSet::new();
         for table in tables {
-            for storage_table in self.version_storage_sources(&table)? {
+            let sources = match tx.tx.target_lineage {
+                BranchLineage::Root => self.version_storage_sources(&table)?,
+                BranchLineage::Branch(branch_id) => {
+                    self.branch_version_storage_sources(&table, branch_id)?
+                }
+            };
+            for storage_table in sources {
                 if !scanned_sources.insert(storage_table.clone()) {
                     continue;
                 }
@@ -219,6 +227,37 @@ where
                 .then_with(|| left.layer().cmp(&right.layer()))
         });
         Ok(versions)
+    }
+
+    fn branch_version_storage_sources(
+        &self,
+        table: &str,
+        branch_id: BranchId,
+    ) -> Result<Vec<String>, Error> {
+        let mut sources = Vec::new();
+        for mapping in self.catalogue.physical_mappings.values() {
+            let Some(table_mapping) = mapping.tables.get(table) else {
+                continue;
+            };
+            if !self
+                .branches
+                .branch_partitions
+                .contains(&(table_mapping.table_id, branch_id))
+            {
+                continue;
+            }
+            sources.push(physical_branch_history_table_name(
+                table_mapping.table_id,
+                branch_id,
+            ));
+            sources.push(physical_branch_register_table_name(
+                table_mapping.table_id,
+                branch_id,
+            ));
+        }
+        sources.sort();
+        sources.dedup();
+        Ok(sources)
     }
 
     pub(super) fn query_versions_for_tx_rows_by_alias(
@@ -504,9 +543,17 @@ where
             user_metadata_json: record
                 .get_nullable_string(TransactionRowRecord::FIELD_USER_METADATA_IDX)?
                 .map(str::to_owned),
-            source_branch: record
-                .get_nullable_uuid(TransactionRowRecord::FIELD_SOURCE_BRANCH_IDX)?
-                .map(BranchId),
+            target_lineage: serde_json::from_slice(
+                record.get_bytes(TransactionRowRecord::FIELD_TARGET_LINEAGE_IDX)?,
+            )
+            .map_err(|_| Error::InvalidStoredValue("invalid target lineage"))?,
+            branch_merge: record
+                .get_nullable_bytes(TransactionRowRecord::FIELD_BRANCH_MERGE_IDX)?
+                .map(|bytes| {
+                    serde_json::from_slice(bytes)
+                        .map_err(|_| Error::InvalidStoredValue("invalid branch merge provenance"))
+                })
+                .transpose()?,
             merge_strategy: record
                 .get_nullable_string(TransactionRowRecord::FIELD_MERGE_STRATEGY_IDX)?
                 .and_then(decode_merge_strategy_tag),

@@ -1021,6 +1021,7 @@ fn decode_typed_version_witness(
         updated_by: AuthorId(record.get_uuid(plan.updated_by_idx)?),
         updated_at: TxTime(record_u64_idx(record, plan.updated_at_idx)?),
         cells: BTreeMap::new(),
+        authored_columns: None,
         deletion,
     };
     let values = register_values_from_parts(&parts)?;
@@ -1123,6 +1124,10 @@ fn build_content_witness_projector(
             .and_then(|field| field_idx_in_descriptor(terminal_descriptor, field))?;
         mapping.push((source, 9 + idx));
     }
+    mapping.push((
+        field_idx_in_descriptor(terminal_descriptor, &schema.authored_columns_field)?,
+        9 + table.columns.len(),
+    ));
     RecordProjector::new(terminal_descriptor, storage_descriptor, mapping).map_err(|_| {
         super::Error::InvalidStoredValue("content witness projector construction failed")
     })
@@ -1608,6 +1613,7 @@ mod tests {
                 updated_by: AuthorId::SYSTEM,
                 updated_at: TxTime(time),
                 cells: BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+                authored_columns: Some(BTreeSet::from(["title".to_owned()])),
                 deletion: None,
             },
             None,
@@ -1630,6 +1636,7 @@ mod tests {
                 updated_by: AuthorId::SYSTEM,
                 updated_at: TxTime(time),
                 cells: BTreeMap::new(),
+                authored_columns: None,
                 deletion: Some(DeletionEvent::Deleted),
             },
             None,
