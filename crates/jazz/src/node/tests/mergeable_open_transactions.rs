@@ -284,6 +284,6 @@ fn abandoning_mergeable_open_transaction_discards_its_only_staged_representation
     );
     assert!(matches!(
         core.commit_mergeable_open(open_tx, || 51).unwrap_err(),
-        Error::MissingOpenTx(missing) if missing == open_tx
+        Error::MissingOpenBatch(missing) if missing == open_tx
     ));
 }

@@ -6,6 +6,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
+use crate::tx::TxId;
+
 macro_rules! batch_id {
     ($name:ident, $kind:literal, $doc:literal) => {
         #[doc = $doc]
@@ -28,8 +30,8 @@ macro_rules! batch_id {
             type Err = String;
 
             fn from_str(raw: &str) -> Result<Self, Self::Err> {
-                let bytes = hex::decode(raw)
-                    .map_err(|err| format!("invalid {} hex: {err}", $kind))?;
+                let bytes =
+                    hex::decode(raw).map_err(|err| format!("invalid {} hex: {err}", $kind))?;
                 let len = bytes.len();
                 let bytes: [u8; 16] = bytes
                     .try_into()
@@ -86,4 +88,53 @@ impl Default for OpenBatchId {
     }
 }
 
-batch_id!(BatchId, "batch id", "Identity of an immutable committed batch.");
+batch_id!(
+    BatchId,
+    "batch id",
+    "Identity of an immutable committed batch."
+);
+
+impl BatchId {
+    /// Derive the public committed-batch identity from core causal identity.
+    ///
+    /// The domain-separated digest keeps the core's wider `TxId` private while
+    /// preserving a stable 128-bit identifier across bindings and runtimes.
+    pub fn from_committed_tx(tx_id: TxId) -> Self {
+        let mut input = [0_u8; 24];
+        input[..8].copy_from_slice(&tx_id.time.0.to_be_bytes());
+        input[8..].copy_from_slice(tx_id.node.0.as_bytes());
+        let digest = blake3::derive_key("jazz committed batch id v1", &input);
+        Self(digest[..16].try_into().expect("16-byte digest prefix"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ids::NodeUuid;
+    use crate::time::TxTime;
+
+    #[test]
+    fn open_batch_ids_are_canonical_uuid_v7_values() {
+        let id = OpenBatchId::new();
+        assert_eq!(id.to_string().len(), 32);
+        assert_eq!(id.as_bytes()[6] >> 4, 7);
+        assert_eq!(id.as_bytes()[8] >> 6, 2);
+        assert_eq!(id.to_string().parse::<OpenBatchId>().unwrap(), id);
+    }
+
+    #[test]
+    fn committed_batch_id_is_stable_and_domain_derived() {
+        let tx = TxId::new(TxTime::from(42), NodeUuid(Uuid::from_bytes([7; 16])));
+        let first = BatchId::from_committed_tx(tx);
+        assert_eq!(first, BatchId::from_committed_tx(tx));
+        assert_eq!(first.to_string().parse::<BatchId>().unwrap(), first);
+        assert_ne!(
+            first,
+            BatchId::from_committed_tx(TxId::new(
+                TxTime::from(43),
+                NodeUuid(Uuid::from_bytes([7; 16]))
+            ))
+        );
+    }
+}

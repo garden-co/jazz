@@ -42,7 +42,6 @@ use crate::node::{
     NodeState, PreparedQueryPlanHandle, QueryReadProfile, RelationEdge, RelationSnapshot,
     RowProvenance, ViewUpdateParts,
 };
-use crate::tools::OpenBatchId;
 use crate::peer::{PeerRole, PeerState};
 #[cfg(feature = "sync-autopsy")]
 use crate::protocol::expand_version_carriers;
@@ -70,6 +69,7 @@ use crate::query::{
 pub use crate::result_tree::{ResultNode, ResultRelation, ResultTree, ResultTreeReplacement};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
+use crate::tools::OpenBatchId;
 use crate::tools::{ObjectId, OutputOccurrenceId};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
 use crate::wire::{
@@ -2423,7 +2423,11 @@ where
     /// Open a mergeable transaction authored and permission-checked as `author`.
     ///
     /// See [`Db::begin_mergeable`] for ownership and operation-handle guidance.
-    pub fn begin_mergeable_for_identity(&self, id: OpenBatchId, author: AuthorId) -> Result<(), Error> {
+    pub fn begin_mergeable_for_identity(
+        &self,
+        id: OpenBatchId,
+        author: AuthorId,
+    ) -> Result<(), Error> {
         self.node
             .node
             .borrow_mut()
