@@ -43,25 +43,73 @@ type ConnectionGate = {
   reject: (error: unknown) => void;
 };
 
+type PersistentRuntimeShared = {
+  worker: Worker;
+  pending: Map<number, PendingCall>;
+  pendingWrites: Set<Promise<unknown>>;
+  settledWrites: Map<string, Map<string, Promise<void>>>;
+  transactionWrites: Map<string, Promise<unknown>[]>;
+  completedTxs: Map<string, CompletedTxState>;
+  openTxs: Set<OpenBatchId>;
+  beginResults: Map<OpenBatchId, Promise<OpenBatchId>>;
+  failedBegins: Map<OpenBatchId, unknown>;
+  committingTxs: Set<OpenBatchId>;
+  rollingBackTxs: Set<OpenBatchId>;
+  subscriptions: Map<number, Function>;
+  remoteSubscriptions: Map<number, Promise<number>>;
+  nextCallId: number;
+  nextSubscriptionId: number;
+  commandTail: Promise<void>;
+};
+
 export type { PersistentBrowserOpfsOwnerRequest } from "./persistent-browser-protocol.js";
 
 export class PersistentBrowserOpfsRuntime implements Runtime {
-  private readonly worker: Worker;
-  private readonly pending = new Map<number, PendingCall>();
+  private readonly shared: PersistentRuntimeShared;
+  private readonly ownerRuntime: PersistentBrowserOpfsRuntime;
+  private readonly viewId: Promise<number | undefined>;
+  private get worker(): Worker {
+    return this.shared.worker;
+  }
+  private get pending(): Map<number, PendingCall> {
+    return this.shared.pending;
+  }
   // Runtime writes are synchronous, but the worker owns the NativeRuntimeAdapter that can
   // produce the real core transaction id. These ids are pending handles
   // that are only valid for waitForTransaction translation below.
-  private readonly pendingWrites = new Set<Promise<unknown>>();
-  private readonly settledWrites = new Map<string, Map<string, Promise<void>>>();
-  private readonly transactionWrites = new Map<string, Promise<unknown>[]>();
-  private readonly completedTxs = new Map<string, CompletedTxState>();
-  private readonly openTxs = new Set<OpenBatchId>();
-  private readonly beginResults = new Map<OpenBatchId, Promise<OpenBatchId>>();
-  private readonly failedBegins = new Map<OpenBatchId, unknown>();
-  private readonly committingTxs = new Set<OpenBatchId>();
-  private readonly rollingBackTxs = new Set<OpenBatchId>();
-  private readonly subscriptions = new Map<number, Function>();
-  private readonly remoteSubscriptions = new Map<number, Promise<number>>();
+  private get pendingWrites() {
+    return this.shared.pendingWrites;
+  }
+  private get settledWrites() {
+    return this.shared.settledWrites;
+  }
+  private get transactionWrites() {
+    return this.shared.transactionWrites;
+  }
+  private get completedTxs() {
+    return this.shared.completedTxs;
+  }
+  private get openTxs() {
+    return this.shared.openTxs;
+  }
+  private get beginResults() {
+    return this.shared.beginResults;
+  }
+  private get failedBegins() {
+    return this.shared.failedBegins;
+  }
+  private get committingTxs() {
+    return this.shared.committingTxs;
+  }
+  private get rollingBackTxs() {
+    return this.shared.rollingBackTxs;
+  }
+  private get subscriptions() {
+    return this.shared.subscriptions;
+  }
+  private get remoteSubscriptions() {
+    return this.shared.remoteSubscriptions;
+  }
   private authFailureCallback: ((reason: string) => void) | undefined;
   // Server-tier operations capture this gate while intentionally disconnected.
   // Reconnect resolves that same gate, so outstanding operations survive instead
@@ -72,9 +120,12 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   private connectionReady = connectionGate(true);
   private waitingForReconnect = false;
   private pagehideAbort: AbortController | null = null;
-  private nextCallId = 1;
-  private nextSubscriptionId = 1;
-  private commandTail: Promise<void> = Promise.resolve();
+  private get nextSubscriptionId(): number {
+    return this.shared.nextSubscriptionId;
+  }
+  private set nextSubscriptionId(value: number) {
+    this.shared.nextSubscriptionId = value;
+  }
   private closed = false;
   private closing = false;
   private readonly opened: Promise<void>;
@@ -86,14 +137,44 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     private readonly node: Uint8Array,
     private readonly author: Uint8Array,
     private readonly initialSyncFlushEvery: number | undefined = 512,
+    owner?: PersistentBrowserOpfsRuntime,
   ) {
-    this.worker = new Worker(new URL("./persistent-browser-worker.js", import.meta.url), {
+    if (owner) {
+      this.ownerRuntime = owner.ownerRuntime;
+      this.shared = owner.shared;
+      this.viewId = this.ownerRuntime.enqueueCommand(
+        () => this.ownerRuntime.sendOwner("registerSchema", [schema]) as Promise<number>,
+      );
+      this.opened = this.viewId.then(() => undefined);
+      return;
+    }
+    this.ownerRuntime = this;
+    const worker = new Worker(new URL("./persistent-browser-worker.js", import.meta.url), {
       type: "module",
     });
-    this.worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
+    this.shared = {
+      worker,
+      pending: new Map(),
+      pendingWrites: new Set(),
+      settledWrites: new Map(),
+      transactionWrites: new Map(),
+      completedTxs: new Map(),
+      openTxs: new Set(),
+      beginResults: new Map(),
+      failedBegins: new Map(),
+      committingTxs: new Set(),
+      rollingBackTxs: new Set(),
+      subscriptions: new Map(),
+      remoteSubscriptions: new Map(),
+      nextCallId: 1,
+      nextSubscriptionId: 1,
+      commandTail: Promise.resolve(),
+    };
+    this.viewId = Promise.resolve(undefined);
+    worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
       this.handleWorkerMessage(event.data);
     };
-    this.worker.onerror = (event) => {
+    worker.onerror = (event) => {
       if (
         this.closing ||
         this.closed ||
@@ -113,7 +194,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
         ),
       );
     };
-    this.opened = this.send("open", [
+    this.opened = this.sendOwner("open", [
       runtimeSources,
       dbName,
       schema,
@@ -131,6 +212,18 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
         { signal: this.pagehideAbort.signal },
       );
     }
+  }
+
+  registerSchemaView(schema: WasmSchema): PersistentBrowserOpfsRuntime {
+    return new PersistentBrowserOpfsRuntime(
+      this.runtimeSources,
+      schema,
+      this.dbName,
+      this.node,
+      this.author,
+      this.initialSyncFlushEvery,
+      this,
+    );
   }
 
   insert(
@@ -188,6 +281,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   waitForTransaction(batchId: BatchId, tier: string): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.waitForTransaction(batchId, tier);
     const wait = (async () => {
       await this.opened;
       if (tier === "edge" || tier === "global") await this.connectionReady.promise;
@@ -202,13 +296,23 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     return wait;
   }
 
-  beginTransaction(kind: TransactionKind, id: OpenBatchId): OpenBatchId {
+  beginTransaction(
+    kind: TransactionKind,
+    id: OpenBatchId,
+    sessionJson?: string | null,
+  ): OpenBatchId {
+    if (this !== this.ownerRuntime)
+      return this.ownerRuntime.beginTransaction(kind, id, sessionJson);
     if (this.openTxs.has(id) || this.completedTxs.has(id) || this.failedBegins.has(id)) {
       throw new Error(`Begin transaction failed: batch ${id} has already been opened`);
     }
     this.openTxs.add(id);
     const begun = this.enqueueCommand(
-      () => this.send("beginTransaction", [kind, id]) as Promise<OpenBatchId>,
+      () =>
+        this.sendOwner(
+          "beginTransaction",
+          sessionJson === undefined ? [kind, id] : [kind, id, sessionJson],
+        ) as Promise<OpenBatchId>,
     );
     this.beginResults.set(id, begun);
     void begun.catch((error) => {
@@ -220,6 +324,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   commitTransaction(openBatchId: OpenBatchId): Promise<BatchId> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.commitTransaction(openBatchId);
     this.assertOpenBatchKnown(openBatchId, "Commit transaction");
     if (this.rollingBackTxs.has(openBatchId)) {
       throw new Error(`Commit transaction failed: batch ${openBatchId} is already rolling back`);
@@ -253,6 +358,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   rollbackTransaction(openBatchId: OpenBatchId): Promise<boolean> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.rollbackTransaction(openBatchId);
     this.assertOpenBatchKnown(openBatchId, "Rollback transaction");
     if (this.committingTxs.has(openBatchId)) {
       throw new Error(`Rollback transaction failed: batch ${openBatchId} is already committing`);
@@ -351,7 +457,8 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   async close(): Promise<void> {
-    if (this.closed) return;
+    if (this !== this.ownerRuntime) return;
+    if (this.closing || this.closed) return;
     this.closing = true;
     this.rejectConnectionWaiters();
     try {
@@ -368,6 +475,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   async clearClientStorage(): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.clearClientStorage();
     if (this.closed) return;
     this.closing = true;
     this.rejectConnectionWaiters();
@@ -389,6 +497,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   connect(url: string, authJson: string): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.connect(url, authJson);
     if (this.closing || this.closed) return;
     const reconnecting = this.waitingForReconnect;
     const gate = reconnecting ? this.connectionReady : connectionGate();
@@ -416,6 +525,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   disconnect(options?: { rejectWaiters?: boolean }): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
     if (this.closing || this.closed) return Promise.resolve();
     if (!this.waitingForReconnect) this.connectionReady = connectionGate();
     this.waitingForReconnect = true;
@@ -428,6 +538,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   updateAuth(authJson: string): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.updateAuth(authJson);
     if (this.closing || this.closed) return;
     // Updating credentials cannot reconnect an explicitly disconnected worker:
     // without a server endpoint the worker treats updateAuth as a no-op. Keep the
@@ -454,6 +565,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   onAuthFailure(callback: (reason: string) => void): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onAuthFailure(callback);
     this.authFailureCallback = callback;
   }
 
@@ -467,10 +579,20 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     args: PersistentBrowserRequestArgs<Method>,
     metadata?: Partial<PersistentBrowserOpfsOwnerRequest>,
   ): Promise<unknown> {
+    return this.viewId.then((viewId) =>
+      this.sendOwner(method, args, viewId === undefined ? metadata : { ...metadata, viewId }),
+    );
+  }
+
+  private sendOwner<Method extends PersistentBrowserWorkerMethod>(
+    method: Method,
+    args: PersistentBrowserRequestArgs<Method>,
+    metadata?: Partial<PersistentBrowserOpfsOwnerRequest>,
+  ): Promise<unknown> {
     if (this.closed) {
       return Promise.reject(new Error("Persistent browser native runtime is closed"));
     }
-    const id = this.nextCallId++;
+    const id = this.shared.nextCallId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
       this.worker.postMessage({
@@ -483,8 +605,8 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 
   private enqueueCommand<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.commandTail.then(operation);
-    this.commandTail = result.then(
+    const result = this.shared.commandTail.then(operation);
+    this.shared.commandTail = result.then(
       () => undefined,
       () => undefined,
     );

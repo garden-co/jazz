@@ -100,7 +100,11 @@ export interface Runtime {
 }
 
 export interface TransactionalRuntime extends Runtime {
-  beginTransaction(transactionKind: TransactionKind, id: OpenBatchId): OpenBatchId;
+  beginTransaction(
+    transactionKind: TransactionKind,
+    id: OpenBatchId,
+    sessionJson?: string | null,
+  ): OpenBatchId;
   commitTransaction(id: OpenBatchId): Promise<BatchId>;
   rollbackTransaction(id: OpenBatchId): Promise<boolean>;
 }
@@ -634,9 +638,14 @@ export class JazzClient {
     return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
   }
 
-  beginTransaction(kind: TransactionKind): OpenBatchId {
+  beginTransaction(kind: TransactionKind, session?: Session): OpenBatchId {
     const id = createOpenBatchId();
-    return requireTransactionalRuntime(this.runtime).beginTransaction(kind, id);
+    const effectiveSession = session ?? this.resolvedSession;
+    return requireTransactionalRuntime(this.runtime).beginTransaction(
+      kind,
+      id,
+      effectiveSession ? JSON.stringify(effectiveSession) : undefined,
+    );
   }
 
   commitTransaction(id: OpenBatchId): Promise<WriteHandle> {

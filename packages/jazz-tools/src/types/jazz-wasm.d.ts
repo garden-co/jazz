@@ -71,6 +71,13 @@ declare module "jazz-wasm" {
     static openBrowser(namespace: string, schema: Uint8Array, config: Uint8Array): Promise<WasmDb>;
     static destroyBrowserStorage(namespace: string): Promise<void>;
 
+    registerSchema(schema: Uint8Array): WasmDb;
+    beginTransaction(openBatchId: string, kind: string, author?: Uint8Array | null): void;
+    commitTransaction(openBatchId: string, kind?: string | null): WasmWrite;
+    rollbackTransaction(openBatchId: string): void;
+    attachMergeableTx(openBatchId: string): WasmTx;
+    attachExclusiveTx(openBatchId: string): WasmTx;
+
     prepareQuery(query: Uint8Array): WasmPreparedQuery;
     all(query: WasmPreparedQuery, opts: unknown): Uint8Array;
     one(query: WasmPreparedQuery, opts: unknown): Uint8Array;

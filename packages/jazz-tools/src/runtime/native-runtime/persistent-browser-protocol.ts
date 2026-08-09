@@ -66,8 +66,9 @@ export type PersistentBrowserWriteRequest =
       args: [table: string, objectId: string, writeContext: string | null | undefined];
     };
 
-export type PersistentBrowserOpfsOwnerRequest =
+type PersistentBrowserRequest =
   | OpenRequest
+  | { id: number; method: "registerSchema"; args: [schema: WasmSchema] }
   | {
       id: number;
       method: "destroyBrowserStorage";
@@ -82,7 +83,7 @@ export type PersistentBrowserOpfsOwnerRequest =
   | {
       id: number;
       method: "beginTransaction";
-      args: [kind: "mergeable" | "exclusive", id: OpenBatchId];
+      args: [kind: "mergeable" | "exclusive", id: OpenBatchId, sessionJson?: string | null];
     }
   | {
       id: number;
@@ -132,6 +133,10 @@ export type PersistentBrowserOpfsOwnerRequest =
       args: [options: { rejectWaiters?: boolean } | undefined];
     }
   | { id: number; method: "updateAuth"; args: [authJson: string] };
+
+export type PersistentBrowserOpfsOwnerRequest = PersistentBrowserRequest & {
+  viewId?: number;
+};
 
 export type PersistentBrowserWorkerMethod = PersistentBrowserOpfsOwnerRequest["method"];
 type RequestForMethod<Method extends PersistentBrowserWorkerMethod> = Extract<

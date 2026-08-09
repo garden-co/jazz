@@ -57,6 +57,30 @@ afterEach(async () => {
 });
 
 describe("db exclusive transaction reads browser integration", () => {
+  it("opens the snapshot before the first schema view is registered", async () => {
+    const tx = db.beginExclusiveTransaction();
+    const receipt = db.insert(todos, {
+      title: "committed after schema-free begin",
+      done: false,
+    });
+    await receipt.batchId;
+
+    await expect(tx.all<Todo>(makeTodoQuery())).resolves.toEqual([]);
+    await tx.rollback();
+  });
+
+  it("anchors a read-only transaction snapshot when begin is called", async () => {
+    const { value: beforeBegin } = db.insert(todos, {
+      title: "visible at begin",
+      done: false,
+    });
+    const tx = db.beginExclusiveTransaction();
+    db.insert(todos, { title: "committed after begin", done: false });
+
+    await expect(tx.all<Todo>(makeTodoQuery())).resolves.toEqual([beforeBegin]);
+    await tx.rollback();
+  });
+
   it("shows only the current transaction's staged inserts through tx.all", async () => {
     const aliceTx = db.beginExclusiveTransaction();
     const bobTx = db.beginExclusiveTransaction();
