@@ -229,11 +229,12 @@ fn core_shell_client_upload_still_reports_global_immediately() {
 /// Black-box regression for authored-column carriage across the public Db and
 /// sync/wire path. Bob explicitly writes the unchanged base title at the newer
 /// timestamp; that authored write must participate in per-column LWW and beat
-/// Alice's older concurrent title change after both commits cross the wire.
+/// Alice's older concurrent title change after both commits cross the wire,
+/// without claiming Alice's independent `completed` edit.
 ///
 /// Planted positive: removing `MergeableCommit::authored_columns` from the
-/// partial-update lowering makes Bob's materialized title look inherited, so
-/// this test resolves to `alice-change` instead of `base`.
+/// partial-update lowering makes Bob's entire materialized row look authored;
+/// Bob still wins `title`, but incorrectly reverts `completed` to false.
 #[test]
 fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
     let schema = schema();
@@ -273,13 +274,25 @@ fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
     pump_client_edge(&bob, &bob_wire, &mut core, bob_session);
     pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
 
+    // An empty partial update has no authored cells and is rejected rather
+    // than becoming a legacy "all materialized cells authored" write. Planted
+    // positive: remove the empty-patch guard in `merge_existing_cells`; this
+    // assertion succeeds and such a concurrent no-op can clobber Alice.
+    assert!(
+        bob.update_at_ms("todos", row, BTreeMap::new(), 250)
+            .is_err()
+    );
+
     // Neither client is pumped after these writes until both heads exist, so
     // they remain concurrent children of the shared t=100 base.
     alice
         .update_at_ms(
             "todos",
             row,
-            BTreeMap::from([("title".to_owned(), Value::String("alice-change".to_owned()))]),
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("alice-change".to_owned())),
+                ("completed".to_owned(), Value::Bool(true)),
+            ]),
             200,
         )
         .unwrap();
@@ -295,4 +308,20 @@ fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
     pump_client_edge(&bob, &bob_wire, &mut core, bob_session);
     pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
     assert_eq!(visible_titles(&alice, DurabilityTier::Global), ["base"]);
+    let prepared = alice.prepare_query(&Query::from("todos")).unwrap();
+    let rows = block_on(alice.all(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            local_updates: LocalUpdates::Deferred,
+            propagation: Propagation::Full,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell(&schema.tables[0], "completed"),
+        Some(Value::Bool(true))
+    );
 }

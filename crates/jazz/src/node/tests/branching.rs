@@ -880,6 +880,74 @@ fn merge_back_parents_every_concurrent_target_head() {
     assert_eq!(parents, vec![left, right]);
 }
 
+/// Successive partial branch writes accumulate authored presence across their
+/// private ancestry. A later patch must not make an earlier explicit branch
+/// edit look inherited merely because the tip's own authored set names only
+/// the later patch.
+///
+/// Planted positive: calculate the merge from only the final branch winner's
+/// authored set. The merged transaction would then lose `title=branch`.
+#[test]
+fn merge_back_accumulates_authored_columns_across_successive_branch_patches() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("completed", ColumnType::Bool),
+        ],
+    )]);
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0x83), schema.clone());
+    let (_core_dir, mut core) = open_history_complete_node_with_schema(node(0x84), schema.clone());
+    let mut oracle = Oracle::new();
+    let row_uuid = row(0x83);
+    let (base, _) = commit_global_and_oracle(
+        &mut writer,
+        &mut core,
+        &mut oracle,
+        MergeableCommit::new("todos", row_uuid, 10).cells(BTreeMap::from([
+            ("title".to_owned(), Value::String("base".to_owned())),
+            ("completed".to_owned(), Value::Bool(false)),
+        ])),
+    );
+
+    let branch_id = branch(0x83);
+    core.create_branch(branch_id).unwrap();
+    let title_patch = core
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("todos", row_uuid, 20)
+                .parents(vec![base])
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), Value::String("branch".to_owned())),
+                    ("completed".to_owned(), Value::Bool(false)),
+                ]))
+                .authored_columns(BTreeSet::from(["title".to_owned()])),
+        )
+        .unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row_uuid, 30)
+            .parents(vec![title_patch])
+            .cells(BTreeMap::from([
+                ("title".to_owned(), Value::String("branch".to_owned())),
+                ("completed".to_owned(), Value::Bool(true)),
+            ]))
+            .authored_columns(BTreeSet::from(["completed".to_owned()])),
+    )
+    .unwrap();
+
+    core.merge_back_branch(branch_id).unwrap();
+    let rows = core.current_rows("todos", DurabilityTier::Local).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].test_cells_by_descriptor(),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("branch".to_owned())),
+            ("completed".to_owned(), Value::Bool(true)),
+        ])
+    );
+}
+
 #[test]
 fn merge_back_deduplicates_shared_transaction_parent_edges() {
     let (_core_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());

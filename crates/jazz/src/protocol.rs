@@ -547,6 +547,7 @@ impl Ord for VersionRecord {
             .cmp(other.table())
             .then_with(|| self.schema_version.cmp(&other.schema_version))
             .then_with(|| self.record.raw().cmp(other.record.raw()))
+            .then_with(|| self.authored_columns.cmp(&other.authored_columns))
     }
 }
 
@@ -2631,9 +2632,34 @@ pub enum OutboxMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use groove::schema::{ColumnSchema, ColumnType};
 
     fn schema_id(byte: u8) -> SchemaVersionId {
         SchemaVersionId::from_bytes([byte; 16])
+    }
+
+    #[test]
+    fn version_record_ordering_distinguishes_authored_presence() {
+        let table = TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]);
+        let base = VersionRecord::from_cells(
+            &table,
+            schema_id(1),
+            RowUuid::from_bytes([1; 16]),
+            Vec::new(),
+            AuthorId::SYSTEM,
+            TxTime(1),
+            AuthorId::SYSTEM,
+            TxTime(1),
+            &BTreeMap::from([("title".to_owned(), Value::String("x".to_owned()))]),
+            None,
+        )
+        .unwrap();
+        let authored = base
+            .clone()
+            .with_authored_columns(Some(BTreeSet::from(["title".to_owned()])));
+
+        assert_ne!(base, authored);
+        assert_ne!(base.cmp(&authored), Ordering::Equal);
     }
 
     fn sample_lens() -> MigrationLens {
