@@ -2432,6 +2432,7 @@ fn lower_correlated_path_relation_graph(
         root_source,
         resolved_sources,
         request,
+        true,
     )
 }
 
@@ -2441,6 +2442,7 @@ fn lower_correlated_path_relation_graph_from_parent(
     parent_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
+    retain_child_window: bool,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     let child_root = path
         .child
@@ -2455,7 +2457,16 @@ fn lower_correlated_path_relation_graph_from_parent(
     })?;
     let child_plan = LinearCurrentRoot {
         root: path.child.root.clone(),
-        steps: child_steps_for_relation_edges(&path.child.steps),
+        steps: if retain_child_window {
+            child_steps_for_relation_edges(&path.child.steps)
+        } else {
+            path.child
+                .steps
+                .iter()
+                .filter(|step| !matches!(step, LinearStep::OrderBy(_) | LinearStep::Slice { .. }))
+                .cloned()
+                .collect()
+        },
     };
     let child = lower_linear_plan_steps(
         child_source.graph.clone(),
@@ -5755,6 +5766,7 @@ fn lower_collect_slot_graphs(
         parent_source,
         resolved_sources,
         request,
+        false,
     )
     .map_err(single_gap_report)?
     .graph;
@@ -7039,6 +7051,7 @@ fn correlated_relation_edge_graphs(
             target,
             resolved_sources,
             request,
+            true,
         )
         .map_err(|gap| {
             Box::new(CapabilityReport {

@@ -126,6 +126,7 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
     let query = child_query(
         ArraySubquery::new("children", "children", "parent_id", "id")
             .select(["label", "rank"])
+            .order_by("rank", OrderDirection::Desc)
             .offset(1)
             .limit(2)
             .nested(
@@ -156,7 +157,7 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
             .iter()
             .map(|child| child.row.row_uuid())
             .collect::<Vec<_>>(),
-        child_ids[1..]
+        vec![child_ids[1], child_ids[0]]
     );
     assert!(children(&tree.roots[0], "empty").is_empty());
     assert_eq!(
@@ -196,6 +197,17 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
         panic!("expected terminal child array");
     };
     assert_eq!(children.len(), 2);
+    let child_ids_from_terminal = children
+        .into_iter()
+        .map(|value| match value {
+            Value::Record(child) => child.get_idx(0).expect("terminal child id"),
+            other => panic!("expected terminal child record, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        child_ids_from_terminal,
+        vec![Value::Uuid(child_ids[1].0), Value::Uuid(child_ids[0].0)]
+    );
 }
 
 #[test]
