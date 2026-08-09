@@ -790,15 +790,25 @@ impl IvmRuntime {
                 if !records.deltas.is_empty() && records.descriptor != output.output {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
-                let terminal_owned = output.root_ordering_node.is_some()
-                    || evaluator.output_is_structured_collect_by(output.node)?;
+                let structured = evaluator.output_is_structured_collect_by(output.node)?;
+                let public_root = evaluator.output_has_public_root(output.node)?;
+                let terminal_owned = output.root_ordering_node.is_some() || structured;
                 let records = records.as_ref().clone();
                 if terminal_owned {
-                    let terminal = if let Some(terminal) =
-                        evaluator.take_terminal_deltas_for_output(output.node)?
-                    {
-                        Some(terminal)
+                    let terminal = if structured {
+                        if let Some(terminal) =
+                            evaluator.take_terminal_deltas_for_output(output.node)?
+                        {
+                            Some(terminal)
+                        } else if !public_root && !records.is_empty() {
+                            Some(terminal_deltas_from_record_deltas(&records)?)
+                        } else {
+                            None
+                        }
                     } else if !records.is_empty() {
+                        // The ordering node can be above a wider source row.
+                        // It contributes only root positions; terminal payloads
+                        // must be encoded from the public sink descriptor.
                         Some(terminal_deltas_from_record_deltas(&records)?)
                     } else {
                         None
@@ -6412,20 +6422,33 @@ where
     ) -> Result<Option<TerminalDeltas>, IvmRuntimeError> {
         let mut pending = vec![node];
         let mut seen = HashSet::new();
+        let mut fallback = None;
+        let mut has_public_root = false;
         while let Some(node) = pending.pop() {
             if !seen.insert(node) {
                 continue;
             }
-            if let Some(deltas) = self.terminal_deltas.remove(&node) {
-                return Ok(Some(deltas));
-            }
-            let node = self
+            let graph_node = self
                 .graph
                 .node(node)
                 .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-            pending.extend(node.descriptor.inputs.iter().copied());
+            let is_public_root = matches!(
+                &graph_node.descriptor.operator,
+                OpType::CollectBy(collect_by) if collect_by.mode == CollectByMode::Root
+            );
+            has_public_root |= is_public_root;
+            if self.terminal_deltas.contains_key(&node) {
+                if is_public_root {
+                    return Ok(self.terminal_deltas.remove(&node));
+                }
+                fallback.get_or_insert(node);
+            }
+            pending.extend(graph_node.descriptor.inputs.iter().copied());
         }
-        Ok(None)
+        Ok((!has_public_root)
+            .then_some(fallback)
+            .flatten()
+            .and_then(|node| self.terminal_deltas.remove(&node)))
     }
 
     fn output_is_structured_collect_by(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
@@ -6448,6 +6471,28 @@ where
                 }
                 _ => pending.extend(node.descriptor.inputs.iter().copied()),
             }
+        }
+        Ok(false)
+    }
+
+    fn output_has_public_root(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
+        let mut pending = vec![node];
+        let mut seen = HashSet::new();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let node = self
+                .graph
+                .node(node)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+            if matches!(
+                &node.descriptor.operator,
+                OpType::CollectBy(collect_by) if collect_by.mode == CollectByMode::Root
+            ) {
+                return Ok(true);
+            }
+            pending.extend(node.descriptor.inputs.iter().copied());
         }
         Ok(false)
     }
@@ -7473,9 +7518,10 @@ where
             [slot] if slot.slots.is_empty() && slot.limit == TopByLimit::Unbounded => Some(slot),
             _ => None,
         };
-        if collect_by.mode == CollectByMode::Collect
-            && (collect_by.slots.is_empty() || direct_tree_slot.is_some())
-            && (collect_by.limit == TopByLimit::Unbounded || direct_tree_slot.is_some())
+        if collect_by.mode == CollectByMode::Root
+            || (collect_by.mode == CollectByMode::Collect
+                && (collect_by.slots.is_empty() || direct_tree_slot.is_some())
+                && (collect_by.limit == TopByLimit::Unbounded || direct_tree_slot.is_some()))
         {
             let operator_key = self.operator_key(node)?;
             let mut operator = self
@@ -7577,8 +7623,14 @@ where
             match collect_by.mode {
                 CollectByMode::Collect | CollectByMode::Root => {
                     let render = |records: &[(Bytes, i64)]| {
-                        if collect_by.mode == CollectByMode::Collect && collect_by.slots.is_empty()
-                        {
+                        if collect_by.mode == CollectByMode::Root {
+                            collect_by_root_from_records(
+                                input_desc,
+                                output_desc,
+                                collect_by,
+                                records,
+                            )
+                        } else if collect_by.slots.is_empty() {
                             collect_by_parent_from_records(
                                 input_desc,
                                 output_desc,
@@ -10518,6 +10570,16 @@ fn update_unbounded_collect_by_terminal_state(
     deltas: &[RecordDelta],
     emit: bool,
 ) -> Result<Vec<TerminalOperation>, IvmRuntimeError> {
+    if collect_by.mode == CollectByMode::Root {
+        return update_collect_by_root_terminal_state(
+            input_desc,
+            output_desc,
+            collect_by,
+            state,
+            deltas,
+            emit,
+        );
+    }
     if !emit {
         state.groups.clear();
         state.roots.clear();
@@ -10704,6 +10766,121 @@ fn update_unbounded_collect_by_terminal_state(
         }
     }
     Ok(operations)
+}
+
+fn update_collect_by_root_terminal_state(
+    input_desc: RecordDescriptor,
+    output_desc: RecordDescriptor,
+    collect_by: &CollectByOp,
+    state: &mut CollectByIncrementalState,
+    deltas: &[RecordDelta],
+    emit: bool,
+) -> Result<Vec<TerminalOperation>, IvmRuntimeError> {
+    if !emit {
+        state.groups.clear();
+        state.roots.clear();
+    }
+    let mut before = BTreeMap::<Vec<u8>, Option<Bytes>>::new();
+    for delta in deltas {
+        let group_key =
+            encoded_record_key_part(input_desc, delta.raw(), &collect_by.group_field_indices)?;
+        if emit && !before.contains_key(&group_key) {
+            let rendered = state.groups.get(&group_key).map_or(Ok(None), |group| {
+                let records = group
+                    .iter()
+                    .map(|((_, record), weight)| (record.clone(), *weight))
+                    .collect::<Vec<_>>();
+                collect_by_root_from_records(input_desc, output_desc, collect_by, &records)
+            })?;
+            before.insert(group_key.clone(), rendered);
+        }
+        let sort_key = collect_by_sort_key(input_desc, delta.raw(), collect_by)?;
+        let state_key = (sort_key, delta.record.clone());
+        let group = state.groups.entry(group_key).or_default();
+        let weight = group.get(&state_key).copied().unwrap_or_default() + delta.weight;
+        if weight == 0 {
+            group.remove(&state_key);
+        } else {
+            group.insert(state_key, weight);
+        }
+    }
+    state.groups.retain(|_, group| !group.is_empty());
+    if !emit {
+        return Ok(Vec::new());
+    }
+
+    let mut operations = Vec::new();
+    for (root_key, before_record) in before {
+        let after_record = state.groups.get(&root_key).map_or(Ok(None), |group| {
+            let records = group
+                .iter()
+                .map(|((_, record), weight)| (record.clone(), *weight))
+                .collect::<Vec<_>>();
+            collect_by_root_from_records(input_desc, output_desc, collect_by, &records)
+        })?;
+        if before_record == after_record {
+            continue;
+        }
+        let edit = match (before_record, after_record) {
+            (None, Some(record)) => TerminalEdit::Insert {
+                index: state
+                    .groups
+                    .keys()
+                    .take_while(|key| *key < &root_key)
+                    .count(),
+                key: root_key.clone(),
+                value: record.to_vec(),
+            },
+            (Some(_), Some(record)) => TerminalEdit::Update {
+                key: root_key.clone(),
+                value: record.to_vec(),
+            },
+            (Some(_), None) => TerminalEdit::Remove {
+                key: root_key.clone(),
+            },
+            (None, None) => continue,
+        };
+        operations.push(TerminalOperation {
+            root_key,
+            path: Vec::new(),
+            edit,
+        });
+    }
+    Ok(operations)
+}
+
+fn collect_by_root_from_records(
+    input_desc: RecordDescriptor,
+    output_desc: RecordDescriptor,
+    collect_by: &CollectByOp,
+    records: &[(Bytes, i64)],
+) -> Result<Option<Bytes>, IvmRuntimeError> {
+    let Some((parent_record, _)) = records.iter().find(|(_, weight)| *weight > 0) else {
+        return Ok(None);
+    };
+    let parent_values = BorrowedRecord::new(parent_record, &input_desc)
+        .to_values()
+        .map_err(|error| {
+            IvmRuntimeError::InvalidCollectBy(format!("root input decode failed: {error}"))
+        })?;
+    let values = collect_by
+        .parent_fields
+        .iter()
+        .enumerate()
+        .map(|(index, field)| {
+            let value = collect_by_projected_value(&parent_values, field)?;
+            let output_type = &output_desc.fields()[index].value_type;
+            Ok::<Value, IvmRuntimeError>(match (output_type, value) {
+                (ValueType::Nullable(_), value @ Value::Nullable(_)) => value,
+                (ValueType::Nullable(_), value) => Value::Nullable(Some(Box::new(value))),
+                (_, value) => value,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let record = output_desc.create(&values).map_err(|error| {
+        IvmRuntimeError::InvalidCollectBy(format!("root record render failed: {error}"))
+    })?;
+    Ok(Some(record.into()))
 }
 
 fn collect_by_parent_from_records(

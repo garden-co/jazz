@@ -15,7 +15,12 @@ import {
   encodeWebSocketFrameBatch,
   isWireHello,
 } from "./websocket.js";
-import { formatUuid, NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.js";
+import {
+  decodeNestedRowBytes,
+  formatUuid,
+  NativeRuntimeAdapter,
+  type Transport,
+} from "./native-runtime-adapter.js";
 import { encodeSchema } from "./schema-codec.js";
 import { decodeNativeDelta } from "../subscription-manager.js";
 import { definePermissions } from "../../permissions/index.js";
@@ -49,6 +54,38 @@ describe("formatUuid", () => {
     ]);
 
     expect(formatUuid(bytes.subarray(2, 18))).toBe("00010203-0405-0607-0809-0a0b0c0d0e0f");
+  });
+});
+
+describe("nested row physical carriers", () => {
+  const id = "00000000-0000-0000-0000-000000000002";
+  const columns: ColumnDescriptor[] = [
+    { name: "title", column_type: { type: "Text" }, nullable: false },
+  ];
+  const descriptor = [
+    { name: "row_uuid", valueType: { tag: 10 } as const },
+    { name: "title", valueType: { tag: 8 } as const },
+  ];
+
+  it("decodes a full snapshot record without stripping its row_uuid field", () => {
+    const bytes = createRecord(descriptor, [uuidBytes(id), new TextEncoder().encode("snapshot")]);
+
+    const row = decodeNestedRowBytes(columns, bytes, descriptor, "full-record");
+
+    expect(row.id).toBe(id);
+    expect(row.values).toEqual([{ type: "Text", value: "snapshot" }]);
+  });
+
+  it("decodes an explicitly keyed terminal payload with the same descriptor", () => {
+    const bytes = concatBytes([
+      uuidBytes(id),
+      createRecord(descriptor.slice(1), [new TextEncoder().encode("terminal")]),
+    ]);
+
+    const row = decodeNestedRowBytes(columns, bytes, descriptor, "keyed-terminal");
+
+    expect(row.id).toBe(id);
+    expect(row.values).toEqual([{ type: "Text", value: "terminal" }]);
   });
 });
 

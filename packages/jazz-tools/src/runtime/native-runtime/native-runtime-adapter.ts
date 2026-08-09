@@ -1574,6 +1574,7 @@ export class NativeRuntimeAdapter implements Runtime {
         chunk.snapshot,
         this.schema,
         subscription.outputColumns?.rootColumns,
+        "full-record",
       );
       subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
       subscription.opened = true;
@@ -3383,6 +3384,7 @@ function rowsFromBatches(
   batches: NativeRowBatch[],
   schema: WasmSchema,
   projectedColumns?: readonly ColumnDescriptor[],
+  nestedRowCarrier: NestedRowCarrier = "full-record",
 ): RowState[] {
   const rows: RowState[] = [];
   for (const batch of batches) {
@@ -3393,7 +3395,7 @@ function rowsFromBatches(
       const valuesByColumn = new Map<string, Value>();
 
       for (const field of fieldPlans) {
-        const value = decodePlannedField(field, decodeRecord, row.raw);
+        const value = decodePlannedField(field, decodeRecord, row.raw, nestedRowCarrier);
         valuesByColumn.set(field.name, value);
         if (field.includeInValues) {
           values.push(value);
@@ -3471,9 +3473,10 @@ function rowsFromRelationSnapshot(
   snapshot: NativeRelationSubscriptionSnapshot,
   schema: WasmSchema,
   projectedColumns?: readonly ColumnDescriptor[],
+  nestedRowCarrier: NestedRowCarrier = "full-record",
 ): RowState[] {
   const rows = stripRelationSnapshotMetadata(
-    rowsFromBatches(snapshot.rows, schema, projectedColumns),
+    rowsFromBatches(snapshot.rows, schema, projectedColumns, nestedRowCarrier),
     schema,
   );
   return rows.slice(0, snapshot.rootCount);
@@ -3544,8 +3547,9 @@ function applySubscriptionDeltaWithWireDelta(
   }
 
   const projectedColumns = outputColumns?.rootColumns;
-  const addedRows = rowsFromBatches(delta.added, schema, projectedColumns);
-  const updatedRows = rowsFromBatches(delta.updated, schema, projectedColumns);
+  const nestedRowCarrier: NestedRowCarrier = "full-record";
+  const addedRows = rowsFromBatches(delta.added, schema, projectedColumns, nestedRowCarrier);
+  const updatedRows = rowsFromBatches(delta.updated, schema, projectedColumns, nestedRowCarrier);
   for (const row of addedRows.concat(updatedRows)) {
     rowsByKey.set(rowKey(row.table, row.id), row);
   }
@@ -3585,12 +3589,13 @@ function decodePlannedField(
   field: NativeRowFieldPlan,
   decodeRecord: (raw: Uint8Array, logicalIndex: number) => Uint8Array | null,
   raw: Uint8Array,
+  nestedRowCarrier: NestedRowCarrier,
 ): Value {
   const bytes = decodeRecord(raw, field.index);
   if (bytes == null) return { type: "Null" };
   if (!field.type) return { type: "Bytea", value: bytes };
   try {
-    return decodeBytes(field.type, bytes, field.name, field.storageType);
+    return decodeBytes(field.type, bytes, field.name, field.storageType, nestedRowCarrier);
   } catch (error) {
     throw new Error(
       `${String(error)} while decoding ${field.name} as ${field.type.type} from storage tag ${field.storageType.tag} (${bytes.byteLength} bytes)`,
@@ -3603,6 +3608,7 @@ function decodeBytes(
   bytes: Uint8Array,
   fieldName?: string,
   storageType?: ValueType,
+  nestedRowCarrier: NestedRowCarrier = "full-record",
 ): Value {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   switch (type.type) {
@@ -3632,12 +3638,22 @@ function decodeBytes(
     case "Array":
       return {
         type: "Array",
-        value: decodeArrayBytes(type.element, bytes, arrayElementStorageType(storageType)),
+        value: decodeArrayBytes(
+          type.element,
+          bytes,
+          arrayElementStorageType(storageType),
+          nestedRowCarrier,
+        ),
       };
     case "Row":
       return {
         type: "Row",
-        value: decodeNestedRowBytes(type.columns, bytes, recordStorageDescriptor(storageType)),
+        value: decodeNestedRowBytes(
+          type.columns,
+          bytes,
+          recordStorageDescriptor(storageType),
+          nestedRowCarrier,
+        ),
       };
   }
 }
@@ -3658,24 +3674,34 @@ function recordStorageDescriptor(storageType?: ValueType): DescriptorField[] | u
   return record?.tag === 15 ? record.record : undefined;
 }
 
-function decodeNestedRowBytes(
+export type NestedRowCarrier = "full-record" | "keyed-terminal";
+
+export function decodeNestedRowBytes(
   columns: readonly ColumnDescriptor[],
   bytes: Uint8Array,
   descriptor?: DescriptorField[],
+  carrier: NestedRowCarrier = "full-record",
 ): { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } {
   if (descriptor) {
-    const keyed = descriptor[0]?.name === "row_uuid";
+    const keyed = carrier === "keyed-terminal";
+    if (keyed && descriptor[0]?.name !== "row_uuid") {
+      throw new Error("keyed terminal nested row descriptor must start with row_uuid");
+    }
     if (keyed && bytes.byteLength < 16) throw new Error("terminal nested row is missing its key");
     const payloadDescriptor = keyed ? descriptor.slice(1) : descriptor;
     const payload = keyed ? bytes.subarray(16) : bytes;
     const decodeRecord = createRecordValueDecoder(payloadDescriptor);
     const columnsByName = new Map(columns.map((column) => [column.name, column]));
     const valuesByColumn = new Map<string, Value>();
-    const id = keyed ? formatUuid(bytes.subarray(0, 16)) : undefined;
+    let id = keyed ? formatUuid(bytes.subarray(0, 16)) : undefined;
     for (let index = 0; index < payloadDescriptor.length; index += 1) {
       const name = payloadDescriptor[index]?.name;
       if (!name) continue;
       const valueBytes = decodeRecord(payload, index);
+      if (!keyed && name === "row_uuid" && valueBytes) {
+        id = formatUuid(valueBytes);
+        continue;
+      }
       const column = columnsByName.get(name);
       if (!column) continue;
       valuesByColumn.set(
@@ -3722,6 +3748,7 @@ function decodeArrayBytes(
   elementType: ColumnType,
   bytes: Uint8Array,
   storageElementType?: ValueType,
+  nestedRowCarrier: NestedRowCarrier = "full-record",
 ): Value[] {
   const elementWidth = fixedValueSize(
     storageElementType ?? storageColumnTypeToValueType(elementType),
@@ -3739,6 +3766,7 @@ function decodeArrayBytes(
           bytes.subarray(offset, offset + elementWidth),
           undefined,
           storageElementType,
+          nestedRowCarrier,
         ),
       );
     }
@@ -3763,7 +3791,13 @@ function decodeArrayBytes(
       throw new Error("invalid variable-width array element offset");
     }
     values.push(
-      decodeBytes(elementType, bytes.subarray(start, end), undefined, storageElementType),
+      decodeBytes(
+        elementType,
+        bytes.subarray(start, end),
+        undefined,
+        storageElementType,
+        nestedRowCarrier,
+      ),
     );
   }
   return values;
@@ -4050,7 +4084,12 @@ function nativeDescriptorMatchesColumns(
 
 function materializePackedResetRows(subscription: SubscriptionState, schema: WasmSchema): void {
   if (!subscription.packedResetBatches) return;
-  subscription.rows = rowsFromBatches(subscription.packedResetBatches, schema);
+  subscription.rows = rowsFromBatches(
+    subscription.packedResetBatches,
+    schema,
+    subscription.outputColumns?.rootColumns,
+    "full-record",
+  );
   subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
   subscription.packedResetBatches = null;
   subscription.packedResetRows = null;

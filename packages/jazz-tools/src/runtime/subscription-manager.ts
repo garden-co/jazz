@@ -318,9 +318,10 @@ export class SubscriptionManager<T extends { id: string }> {
       (operation) => operation.path.length === 0 && "Insert" in operation.edit,
     );
 
-    // Pre-establish only newly inserted roots so child-before-root batches are
-    // addressable. Updates remain in producer order: Groove deliberately emits
-    // nested diffs before the final full root update.
+    // Pre-establish only newly inserted root payloads so child-before-root
+    // batches are addressable. Positional insertion remains in producer order:
+    // applying its index before an earlier root Remove makes the outcome depend
+    // on operation-key ordering.
     for (const operation of rootInserts) {
       const rootId = terminalKeyId(operation.root_key);
       const edit = operation.edit;
@@ -330,9 +331,6 @@ export class SubscriptionManager<T extends { id: string }> {
         rootId,
         decodeNativeTerminalRow(rootId, rootColumns, Uint8Array.from(edit.Insert.value)),
       );
-      this.removeId(rootId);
-      this.insertIdAt(rootId, edit.Insert.index);
-      affectedRoots.add(rootId);
     }
 
     for (const operation of operations) {
@@ -340,8 +338,13 @@ export class SubscriptionManager<T extends { id: string }> {
       const edit = operation.edit;
       if (operation.path.length === 0) {
         assertTerminalRootEditKey(operation.root_key, edit);
-        if ("Insert" in edit) continue;
-        if ("Update" in edit) {
+        if ("Insert" in edit) {
+          if (!this.terminalRows.has(rootId)) {
+            throw new Error(`terminal root insert payload is missing for ${rootId}`);
+          }
+          this.removeId(rootId);
+          this.insertIdAt(rootId, edit.Insert.index);
+        } else if ("Update" in edit) {
           if (!this.terminalRows.has(rootId)) {
             throw new Error(`terminal root update addressed missing root ${rootId}`);
           }

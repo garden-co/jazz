@@ -131,6 +131,9 @@ pub(crate) fn lower_query_program(
                 .is_some_and(|_| parameters.claim_params.contains_key(field))
     });
 
+    let internal_app_rows_graph = (request.output.app_rows.is_some()
+        && root_aggregate_step(&plan).is_none())
+    .then(|| lowered.graph.clone());
     let terminals = lowered_terminals(
         lowered.graph,
         &request,
@@ -162,6 +165,7 @@ pub(crate) fn lower_query_program(
     Ok(QueryProgram {
         lowered: LoweredGraph {
             terminals,
+            internal_app_rows_graph,
             parameters,
             output,
             maintained_terminal_tables: resolved_sources
@@ -1845,6 +1849,22 @@ fn source_requirements(
             PayloadProjection::Tree(tree) => tree.fields.clone().into(),
         };
         if let PayloadProjection::Tree(tree) = &app_rows.projection {
+            if let FieldProjection::Fields(fields) = &tree.fields {
+                for field in fields {
+                    let provenance = match field.as_str() {
+                        "$createdAt" => Some(ProvenanceField::CreatedAt),
+                        "$createdBy" => Some(ProvenanceField::CreatedBy),
+                        "$updatedAt" => Some(ProvenanceField::UpdatedAt),
+                        "$updatedBy" => Some(ProvenanceField::UpdatedBy),
+                        _ => None,
+                    };
+                    if let Some(provenance) = provenance {
+                        root_requirements
+                            .metadata
+                            .insert(SourceMetadataRequirement::Provenance(provenance));
+                    }
+                }
+            }
             collect_app_path_projection_requirements(&tree.paths, &mut requirements)?;
         }
     }
@@ -5001,7 +5021,12 @@ fn lowered_terminals(
     if let Some(app_rows) = &request.output.app_rows {
         let projected_output = projected_multisource_terminal(plan, source);
         let (graph, descriptor, hidden_fields) = match app_rows.projection.clone() {
-            PayloadProjection::Tree(tree) if !tree.paths.is_empty() => {
+            _ if !app_rows.public_terminal => (
+                closure.visible_root.clone(),
+                source.row_shape.descriptor.clone(),
+                hidden_source_fields(&source.row_shape),
+            ),
+            PayloadProjection::Tree(tree) => {
                 let collected = lower_collect_by_app_rows(
                     closure.visible_root.clone(),
                     &tree,
@@ -5361,17 +5386,25 @@ fn lower_collect_by_app_rows(
     request: &QueryProgramRequest,
     route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<LoweredCollectByAppRows> {
+    let mut parameter_domain = parameter_domain_for_request(request).map_err(single_gap_report)?;
+    collect_binding_source_params(&visible_root, &mut parameter_domain);
     let mut layout = collect_layout(
         projection,
         root_source,
         resolved_sources,
         request,
         route_fields,
+        &parameter_domain,
     )?;
     align_collect_root_window(&mut layout, plan)?;
     align_collect_join_key_types(&mut layout.slots, plan, resolved_sources, request)?;
     if layout.slots.is_empty() {
-        let anchor = collect_anchor_graph(visible_root, &layout)?;
+        let mut anchor = collect_anchor_graph(visible_root, &layout)?;
+        for field in layout.root_fields.iter().filter(|field| {
+            field.is_output && !field.is_row_id && field.value_type != field.output_value_type
+        }) {
+            anchor = anchor.unwrap_nullable(&field.input);
+        }
         let has_window = root_linear_steps(plan).is_some_and(|steps| {
             steps
                 .iter()
@@ -5403,13 +5436,7 @@ fn lower_collect_by_app_rows(
                 .root_fields
                 .iter()
                 .filter(|field| field.is_output)
-                .map(|field| {
-                    if field.is_row_id || field.value_type == field.output_value_type {
-                        CollectByField::renamed(&field.input, &field.output)
-                    } else {
-                        CollectByField::renamed_unwrap_nullable(&field.input, &field.output)
-                    }
-                }),
+                .map(|field| CollectByField::renamed(&field.input, &field.output)),
             layout.root_order_cols.clone(),
             layout.root_tie_cols.clone(),
             layout.root_offset,
@@ -5709,6 +5736,7 @@ fn collect_layout(
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
     routing_param_fields: &BTreeSet<String>,
+    parameter_domain: &ParameterDomain,
 ) -> CapabilityResult<CollectLayout> {
     let mut selected_root = BTreeSet::from([root_source.row_shape.row_uuid_field.clone()]);
     match &projection.fields {
@@ -5723,7 +5751,7 @@ fn collect_layout(
             fields
                 .iter()
                 .filter(|field| field.as_str() != "id")
-                .map(|field| collect_projection_source_field(field)),
+                .map(|field| collect_projection_source_field(root_source, field)),
         ),
     }
     let mut root_fields = root_source
@@ -5752,7 +5780,6 @@ fn collect_layout(
             })
         })
         .collect::<Vec<_>>();
-    let parameter_domain = parameter_domain_for_request(request).map_err(single_gap_report)?;
     for route_field in routing_param_fields {
         let value_type = if let Some(param) = route_param_from_field(route_field) {
             parameter_domain
@@ -5849,7 +5876,7 @@ fn collect_slot_layouts(
                         .iter()
                         .filter(|field| field.as_str() != "id")
                         .map(|field| {
-                            collect_projection_source_field(field)
+                            collect_projection_source_field(source, field)
                         }),
                 ),
             }
@@ -5917,7 +5944,7 @@ fn collect_slot_layouts(
         .collect()
 }
 
-fn collect_projection_source_field(field: &str) -> String {
+fn collect_projection_source_field(_source: &ResolvedSource, field: &str) -> String {
     match field {
         "$createdAt" | "$createdBy" | "$updatedAt" | "$updatedBy" => field.to_owned(),
         _ => user_column_field(field),
@@ -5931,7 +5958,12 @@ fn collect_projection_output_field(field: &str) -> String {
         "created_by" => "$createdBy".to_owned(),
         "updated_at" => "$updatedAt".to_owned(),
         "updated_by" => "$updatedBy".to_owned(),
-        _ => logical_user_column(field).to_owned(),
+        // The terminal owns row assembly, but its encoded record remains in
+        // the canonical current-row codec namespace. Native/WASM adapters map
+        // `user_*` fields to public column names from the negotiated schema;
+        // emitting logical names here makes core CurrentRow decoding silently
+        // treat every selected cell as absent.
+        _ => field.to_owned(),
     }
 }
 
@@ -8147,6 +8179,10 @@ pub(crate) struct QueryProgram {
 pub(crate) struct LoweredGraph {
     /// Executable named groove terminals emitted by this program.
     pub(crate) terminals: Vec<LoweredTerminal>,
+    /// Filtered current-row graph used only by synchronous one-shot
+    /// materializers. Public terminals have their own exact output shape and
+    /// must not be decoded as storage-backed current rows.
+    pub(crate) internal_app_rows_graph: Option<GraphBuilder>,
     /// Parameter domains expected by the graph.
     pub(crate) parameters: ParameterDomain,
     /// App row and fact schemas emitted by the graph.

@@ -299,6 +299,68 @@ describe("SubscriptionManager", () => {
     expect(removed).toEqual({ delta: [{ kind: 1, id, index: 0 }], all: [] });
   });
 
+  it("applies root insert positions in producer order after earlier removals", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const ids = {
+      b: "00000000-0000-4000-8000-00000000000b",
+      c: "00000000-0000-4000-8000-00000000000c",
+      d: "00000000-0000-4000-8000-00000000000d",
+    };
+    const key = (id: string) => [10, ...uuidBytes(id)];
+    const emptyNative = {
+      __jazzNativeRowDelta: true as const,
+      added: new Uint8Array(),
+      removed: new Uint8Array(),
+      updated: new Uint8Array(),
+      addedCount: 0,
+      removedCount: 0,
+      updatedCount: 0,
+    };
+    manager.handleDelta(
+      {
+        ...emptyNative,
+        terminalOperations: [
+          {
+            root_key: key(ids.b),
+            path: [],
+            edit: {
+              Insert: { index: 0, key: key(ids.b), value: [...terminalRowData(ids.b, "B", 2)] },
+            },
+          },
+          {
+            root_key: key(ids.c),
+            path: [],
+            edit: {
+              Insert: { index: 1, key: key(ids.c), value: [...terminalRowData(ids.c, "C", 3)] },
+            },
+          },
+        ],
+      },
+      transform,
+      nativeColumns,
+    );
+
+    const result = manager.handleDelta(
+      {
+        ...emptyNative,
+        terminalOperations: [
+          { root_key: key(ids.b), path: [], edit: { Remove: { key: key(ids.b) } } },
+          {
+            root_key: key(ids.d),
+            path: [],
+            edit: {
+              Insert: { index: 1, key: key(ids.d), value: [...terminalRowData(ids.d, "D", 4)] },
+            },
+          },
+        ],
+      },
+      transform,
+      nativeColumns,
+    );
+
+    expect(result.all?.map((row) => row.id)).toEqual([ids.c, ids.d]);
+  });
+
   it("rejects mismatched root addressing and unresolved child paths", () => {
     const manager = new SubscriptionManager<TestItem>();
     const id = "00000000-0000-4000-8000-000000000001";

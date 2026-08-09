@@ -2915,6 +2915,44 @@ fn relation_snapshot_reverse_array_projects_provenance_magic_columns() {
 }
 
 #[test]
+fn version_bearing_current_source_preserves_provenance_timestamps() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let id = row(0x7a);
+    db.insert_with_id_at_ms(
+        "todos",
+        id,
+        doctest_support::todo_cells("provenance", false),
+        1_234,
+    )
+    .unwrap();
+    {
+        let mut node = db.node.node.borrow_mut();
+        let table = node.table("todos").unwrap().clone();
+        let rows = node
+            .test_content_current_with_version(&table, DurabilityTier::Local)
+            .unwrap();
+        let created_at = rows.descriptor.field_index("created_at").unwrap();
+        let record = rows
+            .iter()
+            .find(|(record, weight)| *weight > 0 && record.get_uuid(0).unwrap() == id.0)
+            .unwrap()
+            .0;
+        assert_eq!(record.get_u64(created_at).unwrap(), 1_234);
+    }
+
+    let query = db
+        .table("todos")
+        .select(["title", "$createdAt", "$updatedAt"])
+        .filter(eq(col("id"), lit(Value::Uuid(id.0))));
+    let prepared = db.prepare_query(&query).unwrap();
+    let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
+    let row = rows.iter().find(|row| row.row_uuid() == id).unwrap();
+    assert_eq!(row.raw_field("$createdAt"), Some(Value::U64(1_234)));
+    assert_eq!(row.raw_field("$updatedAt"), Some(Value::U64(1_234)));
+    assert_eq!(row.raw_field("user_done"), None);
+}
+
+#[test]
 fn include_deleted_fails_closed_on_live_subscription_apis() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let query = db.table("todos");
@@ -3593,6 +3631,38 @@ fn flat_subscription_updates_with_nullable_sort_payload() {
         event,
         SubscriptionEvent::Delta { terminal_operations, .. }
             if terminal_operations.iter().any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Update { .. }))
+    ));
+}
+
+#[test]
+fn flat_subscription_shifts_offset_window_when_leading_row_is_deleted() {
+    let schema = relation_schema();
+    let db = open_db(0xd8, AuthorId::from_bytes([0xd8; 16]), &schema);
+    for (id, name) in [(0xa1, "a"), (0xb1, "b"), (0xc1, "c"), (0xd1, "d")] {
+        db.insert_with_id(
+            "users",
+            row(id),
+            BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+        )
+        .unwrap();
+    }
+    let query = Query::from("users")
+        .order_by("name", OrderDirection::Asc)
+        .offset(1)
+        .limit(2);
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert_eq!(row_ids(&initial.rows), vec![row(0xb1), row(0xc1)]);
+
+    db.delete("users", row(0xa1)).unwrap();
+    db.tick().unwrap();
+    let event = block_on(subscription.next_event()).unwrap();
+    assert!(matches!(
+        event,
+        SubscriptionEvent::Delta { terminal_operations, .. }
+            if terminal_operations.iter().any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Remove { .. }))
+                && terminal_operations.iter().any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Insert { index: 1, .. }))
     ));
 }
 

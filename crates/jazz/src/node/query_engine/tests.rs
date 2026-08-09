@@ -475,6 +475,7 @@ fn program_frontier() -> CoverageFrontier {
 fn row_set_output(facts: BTreeSet<ProgramFactKey>) -> RowSetOutputRequest {
     RowSetOutputRequest {
         app_rows: Some(AppRowOutputRequest {
+            public_terminal: true,
             projection: PayloadProjection::ShapeDefault,
             large_values: Vec::new(),
         }),
@@ -502,6 +503,7 @@ fn production_output_request(
         },
         ProductionOutputProfile::RelationSnapshot => RowSetOutputRequest {
             app_rows: Some(AppRowOutputRequest {
+                public_terminal: true,
                 projection: PayloadProjection::ShapeDefault,
                 large_values: Vec::new(),
             }),
@@ -1097,6 +1099,7 @@ fn current_source_select_projection_and_default_ordered_slice_lower() {
         },
         output: RowSetOutputRequest {
             app_rows: Some(AppRowOutputRequest {
+                public_terminal: true,
                 projection: PayloadProjection::Tree(AppProjectionTree {
                     fields: FieldProjection::Fields(BTreeSet::from(["title".to_owned()])),
                     paths: Vec::new(),

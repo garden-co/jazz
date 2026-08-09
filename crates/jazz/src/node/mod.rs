@@ -5303,9 +5303,19 @@ impl CurrentRow {
         );
         let mut values = vec![Value::Uuid(self.row_uuid().0)];
         for column in projected_columns {
-            values.push(Value::Nullable(
-                self.cell(table, &column.name).map(Box::new),
-            ));
+            let cell = self.cell(table, &column.name);
+            let projected = if matches!(column.column_type, records::ValueType::Nullable(_)) {
+                match cell {
+                    Some(value @ Value::Nullable(_)) => Value::Nullable(Some(Box::new(value))),
+                    Some(value) => {
+                        Value::Nullable(Some(Box::new(Value::Nullable(Some(Box::new(value))))))
+                    }
+                    None => Value::Nullable(None),
+                }
+            } else {
+                Value::Nullable(cell.map(Box::new))
+            };
+            values.push(projected);
         }
         if let Some(provenance) = self.provenance()? {
             values.push(Value::Uuid(provenance.created_by.0));

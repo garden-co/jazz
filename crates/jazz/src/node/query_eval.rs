@@ -271,6 +271,15 @@ fn lowered_app_rows_graph(program: &QueryProgram) -> Result<GraphBuilder, Error>
     lowered_terminal_graph(program, JAZZ_APP_ROWS_SINK)
 }
 
+fn lowered_materialization_app_rows_graph(program: &QueryProgram) -> Result<GraphBuilder, Error> {
+    program
+        .lowered
+        .internal_app_rows_graph
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(|| lowered_app_rows_graph(program))
+}
+
 fn lowered_program_sinks(program: &QueryProgram) -> Vec<(String, GraphBuilder)> {
     program
         .lowered
@@ -589,6 +598,7 @@ pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
 
 enum CurrentQueryProgramOutput {
     AppRows,
+    PolicyPredicate,
     AuthorizedRows,
     RelationSnapshot,
     MaintainedView,
@@ -1386,8 +1396,40 @@ where
         table: &TableSchema,
         tier: DurabilityTier,
     ) -> Result<CurrentSourceGraph, SourceResolutionError> {
+        // Keep the schema-aware projected payload as the row source. Version
+        // witnesses are joined alongside it solely to provide authoritative
+        // provenance/version metadata; using the physical witness graph as
+        // the payload source would bypass lenses and large-value projection.
+        let projected =
+            self.projected_content_current_source_graph(request, table, tier, true, true)?;
+        let witnesses = self
+            .node
+            .maintained_view_content_current_with_version(table, tier)
+            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+        let mut fields = vec![ProjectField::renamed(left_field("row_uuid"), "row_uuid")];
+        fields.extend(table.columns.iter().map(|column| {
+            let field = user_column_field(&column.name);
+            ProjectField::renamed(left_field(&field), field)
+        }));
+        fields.extend(
+            [
+                "schema_version",
+                "parents",
+                "authored_columns",
+                "created_by",
+                "created_at",
+                "updated_by",
+                "updated_at",
+                "tx_time",
+                "tx_node_id",
+                "global_seq",
+            ]
+            .into_iter()
+            .map(|field| ProjectField::renamed(right_field(field), field)),
+        );
         Ok(CurrentSourceGraph {
-            graph: self.projected_content_current_source_graph(request, table, tier, true, true)?,
+            graph: GraphBuilder::join(projected, witnesses, ["row_uuid"], ["row_uuid"])
+                .project_fields(fields),
             descriptor: current_row_descriptor(table),
             metadata: BTreeMap::new(),
         })
@@ -1961,7 +2003,11 @@ where
     let mut metadata = BTreeMap::new();
     let needs_version_witnesses = requirements
         .metadata
-        .contains(&SourceMetadataRequirement::VersionWitnesses);
+        .contains(&SourceMetadataRequirement::VersionWitnesses)
+        || requirements
+            .metadata
+            .iter()
+            .any(|requirement| matches!(requirement, SourceMetadataRequirement::Provenance(_)));
     let needs_settle_position = requirements
         .metadata
         .contains(&SourceMetadataRequirement::SettlePosition);
@@ -2017,6 +2063,10 @@ where
             metadata.insert(
                 SourceMetadataRequirement::Provenance(*field),
                 SourceMetadataFields::Provenance {
+                    // Every resolver branch normalizes storage names before it
+                    // exposes this source. Metadata therefore names the
+                    // canonical field on the resolved graph, never the
+                    // physical storage column used below that boundary.
                     field: source_provenance_field(*field).to_owned(),
                 },
             );
@@ -2534,7 +2584,9 @@ fn current_query_output_request(
     query: &JazzQuery,
 ) -> RowSetOutputRequest {
     let facts = match output {
-        CurrentQueryProgramOutput::AppRows => BTreeSet::new(),
+        CurrentQueryProgramOutput::AppRows | CurrentQueryProgramOutput::PolicyPredicate => {
+            BTreeSet::new()
+        }
         CurrentQueryProgramOutput::AuthorizedRows => {
             BTreeSet::from([ProgramFactKey::AuthorizedRows])
         }
@@ -2565,10 +2617,12 @@ fn current_query_output_request(
         app_rows: (matches!(
             output,
             CurrentQueryProgramOutput::AppRows
+                | CurrentQueryProgramOutput::PolicyPredicate
                 | CurrentQueryProgramOutput::RelationSnapshot
                 | CurrentQueryProgramOutput::MaintainedView
         ))
         .then(|| AppRowOutputRequest {
+            public_terminal: !matches!(output, CurrentQueryProgramOutput::PolicyPredicate),
             projection: app_row_payload_projection(
                 query,
                 matches!(output, CurrentQueryProgramOutput::MaintainedView)
@@ -6799,7 +6853,7 @@ where
             policy,
             input,
             output: current_query_output_request(
-                CurrentQueryProgramOutput::AppRows,
+                CurrentQueryProgramOutput::PolicyPredicate,
                 policy_shape.query(),
             ),
         };
@@ -7101,9 +7155,9 @@ where
         };
         let query = shape.query();
         self.finish_engine_query_rows(query, &mut rows)?;
-        if query.flat_join.is_none() {
-            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
-        }
+        // `CurrentQueryProgramOutput::AppRows` is an exact public Root
+        // terminal. Re-projecting it here would reintroduce a higher-level
+        // assembler and can erase independently selected provenance fields.
         Ok(rows)
     }
 
@@ -7244,9 +7298,7 @@ where
         self.finish_engine_query_rows(query, &mut rows)?;
         profile.finish_rows = phase_started.elapsed();
 
-        let phase_started = Instant::now();
-        self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
-        profile.apply_projection = phase_started.elapsed();
+        profile.apply_projection = Default::default();
         profile.total = total_started.elapsed();
         Ok((rows, profile))
     }
@@ -7433,7 +7485,6 @@ where
         let mut rows = self.query_rows_at_with_query_engine(shape, binding, position, identity)?;
         let query = shape.query();
         self.finish_engine_query_rows(query, &mut rows)?;
-        self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
         Ok(rows)
     }
 
@@ -7495,7 +7546,7 @@ where
             self.compile_include_deleted_query_program(&lowered_shape, &binding, tier, identity)?;
         let deltas = self
             .database
-            .query_graph(lowered_app_rows_graph(&program)?)
+            .query_graph(lowered_materialization_app_rows_graph(&program)?)
             .map_err(Error::Groove)?;
         if query.aggregate.is_some() {
             self.materialize_aggregate_query_rows(query, &table, deltas)
@@ -9029,7 +9080,6 @@ where
         };
         let query = shape.query();
         self.finish_engine_query_rows(query, &mut rows)?;
-        self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
         Ok(rows)
     }
 
@@ -9555,9 +9605,6 @@ where
         open_tx.predicate_reads.truncate(predicate_len);
         open_tx.predicate_reads.push(predicate_read);
         self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
-        if query.flat_join.is_none() {
-            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
-        }
         Ok(rows)
     }
 
@@ -10396,6 +10443,16 @@ where
             ["row_uuid"],
             ["row_uuid"],
         ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_content_current_with_version(
+        &mut self,
+        table: &TableSchema,
+        tier: DurabilityTier,
+    ) -> Result<groove::ivm::RecordDeltas, Error> {
+        let graph = self.maintained_view_content_current_with_version(table, tier)?;
+        self.database.query_graph(graph).map_err(Error::Groove)
     }
 
     pub(crate) fn permission_scope_shape_binding(
