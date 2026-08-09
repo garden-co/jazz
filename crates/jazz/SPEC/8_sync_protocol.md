@@ -311,26 +311,21 @@ do not change when future inventory fields are added.
 
 Protocol size limits are enforced at the layer that can recover correctly:
 
-- An encoded `WireFrame` is capped at 2 MiB and an encoded
-  `WireEnvelope.payload` / `SyncMessage` is capped at 2 MiB. These are
-  wire-admission limits: an over-limit frame or payload is rejected before
-  postcard decodes the bytes and produces a structured
-  `WireError { code: MalformedFrame, retry: Never, ... }`. The connection-level
-  admission failure closes or resumes according to the binding's normal
-  structured-error handling; no semantic message is applied.
-  A logical `CatalogueSnapshot` can legitimately exceed this framing cap as
-  catalogue history grows. It is therefore an explicit consumer of the
-  planned generic transport fragmentation/reassembly layer, which must retain
-  atomic logical-message delivery across fragment loss, duplication, and
-  reordering. The catalogue protocol must not grow a bespoke chunk format;
-  until generic fragmentation lands, oversized snapshots cannot traverse the
-  current wire transport.
+- An encoded `WireFrame` is capped at 2 MiB before postcard frame decode.
+  `WireEnvelope.payload` is one physical fragment, not a semantic-message
+  ceiling. Generic fragmentation/reassembly carries an encoded `SyncMessage`
+  of any ordinary database size atomically across bounded frames. Receivers
+  enforce fixed advertised-length, decompressed-output, concurrent-assembly,
+  and aggregate staged-byte limits as adversarial resource
+  defenses; those budgets are transport policy, not query, catalogue, or
+  transaction semantics.
 - A `RegisterShape` AST is capped at 64 KiB encoded. This is a semantic
   admission limit for the shape-registration request; the connection may
   continue after the rejected request. Server shells may expose this as
   configuration later for unusually large generated query shapes.
-- A `CommitUnit` is capped at 4096 row-version records and 2 MiB encoded. These
-  are transaction semantic limits: an over-limit commit unit is rejected as
+- A `CommitUnit` is capped at 4096 row-version records, independently of its
+  encoded byte size. This CPU/fan-out limit is transaction semantics: an
+  over-limit commit unit is rejected as
   `Fate::Rejected(MalformedCommit(_))`, the connection remains live, and later
   well-formed commit units may still settle.
 - A `ContentExtent` response is capped at 1 MiB of bytes per extent. This is a
@@ -347,11 +342,10 @@ Protocol size limits are enforced at the layer that can recover correctly:
   level and are protocol-admission limits: over-limit input is rejected before
   semantic application (`INV-SYNC-28`).
 
-Outbound websocket batching is byte-budgeted by the same 2 MiB encoded-frame
-limit: senders split batches across multiple binary messages instead of relying
-on the historical count-only batch limit. If a single encoded `WireFrame` cannot
-fit the budget, the sender must fail loudly rather than truncate or silently
-drop it.
+Outbound websocket batching is byte-budgeted at the physical layer: senders
+split batches across binary messages rather than relying on a count-only batch
+limit. A logical `SyncMessage` is fragmented first, so each encoded `WireFrame`
+fits the wire-frame budget without truncation or semantic-layer chunking.
 
 **Wire encoding posture (target optimization guidance).** High-rate serial
 transactions (keystroke-grade chains: same author, same row, near-monotone
