@@ -6121,7 +6121,12 @@ where
     ) -> Result<QueryProgramRequest, Error> {
         let lowered_shape;
         let lowered_binding;
-        let use_prepared_binding_source = self.can_use_prepared_current_query_plan(shape)
+        // Prepared binding sources are a serving-side optimization. Client
+        // local execution must lower concrete bindings into its locally
+        // available (already upstream-scoped at Edge/Global) data, rather
+        // than trying to evaluate a server-maintained binding graph.
+        let use_prepared_binding_source = authorization_mode == QueryAuthorizationMode::TrustedServing
+            && self.can_use_prepared_current_query_plan(shape)
             && settled_binding_view.is_none()
             && !matches!(output, CurrentQueryProgramOutput::RelationSnapshot);
         let (shape, binding) = if !use_prepared_binding_source {
@@ -9408,23 +9413,6 @@ where
             tier,
             identity,
             &ReadViewSpec::default(),
-        )
-    }
-
-    pub(crate) fn query_rows_for_client_including_deleted(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        tier: DurabilityTier,
-        identity: AuthorId,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        self.query_rows_including_deleted_in_authorization_mode(
-            shape,
-            binding,
-            tier,
-            None,
-            identity,
-            QueryAuthorizationMode::ClientLocal,
         )
     }
 

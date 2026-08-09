@@ -70,7 +70,7 @@ pub(crate) mod maintained_subscription_view;
 mod open_tx;
 mod physical;
 mod policy;
-mod query_engine;
+pub(crate) mod query_engine;
 mod query_eval;
 mod recovery;
 mod source_resolution;

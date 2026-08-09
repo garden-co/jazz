@@ -42,6 +42,7 @@ use crate::node::{
     NodeState, OpenTxId, PreparedQueryPlanHandle, QueryReadProfile, RelationEdge, RelationSnapshot,
     RowProvenance, ViewUpdateParts,
 };
+use crate::node::query_engine::QueryAuthorizationMode;
 use crate::peer::{PeerRole, PeerState};
 #[cfg(feature = "sync-autopsy")]
 use crate::protocol::expand_version_carriers;
@@ -879,44 +880,90 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.all_for_identity(prepared, opts, self.identity.author)
-            .await
+        self.all_for_identity_in_authorization_mode(
+            prepared,
+            opts,
+            self.identity.author,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .await
     }
 
-    /// Tier-gated one-shot read evaluated as `author`.
+    /// Tier-gated one-shot read evaluated by a trusted host as `author`.
+    ///
+    /// Ordinary client reads use [`Db::all`] and never re-run read policy over
+    /// locally received data. This explicit identity entry point is reserved
+    /// for serving/request hosts that own policy enforcement before emission.
     pub async fn all_for_identity(
         &self,
         prepared: &PreparedQuery,
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.all_for_identity_in_authorization_mode(
+            prepared,
+            opts,
+            author,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .await
+    }
+
+    async fn all_for_identity_in_authorization_mode(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<Vec<CurrentRow>, Error> {
         let tier = effective_read_tier(&opts);
         let mut node = self.node.node.borrow_mut();
         match &opts.read_view.source {
             ReadViewSourceSpec::Current => {}
             ReadViewSourceSpec::Branch { branch } if !opts.include_deleted => {
-                return node
-                    .query_rows_on_branch_for_client(
-                        crate::ids::BranchId(*branch),
-                        &prepared.shape,
-                        &prepared.binding,
-                        author,
-                    )
-                    .map_err(Into::into);
+                return match authorization_mode {
+                    QueryAuthorizationMode::TrustedServing => node
+                        .query_rows_on_branch_for_link(
+                            crate::ids::BranchId(*branch),
+                            &prepared.shape,
+                            &prepared.binding,
+                            author,
+                        )
+                        .map_err(Into::into),
+                    QueryAuthorizationMode::ClientLocal => node
+                        .query_rows_on_branch_for_client(
+                            crate::ids::BranchId(*branch),
+                            &prepared.shape,
+                            &prepared.binding,
+                            author,
+                        )
+                        .map_err(Into::into),
+                };
             }
             _ => ensure_default_read_view(&opts)?,
         }
-        if opts.include_deleted {
-            node.query_rows_for_client_including_deleted(
+        match (opts.include_deleted, authorization_mode) {
+            (true, mode) => node.query_rows_including_deleted_in_authorization_mode(
                 &prepared.shape,
                 &prepared.binding,
                 tier,
+                None,
                 author,
-            )
-        } else {
-            // A client consumes the identity-scoped rows emitted by its
-            // trusted upstream; local reads must not apply policy again.
-            node.query_rows_for_client(&prepared.shape, &prepared.binding, tier, author)
+                mode,
+            ),
+            (false, QueryAuthorizationMode::TrustedServing) => node
+                .query_rows_with_prepared_plan_for_identity(
+                    &prepared.shape,
+                    &prepared.binding,
+                    tier,
+                    None,
+                    author,
+                ),
+            (false, QueryAuthorizationMode::ClientLocal) => {
+                // A client consumes identity-scoped rows emitted by its
+                // trusted upstream; local reads must not apply policy again.
+                node.query_rows_for_client(&prepared.shape, &prepared.binding, tier, author)
+            }
         }
         .map_err(Into::into)
     }
@@ -1583,23 +1630,8 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_absent(table, row, identity)?;
         let cells = self.apply_insert_defaults(table, cells)?;
-        let allowed = self
-            .node
-            .node
-            .borrow_mut()
-            .dry_run_insert_allows(
-                MergeableCommit::new(table, row, self.next_now_ms())
-                    .made_by(identity)
-                    .permission_subject(identity)
-                    .cells(cells.clone()),
-            )
-            .map_err(Error::from)?;
-        if !allowed {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                format!("policy denied INSERT on table {table}"),
-            ));
-        }
+        // Client writes are admitted structurally and staged optimistically.
+        // A trusted serving authority evaluates policy and returns the fate.
         self.write_mergeable(
             identity,
             Some(identity),
@@ -1622,23 +1654,8 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_absent(table, row, identity)?;
         let cells = self.apply_insert_defaults(table, cells)?;
-        let allowed = self
-            .node
-            .node
-            .borrow_mut()
-            .dry_run_insert_allows(
-                MergeableCommit::new(table, row, now_ms)
-                    .made_by(identity)
-                    .permission_subject(identity)
-                    .cells(cells.clone()),
-            )
-            .map_err(Error::from)?;
-        if !allowed {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                format!("policy denied INSERT on table {table}"),
-            ));
-        }
+        // See `insert_with_id_for_identity`: policy fate belongs to the
+        // trusted serving authority, not this local client admission path.
         self.write_mergeable_at_ms(
             identity,
             Some(identity),
@@ -2115,12 +2132,6 @@ where
         now_ms: Option<u64>,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        if !self.can_delete_for_identity(table, row, identity)? {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                format!("policy denied DELETE on table {table}"),
-            ));
-        }
         let (parents, _) = self.row_layer_parents(table, row)?;
         match now_ms {
             Some(now_ms) => self.write_mergeable_at_ms(
