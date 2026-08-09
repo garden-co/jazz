@@ -5,7 +5,13 @@
 import { describe, it, expect } from "vitest";
 import { SubscriptionManager, applySubscriptionDelta } from "./subscription-manager.js";
 import type { SubscriptionDelta } from "./subscription-manager.js";
-import type { ColumnDescriptor, NativeRowDelta, WasmRow, RowDelta } from "../drivers/types.js";
+import type {
+  ColumnDescriptor,
+  NativeRowDelta,
+  WasmRow,
+  RowDelta,
+  Value,
+} from "../drivers/types.js";
 
 interface TestItem {
   id: string;
@@ -82,12 +88,25 @@ function terminalRootWithEmptyChildren(id: string, title: string): Uint8Array {
   return Uint8Array.from(bytes);
 }
 
+function nativeRootWithEmptyChildren(title: string): Uint8Array {
+  const text = new TextEncoder().encode(title);
+  const bytes: number[] = [];
+  pushU32(bytes, 4 + text.byteLength);
+  bytes.push(...text);
+  pushU32(bytes, 0);
+  return Uint8Array.from(bytes);
+}
+
 function terminalTextChild(id: string, name: string): Uint8Array {
   return Uint8Array.from([...uuidBytes(id), ...new TextEncoder().encode(name)]);
 }
 
 function nativeAddedRecord(id: string, index: number, name: string, count: number): Uint8Array {
   const data = nativeRowData(name, count);
+  return nativeAddedRawRecord(id, index, data);
+}
+
+function nativeAddedRawRecord(id: string, index: number, data: Uint8Array): Uint8Array {
   const bytes: number[] = [...uuidBytes(id)];
   pushU32(bytes, index);
   pushU32(bytes, data.byteLength);
@@ -491,6 +510,93 @@ describe("SubscriptionManager", () => {
       rootColumns,
     );
     expect(removed.all).toEqual([{ id: rootId, title: "Updated subscription", project: null }]);
+  });
+
+  it("applies descendant terminal inserts to roots retained from native row frames", () => {
+    type IncludedRoot = {
+      id: string;
+      title: string;
+      children: Array<{ id: string; name: string }>;
+    };
+    const manager = new SubscriptionManager<IncludedRoot>();
+    const rootId = "00000000-0000-4000-8000-000000000001";
+    const childId = "00000000-0000-4000-8000-000000000002";
+    const rootKey = [10, ...uuidBytes(rootId)];
+    const childKey = [10, ...uuidBytes(childId)];
+    const childColumns: ColumnDescriptor[] = [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+    ];
+    const rootColumns: ColumnDescriptor[] = [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      {
+        name: "children",
+        column_type: { type: "Array", element: { type: "Row", columns: childColumns } },
+        nullable: false,
+      },
+    ];
+    const transformIncluded = (row: WasmRow): IncludedRoot => {
+      const byName = (row as WasmRow & { valuesByColumn: Map<string, Value> }).valuesByColumn;
+      const children = byName.get("children");
+      return {
+        id: row.id,
+        title: (byName.get("title") as { type: "Text"; value: string }).value,
+        children:
+          children?.type === "Array"
+            ? children.value.map((value) => {
+                if (value.type !== "Row") throw new Error("expected child row");
+                return {
+                  id: value.value.id!,
+                  name: (value.value.values[0] as { type: "Text"; value: string }).value,
+                };
+              })
+            : [],
+      };
+    };
+
+    manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: nativeAddedRawRecord(rootId, 0, nativeRootWithEmptyChildren("root")),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 1,
+        removedCount: 0,
+        updatedCount: 0,
+      },
+      transformIncluded,
+      rootColumns,
+    );
+
+    const result = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: rootKey,
+            path: [{ Collection: "children" }],
+            edit: {
+              Insert: {
+                index: 0,
+                key: childKey,
+                value: [...terminalTextChild(childId, "child")],
+              },
+            },
+          },
+        ],
+      },
+      transformIncluded,
+      rootColumns,
+    );
+
+    expect(result.all).toEqual([
+      { id: rootId, title: "root", children: [{ id: childId, name: "child" }] },
+    ]);
   });
 
   it("clears tracked state before applying native reset frames", () => {

@@ -261,7 +261,11 @@ export class SubscriptionManager<T extends { id: string }> {
           if (change.kind === RowChangeKind.Removed) {
             this.terminalRows.delete(change.id);
           } else if (change.row) {
-            this.terminalRows.set(change.id, change.row);
+            // The plain native decoder exposes both positional values and a
+            // name map, but decodes them independently. Terminal edits mutate
+            // the positional tree, so normalize the retained terminal copy to
+            // one shared value graph before accepting descendant operations.
+            this.terminalRows.set(change.id, cloneTerminalRow(change.row, nativeColumns));
           }
         }
         const wireResult = this.handleWireDelta(decoded, transform, reset);
