@@ -32,6 +32,8 @@ Invariant digest:
 - `INV-API-16`: `Transport` implementations MUST be non-blocking; `try_recv() == None` MUST mean no inbound message is currently staged and MUST NOT be interpreted by `Db` as disconnect.
 - `INV-API-17`: Db::connectupstream MUST make every already-registered facade subscription eligible for immediate upstream announcement without requiring re-registration.
 - `INV-API-18`: `Db::subscribe` MUST announce newly registered subscriptions to all existing upstream connections so query-driven sync can request remote completion on the next tick.
+- `INV-API-31`: `Db::disconnect` MUST mark the `Db` intentionally offline, disconnect every schema client from its server transport, and leave the local runtime and store alive; `Db::reconnect` MUST clear that marker and reconnect every schema client. A schema client created while intentionally offline MUST remain offline until `reconnect`.
+- `INV-API-32`: While a `Db` is intentionally offline, a read with `propagation = LocalOnly` MUST resolve from current local materialized state without waiting for an upstream coverage frontier: a locally committed pending write MUST be returned, and a row written remotely during the offline period MUST be absent until reconnect delivery reaches the local store. `LocalOnly` selects the local snapshot; it is not a request to wait for that snapshot to become complete relative to an unavailable upstream.
 - `INV-API-19`: Upstream announcement of a subscription MUST make its query definition available before the subscription that uses it, without re-announcing the same definition for that connection.
 - `INV-API-20`: An upstream connection MUST upload each locally-authored transaction at most once.
 - `INV-API-21`: A subscriber `PeerConnection::tick` MUST serve subscriptions under the `AuthorId` passed to `Node::accept_subscriber`, not under the serving node's own identity.
@@ -687,3 +689,26 @@ These are designed but not landed:
 - 🔶 **WASM teardown trap true fix.** The current mitigation hides inert
   teardown traps; the durable fix is an explicit async shutdown and transport
   lifecycle boundary that prevents callbacks into torn-down linear memory.
+
+### Intentional disconnect and local-only reads
+
+`Db::disconnect` marks the `Db` **intentionally offline**. It disconnects every
+schema client from its server transport and leaves the local runtime and store
+alive, so local reads and writes continue to work. `Db::reconnect` clears the
+marker and reconnects every schema client using the configured server URL and
+current auth configuration. A schema client created while the `Db` is
+intentionally offline remains offline until `reconnect` (`INV-API-31`).
+
+While intentionally offline, a read with `propagation = LocalOnly` resolves from
+the current local materialized state. It does not wait for an upstream coverage
+frontier and does not inspect the server (`INV-API-32`):
+
+- a locally committed, pending write is returned immediately;
+- a row written remotely during the offline period is absent — an empty result
+  for a query matching only that row — until reconnect delivery reaches the
+  local store.
+
+`LocalOnly` chooses the local snapshot. It is **not** a request to wait until
+that snapshot becomes complete relative to an upstream that is unavailable by
+construction. Convergence is asserted separately, after `reconnect`.
+
