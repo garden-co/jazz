@@ -4920,6 +4920,17 @@ fn lowered_terminals(
         .intersection(available_fields)
         .cloned()
         .collect::<BTreeSet<_>>();
+    // Closure evidence is an authorization boundary only for policy-claim
+    // routes. Ordinary query parameters can be absent from provenance-only
+    // closure graphs; requiring those fields would either reject the program
+    // or suppress raw evidence needed for local evaluation.
+    let claim_route_fields = parameter_domain_for_request(request)
+        .map_err(single_gap_report)?
+        .claim_params
+        .keys()
+        .filter(|field| root_route_fields.contains(*field))
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let mut terminals = Vec::new();
     let closure = lower_closure_membership(
         graph.clone(),
@@ -5078,7 +5089,7 @@ fn lowered_terminals(
                         plan,
                         resolved_source,
                         resolved_sources,
-                        root_route_fields.clone(),
+                        claim_route_fields.clone(),
                     )?;
                     let graph = fact_terminal_graph(
                         fact,
@@ -5114,7 +5125,7 @@ fn lowered_terminals(
                         plan,
                         resolved_source,
                         resolved_sources,
-                        root_route_fields.clone(),
+                        claim_route_fields.clone(),
                     )?;
                     let contribution_graph = join_contribution_membership_graph(
                         closure.visible_root.clone(),
