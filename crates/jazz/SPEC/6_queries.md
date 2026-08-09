@@ -314,12 +314,13 @@ crossing without sending a renumbering delta. For example, a new eleventh child
 that sorts fifth in a limit-ten relation replaces the old ten-child parent with
 the newly ordered ten-child parent. It does not emit a child retract/add pair.
 
-Array subqueries MUST support `order_by`, `offset`, and a finite `limit` with
-the same semantics as those clauses at the root query. The bounded form is
-mandatory: for limit `L`, the rendered collection contribution is bounded by
-`R(L)`, rather than `R(group)`, and query validation/planning can keep a parent
-payload below `MAX_WIRE_FRAME_BYTES`. A finite zero limit yields an empty child
-array. Child filtering, selection, ordering, offset, and limit change only the
+Array subqueries MUST support `order_by`, `offset`, and an optional finite
+`limit` with the same semantics as those clauses at the root query. An omitted
+limit is unbounded; generic transport fragmentation carries a large atomic
+parent replacement across bounded physical frames. For a supplied limit `L`,
+the rendered collection contribution is bounded by `R(L)` rather than
+`R(group)`. A finite zero limit yields an empty child array. Child filtering,
+selection, ordering, offset, and limit change only the
 rendered child relation unless the array subquery has an explicit requirement;
 unreadable children are omitted while readable parents remain visible for an
 optional relation.
