@@ -95,9 +95,9 @@ fn schema_view_registration_is_idempotent_and_explicit() {
 #[test]
 fn empty_owner_accepts_first_typed_schema_view() {
     let owner = open_owner(JazzSchema::new([]));
-    let view = owner.register_schema_view(schema("first")).unwrap();
     let batch = OpenBatchId::new();
     owner.begin_mergeable(batch).unwrap();
+    let view = owner.register_schema_view(schema("first")).unwrap();
     view.mergeable_tx_ref(batch)
         .insert_with_id("items", RowUuid::from_bytes([3; 16]), Default::default())
         .unwrap();

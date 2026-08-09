@@ -42,7 +42,7 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz::db::{
-    Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity,
+    Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
     InitialSyncFlushCadence as CoreInitialSyncFlushCadence, LocalUpdates as CoreLocalUpdates,
     MergeableTxOps, PeerConnection as CorePeerConnection, PreparedQuery as PreparedQueryInner,
     Propagation as CorePropagation, QueryAttachment as CoreQueryAttachment,
@@ -262,8 +262,15 @@ enum NapiSubscription {
 #[napi(js_name = "Tx")]
 pub struct Tx {
     db: NapiDbInnerStorage,
+    kind: NapiTxKind,
     open_tx: Option<CoreOpenBatchId>,
     owns_lifetime: bool,
+}
+
+#[derive(Clone, Copy)]
+enum NapiTxKind {
+    Mergeable,
+    Exclusive,
 }
 
 macro_rules! with_napi_mergeable_tx {
@@ -276,6 +283,23 @@ macro_rules! with_napi_mergeable_tx {
             }
             NapiDbInnerStorage::Persistent(db) => {
                 let $tx = db.mergeable_tx_ref(open_tx);
+                $operation
+            }
+        }
+        .map_err(|error: jazz::db::Error| napi::Error::from_reason(error.to_string()))
+    }};
+}
+
+macro_rules! with_napi_exclusive_tx {
+    ($transaction:expr, |$tx:ident| $operation:expr) => {{
+        let open_tx = $transaction.open_tx()?;
+        match &$transaction.db {
+            NapiDbInnerStorage::Memory(db) => {
+                let $tx = db.exclusive_tx_ref(open_tx);
+                $operation
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let $tx = db.exclusive_tx_ref(open_tx);
                 $operation
             }
         }
@@ -455,10 +479,15 @@ impl Tx {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
         let now_ms = updated_at_ms.map(|value| value as u64);
-        with_napi_mergeable_tx!(self, |tx| match now_ms {
-            Some(now_ms) => tx.insert_with_id_at_ms(&table, row_id, cells, now_ms),
-            None => tx.insert_with_id(&table, row_id, cells),
-        })
+        match self.kind {
+            NapiTxKind::Mergeable => with_napi_mergeable_tx!(self, |tx| match now_ms {
+                Some(now_ms) => tx.insert_with_id_at_ms(&table, row_id, cells, now_ms),
+                None => tx.insert_with_id(&table, row_id, cells),
+            }),
+            NapiTxKind::Exclusive => {
+                with_napi_exclusive_tx!(self, |tx| tx.insert_with_id(&table, row_id, cells))
+            }
+        }
     }
 
     #[napi(js_name = "updateEncoded")]
@@ -472,10 +501,15 @@ impl Tx {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let patch = decode_core_cells(&patch)?;
         let now_ms = updated_at_ms.map(|value| value as u64);
-        with_napi_mergeable_tx!(self, |tx| match now_ms {
-            Some(now_ms) => tx.update_at_ms(&table, row_id, patch, now_ms),
-            None => tx.update(&table, row_id, patch),
-        })
+        match self.kind {
+            NapiTxKind::Mergeable => with_napi_mergeable_tx!(self, |tx| match now_ms {
+                Some(now_ms) => tx.update_at_ms(&table, row_id, patch, now_ms),
+                None => tx.update(&table, row_id, patch),
+            }),
+            NapiTxKind::Exclusive => {
+                with_napi_exclusive_tx!(self, |tx| tx.update(&table, row_id, patch))
+            }
+        }
     }
 
     #[napi(js_name = "upsertEncoded")]
@@ -489,10 +523,15 @@ impl Tx {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
         let now_ms = updated_at_ms.map(|value| value as u64);
-        with_napi_mergeable_tx!(self, |tx| match now_ms {
-            Some(now_ms) => tx.update_at_ms(&table, row_id, cells, now_ms),
-            None => tx.update(&table, row_id, cells),
-        })
+        match self.kind {
+            NapiTxKind::Mergeable => with_napi_mergeable_tx!(self, |tx| match now_ms {
+                Some(now_ms) => tx.update_at_ms(&table, row_id, cells, now_ms),
+                None => tx.update(&table, row_id, cells),
+            }),
+            NapiTxKind::Exclusive => {
+                with_napi_exclusive_tx!(self, |tx| tx.update(&table, row_id, cells))
+            }
+        }
     }
 
     #[napi(js_name = "delete")]
@@ -503,11 +542,16 @@ impl Tx {
         updated_at_ms: Option<f64>,
     ) -> napi::Result<()> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
-        match updated_at_ms.map(|value| value as u64) {
-            Some(now_ms) => {
-                with_napi_mergeable_tx!(self, |tx| tx.delete_at_ms(&table, row_id, now_ms))
+        match self.kind {
+            NapiTxKind::Mergeable => match updated_at_ms.map(|value| value as u64) {
+                Some(now_ms) => {
+                    with_napi_mergeable_tx!(self, |tx| tx.delete_at_ms(&table, row_id, now_ms))
+                }
+                None => with_napi_mergeable_tx!(self, |tx| tx.delete(&table, row_id)),
+            },
+            NapiTxKind::Exclusive => {
+                with_napi_exclusive_tx!(self, |tx| tx.delete(&table, row_id))
             }
-            None => with_napi_mergeable_tx!(self, |tx| tx.delete(&table, row_id)),
         }
     }
 
@@ -522,10 +566,15 @@ impl Tx {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
         let now_ms = updated_at_ms.map(|value| value as u64);
-        with_napi_mergeable_tx!(self, |tx| match now_ms {
-            Some(now_ms) => tx.restore_at_ms(&table, row_id, cells, now_ms),
-            None => tx.restore(&table, row_id, cells),
-        })
+        match self.kind {
+            NapiTxKind::Mergeable => with_napi_mergeable_tx!(self, |tx| match now_ms {
+                Some(now_ms) => tx.restore_at_ms(&table, row_id, cells, now_ms),
+                None => tx.restore(&table, row_id, cells),
+            }),
+            NapiTxKind::Exclusive => {
+                with_napi_exclusive_tx!(self, |tx| tx.restore(&table, row_id, cells))
+            }
+        }
     }
 
     #[napi]
@@ -668,6 +717,28 @@ impl NapiDb {
                 NapiDbInnerStorage::Memory(db) => NapiDbInnerStorage::Memory(Rc::clone(db)),
                 NapiDbInnerStorage::Persistent(db) => NapiDbInnerStorage::Persistent(Rc::clone(db)),
             },
+            kind: NapiTxKind::Mergeable,
+            open_tx: Some(open_batch_id),
+            owns_lifetime: false,
+        })
+    }
+
+    /// Attach a schema view to an existing owner-wide exclusive batch.
+    #[napi(js_name = "attachExclusiveTx")]
+    pub fn attach_exclusive_tx(&self, open_batch_id: String) -> napi::Result<Tx> {
+        let open_batch_id = open_batch_id
+            .parse::<CoreOpenBatchId>()
+            .map_err(napi::Error::from_reason)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        Ok(Tx {
+            db: match db {
+                NapiDbInnerStorage::Memory(db) => NapiDbInnerStorage::Memory(Rc::clone(db)),
+                NapiDbInnerStorage::Persistent(db) => NapiDbInnerStorage::Persistent(Rc::clone(db)),
+            },
+            kind: NapiTxKind::Exclusive,
             open_tx: Some(open_batch_id),
             owns_lifetime: false,
         })
@@ -721,7 +792,7 @@ impl NapiDb {
         .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
-    /// Commit an owner-wide mergeable batch by id.
+    /// Commit an owner-wide batch by id and optional kind.
     #[napi(js_name = "commitTransaction")]
     pub fn commit_transaction(
         &self,
@@ -1613,6 +1684,7 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => Ok(Tx {
                 db: NapiDbInnerStorage::Memory(Rc::clone(db)),
+                kind: NapiTxKind::Mergeable,
                 open_tx: Some({
                     db.begin_mergeable(open_batch_id)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
@@ -1622,6 +1694,7 @@ impl NapiDb {
             }),
             NapiDbInnerStorage::Persistent(db) => Ok(Tx {
                 db: NapiDbInnerStorage::Persistent(Rc::clone(db)),
+                kind: NapiTxKind::Mergeable,
                 open_tx: Some({
                     db.begin_mergeable(open_batch_id)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
@@ -1649,6 +1722,7 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => Ok(Tx {
                 db: NapiDbInnerStorage::Memory(Rc::clone(db)),
+                kind: NapiTxKind::Mergeable,
                 open_tx: Some({
                     db.begin_mergeable_for_identity(open_batch_id, author)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
@@ -1658,6 +1732,7 @@ impl NapiDb {
             }),
             NapiDbInnerStorage::Persistent(db) => Ok(Tx {
                 db: NapiDbInnerStorage::Persistent(Rc::clone(db)),
+                kind: NapiTxKind::Mergeable,
                 open_tx: Some({
                     db.begin_mergeable_for_identity(open_batch_id, author)
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
@@ -2643,10 +2718,10 @@ mod tests {
     use std::collections::BTreeMap;
     use std::rc::Rc;
 
-    use crate::{NapiDbInnerStorage, Tx, core_block_on, core_read_opts_from_json};
+    use crate::{NapiDbInnerStorage, NapiTxKind, Tx, core_block_on, core_read_opts_from_json};
     use jazz::db::{
-        Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, MergeableTxOps,
-        Propagation as CorePropagation,
+        Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
+        MergeableTxOps, Propagation as CorePropagation,
     };
     use jazz::groove::records::Value as CoreValue;
     use jazz::groove::schema::ColumnType as GrooveColumnType;
@@ -2745,6 +2820,7 @@ mod tests {
         owner.begin_mergeable(batch).unwrap();
         drop(Tx {
             db: NapiDbInnerStorage::Memory(Rc::clone(&view)),
+            kind: NapiTxKind::Mergeable,
             open_tx: Some(batch),
             owns_lifetime: false,
         });
@@ -2756,5 +2832,25 @@ mod tests {
             )
             .unwrap();
         owner.commit_mergeable_handle(batch).unwrap();
+
+        let exclusive = CoreOpenBatchId::new();
+        owner.begin_exclusive(exclusive).unwrap();
+        drop(Tx {
+            db: NapiDbInnerStorage::Memory(Rc::clone(&view)),
+            kind: NapiTxKind::Exclusive,
+            open_tx: Some(exclusive),
+            owns_lifetime: false,
+        });
+        view.exclusive_tx_ref(exclusive)
+            .insert_with_id(
+                "items",
+                CoreRowUuid::from_bytes([2; 16]),
+                BTreeMap::from([(
+                    "label".to_owned(),
+                    CoreValue::String("exclusive-kept".to_owned()),
+                )]),
+            )
+            .unwrap();
+        owner.commit_exclusive_handle(exclusive).unwrap();
     }
 }
