@@ -860,7 +860,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       {
         ...options,
         localUpdates: "deferred",
-        transactionId: openBatchId,
+        openBatchId,
       },
       session,
     );

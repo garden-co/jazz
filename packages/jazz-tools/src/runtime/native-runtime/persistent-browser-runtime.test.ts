@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { NativeRowDelta, WasmSchema } from "../../drivers/types.js";
 import { createOpenBatchId } from "../client.js";
+import type { InsertResult, MutationResult } from "../client.js";
 import type { PersistentBrowserSubscriptionMessage } from "./persistent-browser-protocol.js";
 import {
   PersistentBrowserOpfsRuntime,
@@ -12,6 +13,13 @@ const schema = {
     columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
   },
 } satisfies WasmSchema;
+
+function committed<T extends InsertResult | MutationResult>(
+  result: T,
+): Extract<T, { kind: "committed" }> {
+  if (result.kind !== "committed") throw new Error("expected committed write");
+  return result as Extract<T, { kind: "committed" }>;
+}
 
 class FakeWorker {
   static instances: FakeWorker[] = [];
@@ -451,7 +459,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
       batchId: "native-runtime-transaction",
     });
 
-    const waitPromise = runtime.waitForTransaction(await insert.batchId, "local");
+    const waitPromise = runtime.waitForTransaction(await committed(insert).batchId, "local");
 
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
@@ -621,7 +629,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
       batchId: "native-runtime-transaction",
     });
 
-    const waitPromise = runtime.waitForTransaction(await insert.batchId, "edge");
+    const waitPromise = runtime.waitForTransaction(await committed(insert).batchId, "edge");
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
     });
@@ -834,7 +842,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
       batchId: "native-runtime-transaction",
     });
 
-    const waitPromise = runtime.waitForTransaction(await insert.batchId, "edge");
+    const waitPromise = runtime.waitForTransaction(await committed(insert).batchId, "edge");
     await vi.waitFor(() => {
       expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
     });
