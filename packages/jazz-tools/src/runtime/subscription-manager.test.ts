@@ -195,6 +195,161 @@ describe("SubscriptionManager", () => {
     expect(result.all).toEqual([{ id, name: "after", count: 2 }]);
   });
 
+  it("rejects mismatched terminal identities without mutating subscription state", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const id = "00000000-0000-4000-8000-000000000001";
+    const other = "00000000-0000-4000-8000-000000000002";
+    const key = [10, ...uuidBytes(id)];
+
+    manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: nativeAddedRecord(id, 0, "before", 1),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 1,
+        removedCount: 0,
+        updatedCount: 0,
+      },
+      transform,
+      nativeColumns,
+    );
+
+    expect(() =>
+      manager.handleDelta(
+        {
+          __jazzNativeRowDelta: true,
+          added: new Uint8Array(),
+          removed: new Uint8Array(),
+          updated: new Uint8Array(),
+          addedCount: 0,
+          removedCount: 0,
+          updatedCount: 0,
+          terminalOperations: [
+            {
+              root_key: key,
+              path: [],
+              edit: { Update: { key, value: [...terminalRowData(other, "corrupt", 2)] } },
+            },
+          ],
+        },
+        transform,
+        nativeColumns,
+      ),
+    ).toThrow(/does not match addressed key/);
+    expect(manager.all()).toEqual([{ id, name: "before", count: 1 }]);
+  });
+
+  it("publishes explicit Added and Removed changes for terminal roots", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const id = "00000000-0000-4000-8000-000000000001";
+    const key = [10, ...uuidBytes(id)];
+    const emptyNative = {
+      __jazzNativeRowDelta: true as const,
+      added: new Uint8Array(),
+      removed: new Uint8Array(),
+      updated: new Uint8Array(),
+      addedCount: 0,
+      removedCount: 0,
+      updatedCount: 0,
+    };
+    const added = manager.handleDelta(
+      {
+        ...emptyNative,
+        terminalOperations: [
+          {
+            root_key: key,
+            path: [],
+            edit: { Insert: { index: 0, key, value: [...terminalRowData(id, "root", 1)] } },
+          },
+        ],
+      },
+      transform,
+      nativeColumns,
+    );
+    expect(added.delta).toEqual([{ kind: 0, id, index: 0, item: { id, name: "root", count: 1 } }]);
+
+    const removed = manager.handleDelta(
+      {
+        ...emptyNative,
+        terminalOperations: [{ root_key: key, path: [], edit: { Remove: { key } } }],
+      },
+      transform,
+      nativeColumns,
+    );
+    expect(removed).toEqual({ delta: [{ kind: 1, id, index: 0 }], all: [] });
+  });
+
+  it("rejects mismatched root addressing and unresolved child paths", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const id = "00000000-0000-4000-8000-000000000001";
+    const other = "00000000-0000-4000-8000-000000000002";
+    const key = [10, ...uuidBytes(id)];
+    const otherKey = [10, ...uuidBytes(other)];
+    const emptyNative = {
+      __jazzNativeRowDelta: true as const,
+      added: new Uint8Array(),
+      removed: new Uint8Array(),
+      updated: new Uint8Array(),
+      addedCount: 0,
+      removedCount: 0,
+      updatedCount: 0,
+    };
+
+    expect(() =>
+      manager.handleDelta(
+        {
+          ...emptyNative,
+          terminalOperations: [
+            {
+              root_key: key,
+              path: [],
+              edit: {
+                Insert: { index: 0, key: otherKey, value: [...terminalRowData(id, "root", 1)] },
+              },
+            },
+          ],
+        },
+        transform,
+        nativeColumns,
+      ),
+    ).toThrow(/root edit key/);
+    expect(manager.all()).toEqual([]);
+
+    manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: nativeAddedRecord(id, 0, "before", 1),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 1,
+        removedCount: 0,
+        updatedCount: 0,
+      },
+      transform,
+      nativeColumns,
+    );
+    expect(() =>
+      manager.handleDelta(
+        {
+          ...emptyNative,
+          terminalOperations: [
+            {
+              root_key: key,
+              path: [{ Collection: "missing" }],
+              edit: {
+                Insert: { index: 0, key: otherKey, value: [...terminalRowData(other, "child", 2)] },
+              },
+            },
+          ],
+        },
+        transform,
+        nativeColumns,
+      ),
+    ).toThrow(/unresolved path/);
+    expect(manager.all()).toEqual([{ id, name: "before", count: 1 }]);
+  });
+
   it("reduces keyed root and hidden child terminal inserts before publishing", () => {
     type IncludedRoot = { id: string; title: string; project: { id: string; name: string } | null };
     const manager = new SubscriptionManager<IncludedRoot>();
@@ -241,23 +396,23 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: rootKey,
-            path: [],
-            edit: {
-              Insert: {
-                index: 0,
-                key: rootKey,
-                value: [...terminalRootWithEmptyChildren(rootId, "Watch subscription")],
-              },
-            },
-          },
-          {
-            root_key: rootKey,
             path: [{ Collection: "__jazz_include_project" }],
             edit: {
               Insert: {
                 index: 0,
                 key: childKey,
                 value: [...terminalTextChild(childId, "Announcements")],
+              },
+            },
+          },
+          {
+            root_key: rootKey,
+            path: [],
+            edit: {
+              Insert: {
+                index: 0,
+                key: rootKey,
+                value: [...terminalRootWithEmptyChildren(rootId, "Watch subscription")],
               },
             },
           },
@@ -274,6 +429,36 @@ describe("SubscriptionManager", () => {
         project: { id: childId, name: "Announcements" },
       },
     ]);
+    expect(result.delta).toEqual([{ kind: 0, id: rootId, index: 0, item: result.all![0] }]);
+
+    expect(() =>
+      manager.handleDelta(
+        {
+          __jazzNativeRowDelta: true,
+          added: new Uint8Array(),
+          removed: new Uint8Array(),
+          updated: new Uint8Array(),
+          addedCount: 0,
+          removedCount: 0,
+          updatedCount: 0,
+          terminalOperations: [
+            {
+              root_key: rootKey,
+              path: [{ Collection: "__jazz_include_project" }],
+              edit: {
+                Update: {
+                  key: childKey,
+                  value: [...terminalTextChild(rootId, "Cross-root corruption")],
+                },
+              },
+            },
+          ],
+        },
+        transformIncluded,
+        rootColumns,
+      ),
+    ).toThrow(/does not match addressed key/);
+    expect(manager.all()).toEqual(result.all);
   });
 
   it("clears tracked state before applying native reset frames", () => {

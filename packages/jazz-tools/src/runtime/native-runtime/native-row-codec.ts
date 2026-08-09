@@ -275,7 +275,14 @@ export function decodeNativeTerminalRow(
   raw: Uint8Array,
 ): WasmRow {
   const terminalColumns = [terminalRowKeyColumn, ...columns];
-  const values = decodeNativeRowValues(terminalColumns, raw).slice(1);
+  const decoded = decodeNativeRowValues(terminalColumns, raw);
+  const embeddedKey = decoded[0];
+  if (embeddedKey?.type !== "Uuid" || embeddedKey.value !== id) {
+    throw new Error(
+      `terminal record key ${embeddedKey?.type === "Uuid" ? embeddedKey.value : "<non-uuid>"} does not match addressed key ${id}`,
+    );
+  }
+  const values = decoded.slice(1);
   const valuesByColumn = new Map(columns.map((column, index) => [column.name, values[index]!]));
   const row = { id, values };
   Object.defineProperty(row, "valuesByColumn", {

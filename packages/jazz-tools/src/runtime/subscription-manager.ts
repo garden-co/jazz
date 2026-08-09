@@ -47,6 +47,13 @@ export type SubscriptionDelta<T> =
       reset: true;
     };
 
+type SubscriptionManagerSnapshot<T> = {
+  currentResults: Map<string, T>;
+  terminalRows: Map<string, WasmRow>;
+  orderedIds: string[];
+  orderedIdIndex: Map<string, number>;
+};
+
 /**
  * Canonical reducer for subscription streams. Consumers own the materialized
  * result set; the stream only guarantees that reducing deltas in order yields
@@ -244,24 +251,56 @@ export class SubscriptionManager<T extends { id: string }> {
       if (!nativeColumns) {
         throw new Error("Native subscription delta requires output columns for decoding");
       }
-      if (reset) {
-        this.clear();
-      }
-      if (delta.terminalOperations && delta.terminalOperations.length > 0 && !reset) {
-        return this.handleTerminalOperations(delta.terminalOperations, transform, nativeColumns);
-      }
-      const decoded = decodeNativeDelta(delta, nativeColumns);
-      for (const change of decoded) {
-        if (change.kind === RowChangeKind.Removed) {
-          this.terminalRows.delete(change.id);
-        } else if (change.row) {
-          this.terminalRows.set(change.id, change.row);
+      const snapshot = this.snapshot(nativeColumns);
+      try {
+        if (reset) {
+          this.clear();
         }
+        const decoded = decodeNativeDelta(delta, nativeColumns);
+        for (const change of decoded) {
+          if (change.kind === RowChangeKind.Removed) {
+            this.terminalRows.delete(change.id);
+          } else if (change.row) {
+            this.terminalRows.set(change.id, change.row);
+          }
+        }
+        const wireResult = this.handleWireDelta(decoded, transform, reset);
+        if (delta.terminalOperations && delta.terminalOperations.length > 0) {
+          const terminalResult = this.handleTerminalOperations(
+            delta.terminalOperations,
+            transform,
+            nativeColumns,
+          );
+          return reset
+            ? { delta: terminalResult.delta, all: terminalResult.all ?? this.all(), reset: true }
+            : terminalResult;
+        }
+        return wireResult;
+      } catch (error) {
+        this.restore(snapshot);
+        throw error;
       }
-      return this.handleWireDelta(decoded, transform, reset);
     }
 
     return this.handleWireDelta(delta, transform);
+  }
+
+  private snapshot(columns: readonly ColumnDescriptor[]): SubscriptionManagerSnapshot<T> {
+    return {
+      currentResults: new Map(this.currentResults),
+      terminalRows: new Map(
+        Array.from(this.terminalRows, ([id, row]) => [id, cloneTerminalRow(row, columns)]),
+      ),
+      orderedIds: [...this.orderedIds],
+      orderedIdIndex: new Map(this.orderedIdIndex),
+    };
+  }
+
+  private restore(snapshot: SubscriptionManagerSnapshot<T>): void {
+    this.currentResults = snapshot.currentResults;
+    this.terminalRows = snapshot.terminalRows;
+    this.orderedIds = snapshot.orderedIds;
+    this.orderedIdIndex = snapshot.orderedIdIndex;
   }
 
   private handleTerminalOperations(
@@ -269,39 +308,55 @@ export class SubscriptionManager<T extends { id: string }> {
     transform: (row: WasmRow) => T,
     rootColumns: readonly ColumnDescriptor[],
   ): SubscriptionDelta<T> {
-    const changedRoots = new Set<string>();
-    for (const operation of operations) {
+    const beforeIndices = new Map(this.orderedIdIndex);
+    const affectedRoots = new Set<string>();
+    const rootOperations = operations.filter((operation) => operation.path.length === 0);
+    const descendantOperations = operations.filter((operation) => operation.path.length > 0);
+
+    // Root records establish the addressable tree first. Groove may serialize
+    // child edits before their root within one logical batch.
+    for (const operation of rootOperations) {
       const rootId = terminalKeyId(operation.root_key);
       const edit = operation.edit;
-      if (operation.path.length === 0) {
-        if ("Insert" in edit) {
-          this.terminalRows.set(
-            rootId,
-            decodeNativeTerminalRow(rootId, rootColumns, Uint8Array.from(edit.Insert.value)),
-          );
-          this.removeId(rootId);
-          this.insertIdAt(rootId, edit.Insert.index);
-        } else if ("Update" in edit) {
-          this.terminalRows.set(
-            rootId,
-            decodeNativeTerminalRow(rootId, rootColumns, Uint8Array.from(edit.Update.value)),
-          );
-        } else if ("Remove" in edit) {
-          this.terminalRows.delete(rootId);
-          this.currentResults.delete(rootId);
-          this.removeId(rootId);
-        } else if ("Move" in edit) {
-          this.removeId(rootId);
-          this.insertIdAt(rootId, edit.Move.index);
+      assertTerminalRootEditKey(operation.root_key, edit);
+      if ("Insert" in edit) {
+        this.terminalRows.set(
+          rootId,
+          decodeNativeTerminalRow(rootId, rootColumns, Uint8Array.from(edit.Insert.value)),
+        );
+        this.removeId(rootId);
+        this.insertIdAt(rootId, edit.Insert.index);
+      } else if ("Update" in edit) {
+        if (!this.terminalRows.has(rootId)) {
+          throw new Error(`terminal root update addressed missing root ${rootId}`);
         }
-        changedRoots.add(rootId);
-        continue;
+        this.terminalRows.set(
+          rootId,
+          decodeNativeTerminalRow(rootId, rootColumns, Uint8Array.from(edit.Update.value)),
+        );
+      } else if ("Remove" in edit) {
+        if (!this.terminalRows.delete(rootId)) {
+          throw new Error(`terminal root removal addressed missing root ${rootId}`);
+        }
+        this.currentResults.delete(rootId);
+        this.removeId(rootId);
+      } else if ("Move" in edit) {
+        if (!this.terminalRows.has(rootId)) {
+          throw new Error(`terminal root move addressed missing root ${rootId}`);
+        }
+        this.removeId(rootId);
+        this.insertIdAt(rootId, edit.Move.index);
       }
+      affectedRoots.add(rootId);
+    }
 
+    for (const operation of descendantOperations) {
+      const rootId = terminalKeyId(operation.root_key);
+      const edit = operation.edit;
       const root = this.terminalRows.get(rootId);
-      if (!root) continue;
+      if (!root) throw new Error(`terminal child edit addressed missing root ${rootId}`);
       const target = terminalCollection(root, rootColumns, operation.path);
-      if (!target) continue;
+      if (!target) throw new Error(`terminal child edit addressed an unresolved path on ${rootId}`);
       const { values, columns } = target;
       if ("Insert" in edit) {
         const id = terminalKeyId(edit.Insert.key);
@@ -312,30 +367,39 @@ export class SubscriptionManager<T extends { id: string }> {
       } else if ("Update" in edit) {
         const id = terminalKeyId(edit.Update.key);
         const index = terminalValueIndex(values, id);
-        if (index !== -1) {
-          const row = decodeNativeTerminalRow(id, columns, Uint8Array.from(edit.Update.value));
-          values[index] = { type: "Row", value: { id, values: row.values } };
-        }
+        if (index === -1) throw new Error(`terminal child update addressed missing key ${id}`);
+        const row = decodeNativeTerminalRow(id, columns, Uint8Array.from(edit.Update.value));
+        values[index] = { type: "Row", value: { id, values: row.values } };
       } else if ("Remove" in edit) {
-        removeTerminalValue(values, terminalKeyId(edit.Remove.key));
+        const id = terminalKeyId(edit.Remove.key);
+        if (!removeTerminalValue(values, id)) {
+          throw new Error(`terminal child removal addressed missing key ${id}`);
+        }
       } else if ("Move" in edit) {
         const id = terminalKeyId(edit.Move.key);
         const index = terminalValueIndex(values, id);
-        if (index !== -1) {
-          const [value] = values.splice(index, 1);
-          values.splice(Math.max(0, Math.min(edit.Move.index, values.length)), 0, value);
-        }
+        if (index === -1) throw new Error(`terminal child move addressed missing key ${id}`);
+        const [value] = values.splice(index, 1);
+        values.splice(Math.max(0, Math.min(edit.Move.index, values.length)), 0, value!);
       }
-      changedRoots.add(rootId);
+      affectedRoots.add(rootId);
     }
 
-    const delta = Array.from(changedRoots).flatMap<RowDelta<T>>((id) => {
+    const delta = Array.from(affectedRoots).flatMap<RowDelta<T>>((id) => {
+      const beforeIndex = beforeIndices.get(id);
       const index = this.orderedIdIndex.get(id);
       const row = this.terminalRows.get(id);
+      if (beforeIndex !== undefined && (index === undefined || row === undefined)) {
+        return [{ kind: RowChangeKind.Removed, id, index: beforeIndex }];
+      }
       if (index === undefined || row === undefined) return [];
       const item = transform(row);
       this.currentResults.set(id, item);
-      return [{ kind: RowChangeKind.Updated, id, index, item }];
+      return [
+        beforeIndex === undefined
+          ? { kind: RowChangeKind.Added, id, index, item }
+          : { kind: RowChangeKind.Updated, id, index, item },
+      ];
     });
     return { delta, all: this.all() } as SubscriptionDelta<T>;
   }
@@ -521,13 +585,41 @@ function terminalKeyId(encoded: readonly number[]): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+function assertTerminalRootEditKey(
+  rootKey: readonly number[],
+  edit: NativeTerminalOperation["edit"],
+): void {
+  const editKey =
+    "Insert" in edit
+      ? edit.Insert.key
+      : "Update" in edit
+        ? edit.Update.key
+        : "Remove" in edit
+          ? edit.Remove.key
+          : edit.Move.key;
+  if (rootKey.length !== editKey.length || rootKey.some((byte, index) => byte !== editKey[index])) {
+    throw new Error("terminal root edit key does not match its addressed root key");
+  }
+}
+
 function terminalValueIndex(values: Value[], id: string): number {
   return values.findIndex((value) => value.type === "Row" && value.value.id === id);
 }
 
-function removeTerminalValue(values: Value[], id: string): void {
+function cloneTerminalRow(row: WasmRow, columns: readonly ColumnDescriptor[]): WasmRow {
+  const values = structuredClone(row.values) as Value[];
+  const clone = { id: row.id, values };
+  Object.defineProperty(clone, "valuesByColumn", {
+    value: new Map(columns.map((column, index) => [column.name, values[index]!])),
+  });
+  return clone;
+}
+
+function removeTerminalValue(values: Value[], id: string): boolean {
   const index = terminalValueIndex(values, id);
-  if (index !== -1) values.splice(index, 1);
+  if (index === -1) return false;
+  values.splice(index, 1);
+  return true;
 }
 
 function terminalCollection(
