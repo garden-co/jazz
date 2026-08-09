@@ -59,6 +59,18 @@ function allTodos() {
 }
 
 describe("Db transactions", () => {
+  it("anchors an exclusive read snapshot at the public begin call", async () => {
+    const { value: beforeBegin } = db.insert(app.todos, {
+      title: "visible at begin",
+      done: false,
+    });
+    const tx = db.beginExclusiveTransaction();
+    db.insert(app.todos, { title: "committed after begin", done: false });
+
+    await expect(tx.all(app.todos.where({}), { tier: "local" })).resolves.toEqual([beforeBegin]);
+    await tx.rollback();
+  });
+
   it("rolls back an exclusive callback transaction when commit is called inside the callback", async () => {
     await expect(
       db.exclusiveTransaction(async (tx) => {
@@ -275,12 +287,9 @@ describe("Db transactions", () => {
     }
   });
 
-  it("throws when committing a db transaction before any actions", () => {
+  it("commits an empty exclusive batch opened at begin", async () => {
     const tx = db.beginExclusiveTransaction();
-
-    expect(() => tx.commit()).toThrow(
-      "DbTransaction.commit() requires at least one table operation first",
-    );
+    await expect(tx.commit()).resolves.toBeDefined();
   });
 
   it("rejects exclusive transaction operations after commit", async () => {
@@ -319,22 +328,21 @@ describe("Db transactions", () => {
     );
   });
 
-  it("rejects db exclusive transaction writes against a different client/schema", () => {
+  it("stages exclusive writes from multiple schema views in one batch", async () => {
     const tx = db.beginExclusiveTransaction();
     tx.insert(app.todos, { title: "Primary client", done: false });
-
-    expect(() =>
-      tx.insert(otherApp.todos, { title: "Wrong client", done: false, note: "nope" }),
-    ).toThrow(/cannot be used with table "todos" from a different schema\/client/);
+    tx.insert(otherApp.todos, { title: "Second schema", done: false, note: "kept" });
+    await tx.commit();
+    await expect(allTodos()).resolves.toHaveLength(2);
   });
 });
 
 describe("Db mergeable transactions", () => {
-  it("throws when committing a mergeable transaction before any actions", () => {
+  it("rejects committing an empty mergeable batch", () => {
     const tx = db.beginTransaction();
 
     expect(() => tx.commit()).toThrow(
-      "DbTransaction.commit() requires at least one table operation first",
+      "empty mergeable batch has no committed unit; roll it back instead",
     );
   });
 
@@ -406,13 +414,12 @@ describe("Db mergeable transactions", () => {
     }
   });
 
-  it("rejects db mergeable transaction writes against a different client/schema", () => {
+  it("stages mergeable writes from multiple schema views in one batch", async () => {
     const tx = db.beginTransaction();
     tx.insert(app.todos, { title: "Primary client", done: false });
-
-    expect(() =>
-      tx.insert(otherApp.todos, { title: "Wrong client", done: false, note: "nope" }),
-    ).toThrow(/cannot be used with table "todos" from a different schema\/client/);
+    tx.insert(otherApp.todos, { title: "Second schema", done: false, note: "kept" });
+    await tx.commit();
+    await expect(allTodos()).resolves.toHaveLength(2);
   });
 
   it("keeps write-policy dry-runs independent from uncommitted transaction rows", async () => {

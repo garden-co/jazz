@@ -17,6 +17,8 @@ type WriteMessage = Extract<
 >;
 
 let runtime: NativeRuntimeAdapter | null = null;
+const runtimeViews = new Map<number, NativeRuntimeAdapter>();
+let nextRuntimeViewId = 1;
 let runtimeNamespace: string | null = null;
 
 const workerScope = self as unknown as {
@@ -63,6 +65,13 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
         postResult(message.id, undefined);
         return;
       }
+      case "registerSchema": {
+        const [schema] = message.args;
+        const viewId = nextRuntimeViewId++;
+        runtimeViews.set(viewId, getRuntime().registerSchemaView(schema));
+        postResult(message.id, viewId);
+        return;
+      }
       case "insert":
       case "restore":
       case "update":
@@ -85,8 +94,8 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
         return;
       }
       case "beginTransaction": {
-        const [kind, id] = message.args;
-        const result = getRuntime().beginTransaction(kind, id);
+        const [kind, id, sessionJson] = message.args;
+        const result = getRuntime().beginTransaction(kind, id, sessionJson);
         postResult(message.id, result);
         return;
       }
@@ -103,7 +112,7 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
         return;
       }
       case "query": {
-        const result = await getRuntime().query(...message.args);
+        const result = await getRuntime(message.viewId).query(...message.args);
         setNamedRowValuesEnumerable(result, true);
         try {
           postResult(message.id, result);
@@ -114,8 +123,9 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
       }
       case "createExecutedSubscription": {
         const [ownerHandle, ...subscriptionArgs] = message.args;
-        const result = getRuntime().createSubscription(...subscriptionArgs);
-        getRuntime().executeSubscription(result, (delta: unknown) => {
+        const target = getRuntime(message.viewId);
+        const result = target.createSubscription(...subscriptionArgs);
+        target.executeSubscription(result, (delta: unknown) => {
           if (delta instanceof Error) {
             workerScope.postMessage({
               subscription: ownerHandle,
@@ -135,7 +145,7 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
       }
       case "unsubscribe": {
         const [handle] = message.args;
-        getRuntime().unsubscribe(handle);
+        getRuntime(message.viewId).unsubscribe(handle);
         postResult(message.id, undefined);
         return;
       }
@@ -171,7 +181,7 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
 }
 
 function dispatchWrite(message: WriteMessage): MutationResult {
-  const runtime = getRuntime();
+  const runtime = getRuntime(message.viewId);
   let result: MutationResult;
   switch (message.method) {
     case "insert": {
@@ -214,6 +224,8 @@ async function openRuntime(message: OpenMessage): Promise<void> {
   );
 
   runtime = NativeRuntimeAdapter.fromDb(db as never, schema as never, node, author, 1, true);
+  runtimeViews.clear();
+  nextRuntimeViewId = 1;
   runtime.onAuthFailure((reason: string) => {
     workerScope.postMessage({ event: "authFailure", reason });
   });
@@ -232,14 +244,18 @@ async function closeForStorageClear(): Promise<string> {
 async function closeRuntime(): Promise<void> {
   await runtime?.close?.();
   runtime = null;
+  runtimeViews.clear();
   runtimeNamespace = null;
 }
 
-function getRuntime(): NativeRuntimeAdapter {
+function getRuntime(viewId?: number): NativeRuntimeAdapter {
   if (!runtime) {
     throw new Error("Persistent browser native runtime is not open");
   }
-  return runtime;
+  if (viewId === undefined) return runtime;
+  const view = runtimeViews.get(viewId);
+  if (!view) throw new Error(`Persistent browser runtime view ${viewId} is not registered`);
+  return view;
 }
 
 function postResult(id: number, result: unknown): void {
