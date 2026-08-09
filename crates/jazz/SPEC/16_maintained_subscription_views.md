@@ -251,6 +251,33 @@ with semantic full-recompute repairs.
 
 Implementation status for `array_subqueries`:
 
+### Structured terminal patch contract
+
+A maintained structured terminal does not publish a freshly encoded nested
+root for every descendant change. Its incremental output is a typed structural
+patch addressed by the public root `ResultKey` and an alternating path of
+collection-field names and descendant `ResultKey`s. The operation vocabulary
+is deliberately about terminal values, not relations:
+
+- insert, update, and remove a root or descendant value;
+- move an existing value to an explicit position in its ordered collection;
+- replace a window by the equivalent ordered insert/remove/move operations;
+- reset only for initial hydration, reconnect/resubscription, or an explicitly
+  advertised loss of incremental continuity.
+
+Groove owns the selected ordered keys and scalar payload for every collection
+slot. It emits the smallest affected path operations without re-encoding an
+unmodified ancestor. One-shot reads and initial hydration still render complete
+terminal rows from that state. The transport carries this generic terminal
+operation vocabulary unchanged; a client applies it to its hydrated terminal
+tree and performs no joins, relation-edge interpretation, or query assembly.
+
+This split is required by `INV-INC-1`: replacing a parent containing 20,000
+children after one child insert is observably correct but still performs work
+proportional to accumulated state. Root-addressing alone is insufficient unless
+the changed descendant path is preserved through Groove evaluation and the
+subscription carrier.
+
 - Subscription opening: direct `array_subqueries` are accepted at the `Db` facade
   and sync registration surfaces, covered by
   `array_subquery_live_subscription_tracks_child_edges` and
