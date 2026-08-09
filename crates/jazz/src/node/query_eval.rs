@@ -9472,6 +9472,8 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
     ) -> Result<RelationSnapshot, Error> {
+        #[cfg(test)]
+        record_subscription_snapshot_for_link_call();
         if shape.query().array_subqueries.is_empty() {
             let rows = self.query_rows_for_client(shape, binding, tier, identity)?;
             return Ok(RelationSnapshot {
