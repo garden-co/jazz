@@ -118,6 +118,256 @@ describe("PersistentBrowserOpfsRuntime", () => {
     FakeWorker.instances = [];
   });
 
+  it("does not require connect before server-tier work in a local-only runtime", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-local-only-ready-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    const wait = runtime.waitForTransaction("local-only-transaction", "edge");
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
+    });
+    const waitMessage = worker.messages.find((message) => message.method === "waitForTransaction");
+    worker.respond(waitMessage!.id, undefined);
+
+    await expect(wait).resolves.toBeUndefined();
+    await runtime.close();
+  });
+
+  it("handles rejected connection gates that have no server-tier waiters", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-unused-gate-rejection-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app/ws", "{}");
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "connect")).toBe(true);
+    });
+    worker.reject(
+      worker.messages.find((message) => message.method === "connect")!.id,
+      "Persistent browser native runtime connect failed",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    runtime.updateAuth("{}");
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "updateAuth")).toBe(true);
+    });
+    worker.reject(
+      worker.messages.find((message) => message.method === "updateAuth")!.id,
+      "Persistent browser native runtime auth update failed",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await runtime.close();
+  });
+
+  it("surfaces an unexpected connection failure exactly once through the RPC", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-connect-failure-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app/ws", "{}");
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "connect")).toBe(true);
+    });
+
+    const surfaced: Array<() => void> = [];
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+      callback: () => void,
+    ) => {
+      surfaced.push(callback);
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout);
+
+    worker.reject(
+      worker.messages.find((message) => message.method === "connect")!.id,
+      "arbitrary websocket failure",
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(surfaced).toHaveLength(1);
+    expect(() => surfaced[0]!()).toThrow("arbitrary websocket failure");
+
+    setTimeoutSpy.mockRestore();
+    await runtime.close();
+  });
+
+  it("rejects server-tier work parked behind a reconnect when closed", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-close-reconnect-waiters-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    const disconnect = runtime.disconnect({ rejectWaiters: false });
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "disconnect")).toBe(true);
+    });
+    const disconnectMessage = worker.messages.find((message) => message.method === "disconnect");
+    worker.respond(disconnectMessage!.id, undefined);
+    await disconnect;
+
+    const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null);
+    const wait = runtime.waitForTransaction("parked-transaction", "global");
+    const queryRejection = expect(query).rejects.toThrow(
+      "Persistent browser native runtime is closed",
+    );
+    const waitRejection = expect(wait).rejects.toThrow(
+      "Persistent browser native runtime is closed",
+    );
+    await runtime.close();
+
+    await queryRejection;
+    await waitRejection;
+  });
+
+  it.each(["reconnect", "close"] as const)(
+    "preserves parked server-tier work across repeated disconnects until %s",
+    async (outcome) => {
+      vi.stubGlobal("Worker", FakeWorker);
+
+      const runtime = new PersistentBrowserOpfsRuntime(
+        undefined,
+        schema,
+        `persistent-browser-runtime-repeat-disconnect-${outcome}-test`,
+        new Uint8Array(16),
+        new Uint8Array(16),
+      );
+      const worker = FakeWorker.instances[0];
+
+      const firstDisconnect = runtime.disconnect({ rejectWaiters: false });
+      await vi.waitFor(() => {
+        expect(worker.messages.filter((message) => message.method === "disconnect")).toHaveLength(
+          1,
+        );
+      });
+      worker.respond(
+        worker.messages.find((message) => message.method === "disconnect")!.id,
+        undefined,
+      );
+      await firstDisconnect;
+
+      const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null);
+      const secondDisconnect = runtime.disconnect({ rejectWaiters: false });
+      await vi.waitFor(() => {
+        expect(worker.messages.filter((message) => message.method === "disconnect")).toHaveLength(
+          2,
+        );
+      });
+      worker.respond(
+        worker.messages.filter((message) => message.method === "disconnect")[1]!.id,
+        undefined,
+      );
+      await secondDisconnect;
+
+      if (outcome === "reconnect") {
+        runtime.connect("ws://127.0.0.1:4200/apps/app/ws", "{}");
+        await vi.waitFor(() => {
+          expect(worker.messages.some((message) => message.method === "connect")).toBe(true);
+        });
+        worker.respond(
+          worker.messages.find((message) => message.method === "connect")!.id,
+          undefined,
+        );
+        await vi.waitFor(() => {
+          expect(worker.messages.some((message) => message.method === "query")).toBe(true);
+        });
+        worker.respond(worker.messages.find((message) => message.method === "query")!.id, []);
+        await expect(query).resolves.toEqual([]);
+        await runtime.close();
+      } else {
+        const rejection = expect(query).rejects.toThrow(
+          "Persistent browser native runtime is closed",
+        );
+        await runtime.close();
+        await rejection;
+      }
+    },
+  );
+
+  it.each(["during close", "after close"] as const)(
+    "does not install a new reconnect gate when disconnecting %s",
+    async (timing) => {
+      vi.stubGlobal("Worker", FakeWorker);
+
+      const runtime = new PersistentBrowserOpfsRuntime(
+        undefined,
+        schema,
+        `persistent-browser-runtime-disconnect-${timing.replace(" ", "-")}-test`,
+        new Uint8Array(16),
+        new Uint8Array(16),
+      );
+
+      const close = runtime.close();
+      if (timing === "after close") await close;
+      await runtime.disconnect({ rejectWaiters: false });
+
+      await expect(
+        runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null),
+      ).rejects.toThrow("Persistent browser native runtime is closed");
+      await close;
+    },
+  );
+
+  it.each([
+    ["connect", "during close"],
+    ["connect", "after close"],
+    ["updateAuth", "during close"],
+    ["updateAuth", "after close"],
+  ] as const)("does not replace the terminal gate via %s %s", async (operation, timing) => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      `persistent-browser-runtime-${operation}-${timing.replace(" ", "-")}-test`,
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+
+    const close = runtime.close();
+    if (timing === "after close") await close;
+    if (operation === "connect") {
+      runtime.connect("ws://127.0.0.1:4200/apps/app/ws", "{}");
+    } else {
+      runtime.updateAuth("{}");
+    }
+
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null),
+    ).rejects.toThrow("Persistent browser native runtime is closed");
+    await close;
+  });
+
   it("returns a pending write handle and waits on the worker transaction id", async () => {
     vi.stubGlobal("Worker", FakeWorker);
 
@@ -155,6 +405,91 @@ describe("PersistentBrowserOpfsRuntime", () => {
     worker.respond(waitMessage!.id, undefined);
 
     await expect(waitPromise).resolves.toBeUndefined();
+    await runtime.close();
+  });
+
+  it("registers a subscription before a subsequent fire-and-forget write", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-subscribe-before-write-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    const subscription = runtime.createSubscription(JSON.stringify({ table: "todos" }));
+    runtime.executeSubscription(subscription, () => undefined);
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "must follow subscription registration" } },
+      undefined,
+      "00000000-0000-0000-0000-000000000001",
+    );
+
+    await vi.waitFor(() => {
+      expect(
+        worker.messages.some((message) => message.method === "createExecutedSubscription"),
+      ).toBe(true);
+    });
+    expect(worker.messages.some((message) => message.method === "insert")).toBe(false);
+
+    const create = worker.messages.find(
+      (message) => message.method === "createExecutedSubscription",
+    );
+    worker.respond(create!.id, 7);
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
+    });
+    const insert = worker.messages.find((message) => message.method === "insert");
+    worker.respond(insert!.id, { transactionId: "native-runtime-transaction" });
+
+    await runtime.close();
+  });
+
+  it("does not delay a write behind a subscription created later", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-write-before-subscribe-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "must be in the subscription snapshot" } },
+      undefined,
+      "00000000-0000-0000-0000-000000000001",
+    );
+    const subscription = runtime.createSubscription(JSON.stringify({ table: "todos" }));
+    runtime.executeSubscription(subscription, () => undefined);
+
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
+    });
+    expect(worker.messages.some((message) => message.method === "createExecutedSubscription")).toBe(
+      false,
+    );
+
+    const insert = worker.messages.find((message) => message.method === "insert")!;
+    worker.respond(insert.id, { transactionId: "native-runtime-transaction" });
+    await vi.waitFor(() => {
+      expect(
+        worker.messages.some((message) => message.method === "createExecutedSubscription"),
+      ).toBe(true);
+    });
+    const create = worker.messages.find(
+      (message) => message.method === "createExecutedSubscription",
+    )!;
+    expect(worker.messages.indexOf(insert)).toBeLessThan(worker.messages.indexOf(create));
+    worker.respond(create.id, 7);
+
     await runtime.close();
   });
 
@@ -238,6 +573,172 @@ describe("PersistentBrowserOpfsRuntime", () => {
     worker.respond(waitMessage!.id, undefined);
 
     await expect(waitPromise).resolves.toBeUndefined();
+    await runtime.close();
+  });
+
+  it("keeps server-tier waits alive across a disconnect and reconnect", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-reconnect-wait-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app/ws", "{}");
+    const insert = runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "reconnect wait" } },
+      undefined,
+      "00000000-0000-0000-0000-000000000001",
+    );
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "connect")).toBe(true);
+      expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
+    });
+    const connectMessage = worker.messages.find((message) => message.method === "connect");
+    const insertMessage = worker.messages.find((message) => message.method === "insert");
+    worker.respond(connectMessage!.id, undefined);
+    worker.respond(insertMessage!.id, { transactionId: "native-runtime-transaction" });
+
+    const waitPromise = runtime.waitForTransaction(insert.transactionId, "edge");
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
+    });
+    const waitMessage = worker.messages.find((message) => message.method === "waitForTransaction");
+
+    const disconnectPromise = runtime.disconnect({ rejectWaiters: false });
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "disconnect")).toBe(true);
+    });
+    const disconnectMessage = worker.messages.find((message) => message.method === "disconnect");
+    expect(disconnectMessage?.args).toEqual([{ rejectWaiters: false }]);
+    worker.respond(disconnectMessage!.id, undefined);
+    await disconnectPromise;
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app/ws", "{}");
+    await vi.waitFor(() => {
+      expect(worker.messages.filter((message) => message.method === "connect")).toHaveLength(2);
+    });
+    const reconnectMessage = worker.messages.filter((message) => message.method === "connect")[1];
+    worker.respond(reconnectMessage!.id, undefined);
+    worker.respond(waitMessage!.id, undefined);
+
+    await expect(waitPromise).resolves.toBeUndefined();
+    await runtime.close();
+  });
+
+  it("runs local reads and defers edge reads until reconnect", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-disconnected-read-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    const disconnectPromise = runtime.disconnect({ rejectWaiters: false });
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "disconnect")).toBe(true);
+    });
+    const disconnectMessage = worker.messages.find((message) => message.method === "disconnect");
+    worker.respond(disconnectMessage!.id, undefined);
+    await disconnectPromise;
+
+    const localRead = runtime.query(
+      JSON.stringify({ table: "todos" }),
+      null,
+      "local",
+      JSON.stringify({ propagation: "full" }),
+    );
+    const edgeRead = runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null);
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "query")).toBe(true);
+    });
+    expect(worker.messages.filter((message) => message.method === "query")).toHaveLength(1);
+    const localQueryMessage = worker.messages.find((message) => message.method === "query");
+    expect(localQueryMessage?.args[2]).toBe("local");
+    worker.respond(localQueryMessage!.id, ["local"]);
+    await expect(localRead).resolves.toEqual(["local"]);
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app/ws", "{}");
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "connect")).toBe(true);
+    });
+    const connectMessage = worker.messages.find((message) => message.method === "connect");
+    worker.respond(connectMessage!.id, undefined);
+
+    await vi.waitFor(() => {
+      expect(worker.messages.filter((message) => message.method === "query")).toHaveLength(2);
+    });
+    const edgeQueryMessage = worker.messages.filter((message) => message.method === "query")[1];
+    expect(edgeQueryMessage?.args[2]).toBe("edge");
+    worker.respond(edgeQueryMessage!.id, ["edge"]);
+    await expect(edgeRead).resolves.toEqual(["edge"]);
+    await runtime.close();
+  });
+
+  it("does not release disconnected server-tier work when auth changes", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-disconnected-auth-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    const disconnect = runtime.disconnect({ rejectWaiters: false });
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "disconnect")).toBe(true);
+    });
+    worker.respond(
+      worker.messages.find((message) => message.method === "disconnect")!.id,
+      undefined,
+    );
+    await disconnect;
+
+    const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null);
+    const wait = runtime.waitForTransaction("disconnected-auth-transaction", "global");
+    runtime.updateAuth('{"token":"replacement"}');
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "updateAuth")).toBe(true);
+    });
+    worker.respond(
+      worker.messages.find((message) => message.method === "updateAuth")!.id,
+      undefined,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(worker.messages.some((message) => message.method === "query")).toBe(false);
+    expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(false);
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app/ws", "{}");
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "connect")).toBe(true);
+    });
+    worker.respond(worker.messages.find((message) => message.method === "connect")!.id, undefined);
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
+    });
+    worker.respond(
+      worker.messages.find((message) => message.method === "waitForTransaction")!.id,
+      undefined,
+    );
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "query")).toBe(true);
+    });
+    worker.respond(worker.messages.find((message) => message.method === "query")!.id, []);
+
+    await expect(query).resolves.toEqual([]);
+    await expect(wait).resolves.toBeUndefined();
     await runtime.close();
   });
 

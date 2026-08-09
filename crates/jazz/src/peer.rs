@@ -29,7 +29,7 @@ use crate::protocol::{
     ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier,
     VersionRecord, expand_version_carriers,
 };
-use crate::protocol_limits::{MAX_SYNC_MESSAGE_BYTES, validate_fetch_row_versions};
+use crate::protocol_limits::validate_fetch_row_versions;
 use crate::query::{Binding, ValidatedQuery};
 use crate::schema::TableSchema;
 use crate::tools::OutputOccurrenceId;
@@ -106,6 +106,7 @@ pub struct PeerState {
     deferred_edge_fates: BTreeMap<TxId, DeferredEdgeFate>,
     edge_scope_subscription_refs: BTreeMap<SubscriptionKey, usize>,
     idle_edge_scope_subscriptions: BTreeMap<SubscriptionKey, u64>,
+    announced_catalogue_fingerprint: Option<[u8; 32]>,
     /// Deterministic counters for this peer.
     pub metrics: PeerMetrics,
 }
@@ -279,6 +280,7 @@ impl Default for PeerState {
             deferred_edge_fates: BTreeMap::new(),
             edge_scope_subscription_refs: BTreeMap::new(),
             idle_edge_scope_subscriptions: BTreeMap::new(),
+            announced_catalogue_fingerprint: None,
             metrics: PeerMetrics::default(),
         }
     }
@@ -292,6 +294,14 @@ fn edge_scope_ttl_ms() -> u64 {
 }
 
 impl PeerState {
+    pub(crate) fn needs_catalogue_snapshot(&self, fingerprint: [u8; 32]) -> bool {
+        self.announced_catalogue_fingerprint != Some(fingerprint)
+    }
+
+    pub(crate) fn mark_catalogue_snapshot_announced(&mut self, fingerprint: [u8; 32]) {
+        self.announced_catalogue_fingerprint = Some(fingerprint);
+    }
+
     /// Construct a permanent relay peer.
     pub fn new() -> Self {
         Self::default()
@@ -1657,7 +1667,9 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         let versions = node.row_version_payloads_for_refs(requests, self.identity())?;
-        split_row_version_payloads(versions)
+        Ok(vec![SyncMessage::RowVersionPayloads {
+            version_bundles: versions,
+        }])
     }
 
     /// Build a bulk-lane response for extents that belong to one row.
@@ -2179,48 +2191,6 @@ fn view_update_singleton_bundles(
         bundles.append(&mut expanded);
     }
     bundles
-}
-
-fn split_row_version_payloads(
-    version_bundles: Vec<VersionBundle>,
-) -> Result<Vec<SyncMessage>, Error> {
-    let mut messages = Vec::new();
-    let mut current = Vec::new();
-    for bundle in version_bundles {
-        let single_encoded = postcard::to_allocvec(&SyncMessage::RowVersionPayloads {
-            version_bundles: vec![bundle.clone()],
-        })
-        .map_err(|_| Error::UnsupportedSyncMessage("failed to measure row-version payload"))?;
-        if single_encoded.len() > MAX_SYNC_MESSAGE_BYTES {
-            return Err(Error::UnsupportedSyncMessage(
-                "row-version payload exceeds sync message limit",
-            ));
-        }
-        if current.is_empty() {
-            current.push(bundle);
-            continue;
-        }
-        let mut candidate = current.clone();
-        candidate.push(bundle.clone());
-        let encoded = postcard::to_allocvec(&SyncMessage::RowVersionPayloads {
-            version_bundles: candidate,
-        })
-        .map_err(|_| Error::UnsupportedSyncMessage("failed to measure row-version payload"))?;
-        if encoded.len() > MAX_SYNC_MESSAGE_BYTES {
-            messages.push(SyncMessage::RowVersionPayloads {
-                version_bundles: current,
-            });
-            current = vec![bundle];
-        } else {
-            current.push(bundle);
-        }
-    }
-    if !current.is_empty() {
-        messages.push(SyncMessage::RowVersionPayloads {
-            version_bundles: current,
-        });
-    }
-    Ok(messages)
 }
 
 fn storage_read_metrics_buckets(metrics: &StorageReadMetrics) -> String {
@@ -2887,11 +2857,6 @@ mod tests {
     fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
         match update {
             SyncMessage::ViewUpdate {
-                version_carriers,
-                version_bundles,
-                ..
-            }
-            | SyncMessage::ViewUpdateChunk {
                 version_carriers,
                 version_bundles,
                 ..

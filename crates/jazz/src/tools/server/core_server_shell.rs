@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::mpsc;
 use std::thread;
 
-use crate::db::{CommitUnitTrust, DbIdentity, Transport};
+use crate::db::{CommitUnitTrust, DbIdentity, RowCells, Transport};
 use crate::groove::records::Value;
-use crate::ids::{AuthorId, NodeUuid, SchemaVersionId};
+use crate::ids::{AuthorId, BranchId, NodeUuid, RowUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
 use crate::protocol::MigrationLens;
 use crate::schema::JazzSchema;
@@ -29,6 +29,16 @@ pub(crate) struct ServerShellHandle {
 type ServerShellJob = Box<dyn FnOnce(&mut InMemoryServerShell) + Send + 'static>;
 
 impl ServerShellHandle {
+    #[cfg(test)]
+    pub(crate) async fn runtime_catalogue_contains(
+        &self,
+        schema: SchemaVersionId,
+        lens: crate::ids::MigrationLensId,
+    ) -> Result<(bool, bool), String> {
+        self.run(move |shell| Ok(shell.runtime_catalogue_contains(schema, lens)))
+            .await
+    }
+
     pub(crate) fn start_with_storage(
         schema: JazzSchema,
         storage_config: StorageConfig,
@@ -132,36 +142,53 @@ impl ServerShellHandle {
         .await
     }
 
-    pub(crate) async fn publish_catalogue_schema(
+    pub(crate) async fn publish_schema_with_lens(
         &self,
         schema: JazzSchema,
+        lens: MigrationLens,
+        new_tables: Vec<String>,
+        dropped_tables: Vec<String>,
     ) -> Result<SchemaVersionId, String> {
         self.run(move |shell| {
             shell
-                .publish_catalogue_schema(schema)
+                .publish_runtime_schema_with_lens(schema, lens, new_tables, dropped_tables)
                 .map_err(|error| error.to_string())
         })
         .await
     }
 
-    pub(crate) async fn publish_lens(&self, lens: MigrationLens) -> Result<(), String> {
-        self.run(move |shell| {
-            shell
-                .publish_runtime_lens(lens)
-                .map_err(|error| error.to_string())
-        })
-        .await
+    #[allow(dead_code)] // exercised only by the integration-test server feature
+    pub(crate) async fn seed_branch_row_for_test(
+        &self,
+        branch: BranchId,
+        table: String,
+        row_id: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), String> {
+        let activity_tx = self.activity_tx.clone();
+        let result = self
+            .run(move |shell| {
+                shell
+                    .seed_branch_row_with_id(branch, table, row_id, cells)
+                    .map_err(|error| error.to_string())
+            })
+            .await;
+        if result.is_ok() {
+            notify_shell_activity(&activity_tx);
+        }
+        result
     }
 
     pub(crate) async fn publish_permissions_schema(
         &self,
         schema: JazzSchema,
+        lineage_source: SchemaVersionId,
     ) -> Result<SchemaVersionId, String> {
         let activity_tx = self.activity_tx.clone();
         let result = self
             .run(move |shell| {
                 shell
-                    .publish_permissions_schema(schema)
+                    .publish_permissions_schema(schema, lineage_source)
                     .map_err(|error| error.to_string())
             })
             .await;

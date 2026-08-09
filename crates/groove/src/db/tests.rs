@@ -31,6 +31,12 @@ use crate::storage::{
 };
 use crate::window_codec::TARGET_RECORDS_PER_WINDOW;
 
+fn version_zero_payload(stored: &[u8]) -> &[u8] {
+    let (version, payload) = crate::records::split_versioned_record(stored).unwrap();
+    assert_eq!(version, 0);
+    payload
+}
+
 fn albums_schema() -> DatabaseSchema {
     DatabaseSchema::new([TableSchema::new(
         "albums",
@@ -225,15 +231,17 @@ fn collect_tree_schema() -> DatabaseSchema {
 }
 
 fn collect_tree_values(
-    id: u64,
-    child: u64,
-    child_order: u64,
-    grandchild: u64,
-    grandchild_order: u64,
-    left: u64,
-    left_order: u64,
-    right: u64,
-    right_order: u64,
+    [
+        id,
+        child,
+        child_order,
+        grandchild,
+        grandchild_order,
+        left,
+        left_order,
+        right,
+        right_order,
+    ]: [u64; 9],
 ) -> Vec<Value> {
     vec![
         Value::U64(id),
@@ -1100,16 +1108,17 @@ fn commits_insert_update_and_delete_batches() {
             .storage
             .get("albums", &PrimaryKeyValue::U64(7).into_bytes())
             .unwrap(),
-        Some(
-            database
+        Some(crate::records::encode_versioned_record(
+            0,
+            &database
                 .ivm_runtime
                 .schema()
                 .table("albums")
                 .unwrap()
                 .record_schema()
                 .create(&[Value::U64(7), Value::String("Blue Train".to_owned())])
-                .unwrap()
-        )
+                .unwrap(),
+        ))
     );
 
     let mut batch = database.open_batch();
@@ -1129,8 +1138,9 @@ fn commits_insert_update_and_delete_batches() {
         .table("albums")
         .unwrap()
         .record_schema();
+    let stored = version_zero_payload(&stored);
     assert_eq!(
-        descriptor.get(&stored, "title").unwrap(),
+        descriptor.get(stored, "title").unwrap(),
         Value::String("Giant Steps".to_owned())
     );
 
@@ -1777,7 +1787,9 @@ fn assert_direct_record_store_round_trips_array_of_record_values() {
     let results = Value::Array(vec![Value::Record(first), Value::Record(second)]);
     let store = database.direct_record_store("rendered_results").unwrap();
 
-    store.set(&[Value::U64(7)], &[results.clone()]).unwrap();
+    store
+        .set(&[Value::U64(7)], std::slice::from_ref(&results))
+        .unwrap();
 
     assert_eq!(
         store
@@ -2596,13 +2608,14 @@ fn inserts_accept_values_in_table_declaration_order_even_when_storage_order_diff
         .unwrap()
         .unwrap();
 
-    assert_eq!(descriptor.get(&stored, "id").unwrap(), Value::U64(7));
+    let stored = version_zero_payload(&stored);
+    assert_eq!(descriptor.get(stored, "id").unwrap(), Value::U64(7));
     assert_eq!(
-        descriptor.get(&stored, "title").unwrap(),
+        descriptor.get(stored, "title").unwrap(),
         Value::String("Blue Train".to_owned())
     );
     assert_eq!(
-        descriptor.get(&stored, "rating").unwrap(),
+        descriptor.get(stored, "rating").unwrap(),
         Value::Nullable(Some(Box::new(Value::F64(4.5))))
     );
 }
@@ -2724,7 +2737,9 @@ fn composite_primary_keys_are_encoded_from_multiple_columns() {
         .record_schema();
     let stored = database.storage.get("history", &key).unwrap().unwrap();
     assert_eq!(
-        descriptor.get(&stored, "payload").unwrap(),
+        descriptor
+            .get(version_zero_payload(&stored), "payload")
+            .unwrap(),
         Value::String("first".to_owned())
     );
 
@@ -5172,9 +5187,18 @@ fn collect_by_tree_renders_sibling_slots_and_grandchildren_with_independent_wind
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
-    batch.insert("tree", collect_tree_values(1, 10, 20, 100, 10, 3, 3, 9, 9));
-    batch.insert("tree", collect_tree_values(2, 10, 20, 101, 20, 1, 1, 5, 5));
-    batch.insert("tree", collect_tree_values(3, 20, 10, 200, 10, 2, 2, 7, 7));
+    batch.insert(
+        "tree",
+        collect_tree_values([1, 10, 20, 100, 10, 3, 3, 9, 9]),
+    );
+    batch.insert(
+        "tree",
+        collect_tree_values([2, 10, 20, 101, 20, 1, 1, 5, 5]),
+    );
+    batch.insert(
+        "tree",
+        collect_tree_values([3, 20, 10, 200, 10, 2, 2, 7, 7]),
+    );
     database.commit_batch(batch).unwrap();
     let initial = subscription.recv().unwrap().to_values().unwrap();
     assert_eq!(initial.len(), 1);
@@ -5237,8 +5261,14 @@ fn collect_by_tree_grandchild_change_replaces_one_whole_parent_and_suppresses_un
     let subscription = database.subscribe_one_sink(collect_tree_graph()).unwrap();
     assert!(subscription.recv().unwrap().is_empty());
     let mut batch = database.open_batch();
-    batch.insert("tree", collect_tree_values(1, 10, 20, 100, 10, 3, 3, 9, 9));
-    batch.insert("tree", collect_tree_values(2, 10, 20, 101, 20, 1, 1, 5, 5));
+    batch.insert(
+        "tree",
+        collect_tree_values([1, 10, 20, 100, 10, 3, 3, 9, 9]),
+    );
+    batch.insert(
+        "tree",
+        collect_tree_values([2, 10, 20, 101, 20, 1, 1, 5, 5]),
+    );
     database.commit_batch(batch).unwrap();
     let _initial = subscription.recv().unwrap();
 
@@ -5246,7 +5276,7 @@ fn collect_by_tree_grandchild_change_replaces_one_whole_parent_and_suppresses_un
     // parent must change. Its one -/+ pair proves delivery is whole-parent,
     // not a child delta or one replacement at each descriptor level.
     let mut batch = database.open_batch();
-    batch.insert("tree", collect_tree_values(3, 10, 20, 99, 0, 2, 2, 7, 7));
+    batch.insert("tree", collect_tree_values([3, 10, 20, 99, 0, 2, 2, 7, 7]));
     database.commit_batch(batch).unwrap();
     let replacement = subscription.recv().unwrap().to_values().unwrap();
     assert_eq!(replacement.len(), 2);
@@ -5282,7 +5312,7 @@ fn collect_by_tree_grandchild_change_replaces_one_whole_parent_and_suppresses_un
     let mut batch = database.open_batch();
     batch.insert(
         "tree",
-        collect_tree_values(4, 10, 20, 999, 999, 999, 999, 1, 1),
+        collect_tree_values([4, 10, 20, 999, 999, 999, 999, 1, 1]),
     );
     database.commit_batch(batch).unwrap();
     assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
@@ -6989,7 +7019,7 @@ fn same_key_writes_in_one_batch_emit_deltas_against_earlier_batch_writes() {
             .table("albums")
             .unwrap()
             .record_schema()
-            .get(&stored, "title")
+            .get(version_zero_payload(&stored), "title")
             .unwrap(),
         Value::String("Giant Steps".to_owned())
     );
@@ -7033,7 +7063,7 @@ fn inserts_over_existing_primary_keys_are_rejected() {
             .table("albums")
             .unwrap()
             .record_schema()
-            .get(&stored, "title")
+            .get(version_zero_payload(&stored), "title")
             .unwrap(),
         Value::String("Blue Train".to_owned())
     );
@@ -11592,7 +11622,7 @@ fn table_pairs_from_query(
         .collect()
 }
 
-fn record_values(records: Vec<Record<'_>>) -> Vec<Vec<Value>> {
+fn record_values(records: Vec<VersionedRecord>) -> Vec<Vec<Value>> {
     records
         .into_iter()
         .map(|record| record.to_values().unwrap())

@@ -120,6 +120,9 @@ pub(crate) struct ResultMembershipSchema {
     /// Ordered source-row identity fields for the rendered output occurrence.
     /// The root source is first; ordinary output contains only `row_field`.
     pub(crate) occurrence_id_fields: Vec<String>,
+    /// Flattened public tuple fields retained with the membership record when
+    /// this is a flat joined output. Ordinary row output leaves this empty.
+    pub(crate) payload_fields: Vec<TypedOutputField>,
     /// Branch/prefix field, when branch/prefix participates in result
     /// identity.
     pub(crate) branch_or_prefix_field: Option<String>,

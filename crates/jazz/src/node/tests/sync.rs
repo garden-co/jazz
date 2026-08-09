@@ -1618,7 +1618,14 @@ fn content_extent_fetch_rejects_row_context_mismatch_and_invisible_content() {
     let other_row = row(8);
     let extent = node
         .content_store()
-        .append(author, visible_row, "title", b"unreferenced")
+        .append(
+            schema().version_id(),
+            "todos",
+            author,
+            visible_row,
+            "title",
+            b"unreferenced",
+        )
         .unwrap();
     let mut peer = PeerState::client_link(author);
 
@@ -3688,5 +3695,82 @@ fn duplicate_commit_units_compare_versions_without_wire_order() {
     assert!(
         core.ingest_commit_unit(tx, reversed, u64::MAX - SKEW_TOLERANCE_MS)
             .is_ok()
+    );
+}
+/// A locally pending partial update is rebuilt from durable history after
+/// `bob` reopens, then uploaded as a real commit unit. Its explicitly authored
+/// `title` wins while `alice`'s concurrent `completed` edit survives.
+///
+/// ```text
+/// base(base,false) ─┬─ alice(completed=true) ──┐
+///                   └─ bob(title=base) ─ reopen ─ upload ─┴─► base,true
+/// ```
+///
+/// Planted positive: force `VersionRecord::from_stored` to attach
+/// `authored_columns=None`. Bob's materialized `completed=false` then appears
+/// authored on the rebuilt wire unit and this test fails.
+#[test]
+fn reopened_pending_partial_update_upload_preserves_authored_columns() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("completed", ColumnType::Bool),
+        ],
+    )]);
+    let (bob_dir, mut bob) = open_node_with_schema(node(0x91), schema.clone());
+    let (_alice_dir, mut alice) = open_node_with_schema(node(0x92), schema.clone());
+    let (_core_dir, mut core) =
+        open_history_complete_node_with_schema(node(0x93), schema.clone());
+    let row_uuid = row(0x91);
+
+    let (base, base_unit) = bob
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 10).cells(BTreeMap::from([
+                ("title".to_owned(), Value::String("base".to_owned())),
+                ("completed".to_owned(), Value::Bool(false)),
+            ])),
+        )
+        .unwrap();
+    let [base_fate] = core.apply_sync_message(base_unit).unwrap().try_into().unwrap();
+    bob.apply_sync_message(base_fate).unwrap();
+
+    let (_alice_tx, alice_unit) = alice
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 20)
+                .parents(vec![base])
+                .cells(BTreeMap::from([(
+                    "completed".to_owned(),
+                    Value::Bool(true),
+                )])),
+        )
+        .unwrap();
+    core.apply_sync_message(alice_unit).unwrap();
+
+    let bob_tx = bob
+        .commit_mergeable(
+            MergeableCommit::new("todos", row_uuid, 30)
+                .parents(vec![base])
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), Value::String("base".to_owned())),
+                    ("completed".to_owned(), Value::Bool(false)),
+                ]))
+                .authored_columns(BTreeSet::from(["title".to_owned()])),
+        )
+        .unwrap();
+    drop(bob);
+
+    let mut reopened = reopen_node_at(&bob_dir, node(0x91), schema);
+    let rebuilt = reopened.commit_unit_for(bob_tx).unwrap();
+    core.apply_sync_message(rebuilt).unwrap();
+
+    let rows = core.current_rows("todos", DurabilityTier::Local).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].test_cells_by_descriptor(),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("base".to_owned())),
+            ("completed".to_owned(), Value::Bool(true)),
+        ])
     );
 }

@@ -1378,9 +1378,40 @@ mod tests {
         let v1_hash = SchemaHash::compute(&v1);
         let v2_hash = SchemaHash::compute(&v2);
 
-        let state = make_state_with_schema(v2).await;
+        let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
-        publish_schema_for_test(&app, v1).await;
+        publish_schema_for_test(&app, v2).await;
+        let runtime_v1 = crate::tools::server::public_schema_convert::convert_public_schema(&v1)
+            .expect("convert source schema");
+        let runtime_v2 = crate::tools::server::public_schema_convert::convert_public_schema(
+            &state
+                .catalogue
+                .known_schema(&state.catalogue_store, &v2_hash)
+                .expect("read target schema")
+                .expect("target schema stored"),
+        )
+        .expect("convert target schema");
+        let expected_runtime_lens = crate::protocol::MigrationLens::new(
+            runtime_v1.version_id(),
+            runtime_v2.version_id(),
+            vec![crate::protocol::TableLens {
+                source_table: "users".to_owned(),
+                target_table: "users".to_owned(),
+                ops: vec![crate::protocol::LensOp::RenameColumn {
+                    from: "email".to_owned(),
+                    to: "email_address".to_owned(),
+                }],
+            }],
+        );
+        let runtime_shell = state.core_server_shell().expect("runtime shell started");
+        assert_eq!(
+            runtime_shell
+                .runtime_catalogue_contains(runtime_v2.version_id(), expected_runtime_lens.id)
+                .await
+                .expect("inspect runtime catalogue before lens"),
+            (false, false),
+            "publishing a schema draft must not expose it before its lineage lens"
+        );
 
         let disconnected = app
             .clone()
@@ -1598,9 +1629,40 @@ mod tests {
         let v1_hash = SchemaHash::compute(&v1);
         let v2_hash = SchemaHash::compute(&v2);
 
-        let state = make_state_with_schema(v2).await;
+        let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
-        publish_schema_for_test(&app, v1).await;
+        publish_schema_for_test(&app, v2).await;
+        let runtime_v1 = crate::tools::server::public_schema_convert::convert_public_schema(&v1)
+            .expect("convert source schema");
+        let runtime_v2 = crate::tools::server::public_schema_convert::convert_public_schema(
+            &state
+                .catalogue
+                .known_schema(&state.catalogue_store, &v2_hash)
+                .expect("read target schema")
+                .expect("target schema stored"),
+        )
+        .expect("convert target schema");
+        let expected_runtime_lens = crate::protocol::MigrationLens::new(
+            runtime_v1.version_id(),
+            runtime_v2.version_id(),
+            vec![crate::protocol::TableLens {
+                source_table: "users".to_owned(),
+                target_table: "users".to_owned(),
+                ops: vec![crate::protocol::LensOp::RenameColumn {
+                    from: "email".to_owned(),
+                    to: "email_address".to_owned(),
+                }],
+            }],
+        );
+        let runtime_shell = state.core_server_shell().expect("runtime shell started");
+        assert_eq!(
+            runtime_shell
+                .runtime_catalogue_contains(runtime_v2.version_id(), expected_runtime_lens.id)
+                .await
+                .expect("inspect runtime catalogue before lens"),
+            (false, false),
+            "publishing a schema draft must not expose it before its lineage lens"
+        );
 
         let request_body = serde_json::json!({
             "fromHash": v1_hash.to_string(),
@@ -1642,6 +1704,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(created.status(), StatusCode::CREATED);
+        assert_eq!(
+            runtime_shell
+                .runtime_catalogue_contains(runtime_v2.version_id(), expected_runtime_lens.id)
+                .await
+                .expect("inspect runtime catalogue after lens"),
+            (true, true),
+            "migration publication must activate target schema and lens together"
+        );
 
         let lens = state
             .catalogue_store
@@ -1680,9 +1750,9 @@ mod tests {
         let v1_hash = SchemaHash::compute(&v1);
         let v2_hash = SchemaHash::compute(&v2);
 
-        let state = make_state_with_schema(v2).await;
+        let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
-        publish_schema_for_test(&app, v1).await;
+        publish_schema_for_test(&app, v2).await;
 
         let request_body = serde_json::json!({
             "fromHash": v1_hash.to_string(),
@@ -1710,7 +1780,16 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(created.status(), StatusCode::CREATED);
+        let created_status = created.status();
+        let created_body = body::to_bytes(created.into_body(), usize::MAX)
+            .await
+            .expect("migration response body");
+        assert_eq!(
+            created_status,
+            StatusCode::CREATED,
+            "{}",
+            String::from_utf8_lossy(&created_body)
+        );
 
         let lens = state
             .catalogue_store
@@ -1766,9 +1845,9 @@ mod tests {
         let v1_hash = SchemaHash::compute(&v1);
         let v2_hash = SchemaHash::compute(&v2);
 
-        let state = make_state_with_schema(v2.clone()).await;
+        let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
-        publish_schema_for_test(&app, v1.clone()).await;
+        publish_schema_for_test(&app, v2.clone()).await;
 
         let request_body = serde_json::json!({
             "fromHash": v1_hash.to_string(),

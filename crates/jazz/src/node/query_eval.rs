@@ -49,15 +49,16 @@ use crate::protocol::{
     BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry, ReadViewKey,
     ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry,
     ResultMemberPayloadEntry, RowVersionRef, ShapeAst, ShapeBody, Subscribe, SubscriptionKey,
-    SyncMessage, SyntheticReplacementToken,
+    SyntheticReplacementToken,
 };
-use crate::protocol_limits::{MAX_KNOWN_STATE_EXACT_REFS, MAX_SYNC_MESSAGE_BYTES};
+use crate::protocol_limits::MAX_KNOWN_STATE_EXACT_REFS;
 use crate::query::{
     Aggregate, AggregateFunction, AggregateQuery, ArraySubquery, ArraySubqueryRequirement, Binding,
     Include, JoinTarget, JoinVia, Operand, OrderDirection, Predicate, Query as JazzQuery,
     QueryError, ShapeId, ValidatedQuery, binding_id_for_values, relation_query_to_query,
 };
-use crate::schema::{ColumnSchema, branch_metadata_table_schema, global_current_index_name};
+use crate::schema::{ColumnSchema, branch_metadata_table_schema};
+use crate::tools::{ObjectId, OutputOccurrenceId};
 
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
@@ -356,6 +357,7 @@ fn fact_public_fields(
             fields.extend(result_membership_version_fields(&schema.version));
             fields.extend(schema.settle_position_field.clone());
             fields.extend(schema.routing_param_fields.iter().cloned());
+            fields.extend(schema.payload_fields.iter().map(|field| field.name.clone()));
             Ok(fields)
         }
         ProgramFactSchema::AggregateResult(schema) => {
@@ -553,7 +555,7 @@ fn version_identity_fields(schema: &VersionIdentityFields) -> Vec<String> {
 
 pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
     pub(crate) added: Vec<CurrentRow>,
-    pub(crate) removed: Vec<(String, RowUuid)>,
+    pub(crate) removed: Vec<OutputOccurrenceId>,
     pub(crate) added_edges: Vec<(RelationEdge, Option<CurrentRow>)>,
     pub(crate) removed_edges: Vec<RelationEdge>,
 }
@@ -579,17 +581,9 @@ struct CurrentSourceGraph {
 }
 
 #[derive(Clone, Debug)]
-struct ProjectedCurrentPartition {
-    schema_version: SchemaVersionId,
-    base_for_current_names: SchemaVersionId,
-    table: TableSchema,
-    lens_path: Option<CompiledLensPath>,
-}
-
-#[derive(Clone, Debug)]
 enum CurrentAccessPath {
     PrimaryKey(Vec<Value>),
-    Index { index: String, prefix: Vec<Value> },
+    Index { column: String, prefix: Vec<Value> },
 }
 
 impl<S> SourceResolver for CurrentQuerySourceResolver<'_, S>
@@ -883,7 +877,11 @@ where
                 .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
             let rows = self
                 .node
-                .branch_current_rows(&request.source.table, &branch)
+                .branch_current_rows_for_schema(
+                    &request.source.table,
+                    &branch,
+                    self.read_view.read_schema,
+                )
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             let schema_version_alias = self
                 .node
@@ -1019,16 +1017,7 @@ where
                 (graph, source.descriptor, source.metadata, BTreeSet::new())
             }
         } else if request.visibility == RowVisibility::IncludeDeleted
-            && (self.read_view.read_schema != self.node.catalogue.current_schema_version_id
-                || self
-                    .node
-                    .catalogue
-                    .partitions
-                    .iter()
-                    .any(|(logical, version)| {
-                        logical == &request.source.table
-                            && *version != self.node.catalogue.current_schema_version_id
-                    }))
+            && self.needs_projected_current_source(&request.source.table)
         {
             let tier = graph_tier.expect("visible current source has a tier");
             let rows = self
@@ -1206,13 +1195,18 @@ where
                     table, tier, prefix,
                 )))
             }
-            CurrentAccessPath::Index { index, prefix } => {
+            CurrentAccessPath::Index { column, prefix } => {
                 if tier != DurabilityTier::Global {
                     return Ok(None);
                 }
                 let rows = self
                     .node
-                    .global_current_rows_for_index_scan(table, &index, &prefix)
+                    .physical_global_current_source_for_index_scan(
+                        table,
+                        self.read_view.read_schema,
+                        &column,
+                        &prefix,
+                    )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 self.node.query_engine_read_metrics.source_index_probes += 1;
                 Ok(Some(rows))
@@ -1255,8 +1249,15 @@ where
                 row_uuid_field: "row_uuid".to_owned(),
             }));
         }
+        let register_table = self
+            .node
+            .physical_register_table_for_schema(
+                self.node.catalogue.current_schema_version_id,
+                &table.name,
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         Ok(Some(DeletionRegisterSource {
-            graph: deletion_register_current_source_graph(&table.name, tier),
+            graph: deletion_register_current_source_graph(&table.name, &register_table, tier),
             row_uuid_field: "row_uuid".to_owned(),
         }))
     }
@@ -1292,7 +1293,8 @@ where
         }
         if self.needs_projected_current_source(&request.source.table) {
             return Ok(Some(ContentVersionSource {
-                graph: self.projected_content_current_source_graph(request, table, tier, false)?,
+                graph: self
+                    .projected_content_current_source_graph(request, table, tier, false, false)?,
                 row_uuid_field: "row_uuid".to_owned(),
             }));
         }
@@ -1308,7 +1310,7 @@ where
         table: &TableSchema,
         position: GlobalSeq,
     ) -> Result<GraphBuilder, SourceResolutionError> {
-        if self.uses_current_schema_partition(&request.source.table) {
+        if self.can_use_bounded_historical_source(&request.source.table) {
             self.node
                 .query_engine_read_metrics
                 .source_global_seq_range_scans += 1;
@@ -1339,7 +1341,7 @@ where
         tier: DurabilityTier,
     ) -> Result<CurrentSourceGraph, SourceResolutionError> {
         Ok(CurrentSourceGraph {
-            graph: self.projected_content_current_source_graph(request, table, tier, true)?,
+            graph: self.projected_content_current_source_graph(request, table, tier, true, true)?,
             descriptor: current_row_descriptor(table),
             metadata: BTreeMap::new(),
         })
@@ -1351,47 +1353,89 @@ where
         read_table: &TableSchema,
         tier: DurabilityTier,
         include_global_seq: bool,
+        exclude_deleted: bool,
     ) -> Result<GraphBuilder, SourceResolutionError> {
-        let partitions = self.projected_current_partitions(request)?;
-        let read_schema_alias = self
-            .node
-            .ensure_schema_version_alias(self.read_view.read_schema)
-            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
-            .0;
-        let inputs = partitions
-            .iter()
-            .map(|partition| {
-                let graph = current_content_with_version_graph_for_schema(
-                    &partition.table,
-                    partition.schema_version,
-                    partition.base_for_current_names,
-                    tier,
-                    include_global_seq,
-                );
-                graph.project_fields(project_current_content_fields(
-                    &partition.table,
-                    read_table,
-                    partition.lens_path.as_ref(),
-                    read_schema_alias,
-                    include_global_seq,
-                ))
-            })
-            .collect::<Vec<_>>();
-        let graph = match inputs.as_slice() {
-            [] => {
-                return Err(source_resolution_error(
-                    request,
-                    SourceGap::SchemaProjection,
-                ));
+        let fields = global_current_storage_fields(read_table, true, include_global_seq);
+        let access_path = self.access_paths.get(&request.source).cloned();
+        let global = match &access_path {
+            Some(CurrentAccessPath::PrimaryKey(prefix)) => {
+                self.node.query_engine_read_metrics.source_primary_key_scans += 1;
+                self.node
+                    .physical_current_source_scan_graph(
+                        self.read_view.read_schema,
+                        &request.source.table,
+                        PhysicalCurrentClass::Global,
+                        static_scan_for_prefix(prefix.clone(), 1),
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
             }
-            [single] => single.clone(),
-            _ => GraphBuilder::union(inputs),
+            Some(CurrentAccessPath::Index { column, prefix }) if tier == DurabilityTier::Global => {
+                self.node.query_engine_read_metrics.source_index_probes += 1;
+                self.node
+                    .physical_global_current_source_for_index_scan(
+                        read_table,
+                        self.read_view.read_schema,
+                        column,
+                        prefix,
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+            }
+            _ => {
+                self.node.query_engine_read_metrics.source_full_scans += 1;
+                self.node
+                    .physical_current_source_graph(
+                        self.read_view.read_schema,
+                        &request.source.table,
+                        PhysicalCurrentClass::Global,
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
+            }
         };
-        Ok(
-            GraphBuilder::arg_max_by(graph, ["row_uuid"], ["tx_time", "tx_node_id"]).project(
-                global_current_storage_fields(read_table, true, include_global_seq),
-            ),
-        )
+        let content = if tier == DurabilityTier::Global {
+            global
+        } else {
+            let global = global.project(fields.clone());
+            let ahead = match &access_path {
+                Some(CurrentAccessPath::PrimaryKey(prefix)) => {
+                    self.node.physical_current_source_scan_graph(
+                        self.read_view.read_schema,
+                        &request.source.table,
+                        PhysicalCurrentClass::Ahead,
+                        static_scan_for_prefix(prefix.clone(), 3),
+                    )
+                }
+                _ => self.node.physical_current_source_graph(
+                    self.read_view.read_schema,
+                    &request.source.table,
+                    PhysicalCurrentClass::Ahead,
+                ),
+            }
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+            let ahead = if tier == DurabilityTier::Edge {
+                edge_visible_ahead_current_source_graph(ahead, fields.clone())
+            } else {
+                ahead.project(fields.clone())
+            };
+            GraphBuilder::arg_max_by(
+                GraphBuilder::union([global, ahead]),
+                ["row_uuid"],
+                ["tx_time", "tx_node_id"],
+            )
+            .project(fields.clone())
+        };
+        if !exclude_deleted {
+            return Ok(content.project(fields));
+        }
+        let deleted_winners = self
+            .projected_deletion_register_current_source_graph(request, tier)?
+            .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+            .project(["row_uuid"]);
+        Ok(GraphBuilder::anti_join(
+            content,
+            deleted_winners,
+            ["row_uuid"],
+            ["row_uuid"],
+        ))
     }
 
     fn projected_deletion_register_current_source_graph(
@@ -1399,105 +1443,28 @@ where
         request: &SourceRequest,
         tier: DurabilityTier,
     ) -> Result<GraphBuilder, SourceResolutionError> {
-        let partitions = self.projected_current_partitions(request)?;
-        let inputs = partitions
-            .iter()
-            .map(|partition| {
-                deletion_register_current_source_graph_for_schema(
-                    &partition.table.name,
-                    partition.schema_version,
-                    partition.base_for_current_names,
-                    tier,
-                )
-            })
-            .collect::<Vec<_>>();
-        let graph = match inputs.as_slice() {
-            [] => {
-                return Err(source_resolution_error(
-                    request,
-                    SourceGap::SchemaProjection,
-                ));
-            }
-            [single] => single.clone(),
-            _ => GraphBuilder::union(inputs),
+        let table_id = self
+            .node
+            .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let fields = register_storage_fields_for_query_engine("");
+        let global = GraphBuilder::table(physical_register_global_current_table_name(table_id));
+        if tier == DurabilityTier::Global {
+            return Ok(global);
+        }
+        let global = global.project_fields(fields.clone());
+        let ahead = GraphBuilder::table(physical_register_ahead_current_table_name(table_id));
+        let ahead = if tier == DurabilityTier::Edge {
+            edge_visible_ahead_current_source_graph(ahead, register_storage_field_names())
+        } else {
+            ahead.project_fields(fields.clone())
         };
-        Ok(
-            GraphBuilder::arg_max_by(graph, ["row_uuid"], ["tx_time", "tx_node_id"])
-                .project_fields(register_storage_fields_for_query_engine("")),
+        Ok(GraphBuilder::arg_max_by(
+            GraphBuilder::union([global, ahead]),
+            ["row_uuid"],
+            ["tx_time", "tx_node_id"],
         )
-    }
-
-    fn projected_current_partitions(
-        &mut self,
-        request: &SourceRequest,
-    ) -> Result<Vec<ProjectedCurrentPartition>, SourceResolutionError> {
-        let candidates = self.node.catalogue.partitions.clone();
-        let mut partitions = Vec::new();
-        for (logical_table, schema_version) in candidates {
-            let Ok(source_table) = self.node.table_in_schema(&logical_table, schema_version) else {
-                continue;
-            };
-            let lens_path = if schema_version == self.read_view.read_schema
-                && logical_table == request.source.table
-            {
-                None
-            } else if let Some(path) = self
-                .node
-                .compiled_lens_path(
-                    schema_version,
-                    self.read_view.read_schema,
-                    LensPathDirection::Forward,
-                    &logical_table,
-                )
-                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
-            {
-                if path.target_table != request.source.table {
-                    continue;
-                }
-                Some(path)
-            } else if let Some(path) = self
-                .node
-                .compiled_lens_path(
-                    schema_version,
-                    self.read_view.read_schema,
-                    LensPathDirection::Reverse,
-                    &logical_table,
-                )
-                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
-            {
-                if path.target_table != request.source.table {
-                    continue;
-                }
-                Some(path)
-            } else {
-                continue;
-            };
-            let base_for_current_names = if self
-                .node
-                .table_in_schema(
-                    &source_table.name,
-                    self.node.catalogue.current_schema_version_id,
-                )
-                .is_ok()
-            {
-                self.node.catalogue.current_schema_version_id
-            } else {
-                schema_version
-            };
-            partitions.push(ProjectedCurrentPartition {
-                schema_version,
-                base_for_current_names,
-                table: source_table,
-                lens_path,
-            });
-        }
-        if partitions.is_empty() {
-            return Err(source_resolution_error(
-                request,
-                SourceGap::SchemaProjection,
-            ));
-        }
-        Ok(partitions)
+        .project_fields(fields))
     }
 
     fn projected_visible_current_source_graph(
@@ -1507,11 +1474,10 @@ where
         tier: DurabilityTier,
     ) -> Result<CurrentSourceGraph, SourceResolutionError> {
         Ok(CurrentSourceGraph {
-            // Resolve projected sources directly from their storage partitions.
-            // Calling `current_rows_for_schema` here re-enters query compilation;
-            // a renamed table maps back to this resolver and recurses forever.
+            // Project heterogeneous physical rows at the source boundary so the
+            // rest of the query graph retains the requested logical descriptor.
             graph: self
-                .projected_content_current_source_graph(request, table, tier, false)?
+                .projected_content_current_source_graph(request, table, tier, false, true)?
                 .project_fields(storage_to_canonical_current_source_fields(
                     table, true, false,
                 )),
@@ -1520,56 +1486,34 @@ where
         })
     }
 
-    fn uses_current_schema_partition(&mut self, table: &str) -> bool {
-        !self.needs_projected_current_source(table)
+    fn can_use_bounded_historical_source(&self, table: &str) -> bool {
+        if self.read_view.read_schema != self.node.catalogue.current_schema_version_id {
+            return false;
+        }
+        self.node
+            .physical_table_id_for_schema(self.read_view.read_schema, table)
+            .is_ok()
     }
 
     fn needs_projected_current_source(&mut self, table: &str) -> bool {
-        self.read_view.read_schema != self.node.catalogue.current_schema_version_id
-            || self
-                .node
-                .catalogue
-                .partitions
-                .iter()
-                .any(|(logical, version)| {
-                    logical == table && *version != self.node.catalogue.current_schema_version_id
-                })
-            || self
-                .node
-                .catalogue
-                .partitions
-                .clone()
-                .into_iter()
-                .any(|(logical, version)| {
-                    if logical == table {
-                        return false;
-                    }
-                    [LensPathDirection::Forward, LensPathDirection::Reverse]
-                        .into_iter()
-                        .any(|direction| {
-                            self.node
-                                .compiled_lens_path(
-                                    version,
-                                    self.read_view.read_schema,
-                                    direction,
-                                    &logical,
-                                )
-                                .is_ok_and(|path| {
-                                    path.is_some_and(|path| path.target_table == table)
-                                })
-                        })
-                })
+        self.node
+            .physical_table_id_for_schema(self.read_view.read_schema, table)
+            .is_ok()
     }
 }
 
-fn deletion_register_current_source_graph(table: &str, tier: DurabilityTier) -> GraphBuilder {
+fn deletion_register_current_source_graph(
+    table: &str,
+    physical_register_table: &str,
+    tier: DurabilityTier,
+) -> GraphBuilder {
     if tier == DurabilityTier::Global {
         return GraphBuilder::table(register_global_current_table_name(table))
             .project_fields(register_storage_fields_for_query_engine(""));
     }
     let current_keys = deletion_register_current_keys_graph(table, tier);
     GraphBuilder::join(
-        GraphBuilder::table(register_table_name(table)),
+        GraphBuilder::table(physical_register_table),
         current_keys,
         ["row_uuid", "tx_time", "tx_node_id"],
         ["row_uuid", "tx_time", "tx_node_id"],
@@ -1577,144 +1521,12 @@ fn deletion_register_current_source_graph(table: &str, tier: DurabilityTier) -> 
     .project_fields(register_storage_fields_for_query_engine("left."))
 }
 
-fn current_content_with_version_graph_for_schema(
-    table: &TableSchema,
-    schema_version: SchemaVersionId,
-    base_schema_version: SchemaVersionId,
-    tier: DurabilityTier,
-    include_global_seq: bool,
+fn edge_visible_ahead_current_source_graph(
+    source: GraphBuilder,
+    fields: Vec<String>,
 ) -> GraphBuilder {
-    let fields = global_current_storage_fields(table, true, include_global_seq);
-    let deleted_winners = deletion_register_current_keys_graph_for_schema(
-        &table.name,
-        schema_version,
-        base_schema_version,
-        tier,
-        true,
-    );
-    let content_current = if tier == DurabilityTier::Global {
-        GraphBuilder::table(global_current_table_name_for_schema(
-            &table.name,
-            schema_version,
-            base_schema_version,
-        ))
-        .project(fields.clone())
-    } else {
-        let ahead = if tier == DurabilityTier::Edge {
-            edge_visible_ahead_current_graph(
-                ahead_current_table_name_for_schema(
-                    &table.name,
-                    schema_version,
-                    base_schema_version,
-                ),
-                fields.clone(),
-            )
-        } else {
-            GraphBuilder::table(ahead_current_table_name_for_schema(
-                &table.name,
-                schema_version,
-                base_schema_version,
-            ))
-            .project(fields.clone())
-        };
-        GraphBuilder::arg_max_by(
-            GraphBuilder::union([
-                GraphBuilder::table(global_current_table_name_for_schema(
-                    &table.name,
-                    schema_version,
-                    base_schema_version,
-                ))
-                .project(fields.clone()),
-                ahead,
-            ]),
-            ["row_uuid"],
-            ["tx_time", "tx_node_id"],
-        )
-        .project(fields.clone())
-    };
-    GraphBuilder::anti_join(content_current, deleted_winners, ["row_uuid"], ["row_uuid"])
-        .project(fields)
-}
-
-fn deletion_register_current_source_graph_for_schema(
-    table: &str,
-    schema_version: SchemaVersionId,
-    base_schema_version: SchemaVersionId,
-    tier: DurabilityTier,
-) -> GraphBuilder {
-    if tier == DurabilityTier::Global {
-        return GraphBuilder::table(register_global_current_table_name_for_schema(
-            table,
-            schema_version,
-            base_schema_version,
-        ))
-        .project_fields(register_storage_fields_for_query_engine(""));
-    }
-    let current_keys = deletion_register_current_keys_graph_for_schema(
-        table,
-        schema_version,
-        base_schema_version,
-        tier,
-        false,
-    );
     GraphBuilder::join(
-        GraphBuilder::table(version_storage_table_name_for_schema(
-            table,
-            VersionLayer::Deletion,
-            schema_version,
-            base_schema_version,
-        )),
-        current_keys,
-        ["row_uuid", "tx_time", "tx_node_id"],
-        ["row_uuid", "tx_time", "tx_node_id"],
-    )
-    .project_fields(register_storage_fields_for_query_engine("left."))
-}
-
-fn deletion_register_current_keys_graph_for_schema(
-    table: &str,
-    schema_version: SchemaVersionId,
-    base_schema_version: SchemaVersionId,
-    tier: DurabilityTier,
-    deleted_only: bool,
-) -> GraphBuilder {
-    let key_fields = ["row_uuid", "tx_time", "tx_node_id"];
-    let global_table =
-        register_global_current_table_name_for_schema(table, schema_version, base_schema_version);
-    if tier == DurabilityTier::Global {
-        let graph = GraphBuilder::table(global_table);
-        return if deleted_only {
-            graph
-                .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
-                .project(key_fields)
-        } else {
-            graph.project(key_fields)
-        };
-    }
-    let ahead_table =
-        register_ahead_current_table_name_for_schema(table, schema_version, base_schema_version);
-    let ahead = if tier == DurabilityTier::Edge {
-        edge_visible_ahead_current_graph(ahead_table, key_fields.map(str::to_owned).to_vec())
-    } else {
-        GraphBuilder::table(ahead_table).project(key_fields)
-    };
-    let graph = GraphBuilder::arg_max_by(
-        GraphBuilder::union([GraphBuilder::table(global_table).project(key_fields), ahead]),
-        ["row_uuid"],
-        ["tx_time", "tx_node_id"],
-    );
-    if deleted_only {
-        graph
-            .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
-            .project(key_fields)
-    } else {
-        graph.project(key_fields)
-    }
-}
-
-fn edge_visible_ahead_current_graph(table_name: String, fields: Vec<String>) -> GraphBuilder {
-    GraphBuilder::join(
-        GraphBuilder::table(table_name).project(fields.clone()),
+        source.project(fields.clone()),
         GraphBuilder::table("jazz_transactions")
             .filter(
                 PredicateExpr::And(vec![
@@ -1736,98 +1548,6 @@ fn edge_visible_ahead_current_graph(table_name: String, fields: Vec<String>) -> 
             .into_iter()
             .map(|field| ProjectField::renamed(left_field(&field), field)),
     )
-}
-
-fn project_current_content_fields(
-    source_table: &TableSchema,
-    read_table: &TableSchema,
-    lens_path: Option<&CompiledLensPath>,
-    read_schema_alias: u64,
-    include_global_seq: bool,
-) -> Vec<ProjectField> {
-    let mut column_fields = source_table
-        .columns
-        .iter()
-        .map(|column| {
-            (
-                column.name.clone(),
-                ProjectField::named(user_column_field(&column.name)),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    if let Some(path) = lens_path {
-        for op in &path.ops {
-            match op {
-                CompiledLensOp::Rename { from, to } => {
-                    if let Some(mut field) = column_fields.remove(from) {
-                        field.output_name = user_column_field(to);
-                        column_fields.insert(to.clone(), field);
-                    }
-                }
-                CompiledLensOp::Copy { from, to } => {
-                    if let Some(field) = column_fields.get(from) {
-                        let mut copy = field.clone();
-                        copy.output_name = user_column_field(to);
-                        column_fields.insert(to.clone(), copy);
-                    }
-                }
-                CompiledLensOp::Add { column, default } => {
-                    column_fields.insert(
-                        column.clone(),
-                        ProjectField::literal_typed(
-                            user_column_field(column),
-                            Value::Nullable(Some(Box::new(default.clone()))),
-                            read_table
-                                .columns
-                                .iter()
-                                .find(|candidate| candidate.name == *column)
-                                .map(|candidate| {
-                                    ValueType::Nullable(Box::new(candidate.column_type.clone()))
-                                })
-                                // A multi-lens path can add a temporary column
-                                // and remove it again before reaching the read
-                                // schema. It still needs a type while we carry
-                                // the intermediate projection.
-                                .unwrap_or_else(|| ValueType::Nullable(Box::new(ValueType::Bytes))),
-                        ),
-                    );
-                }
-                CompiledLensOp::Drop { column } => {
-                    column_fields.remove(column);
-                }
-            }
-        }
-    }
-
-    let mut fields = vec![
-        ProjectField::named("row_uuid"),
-        ProjectField::literal("schema_version", Value::U64(read_schema_alias)),
-        ProjectField::named("parents"),
-        ProjectField::null_typed(
-            "authored_columns",
-            ValueType::Nullable(Box::new(ValueType::Bytes)),
-        ),
-    ];
-    fields.extend(read_table.columns.iter().map(|column| {
-        column_fields.remove(&column.name).unwrap_or_else(|| {
-            ProjectField::null_typed(
-                user_column_field(&column.name),
-                ValueType::Nullable(Box::new(column.column_type.clone())),
-            )
-        })
-    }));
-    fields.extend([
-        ProjectField::named("created_by"),
-        ProjectField::named("created_at"),
-        ProjectField::named("updated_by"),
-        ProjectField::named("updated_at"),
-        ProjectField::named("tx_time"),
-        ProjectField::named("tx_node_id"),
-    ]);
-    if include_global_seq {
-        fields.push(ProjectField::named("global_seq"));
-    }
-    fields
 }
 
 fn content_version_current_source_graph(
@@ -2045,6 +1765,13 @@ fn selected_visible_current_primary_key_graph(
 }
 
 fn register_storage_fields_for_query_engine(prefix: &str) -> Vec<ProjectField> {
+    register_storage_field_names()
+        .into_iter()
+        .map(|field| ProjectField::renamed(format!("{prefix}{field}"), field))
+        .collect()
+}
+
+fn register_storage_field_names() -> Vec<String> {
     [
         "row_uuid",
         "tx_time",
@@ -2058,7 +1785,7 @@ fn register_storage_fields_for_query_engine(prefix: &str) -> Vec<ProjectField> {
         "_deletion",
     ]
     .into_iter()
-    .map(|field| ProjectField::renamed(format!("{prefix}{field}"), field))
+    .map(str::to_owned)
     .collect()
 }
 
@@ -2792,7 +2519,8 @@ fn current_query_output_request(
         .then(|| AppRowOutputRequest {
             projection: app_row_payload_projection(
                 query,
-                matches!(output, CurrentQueryProgramOutput::MaintainedView),
+                matches!(output, CurrentQueryProgramOutput::MaintainedView)
+                    || !query.array_subqueries.is_empty(),
             ),
             large_values: Vec::new(),
         }),
@@ -2976,7 +2704,7 @@ fn select_current_access_path(
     for column in table.global_current_indexed_columns() {
         if let Some(value) = equalities.get(&column).cloned() {
             return Some(CurrentAccessPath::Index {
-                index: global_current_index_name(&column),
+                column,
                 prefix: vec![Value::Nullable(Some(Box::new(value)))],
             });
         }
@@ -3536,7 +3264,6 @@ fn normalize_reachable(
         binding_source_shape,
         param_types,
     )?;
-
     let frontier_node = RowSetNodeId(format!("{reachable_id}:frontier"));
     nodes.insert(
         frontier_node.clone(),
@@ -3867,13 +3594,14 @@ fn normalize_reachable_seed(
     param_types: &BTreeMap<String, ColumnType>,
 ) -> Result<(RowSetNodeId, Vec<ValueSourceColumn>), Error> {
     if let Some(seed) = &reachable.seed {
-        if !predicate_params(&seed.filters).is_empty() {
-            return Err(normalization_gap(
-                "reachable_via relation seed filters with retained params need binding-param filter lowering",
-            ));
-        }
         let seed_source = reachable_seed_source_id(seed, reachable_id);
-        let columns = reachable_seed_frontier_columns(schema, &seed_source, seed)?;
+        let mut columns = reachable_seed_frontier_columns(schema, &seed_source, seed)?;
+        let edge_route_columns = reachable_edge_route_columns(reachable, param_types)?;
+        for column in &edge_route_columns {
+            if !columns.iter().any(|existing| existing.name == column.name) {
+                columns.push(column.clone());
+            }
+        }
         let user_column_ty = seed
             .user_column
             .as_ref()
@@ -3957,6 +3685,10 @@ fn normalize_reachable_seed(
                 value: NormalizedValueRef::Param(claim_field.clone()),
             });
         }
+        seed_columns.extend(edge_route_columns.into_iter().map(|column| RowProjection {
+            output: typed_output_field(&column.name, column.ty),
+            value: column.value,
+        }));
         nodes.insert(
             seed_project_node.clone(),
             RowSetExpr::Project {
@@ -3967,7 +3699,12 @@ fn normalize_reachable_seed(
         return Ok((seed_project_node, columns));
     }
 
-    let columns = reachable_frontier_columns(&reachable.from, param_types)?;
+    let mut columns = reachable_frontier_columns(&reachable.from, param_types)?;
+    for column in reachable_edge_route_columns(reachable, param_types)? {
+        if !columns.iter().any(|existing| existing.name == column.name) {
+            columns.push(column);
+        }
+    }
     let seed_node = RowSetNodeId(format!("{reachable_id}:seed"));
     nodes.insert(
         seed_node.clone(),
@@ -3978,6 +3715,25 @@ fn normalize_reachable_seed(
         },
     );
     Ok((seed_node, columns))
+}
+
+fn reachable_edge_route_columns(
+    reachable: &crate::query::ReachableVia,
+    param_types: &BTreeMap<String, ColumnType>,
+) -> Result<Vec<ValueSourceColumn>, Error> {
+    predicate_params(&reachable.edge_filters)
+        .into_iter()
+        .map(|param| {
+            let ty = param_types.get(&param).cloned().ok_or_else(|| {
+                Error::QueryLowering(format!("unknown reachable edge parameter {param}"))
+            })?;
+            Ok(ValueSourceColumn {
+                name: route_param_field(&param),
+                value: NormalizedValueRef::Param(param),
+                ty,
+            })
+        })
+        .collect()
 }
 
 fn reachable_seed_frontier_columns(
@@ -5284,7 +5040,9 @@ where
         // query rank. Membership/windowing is already lowered; only restore the
         // selected roots to their advertised order before sending a reset.
         self.apply_query_order(shape.query(), &mut rows)?;
-        self.apply_projection(shape.query(), &mut rows)?;
+        if shape.query().flat_join.is_none() {
+            self.apply_projection(shape.query(), &mut rows)?;
+        }
         let root_count = rows.len();
         let mut edges = Vec::new();
         for fact in program_facts {
@@ -5333,7 +5091,7 @@ where
                 .current_row_from_aggregate_result_payload(query, member, payload)
                 .map(Some);
         }
-        if member.as_row().is_none()
+        if (query.flat_join.is_some() || member.as_row().is_none())
             && let Some(payload) = result_payloads.get(member)
         {
             let Some(table_name) = member.table_name() else {
@@ -5366,19 +5124,29 @@ where
         row_uuid: RowUuid,
     ) -> Result<Option<CurrentRow>, Error> {
         let table = self.table(table_name)?.clone();
-        let global_tables = table.global_current_storage_tables();
-        let Some(content_raw) = self
+        let schema_version = self.catalogue.current_schema_version_id;
+        let table_id = self.physical_table_id_for_schema(schema_version, table_name)?;
+        let content_graph = self.physical_current_source_scan_graph(
+            schema_version,
+            table_name,
+            PhysicalCurrentClass::Global,
+            StaticScanSpec::Point(vec![groove::ivm::LiteralValue::from(Value::Uuid(
+                row_uuid.0,
+            ))]),
+        )?;
+        let content = self
             .database
-            .primary_key_get_raw(&global_tables[0].name, &[Value::Uuid(row_uuid.0)])?
-        else {
+            .query_graph(content_graph)
+            .map_err(|error| Self::malformed_current_query_error(table_name, row_uuid, error))?;
+        let Some(content_delta) = content.deltas.into_iter().find(|delta| delta.weight > 0) else {
             return Ok(None);
         };
-        let content_record = content_raw.record();
+        let content_record = BorrowedRecord::new(&content_delta.record, &content.descriptor);
         let content_tx = self.current_record_sort_key(table_name, row_uuid, content_record)?;
-        if let Some(deletion_raw) = self
-            .database
-            .primary_key_get_raw(&global_tables[1].name, &[Value::Uuid(row_uuid.0)])?
-        {
+        if let Some(deletion_raw) = self.database.primary_key_get_raw(
+            &physical_register_global_current_table_name(table_id),
+            &[Value::Uuid(row_uuid.0)],
+        )? {
             let deletion_record = deletion_raw.record();
             let deletion_tx =
                 self.current_record_sort_key(table_name, row_uuid, deletion_record)?;
@@ -5775,40 +5543,58 @@ where
         Ok(())
     }
 
-    fn global_current_rows_for_index_scan(
+    fn physical_global_current_source_for_index_scan(
         &self,
         table: &TableSchema,
-        index: &str,
+        schema_version: SchemaVersionId,
+        column: &str,
         prefix: &[Value],
     ) -> Result<GraphBuilder, Error> {
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(&table.name))
+            .ok_or(Error::InvalidStoredValue(
+                "physical current index table mapping missing",
+            ))?;
+        let column_id = mapping
+            .columns
+            .get(column)
+            .copied()
+            .ok_or(Error::InvalidStoredValue(
+                "physical current index column mapping missing",
+            ))?;
+        let storage_table = physical_global_current_table_name(mapping.table_id);
+        let alias = self
+            .catalogue
+            .schema_version_aliases
+            .get(&schema_version)
+            .copied()
+            .ok_or(Error::InvalidStoredValue(
+                "physical current index schema alias missing",
+            ))?;
+        let target = physical_current_projection_target(alias, &table.name);
+        let indexed = self.database.index_scan_raw(
+            &storage_table,
+            &physical_current_index_name(column_id),
+            prefix,
+        )?;
+        let mut records = Vec::with_capacity(indexed.len());
+        for raw in indexed {
+            let schema_version = raw.schema_version();
+            let record = groove::records::VersionedRecord::new(schema_version, raw.owned_record());
+            if let Some(projected) =
+                self.database
+                    .project_variant_record(&storage_table, &target, &record)?
+            {
+                records.push(projected.raw().to_vec());
+            }
+        }
         Ok(GraphBuilder::inline_records(
             table.global_current_storage_tables()[0].record_schema(),
-            self.global_current_row_records_for_index_scan(table, index, prefix)?,
+            records,
         ))
-    }
-
-    fn global_current_row_records_for_index_scan(
-        &self,
-        table: &TableSchema,
-        index: &str,
-        prefix: &[Value],
-    ) -> Result<Vec<Vec<u8>>, Error> {
-        let storage_table = global_current_table_name(&table.name);
-        self.encoded_records_for_index_scan(&storage_table, index, prefix)
-    }
-
-    fn encoded_records_for_index_scan(
-        &self,
-        storage_table: &str,
-        index: &str,
-        prefix: &[Value],
-    ) -> Result<Vec<Vec<u8>>, Error> {
-        Ok(self
-            .database
-            .index_scan_raw(storage_table, index, prefix)?
-            .into_iter()
-            .map(|raw| raw.record().raw().to_vec())
-            .collect())
     }
 
     fn compile_historical_query_program(
@@ -6431,6 +6217,163 @@ where
             )?;
         }
 
+        // Flat joins are an output form separate from `JoinVia`. Every input
+        // stays a normal source, so read-policy filtering and read-view/lens
+        // projection happen before Groove's inner JoinOp combines records.
+        if let Some(flat_join) = &query.flat_join {
+            let root_name = flat_join
+                .root_alias
+                .as_deref()
+                .unwrap_or(query.table.as_str())
+                .to_owned();
+            let mut sources = BTreeMap::from([(root_name, root_source.clone())]);
+            let mut tuple_sources = vec![root_source.clone()];
+            let mut output_sources = vec![(
+                flat_join
+                    .root_alias
+                    .as_deref()
+                    .unwrap_or(query.table.as_str())
+                    .to_owned(),
+                root_source.clone(),
+            )];
+
+            for (index, join) in flat_join.sources.iter().enumerate() {
+                let name = join
+                    .alias
+                    .as_deref()
+                    .unwrap_or(join.table.as_str())
+                    .to_owned();
+                let source = SourceId {
+                    table: join.table.clone(),
+                    path: SourcePath {
+                        components: vec![SourceRole::Alias(format!("flat_join:{index}:{name}"))],
+                    },
+                };
+                let source_node = RowSetNodeId(format!("flat_join:{index}:source"));
+                nodes.insert(
+                    source_node.clone(),
+                    RowSetExpr::Source {
+                        source: source.clone(),
+                        visibility: RowVisibility::Visible,
+                    },
+                );
+                auxiliary_sources.insert(source.clone());
+                let value_ref = |field: &str| -> Result<NormalizedValueRef, Error> {
+                    let (scope, column) = field.rsplit_once('.').ok_or_else(|| {
+                        Error::QueryCapability(format!(
+                            "flat join field must be qualified: {field}"
+                        ))
+                    })?;
+                    let source = sources.get(scope).ok_or_else(|| {
+                        Error::QueryCapability(format!("unknown flat join source {scope}"))
+                    })?;
+                    Ok(if column == "id" || column == "_id" {
+                        NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
+                    } else {
+                        NormalizedValueRef::SourceField {
+                            source: source.clone(),
+                            field: column.to_owned(),
+                        }
+                    })
+                };
+                let (_, right_column) = join.on.right.rsplit_once('.').ok_or_else(|| {
+                    Error::QueryCapability(format!(
+                        "flat join field must be qualified: {}",
+                        join.on.right
+                    ))
+                })?;
+                let join_node = RowSetNodeId(format!("flat_join:{index}:join"));
+                nodes.insert(
+                    join_node.clone(),
+                    RowSetExpr::Join {
+                        left: current,
+                        right: source_node,
+                        mode: NormalizedJoinMode::Inner,
+                        on: NormalizedPredicateExpr::Compare {
+                            left: value_ref(&join.on.left)?,
+                            op: NormalizedComparisonOp::Eq,
+                            right: if right_column == "id" || right_column == "_id" {
+                                NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
+                            } else {
+                                NormalizedValueRef::SourceField {
+                                    source: source.clone(),
+                                    field: right_column.to_owned(),
+                                }
+                            },
+                        },
+                    },
+                );
+                current = join_node;
+                sources.insert(name.clone(), source.clone());
+                output_sources.push((name, source.clone()));
+                tuple_sources.push(source);
+            }
+
+            let projection_node = RowSetNodeId("flat_join:output".to_owned());
+            let mut columns = Vec::new();
+            for (position, source) in tuple_sources.iter().enumerate() {
+                columns.push(RowProjection {
+                    output: TypedOutputField {
+                        name: if position == 0 {
+                            "row_uuid".to_owned()
+                        } else {
+                            format!("__flat_join_row_{position}")
+                        },
+                        ty: ColumnType::Uuid,
+                    },
+                    value: NormalizedValueRef::RowId(RowIdRef::Source(source.clone())),
+                });
+            }
+            // Retain the representative root version used by the existing
+            // real-row membership envelope. Joined source versions stay in
+            // their own source terminals; the rendered tuple itself is kept
+            // in the membership payload below.
+            for (name, ty) in [
+                ("tx_time", ColumnType::U64),
+                ("tx_node_id", ColumnType::U64),
+            ] {
+                columns.push(RowProjection {
+                    output: TypedOutputField {
+                        name: name.to_owned(),
+                        ty,
+                    },
+                    value: NormalizedValueRef::SourceField {
+                        source: root_source.clone(),
+                        field: name.to_owned(),
+                    },
+                });
+            }
+            for (name, source) in &output_sources {
+                let source_schema = schema
+                    .tables
+                    .iter()
+                    .find(|table| table.name == source.table)
+                    .ok_or_else(|| {
+                        Error::QueryCapability(format!("unknown flat join table {}", source.table))
+                    })?;
+                for column in source_schema.columns.iter() {
+                    columns.push(RowProjection {
+                        output: TypedOutputField {
+                            name: format!("{name}.{}", column.name),
+                            ty: column.column_type.clone(),
+                        },
+                        value: NormalizedValueRef::SourceField {
+                            source: source.clone(),
+                            field: column.name.clone(),
+                        },
+                    });
+                }
+            }
+            nodes.insert(
+                projection_node.clone(),
+                RowSetExpr::Project {
+                    input: current,
+                    columns,
+                },
+            );
+            current = projection_node;
+        }
+
         for (index, subquery) in query.array_subqueries.iter().enumerate() {
             current = normalize_array_subquery(
                 &mut nodes,
@@ -7012,6 +6955,17 @@ where
         let deltas = deltas_result?;
         let mut rows = if shape.query().aggregate.is_some() {
             self.materialize_aggregate_query_rows(shape.query(), &table_schema, deltas)?
+        } else if shape.query().flat_join.is_some() {
+            deltas
+                .iter()
+                .filter(|(_, weight)| *weight > 0)
+                .map(|(record, _)| {
+                    CurrentRow::new(
+                        shape.query().table.clone(),
+                        OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
+                    )
+                })
+                .collect()
         } else {
             let mut rows = Vec::new();
             for (record, weight) in deltas.iter() {
@@ -7024,7 +6978,9 @@ where
         };
         let query = shape.query();
         self.finish_engine_query_rows(query, &mut rows)?;
-        self.apply_projection(query, &mut rows)?;
+        if query.flat_join.is_none() {
+            self.apply_projection(query, &mut rows)?;
+        }
         Ok(rows)
     }
 
@@ -7177,7 +7133,9 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<Option<BindingViewKey>, Error> {
-        if !self.can_use_prepared_current_query_plan(shape) {
+        if !self.can_use_prepared_current_query_plan(shape)
+            || self.query_uses_heterogeneous_physical_lineage(shape)
+        {
             return Ok(None);
         }
         let binding_view_key = BindingViewKey::new(
@@ -7194,10 +7152,76 @@ where
 
     fn can_use_prepared_current_query_plan(&self, shape: &ValidatedQuery) -> bool {
         shape.schema_version() == self.catalogue.current_schema_version_id
-            && !self.catalogue.partitions.iter().any(|(table, version)| {
-                table == &shape.query().table
-                    && *version != self.catalogue.current_schema_version_id
-            })
+    }
+
+    fn query_uses_heterogeneous_physical_lineage(&self, shape: &ValidatedQuery) -> bool {
+        let Some(tables) = self.query_storage_read_tables(shape) else {
+            return true;
+        };
+        tables.into_iter().any(|logical_table| {
+            let Ok(table_id) =
+                self.physical_table_id_for_schema(shape.schema_version(), &logical_table)
+            else {
+                return true;
+            };
+            self.catalogue
+                .physical_mappings
+                .iter()
+                .any(|(schema_version, mapping)| {
+                    *schema_version != shape.schema_version()
+                        && mapping
+                            .tables
+                            .values()
+                            .any(|table| table.table_id == table_id)
+                })
+        })
+    }
+
+    fn query_storage_read_tables(&self, shape: &ValidatedQuery) -> Option<BTreeSet<String>> {
+        let query = shape.query();
+        let read_schema_version = shape.schema_version();
+        let mut tables = BTreeSet::from([query.table.clone()]);
+        for join in &query.joins {
+            collect_join_read_tables(join, &mut tables);
+        }
+        for reachable in &query.reachable {
+            tables.insert(reachable.access_table.clone());
+            tables.insert(reachable.edge_table.clone());
+            if let Some(seed) = &reachable.seed {
+                tables.insert(seed.table.clone());
+            }
+        }
+        self.collect_include_read_tables(
+            &query.table,
+            read_schema_version,
+            &query.includes,
+            &mut tables,
+        )?;
+        Some(tables)
+    }
+
+    fn collect_include_read_tables(
+        &self,
+        root_table: &str,
+        read_schema_version: SchemaVersionId,
+        includes: &[Include],
+        tables: &mut BTreeSet<String>,
+    ) -> Option<()> {
+        for include in includes {
+            if !include.require && include.join_mode != crate::query::JoinMode::Inner {
+                continue;
+            }
+            let mut current_table_name = root_table.to_owned();
+            for segment in include.path.split('.') {
+                let current_table = self
+                    .table_in_schema(&current_table_name, read_schema_version)
+                    .ok()?;
+                let target_table = current_table.references.get(segment)?.clone();
+                tables.insert(target_table.clone());
+                current_table_name = target_table;
+            }
+        }
+        Some(())
     }
 
     fn settled_binding_view_source_rows(
@@ -7214,7 +7238,6 @@ where
             .filter(|(entry_table, _, _)| entry_table.as_str() == table)
             .collect::<Vec<_>>();
         let table_schema = self.table(table)?.clone();
-        let content_descriptor = table_schema.history_storage_table().record_schema();
         let mut rows = Vec::with_capacity(row_entries.len());
         for (_, row_uuid, tx_id) in row_entries {
             let tx_node_alias = self
@@ -7223,13 +7246,12 @@ where
                 .copied()
                 .ok_or(Error::MissingTransaction(tx_id))?;
             let version = self
-                .query_version_by_alias_with_descriptor(
+                .query_version_by_alias(
                     table,
                     row_uuid,
                     VersionLayer::Content,
                     tx_id.time,
                     tx_node_alias,
-                    &content_descriptor,
                 )?
                 .ok_or(Error::MissingTransaction(tx_id))?;
             rows.push(self.current_row_from_materialized_version(&table_schema, &version)?);
@@ -7432,21 +7454,20 @@ where
         table: &str,
         position: GlobalSeq,
     ) -> Result<Vec<groove::db::EncodedKeyValue<'_>>, Error> {
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
         if position.0 == u64::MAX {
             Ok(self.database.index_scan_raw(
                 "jazz_global_changes",
                 "by_table_global_seq",
-                &[Value::Bytes(table.as_bytes().to_vec())],
+                &[Value::U64(table_id.0)],
             )?)
         } else {
             Ok(self.database.index_scan_range_raw(
                 "jazz_global_changes",
                 "by_table_global_seq",
-                &[Value::Bytes(table.as_bytes().to_vec()), Value::U64(0)],
-                &[
-                    Value::Bytes(table.as_bytes().to_vec()),
-                    Value::U64(position.0 + 1),
-                ],
+                &[Value::U64(table_id.0), Value::U64(0)],
+                &[Value::U64(table_id.0), Value::U64(position.0 + 1)],
             )?)
         }
     }
@@ -7457,7 +7478,6 @@ where
         position: GlobalSeq,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table_schema = self.table(table)?.clone();
-        let content_descriptor = table_schema.history_storage_table().record_schema();
         let mut rows_by_uuid = BTreeMap::<
             RowUuid,
             (
@@ -7499,13 +7519,12 @@ where
                 continue;
             };
             let version = self
-                .query_version_by_alias_with_descriptor(
+                .query_version_by_alias(
                     table,
                     row_uuid,
                     VersionLayer::Content,
                     tx_time,
                     tx_node_alias,
-                    &content_descriptor,
                 )?
                 .ok_or(Error::InvalidStoredValue(
                     "historical content winner is missing",
@@ -7698,6 +7717,13 @@ where
             }
         }
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
+        let mut payload_states = BTreeMap::<
+            ResultMemberEntry,
+            (
+                Option<ResultMemberPayloadEntry>,
+                Option<ResultMemberPayloadEntry>,
+            ),
+        >::new();
         let mut fact_states = BTreeMap::<ProgramFactEntry, (bool, bool)>::new();
         let mut structured_app_row_changes = BTreeSet::new();
         loop {
@@ -7724,6 +7750,20 @@ where
                             .and_modify(|(_, after)| *after = false)
                             .or_insert((before, false));
                     }
+                    for member in transitions.result_payload_removes {
+                        let before = local.result_payloads.get(&member).cloned();
+                        payload_states
+                            .entry(member)
+                            .and_modify(|(_, after)| *after = None)
+                            .or_insert((before, None));
+                    }
+                    for (member, payload) in transitions.result_payload_adds {
+                        let before = local.result_payloads.get(&member).cloned();
+                        payload_states
+                            .entry(member)
+                            .and_modify(|(_, after)| *after = Some(payload.clone()))
+                            .or_insert((before, Some(payload)));
+                    }
                     for fact in transitions.program_fact_adds {
                         let before = local.program_facts.contains(&fact);
                         fact_states
@@ -7745,7 +7785,11 @@ where
                 }
             }
         }
-        if states.is_empty() && fact_states.is_empty() && structured_app_row_changes.is_empty() {
+        if states.is_empty()
+            && payload_states.is_empty()
+            && fact_states.is_empty()
+            && structured_app_row_changes.is_empty()
+        {
             return Ok(None);
         }
         let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
@@ -7754,6 +7798,17 @@ where
             match (before, after) {
                 (false, true) => transitions.adds.push(entry),
                 (true, false) => transitions.removes.push(entry),
+                _ => {}
+            }
+        }
+        for (member, (before, after)) in payload_states {
+            match (before, after) {
+                (None, Some(payload)) => transitions.result_payload_adds.push((member, payload)),
+                (Some(_), None) => transitions.result_payload_removes.push(member),
+                (Some(before), Some(after)) if before != after => {
+                    transitions.result_payload_removes.push(member.clone());
+                    transitions.result_payload_adds.push((member, after));
+                }
                 _ => {}
             }
         }
@@ -7768,24 +7823,26 @@ where
         // members. Preserve their current values alongside membership while
         // coalescing a multisink batch; otherwise a present NULL or a revised
         // aggregate can be mistaken for an absent payload at materialization.
-        transitions.result_payload_adds = transitions
-            .program_fact_adds
-            .iter()
-            .filter_map(|fact| match fact {
-                ProgramFactEntry::ResultPayload(payload) => {
-                    Some((payload.member.clone(), payload.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-        transitions.result_payload_removes = transitions
-            .program_fact_removes
-            .iter()
-            .filter_map(|fact| match fact {
-                ProgramFactEntry::ResultPayload(payload) => Some(payload.member.clone()),
-                _ => None,
-            })
-            .collect();
+        if local.result_query.aggregate.is_some() {
+            transitions.result_payload_adds = transitions
+                .program_fact_adds
+                .iter()
+                .filter_map(|fact| match fact {
+                    ProgramFactEntry::ResultPayload(payload) => {
+                        Some((payload.member.clone(), payload.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            transitions.result_payload_removes = transitions
+                .program_fact_removes
+                .iter()
+                .filter_map(|fact| match fact {
+                    ProgramFactEntry::ResultPayload(payload) => Some(payload.member.clone()),
+                    _ => None,
+                })
+                .collect();
+        }
         Ok(Some(transitions))
     }
 
@@ -7859,8 +7916,8 @@ where
             }
             if local.result_set.remove(&member) {
                 if materialize_update && !structured_output {
-                    if let Some((table, row_uuid, _)) = member.as_row() {
-                        removed.push((table.to_string(), row_uuid));
+                    if let Some(occurrence_id) = member.output_occurrence_id() {
+                        removed.push(occurrence_id);
                     } else if is_public_aggregate_result_member(
                         &member,
                         local.result_table.as_str(),
@@ -7876,7 +7933,9 @@ where
                                 .is_ok_and(|candidate_uuid| candidate_uuid == row_uuid)
                         });
                         if !aggregate_replacements.contains(&row_uuid) && !replacement_is_current {
-                            removed.push((local.result_table.clone(), row_uuid));
+                            removed.push(OutputOccurrenceId::single_source(ObjectId::from_uuid(
+                                row_uuid.0,
+                            )));
                         }
                     }
                 }
@@ -7932,7 +7991,9 @@ where
             for root in structured_app_row_changes {
                 match local.maintained.structured_app_row(root) {
                     Some(record) => added.push(CurrentRow::new(local.result_table.clone(), record)),
-                    None => removed.push((local.result_table.clone(), root)),
+                    None => removed.push(OutputOccurrenceId::single_source(ObjectId::from_uuid(
+                        root.0,
+                    ))),
                 }
             }
         }
@@ -8112,6 +8173,17 @@ where
             ));
         };
         let table = self.table(entry.0.as_str())?.clone();
+        if local.result_query.flat_join.is_some() {
+            let payload = local
+                .result_payloads
+                .get(member)
+                .ok_or(Error::InvalidStoredValue(
+                    "flat joined result member is missing its tuple payload",
+                ))?;
+            return self
+                .current_row_from_result_payload(&table, payload)
+                .map(Some);
+        }
         if local.result_select.is_some()
             && let Some(payload) = local.result_payloads.get(member)
         {
@@ -8174,6 +8246,17 @@ where
             ));
         };
         let table = self.table(entry.0.as_str())?.clone();
+        if local.result_query.flat_join.is_some() {
+            let payload = local
+                .result_payloads
+                .get(member)
+                .ok_or(Error::InvalidStoredValue(
+                    "flat joined result member is missing its tuple payload",
+                ))?;
+            return self
+                .current_row_from_result_payload(&table, payload)
+                .map(Some);
+        }
         let tx_versions = self.local_maintained_tx_versions(local, entry.2, cache);
         let version = if let Some(version) =
             local_maintained_view_content_witness(tx_versions, entry.0.as_str(), entry.1)
@@ -8252,8 +8335,12 @@ where
                     cache.insert(tx_id, versions);
                     continue;
                 };
+                let mut scanned_sources = BTreeSet::new();
                 for table in &tables {
-                    for (storage_table, descriptor) in self.version_storage_sources(table)? {
+                    for storage_table in self.version_storage_sources(table)? {
+                        if !scanned_sources.insert(storage_table.clone()) {
+                            continue;
+                        }
                         let raws = self
                             .database
                             .index_scan_range_raw(
@@ -8263,13 +8350,11 @@ where
                                 &[Value::U64(end.0), Value::U64(0)],
                             )?
                             .into_iter()
-                            .map(|raw| raw.raw().to_vec())
+                            .map(|raw| raw.owned_record())
                             .collect::<Vec<_>>();
-                        for raw in raws {
-                            let version = self.decode_history_record(
-                                table,
-                                BorrowedRecord::new(&raw, &descriptor),
-                            )?;
+                        for record in raws {
+                            let version =
+                                self.decode_history_owned_record(table, &storage_table, record)?;
                             if version.tx_node_alias() != alias
                                 || !times.contains(&version.tx_time())
                             {
@@ -8308,6 +8393,48 @@ where
             .get(&tx_id)
             .expect("tx version cache was just populated")
             .as_slice())
+    }
+
+    fn large_value_version_for_tx_with_materialization_cache(
+        &mut self,
+        tx_id: TxId,
+        row_uuid: RowUuid,
+        table_id: PhysicalTableId,
+        column_id: PhysicalColumnId,
+        cache: &mut LocalMaintainedMaterializationCache,
+    ) -> Result<(VersionRow, TableSchema, String, SchemaVersionId), Error> {
+        let versions = self.tx_versions_for_materialization(tx_id, cache)?.to_vec();
+        for version in versions {
+            if version.row_uuid() != row_uuid || version.layer() != VersionLayer::Content {
+                continue;
+            }
+            let schema = self
+                .schema_version_for_alias(version.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "large-value ancestor schema alias is unknown",
+                ))?;
+            let Some(table_mapping) = self
+                .catalogue
+                .physical_mappings
+                .get(&schema)
+                .and_then(|mapping| mapping.tables.get(version.table()))
+            else {
+                continue;
+            };
+            if table_mapping.table_id != table_id {
+                continue;
+            }
+            let Some(column) = table_mapping
+                .columns
+                .iter()
+                .find_map(|(name, id)| (*id == column_id).then(|| name.clone()))
+            else {
+                continue;
+            };
+            let table = self.table_in_schema(version.table(), schema)?.clone();
+            return Ok((version, table, column, schema));
+        }
+        Err(Error::MissingTransaction(tx_id))
     }
 
     fn current_row_from_materialized_version_with_materialization_cache(
@@ -8364,13 +8491,42 @@ where
         kind: LargeValueKind,
         cache: &mut LocalMaintainedMaterializationCache,
     ) -> Result<Vec<u8>, Error> {
-        let len =
-            self.large_value_column_len_with_materialization_cache(table, version, column, cache)?;
+        let canonical = self.canonical_maintained_view_witness(version)?;
+        let version = canonical.as_ref().unwrap_or(version);
+        let authored_schema = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "large-value schema alias is unknown",
+            ))?;
+        let (authored_table, authored_column) =
+            self.authored_large_value_identity(authored_schema, table, column)?;
+        let authored_table_schema = self
+            .table_in_schema(&authored_table, authored_schema)?
+            .clone();
+        let len = self.large_value_column_len_with_materialization_cache(
+            &authored_table_schema,
+            version,
+            &authored_column,
+            cache,
+        )?;
         let refs = self.large_value_extent_refs_for_version_with_materialization_cache(
-            table, version, column, kind, cache,
+            &authored_table_schema,
+            version,
+            &authored_column,
+            kind,
+            cache,
         )?;
         let tx_id = self.version_tx_id(version)?;
-        encode_large_value_handle(table, version.row_uuid(), column, tx_id, kind, len, refs)
+        encode_large_value_handle(
+            authored_schema,
+            &authored_table,
+            version.row_uuid(),
+            &authored_column,
+            tx_id,
+            kind,
+            len,
+            refs,
+        )
     }
 
     fn large_value_column_len_with_materialization_cache(
@@ -8383,25 +8539,36 @@ where
         let mut suffix = Vec::new();
         let mut current = self.version_tx_id(winner)?;
         let mut checkpoint_len = None;
+        let schema = self
+            .schema_version_for_alias(winner.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "large-value schema alias is unknown",
+            ))?;
+        let (authored_table, authored_column) =
+            self.authored_large_value_identity(schema, table, column)?;
+        let (table_id, column_id) =
+            self.large_value_lineage_ids(schema, &authored_table, &authored_column)?;
         loop {
-            let version = self
-                .tx_versions_for_materialization(current, cache)?
-                .iter()
-                .find(|version| {
-                    version.table() == table.name
-                        && version.row_uuid() == winner.row_uuid()
-                        && version.layer() == VersionLayer::Content
-                })
-                .cloned()
-                .ok_or(Error::MissingTransaction(current))?;
-            if let Some(value) =
-                self.large_value_checkpoint(table, version.row_uuid(), column, current)?
-            {
+            let (version, version_table, version_column, version_schema) = self
+                .large_value_version_for_tx_with_materialization_cache(
+                    current,
+                    winner.row_uuid(),
+                    table_id,
+                    column_id,
+                    cache,
+                )?;
+            if let Some(value) = self.large_value_checkpoint(
+                version_schema,
+                &version_table,
+                version.row_uuid(),
+                &version_column,
+                current,
+            )? {
                 checkpoint_len = Some(value.len());
                 break;
             }
             let parents = version.parents();
-            suffix.push(version);
+            suffix.push((version, version_table, version_column));
             match parents.as_slice() {
                 [] => break,
                 [parent] => current = *parent,
@@ -8411,11 +8578,11 @@ where
         suffix.reverse();
 
         let mut value_len = checkpoint_len.unwrap_or_default();
-        for version in &suffix {
-            let Some(Value::Bytes(payload)) = version.cell(table, column)? else {
+        for (version, version_table, version_column) in &suffix {
+            let Some(Value::Bytes(payload)) = version.cell(version_table, version_column)? else {
                 continue;
             };
-            match column_large_value_kind(table, column)? {
+            match column_large_value_kind(version_table, version_column)? {
                 LargeValueKind::Text => {
                     let op = self.decode_text_storage_op(&payload)?;
                     let value = vec![0; value_len];
@@ -8456,19 +8623,26 @@ where
     ) -> Result<Vec<content_store::Extent>, Error> {
         let mut suffix = Vec::new();
         let mut current = self.version_tx_id(winner)?;
+        let schema = self
+            .schema_version_for_alias(winner.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "large-value schema alias is unknown",
+            ))?;
+        let (authored_table, authored_column) =
+            self.authored_large_value_identity(schema, table, column)?;
+        let (table_id, column_id) =
+            self.large_value_lineage_ids(schema, &authored_table, &authored_column)?;
         loop {
-            let version = self
-                .tx_versions_for_materialization(current, cache)?
-                .iter()
-                .find(|version| {
-                    version.table() == table.name
-                        && version.row_uuid() == winner.row_uuid()
-                        && version.layer() == VersionLayer::Content
-                })
-                .cloned()
-                .ok_or(Error::MissingTransaction(current))?;
+            let (version, version_table, version_column, _) = self
+                .large_value_version_for_tx_with_materialization_cache(
+                    current,
+                    winner.row_uuid(),
+                    table_id,
+                    column_id,
+                    cache,
+                )?;
             let parents = version.parents();
-            suffix.push(version);
+            suffix.push((version, version_table, version_column));
             match parents.as_slice() {
                 [] => break,
                 [parent] => current = *parent,
@@ -8478,8 +8652,8 @@ where
         suffix.reverse();
 
         let mut refs = Vec::new();
-        for version in &suffix {
-            let Some(Value::Bytes(payload)) = version.cell(table, column)? else {
+        for (version, version_table, version_column) in &suffix {
+            let Some(Value::Bytes(payload)) = version.cell(version_table, version_column)? else {
                 continue;
             };
             match kind {
@@ -8580,6 +8754,9 @@ where
         let descriptor = RecordDescriptor::new(descriptor_fields);
         let raw = descriptor.create(&values)?;
         let row = CurrentRow::new(table.name.clone(), OwnedRecord::new(raw, descriptor));
+        if row.raw_field("__flat_join_row_1").is_some() {
+            return Ok(row);
+        }
         self.materialize_current_row(table, row)
     }
 
@@ -8890,13 +9067,12 @@ where
         target_tx_time: TxTime,
         target_tx_node: NodeAlias,
     ) -> Result<CurrentRow, Error> {
-        if let Some(version) = self.query_version_by_alias_with_descriptor(
+        if let Some(version) = self.query_version_by_alias(
             target_table_name,
             target_row,
             VersionLayer::Content,
             target_tx_time,
             target_tx_node,
-            &target_table.history_storage_table().record_schema(),
         )? {
             return self.current_row_from_materialized_version(target_table, &version);
         }
@@ -9026,58 +9202,8 @@ where
         self.query_rows_at_for_identity(shape, binding, position, identity)
     }
 
-    pub(crate) fn uses_partitioned_or_schema_projected_read(&self, shape: &ValidatedQuery) -> bool {
+    pub(crate) fn uses_schema_projected_read(&self, shape: &ValidatedQuery) -> bool {
         shape.schema_version() != self.catalogue.current_schema_version_id
-            || self.query_storage_read_tables(shape).is_some_and(|tables| {
-                self.catalogue.partitions.iter().any(|(table, version)| {
-                    *version != self.catalogue.current_schema_version_id && tables.contains(table)
-                })
-            })
-    }
-
-    fn query_storage_read_tables(&self, shape: &ValidatedQuery) -> Option<BTreeSet<String>> {
-        let query = shape.query();
-        let read_schema_version = shape.schema_version();
-        let mut tables = BTreeSet::from([query.table.clone()]);
-        tables.extend(query.joins.iter().map(|join| join.table.clone()));
-        for reachable in &query.reachable {
-            tables.insert(reachable.access_table.clone());
-            tables.insert(reachable.edge_table.clone());
-            if let Some(seed) = &reachable.seed {
-                tables.insert(seed.table.clone());
-            }
-        }
-        self.collect_include_read_tables(
-            &query.table,
-            read_schema_version,
-            &query.includes,
-            &mut tables,
-        )?;
-        Some(tables)
-    }
-
-    fn collect_include_read_tables(
-        &self,
-        root_table: &str,
-        read_schema_version: SchemaVersionId,
-        includes: &[Include],
-        tables: &mut BTreeSet<String>,
-    ) -> Option<()> {
-        for include in includes {
-            if !include.require && include.join_mode != crate::query::JoinMode::Inner {
-                continue;
-            }
-            let mut current_table_name = root_table.to_owned();
-            for segment in include.path.split('.') {
-                let current_table = self
-                    .table_in_schema(&current_table_name, read_schema_version)
-                    .ok()?;
-                let target_table = current_table.references.get(segment)?.clone();
-                tables.insert(target_table.clone());
-                current_table_name = target_table;
-            }
-        }
-        Some(())
     }
 
     fn finish_engine_query_rows(
@@ -9260,9 +9386,9 @@ where
     ) -> Result<(), Error> {
         // `JoinVia` is an existential constraint on this query's root-row
         // result, not flat joined output: maintained membership and delivery
-        // remain addressed by the selected root row. Flat public join output,
-        // which can contain several occurrences for one root, remains rejected
-        // at the public-client boundary until it supplies source tuples.
+        // remain addressed by the selected root row. Flat public join output
+        // carries its source tuple through the maintained terminal, so it can
+        // safely address several occurrences for one root as well.
         self.compile_current_query_program_for_read_view(
             shape,
             binding,
@@ -9957,52 +10083,66 @@ where
         table: &TableSchema,
         tier: DurabilityTier,
     ) -> Result<GraphBuilder, Error> {
-        if tier == DurabilityTier::Global {
-            let content = GraphBuilder::table(global_current_table_name(&table.name))
-                .project(global_current_storage_fields(table, true, true));
-            let deleted = GraphBuilder::table(register_global_current_table_name(&table.name))
-                .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
-                .project(["row_uuid"]);
-            return Ok(GraphBuilder::anti_join(
-                content,
-                deleted,
-                ["row_uuid"],
-                ["row_uuid"],
-            ));
-        }
-        let payload = content_version_current_source_graph(table, tier, true).project([
-            "row_uuid",
-            "tx_time",
-            "tx_node_id",
-            "schema_version",
-            "parents",
-            "authored_columns",
-            "global_seq",
-        ]);
-        Ok(GraphBuilder::join(
-            visible_current_graph(table, tier),
-            payload,
-            ["row_uuid", "tx_time", "tx_node_id"],
-            ["row_uuid", "tx_time", "tx_node_id"],
-        )
-        .project_fields(
-            std::iter::once(ProjectField::renamed("left.row_uuid", "row_uuid"))
-                .chain(table.columns.iter().map(|column| {
-                    let field = user_column_field(&column.name);
-                    ProjectField::renamed(left_field(&field), field)
-                }))
-                .chain([
-                    ProjectField::renamed("left.$createdBy", "created_by"),
-                    ProjectField::renamed("left.$createdAt", "created_at"),
-                    ProjectField::renamed("left.$updatedBy", "updated_by"),
-                    ProjectField::renamed("left.$updatedAt", "updated_at"),
-                    ProjectField::renamed("left.tx_time", "tx_time"),
-                    ProjectField::renamed("left.tx_node_id", "tx_node_id"),
-                    ProjectField::renamed("right.schema_version", "schema_version"),
-                    ProjectField::renamed("right.parents", "parents"),
-                    ProjectField::renamed("right.authored_columns", "authored_columns"),
-                    ProjectField::renamed("right.global_seq", "global_seq"),
-                ]),
+        let schema_version = self.catalogue.current_schema_version_id;
+        let table_id = self.physical_table_id_for_schema(schema_version, &table.name)?;
+        let content_fields = global_current_storage_fields(table, true, true);
+        let global_content = self
+            .physical_current_source_graph(
+                schema_version,
+                &table.name,
+                PhysicalCurrentClass::Global,
+            )?
+            .project(content_fields.clone());
+        let global_deletion =
+            GraphBuilder::table(physical_register_global_current_table_name(table_id))
+                .project_fields(register_storage_fields_for_query_engine(""));
+
+        let (content, deletion) = if tier == DurabilityTier::Global {
+            (global_content, global_deletion)
+        } else {
+            let ahead_content = self.physical_current_source_graph(
+                schema_version,
+                &table.name,
+                PhysicalCurrentClass::Ahead,
+            )?;
+            let ahead_content = if tier == DurabilityTier::Edge {
+                edge_visible_ahead_current_source_graph(ahead_content, content_fields.clone())
+            } else {
+                ahead_content.project(content_fields.clone())
+            };
+            let ahead_deletion =
+                GraphBuilder::table(physical_register_ahead_current_table_name(table_id));
+            let ahead_deletion = if tier == DurabilityTier::Edge {
+                edge_visible_ahead_current_source_graph(
+                    ahead_deletion,
+                    register_storage_field_names(),
+                )
+            } else {
+                ahead_deletion.project_fields(register_storage_fields_for_query_engine(""))
+            };
+            (
+                GraphBuilder::arg_max_by(
+                    GraphBuilder::union([global_content, ahead_content]),
+                    ["row_uuid"],
+                    ["tx_time", "tx_node_id"],
+                )
+                .project(content_fields),
+                GraphBuilder::arg_max_by(
+                    GraphBuilder::union([global_deletion, ahead_deletion]),
+                    ["row_uuid"],
+                    ["tx_time", "tx_node_id"],
+                )
+                .project_fields(register_storage_fields_for_query_engine("")),
+            )
+        };
+        let deleted = deletion
+            .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+            .project(["row_uuid"]);
+        Ok(GraphBuilder::anti_join(
+            content,
+            deleted,
+            ["row_uuid"],
+            ["row_uuid"],
         ))
     }
 
@@ -10997,25 +11137,15 @@ fn query_binding_value_signature(binding: &Binding) -> String {
 }
 
 fn exact_known_state_declaration_if_within_limits(
-    shape_id: ShapeId,
-    subscription: SubscriptionKey,
-    values: &[Value],
+    _shape_id: ShapeId,
+    _subscription: SubscriptionKey,
+    _values: &[Value],
     refs: Vec<RowVersionRef>,
 ) -> Option<KnownStateDeclaration> {
     if refs.len() > MAX_KNOWN_STATE_EXACT_REFS {
         return None;
     }
-    let declaration = KnownStateDeclaration::ExactVersionSet { versions: refs };
-    let subscribe = SyncMessage::Subscribe(Subscribe {
-        shape_id,
-        subscription,
-        values: values.to_vec(),
-        known_state: Some(declaration.clone()),
-    });
-    let Ok(bytes) = postcard::to_allocvec(&subscribe) else {
-        return None;
-    };
-    (bytes.len() <= MAX_SYNC_MESSAGE_BYTES).then_some(declaration)
+    Some(KnownStateDeclaration::ExactVersionSet { versions: refs })
 }
 
 #[cfg(test)]
@@ -11411,18 +11541,42 @@ fn predicate_params(predicates: &[Predicate]) -> BTreeSet<String> {
             Predicate::Not(predicate) => {
                 params.extend(predicate_params(std::slice::from_ref(predicate)));
             }
-            Predicate::Eq(Operand::Column(_), Operand::Param(param))
-            | Predicate::Eq(Operand::Param(param), Operand::Column(_))
-            | Predicate::Ne(Operand::Column(_), Operand::Param(param))
-            | Predicate::Ne(Operand::Param(param), Operand::Column(_))
-            | Predicate::Contains(Operand::Column(_), Operand::Param(param))
-            | Predicate::Contains(Operand::Param(param), Operand::Column(_)) => {
-                params.insert(param.clone());
+            Predicate::Eq(left, right)
+            | Predicate::Ne(left, right)
+            | Predicate::Gt(left, right)
+            | Predicate::Gte(left, right)
+            | Predicate::Lt(left, right)
+            | Predicate::Lte(left, right)
+            | Predicate::Contains(left, right) => {
+                collect_operand_param(left, &mut params);
+                collect_operand_param(right, &mut params);
             }
-            _ => {}
+            Predicate::In(operand, choices) => {
+                collect_operand_param(operand, &mut params);
+                for choice in choices {
+                    collect_operand_param(choice, &mut params);
+                }
+            }
+            Predicate::IsNull(operand) => collect_operand_param(operand, &mut params),
         }
     }
     params
+}
+
+fn collect_operand_param(operand: &Operand, params: &mut BTreeSet<String>) {
+    if let Operand::Param(param) = operand {
+        params.insert(param.clone());
+    }
+}
+
+fn collect_join_read_tables(join: &crate::query::JoinVia, tables: &mut BTreeSet<String>) {
+    tables.insert(join.table.clone());
+    if let Some(source_lookup) = &join.source_lookup {
+        tables.insert(source_lookup.table.clone());
+    }
+    for nested_join in &join.nested_joins {
+        collect_join_read_tables(nested_join, tables);
+    }
 }
 
 #[cfg(test)]
@@ -11865,9 +12019,14 @@ fn inline_branch_current_record(
 }
 
 #[cfg(test)]
-fn historical_current_graph_full_scan(table: &TableSchema, position: GlobalSeq) -> GraphBuilder {
+fn historical_current_graph_full_scan(
+    table: &TableSchema,
+    table_id: PhysicalTableId,
+    position: GlobalSeq,
+    history_rows: GraphBuilder,
+) -> GraphBuilder {
     let cut_predicate = PredicateExpr::And(vec![
-        PredicateExpr::eq("table_name", Value::Bytes(table.name.as_bytes().to_vec())),
+        PredicateExpr::eq("physical_table_id", Value::U64(table_id.0)),
         PredicateExpr::LtEq {
             field: "global_seq".to_owned(),
             value: Value::U64(position.0).into(),
@@ -11908,8 +12067,7 @@ fn historical_current_graph_full_scan(table: &TableSchema, position: GlobalSeq) 
     );
     let content_winners =
         GraphBuilder::arg_max_by(content_events, ["row_uuid"], ["tx_time", "tx_node_id"]);
-    let history_rows = GraphBuilder::table(history_table_name(&table.name))
-        .project(maintained_view_history_storage_field_names(table));
+    let history_rows = history_rows.project(maintained_view_history_storage_field_names(table));
     let content_current = GraphBuilder::join(
         history_rows,
         content_winners,
@@ -12172,7 +12330,6 @@ fn maintained_view_history_storage_field_names(table: &TableSchema) -> Vec<Strin
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use groove::ivm::{FieldRef, ProjectExpr};
     use groove::schema::{ColumnSchema, ColumnType};
     use groove::storage::{Durability, RocksDbStorage};
 
@@ -12193,6 +12350,75 @@ mod tests {
     use super::*;
 
     #[test]
+    fn predicate_params_collects_every_operand_position_and_operator() {
+        let predicates = [Predicate::All(vec![
+            Predicate::Gt(param("left"), col("value")),
+            Predicate::In(
+                col("kind"),
+                vec![lit("fixed"), param("choice"), param("second_choice")],
+            ),
+            Predicate::IsNull(param("nullable")),
+            Predicate::Not(Box::new(Predicate::Lte(col("limit"), param("upper")))),
+        ])];
+
+        assert_eq!(
+            predicate_params(&predicates),
+            BTreeSet::from([
+                "choice".to_owned(),
+                "left".to_owned(),
+                "nullable".to_owned(),
+                "second_choice".to_owned(),
+                "upper".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn join_read_tables_include_source_lookups_and_nested_joins() {
+        let nested = crate::query::JoinVia {
+            table: "nested_junction".to_owned(),
+            on_column: "target".to_owned(),
+            target: Default::default(),
+            source_column: None,
+            source_lookup: Some(JoinSourceLookup {
+                table: "nested_lookup".to_owned(),
+                row_id_source_column: "lookup_id".to_owned(),
+                value_column: "value".to_owned(),
+            }),
+            correlated_filters: vec![],
+            filters: vec![],
+            nested_joins: vec![],
+        };
+        let root = crate::query::JoinVia {
+            table: "root_junction".to_owned(),
+            on_column: "target".to_owned(),
+            target: Default::default(),
+            source_column: None,
+            source_lookup: Some(JoinSourceLookup {
+                table: "root_lookup".to_owned(),
+                row_id_source_column: "lookup_id".to_owned(),
+                value_column: "value".to_owned(),
+            }),
+            correlated_filters: vec![],
+            filters: vec![],
+            nested_joins: vec![nested],
+        };
+        let mut tables = BTreeSet::new();
+
+        collect_join_read_tables(&root, &mut tables);
+
+        assert_eq!(
+            tables,
+            BTreeSet::from([
+                "nested_junction".to_owned(),
+                "nested_lookup".to_owned(),
+                "root_junction".to_owned(),
+                "root_lookup".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
     fn unordered_array_windows_materialize_per_parent_row_id_order() {
         let windows =
             NodeState::<RocksDbStorage>::relation_snapshot_no_order_windows(&[ArraySubquery::new(
@@ -12205,41 +12431,6 @@ mod tests {
                 .get("comments")
                 .map(|window| (window.offset, window.limit)),
             Some((1, Some(2)))
-        );
-    }
-
-    #[test]
-    fn chained_renames_preserve_the_original_projection_source() {
-        let source_table =
-            TableSchema::new("users", [ColumnSchema::new("email", ColumnType::String)]);
-        let read_table = TableSchema::new(
-            "users",
-            [ColumnSchema::new("contact_email", ColumnType::String)],
-        );
-        let lens_path = CompiledLensPath {
-            target_table: "users".to_owned(),
-            ops: vec![
-                CompiledLensOp::Rename {
-                    from: "email".to_owned(),
-                    to: "email_address".to_owned(),
-                },
-                CompiledLensOp::Rename {
-                    from: "email_address".to_owned(),
-                    to: "contact_email".to_owned(),
-                },
-            ],
-        };
-
-        let fields =
-            project_current_content_fields(&source_table, &read_table, Some(&lens_path), 7, false);
-        let contact_email = fields
-            .iter()
-            .find(|field| field.output_name == user_column_field("contact_email"))
-            .expect("projected read column");
-
-        assert_eq!(
-            contact_email.expression,
-            ProjectExpr::Field(FieldRef::name(user_column_field("email"))),
         );
     }
 
@@ -12258,25 +12449,29 @@ mod tests {
         )]);
         let evolved_payload = SchemaVersion::new(evolved);
         let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xa2; 16]), base.clone());
-        node.apply_sync_message(SyncMessage::PublishSchema {
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
-            schema: Box::new(evolved_payload.clone()),
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                evolved_payload.clone(),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved_payload.id,
+                    vec![TableLens {
+                        source_table: "users".to_owned(),
+                        target_table: "people".to_owned(),
+                        ops: vec![LensOp::RenameTable {
+                            from: "users".to_owned(),
+                            to: "people".to_owned(),
+                        }],
+                    }],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
         })
         .unwrap();
-        node.apply_sync_message(SyncMessage::PublishLens {
-            author: AuthorId::SYSTEM,
-            lens: MigrationLens::new(
-                base.version_id(),
-                evolved_payload.id,
-                vec![TableLens {
-                    source_table: "users".to_owned(),
-                    target_table: "people".to_owned(),
-                    ops: vec![],
-                }],
-            ),
-        })
-        .unwrap();
-        node.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
@@ -12308,8 +12503,10 @@ mod tests {
                 metadata: BTreeSet::from([SourceMetadataRequirement::VersionPayloads]),
             },
         };
-        let expected_people_current =
-            global_current_table_name_for_schema("people", evolved_payload.id, evolved_payload.id);
+        let expected_people_current = physical_global_current_table_name(
+            node.physical_table_id_for_schema(evolved_payload.id, "people")
+                .unwrap(),
+        );
         let mut resolver = CurrentQuerySourceResolver {
             node: &mut node,
             read_view: &read_view,
@@ -12325,11 +12522,11 @@ mod tests {
 
         assert!(
             format!("{:?}", resolved.graph).contains(&expected_people_current),
-            "membership source must include the reverse-lens people partition"
+            "membership source must include the shared physical current table"
         );
         assert!(
             format!("{:?}", content_version.graph).contains(&expected_people_current),
-            "content-version source must include the reverse-lens people partition"
+            "content-version source must include the shared physical current table"
         );
     }
 
@@ -12707,9 +12904,20 @@ mod tests {
         table: &TableSchema,
         position: GlobalSeq,
     ) -> BTreeMap<RowUuid, Value> {
+        let table_id = node
+            .physical_table_id_for_schema(node.catalogue.current_schema_version_id, &table.name)
+            .expect("physical table id");
+        let history_source = node
+            .physical_history_source_graph(node.catalogue.current_schema_version_id, &table.name)
+            .expect("physical history source");
         let deltas = node
             .database
-            .query_graph(historical_current_graph_full_scan(table, position))
+            .query_graph(historical_current_graph_full_scan(
+                table,
+                table_id,
+                position,
+                history_source,
+            ))
             .expect("full-scan historical graph");
         let rows = node
             .materialize_inline_current_query_rows(table, deltas)
@@ -12890,13 +13098,17 @@ mod tests {
         .expect("accept second version");
 
         let table = node.table("issues").expect("issues table").clone();
+        let current_source = node
+            .physical_current_source_graph(
+                node.catalogue.current_schema_version_id,
+                "issues",
+                PhysicalCurrentClass::Global,
+            )
+            .expect("physical current source")
+            .project(maintained_view_history_storage_field_names(&table));
         let current_deltas = node
             .database
-            .query_graph(content_version_current_source_graph(
-                &table,
-                DurabilityTier::Global,
-                false,
-            ))
+            .query_graph(current_source)
             .expect("query denormalized current payload");
         let current_rows = current_deltas
             .iter()
@@ -12905,10 +13117,13 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(current_rows.len(), 1);
 
+        let history_source = node
+            .physical_history_source_graph(node.catalogue.current_schema_version_id, "issues")
+            .expect("physical history source");
         let history_deltas = node
             .database
             .query_graph(
-                GraphBuilder::table(history_table_name("issues"))
+                history_source
                     .project(maintained_view_history_storage_field_names(&table))
                     .filter(
                         PredicateExpr::And(vec![
@@ -13471,10 +13686,15 @@ mod tests {
             user_column: None,
             user_claim: None,
             team_column: "team".to_owned(),
-            filters: vec![eq(col("kind"), lit("sync"))],
+            filters: vec![gt(col("kind"), param("seed_kind_lower_bound"))],
         });
         let shape = query.validate(&schema).unwrap();
-        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let binding = shape
+            .bind(BTreeMap::from([(
+                "seed_kind_lower_bound".to_owned(),
+                Value::String("s".to_owned()),
+            )]))
+            .unwrap();
 
         let rows = node
             .query_rows(&shape, &binding, DurabilityTier::Global)

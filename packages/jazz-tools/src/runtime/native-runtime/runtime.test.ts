@@ -1821,7 +1821,6 @@ describe("NativeRuntimeAdapter server transport", () => {
             table: "todos",
             inner_column: "owner_id",
             outer_column: "id",
-            unbounded: true,
           },
         ],
       }),
@@ -1979,7 +1978,6 @@ describe("NativeRuntimeAdapter server transport", () => {
             table: "todos",
             inner_column: "owner_id",
             outer_column: "users.id",
-            unbounded: true,
           },
         ],
       }),
@@ -5118,6 +5116,7 @@ function readPreparedQueryTail(
 } {
   if (!opts.prefixAlreadySkipped) {
     reader.readVec(() => undefined); // joins
+    reader.option(() => undefined); // flat_join
     reader.readVec(() => undefined); // policy_branches
     reader.readVec(() => undefined); // reachable
     reader.readVec(() => undefined); // inherits
@@ -5148,6 +5147,7 @@ function readPreparedSelect(query: Uint8Array): string[] | undefined {
     reader.string();
   });
   reader.readVec(() => undefined);
+  reader.option(() => undefined);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
@@ -5361,6 +5361,7 @@ function readPolicyQueryForTest(reader: PostcardReader): {
   const table = reader.string();
   const filters = reader.readVec(readPolicyPredicateForTest);
   const joins = reader.readVec(readPolicyJoinForTest);
+  reader.option(() => undefined);
   const branches = reader.readVec(readPolicyBranchForTest);
   reader.readVec(skipPolicyReachableForTest);
   reader.readVec(readPolicyInheritsForTest);
@@ -5466,6 +5467,7 @@ function readPolicyQueryWithReachablesForTest(reader: PostcardReader): {
   reader.string();
   reader.readVec(readPolicyPredicateForTest);
   reader.readVec(readPolicyJoinForTest);
+  reader.option(() => undefined);
   reader.readVec(readPolicyBranchForTest);
   const reachables = reader.readVec(readPolicyReachableForTest);
   reader.readVec(() => undefined);
@@ -5486,6 +5488,7 @@ function readPolicyQueryWithInheritsForTest(reader: PostcardReader): {
   reader.string();
   reader.readVec(readPolicyPredicateForTest);
   const joinCount = reader.readVec(readPolicyJoinForTest).length;
+  reader.option(() => undefined);
   reader.readVec(readPolicyBranchForTest);
   reader.readVec(skipPolicyReachableForTest);
   const inherits = reader.readVec(readPolicyInheritsForTest);

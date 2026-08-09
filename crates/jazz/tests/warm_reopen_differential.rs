@@ -44,6 +44,8 @@ enum CanonicalEvent {
     Closed,
 }
 
+type NamedMutation = (&'static str, Box<dyn Fn(&Db<RocksDbStorage>)>);
+
 fn row(seed: u64) -> RowUuid {
     let mut bytes = [0_u8; 16];
     bytes[..8].copy_from_slice(&0x019e_0000_0000_7000_u64.to_be_bytes());
@@ -86,8 +88,7 @@ fn query() -> Query {
         .array_subquery(
             ArraySubquery::new("children", "children", "parent_id", "id")
                 .select(["label", "rank"])
-                .order_by("rank", OrderDirection::Asc)
-                .unbounded(),
+                .order_by("rank", OrderDirection::Asc),
         )
 }
 
@@ -476,7 +477,7 @@ fn reopen_from_rebuild_and_persisted_placeholder_are_incrementally_equivalent() 
         "persisted placeholder open",
     );
 
-    let mutations: Vec<(&str, Box<dyn Fn(&Db<RocksDbStorage>)>)> = vec![
+    let mutations: Vec<NamedMutation> = vec![
         (
             "related row insert",
             Box::new(|db| {

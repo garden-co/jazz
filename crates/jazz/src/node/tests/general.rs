@@ -210,6 +210,9 @@ fn mergeable_commits_persist_transaction_and_history_rows() {
             .unwrap(),
         &v("write tests")
     );
+    let history = node
+        .physical_history_source_graph(node.catalogue.current_schema_version_id, "todos")
+        .unwrap();
     let mut database = node.into_database();
     assert!(
         !database
@@ -217,12 +220,7 @@ fn mergeable_commits_persist_transaction_and_history_rows() {
             .unwrap()
             .is_empty()
     );
-    assert!(
-        !database
-            .query(select_all("jazz_todos_history"))
-            .unwrap()
-            .is_empty()
-    );
+    assert!(database.query_graph(history).unwrap().iter().next().is_some());
 }
 
 #[test]

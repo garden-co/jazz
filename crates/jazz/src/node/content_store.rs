@@ -4,7 +4,7 @@ use groove::db::Database;
 use groove::records::Value;
 use groove::storage::OrderedKvStorage;
 
-use crate::ids::{AuthorId, RowUuid};
+use crate::ids::{AuthorId, RowUuid, SchemaVersionId};
 use crate::schema::{CONTENT_CHECKPOINTS_STORE, CONTENT_EXTENTS_STORE, CONTENT_META_STORE};
 use crate::tx::TxId;
 
@@ -15,6 +15,10 @@ use super::Error;
     Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
 )]
 pub struct Extent {
+    /// Authored schema that defines the logical table and column names.
+    pub schema: SchemaVersionId,
+    /// Logical table in the authored schema.
+    pub table: String,
     /// Writer that owns the stream.
     pub writer: AuthorId,
     /// Row addressed by the stream.
@@ -43,13 +47,15 @@ where
     /// Append bytes to the end of a `(writer, row, column)` stream.
     pub fn append(
         &self,
+        schema: SchemaVersionId,
+        table: &str,
         writer: AuthorId,
         row: RowUuid,
         column: &str,
         bytes: &[u8],
     ) -> Result<Extent, Error> {
         let meta = self.database.direct_record_store(CONTENT_META_STORE)?;
-        let meta_key = stream_key(writer, row, column);
+        let meta_key = stream_key(schema, table, writer, row, column);
         let offset = match meta.get(&meta_key)? {
             Some(value) => match value.get("offset")? {
                 Value::U64(offset) => offset,
@@ -60,6 +66,8 @@ where
         let len = u64::try_from(bytes.len())
             .map_err(|_| Error::InvalidStoredValue("content too large"))?;
         let extent = Extent {
+            schema,
+            table: table.to_owned(),
             writer,
             row,
             column: column.to_owned(),
@@ -70,7 +78,7 @@ where
             self.database
                 .direct_record_store(CONTENT_EXTENTS_STORE)?
                 .set(
-                    &extent_key(writer, row, column, offset),
+                    &extent_key(schema, table, writer, row, column, offset),
                     &[Value::Bytes(bytes.to_vec())],
                 )?;
         }
@@ -105,12 +113,25 @@ where
             self.database
                 .direct_record_store(CONTENT_EXTENTS_STORE)?
                 .set(
-                    &extent_key(extent.writer, extent.row, &extent.column, extent.offset),
+                    &extent_key(
+                        extent.schema,
+                        &extent.table,
+                        extent.writer,
+                        extent.row,
+                        &extent.column,
+                        extent.offset,
+                    ),
                     &[Value::Bytes(bytes.to_vec())],
                 )?;
         }
         let meta = self.database.direct_record_store(CONTENT_META_STORE)?;
-        let meta_key = stream_key(extent.writer, extent.row, &extent.column);
+        let meta_key = stream_key(
+            extent.schema,
+            &extent.table,
+            extent.writer,
+            extent.row,
+            &extent.column,
+        );
         let current = match meta.get(&meta_key)? {
             Some(value) => match value.get("offset")? {
                 Value::U64(offset) => offset,
@@ -152,10 +173,24 @@ where
                 .map_err(|_| Error::InvalidStoredValue("content extent too large"))?,
         );
         for entry in extents.range_entries(
-            &extent_key(extent.writer, extent.row, &extent.column, extent.offset),
-            &extent_key(extent.writer, extent.row, &extent.column, end),
+            &extent_key(
+                extent.schema,
+                &extent.table,
+                extent.writer,
+                extent.row,
+                &extent.column,
+                extent.offset,
+            ),
+            &extent_key(
+                extent.schema,
+                &extent.table,
+                extent.writer,
+                extent.row,
+                &extent.column,
+                end,
+            ),
         )? {
-            let offset = match entry.key.get(3) {
+            let offset = match entry.key.get(5) {
                 Some(Value::U64(offset)) => *offset,
                 _ => return Err(Error::InvalidStoredValue("invalid content extent offset")),
             };
@@ -179,6 +214,7 @@ where
     /// Store a local materialized large-value checkpoint for one version.
     pub fn put_checkpoint(
         &self,
+        schema: SchemaVersionId,
         table: &str,
         row: RowUuid,
         column: &str,
@@ -188,7 +224,7 @@ where
         self.database
             .direct_record_store(CONTENT_CHECKPOINTS_STORE)?
             .set(
-                &checkpoint_key(table, row, column, version),
+                &checkpoint_key(schema, table, row, column, version),
                 &[Value::Bytes(bytes.to_vec())],
             )?;
         Ok(())
@@ -197,6 +233,7 @@ where
     /// Read a local materialized large-value checkpoint for one version.
     pub fn checkpoint(
         &self,
+        schema: SchemaVersionId,
         table: &str,
         row: RowUuid,
         column: &str,
@@ -204,7 +241,7 @@ where
     ) -> Result<Option<Vec<u8>>, Error> {
         self.database
             .direct_record_store(CONTENT_CHECKPOINTS_STORE)?
-            .get(&checkpoint_key(table, row, column, version))?
+            .get(&checkpoint_key(schema, table, row, column, version))?
             .map(|record| match record.get("bytes") {
                 Ok(Value::Bytes(bytes)) => Ok(bytes),
                 Ok(_) => Err(Error::InvalidStoredValue(
@@ -216,22 +253,44 @@ where
     }
 }
 
-fn stream_key(writer: AuthorId, row: RowUuid, column: &str) -> Vec<Value> {
+fn stream_key(
+    schema: SchemaVersionId,
+    table: &str,
+    writer: AuthorId,
+    row: RowUuid,
+    column: &str,
+) -> Vec<Value> {
     vec![
+        Value::Uuid(schema.0),
+        Value::String(table.to_owned()),
         Value::Uuid(writer.0),
         Value::Uuid(row.0),
         Value::String(column.to_owned()),
     ]
 }
 
-fn extent_key(writer: AuthorId, row: RowUuid, column: &str, offset: u64) -> Vec<Value> {
-    let mut key = stream_key(writer, row, column);
+fn extent_key(
+    schema: SchemaVersionId,
+    table: &str,
+    writer: AuthorId,
+    row: RowUuid,
+    column: &str,
+    offset: u64,
+) -> Vec<Value> {
+    let mut key = stream_key(schema, table, writer, row, column);
     key.push(Value::U64(offset));
     key
 }
 
-fn checkpoint_key(table: &str, row: RowUuid, column: &str, version: TxId) -> Vec<Value> {
+fn checkpoint_key(
+    schema: SchemaVersionId,
+    table: &str,
+    row: RowUuid,
+    column: &str,
+    version: TxId,
+) -> Vec<Value> {
     vec![
+        Value::Uuid(schema.0),
         Value::String(table.to_owned()),
         Value::Uuid(row.0),
         Value::String(column.to_owned()),
