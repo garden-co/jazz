@@ -2756,7 +2756,8 @@ fn exclusive_writes_store_versions_under_current_write_schema_storage() {
     })
     .unwrap();
 
-    let tx = core.open_exclusive().unwrap();
+    let tx = OpenBatchId::new();
+    core.open_exclusive(tx).unwrap();
     core.tx_write(
         tx,
         "todos",

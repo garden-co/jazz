@@ -9,10 +9,11 @@ use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::node::{MergeableCommit, NodeState, OpenBatchId};
+use jazz::node::{MergeableCommit, NodeState};
 use jazz::protocol::SyncMessage;
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::tools::OpenBatchId;
 use jazz::tx::{DurabilityTier, Fate, RejectionReason, TxId};
 
 fn todo_table() -> TableSchema {
@@ -119,7 +120,8 @@ impl CoreDb {
     }
 
     fn exclusive_tx(&self) -> Result<CoreExclusiveTx<'_>, Error> {
-        let tx_id = self.server.node().borrow_mut().open_exclusive()?;
+        let tx_id = OpenBatchId::new();
+        self.server.node().borrow_mut().open_exclusive(tx_id)?;
         Ok(CoreExclusiveTx {
             core: self,
             tx_id,
