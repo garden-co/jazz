@@ -3016,12 +3016,12 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
     let empty = JazzSchema::new([]);
     let refs = empty.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-    let owner = block_on(Db::open(DbConfig {
+    let owner = block_on(Db::open_history_complete(DbConfig {
         schema: empty,
         storage: doctest_support::MemoryStorage::new(&refs),
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0x91; 16]),
-            author: AuthorId::from_bytes([0x92; 16]),
+            author: AuthorId::SYSTEM,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(91))),
         large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
@@ -3034,7 +3034,7 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
             ColumnSchema::new("done", ColumnType::Bool),
         ],
     )]);
-    let view = owner.register_schema_view(schema).unwrap();
+    let view = owner.register_schema_view(schema.clone()).unwrap();
     let open = OpenBatchId::new();
     owner.begin_mergeable(open).unwrap();
     let inserted = row(0x91);
@@ -3048,12 +3048,63 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
         .unwrap();
     owner.commit_mergeable_handle(open).unwrap();
 
+    // Advance the owner's canonical schema after the query view was registered.
+    // The historical view still calls this column `title`; resolving projection
+    // against the canonical schema would silently omit it after the rename.
+    let renamed_schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("summary", ColumnType::String),
+            ColumnSchema::new("done", ColumnType::Bool),
+        ],
+    )]);
+    let renamed = SchemaVersion::new(renamed_schema);
+    owner
+        .publish_schema_with_lens(
+            2,
+            SchemaLineagePublication::new(
+                renamed.clone(),
+                MigrationLens::new(
+                    schema.version_id(),
+                    renamed.id,
+                    vec![TableLens {
+                        source_table: "todos".to_owned(),
+                        target_table: "todos".to_owned(),
+                        ops: vec![LensOp::RenameColumn {
+                            from: "title".to_owned(),
+                            to: "summary".to_owned(),
+                        }],
+                    }],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            ),
+        )
+        .unwrap();
+    owner
+        .set_current_write_schema(CurrentWriteSchema {
+            revision: 2,
+            schema: renamed.id,
+        })
+        .unwrap();
+
     let prepared = view
         .prepare_query(&view.table("todos").select(["title", "$updatedAt"]))
         .unwrap();
     let rows = block_on(view.all(&prepared, ReadOpts::default())).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), inserted);
+    assert!(
+        rows[0]
+            .encoded_record()
+            .0
+            .field_index("user_title")
+            .is_some()
+    );
+    assert_eq!(
+        rows[0].cell_at(0),
+        Some(Value::String("attached".to_owned()))
+    );
 }
 
 #[test]

@@ -547,20 +547,17 @@ impl Backend {
         }
     }
 
-    fn exclusive_all_for_identity(
+    fn transaction_all_for_identity(
         &self,
         tx_id: OpenBatchId,
         prepared: &crate::db::PreparedQuery,
         author: CoreAuthorId,
+        opts: CoreReadOpts,
     ) -> std::result::Result<Vec<crate::node::CurrentRow>, CoreDbError> {
         match self {
-            Self::Memory(db) => {
-                db.transaction_all_for_identity(tx_id, prepared, author, CoreReadOpts::default())
-            }
+            Self::Memory(db) => db.transaction_all_for_identity(tx_id, prepared, author, opts),
             #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => {
-                db.transaction_all_for_identity(tx_id, prepared, author, CoreReadOpts::default())
-            }
+            Self::RocksDb(db) => db.transaction_all_for_identity(tx_id, prepared, author, opts),
         }
     }
 
