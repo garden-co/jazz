@@ -6122,8 +6122,7 @@ where
             let mut query = authorization_query_from_read_policy(table);
             let mut values = BTreeMap::new();
             bind_scope_claim_operands(&mut query, claims, &mut values);
-            for (name, claim) in
-                disambiguate_policy_claim_params(&mut query, schema, &mut values)?
+            for (name, claim) in disambiguate_policy_claim_params(&mut query, schema, &mut values)?
             {
                 // The root policy may rediscover the same claim slot while
                 // walking its source tables. Keep the already-lowered slot in
@@ -7241,6 +7240,32 @@ where
 
     fn can_use_prepared_current_query_plan(&self, shape: &ValidatedQuery) -> bool {
         shape.schema_version() == self.catalogue.current_schema_version_id
+            && !self.required_include_membership_is_identity_sensitive(shape)
+    }
+
+    fn required_include_membership_is_identity_sensitive(&self, shape: &ValidatedQuery) -> bool {
+        for include in &shape.query().includes {
+            if !include.require && include.join_mode != crate::query::JoinMode::Inner {
+                continue;
+            }
+            let mut table_name = shape.query().table.clone();
+            for segment in include.path.split('.') {
+                let Ok(table) = self.table_in_schema(&table_name, shape.schema_version()) else {
+                    return true;
+                };
+                let Some(target_name) = table.references.get(segment) else {
+                    return true;
+                };
+                let Ok(target) = self.table_in_schema(target_name, shape.schema_version()) else {
+                    return true;
+                };
+                if target.read_policy.is_some() {
+                    return true;
+                }
+                table_name = target_name.clone();
+            }
+        }
+        false
     }
 
     fn query_uses_heterogeneous_physical_lineage(&self, shape: &ValidatedQuery) -> bool {
