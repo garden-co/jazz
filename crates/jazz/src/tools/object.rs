@@ -243,29 +243,48 @@ impl<'de> Deserialize<'de> for ResultKey {
 }
 
 fn decode_typed_result_key(identity: &[u8]) -> Option<ResultKey> {
-    let mut cursor = 0usize;
-    let mut take = |len: usize| {
+    const MAX_JOINED_COMPONENTS: usize = 256;
+    const MAX_DISCRIMINATOR_BYTES: usize = 4 * 1024;
+    fn take<'a>(identity: &'a [u8], cursor: &mut usize, len: usize) -> Option<&'a [u8]> {
         let end = cursor.checked_add(len)?;
-        let value = identity.get(cursor..end)?;
-        cursor = end;
+        let value = identity.get(*cursor..end)?;
+        *cursor = end;
         Some(value)
-    };
+    }
+    let mut cursor = 0usize;
     let object_id = |bytes: &[u8]| {
         let bytes: [u8; 16] = bytes.try_into().ok()?;
         Some(ObjectId::from_uuid(Uuid::from_bytes(bytes)))
     };
-    let root = object_id(take(16)?)?;
-    let joined_count = u32::from_be_bytes(take(4)?.try_into().ok()?) as usize;
+    let root = object_id(take(identity, &mut cursor, 16)?)?;
+    let joined_count =
+        u32::from_be_bytes(take(identity, &mut cursor, 4)?.try_into().ok()?) as usize;
+    if joined_count > MAX_JOINED_COMPONENTS
+        || identity.len().saturating_sub(cursor) < joined_count.checked_mul(16)?.checked_add(4)?
+    {
+        return None;
+    }
     let mut joined = Vec::with_capacity(joined_count);
     for _ in 0..joined_count {
-        joined.push(object_id(take(16)?)?);
+        joined.push(object_id(take(identity, &mut cursor, 16)?)?);
     }
-    let discriminator_count = u32::from_be_bytes(take(4)?.try_into().ok()?) as usize;
+    let discriminator_count =
+        u32::from_be_bytes(take(identity, &mut cursor, 4)?.try_into().ok()?) as usize;
+    if discriminator_count > joined_count {
+        return None;
+    }
     let mut union_arms = Vec::with_capacity(discriminator_count);
     for _ in 0..discriminator_count {
-        let position = u32::from_be_bytes(take(4)?.try_into().ok()?) as usize;
-        let len = u32::from_be_bytes(take(4)?.try_into().ok()?) as usize;
-        let label = std::str::from_utf8(take(len)?).ok()?.to_owned();
+        let position =
+            u32::from_be_bytes(take(identity, &mut cursor, 4)?.try_into().ok()?) as usize;
+        let len = u32::from_be_bytes(take(identity, &mut cursor, 4)?.try_into().ok()?) as usize;
+        if len == 0 || len > MAX_DISCRIMINATOR_BYTES || len > identity.len().saturating_sub(cursor)
+        {
+            return None;
+        }
+        let label = std::str::from_utf8(take(identity, &mut cursor, len)?)
+            .ok()?
+            .to_owned();
         union_arms.push((position, label));
     }
     if cursor != identity.len() {
@@ -463,6 +482,13 @@ mod tests {
         malformed.extend_from_slice(&valid.typed_canonical_bytes());
         malformed.push(0);
         assert!(serde_json::from_value::<ResultKey>(serde_json::json!(malformed)).is_err());
+
+        let typed = ResultKey(valid);
+        let mut oversized: Vec<u8> =
+            serde_json::from_slice(&serde_json::to_vec(&typed).expect("encode typed key fixture"))
+                .expect("inspect typed key fixture");
+        oversized[17..21].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(serde_json::from_value::<ResultKey>(serde_json::json!(oversized)).is_err());
     }
 
     #[test]

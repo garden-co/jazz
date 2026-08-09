@@ -1691,13 +1691,30 @@ fn analyze_union(
         ));
     }
 
+    let label_counts = inputs
+        .iter()
+        .fold(BTreeMap::<&str, usize>::new(), |mut counts, input| {
+            *counts.entry(input.label.as_str()).or_default() += 1;
+            counts
+        });
     let mut branches = Vec::new();
     for input in inputs {
+        if input.label.is_empty() {
+            return Err(UnsupportedReason::Operator(
+                "union arm labels must be non-empty stable semantic identities".to_owned(),
+            ));
+        }
         let plan = analyze_relation_input_node(&input.node, nodes, visited)?;
-        branches.push(UnionBranchPlan {
-            label: input.label.clone(),
-            plan,
-        });
+        // Normalized semantic labels are the stable identity. When a producer
+        // repeats one, disambiguate with the stable normalized node id rather
+        // than traversal order, so inserting/reordering siblings does not
+        // churn unchanged ResultKeys.
+        let label = if label_counts[input.label.as_str()] == 1 {
+            input.label.clone()
+        } else {
+            format!("{}\u{0}{}", input.label, input.node.0)
+        };
+        branches.push(UnionBranchPlan { label, plan });
     }
     Ok(UnionPlan { branches })
 }
@@ -2676,12 +2693,38 @@ fn lower_union_relation_input(
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
+    lower_union_relation_input_with_prefix(union, resolved_sources, request, None)
+}
+
+fn lower_union_relation_input_with_prefix(
+    union: &UnionPlan,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+    prefix: Option<&str>,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
     let mut lowered = Vec::new();
     for branch in &union.branches {
-        let RelationInputPlan::Linear(linear) = &branch.plan else {
-            return Err(UnsupportedReason::Operator(
-                "UNION ALL join occurrence identity requires source-rooted linear arms".to_owned(),
-            ));
+        let label = prefix.map_or_else(
+            || branch.label.clone(),
+            |prefix| format!("{prefix}\u{0}{}", branch.label),
+        );
+        let linear = match &branch.plan {
+            RelationInputPlan::Linear(linear) => linear,
+            RelationInputPlan::Union(nested) => {
+                lowered.push(lower_union_relation_input_with_prefix(
+                    nested,
+                    resolved_sources,
+                    request,
+                    Some(&label),
+                )?);
+                continue;
+            }
+            RelationInputPlan::Recursive(_) => {
+                return Err(UnsupportedReason::Operator(
+                    "recursive UNION ALL join arms lack a stable finite occurrence carrier"
+                        .to_owned(),
+                ));
+            }
         };
         let source_id = linear.root.source().ok_or_else(|| {
             UnsupportedReason::Operator(
@@ -2729,7 +2772,7 @@ fn lower_union_relation_input(
                 .project_fields(output.fields.iter().map(ProjectField::named).chain(
                     std::iter::once(ProjectField::literal(
                         "__union_occurrence_arm",
-                        Value::String(branch.label.clone()),
+                        Value::String(label),
                     )),
                 ));
         output.fields.insert("__union_occurrence_arm".to_owned());

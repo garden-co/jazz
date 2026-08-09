@@ -438,9 +438,11 @@ typed `(arm-label, row-id)` carrier is retained below the public projection and
 is used by Root grouping, maintained membership, reset snapshots, and
 `ResultKey`. Row-only keys retain the version-1 UUID-vector encoding byte for
 byte; keys with derivation discriminators use the version-2 typed encoding.
-Empty, duplicate-position, or out-of-range discriminators are malformed. A
-nested or recursive bag input without a stable labeled source-row carrier MUST
-still fail lowering rather than collapse copies.
+Empty, duplicate-position, or out-of-range discriminators are malformed.
+Nested non-recursive unions compose their stable semantic arm labels into one
+typed path component; sibling insertion or reordering therefore does not rekey
+unchanged arms. Recursive bag inputs without a finite stable labeled source-row
+carrier MUST still fail lowering rather than collapse copies.
 
 Maintained flat-join additions, removals, updates, reset snapshots, and the
 subscriber cache MUST be keyed by `OutputOccurrenceId`; the root `ObjectId`
