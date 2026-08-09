@@ -171,6 +171,9 @@ enum MaintainedTerminalKind {
     ReplacementDeletion(VersionWitnessSchema),
     RelationEdge(RelationEdgeSchema),
     StructuredAppRows(AppRowSchema),
+    /// Public aggregate rows are a one-shot output sibling. Maintained state
+    /// is driven by the typed AggregateResult fact terminal instead.
+    IgnoredAggregateAppRows,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -213,6 +216,9 @@ impl MaintainedSubscriptionView {
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     ) -> Result<ResultTransitions, super::Error> {
         let kind = schemas.get(sink)?;
+        if matches!(kind, MaintainedTerminalKind::IgnoredAggregateAppRows) {
+            return Ok(ResultTransitions::default());
+        }
         let observed_result_delta_batch = !deltas.is_empty() && kind.is_result_terminal();
         let mut decode_plan_cache = VersionDecodePlanCache::new();
         let decoded = deltas
@@ -653,6 +659,11 @@ impl MaintainedTerminalSchemas {
                         terminal.sink.clone(),
                         MaintainedTerminalKind::StructuredAppRows(rows.clone()),
                     );
+                } else {
+                    sinks.insert(
+                        terminal.sink.clone(),
+                        MaintainedTerminalKind::IgnoredAggregateAppRows,
+                    );
                 }
                 continue;
             };
@@ -747,6 +758,9 @@ fn decode_typed_terminal_record(
     decode_plan_cache: &mut VersionDecodePlanCache,
 ) -> Result<DecodedMaintainedEvent, super::Error> {
     match kind {
+        MaintainedTerminalKind::IgnoredAggregateAppRows => {
+            unreachable!("ignored aggregate app-row terminals are filtered before record decoding")
+        }
         MaintainedTerminalKind::ResultCurrent(schema) => {
             let table_name = match record.get_idx(field_idx(record, &schema.table_field)?)? {
                 Value::String(value) => value,
