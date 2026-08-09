@@ -456,6 +456,13 @@ impl MaintainedSubscriptionView {
             .next()
     }
 
+    pub(crate) fn structured_app_rows(&self) -> Vec<(RowUuid, OwnedRecord)> {
+        self.structured_app_rows
+            .keys()
+            .filter_map(|root| self.structured_app_row(*root).map(|record| (*root, record)))
+            .collect()
+    }
+
     fn apply_structured_app_row_delta(&mut self, root: RowUuid, record: OwnedRecord, weight: i64) {
         self.structured_app_row_descriptor = Some(*record.descriptor());
         let records = self.structured_app_rows.entry(root).or_default();

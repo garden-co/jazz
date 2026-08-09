@@ -228,6 +228,7 @@ fn canonical_event(schema: &JazzSchema, event: &SubscriptionEvent) -> CanonicalE
             removed_edges,
             settled,
             tier,
+            ..
         } => {
             let mut added_related = added_related
                 .iter()

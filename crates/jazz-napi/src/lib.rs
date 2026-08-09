@@ -1973,7 +1973,7 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
             removed_edges,
             settled,
             tier,
-            ..
+            terminal_rows,
         } => {
             // Keep the current native wire source-row addressed until a later
             // revision carries occurrence identity explicitly.
@@ -2001,6 +2001,7 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
                 "reset": reset,
                 "delta": delta,
                 "relation_delta": relation_delta,
+                "output_mode": if *terminal_rows { "terminal_rows" } else { "relation_facts" },
                 "settled": settled,
                 "tier": format!("{tier:?}"),
             }))

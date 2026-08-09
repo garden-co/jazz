@@ -1147,6 +1147,7 @@ where
             materialize_result_tree(prepared.shape.query(), snapshot.clone())?;
         }
         let maintained_subscription = Some(subscription);
+        let terminal_rows = !local_shape.query().array_subqueries.is_empty();
         let mut state_shape = local_shape;
         let mut state_binding = local_binding;
         let mut remote_read_tier = None;
@@ -1189,6 +1190,7 @@ where
         let state_snapshot = relation_snapshot_with_delta_slack(&snapshot);
         let snapshot_index = RelationSnapshotIndex::from_snapshot(&state_snapshot);
         let state = Rc::new(RefCell::new(SubscriptionState {
+            terminal_rows,
             kind: SubscriptionKind::Prepared {
                 shape: state_shape,
                 binding: state_binding,
@@ -1209,7 +1211,12 @@ where
         state
             .borrow()
             .sender
-            .unbounded_send(subscription_reset_event(read_tier, settled, snapshot))
+            .unbounded_send(subscription_reset_event(
+                read_tier,
+                settled,
+                snapshot,
+                terminal_rows,
+            ))
             .map_err(|_| Error::new(ErrorCode::Protocol, "subscription receiver closed"))?;
         self.node
             .subscriptions
@@ -4178,7 +4185,15 @@ where
         let Some(state) = weak.upgrade() else {
             continue;
         };
-        let (read_tier, remote_read_tier, read_view, previous_source, previous_settled, author) = {
+        let (
+            read_tier,
+            remote_read_tier,
+            read_view,
+            previous_source,
+            previous_settled,
+            author,
+            terminal_rows,
+        ) = {
             let state = state.borrow();
             (
                 state.read_tier,
@@ -4187,6 +4202,7 @@ where
                 state.snapshot_source,
                 state.settled,
                 state.author,
+                state.terminal_rows,
             )
         };
         let groove_runtime_token = node.borrow().groove_runtime_token();
@@ -4224,6 +4240,7 @@ where
                 &state_ref.snapshot,
                 &snapshot,
                 true,
+                terminal_rows,
             );
             state_ref.groove_runtime_token = groove_runtime_token;
             state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
@@ -4396,6 +4413,7 @@ where
                                 update,
                                 snapshot_tier,
                                 previous_settled,
+                                terminal_rows,
                             );
                         }
                         let settled = subscription_is_settled(
@@ -4440,6 +4458,7 @@ where
                                 update,
                                 snapshot_tier,
                                 previous_settled,
+                                terminal_rows,
                             );
                             state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
                             let settled = subscription_is_settled(
@@ -4582,9 +4601,16 @@ where
                     &previous,
                     &snapshot,
                     true,
+                    terminal_rows,
                 )
             } else {
-                subscription_delta_event(snapshot_tier, settled, &previous, &snapshot)
+                subscription_delta_event(
+                    snapshot_tier,
+                    settled,
+                    &previous,
+                    &snapshot,
+                    terminal_rows,
+                )
             };
             state.snapshot = relation_snapshot_with_delta_slack(&snapshot);
             state.snapshot_index = RelationSnapshotIndex::from_snapshot(&state.snapshot);
@@ -8161,6 +8187,7 @@ fn rendered_node_bytes(row: &CurrentRow, relations: &BTreeMap<String, ResultRela
 }
 
 struct SubscriptionState {
+    terminal_rows: bool,
     kind: SubscriptionKind,
     groove_runtime_token: u64,
     propagates_upstream: bool,
@@ -8276,6 +8303,10 @@ pub enum SubscriptionEvent {
         settled: bool,
         /// Read tier used to materialize the rows.
         tier: DurabilityTier,
+        /// Whether `added`/`updated` are the authoritative Groove terminal
+        /// rows, including any nested values. Relation facts are then internal
+        /// evidence and must not be assembled by the receiver.
+        terminal_rows: bool,
     },
     /// The serving peer rejected the propagated upstream subscription.
     Rejected {
@@ -8391,14 +8422,16 @@ fn subscription_delta_event(
     settled: bool,
     previous: &RelationSnapshot,
     current: &RelationSnapshot,
+    terminal_rows: bool,
 ) -> SubscriptionEvent {
-    subscription_delta_event_with_reset(tier, settled, previous, current, false)
+    subscription_delta_event_with_reset(tier, settled, previous, current, false, terminal_rows)
 }
 
 fn subscription_reset_event(
     tier: DurabilityTier,
     settled: bool,
     current: RelationSnapshot,
+    terminal_rows: bool,
 ) -> SubscriptionEvent {
     SubscriptionEvent::Delta {
         reset: true,
@@ -8414,6 +8447,7 @@ fn subscription_reset_event(
         removed_edges: Vec::new(),
         settled,
         tier,
+        terminal_rows,
     }
 }
 
@@ -8423,6 +8457,7 @@ fn subscription_delta_event_with_reset(
     previous: &RelationSnapshot,
     current: &RelationSnapshot,
     reset: bool,
+    terminal_rows: bool,
 ) -> SubscriptionEvent {
     let mut previous_by_id = BTreeMap::new();
     for row in &previous.rows {
@@ -8478,6 +8513,7 @@ fn subscription_delta_event_with_reset(
         removed_edges,
         settled,
         tier,
+        terminal_rows,
     }
 }
 
@@ -8487,6 +8523,7 @@ fn apply_maintained_update_to_snapshot(
     update: LocalMaintainedViewSubscriptionUpdate,
     tier: DurabilityTier,
     settled: bool,
+    terminal_rows: bool,
 ) -> SubscriptionEvent {
     let LocalMaintainedViewSubscriptionUpdate {
         added: update_added,
@@ -8519,6 +8556,7 @@ fn apply_maintained_update_to_snapshot(
                 removed_edges: Vec::new(),
                 settled,
                 tier,
+                terminal_rows,
             };
         }
 
@@ -8568,6 +8606,7 @@ fn apply_maintained_update_to_snapshot(
             removed_edges: Vec::new(),
             settled,
             tier,
+            terminal_rows,
         };
     }
 
@@ -8691,6 +8730,7 @@ fn apply_maintained_update_to_snapshot(
         removed_edges: update_removed_edges,
         settled,
         tier,
+        terminal_rows,
     }
 }
 

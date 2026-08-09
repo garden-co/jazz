@@ -40,6 +40,7 @@ import {
   createNativeRowValueEncoder,
   createRecord,
   createRecordValueDecoder,
+  decodeNativeRowValues,
   storageColumnTypeToValueType,
   storageColumnValueType,
   writeDescriptor,
@@ -1676,6 +1677,7 @@ export class NativeRuntimeAdapter implements Runtime {
       }
       if (
         chunk.relationDelta &&
+        !chunk.terminalRows &&
         (subscription.query === null ||
           subscription.relationMaterialization.arraySubqueries.length > 0)
       ) {
@@ -1761,6 +1763,7 @@ export class NativeRuntimeAdapter implements Runtime {
           chunk.delta,
           this.schema,
           chunk.reset === true,
+          chunk.terminalRows ? subscription.outputColumns?.rootColumns : undefined,
         );
         subscription.rows = applied.rows;
         subscription.rowIndexByKey = applied.rowIndexByKey;
@@ -3570,10 +3573,14 @@ function readRelationSnapshot(payload: Uint8Array): NativeRelationSubscriptionSn
   return readNativeRelationSubscriptionSnapshot(new PostcardReader(payload));
 }
 
-function rowsFromBatches(batches: NativeRowBatch[], schema: WasmSchema): RowState[] {
+function rowsFromBatches(
+  batches: NativeRowBatch[],
+  schema: WasmSchema,
+  projectedColumns?: readonly ColumnDescriptor[],
+): RowState[] {
   const rows: RowState[] = [];
   for (const batch of batches) {
-    const fieldPlans = nativeRowFieldPlans(batch, schema);
+    const fieldPlans = nativeRowFieldPlans(batch, schema, projectedColumns);
     const decodeRecord = createRecordValueDecoder(batch.descriptor);
     for (const row of batch.rows) {
       const values: Value[] = [];
@@ -3602,17 +3609,21 @@ function rowsFromBatches(batches: NativeRowBatch[], schema: WasmSchema): RowStat
   return rows;
 }
 
-function nativeRowFieldPlans(batch: NativeRowBatch, schema: WasmSchema): NativeRowFieldPlan[] {
+function nativeRowFieldPlans(
+  batch: NativeRowBatch,
+  schema: WasmSchema,
+  projectedColumns?: readonly ColumnDescriptor[],
+): NativeRowFieldPlan[] {
   let cache = nativeRowFieldPlanCache.get(schema);
   if (!cache) {
     cache = new Map();
     nativeRowFieldPlanCache.set(schema, cache);
   }
   const cacheKey = nativeRowFieldPlanCacheKey(batch);
-  const cached = cache.get(cacheKey);
+  const cached = projectedColumns ? undefined : cache.get(cacheKey);
   if (cached) return cached;
 
-  const columns = schema[batch.table]?.columns ?? [];
+  const columns = projectedColumns ?? schema[batch.table]?.columns ?? [];
   const columnsByName = new Map(columns.map((column) => [column.name, column]));
   const plans: NativeRowFieldPlan[] = [];
 
@@ -3633,7 +3644,7 @@ function nativeRowFieldPlans(batch: NativeRowBatch, schema: WasmSchema): NativeR
     });
   }
 
-  cache.set(cacheKey, plans);
+  if (!projectedColumns) cache.set(cacheKey, plans);
   return plans;
 }
 
@@ -3874,6 +3885,7 @@ function applySubscriptionDeltaWithWireDelta(
   delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] },
   schema: WasmSchema,
   reset = false,
+  projectedColumns?: readonly ColumnDescriptor[],
 ): { rows: RowState[]; rowIndexByKey: Map<string, number>; wireDelta: NativeRowDelta } {
   const rowsByKey = reset
     ? new Map<string, RowState>()
@@ -3887,8 +3899,8 @@ function applySubscriptionDeltaWithWireDelta(
     rowsByKey.delete(key);
   }
 
-  const addedRows = rowsFromBatches(delta.added, schema);
-  const updatedRows = rowsFromBatches(delta.updated, schema);
+  const addedRows = rowsFromBatches(delta.added, schema, projectedColumns);
+  const updatedRows = rowsFromBatches(delta.updated, schema, projectedColumns);
   for (const row of addedRows.concat(updatedRows)) {
     rowsByKey.set(rowKey(row.table, row.id), row);
   }
@@ -4071,8 +4083,28 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array, fieldName?: string): V
     case "Array":
       return { type: "Array", value: decodeArrayBytes(type.element, bytes) };
     case "Row":
-      return { type: "Bytea", value: bytes.slice() };
+      return { type: "Row", value: decodeNestedRowBytes(type.columns, bytes) };
   }
+}
+
+function decodeNestedRowBytes(
+  columns: readonly ColumnDescriptor[],
+  bytes: Uint8Array,
+): { id?: string; values: Value[] } {
+  if (bytes.byteLength < 5) throw new Error("invalid nested row value");
+  const hasId = bytes[0] === 1;
+  let offset = 1;
+  let id: string | undefined;
+  if (hasId) {
+    if (bytes.byteLength < 21) throw new Error("invalid nested row id");
+    id = formatUuid(bytes.subarray(offset, offset + 16));
+    offset += 16;
+  }
+  const length = readU32Le(bytes, offset);
+  offset += 4;
+  const raw = bytes.subarray(offset, offset + length);
+  if (raw.byteLength !== length) throw new Error("invalid nested row value length");
+  return { id, values: decodeNativeRowValues(columns, raw) };
 }
 
 function decodeArrayBytes(elementType: ColumnType, bytes: Uint8Array): Value[] {
@@ -4119,6 +4151,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
       delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] };
       relationDelta?: NativeRelationSubscriptionDelta;
       relationSnapshot?: NativeRelationSubscriptionSnapshot;
+      terminalRows: boolean;
       settled?: boolean;
     }
   | {
@@ -4136,6 +4169,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
     delta?: unknown;
     relation_delta?: unknown;
     relation_snapshot?: unknown;
+    output_mode?: unknown;
     reason?: unknown;
     reset?: unknown;
     settled?: unknown;
@@ -4169,6 +4203,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
           : readRelationSnapshot(
               assertBytes(record.relation_snapshot, "relation subscription snapshot"),
             ),
+      terminalRows: record.output_mode === "terminal_rows",
       settled: typeof record.settled === "boolean" ? record.settled : undefined,
     };
   }

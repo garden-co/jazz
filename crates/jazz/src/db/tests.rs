@@ -212,17 +212,54 @@ fn delta_rows(event: SubscriptionEvent) -> (Vec<CurrentRow>, Vec<CurrentRow>, Ve
     }
 }
 
-fn snapshot_edges(event: &SubscriptionEvent) -> BTreeSet<RelationEdge> {
-    let event = event.clone();
-    let mut snapshot = RelationSnapshot::default();
-    apply_subscription_event(&mut snapshot, event);
-    snapshot.edges.iter().cloned().collect()
-}
-
 fn snapshot_from_event(event: SubscriptionEvent) -> RelationSnapshot {
     let mut snapshot = RelationSnapshot::default();
     apply_subscription_event(&mut snapshot, event);
     snapshot
+}
+
+fn terminal_nested_text_values(
+    snapshot: &RelationSnapshot,
+    root: RowUuid,
+    relation: &str,
+    column: &str,
+) -> Vec<String> {
+    let row = snapshot
+        .rows
+        .iter()
+        .take(snapshot.root_count)
+        .find(|row| row.row_uuid() == root)
+        .expect("terminal root row");
+    let (descriptor, raw) = row.encoded_record();
+    let record = groove::records::BorrowedRecord::new(raw, descriptor);
+    let Value::Array(children) = record.get(relation).expect("nested terminal field") else {
+        panic!("nested terminal field must be an array")
+    };
+    children
+        .into_iter()
+        .map(|child| {
+            let Value::Record(child) = child else {
+                panic!("nested terminal array must contain records")
+            };
+            let Value::String(value) = child.get(column).expect("nested text field") else {
+                panic!("nested terminal field must be text")
+            };
+            value
+        })
+        .collect()
+}
+
+fn terminal_sorted_limited_text_values(
+    snapshot: &RelationSnapshot,
+    root: RowUuid,
+    relation: &str,
+    column: &str,
+    limit: usize,
+) -> Vec<String> {
+    let mut values = terminal_nested_text_values(snapshot, root, relation, column);
+    values.sort();
+    values.truncate(limit);
+    values
 }
 
 fn schema_table<'a>(schema: &'a JazzSchema, table: &str) -> &'a TableSchema {
@@ -300,29 +337,6 @@ fn sorted_related_text_values(
         column,
     );
     values.sort();
-    values
-}
-
-fn ordered_limited_related_text_values(
-    snapshot: &RelationSnapshot,
-    schema: &JazzSchema,
-    source_table: &str,
-    source_row: RowUuid,
-    relation: &str,
-    target_table: &str,
-    column: &str,
-    limit: usize,
-) -> Vec<String> {
-    let mut values = sorted_related_text_values(
-        snapshot,
-        schema,
-        source_table,
-        source_row,
-        relation,
-        target_table,
-        column,
-    );
-    values.truncate(limit);
     values
 }
 
@@ -3015,7 +3029,7 @@ fn include_deleted_fails_closed_on_live_subscription_apis() {
 }
 
 #[test]
-fn array_subquery_live_subscription_tracks_child_edges() {
+fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
     let schema = relation_schema();
     let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
     db.insert_with_id(
@@ -3038,11 +3052,17 @@ fn array_subquery_live_subscription_tracks_child_edges() {
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
     let opened = block_on(subscription.next_event()).unwrap();
+    let SubscriptionEvent::Delta { terminal_rows, .. } = &opened else {
+        panic!("expected terminal reset")
+    };
+    assert!(*terminal_rows);
+    let mut snapshot = snapshot_from_event(opened);
     assert_eq!(
-        snapshot_edges(&opened),
-        BTreeSet::new(),
-        "initial parent has no children"
+        terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
+        Vec::<String>::new(),
+        "an empty nested collection is encoded in the surviving root"
     );
+    assert!(snapshot.edges.is_empty());
 
     db.insert_with_id(
         "todos",
@@ -3053,15 +3073,30 @@ fn array_subquery_live_subscription_tracks_child_edges() {
         ]),
     )
     .unwrap();
+    db.tick().unwrap();
+    let mut child_added = block_on(subscription.next_event()).unwrap();
+    while let Some(next) = subscription.try_next_event() {
+        child_added = next;
+    }
+    let SubscriptionEvent::Delta {
+        updated,
+        added_edges,
+        terminal_rows,
+        ..
+    } = &child_added
+    else {
+        panic!("expected root replacement")
+    };
+    assert!(*terminal_rows);
+    assert_eq!(updated.len(), 1, "a child insertion replaces one root");
+    assert!(
+        added_edges.is_empty(),
+        "relation facts are not public output"
+    );
+    apply_subscription_event(&mut snapshot, child_added);
     assert_eq!(
-        snapshot_edges(&block_on(subscription.next_event()).unwrap()),
-        BTreeSet::from([RelationEdge {
-            source_table: "users".to_owned(),
-            source_row: row(0xa1),
-            relation: "todosViaOwner".to_owned(),
-            target_table: "todos".to_owned(),
-            target_row: row(0x11),
-        }])
+        terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
+        vec!["first".to_owned()]
     );
 
     db.update(
@@ -3070,10 +3105,10 @@ fn array_subquery_live_subscription_tracks_child_edges() {
         BTreeMap::from([("owner_id".to_owned(), Value::Uuid(row(0xb1).0))]),
     )
     .unwrap();
+    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
     assert_eq!(
-        snapshot_edges(&block_on(subscription.next_event()).unwrap()),
-        BTreeSet::new(),
-        "child leaves the correlated array when its owner changes"
+        terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
+        Vec::<String>::new()
     );
 
     db.update(
@@ -3082,16 +3117,11 @@ fn array_subquery_live_subscription_tracks_child_edges() {
         BTreeMap::from([("owner_id".to_owned(), Value::Uuid(row(0xa1).0))]),
     )
     .unwrap();
+    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
     assert_eq!(
-        snapshot_edges(&block_on(subscription.next_event()).unwrap()),
-        BTreeSet::from([RelationEdge {
-            source_table: "users".to_owned(),
-            source_row: row(0xa1),
-            relation: "todosViaOwner".to_owned(),
-            target_table: "todos".to_owned(),
-            target_row: row(0x11),
-        }]),
-        "re-populated group is emitted as full current relation state"
+        terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
+        vec!["first".to_owned()],
+        "re-populated group is emitted in the authoritative root"
     );
 }
 
@@ -3113,17 +3143,9 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
-    let opened = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    let mut snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
     assert_eq!(
-        sorted_related_text_values(
-            &opened,
-            &schema,
-            "todos",
-            row(0x21),
-            "comments",
-            "comments",
-            "body"
-        ),
+        terminal_nested_text_values(&snapshot, row(0x21), "comments", "body"),
         Vec::<String>::new()
     );
 
@@ -3136,17 +3158,9 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
         ]),
     )
     .unwrap();
-    let after_insert = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
     assert_eq!(
-        sorted_related_text_values(
-            &after_insert,
-            &schema,
-            "todos",
-            row(0x21),
-            "comments",
-            "comments",
-            "body"
-        ),
+        terminal_nested_text_values(&snapshot, row(0x21), "comments", "body"),
         vec!["first".to_owned()]
     );
 
@@ -3156,32 +3170,16 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
         BTreeMap::from([("body".to_owned(), Value::String("edited".to_owned()))]),
     )
     .unwrap();
-    let after_update = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
     assert_eq!(
-        sorted_related_text_values(
-            &after_update,
-            &schema,
-            "todos",
-            row(0x21),
-            "comments",
-            "comments",
-            "body"
-        ),
+        terminal_nested_text_values(&snapshot, row(0x21), "comments", "body"),
         vec!["edited".to_owned()]
     );
 
     db.delete("comments", row(0xc1)).unwrap();
-    let after_child_delete = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
     assert_eq!(
-        sorted_related_text_values(
-            &after_child_delete,
-            &schema,
-            "todos",
-            row(0x21),
-            "comments",
-            "comments",
-            "body"
-        ),
+        terminal_nested_text_values(&snapshot, row(0x21), "comments", "body"),
         Vec::<String>::new()
     );
 
@@ -3194,25 +3192,17 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
         ]),
     )
     .unwrap();
-    let after_repopulate = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
     assert_eq!(
-        sorted_related_text_values(
-            &after_repopulate,
-            &schema,
-            "todos",
-            row(0x21),
-            "comments",
-            "comments",
-            "body"
-        ),
+        terminal_nested_text_values(&snapshot, row(0x21), "comments", "body"),
         vec!["second".to_owned()]
     );
 
     db.delete("todos", row(0x21)).unwrap();
-    let after_parent_delete = snapshot_from_event(block_on(subscription.next_event()).unwrap());
-    assert_eq!(after_parent_delete.root_count, 0);
+    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
+    assert_eq!(snapshot.root_count, 0);
     assert!(
-        after_parent_delete.edges.is_empty(),
+        snapshot.edges.is_empty(),
         "parent removal must cascade assembled child entries away"
     );
 }
@@ -3237,16 +3227,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
 
     let mut snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
     assert_eq!(
-        ordered_limited_related_text_values(
-            &snapshot,
-            &schema,
-            "todos",
-            row(0x31),
-            "comments",
-            "comments",
-            "body",
-            1
-        ),
+        terminal_sorted_limited_text_values(&snapshot, row(0x31), "comments", "body", 1),
         Vec::<String>::new()
     );
 
@@ -3262,16 +3243,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     db.tick().unwrap();
     apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
     assert_eq!(
-        ordered_limited_related_text_values(
-            &snapshot,
-            &schema,
-            "todos",
-            row(0x31),
-            "comments",
-            "comments",
-            "body",
-            1
-        ),
+        terminal_sorted_limited_text_values(&snapshot, row(0x31), "comments", "body", 1),
         vec!["b".to_owned()]
     );
 
@@ -3288,16 +3260,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     if let Some(outside_boundary_event) = subscription.try_next_event() {
         apply_subscription_event(&mut snapshot, outside_boundary_event);
         assert_eq!(
-            ordered_limited_related_text_values(
-                &snapshot,
-                &schema,
-                "todos",
-                row(0x31),
-                "comments",
-                "comments",
-                "body",
-                1
-            ),
+            terminal_sorted_limited_text_values(&snapshot, row(0x31), "comments", "body", 1),
             vec!["b".to_owned()]
         );
     }
@@ -3314,16 +3277,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     db.tick().unwrap();
     apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
     assert_eq!(
-        ordered_limited_related_text_values(
-            &snapshot,
-            &schema,
-            "todos",
-            row(0x31),
-            "comments",
-            "comments",
-            "body",
-            1
-        ),
+        terminal_sorted_limited_text_values(&snapshot, row(0x31), "comments", "body", 1),
         vec!["a".to_owned()]
     );
 
@@ -3336,16 +3290,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     db.tick().unwrap();
     apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
     assert_eq!(
-        ordered_limited_related_text_values(
-            &snapshot,
-            &schema,
-            "todos",
-            row(0x31),
-            "comments",
-            "comments",
-            "body",
-            1
-        ),
+        terminal_sorted_limited_text_values(&snapshot, row(0x31), "comments", "body", 1),
         vec!["b".to_owned()]
     );
 }

@@ -7699,6 +7699,7 @@ where
         }
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
         let mut fact_states = BTreeMap::<ProgramFactEntry, (bool, bool)>::new();
+        let mut structured_app_row_changes = BTreeSet::new();
         loop {
             match local.subscription.try_recv() {
                 Ok(deltas) => {
@@ -7708,6 +7709,7 @@ where
                         &local.tables,
                         &self.node_aliases,
                     )?;
+                    structured_app_row_changes.extend(transitions.structured_app_row_changes);
                     for entry in transitions.adds {
                         let before = local.result_set.contains(&entry);
                         states
@@ -7743,10 +7745,11 @@ where
                 }
             }
         }
-        if states.is_empty() && fact_states.is_empty() {
+        if states.is_empty() && fact_states.is_empty() && structured_app_row_changes.is_empty() {
             return Ok(None);
         }
         let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
+        transitions.structured_app_row_changes = structured_app_row_changes;
         for (entry, (before, after)) in states {
             match (before, after) {
                 (false, true) => transitions.adds.push(entry),
@@ -7800,6 +7803,8 @@ where
         transitions: super::maintained_subscription_view::ResultTransitions,
         materialize_update: bool,
     ) -> Result<LocalMaintainedViewSubscriptionUpdate, Error> {
+        let structured_output = !local.result_query.array_subqueries.is_empty();
+        let structured_app_row_changes = transitions.structured_app_row_changes.clone();
         let aggregate_replacements = transitions
             .adds
             .iter()
@@ -7836,7 +7841,7 @@ where
             ) {
                 continue;
             }
-            if local.result_set.insert(member.clone()) && materialize_update {
+            if local.result_set.insert(member.clone()) && materialize_update && !structured_output {
                 if let Some(row) =
                     self.materialize_local_maintained_view_result_member(local, &member)?
                 {
@@ -7853,7 +7858,7 @@ where
                 continue;
             }
             if local.result_set.remove(&member) {
-                if materialize_update {
+                if materialize_update && !structured_output {
                     if let Some((table, row_uuid, _)) = member.as_row() {
                         removed.push((table.to_string(), row_uuid));
                     } else if is_public_aggregate_result_member(
@@ -7879,7 +7884,10 @@ where
         }
         for fact in transitions.program_fact_removes {
             if local.program_facts.remove(&fact) {
-                if materialize_update && let ProgramFactEntry::RelationEdge(edge) = fact {
+                if materialize_update
+                    && !structured_output
+                    && let ProgramFactEntry::RelationEdge(edge) = fact
+                {
                     removed_edges.push(RelationEdge {
                         source_table: edge.source_table.to_string(),
                         source_row: edge.source_row,
@@ -7891,7 +7899,7 @@ where
             }
         }
         for fact in transitions.program_fact_adds {
-            let edge = materialize_update
+            let edge = (materialize_update && !structured_output)
                 .then(|| match &fact {
                     ProgramFactEntry::RelationEdge(edge) => Some(edge.clone()),
                     _ => None,
@@ -7920,6 +7928,14 @@ where
                 added_edges.push((relation_edge, row));
             }
         }
+        if materialize_update && structured_output {
+            for root in structured_app_row_changes {
+                match local.maintained.structured_app_row(root) {
+                    Some(record) => added.push(CurrentRow::new(local.result_table.clone(), record)),
+                    None => removed.push((local.result_table.clone(), root)),
+                }
+            }
+        }
         Ok(LocalMaintainedViewSubscriptionUpdate {
             added,
             removed,
@@ -7932,6 +7948,20 @@ where
         &mut self,
         local: &LocalMaintainedViewSubscription,
     ) -> Result<RelationSnapshot, Error> {
+        if !local.result_query.array_subqueries.is_empty() {
+            let mut rows = local
+                .maintained
+                .structured_app_rows()
+                .into_iter()
+                .map(|(_, record)| CurrentRow::new(local.result_table.clone(), record))
+                .collect::<Vec<_>>();
+            self.apply_query_order(&local.result_query, &mut rows)?;
+            return Ok(RelationSnapshot {
+                root_count: rows.len(),
+                rows,
+                edges: Vec::new(),
+            });
+        }
         let mut cache = self.preload_local_maintained_materialization_cache(local)?;
         let mut rows = Vec::with_capacity(local.result_set.len());
         let mut row_keys = BTreeSet::new();

@@ -2464,6 +2464,7 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             removed_edges,
             settled,
             tier,
+            terminal_rows,
         } => {
             // The current native wire remains source-row addressed. Occurrence
             // identity is maintained in the Rust subscription boundary until a
@@ -2501,6 +2502,15 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             set_prop(&object, "reset", JsValue::from_bool(reset))?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;
             set_prop(&object, "tier", JsValue::from_str(&format!("{tier:?}")))?;
+            set_prop(
+                &object,
+                "output_mode",
+                JsValue::from_str(if terminal_rows {
+                    "terminal_rows"
+                } else {
+                    "relation_facts"
+                }),
+            )?;
         }
         SubscriptionEvent::Closed => {
             set_prop(&object, "type", JsValue::from_str("closed"))?;
