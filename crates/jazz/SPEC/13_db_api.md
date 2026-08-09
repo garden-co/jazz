@@ -711,4 +711,3 @@ frontier and does not inspect the server (`INV-API-32`):
 `LocalOnly` chooses the local snapshot. It is **not** a request to wait until
 that snapshot becomes complete relative to an upstream that is unavailable by
 construction. Convergence is asserted separately, after `reconnect`.
-

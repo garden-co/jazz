@@ -2197,7 +2197,6 @@ impl JazzClient {
             propagation: CorePropagation::Full,
             include_deleted: false,
             read_view,
-            ..CoreReadOpts::default()
         })
     }
     fn core_query(&self, query: &Query) -> Result<crate::query::Query> {
@@ -2978,7 +2977,7 @@ mod tests {
     use super::*;
     use crate::tools::AppId;
     use crate::tools::public_schema::Schema;
-    use crate::tools::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
+    use crate::tools::{ClientStorage, ColumnType, QueryBuilder, SchemaBuilder, TableSchema};
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -3003,7 +3002,7 @@ mod tests {
         let error = JazzClient::core_read_opts(&query, None)
             .expect_err("v1 must not lower plural branches to unsupported MergedBranches");
         assert!(
-            matches!(error, JazzError::Query(message) if message.contains("multi-branch read views are not supported")),
+            matches!(error, JazzError::Query(ref message) if message.contains("multi-branch read views are not supported")),
             "unexpected multi-branch capability error: {error}"
         );
     }
