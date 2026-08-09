@@ -62,11 +62,6 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   private readonly rollingBackTxs = new Set<OpenBatchId>();
   private readonly subscriptions = new Map<number, Function>();
   private readonly remoteSubscriptions = new Map<number, Promise<number>>();
-  // A public subscription is synchronous at this boundary, while the worker
-  // registration is asynchronous. Preserve the caller's program order: a
-  // write issued immediately after subscribe must not overtake registration
-  // and become invisible to its maintained view.
-  private subscriptionRegistration: Promise<void> = Promise.resolve();
   private authFailureCallback: ((reason: string) => void) | undefined;
   // Server-tier operations capture this gate while intentionally disconnected.
   // Reconnect resolves that same gate, so outstanding operations survive instead
@@ -316,7 +311,8 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   ): number {
     const localHandle = this.nextSubscriptionId++;
     const readFence = this.captureReadFence(optionsJson);
-    const remoteHandle = this.opened.then(async () => {
+    const remoteHandle = this.enqueueCommand(async () => {
+      await this.opened;
       await this.awaitReadBatchBegin(optionsJson);
       this.assertReadTransactionOpen(optionsJson);
       await this.settleReadFence(readFence);
@@ -335,9 +331,6 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     });
     void remoteHandle.catch(ignoreExpectedShutdown);
     this.remoteSubscriptions.set(localHandle, remoteHandle);
-    this.subscriptionRegistration = this.subscriptionRegistration
-      .catch(() => undefined)
-      .then(() => remoteHandle.then(() => undefined).catch(() => undefined));
     return localHandle;
   }
 
@@ -403,7 +396,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     const connectWorker = () =>
       this.opened.then(() => {
         if (this.closed) return undefined;
-        return this.send("connect", [url, authJson]);
+        return this.send("connect", [url, authJson], reconnecting ? { control: "reconnect" } : {});
       });
     // An initial connect is an ordinary FIFO command. Reconnect is the control
     // operation that releases already-parked server commands, so it must bypass
@@ -514,9 +507,6 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     method: Method,
     ...args: PersistentBrowserRequestArgs<Method>
   ): MutationResult {
-    // Capture the registration frontier at the public call boundary. A
-    // subscription created after this write must not retroactively delay it.
-    const registrationBeforeWrite = this.subscriptionRegistration;
     const batchId = this.batchIdFromWriteArgs(method, args);
     if (
       batchId &&
@@ -531,7 +521,6 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       );
     }
     const write = this.enqueueCommand(async () => {
-      await registrationBeforeWrite;
       if (batchId) await this.awaitBegin(batchId as OpenBatchId);
       if (batchId && this.completedTxs.get(batchId) === "rolled_back") {
         return { kind: "staged", openBatchId: batchId as OpenBatchId } satisfies MutationResult;

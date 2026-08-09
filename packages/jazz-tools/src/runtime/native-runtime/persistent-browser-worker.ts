@@ -32,6 +32,16 @@ workerScope.onmessage = (event: MessageEvent<PersistentBrowserOpfsOwnerRequest>)
     void handleMessage(message);
     return;
   }
+  // Connection control releases server-tier commands that may already be
+  // executing inside this queue. Queuing it behind those commands would make
+  // the worker wait for the very control operation it has not yet dispatched.
+  if (
+    message.method === "disconnect" ||
+    (message.method === "connect" && message.control === "reconnect")
+  ) {
+    void handleMessage(message);
+    return;
+  }
   commandQueue = commandQueue.then(
     () => handleMessage(message),
     () => handleMessage(message),

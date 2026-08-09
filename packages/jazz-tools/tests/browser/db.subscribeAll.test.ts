@@ -458,6 +458,63 @@ describe("db.subscribeAll browser integration", () => {
     unsubscribe();
   });
 
+  it("registers a persistent-worker subscription before a subsequently called write", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-subscribe-test",
+        driver: { type: "persistent", dbName: uniqueDbName("subscription-write-fifo") },
+      }),
+    );
+    await db.all(makeQuery<Todo>("todos", {}), {
+      tier: "local",
+      localUpdates: "immediate",
+      propagation: "local-only",
+    });
+    const clients = (db as unknown as { clients: Map<string, unknown> }).clients;
+    const client = clients.values().next().value as { runtime: unknown };
+    const runtime = client.runtime as {
+      opened: Promise<void>;
+      worker: { postMessage(message: unknown): void };
+    };
+    await runtime.opened;
+    const postedMethods: string[] = [];
+    const postMessage = runtime.worker.postMessage.bind(runtime.worker);
+    runtime.worker.postMessage = (message: unknown) => {
+      postedMethods.push((message as { method: string }).method);
+      postMessage(message);
+    };
+    let releaseReadiness!: () => void;
+    runtime.opened = new Promise<void>((resolve) => {
+      releaseReadiness = resolve;
+    });
+    const deltas: Array<SubscriptionDelta<Todo>> = [];
+    const unsubscribe = trackUnsubscribe(
+      db.subscribeAll(makeQuery<Todo>("todos", {}), (delta) => deltas.push(delta)),
+    );
+
+    const { value } = db.insert(todos, {
+      title: "after subscription registration",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: [],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const writeOvertookSubscriptionReadiness = postedMethods.includes("insert");
+    releaseReadiness();
+    expect(writeOvertookSubscriptionReadiness).toBe(false);
+
+    await waitForCondition(
+      () => deltas.some((delta) => hasChangeForId(delta, 0, value.id)),
+      4000,
+      "expected the registered subscription to observe the subsequent write",
+    );
+    expect(deltas[0]?.all).toEqual([]);
+    expect(deltas.slice(1).some((delta) => hasChangeForId(delta, 0, value.id))).toBe(true);
+
+    unsubscribe();
+  });
+
   for (const testCase of conditionCases) {
     it(`supports condition filter ${testCase.name}`, async () => {
       const deltas: Array<SubscriptionDelta<Todo>> = [];

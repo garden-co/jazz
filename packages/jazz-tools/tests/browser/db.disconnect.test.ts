@@ -279,6 +279,35 @@ describe("Db disconnect/reconnect", () => {
       );
     }, 60_000);
 
+    it("dispatches connection control around an executing worker durability wait", async () => {
+      const { db } = await createDbPair(ctx, createWorkerDb);
+      const write = db.insert(todos, { title: "blocked durability wait", done: false });
+      const batchId = await write.batchId;
+      await db.disconnect();
+
+      // Reach below the parent reconnect gate to reproduce a server-tier command
+      // already executing in the worker, as can happen when a connection drops
+      // after the worker dispatched the wait.
+      const clients = (db as unknown as { clients: Map<string, unknown> }).clients;
+      const client = clients.values().next().value as { runtime: unknown };
+      const runtime = client.runtime as {
+        send(method: "waitForTransaction", args: [typeof batchId, string]): Promise<void>;
+      };
+      const edgeWait = runtime.send("waitForTransaction", [batchId, "edge"]);
+      await expectStillPending(
+        edgeWait,
+        PENDING_ASSERTION_MS,
+        "worker mode: executing edge wait while disconnected",
+      );
+
+      await db.reconnect();
+      await withTimeout(
+        edgeWait,
+        SYNC_OPERATION_TIMEOUT_MS,
+        "worker mode: durability wait did not settle after reconnect",
+      );
+    }, 60_000);
+
     it("resolves local reads and defers edge reads while disconnected", async () => {
       const { db } = await createDbPair(ctx, createWorkerDb);
 
