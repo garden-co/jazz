@@ -368,6 +368,7 @@ export class SubscriptionManager<T extends { id: string }> {
 
       const root = this.terminalRows.get(rootId);
       if (!root) throw new Error(`terminal child edit addressed missing root ${rootId}`);
+      assertTerminalPathEditKey(operation.path, edit);
       const target = terminalCollection(root, rootColumns, operation.path);
       if (!target) throw new Error(`terminal child edit addressed an unresolved path on ${rootId}`);
       const { values, columns } = target;
@@ -615,6 +616,31 @@ function assertTerminalRootEditKey(
   }
 }
 
+function assertTerminalPathEditKey(
+  path: NativeTerminalOperation["path"],
+  edit: NativeTerminalOperation["edit"],
+): void {
+  const last = path.at(-1);
+  if (!last || !("Key" in last)) return;
+  const editKey = terminalEditKey(edit);
+  if (
+    last.Key.length !== editKey.length ||
+    last.Key.some((byte, index) => byte !== editKey[index])
+  ) {
+    throw new Error("terminal path key does not match its edit key");
+  }
+}
+
+function terminalEditKey(edit: NativeTerminalOperation["edit"]): readonly number[] {
+  return "Insert" in edit
+    ? edit.Insert.key
+    : "Update" in edit
+      ? edit.Update.key
+      : "Remove" in edit
+        ? edit.Remove.key
+        : edit.Move.key;
+}
+
 function terminalValueIndex(values: Value[], id: string): number {
   return values.findIndex((value) => value.type === "Row" && value.value.id === id);
 }
@@ -660,6 +686,7 @@ function terminalCollection(
     const keySegment = path[++index];
     if (!keySegment || !("Key" in keySegment)) return undefined;
     const childId = terminalKeyId(keySegment.Key);
+    if (index === path.length - 1) return { values, columns: childColumns };
     const child = values.find((value) => value.type === "Row" && value.value.id === childId);
     if (child?.type !== "Row") return undefined;
     ownerValues = child.value.values;

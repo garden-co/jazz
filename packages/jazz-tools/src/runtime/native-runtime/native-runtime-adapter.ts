@@ -3654,25 +3654,25 @@ function decodeNestedRowBytes(
   descriptor?: DescriptorField[],
 ): { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } {
   if (descriptor) {
-    const decodeRecord = createRecordValueDecoder(descriptor);
+    const keyed = descriptor[0]?.name === "row_uuid";
+    if (keyed && bytes.byteLength < 16) throw new Error("terminal nested row is missing its key");
+    const payloadDescriptor = keyed ? descriptor.slice(1) : descriptor;
+    const payload = keyed ? bytes.subarray(16) : bytes;
+    const decodeRecord = createRecordValueDecoder(payloadDescriptor);
     const columnsByName = new Map(columns.map((column) => [column.name, column]));
     const valuesByColumn = new Map<string, Value>();
-    let id: string | undefined;
-    for (let index = 0; index < descriptor.length; index += 1) {
-      const name = descriptor[index]?.name;
+    const id = keyed ? formatUuid(bytes.subarray(0, 16)) : undefined;
+    for (let index = 0; index < payloadDescriptor.length; index += 1) {
+      const name = payloadDescriptor[index]?.name;
       if (!name) continue;
-      const valueBytes = decodeRecord(bytes, index);
-      if (name === "row_uuid" && valueBytes) {
-        id = formatUuid(valueBytes);
-        continue;
-      }
+      const valueBytes = decodeRecord(payload, index);
       const column = columnsByName.get(name);
       if (!column) continue;
       valuesByColumn.set(
         name,
         valueBytes == null
           ? { type: "Null" }
-          : decodeBytes(column.column_type, valueBytes, name, descriptor[index]?.valueType),
+          : decodeBytes(column.column_type, valueBytes, name, payloadDescriptor[index]?.valueType),
       );
     }
     const row: { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } = {

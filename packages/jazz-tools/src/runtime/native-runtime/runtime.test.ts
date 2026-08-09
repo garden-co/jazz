@@ -5965,9 +5965,9 @@ function encodeTerminalRelationSnapshot(schema: WasmSchema): Uint8Array {
       valueType: { tag: 13, inner: { tag: 15, record: childDescriptor } },
     },
   ];
-  const childRecord = createRecord(childDescriptor, [
+  const childRecord = concatBytes([
     uuidBytes("00000000-0000-0000-0000-000000000002"),
-    new TextEncoder().encode("Ship relation reads"),
+    createRecord(childDescriptor.slice(1), [new TextEncoder().encode("Ship relation reads")]),
   ]);
   const nestedRowsHeader = new Uint8Array(4);
   new DataView(nestedRowsHeader.buffer).setUint32(0, 1, true);
