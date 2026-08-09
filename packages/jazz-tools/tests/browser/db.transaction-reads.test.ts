@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
-import { WriteHandle } from "../../src/runtime/client.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { uniqueDbName } from "./support.js";
 
@@ -107,7 +106,7 @@ describe("db exclusive transaction reads browser integration", () => {
     expect(await db.one<Todo>(makeTodoQuery())).toEqual(todo);
     expect(await tx.one<Todo>(makeTodoQuery())).toBeNull();
 
-    tx.commit();
+    await tx.commit();
 
     expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
   });
@@ -118,7 +117,7 @@ describe("db exclusive transaction reads browser integration", () => {
 
     expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
 
-    tx.commit();
+    await tx.commit();
 
     expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
   });
@@ -126,11 +125,11 @@ describe("db exclusive transaction reads browser integration", () => {
   it("rejects transaction operations after commit", async () => {
     const tx = db.beginExclusiveTransaction();
     tx.insert(todos, { title: "Committed transaction", done: false });
-    const transactionId = tx.transactionId();
+    const openBatchId = tx.openBatchId();
 
-    tx.commit();
+    await tx.commit();
 
-    const coreError = `transaction ${transactionId} is already committed`;
+    const coreError = `open batch ${openBatchId} is already committed`;
     expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.insert(todos, { title: "Nope", done: false })).toThrow(
@@ -145,7 +144,7 @@ describe("db exclusive transaction reads browser integration", () => {
     const tx = db.beginExclusiveTransaction();
     tx.insert(todos, { title: "Exclusive transaction", done: false });
 
-    tx.rollback();
+    await tx.rollback();
 
     expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
   });
@@ -153,11 +152,11 @@ describe("db exclusive transaction reads browser integration", () => {
   it("rejects transaction operations after rollback", async () => {
     const tx = db.beginExclusiveTransaction();
     tx.insert(todos, { title: "Rolled-back transaction", done: false });
-    const transactionId = tx.transactionId();
+    const openBatchId = tx.openBatchId();
 
-    tx.rollback();
+    await tx.rollback();
 
-    const coreError = `transaction ${transactionId} has already been completed or was never opened`;
+    const coreError = `open batch ${openBatchId} has already been completed or was never opened`;
     expect(() => tx.commit()).toThrow(`Commit transaction failed: Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Rollback transaction failed: Write error: ${coreError}`);
     expect(() => tx.insert(todos, { title: "Nope", done: false })).toThrow(
@@ -194,7 +193,7 @@ describe("db exclusive transaction reads browser integration", () => {
     });
     expect(await db.all<Todo>(makeTodoQuery())).toEqual([existingTodo]);
 
-    tx.commit();
+    await tx.commit();
 
     const committedRows = await db.all<Todo>(makeTodoQuery());
     expect(committedRows).toHaveLength(3);
@@ -258,7 +257,7 @@ describe("db exclusive transaction reads browser integration", () => {
     });
 
     it("commits changes once the callback resolves and the authority accepts the transaction", async () => {
-      const txResult = db.exclusiveTransaction((tx) => {
+      const txResult = await db.exclusiveTransaction((tx) => {
         return tx.insert(todos, { title: "Exclusive transaction", done: false });
       });
       const insertedTodo = txResult.value;
@@ -321,8 +320,8 @@ describe("db exclusive transaction reads browser integration", () => {
     aliceTx.update(todos, base.id, { title: "Alice's title" });
     bobTx.update(todos, base.id, { title: "Bob's title" });
 
-    await aliceTx.commit().wait();
-    await expect(bobTx.commit().wait()).rejects.toThrow(
+    await (await aliceTx.commit()).wait();
+    await expect(bobTx.commit().then((committed) => committed.wait())).rejects.toThrow(
       "(transaction_conflict): row visible parent changed since transaction write was staged",
     );
 
@@ -337,18 +336,18 @@ describe("db mergeable transaction reads browser integration", () => {
 
     expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
 
-    tx.commit();
+    await tx.commit();
     expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
   });
 
   it("rejects mergeable transaction operations after commit", async () => {
     const tx = db.beginTransaction();
     tx.insert(todos, { title: "Committed mergeable transaction", done: false });
-    const transactionId = tx.transactionId();
+    const openBatchId = tx.openBatchId();
 
-    tx.commit();
+    await tx.commit();
 
-    const coreError = `transaction ${transactionId} is already committed`;
+    const coreError = `open batch ${openBatchId} is already committed`;
     expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.insert(todos, { title: "Nope", done: false })).toThrow(
@@ -362,11 +361,11 @@ describe("db mergeable transaction reads browser integration", () => {
   it("rejects mergeable transaction operations after rollback", async () => {
     const tx = db.beginTransaction();
     tx.insert(todos, { title: "Rolled-back mergeable transaction", done: false });
-    const transactionId = tx.transactionId();
+    const openBatchId = tx.openBatchId();
 
-    tx.rollback();
+    await tx.rollback();
 
-    const coreError = `transaction ${transactionId} has already been completed or was never opened`;
+    const coreError = `open batch ${openBatchId} has already been completed or was never opened`;
     expect(() => tx.commit()).toThrow(`Commit transaction failed: Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Rollback transaction failed: Write error: ${coreError}`);
     expect(() => tx.insert(todos, { title: "Nope", done: false })).toThrow(
@@ -403,7 +402,7 @@ describe("db mergeable transaction reads browser integration", () => {
     });
     expect(await db.all<Todo>(makeTodoQuery())).toEqual([existingTodo]);
 
-    tx.commit();
+    await tx.commit();
 
     const committedRows = await db.all<Todo>(makeTodoQuery());
     expect(committedRows).toHaveLength(3);
@@ -433,19 +432,19 @@ describe("db mergeable transaction reads browser integration", () => {
   });
 
   describe("db.transaction(cb)", () => {
-    it("returns the callback value when an async mergeable transaction only reads", async () => {
+    it("rejects an async mergeable transaction that only reads because it has no commit", async () => {
       const { value: existingTodo } = db.insert(todos, {
         title: "Alice reviewed the plan",
         done: false,
       });
 
-      const result = await db.transaction(async (tx) => {
-        const rows = await tx.all<Todo>(makeTodoQuery());
-        expect(rows).toEqual([existingTodo]);
-        return "no writes needed";
-      });
-      expect(result.value).toEqual("no writes needed");
-      await expect(result.wait({ tier: "global" })).resolves.toEqual("no writes needed");
+      await expect(
+        db.transaction(async (tx) => {
+          const rows = await tx.all<Todo>(makeTodoQuery());
+          expect(rows).toEqual([existingTodo]);
+          return "no writes needed";
+        }),
+      ).rejects.toThrow("empty mergeable batch has no committed unit; roll it back instead");
     });
 
     it("rolls back cleanly when an async mergeable transaction reads then throws before writing", async () => {
@@ -467,7 +466,7 @@ describe("db mergeable transaction reads browser integration", () => {
     });
 
     it("commits changes once the callback resolves", async () => {
-      const txResult = db.transaction((tx) => {
+      const txResult = await db.transaction((tx) => {
         return tx.insert(todos, { title: "Mergeable transaction", done: false });
       });
       const insertedTodo = txResult.value;

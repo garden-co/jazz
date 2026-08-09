@@ -654,7 +654,18 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
     }
     throw error;
   }
-  const committed = await transaction.commit();
+  let committed: TransactionCommitHandle<TKind>;
+  try {
+    committed = await transaction.commit();
+  } catch (error) {
+    try {
+      await transaction.rollback();
+    } catch {
+      // Preserve the commit error while ensuring an empty mergeable batch is
+      // consumed when the callback helper has no handle to return to callers.
+    }
+    throw error;
+  }
   return createTransactionWriteResult(
     transaction,
     resolvedValue,
