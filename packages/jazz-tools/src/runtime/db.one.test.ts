@@ -105,7 +105,7 @@ describe("Db.one", () => {
 
     await tx.one(app.todos.where({ done: false }));
 
-    expect(beginTransaction).toHaveBeenCalledWith("mergeable");
+    expect(beginTransaction).toHaveBeenCalledWith("mergeable", undefined);
     expect(rootLimit(firstQueryJson(query))).toBe(1);
     expect(query.mock.calls[0]?.[1]).toMatchObject({
       openBatchId: "00000000000070008000000000000001",
