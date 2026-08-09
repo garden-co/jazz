@@ -9490,6 +9490,9 @@ where
         open_tx.predicate_reads.truncate(predicate_len);
         open_tx.predicate_reads.push(predicate_read);
         self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
+        if query.flat_join.is_none() {
+            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
+        }
         Ok(rows)
     }
 
