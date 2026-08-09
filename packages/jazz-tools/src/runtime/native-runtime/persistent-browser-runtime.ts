@@ -25,6 +25,7 @@ import {
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 
 type PendingCall = {
+  method: PersistentBrowserWorkerMethod;
   resolve: (value: unknown) => void;
   reject: (error: unknown) => void;
 };
@@ -463,6 +464,10 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     this.rejectConnectionWaiters();
     try {
       await this.opened;
+      const durabilityWaitIsExecuting = Array.from(this.pending.values()).some(
+        (call) => call.method === "waitForTransaction",
+      );
+      if (!durabilityWaitIsExecuting) await this.shared.commandTail;
       await this.send("close", []);
     } finally {
       this.closed = true;
@@ -594,7 +599,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     }
     const id = this.shared.nextCallId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      this.pending.set(id, { method, resolve, reject });
       this.worker.postMessage({
         id,
         method,
