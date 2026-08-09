@@ -314,6 +314,30 @@ describe("PersistentBrowserOpfsRuntime", () => {
     },
   );
 
+  it.each(["during close", "after close"] as const)(
+    "does not install a new reconnect gate when disconnecting %s",
+    async (timing) => {
+      vi.stubGlobal("Worker", FakeWorker);
+
+      const runtime = new PersistentBrowserOpfsRuntime(
+        undefined,
+        schema,
+        `persistent-browser-runtime-disconnect-${timing.replace(" ", "-")}-test`,
+        new Uint8Array(16),
+        new Uint8Array(16),
+      );
+
+      const close = runtime.close();
+      if (timing === "after close") await close;
+      await runtime.disconnect({ rejectWaiters: false });
+
+      await expect(
+        runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null),
+      ).rejects.toThrow("Persistent browser native runtime is closed");
+      await close;
+    },
+  );
+
   it("returns a pending write handle and waits on the worker transaction id", async () => {
     vi.stubGlobal("Worker", FakeWorker);
 
