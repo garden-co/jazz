@@ -1916,7 +1916,7 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
 
     let note = row(0x3e);
     assert!(
-        core.dry_run_mergeable_write_allows(
+        core.advisory_mergeable_write_allows(
             MergeableCommit::new("notes", note, 10).cells(BTreeMap::from([(
                 "body".to_owned(),
                 v("live add-table write"),
@@ -2147,12 +2147,13 @@ fn shared_physical_reads_project_natural_lenses_after_schema_agnostic_winner() {
         .bind(BTreeMap::from([("wanted".to_owned(), v("new-name"))]))
         .unwrap();
     let include_deleted_rows = core
-        .query_rows_including_deleted_for_identity(
+        .query_rows_including_deleted_in_authorization_mode(
             &include_deleted_shape,
             &include_deleted_binding,
             DurabilityTier::Local,
             None,
             AuthorId::SYSTEM,
+            QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
     assert_eq!(include_deleted_rows.len(), 1);
@@ -3389,12 +3390,13 @@ fn include_deleted_schema_projected_root_filters_translate_old_names() {
         .bind(BTreeMap::from([("wanted".to_owned(), v("deleted-root"))]))
         .unwrap();
     let rows = core
-        .query_rows_including_deleted_for_identity(
+        .query_rows_including_deleted_in_authorization_mode(
             &shape,
             &binding,
             DurabilityTier::Local,
             None,
             AuthorId::SYSTEM,
+            QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
 
@@ -3489,12 +3491,13 @@ fn include_deleted_schema_projected_join_filters_translate_old_names() {
         .unwrap();
     let binding = shape.bind(BTreeMap::from([("tag".to_owned(), v("bug"))])).unwrap();
     let rows = core
-        .query_rows_including_deleted_for_identity(
+        .query_rows_including_deleted_in_authorization_mode(
             &shape,
             &binding,
             DurabilityTier::Local,
             None,
             AuthorId::SYSTEM,
+            QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
 
@@ -3665,12 +3668,13 @@ fn include_deleted_schema_projected_reachable_filters_translate_old_names() {
         ]))
         .unwrap();
     let rows = core
-        .query_rows_including_deleted_for_identity(
+        .query_rows_including_deleted_in_authorization_mode(
             &shape,
             &binding,
             DurabilityTier::Local,
             None,
             AuthorId::SYSTEM,
+            QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
 
@@ -4188,3 +4192,4 @@ fn wire_commit_units_preserve_node_and_schema_uuids_not_local_aliases() {
     let stored_wire = core.version_record_from_row(child_row).unwrap();
     assert_eq!(stored_wire.schema_version(), schema.version_id());
 }
+use crate::node::query_engine::QueryAuthorizationMode;

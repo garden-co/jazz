@@ -5713,22 +5713,6 @@ where
         self.compile_query_program_request(request)
     }
 
-    fn compile_include_deleted_query_program(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        tier: DurabilityTier,
-        identity: AuthorId,
-    ) -> Result<QueryProgram, Error> {
-        self.compile_include_deleted_query_program_in_authorization_mode(
-            shape,
-            binding,
-            tier,
-            identity,
-            QueryAuthorizationMode::TrustedServing,
-        )
-    }
-
     fn compile_include_deleted_query_program_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
@@ -5815,24 +5799,6 @@ where
             output: current_query_output_request(output, lowered_shape.query()),
         };
         self.compile_query_program_request(request)
-    }
-
-    fn compile_branch_query_program(
-        &mut self,
-        branch_id: BranchId,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        identity: AuthorId,
-        output: CurrentQueryProgramOutput,
-    ) -> Result<QueryProgram, Error> {
-        self.compile_branch_query_program_in_authorization_mode(
-            branch_id,
-            shape,
-            binding,
-            identity,
-            output,
-            QueryAuthorizationMode::TrustedServing,
-        )
     }
 
     fn compile_branch_query_program_in_authorization_mode(
@@ -7065,25 +7031,7 @@ where
         )
     }
 
-    pub(crate) fn query_rows_including_deleted_for_identity(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        tier: DurabilityTier,
-        prepared_plan: Option<&PreparedQueryPlanHandle>,
-        identity: AuthorId,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        self.query_rows_including_deleted_for_identity_in_authorization_mode(
-            shape,
-            binding,
-            tier,
-            prepared_plan,
-            identity,
-            QueryAuthorizationMode::TrustedServing,
-        )
-    }
-
-    fn query_rows_including_deleted_for_identity_in_authorization_mode(
+    pub(crate) fn query_rows_including_deleted_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -9147,33 +9095,17 @@ where
         Ok(rows)
     }
 
-    pub(crate) fn query_rows_for_link_with_prepared_plan(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        tier: DurabilityTier,
-        identity: AuthorId,
-        prepared_plan: Option<&PreparedQueryPlanHandle>,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        self.query_rows_with_prepared_plan_for_identity(
-            shape,
-            binding,
-            tier,
-            prepared_plan,
-            identity,
-        )
-    }
-
     /// Evaluate a query plus its array-subquery relation payload against local
     /// visible-current knowledge for one identity.
-    pub(crate) fn query_relation_snapshot_for_link(
+    #[cfg(test)]
+    pub(crate) fn query_relation_snapshot_for_serving(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
         identity: AuthorId,
     ) -> Result<RelationSnapshot, Error> {
-        self.query_relation_snapshot_for_link_in_read_view(
+        self.query_relation_snapshot_for_serving_in_read_view(
             shape,
             binding,
             tier,
@@ -9182,7 +9114,8 @@ where
         )
     }
 
-    pub(crate) fn query_relation_snapshot_for_link_in_read_view(
+    #[cfg(test)]
+    pub(crate) fn query_relation_snapshot_for_serving_in_read_view(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -9453,18 +9386,6 @@ where
         Ok(rows)
     }
 
-    pub(crate) fn subscription_snapshot_for_link(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        tier: DurabilityTier,
-        identity: AuthorId,
-    ) -> Result<RelationSnapshot, Error> {
-        #[cfg(test)]
-        record_subscription_snapshot_for_link_call();
-        self.subscription_snapshot_for_link_with_prepared_plan(shape, binding, tier, identity, None)
-    }
-
     pub(crate) fn subscription_snapshot_for_client(
         &mut self,
         shape: &ValidatedQuery,
@@ -9491,41 +9412,6 @@ where
         )
     }
 
-    pub(crate) fn subscription_snapshot_for_link_with_prepared_plan(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        tier: DurabilityTier,
-        identity: AuthorId,
-        prepared_plan: Option<&PreparedQueryPlanHandle>,
-    ) -> Result<RelationSnapshot, Error> {
-        if shape.query().array_subqueries.is_empty() {
-            let rows = self.query_rows_for_link_with_prepared_plan(
-                shape,
-                binding,
-                tier,
-                identity,
-                prepared_plan,
-            )?;
-            return Ok(RelationSnapshot {
-                root_count: rows.len(),
-                rows,
-                edges: Vec::new(),
-            });
-        }
-        self.query_relation_snapshot_for_link(shape, binding, tier, identity)
-    }
-
-    pub(crate) fn query_rows_for_link_including_deleted(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        tier: DurabilityTier,
-        identity: AuthorId,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        self.query_rows_including_deleted_for_identity(shape, binding, tier, None, identity)
-    }
-
     pub(crate) fn query_rows_for_client_including_deleted(
         &mut self,
         shape: &ValidatedQuery,
@@ -9533,7 +9419,7 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.query_rows_including_deleted_for_identity_in_authorization_mode(
+        self.query_rows_including_deleted_in_authorization_mode(
             shape,
             binding,
             tier,
@@ -13963,12 +13849,13 @@ mod tests {
         );
 
         let error = node
-            .compile_branch_query_program(
+            .compile_branch_query_program_in_authorization_mode(
                 branch_id,
                 &shape,
                 &binding,
                 AuthorId::SYSTEM,
                 CurrentQueryProgramOutput::MaintainedView,
+                QueryAuthorizationMode::TrustedServing,
             )
             .unwrap_err();
         let Error::QueryCapability(report) = error else {

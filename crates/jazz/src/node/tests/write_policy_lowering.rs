@@ -1365,13 +1365,13 @@ fn lowered_write_policy_keeps_v1_policy_pinned_after_table_rename() {
         .cells(candidate.clone())
         .parents(vec![existing_tx]);
     assert!(
-        core.dry_run_mergeable_write_allows(update.clone().made_by(owner))
+        core.advisory_mergeable_write_allows(update.clone().made_by(owner))
             .unwrap(),
         "the actual v2 update must use the pinned v1 update clauses"
     );
     assert!(
         !core
-            .dry_run_mergeable_write_allows(update.made_by(user(0xe4)))
+            .advisory_mergeable_write_allows(update.made_by(user(0xe4)))
             .unwrap(),
         "the actual v2 update must deny an identity rejected by the pinned v1 update clauses"
     );
@@ -1380,13 +1380,13 @@ fn lowered_write_policy_keeps_v1_policy_pinned_after_table_rename() {
         .parents(vec![existing_tx])
         .deletion(DeletionEvent::Deleted);
     assert!(
-        core.dry_run_mergeable_write_allows(delete.clone().made_by(owner))
+        core.advisory_mergeable_write_allows(delete.clone().made_by(owner))
             .unwrap(),
         "the actual v2 delete must use the pinned v1 delete clause"
     );
     assert!(
         !core
-            .dry_run_mergeable_write_allows(delete.made_by(user(0xe4)))
+            .advisory_mergeable_write_allows(delete.made_by(user(0xe4)))
             .unwrap(),
         "the actual v2 delete must deny an identity rejected by the pinned v1 delete clause"
     );
