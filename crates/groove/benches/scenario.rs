@@ -177,7 +177,7 @@ fn run_groove_social_feed_prepared_with(mode: PreparedFeedMode) {
                 .prepare_one_sink(
                     feed_prepared_shape_graph(),
                     "feed_params",
-                    RecordDescriptor::new([("follower_id", ColumnType::U64.value_type())]),
+                    RecordDescriptor::new([("follower_id", ColumnType::U64.clone())]),
                     ["follower_id"],
                 )
                 .expect("subscribe feed family");
@@ -558,7 +558,7 @@ fn feed_graph(user_id: u64) -> GraphBuilder {
 fn feed_prepared_shape_graph() -> GraphBuilder {
     let params = GraphBuilder::binding_source(
         "feed_params",
-        RecordDescriptor::new([("follower_id", ColumnType::U64.value_type())]),
+        RecordDescriptor::new([("follower_id", ColumnType::U64.clone())]),
     );
     let follows = GraphBuilder::table("follows").project(["follower_id", "followee_id"]);
     let followed = GraphBuilder::join(params, follows, ["follower_id"], ["follower_id"])
@@ -988,7 +988,7 @@ fn run_groove_acl_prepared() {
         .prepare_one_sink(
             acl_prepared_shape_graph(),
             "acl_params",
-            RecordDescriptor::new([("principal_id", ColumnType::U64.value_type())]),
+            RecordDescriptor::new([("principal_id", ColumnType::U64.clone())]),
             ["principal_id"],
         )
         .expect("subscribe acl family");
@@ -1408,7 +1408,7 @@ fn acl_graph(principal: u64) -> GraphBuilder {
         .project_fields([ProjectField::renamed("parent_id", "principal_id")]);
     let frontier = GraphBuilder::frontier_source(
         "frontier",
-        groove::records::RecordDescriptor::new([("principal_id", ColumnType::U64.value_type())]),
+        groove::records::RecordDescriptor::new([("principal_id", ColumnType::U64.clone())]),
     );
     let step = GraphBuilder::join(
         frontier,
@@ -1432,12 +1432,12 @@ fn acl_graph(principal: u64) -> GraphBuilder {
 
 fn acl_prepared_shape_graph() -> GraphBuilder {
     let reach = RecordDescriptor::new([
-        ("principal_id", ColumnType::U64.value_type()),
-        ("group_id", ColumnType::U64.value_type()),
+        ("principal_id", ColumnType::U64.clone()),
+        ("group_id", ColumnType::U64.clone()),
     ]);
     let params = GraphBuilder::binding_source(
         "acl_params",
-        RecordDescriptor::new([("principal_id", ColumnType::U64.value_type())]),
+        RecordDescriptor::new([("principal_id", ColumnType::U64.clone())]),
     );
     let seed = GraphBuilder::join(
         params,
@@ -1945,10 +1945,10 @@ fn seed_oneshot_posts(db: &mut Database<RocksDbStorage>, rows: usize, authors: u
 
 fn posts_descriptor() -> RecordDescriptor {
     RecordDescriptor::new([
-        ("id", ColumnType::U64.value_type()),
-        ("author_id", ColumnType::U64.value_type()),
-        ("created_at", ColumnType::U64.value_type()),
-        ("visibility", ColumnType::String.value_type()),
+        ("id", ColumnType::U64.clone()),
+        ("author_id", ColumnType::U64.clone()),
+        ("created_at", ColumnType::U64.clone()),
+        ("visibility", ColumnType::String.clone()),
     ])
 }
 

@@ -32,10 +32,13 @@ Invariant digest:
 - `INV-API-16`: `Transport` implementations MUST be non-blocking; `try_recv() == None` MUST mean no inbound message is currently staged and MUST NOT be interpreted by `Db` as disconnect.
 - `INV-API-17`: Db::connectupstream MUST make every already-registered facade subscription eligible for immediate upstream announcement without requiring re-registration.
 - `INV-API-18`: `Db::subscribe` MUST announce newly registered subscriptions to all existing upstream connections so query-driven sync can request remote completion on the next tick.
+- `INV-API-31`: `Db::disconnect` MUST mark the `Db` intentionally offline, disconnect every schema client from its server transport, and leave the local runtime and store alive; `Db::reconnect` MUST clear that marker and reconnect every schema client. A schema client created while intentionally offline MUST remain offline until `reconnect`.
+- `INV-API-32`: While a `Db` is intentionally offline, a read with `propagation = LocalOnly` MUST resolve from current local materialized state without waiting for an upstream coverage frontier: a locally committed pending write MUST be returned, and a row written remotely during the offline period MUST be absent until reconnect delivery reaches the local store. `LocalOnly` selects the local snapshot; it is not a request to wait for that snapshot to become complete relative to an unavailable upstream.
 - `INV-API-19`: Upstream announcement of a subscription MUST make its query definition available before the subscription that uses it, without re-announcing the same definition for that connection.
 - `INV-API-20`: An upstream connection MUST upload each locally-authored transaction at most once.
 - `INV-API-21`: A subscriber `PeerConnection::tick` MUST serve subscriptions under the `AuthorId` passed to `Node::accept_subscriber`, not under the serving node's own identity.
 - `INV-API-22`: Db::tick() MUST service every registered connection exactly once.
+- `INV-API-23`: A client binding tick driver MUST classify `Db::tick()` failures. A recoverable protocol condition MUST NOT terminate the driver; the driver MUST continue through its documented repair or reconnect path with bounded backoff. A fatal failure, or exhausted recovery, MUST stop the driver and be surfaced to the caller as an error rather than appearing as a stalled sync operation.
 - `INV-API-24`: The query builder exposed through Db::table MUST expose the schema-validated query construction capabilities defined in ch. 6.
 - `INV-API-25`: `TextEdit` operations MUST use byte offsets relative to the current local parent value for the column and MUST lower to `LargeValueEditOp::Insert`/`LargeValueEditOp::Delete`.
 - `INV-API-26`: `Db::mergeable_tx()` MUST group multiple facade writes under one mergeable `TxId`, and the produced commit unit MUST set `Transaction.n_total_writes` to the number of grouped versions.
@@ -298,6 +301,16 @@ directions; relay/edge/core peer roles remain below the facade (ch. 9).
 (`RegisterShape` then `Subscribe`, `INV-API-19`), uploads each local commit
 once (`INV-API-20`), drains inbound messages, applies them, and refreshes
 registered subscriptions (ch. 8).
+
+Bindings that schedule `Db::tick()` in a background client driver own the
+driver's lifecycle. They classify a returned error before deciding whether to
+stop: bounded-queue backpressure retries, a missing content extent follows the
+content-repair path, and a closed upstream WebSocket detaches and reconnects.
+Other errors are terminal because no repair is defined for them. Recovery uses
+bounded exponential backoff; when it exhausts, the binding records a terminal
+sync error. Queries, hydration, and durability waits must observe that error
+promptly rather than waiting for ordinary coverage or settlement timeouts
+(`INV-API-23`).
 
 The binding-facing surface includes:
 
@@ -587,6 +600,32 @@ These are designed but not landed:
   a settled subscription result set for the binding (ch. 6), surfaced as a
   queryable `settled()` bit on the handle before the first gate. Neither the
   gating nor `settled()` is implemented yet.
+- 🔶 **Observable connection state, and cancelling a wait.** A wait at `Edge` or
+  `Global` tier while disconnected has no honest answer today: rejecting loses a
+  write's durability observation that would have resolved on reconnect, and
+  waiting indefinitely gives the caller no way to distinguish "offline, will
+  resolve later" from "something is broken". Neither carries a diagnosis.
+  The intended shape is that the **core waits indefinitely** and cancellation is
+  **caller policy**, because the core promises durability, not latency — only the
+  caller knows whether a wait backs a background sync or a user pressing Save. In
+  Rust this needs nothing new: `wait` is an `async fn`, so dropping the future
+  cancels and `tokio::time::timeout` composes. In TypeScript the idiomatic form is
+  an `AbortSignal` on the wait options, which yields timeouts via
+  `AbortSignal.timeout`, composition via `AbortSignal.any`, and component-lifecycle
+  cancellation for free; there is currently no `AbortSignal` anywhere in the
+  runtime API. Three details are load-bearing whenever this is built: cancelling a
+  _wait_ MUST NOT cancel the _write_, which is already committed and queued;
+  abort MUST reject with a distinct reason so "I gave up" is never mistaken for
+  "the write failed"; and abort MUST deregister the waiter, or an indefinite wait
+  becomes a slow leak on a long-lived client.
+  The missing complement is an **observable connection and pending state** — at
+  minimum whether the client is connected, and how many writes are outstanding at
+  each tier — so an application can render honestly rather than inferring from a
+  promise that has not settled. This is the more valuable half: a timeout tells
+  you only that time passed. A bulk import that hung on a global-tier wait was
+  undiagnosable for exactly this reason; the wait was unbounded, uncancellable,
+  and invisible, and the cause could only be found by instrumenting the core.
+  None of this is implemented.
 - 🔶 **Identity modes & admission.** `DbIdentity` is `{ node, author }` today;
   core-only attributed writes are callable, but the broader backend /
   no-identity-platform modes (ch. 9) and `accept_subscriber` admission policy are
@@ -650,3 +689,25 @@ These are designed but not landed:
 - 🔶 **WASM teardown trap true fix.** The current mitigation hides inert
   teardown traps; the durable fix is an explicit async shutdown and transport
   lifecycle boundary that prevents callbacks into torn-down linear memory.
+
+### Intentional disconnect and local-only reads
+
+`Db::disconnect` marks the `Db` **intentionally offline**. It disconnects every
+schema client from its server transport and leaves the local runtime and store
+alive, so local reads and writes continue to work. `Db::reconnect` clears the
+marker and reconnects every schema client using the configured server URL and
+current auth configuration. A schema client created while the `Db` is
+intentionally offline remains offline until `reconnect` (`INV-API-31`).
+
+While intentionally offline, a read with `propagation = LocalOnly` resolves from
+the current local materialized state. It does not wait for an upstream coverage
+frontier and does not inspect the server (`INV-API-32`):
+
+- a locally committed, pending write is returned immediately;
+- a row written remotely during the offline period is absent — an empty result
+  for a query matching only that row — until reconnect delivery reaches the
+  local store.
+
+`LocalOnly` chooses the local snapshot. It is **not** a request to wait until
+that snapshot becomes complete relative to an upstream that is unavailable by
+construction. Convergence is asserted separately, after `reconnect`.

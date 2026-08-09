@@ -102,6 +102,14 @@ maintained-subscription semantics. `array_subqueries` are
 canonicalized into shape identity separately from includes; sibling ordering is
 not semantic, but duplicate sibling `column_name`s are rejected.
 
+Every binding layer MUST preserve the explicit boundedness choice across its
+builder, normalized JSON, worker, and native-codec boundaries. Absence is not
+an unbounded declaration and MUST remain invalid rather than being inferred as
+unbounded during lowering. In the TypeScript DSL, `include({ relation: true })`
+and nested object shorthand explicitly request the complete relation and are
+therefore sugar for an unbounded array subquery; an included query builder MUST
+instead call either `.limit(n)` or `.unbounded()`.
+
 `JoinVia` is an existential reference/junction traversal: it constrains root
 membership and supplies join witnesses; it is not a general relational join
 whose record is publicly returned. Flat joined output is a separate target AST
@@ -349,10 +357,11 @@ within one parent's array unless the query shape guarantees it.
 **Decision, Anselm 2026-08-04 — bounded arrays are enforced, with a runtime
 over-size error as backstop.** Two mechanisms, both required:
 
-1. **Validation enforces the bound.** An array subquery MUST carry a finite
-   child limit; query validation MUST reject an unbounded array subquery in a
-   structured result. This makes the size bound a property of the query rather
-   than of the data.
+1. **Validation enforces an explicit boundedness choice.** An array subquery
+   MUST carry either a finite child limit or an explicit unbounded declaration;
+   query validation MUST reject an undeclared choice. This makes intentional
+   unboundedness (and the common finite bound) a property of the query rather
+   than an accidental consequence of omitted data.
 2. **A runtime over-size error backstops it.** A bounded array can still render
    a parent larger than `MAX_WIRE_FRAME_BYTES` (2 MiB;
    `crates/jazz/src/protocol_limits.rs:16`) when individual children are large.
@@ -592,6 +601,86 @@ not affect a rendered relation must not reorder neighboring children, while a
 child insert/order change replaces only its touched rendered parent group rather
 than scanning or diffing the accumulated view.
 
+### 6.4.3 Aggregate result representation
+
+An aggregate or grouped query returns its results through the same row-shaped
+surface as any other query, because a caller should not need a second result
+vocabulary to read a total. But an aggregate result row is not a stored row: it
+has no row id, no version, no provenance, and no deletion state. This section
+fixes how such a result is represented at each layer it crosses. The
+representation — not the aggregation — is where this surface has repeatedly
+failed, and each failure was a case that no layer had been told to handle.
+Groove owns the operator-level contract, including which functions are
+maintainable and the value-level null rules
+(`groove/SPEC/3_queries_operators.md`); this section owns what Jazz delivers to
+a caller.
+
+An aggregate value crosses three boundaries. The groove `Aggregate` terminal
+emits group fields and aggregate values into a record; Jazz carries that record
+as a `ResultPayload` program fact keyed by a synthetic result member (ch. 16
+§16.6); the public API renders it as the cells of a result row. The first two
+layers are internal and MUST preserve the value exactly. The third is the only
+layer permitted to reshape it.
+
+**`INV-QUERY-30`** — An aggregate result member's identity MUST be derived
+structurally from its group key, and a scalar global aggregate MUST lower to one
+fixed synthetic identity. Neither the identity nor any delivery decision keyed on
+it may be derived from, or matched against, a constructed name such as
+`<table>_aggregate`. Filtering delivery by string comparison against a table name
+is specifically forbidden: an aggregate member's name is a label, not a key.
+
+**`INV-QUERY-31`** — Aggregate output types are fixed by function, not inferred
+per call site. `count` is `U64` and is never null. `sum`, `min`, and `max` are
+nullable over the non-nullable base type of their input, and `avg` is
+`Nullable(F64)` regardless of input type. `sum` MUST NOT silently widen its
+result type, and a sum exceeding its declared width MUST fail with a named
+overflow error rather than wrapping, saturating, or promoting.
+
+**`INV-QUERY-32`** — There are two distinct nullable layers, and exactly one
+place where they merge. The payload layer carries SQL `NULL` as
+`Nullable(None)`; the public cell layer carries a caller-visible absent value.
+Both internal layers MUST keep a present-but-`NULL` aggregate distinguishable
+from a payload that is absent altogether. The public boundary collapses the two
+into one, and that collapse MUST happen exactly once, at that boundary, and
+nowhere earlier. It is the only lossy step in the path, and the sole distinction
+it is permitted to lose is between those two layers — which, at that point,
+denote the same fact.
+
+**`INV-QUERY-33`** — A group that is present with a `NULL` aggregate, a group
+that is absent, and a group whose aggregate value has changed are three distinct
+outcomes, and the delivered result MUST distinguish them. An empty group and a
+group whose inputs are all `NULL` are both present-with-`NULL`, not absent.
+Collapsing present-with-`NULL` into absence is a defect even when the rendered
+cell is identical, because the two differ under a subsequent update.
+
+**`INV-QUERY-34`** — The non-aggregate fields of a synthetic aggregate row —
+row id, version, provenance, deletion state — carry no meaning. Producers MUST
+NOT populate them with values that invite interpretation, and consumers MUST NOT
+read them. A synthetic row's meaningful content is exactly its group fields and
+its aggregate values.
+
+**`INV-QUERY-35`** — A delivered change for an aggregate result member that the
+subscriber does not currently hold MUST be delivered as an add, not an update.
+Aggregate rows are replaced rather than mutated, so a retraction and its
+replacement can cross on the wire; the delivery boundary normalizes this rather
+than emitting an update against a member the peer has never seen. Maintained
+delivery otherwise follows ch. 16 §16.6.
+
+These are representation requirements, not delivery-strategy requirements: a
+one-shot read, an initial snapshot, a maintained delta, and a settled subscriber
+read of the same aggregate at the same frontier MUST all reduce to the same
+represented result, per §6.4.2.
+
+Decision, Anselm 2026-08-07: a scalar global aggregate over no input rows
+delivers a present row — `0` for `count`, `NULL` for `sum`, `avg`, `min` and
+`max` — following SQL, on both the one-shot and the maintained path. This is a
+consequence of the reduction requirement above rather than an independent rule:
+`groove/SPEC/3_queries_operators.md` already specified the one-shot behaviour, so
+a maintained subscription that delivered nothing for the same query would make
+the two paths disagree. Ch. 16 §16.6 carries the maintained-side detail,
+including why this row is replaced rather than added or removed across the
+transition to and from a non-empty input.
+
 ### 6.5 Query-driven sync
 
 A subscription binds a shape to one binding in one read view. `RegisterShapeOptions`
@@ -750,6 +839,28 @@ parallel query identities.
   types inside one relation. If future relation-valued outputs can mix id types
   or grouped outputs can expose heterogeneous key domains at one key position,
   the spec needs a stable cross-type ordering rule or must reject those shapes.
+- 🔶 **Whether `sum` should widen its result type.** `INV-QUERY-31` currently
+  keeps `sum` at its input width and requires a named overflow error, which is
+  honest but means `sum` over a `U8` column fails at 256 — early enough to be a
+  usability problem rather than a safety one. Postgres widens instead
+  (`int → bigint`, `bigint → numeric`), trading a type surprise for a much later
+  failure. Widening is the likely destination, but it changes the declared
+  descriptor type of every existing `sum`, so it should land as a deliberate
+  cut with the wire and schema consequences priced in, not as a quiet
+  relaxation. What should decide it is whether real schemas aggregate narrow
+  integer columns at all.
+- 🔶 **Aggregate result identity across a table rename.** `INV-QUERY-30`
+  requires aggregate identity to be derived structurally from the group key.
+  The implementation namespaces that derivation by the source table's _name_
+  (`jazz:aggregate-result:v1` + table + group key), so renaming a table changes
+  the identity of every aggregate row over it: a maintained subscription
+  spanning the rename observes a member removal followed by an add rather than
+  continuity. Namespacing itself is necessary — aggregates over different
+  tables must not collide — but the namespace does not have to be the mutable
+  name, and a stable table identity would preserve continuity across a rename.
+  Deferred deliberately (Anselm 2026-08-07): this is the same question
+  multi-schema support must answer for every name-keyed identity, so it should
+  be settled together with that work rather than patched here in isolation.
 - 🔶 **SQL dialect boundary.** Define the first supported SQL subset, parameter
   syntax, error reporting, and escape-hatch rules, and prove it lowers to the
   same `Query` contract as the builder DSL.

@@ -111,7 +111,7 @@ export function encodeSchema(schema: WasmSchema): Uint8Array {
 
 export function columnValueType(column: ColumnDescriptor): ValueType {
   const valueType = columnTypeToValueType(column.column_type);
-  return column.nullable ? { tag: 12, inner: valueType } : valueType;
+  return column.nullable ? { tag: 14, inner: valueType } : valueType;
 }
 
 function writeLargeValueKind(writer: PostcardWriter, column: ColumnDescriptor) {
@@ -166,7 +166,7 @@ function writeDefaultValue(writer: PostcardWriter, columnType: ColumnType, value
         throw new Error("expected BigInt default");
       }
       writer.u64(13); // groove::records::Value::I64
-      writer.i64(value.value);
+      writer.i64(expectI64(value, "BigInt"));
       return;
     case "Timestamp":
       if (value.type !== "Timestamp") throw new Error("expected Timestamp default");
@@ -240,27 +240,27 @@ function writeMergeStrategies(writer: PostcardWriter, columns: ColumnDescriptor[
 export function columnTypeToValueType(type: ColumnType): ValueType {
   switch (type.type) {
     case "Boolean":
-      return { tag: 5 };
+      return { tag: 7 };
     case "Integer":
-      return { tag: 14 };
+      return { tag: 4 };
     case "BigInt":
-      return { tag: 13 };
+      return { tag: 5 };
     case "Timestamp":
       return { tag: 3 };
     case "Double":
-      return { tag: 4 };
+      return { tag: 6 };
     case "Text":
     case "Json":
     case "Enum":
-      return { tag: 6 };
-    case "Bytea":
-      return { tag: 7 };
-    case "Uuid":
       return { tag: 8 };
+    case "Bytea":
+      return { tag: 9 };
+    case "Uuid":
+      return { tag: 10 };
     case "Array":
-      return { tag: 11, inner: columnTypeToValueType(type.element) };
+      return { tag: 13, inner: columnTypeToValueType(type.element) };
     case "Row":
-      throw new Error("Core runtime does not encode nested row columns yet");
+      throw new Error("Core runtime schema does not support nested Row columns");
   }
 }
 
@@ -420,12 +420,12 @@ function writePolicyLiteral(writer: PostcardWriter, value: Value): void {
       writer.bool(value.value);
       return;
     case "Integer":
-      writer.u64(2); // groove::records::Value::U32
-      writer.u64(value.value);
+      writer.u64(14); // groove::records::Value::I32
+      writer.i64(expectI32(value, "Integer policy literal"));
       return;
     case "BigInt":
       writer.u64(13); // groove::records::Value::I64
-      writer.i64(value.value);
+      writer.i64(expectI64(value, "BigInt policy literal"));
       return;
     case "Timestamp":
       writer.u64(3); // groove::records::Value::U64
@@ -1468,6 +1468,17 @@ function expectI32(value: Value, type: string): number {
   const number = Number(value.value);
   if (!Number.isSafeInteger(number) || number < -0x80000000 || number > 0x7fffffff) {
     throw new Error(`${type} default must be a signed 32-bit integer`);
+  }
+  return number;
+}
+
+function expectI64(value: Value, type: string): bigint {
+  if (value.type !== "Integer" && value.type !== "BigInt") {
+    throw new Error(`expected ${type}`);
+  }
+  const number = BigInt(value.value);
+  if (number < -(1n << 63n) || number > (1n << 63n) - 1n) {
+    throw new Error(`${type} must be a signed 64-bit integer`);
   }
   return number;
 }

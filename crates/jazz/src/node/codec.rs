@@ -211,15 +211,16 @@ groove::define_record! {
         7 => absent_read_set: Option<Value>,
         8 => predicate_read_set: Option<Value>,
         9 => user_metadata: Option<String>,
-        10 => source_branch: Option<BranchId>,
-        11 => permission_subject: Option<AuthorId>,
-        12 => merge_strategy: Option<String>,
-        13 => fate: FateTag,
-        14 => global_seq: Option<GlobalSeq>,
-        15 => rejection_reason: Option<RejectionReasonTag>,
-        16 => cascade_root: Option<Value>,
-        17 => reason_detail: Option<String>,
-        18 => durability: DurabilityTier,
+        10 => target_lineage: Vec<u8>,
+        11 => branch_merge: Option<Vec<u8>>,
+        12 => permission_subject: Option<AuthorId>,
+        13 => merge_strategy: Option<String>,
+        14 => fate: FateTag,
+        15 => global_seq: Option<GlobalSeq>,
+        16 => rejection_reason: Option<RejectionReasonTag>,
+        17 => cascade_root: Option<Value>,
+        18 => reason_detail: Option<String>,
+        19 => durability: DurabilityTier,
     }
 }
 
@@ -283,9 +284,11 @@ groove::impl_record_field_enum!(BranchState {
 groove::define_record! {
     pub(super) struct BranchRowRecord {
         0 => branch_id: BranchId,
-        1 => parent: Option<BranchId>,
-        2 => base_global: Option<GlobalSeq>,
-        3 => state: BranchState,
+        1 => created_by: AuthorId,
+        2 => parent: Option<BranchId>,
+        3 => base_snapshot: Option<Value>,
+        4 => state: BranchState,
+        5 => metadata_pending: bool,
     }
 }
 
@@ -342,6 +345,7 @@ impl VersionRecord {
             &positional,
             commit.deletion,
         )
+        .map(|record| record.with_authored_columns(commit.authored_columns.clone()))
         .map_err(Error::from)
     }
 
@@ -358,6 +362,7 @@ impl VersionRecord {
             .iter()
             .map(|column| stored.cell(table, &column.name))
             .collect::<Result<Vec<_>, _>>()?;
+        let authored_columns = stored.authored_columns(table)?;
         VersionRecord::encode(
             table,
             schema_version,
@@ -370,6 +375,7 @@ impl VersionRecord {
             &cells,
             stored.deletion(),
         )
+        .map(|record| record.with_authored_columns(authored_columns))
         .map_err(Error::from)
     }
 }
@@ -493,7 +499,8 @@ impl StoredTransaction {
             global_seq: self.global_seq,
             durability: self.durability,
             user_metadata_json: self.tx.user_metadata_json.clone(),
-            source_branch: self.tx.source_branch,
+            target_lineage: self.tx.target_lineage,
+            branch_merge: self.tx.branch_merge.clone(),
         }
     }
 }
@@ -516,6 +523,7 @@ pub(super) struct VersionRowParts {
     pub(super) updated_by: AuthorId,
     pub(super) updated_at: TxTime,
     pub(super) cells: BTreeMap<String, Value>,
+    pub(super) authored_columns: Option<BTreeSet<String>>,
     pub(super) deletion: Option<DeletionEvent>,
 }
 
@@ -755,6 +763,29 @@ impl VersionRow {
         nullable_value(self.record.borrowed().get_idx(field)?)
     }
 
+    /// `None` is the deliberate legacy/lens fallback: every present cell is
+    /// treated as authored by merge code.
+    pub(super) fn authored_columns(
+        &self,
+        table: &TableSchema,
+    ) -> Result<Option<BTreeSet<String>>, Error> {
+        if self.is_register_record() {
+            return Ok(None);
+        }
+        let field = HistoryRowRecord::USER_CELLS + table.columns.len();
+        if field >= self.record.descriptor().fields().len() {
+            return Ok(None);
+        }
+        let value = nullable_value(self.record.borrowed().get_idx(field)?)?;
+        value
+            .map(|value| match value {
+                Value::Bytes(bytes) => serde_json::from_slice(&bytes)
+                    .map_err(|_| Error::InvalidStoredValue("invalid authored columns")),
+                _ => Err(Error::InvalidStoredValue("authored columns must be bytes")),
+            })
+            .transpose()
+    }
+
     pub(super) fn peek_cell(
         &self,
         table: &TableSchema,
@@ -797,7 +828,8 @@ impl VersionRow {
                 global_seq: tx.global_seq,
                 durability: tx.durability,
                 user_metadata_json: tx.tx.user_metadata_json.clone(),
-                source_branch: tx.tx.source_branch,
+                target_lineage: tx.tx.target_lineage,
+                branch_merge: tx.tx.branch_merge.clone(),
             },
             is_locally_current,
             is_globally_current,
@@ -821,14 +853,33 @@ pub(super) fn owned_record_from_storage_values_with_descriptor(
     Ok(OwnedRecord::new(raw, descriptor))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ParkedIngressRole {
+    Relay,
+    EdgeAuthority,
+    Authority,
+    EdgeAccepted,
+}
+
+impl ParkedIngressRole {
+    pub(super) fn strongest(self, other: Self) -> Self {
+        use ParkedIngressRole::{Authority, EdgeAccepted, EdgeAuthority, Relay};
+        match (self, other) {
+            (EdgeAccepted, _) | (_, EdgeAccepted) => EdgeAccepted,
+            (Authority, _) | (_, Authority) => Authority,
+            (EdgeAuthority, _) | (_, EdgeAuthority) => EdgeAuthority,
+            (Relay, Relay) => Relay,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ParkedCommitUnit {
     pub(super) tx: Transaction,
     pub(super) versions: Vec<VersionRecord>,
     pub(super) now_ms: u64,
     pub(super) ingest_context: Option<CommitUnitIngestContext>,
-    pub(super) edge_authority_mergeable: bool,
-    pub(super) edge_accepted_mergeable: bool,
+    pub(super) ingress_role: ParkedIngressRole,
 }
 
 pub(super) fn current_version_index(
@@ -987,7 +1038,14 @@ pub(super) fn transaction_values(
                 .clone()
                 .map(|value| Box::new(Value::String(value))),
         ),
-        Value::Nullable(tx.source_branch.map(|id| Box::new(Value::Uuid(id.0)))),
+        Value::Bytes(
+            serde_json::to_vec(&tx.target_lineage).expect("target lineage is serializable"),
+        ),
+        Value::Nullable(tx.branch_merge.as_ref().map(|provenance| {
+            Box::new(Value::Bytes(
+                serde_json::to_vec(provenance).expect("branch merge provenance is serializable"),
+            ))
+        })),
         Value::Nullable(tx.permission_subject.map(|id| Box::new(Value::Uuid(id.0)))),
         Value::Nullable(
             tx.merge_strategy
@@ -1283,6 +1341,17 @@ pub(super) fn history_values_from_parts(
             version.cells.get(&column.name).cloned().map(Box::new),
         ));
     }
+    values.push(Value::Nullable(
+        version
+            .authored_columns
+            .as_ref()
+            .map(|columns| {
+                serde_json::to_vec(columns)
+                    .expect("serializing an ordered set of strings cannot fail")
+            })
+            .map(Box::new)
+            .map(|bytes| Box::new(Value::Bytes(*bytes))),
+    ));
     Ok(values)
 }
 
@@ -1316,6 +1385,12 @@ fn history_values_from_wire(
         }
         values.push(Value::Nullable(value.map(Box::new)));
     }
+    values.push(Value::Nullable(
+        version
+            .authored_columns()
+            .map(|columns| serde_json::to_vec(columns).expect("serializing authored columns"))
+            .map(|bytes| Box::new(Value::Bytes(bytes))),
+    ));
     Ok(values)
 }
 
@@ -1424,6 +1499,12 @@ pub(super) fn global_current_values(
             nullable_value(version.record.borrowed().get_idx(field)?)?.map(Box::new),
         ));
     }
+    values.push(Value::Nullable(
+        version
+            .authored_columns(table)?
+            .map(|columns| serde_json::to_vec(&columns).expect("serializing authored columns"))
+            .map(|bytes| Box::new(Value::Bytes(bytes))),
+    ));
     Ok(values)
 }
 
@@ -1787,7 +1868,7 @@ fn build_current_row_descriptor(table: &TableSchema) -> records::RecordDescripto
             .chain(table.columns.iter().map(|column| {
                 (
                     user_column_field(&column.name),
-                    records::ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
+                    records::ValueType::Nullable(Box::new(column.column_type.clone())),
                 )
             }))
             .chain([
@@ -1811,7 +1892,7 @@ pub(super) fn current_row_from_positional_cells(
             table.columns.iter().map(|column| {
                 (
                     column.name.clone(),
-                    records::ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
+                    records::ValueType::Nullable(Box::new(column.column_type.clone())),
                 )
             }),
         ),
@@ -1884,7 +1965,7 @@ pub(super) fn nullable_value(value: Value) -> Result<Option<Value>, Error> {
 }
 
 pub(super) fn validate_cell_value(column: &ColumnSchema, value: &Value) -> Result<(), Error> {
-    records::RecordDescriptor::new([("cell", column.column_type.clone().value_type())])
+    records::RecordDescriptor::new([("cell", column.column_type.clone())])
         .create(std::slice::from_ref(value))?;
     Ok(())
 }

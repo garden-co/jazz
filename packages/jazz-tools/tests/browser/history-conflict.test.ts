@@ -407,14 +407,12 @@ describe("History & Conflict Management", () => {
 
   /**
    * Alice edits title, Bob edits done — concurrently on the same row.
-   * Atomicity is per-row (not per-column): whole-row LWW means the
-   * latest commit wins ALL fields, so one side's field change is lost.
-   * This test is skipped because convergence on mixed-field edits
-   * cannot hold under row-level LWW semantics.
+   * Each update carries authored-column provenance, so independent fields
+   * converge independently: Alice's title and Bob's done value both survive.
    *
    *   dbAlice ──update title──► server ◄──update done── dbBob
    */
-  it.skip("concurrent edits on different fields", async () => {
+  it("concurrent edits on different fields", async () => {
     const token = generateAuthSecret();
     const dbAlice = await createReadySyncedDb(ctx, "hc-alice-fields", token, testingServer);
     const dbBob = await createReadySyncedDb(ctx, "hc-bob-fields", token, testingServer);
@@ -439,7 +437,8 @@ describe("History & Conflict Management", () => {
       dbBob.update(todos, id, { done: true }).wait({ tier: "local" }),
     ]);
 
-    // Both must converge to the same state
+    // Both must converge to the per-column merge, rather than merely to each
+    // other (which would allow whole-row LWW to silently drop one edit).
     await waitForCondition(
       async () => {
         const aliceRows = await dbAlice.all(allTodos);
@@ -447,10 +446,15 @@ describe("History & Conflict Management", () => {
         const a = aliceRows.find((r) => r.id === id);
         const b = bobRows.find((r) => r.id === id);
         if (!a || !b) return false;
-        return a.title === b.title && a.done === b.done;
+        return (
+          a.title === "alice-title" &&
+          a.done === true &&
+          b.title === "alice-title" &&
+          b.done === true
+        );
       },
       40000,
-      "Alice and Bob converge on same row state",
+      "Alice and Bob converge to the authored per-column merge",
     );
   }, 90000);
 });

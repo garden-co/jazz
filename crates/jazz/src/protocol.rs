@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use groove::records::{OwnedRecord, Value};
 
-use crate::ids::{AuthorId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
+use crate::ids::{AuthorId, BranchId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
 use crate::node::content_store::Extent;
 use crate::query::{BindingId, Query, RelationQuery, ShapeId};
 use crate::schema::{JazzSchema, TableSchema};
@@ -24,6 +24,19 @@ use crate::tx::{DeletionEvent, DurabilityTier, Fate, Snapshot, Transaction, TxId
 /// Messages exchanged between Jazz nodes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum SyncMessage {
+    /// Durable routing metadata required before a branch-target commit unit or
+    /// branch-scoped view payload can be admitted. This is intentionally
+    /// separate from the ordinary transaction payload: it selects the target
+    /// partition, but never changes transaction semantics.
+    BranchMetadata(BranchMetadata),
+    /// Bounded repair request for branch routing metadata observed out of
+    /// order. Trusted peers may retain every branch; serving policy decides
+    /// whether a client is sent a requested record.
+    FetchBranchMetadata {
+        /// Exact branch routing records requested, bounded by the protocol
+        /// repair limit at decode and serving boundaries.
+        branches: Vec<BranchId>,
+    },
     /// Trusted backend assertion of process-local auth claims for a write subject.
     SessionClaims {
         /// Identity these claims describe.
@@ -194,6 +207,21 @@ pub enum SyncMessage {
     },
 }
 
+/// Wire-stable durable description of one branch routing target.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct BranchMetadata {
+    /// Stable target lineage identifier.
+    pub branch_id: BranchId,
+    /// Session identity that created this immutable branch record.
+    pub created_by: AuthorId,
+    /// Optional parent lineage for a snapshot-base branch.
+    pub parent: Option<BranchId>,
+    /// Frozen base used by ordinary branch reads.
+    pub base: Option<Snapshot>,
+    /// `false` denotes the terminal discarded state.
+    pub open: bool,
+}
+
 impl SyncMessage {
     /// Validate any packed view-update carrier runs in this message.
     pub fn validate_version_carriers(&self) -> Result<(), VersionBundleRunError> {
@@ -295,6 +323,10 @@ pub struct VersionRecord {
     table: groove::Intern<String>,
     schema_version: SchemaVersionId,
     record: OwnedRecord,
+    /// `None` denotes a legacy or lens-translated payload whose authored
+    /// presence is unavailable; consumers must conservatively treat every
+    /// present payload cell as authored.
+    authored_columns: Option<BTreeSet<String>>,
 }
 
 impl VersionRecord {
@@ -308,7 +340,20 @@ impl VersionRecord {
             table: groove::Intern::new(table.into()),
             schema_version,
             record,
+            authored_columns: None,
         }
+    }
+
+    pub(crate) fn with_authored_columns(
+        mut self,
+        authored_columns: Option<BTreeSet<String>>,
+    ) -> Self {
+        self.authored_columns = authored_columns;
+        self
+    }
+
+    pub(crate) fn authored_columns(&self) -> Option<&BTreeSet<String>> {
+        self.authored_columns.as_ref()
     }
 
     /// Encode a wire record directly from typed row payload parts.
@@ -530,6 +575,7 @@ impl Ord for VersionRecord {
             .cmp(other.table())
             .then_with(|| self.schema_version.cmp(&other.schema_version))
             .then_with(|| self.record.raw().cmp(other.record.raw()))
+            .then_with(|| self.authored_columns.cmp(&other.authored_columns))
     }
 }
 
@@ -1541,6 +1587,37 @@ pub enum SubscribeServerFailureCode {
 /// `(table, row_uuid, content_tx_id)`.
 pub type ResultRowEntry = (groove::Intern<String>, RowUuid, TxId);
 
+/// Opaque replacement discriminator for a synthetic result member.
+///
+/// Aggregate result rows have no revision or version. The runtime needs a
+/// token solely to pair a retracted aggregate record with its replacement;
+/// callers cannot inspect or construct the token as a meaningful value.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct SyntheticReplacementToken(Vec<u8>);
+
+impl std::fmt::Debug for SyntheticReplacementToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SyntheticReplacementToken(..)")
+    }
+}
+
+impl SyntheticReplacementToken {
+    pub(crate) fn from_encoded_record(value: Vec<u8>) -> Self {
+        Self(value)
+    }
+}
+
+#[cfg(test)]
+mod synthetic_replacement_token_tests {
+    use super::SyntheticReplacementToken;
+
+    #[test]
+    fn replacement_token_does_not_expose_a_plausible_revision_value() {
+        let token = SyntheticReplacementToken::from_encoded_record(vec![6]);
+        assert_eq!(format!("{token:?}"), "SyntheticReplacementToken(..)");
+    }
+}
+
 /// Protocol-visible result member.
 ///
 /// A member identifies one terminal output of a lowered query program. Ordinary
@@ -1554,12 +1631,12 @@ pub enum ResultMemberEntry {
     Row(RealRowMemberEntry),
     /// Synthetic result row, such as aggregate output.
     Synthetic {
-        /// Logical synthetic table/relation.
+        /// Logical synthetic result kind. This is a label, not identity.
         table: String,
-        /// Stable synthetic row id.
+        /// Stable identity derived from the aggregate group key.
         row: Vec<u8>,
-        /// Synthetic revision/version id.
-        revision: Vec<u8>,
+        /// Opaque runtime-only discriminator for replacement pairing.
+        replacement: SyntheticReplacementToken,
     },
     /// Relation/path tuple membership.
     PathTuple {
@@ -2583,9 +2660,34 @@ pub enum OutboxMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use groove::schema::{ColumnSchema, ColumnType};
 
     fn schema_id(byte: u8) -> SchemaVersionId {
         SchemaVersionId::from_bytes([byte; 16])
+    }
+
+    #[test]
+    fn version_record_ordering_distinguishes_authored_presence() {
+        let table = TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]);
+        let base = VersionRecord::from_cells(
+            &table,
+            schema_id(1),
+            RowUuid::from_bytes([1; 16]),
+            Vec::new(),
+            AuthorId::SYSTEM,
+            TxTime(1),
+            AuthorId::SYSTEM,
+            TxTime(1),
+            &BTreeMap::from([("title".to_owned(), Value::String("x".to_owned()))]),
+            None,
+        )
+        .unwrap();
+        let authored = base
+            .clone()
+            .with_authored_columns(Some(BTreeSet::from(["title".to_owned()])));
+
+        assert_ne!(base, authored);
+        assert_ne!(base.cmp(&authored), Ordering::Equal);
     }
 
     fn sample_lens() -> MigrationLens {

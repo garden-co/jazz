@@ -1680,7 +1680,11 @@ export class NativeRuntimeAdapter implements Runtime {
         subscription.packedResetBatches = null;
         subscription.packedResetRows = null;
       }
-      if (chunk.relationDelta && subscription.relationMaterialization.arraySubqueries.length > 0) {
+      if (
+        chunk.relationDelta &&
+        (subscription.query === null ||
+          subscription.relationMaterialization.arraySubqueries.length > 0)
+      ) {
         const previousRows = subscription.rows;
         applyRelationSubscriptionDelta(
           subscription,
@@ -2912,6 +2916,8 @@ function readQueryArraySubquery(
     select_columns?: unknown;
     order_by?: unknown;
     limit?: unknown;
+    unbounded?: unknown;
+    offset?: unknown;
     requirement?: unknown;
     nested_arrays?: unknown;
   };
@@ -2939,6 +2945,8 @@ function readQueryArraySubquery(
     select,
     orderBy,
     limit: record.limit == null ? null : readLimit(record.limit),
+    unbounded: readArraySubqueryUnbounded(record.unbounded),
+    offset: readOffset(record.offset),
     requirement: readArraySubqueryRequirement(record.requirement),
     nestedArrays,
   };
@@ -3017,6 +3025,12 @@ function readArraySubqueryRequirement(value: unknown): QueryArraySubquery["requi
   if (value == null || value === "Optional") return "Optional";
   if (value === "AtLeastOne" || value === "MatchCorrelationCardinality") return value;
   throw unsupportedQueryEncodingError("array_subqueries.requirement");
+}
+
+function readArraySubqueryUnbounded(value: unknown): boolean {
+  if (value == null) return false;
+  if (typeof value === "boolean") return value;
+  throw unsupportedQueryEncodingError("array_subqueries.unbounded");
 }
 
 function stripParentQualifier(column: string, parentTable: string): string {
@@ -3433,14 +3447,13 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
     case "Boolean":
       return Uint8Array.of(value.type === "Boolean" && value.value ? 1 : 0);
     case "Integer":
-      view.setUint32(0, encodeSignedI32ForStorage(expectI32(value, "Integer")), true);
+      view.setInt32(0, expectI32(value, "Integer"), true);
       return new Uint8Array(view.buffer, 0, 4);
     case "Timestamp":
       view.setBigUint64(0, BigInt(expectNumber(value, type.type)), true);
       return new Uint8Array(view.buffer);
     case "BigInt":
-      if (value.type !== "BigInt") throw new Error("expected BigInt value");
-      view.setBigUint64(0, encodeSignedI64ForStorage(BigInt(value.value)), true);
+      view.setBigInt64(0, expectI64(value, "BigInt"), true);
       return new Uint8Array(view.buffer);
     case "Double":
       view.setFloat64(0, expectNumber(value, "Double"), true);
@@ -3490,21 +3503,21 @@ function encodeNullValue(valueType: ValueType): Uint8Array {
 function fixedValueSize(valueType: ValueType): number | undefined {
   switch (valueType.tag) {
     case 0:
-    case 5:
-    case 9:
+    case 7:
+    case 11:
       return 1;
     case 1:
       return 2;
     case 2:
-    case 15:
+    case 4:
       return 4;
     case 3:
-    case 14:
-    case 4:
+    case 5:
+    case 6:
       return 8;
-    case 8:
+    case 10:
       return 16;
-    case 10: {
+    case 12: {
       const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
       return members.reduce<number | undefined>((total, member) => {
         if (total == null) return undefined;
@@ -3512,7 +3525,7 @@ function fixedValueSize(valueType: ValueType): number | undefined {
         return memberSize == null ? undefined : total + memberSize;
       }, 0);
     }
-    case 12: {
+    case 14: {
       const innerSize = valueType.inner ? fixedValueSize(valueType.inner) : undefined;
       return innerSize == null ? undefined : innerSize + 1;
     }
@@ -3539,20 +3552,13 @@ function expectI32(value: Value, type: string): number {
   return number;
 }
 
-function encodeSignedI32ForStorage(value: number): number {
-  return (value ^ 0x80000000) >>> 0;
-}
-
-function decodeSignedI32FromStorage(value: number): number {
-  return (value ^ 0x80000000) | 0;
-}
-
-function encodeSignedI64ForStorage(value: bigint): bigint {
-  return BigInt.asUintN(64, value) ^ (1n << 63n);
-}
-
-function decodeSignedI64FromStorage(value: bigint): bigint {
-  return BigInt.asIntN(64, value ^ (1n << 63n));
+function expectI64(value: Value, type: string): bigint {
+  if (value.type !== "BigInt") throw new Error(`expected ${type} value`);
+  const number = BigInt(value.value);
+  if (number < -(1n << 63n) || number > (1n << 63n) - 1n) {
+    throw new Error(`${type} value must be a signed 64-bit integer`);
+  }
+  return number;
 }
 
 function expectString(value: Value, type: string): string {
@@ -4048,9 +4054,9 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array, fieldName?: string): V
     case "Boolean":
       return { type: "Boolean", value: bytes[0] !== 0 };
     case "Integer":
-      return { type: "Integer", value: decodeSignedI32FromStorage(view.getUint32(0, true)) };
+      return { type: "Integer", value: view.getInt32(0, true) };
     case "BigInt":
-      return { type: "BigInt", value: decodeSignedI64FromStorage(view.getBigUint64(0, true)) };
+      return { type: "BigInt", value: view.getBigInt64(0, true) };
     case "Double":
       return { type: "Double", value: view.getFloat64(0, true) };
     case "Timestamp":
@@ -4392,7 +4398,7 @@ function createRawNativeFrameRowEncoder(
 }
 
 function encodeFrameColumnValue(decoded: Uint8Array, outputValueType: ValueType): Uint8Array {
-  if (outputValueType.tag !== 12) return decoded;
+  if (outputValueType.tag !== 14) return decoded;
   const output = new Uint8Array(decoded.length + 1);
   output[0] = 1;
   output.set(decoded, 1);

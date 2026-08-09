@@ -113,6 +113,14 @@ impl JazzSchema {
                             column.name
                         );
                     }
+                    MergeStrategy::GSet => {
+                        assert!(
+                            is_gset_column_type(&column.column_type),
+                            "g-set merge strategy requires a non-nullable array column: {}.{}",
+                            table.name,
+                            column.name
+                        );
+                    }
                 }
             }
             for column in &table.columns {
@@ -398,6 +406,7 @@ pub(crate) fn branch_metadata_table_schema() -> TableSchema {
         "jazz_branches",
         [
             ColumnSchema::new("branch_id", GrooveColumnType::Uuid),
+            ColumnSchema::new("created_by", GrooveColumnType::Uuid),
             ColumnSchema::new("parent", GrooveColumnType::Uuid.nullable()),
             ColumnSchema::new("base_global", GrooveColumnType::U64.nullable()),
             ColumnSchema::new("state", GrooveColumnType::String),
@@ -417,6 +426,8 @@ pub enum MergeStrategy {
     Lww,
     /// Concurrent integer deltas from observed bases are summed.
     Counter,
+    /// Array elements grow monotonically by union over the version DAG.
+    GSet,
 }
 
 fn is_counter_column_type(column_type: &GrooveColumnType) -> bool {
@@ -429,6 +440,10 @@ fn is_counter_column_type(column_type: &GrooveColumnType) -> bool {
             | GrooveColumnType::I32
             | GrooveColumnType::I64
     )
+}
+
+fn is_gset_column_type(column_type: &GrooveColumnType) -> bool {
+    matches!(column_type, GrooveColumnType::Array(_))
 }
 
 /// Jazz-level large-value column kind.
@@ -752,7 +767,6 @@ impl TableSchema {
                 user_column.column_type.clone().nullable(),
             )
         }));
-
         GrooveTableSchema::new(format!("jazz_{}_rejected_versions", self.name), columns)
             .with_primary_key(PrimaryKey::composite([
                 PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
@@ -806,6 +820,12 @@ impl TableSchema {
                 user_column.column_type.clone().nullable(),
             )
         }));
+        // Absent on legacy records. When present, this is a serialized set of
+        // user columns explicitly authored by this version.
+        columns.push(column(
+            "authored_columns",
+            GrooveColumnType::Bytes.nullable(),
+        ));
 
         GrooveTableSchema::new(name, columns)
             .with_primary_key(PrimaryKey::composite([
@@ -898,6 +918,10 @@ impl TableSchema {
                 user_column.column_type.clone().nullable(),
             )
         }));
+        content_columns.push(column(
+            "authored_columns",
+            GrooveColumnType::Bytes.nullable(),
+        ));
         let mut content_table = GrooveTableSchema::new(
             format!("jazz_{}_global_current", self.name),
             content_columns,
@@ -961,6 +985,10 @@ impl TableSchema {
                 user_column.column_type.clone().nullable(),
             )
         }));
+        content_columns.push(column(
+            "authored_columns",
+            GrooveColumnType::Bytes.nullable(),
+        ));
         vec![
             GrooveTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
                 .with_primary_key(PrimaryKey::composite([
@@ -1032,7 +1060,7 @@ impl TableSchema {
                 ("row_uuid".to_owned(), ValueType::Uuid),
                 (
                     "parents".to_owned(),
-                    ValueType::Array(Box::new(tx_id_column().value_type())),
+                    ValueType::Array(Box::new(tx_id_column().clone())),
                 ),
                 ("created_by".to_owned(), ValueType::Uuid),
                 ("created_at".to_owned(), ValueType::U64),
@@ -1040,14 +1068,14 @@ impl TableSchema {
                 ("updated_at".to_owned(), ValueType::U64),
                 (
                     "_deletion".to_owned(),
-                    ValueType::Nullable(Box::new(deletion_column().value_type())),
+                    ValueType::Nullable(Box::new(deletion_column().clone())),
                 ),
             ]
             .into_iter()
             .chain(self.columns.iter().map(|column| {
                 (
                     format!("user_{}", column.name),
-                    ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
+                    ValueType::Nullable(Box::new(column.column_type.clone())),
                 )
             })),
         )
@@ -1196,12 +1224,14 @@ fn branches_table() -> GrooveTableSchema {
         "jazz_branches",
         [
             column("branch_id", GrooveColumnType::Uuid),
+            column("created_by", GrooveColumnType::Uuid),
             column("parent", GrooveColumnType::Uuid.nullable()),
-            column("base_global", GrooveColumnType::U64.nullable()),
+            column("base_snapshot", GrooveColumnType::Bytes.nullable()),
             column(
                 "state",
                 storage_enum("jazz_branch_state", &["open", "merged", "discarded"]),
             ),
+            column("metadata_pending", GrooveColumnType::Bool),
         ],
     )
     .with_primary_key(PrimaryKey::composite([PrimaryKeyColumn::uuid("branch_id")]))
@@ -1363,7 +1393,8 @@ fn transactions_table() -> GrooveTableSchema {
             column("absent_read_set", GrooveColumnType::Bytes.nullable()),
             column("predicate_read_set", GrooveColumnType::Bytes.nullable()),
             column("user_metadata", GrooveColumnType::String.nullable()),
-            column("source_branch", GrooveColumnType::Uuid.nullable()),
+            column("target_lineage", GrooveColumnType::Bytes),
+            column("branch_merge", GrooveColumnType::Bytes.nullable()),
             column("permission_subject", GrooveColumnType::Uuid.nullable()),
             column("merge_strategy", GrooveColumnType::String.nullable()),
             // upstream-decided: written only by fate/state application.
@@ -1420,6 +1451,7 @@ fn put_merge_strategy(bytes: &mut Vec<u8>, strategy: MergeStrategy) {
     bytes.push(match strategy {
         MergeStrategy::Lww => 0,
         MergeStrategy::Counter => 1,
+        MergeStrategy::GSet => 2,
     });
 }
 
@@ -1440,19 +1472,19 @@ fn put_text_merge_spec(bytes: &mut Vec<u8>, spec: &TextMergeSpec) {
 
 fn put_column_type(bytes: &mut Vec<u8>, column_type: &GrooveColumnType) {
     match column_type {
-        GrooveColumnType::U8 => bytes.push(1),
-        GrooveColumnType::U16 => bytes.push(2),
-        GrooveColumnType::U32 => bytes.push(3),
-        GrooveColumnType::U64 => bytes.push(4),
-        GrooveColumnType::I64 => bytes.push(14),
-        GrooveColumnType::I32 => bytes.push(15),
-        GrooveColumnType::F64 => bytes.push(5),
-        GrooveColumnType::Bool => bytes.push(6),
-        GrooveColumnType::String => bytes.push(7),
-        GrooveColumnType::Bytes => bytes.push(8),
-        GrooveColumnType::Uuid => bytes.push(9),
+        GrooveColumnType::U8 => bytes.push(0),
+        GrooveColumnType::U16 => bytes.push(1),
+        GrooveColumnType::U32 => bytes.push(2),
+        GrooveColumnType::U64 => bytes.push(3),
+        GrooveColumnType::I32 => bytes.push(4),
+        GrooveColumnType::I64 => bytes.push(5),
+        GrooveColumnType::F64 => bytes.push(6),
+        GrooveColumnType::Bool => bytes.push(7),
+        GrooveColumnType::String => bytes.push(8),
+        GrooveColumnType::Bytes => bytes.push(9),
+        GrooveColumnType::Uuid => bytes.push(10),
         GrooveColumnType::Enum(schema) => {
-            bytes.push(10);
+            bytes.push(11);
             put_str(bytes, &schema.name);
             put_u64(bytes, schema.variants.len() as u64);
             for variant in &schema.variants {
@@ -1460,19 +1492,33 @@ fn put_column_type(bytes: &mut Vec<u8>, column_type: &GrooveColumnType) {
             }
         }
         GrooveColumnType::Tuple(members) => {
-            bytes.push(11);
+            bytes.push(12);
             put_u64(bytes, members.len() as u64);
             for member in members {
                 put_column_type(bytes, member);
             }
         }
         GrooveColumnType::Array(member) => {
-            bytes.push(12);
+            bytes.push(13);
             put_column_type(bytes, member);
         }
         GrooveColumnType::Nullable(member) => {
-            bytes.push(13);
+            bytes.push(14);
             put_column_type(bytes, member);
+        }
+        GrooveColumnType::Record(descriptor) => {
+            bytes.push(15);
+            put_u64(bytes, descriptor.fields().len() as u64);
+            for field in descriptor.fields() {
+                match &field.name {
+                    Some(name) => {
+                        bytes.push(1);
+                        put_str(bytes, name);
+                    }
+                    None => bytes.push(0),
+                }
+                put_column_type(bytes, &field.value_type);
+            }
         }
     }
 }

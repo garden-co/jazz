@@ -158,6 +158,91 @@ describe("PersistentBrowserOpfsRuntime", () => {
     await runtime.close();
   });
 
+  it("registers a subscription before a subsequent fire-and-forget write", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-subscribe-before-write-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    const subscription = runtime.createSubscription(JSON.stringify({ table: "todos" }));
+    runtime.executeSubscription(subscription, () => undefined);
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "must follow subscription registration" } },
+      undefined,
+      "00000000-0000-0000-0000-000000000001",
+    );
+
+    await vi.waitFor(() => {
+      expect(
+        worker.messages.some((message) => message.method === "createExecutedSubscription"),
+      ).toBe(true);
+    });
+    expect(worker.messages.some((message) => message.method === "insert")).toBe(false);
+
+    const create = worker.messages.find(
+      (message) => message.method === "createExecutedSubscription",
+    );
+    worker.respond(create!.id, 7);
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
+    });
+    const insert = worker.messages.find((message) => message.method === "insert");
+    worker.respond(insert!.id, { transactionId: "native-runtime-transaction" });
+
+    await runtime.close();
+  });
+
+  it("does not delay a write behind a subscription created later", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-write-before-subscribe-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "must be in the subscription snapshot" } },
+      undefined,
+      "00000000-0000-0000-0000-000000000001",
+    );
+    const subscription = runtime.createSubscription(JSON.stringify({ table: "todos" }));
+    runtime.executeSubscription(subscription, () => undefined);
+
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "insert")).toBe(true);
+    });
+    expect(worker.messages.some((message) => message.method === "createExecutedSubscription")).toBe(
+      false,
+    );
+
+    const insert = worker.messages.find((message) => message.method === "insert")!;
+    worker.respond(insert.id, { transactionId: "native-runtime-transaction" });
+    await vi.waitFor(() => {
+      expect(
+        worker.messages.some((message) => message.method === "createExecutedSubscription"),
+      ).toBe(true);
+    });
+    const create = worker.messages.find(
+      (message) => message.method === "createExecutedSubscription",
+    )!;
+    expect(worker.messages.indexOf(insert)).toBeLessThan(worker.messages.indexOf(create));
+    worker.respond(create.id, 7);
+
+    await runtime.close();
+  });
+
   it("rejects waits when the worker write fails before core returns a transaction id", async () => {
     vi.stubGlobal("Worker", FakeWorker);
 

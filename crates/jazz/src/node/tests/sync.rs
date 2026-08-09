@@ -619,7 +619,8 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        source_branch: None,
+        target_lineage: crate::tx::BranchLineage::Root,
+        branch_merge: None,
         merge_strategy: None,
     };
     let first = version_record(row(1), Vec::new(), title_cells("one"), None);
@@ -713,7 +714,8 @@ fn sequential_partial_exclusive_bundles_index_the_complete_transaction() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        source_branch: None,
+        target_lineage: crate::tx::BranchLineage::Root,
+        branch_merge: None,
         merge_strategy: None,
     };
     let updates = [
@@ -759,7 +761,8 @@ fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        source_branch: None,
+        target_lineage: crate::tx::BranchLineage::Root,
+        branch_merge: None,
         merge_strategy: None,
     };
     reader
@@ -950,7 +953,8 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        source_branch: None,
+        target_lineage: crate::tx::BranchLineage::Root,
+        branch_merge: None,
         merge_strategy: None,
     };
     let first = version_record(row(1), Vec::new(), title_cells("one"), None);
@@ -1267,7 +1271,8 @@ fn originating_causality_rejection_retains_child_payload() {
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json: None,
-            source_branch: None,
+            target_lineage: crate::tx::BranchLineage::Root,
+            branch_merge: None,
             merge_strategy: None,
         },
         vec![version_record(row, Vec::new(), title_cells("parent"), None)],
@@ -1555,7 +1560,8 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
                     absent_read_set: None,
                     predicate_read_set: None,
                     user_metadata_json: None,
-                    source_branch: None,
+                    target_lineage: crate::tx::BranchLineage::Root,
+                    branch_merge: None,
                     merge_strategy: None,
                 },
                 versions: Vec::new(),
@@ -1905,12 +1911,38 @@ fn policy_graph_dropdown_entry_cells(dropdown: RowUuid, idx: usize) -> BTreeMap<
             nullable(Some(Value::Bool(false))),
         ),
         ("c729".to_owned(), Value::Bool(true)),
-        ("c488".to_owned(), nullable(Some(Value::U32(idx as u32)))),
+        ("c488".to_owned(), nullable(Some(Value::I32(idx as i32)))),
         ("c730".to_owned(), Value::Bool(idx.is_multiple_of(3))),
         ("c731".to_owned(), nullable(None)),
         ("c732".to_owned(), nullable(None)),
-        ("c733".to_owned(), nullable(Some(Value::U32(0)))),
+        ("c733".to_owned(), nullable(Some(Value::I32(0)))),
     ])
+}
+
+fn assert_policy_graph_perf_fixture_matches_schema(schema: &JazzSchema) {
+    for (table_name, column_name, expected_type) in [
+        ("t50", "c632", ColumnType::I32),
+        ("t67", "c488", ColumnType::I32.nullable()),
+        ("t67", "c733", ColumnType::I32.nullable()),
+    ] {
+        let table = schema
+            .tables
+            .iter()
+            .find(|candidate| candidate.name == table_name)
+            .unwrap_or_else(|| panic!("policy-graph performance fixture is missing {table_name}"));
+        let column = table
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column_name)
+            .unwrap_or_else(|| {
+                panic!("policy-graph performance fixture is missing {table_name}.{column_name}")
+            });
+        assert_eq!(
+            column.column_type,
+            expected_type,
+            "policy-graph performance fixture writes {table_name}.{column_name} as Value::I32"
+        );
+    }
 }
 
 fn policy_graph_version(
@@ -1936,7 +1968,11 @@ fn policy_graph_version(
         cells,
         None,
     )
-    .unwrap()
+    .unwrap_or_else(|error| {
+        panic!(
+            "policy-graph performance fixture has invalid cells for table={table} row={row_uuid:?}: {error:?}; cells={cells:?}"
+        )
+    })
 }
 
 fn seed_policy_graph_known_global(
@@ -1960,7 +1996,8 @@ fn seed_policy_graph_known_global(
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
-                source_branch: None,
+                target_lineage: crate::tx::BranchLineage::Root,
+                branch_merge: None,
                 merge_strategy: None,
             },
             vec![version],
@@ -2036,6 +2073,7 @@ where
 fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
     jazz_benchmark_guard::refuse_contaminated_measurement();
     let schema = policy_graph_perf_schema_fixture();
+    assert_policy_graph_perf_fixture_matches_schema(&schema);
     let (_core_dir, mut core) = open_node_with_schema(node(0x22), schema.clone());
 
     let member = policy_graph_author(0x31, 1);
@@ -2068,7 +2106,7 @@ fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
         corp,
         BTreeMap::from([
             ("c457".to_owned(), Value::Uuid(member_team.0)),
-            ("c632".to_owned(), Value::U32(0)),
+            ("c632".to_owned(), Value::I32(0)),
         ]),
     ));
     seed_rows.push((
@@ -3634,7 +3672,8 @@ fn duplicate_commit_units_compare_versions_without_wire_order() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        source_branch: None,
+        target_lineage: crate::tx::BranchLineage::Root,
+        branch_merge: None,
         merge_strategy: None,
     };
     let versions = vec![
@@ -3649,5 +3688,82 @@ fn duplicate_commit_units_compare_versions_without_wire_order() {
     assert!(
         core.ingest_commit_unit(tx, reversed, u64::MAX - SKEW_TOLERANCE_MS)
             .is_ok()
+    );
+}
+/// A locally pending partial update is rebuilt from durable history after
+/// `bob` reopens, then uploaded as a real commit unit. Its explicitly authored
+/// `title` wins while `alice`'s concurrent `completed` edit survives.
+///
+/// ```text
+/// base(base,false) ─┬─ alice(completed=true) ──┐
+///                   └─ bob(title=base) ─ reopen ─ upload ─┴─► base,true
+/// ```
+///
+/// Planted positive: force `VersionRecord::from_stored` to attach
+/// `authored_columns=None`. Bob's materialized `completed=false` then appears
+/// authored on the rebuilt wire unit and this test fails.
+#[test]
+fn reopened_pending_partial_update_upload_preserves_authored_columns() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("completed", ColumnType::Bool),
+        ],
+    )]);
+    let (bob_dir, mut bob) = open_node_with_schema(node(0x91), schema.clone());
+    let (_alice_dir, mut alice) = open_node_with_schema(node(0x92), schema.clone());
+    let (_core_dir, mut core) =
+        open_history_complete_node_with_schema(node(0x93), schema.clone());
+    let row_uuid = row(0x91);
+
+    let (base, base_unit) = bob
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 10).cells(BTreeMap::from([
+                ("title".to_owned(), Value::String("base".to_owned())),
+                ("completed".to_owned(), Value::Bool(false)),
+            ])),
+        )
+        .unwrap();
+    let [base_fate] = core.apply_sync_message(base_unit).unwrap().try_into().unwrap();
+    bob.apply_sync_message(base_fate).unwrap();
+
+    let (_alice_tx, alice_unit) = alice
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 20)
+                .parents(vec![base])
+                .cells(BTreeMap::from([(
+                    "completed".to_owned(),
+                    Value::Bool(true),
+                )])),
+        )
+        .unwrap();
+    core.apply_sync_message(alice_unit).unwrap();
+
+    let bob_tx = bob
+        .commit_mergeable(
+            MergeableCommit::new("todos", row_uuid, 30)
+                .parents(vec![base])
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), Value::String("base".to_owned())),
+                    ("completed".to_owned(), Value::Bool(false)),
+                ]))
+                .authored_columns(BTreeSet::from(["title".to_owned()])),
+        )
+        .unwrap();
+    drop(bob);
+
+    let mut reopened = reopen_node_at(&bob_dir, node(0x91), schema);
+    let rebuilt = reopened.commit_unit_for(bob_tx).unwrap();
+    core.apply_sync_message(rebuilt).unwrap();
+
+    let rows = core.current_rows("todos", DurabilityTier::Local).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].test_cells_by_descriptor(),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("base".to_owned())),
+            ("completed".to_owned(), Value::Bool(true)),
+        ])
     );
 }

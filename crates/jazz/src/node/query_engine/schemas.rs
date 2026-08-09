@@ -250,6 +250,8 @@ pub(crate) struct VersionWitnessSchema {
     pub(crate) updated_at_field: String,
     /// Parent transaction set field.
     pub(crate) parents_field: String,
+    /// Nullable serialized set of explicitly authored user columns.
+    pub(crate) authored_columns_field: String,
     /// Nullable deletion event field.
     pub(crate) deletion_field: String,
     /// Terminal field name for each app column.
@@ -430,8 +432,8 @@ pub(crate) struct SyntheticResultMembershipSchema {
     pub(crate) table_field: String,
     /// Stable synthetic row id field.
     pub(crate) row_field: String,
-    /// Synthetic revision/version field used for replacement deltas.
-    pub(crate) revision_field: String,
+    /// Opaque replacement-token field; not a result-row version.
+    pub(crate) replacement_field: String,
     /// Retained binding/routing parameter fields.
     pub(crate) routing_param_fields: BTreeSet<String>,
 }

@@ -24,9 +24,9 @@ fn main() {
 
 fn run_record_encode_decode(iterations: usize) -> String {
     let descriptor = RecordDescriptor::new([
-        ("id", ColumnType::U64.value_type()),
-        ("artist_id", ColumnType::U64.value_type()),
-        ("title", ColumnType::String.value_type()),
+        ("id", ColumnType::U64.clone()),
+        ("artist_id", ColumnType::U64.clone()),
+        ("title", ColumnType::String.clone()),
     ]);
     let mut hist = Histogram::<u64>::new(3).expect("hist");
     let mut bytes = 0usize;

@@ -10,7 +10,7 @@ use std::sync::mpsc::TryRecvError;
 
 use groove::db::{StorageReadBucket, StorageReadMetrics};
 use groove::ivm::MultisinkSubscription;
-use groove::storage::OrderedKvStorage;
+use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use web_time::Instant;
 
 use crate::ids::{AuthorId, RowUuid};
@@ -832,7 +832,7 @@ impl PeerState {
     fn drain_maintained_subscription_view_changes<S>(
         &mut self,
         node: &mut NodeState<S>,
-        _shape: &ValidatedQuery,
+        shape: &ValidatedQuery,
         subscription: SubscriptionKey,
         result_table_filter: Option<&str>,
         flush_query_runtime: bool,
@@ -859,6 +859,11 @@ impl PeerState {
             .and_then(|state| state.maintained_subscription_view.as_ref())
             .map(|maintained| maintained.tables.clone())
             .unwrap_or_default();
+        let aggregate_is_policy_scoped = shape.query().aggregate.is_some()
+            && node
+                .table(shape.query().table.as_str())?
+                .read_policy
+                .is_some();
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
         let mut program_fact_adds = Vec::new();
         let mut program_fact_removes = Vec::new();
@@ -955,7 +960,8 @@ impl PeerState {
                 continue;
             }
             if !output_tables.contains_key(table_name)
-                && !matches!(member, ResultMemberEntry::Synthetic { .. })
+                && (!matches!(member, ResultMemberEntry::Synthetic { .. })
+                    || aggregate_is_policy_scoped)
             {
                 continue;
             }
@@ -1017,6 +1023,11 @@ impl PeerState {
         let raw_fact_add_count = transitions.program_fact_adds.len();
         let filter_start = Instant::now();
         let output_tables = tables.clone();
+        let aggregate_is_policy_scoped = shape.query().aggregate.is_some()
+            && node
+                .table(shape.query().table.as_str())?
+                .read_policy
+                .is_some();
         let known_state = self
             .subscriptions
             .get(&subscription)
@@ -1040,7 +1051,8 @@ impl PeerState {
                 };
                 result_table_filter.is_none_or(|table| table_name == table)
                     && (output_tables.contains_key(table_name)
-                        || matches!(member, ResultMemberEntry::Synthetic { .. }))
+                        || (matches!(member, ResultMemberEntry::Synthetic { .. })
+                            && !aggregate_is_policy_scoped))
             })
             .collect::<Vec<_>>();
         let current_member_result_set = result_member_adds.iter().cloned().collect::<BTreeSet<_>>();
@@ -1709,7 +1721,7 @@ impl PeerState {
         now_ms: u64,
     ) -> Result<Vec<SyncMessage>, Error>
     where
-        S: OrderedKvStorage,
+        S: OrderedKvStorage + ReopenableStorage,
     {
         self.evict_idle_edge_scope_subscriptions(node, now_ms);
         if tx.kind != TxKind::Mergeable {
@@ -1758,7 +1770,7 @@ impl PeerState {
         now_ms: u64,
     ) -> Result<Vec<SyncMessage>, Error>
     where
-        S: OrderedKvStorage,
+        S: OrderedKvStorage + ReopenableStorage,
     {
         self.evict_idle_edge_scope_subscriptions(node, now_ms);
         let deferred = self
@@ -4296,7 +4308,7 @@ mod tests {
         let binding = shape.bind(BTreeMap::new()).unwrap();
 
         for (identity, expected_count, expected_sum) in
-            [(admin, 2, 30), (member, 2, 40), (spy, 0, 0)]
+            [(admin, 2, Some(30)), (member, 2, Some(40)), (spy, 0, None)]
         {
             let rows = core
                 .query_rows_with_prepared_plan_for_identity(
@@ -4307,13 +4319,12 @@ mod tests {
                     identity,
                 )
                 .unwrap();
-            if expected_count == 0 {
-                assert!(rows.is_empty());
-                continue;
-            }
             let cells = aggregate_cells(&rows[0]);
             assert_eq!(cells["count"], Value::U64(expected_count));
-            assert_eq!(cells["sum_score"], Value::U64(expected_sum));
+            assert_eq!(
+                cells.get("sum_score").cloned(),
+                expected_sum.map(Value::U64)
+            );
         }
     }
 

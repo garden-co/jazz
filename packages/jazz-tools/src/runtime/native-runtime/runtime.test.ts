@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import type { ColumnDescriptor, NativeRowDelta, WasmSchema } from "../../drivers/types.js";
 import {
@@ -1588,7 +1588,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
-  it("encodes negative integer query literals as signed i32 bits for core", () => {
+  it("encodes integer query literals with the Groove I32 tag", () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new NativeRuntimeAdapter(
       {
@@ -1640,9 +1640,33 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(readPreparedFirstLiteral(preparedBytes!)).toEqual({
       column: "priority",
       opTag: 8,
-      literalTag: 2,
-      value: 0x7fffffff,
+      literalTag: 14,
+      value: -1,
     });
+  });
+
+  it("preserves signed i32 query literal boundaries and rejects overflow", () => {
+    const query = queryWithPredicates("metrics", [
+      { column: "count", op: "Gte", value: { type: "Integer", value: -0x80000000 } },
+      { column: "count", op: "Eq", value: { type: "Integer", value: 0 } },
+      { column: "count", op: "Lte", value: { type: "Integer", value: 0x7fffffff } },
+    ]);
+
+    expect(readPreparedComparisonLiterals(query)).toEqual([
+      { predicateTag: 7, column: "count", literal: { tag: 14, value: -0x80000000 } },
+      { predicateTag: 3, column: "count", literal: { tag: 14, value: 0 } },
+      { predicateTag: 9, column: "count", literal: { tag: 14, value: 0x7fffffff } },
+    ]);
+    expect(() =>
+      queryWithPredicates("metrics", [
+        { column: "count", op: "Eq", value: { type: "Integer", value: -0x80000001 } },
+      ]),
+    ).toThrow("Integer value must be a signed 32-bit integer");
+    expect(() =>
+      queryWithPredicates("metrics", [
+        { column: "count", op: "Eq", value: { type: "Integer", value: 0x80000000 } },
+      ]),
+    ).toThrow("Integer value must be a signed 32-bit integer");
   });
 
   it("encodes BIGINT query literals as signed i64 values", () => {
@@ -1655,6 +1679,97 @@ describe("NativeRuntimeAdapter server transport", () => {
       { predicateTag: 6, column: "largeCount", literal: { tag: 13, value: 9007199254740993n } },
       { predicateTag: 8, column: "largeCount", literal: { tag: 13, value: -5n } },
     ]);
+    for (const value of [-(1n << 63n) - 1n, 1n << 63n]) {
+      expect(() =>
+        queryWithPredicates("metrics", [
+          { column: "largeCount", op: "Eq", value: { type: "BigInt", value } },
+        ]),
+      ).toThrow("BigInt value must be a signed 64-bit integer");
+    }
+  });
+
+  it("encodes signed Integer policy literals as logical I32 values", () => {
+    const policy = readSchemaSelectPolicyBranches(
+      encodeSchema({
+        metrics: {
+          columns: [{ name: "score", column_type: { type: "Integer" }, nullable: false }],
+          policies: {
+            select: {
+              using: {
+                type: "And",
+                exprs: [
+                  {
+                    type: "Cmp",
+                    column: "score",
+                    op: "Ge",
+                    value: { type: "Literal", value: { type: "Integer", value: -7 } },
+                  },
+                  {
+                    type: "Cmp",
+                    column: "score",
+                    op: "Le",
+                    value: { type: "Literal", value: { type: "Integer", value: 8 } },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      }),
+      "metrics",
+    );
+
+    expect(policy.filters).toEqual([
+      {
+        tag: 7,
+        column: "score",
+        operand: { tag: 3, literalTag: 14, value: -7n },
+      },
+      {
+        tag: 9,
+        column: "score",
+        operand: { tag: 3, literalTag: 14, value: 8n },
+      },
+    ]);
+
+    for (const value of [-2_147_483_649, 2_147_483_648]) {
+      expect(() =>
+        encodeSchema({
+          metrics: {
+            columns: [{ name: "score", column_type: { type: "Integer" }, nullable: false }],
+            policies: {
+              select: {
+                using: {
+                  type: "Cmp",
+                  column: "score",
+                  op: "Eq",
+                  value: { type: "Literal", value: { type: "Integer", value } },
+                },
+              },
+            },
+          },
+        }),
+      ).toThrow("Integer policy literal default must be a signed 32-bit integer");
+    }
+    for (const value of [-(1n << 63n) - 1n, 1n << 63n]) {
+      expect(() =>
+        encodeSchema({
+          metrics: {
+            columns: [{ name: "score", column_type: { type: "BigInt" }, nullable: false }],
+            policies: {
+              select: {
+                using: {
+                  type: "Cmp",
+                  column: "score",
+                  op: "Eq",
+                  value: { type: "Literal", value: { type: "BigInt", value } },
+                },
+              },
+            },
+          },
+        }),
+      ).toThrow("BigInt policy literal must be a signed 64-bit integer");
+    }
   });
 
   it("materializes array subquery relation snapshots for subscriptions", async () => {
@@ -1706,6 +1821,7 @@ describe("NativeRuntimeAdapter server transport", () => {
             table: "todos",
             inner_column: "owner_id",
             outer_column: "id",
+            unbounded: true,
           },
         ],
       }),
@@ -1863,6 +1979,7 @@ describe("NativeRuntimeAdapter server transport", () => {
             table: "todos",
             inner_column: "owner_id",
             outer_column: "users.id",
+            unbounded: true,
           },
         ],
       }),
@@ -3030,8 +3147,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         column: "count",
         literals: [
-          { tag: 2, value: encodeSignedI32ForTest(5) },
-          { tag: 2, value: encodeSignedI32ForTest(10) },
+          { tag: 14, value: 5 },
+          { tag: 14, value: 10 },
         ],
       },
       {
@@ -3268,6 +3385,81 @@ describe("NativeRuntimeAdapter server transport", () => {
     if (decoded[0]?.kind !== 0) throw new Error("expected added row");
     expect(Object.keys(decoded[0].row)).toEqual(["id", "values"]);
     runtime.close();
+  });
+
+  it("reconciles native relation subscription lifecycles without leaking projection records", () => {
+    const first = uuidBytes("00000000-0000-0000-0000-000000000401");
+    const second = uuidBytes("00000000-0000-0000-0000-000000000402");
+    const chunks = [
+      relationSubscriptionChunk({
+        reset: true,
+        rootAdded: [{ table: "todos", rowId: first, title: "first" }],
+        relationAdded: [{ table: "todos", rowId: first, title: "first" }],
+      }),
+      relationSubscriptionChunk({
+        // Relation snapshots carry the authoritative rendered row. The root
+        // delta can be stale/partial while that snapshot advances.
+        rootUpdated: [{ table: "todos", rowId: first, title: "stale root" }],
+        relationUpdated: [{ table: "todos", rowId: first, title: "first updated" }],
+      }),
+      relationSubscriptionChunk({
+        rootRemoved: [{ table: "todos", rowId: first }],
+        relationRemoved: [{ table: "todos", rowId: first }],
+      }),
+      relationSubscriptionChunk({
+        reset: true,
+        rootAdded: [{ table: "todos", rowId: second, title: "second" }],
+        relationAdded: [{ table: "todos", rowId: second, title: "second" }],
+      }),
+    ];
+    const runtime = runtimeWithNativeRelationSubscriptionChunks(chunks);
+    const deltas: NativeRowDelta[] = [];
+    const handle = runtime.createSubscription(
+      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      null,
+      null,
+      null,
+    );
+
+    runtime.executeSubscription(handle, (delta: NativeRowDelta) => deltas.push(delta));
+
+    expect(deltas).toHaveLength(4);
+    expect(decodeTestDeltas([deltas[0]!])[0]).toMatchObject([
+      { kind: 0, id: formatUuid(first), index: 0, row: { values: [{ value: "first" }] } },
+    ]);
+    expect(decodeTestDeltas([deltas[1]!])[0]).toMatchObject([
+      {
+        kind: 2,
+        id: formatUuid(first),
+        index: 0,
+        row: { values: [{ value: "first updated" }] },
+      },
+    ]);
+    expect(decodeTestDeltas([deltas[2]!])[0]).toEqual([
+      { kind: 1, id: formatUuid(first), index: 0 },
+    ]);
+    expect(decodeTestDeltas([deltas[3]!])[0]).toMatchObject([
+      { kind: 0, id: formatUuid(second), index: 0, row: { values: [{ value: "second" }] } },
+    ]);
+    expect(deltas[0]!.reset).toBe(true);
+    expect(deltas[3]!.reset).toBe(true);
+    runtime.close();
+
+    const ordinary = runtimeWithNativeSubscriptionChunk(
+      relationSubscriptionChunk({
+        reset: true,
+        rootAdded: [{ table: "todos", rowId: first, title: "ordinary" }],
+      }),
+    );
+    const ordinaryDeltas: NativeRowDelta[] = [];
+    const ordinaryHandle = ordinary.createSubscription(JSON.stringify({ table: "todos" }));
+    ordinary.executeSubscription(ordinaryHandle, (delta: NativeRowDelta) =>
+      ordinaryDeltas.push(delta),
+    );
+    expect(decodeTestDeltas(ordinaryDeltas)[0]).toMatchObject([
+      { kind: 0, id: formatUuid(first), row: { values: [{ value: "ordinary" }] } },
+    ]);
+    ordinary.close();
   });
 
   it("rewraps user field option bytes when packed reset frames filter engine records", () => {
@@ -4083,6 +4275,15 @@ describe("NativeRuntimeAdapter server transport", () => {
     const expectedBytes = new Uint8Array(readFileSync(new URL("schema.native.bin", fixtureDir)));
     const encoded = encodeSchema(source.mergedSchema);
 
+    if (process.env.JAZZ_UPDATE_POLICY_GRAPH_PERF_NATIVE_SCHEMA) {
+      writeFileSync(new URL("schema.native.bin", fixtureDir), encoded);
+      writeFileSync(
+        new URL("schema.native.hex", fixtureDir),
+        `${Buffer.from(encoded).toString("hex")}\n`,
+      );
+      return;
+    }
+
     expect(encoded).toEqual(expectedBytes);
   });
 
@@ -4631,6 +4832,67 @@ function runtimeWithNativeSubscriptionChunk(
   );
 }
 
+function runtimeWithNativeRelationSubscriptionChunks(chunks: unknown[]): NativeRuntimeAdapter {
+  return new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          subscribeRelationQuery: () => ({
+            readAll: () => chunks,
+            close: () => true,
+          }),
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    new Uint8Array(16),
+    1,
+    true,
+  );
+}
+
+function relationSubscriptionChunk({
+  reset = false,
+  rootAdded = [],
+  rootUpdated = [],
+  rootRemoved = [],
+  relationAdded = [],
+  relationUpdated = [],
+  relationRemoved = [],
+}: {
+  reset?: boolean;
+  rootAdded?: EncodedTestRow[];
+  rootUpdated?: EncodedTestRow[];
+  rootRemoved?: Array<{ table: string; rowId: Uint8Array }>;
+  relationAdded?: EncodedTestRow[];
+  relationUpdated?: EncodedTestRow[];
+  relationRemoved?: Array<{ table: string; rowId: Uint8Array }>;
+}): unknown {
+  return {
+    type: "delta",
+    reset,
+    settled: true,
+    delta: encodeSubscriptionDelta({
+      added: rootAdded,
+      updated: rootUpdated,
+      removed: rootRemoved,
+    }),
+    relation_delta: encodeRelationSubscriptionDelta({
+      baseCursor: 0,
+      cursor: 1,
+      added: relationAdded,
+      updated: relationUpdated,
+      removed: relationRemoved,
+      addedEdges: [],
+      removedEdges: [],
+    }),
+  };
+}
+
 function indexedUuidBytes(index: number): Uint8Array {
   const bytes = new Uint8Array(16);
   new DataView(bytes.buffer).setUint32(12, index, false);
@@ -4768,13 +5030,11 @@ function readPreparedNumericLiteral(reader: PostcardReader): {
       return { tag, value: reader.f64Le() };
     case 13:
       return { tag, value: reader.i64() };
+    case 14:
+      return { tag, value: Number(reader.i64()) };
     default:
       throw new Error(`expected numeric prepared literal tag, got ${tag}`);
   }
-}
-
-function encodeSignedI32ForTest(value: number): number {
-  return (value ^ 0x80000000) >>> 0;
 }
 
 function readPreparedLimit(query: Uint8Array): number | undefined {
@@ -4933,7 +5193,7 @@ function readPreparedFirstLiteral(query: Uint8Array): {
   const column = reader.string();
   expect(reader.u64()).toBe(3);
   const literalTag = reader.u64();
-  const value = literalTag === 13 ? Number(reader.i64()) : reader.u64();
+  const value = literalTag === 13 || literalTag === 14 ? Number(reader.i64()) : reader.u64();
   return { column, opTag, literalTag, value };
 }
 
@@ -5320,7 +5580,7 @@ function readPolicyPredicateForTest(reader: PostcardReader): TestPolicyPredicate
   if (tag === 2) {
     return { tag, child: readPolicyPredicateForTest(reader) };
   }
-  if (tag === 3) {
+  if ([3, 4, 6, 7, 8, 9].includes(tag)) {
     expect(reader.u64()).toBe(0);
     const column = reader.string();
     return { tag, column, operand: readPolicyOperandForTest(reader) };
@@ -5351,7 +5611,7 @@ function readPolicyOperandForTest(reader: PostcardReader): TestPolicyOperand {
     if (literalTag === 2 || literalTag === 3) {
       return { tag, literalTag, value: reader.u64() };
     }
-    if (literalTag === 13) {
+    if (literalTag === 13 || literalTag === 14) {
       return { tag, literalTag, value: reader.i64() };
     }
     if (literalTag === 4) {
@@ -5376,7 +5636,25 @@ function readPolicyOperandForTest(reader: PostcardReader): TestPolicyOperand {
 
 function skipSchemaValueType(reader: PostcardReader): void {
   const tag = reader.u64();
-  if (tag === 11 || tag === 12) skipSchemaValueType(reader);
+  if (tag === 11) {
+    reader.string();
+    reader.readVec((variant) => variant.string());
+    return;
+  }
+  if (tag === 12) {
+    reader.readVec(skipSchemaValueType);
+    return;
+  }
+  if (tag === 13 || tag === 14) {
+    skipSchemaValueType(reader);
+    return;
+  }
+  if (tag === 15) {
+    reader.readVec((field) => {
+      field.option((name) => name.string());
+      skipSchemaValueType(field);
+    });
+  }
 }
 
 function skipGrooveValue(reader: PostcardReader): void {
@@ -5634,7 +5912,7 @@ function writeRowBatches(writer: PostcardWriter, rows: EncodedTestRow[]): void {
       (row) => row.createdAt !== undefined || row.updatedAt !== undefined,
     );
     const descriptor = [
-      { name: "title", valueType: { tag: 6 } },
+      { name: "title", valueType: { tag: 8 } },
       ...(hasProvenance
         ? [
             { name: "$createdAt", valueType: { tag: 3 } },
@@ -5719,9 +5997,9 @@ function encodeUserWrappedSubscriptionDelta(row: {
   note: string;
 }): Uint8Array {
   const descriptor = [
-    { name: "row_uuid", valueType: { tag: 8 } },
-    { name: "user_title", valueType: { tag: 12, inner: { tag: 6 } } },
-    { name: "user_note", valueType: { tag: 12, inner: { tag: 12, inner: { tag: 6 } } } },
+    { name: "row_uuid", valueType: { tag: 10 } },
+    { name: "user_title", valueType: { tag: 14, inner: { tag: 8 } } },
+    { name: "user_note", valueType: { tag: 14, inner: { tag: 14, inner: { tag: 8 } } } },
     { name: "$createdAt", valueType: { tag: 3 } },
   ];
   const delta = new PostcardWriter();
@@ -5763,8 +6041,8 @@ function writeRelationEdge(writer: PostcardWriter, edge: NativeRelationSubscript
 
 function encodeBinaryLargeValueRows(): Uint8Array {
   const descriptor = [
-    { name: "chunk_refs", valueType: { tag: 11, inner: { tag: 8 } } },
-    { name: "chunk_sizes", valueType: { tag: 11, inner: { tag: 4 } } },
+    { name: "chunk_refs", valueType: { tag: 13, inner: { tag: 10 } } },
+    { name: "chunk_sizes", valueType: { tag: 13, inner: { tag: 6 } } },
   ];
   const writer = new PostcardWriter();
   writer.vec((batch) => {

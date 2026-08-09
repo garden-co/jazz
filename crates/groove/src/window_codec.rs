@@ -40,12 +40,12 @@ impl WindowSchema {
     }
 
     pub fn from_primary_key(primary_key: &PrimaryKey, value: RecordDescriptor) -> Self {
-        let key = RecordDescriptor::new(primary_key.columns.iter().map(|column| {
-            (
-                column.column.clone(),
-                column.key_type.column_type().value_type(),
-            )
-        }));
+        let key = RecordDescriptor::new(
+            primary_key
+                .columns
+                .iter()
+                .map(|column| (column.column.clone(), column.key_type.column_type().clone())),
+        );
         Self { key, value }
     }
 

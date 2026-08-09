@@ -2,16 +2,19 @@ use std::collections::BTreeMap;
 
 use groove::records::Value;
 use groove::schema::ColumnType;
-use jazz::ids::{AuthorId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
+use jazz::ids::{AuthorId, BranchId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
 use jazz::node::content_store::Extent;
 use jazz::protocol::{
-    CatalogueAck, ContentExtent, CurrentWriteSchema, LargeValueOwnerRef, LensOp, MigrationLens,
-    PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, RowVersionRef, SchemaVersion,
-    ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey,
-    SyncMessage, TableLens, VersionBundle, VersionCarrier, VersionRecord,
+    BranchMetadata, CatalogueAck, ContentExtent, CurrentWriteSchema, LargeValueOwnerRef, LensOp,
+    MigrationLens, PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, RowVersionRef,
+    SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
+    SubscriptionKey, SyncMessage, TableLens, VersionBundle, VersionCarrier, VersionRecord,
     build_version_bundle_runs_from_singletons,
 };
-use jazz::query::{BindingId, Query, ShapeId};
+use jazz::query::{
+    ArraySubquery, ArraySubqueryRequirement, BindingId, OrderDirection, Query, ShapeId, col, eq,
+    lit,
+};
 use jazz::schema::{ColumnSchema, JazzSchema, TableSchema};
 use jazz::time::{GlobalSeq, TxTime};
 use jazz::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
@@ -24,6 +27,14 @@ use serde::{Deserialize, Serialize};
 const FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/wire_message_frames.json"
+);
+const NATIVE_ROW_CODEC_FIXTURE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/native_row_codec.json"
+);
+const NATIVE_QUERY_CODEC_FIXTURE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/native_query_codec.json"
 );
 
 #[derive(Serialize)]
@@ -45,12 +56,12 @@ struct Fixture {
     decoded_debug: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct NativeRowCodecFixture {
     cases: Vec<NativeRowCodecCase>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct NativeRowCodecCase {
     name: String,
     descriptor_hex: Vec<String>,
@@ -58,10 +69,22 @@ struct NativeRowCodecCase {
     fields: Vec<NativeRowCodecField>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct NativeRowCodecField {
     name: String,
     encoded_hex: String,
+    decoded_hex: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct NativeQueryCodecFixture {
+    cases: Vec<NativeQueryCodecCase>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct NativeQueryCodecCase {
+    name: String,
+    query_hex: String,
 }
 
 fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
@@ -87,6 +110,24 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
     };
 
     vec![
+        (
+            "branch_metadata_root_open",
+            "BranchMetadata",
+            SyncMessage::BranchMetadata(BranchMetadata {
+                branch_id: BranchId::from_bytes([0x42; 16]),
+                created_by: AuthorId::from_bytes([0x43; 16]),
+                parent: None,
+                base: None,
+                open: true,
+            }),
+        ),
+        (
+            "fetch_branch_metadata",
+            "FetchBranchMetadata",
+            SyncMessage::FetchBranchMetadata {
+                branches: vec![BranchId::from_bytes([0x42; 16])],
+            },
+        ),
         (
             "fate_update_accepted_global",
             "FateUpdate",
@@ -222,7 +263,32 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                     absent_read_set: None,
                     predicate_read_set: None,
                     user_metadata_json: Some("{\"fixture\":\"wire\"}".to_owned()),
-                    source_branch: None,
+                    target_lineage: jazz::tx::BranchLineage::Root,
+                    branch_merge: None,
+                    merge_strategy: None,
+                },
+                versions: Vec::new(),
+            },
+        ),
+        (
+            "commit_unit_branch_target_empty",
+            "CommitUnit",
+            SyncMessage::CommitUnit {
+                tx: Transaction {
+                    tx_id: TxId::new(TxTime(43), node),
+                    kind: TxKind::Mergeable,
+                    n_total_writes: 0,
+                    made_by: author,
+                    permission_subject: None,
+                    base_snapshot: None,
+                    row_read_set: None,
+                    absent_read_set: None,
+                    predicate_read_set: None,
+                    user_metadata_json: None,
+                    target_lineage: jazz::tx::BranchLineage::Branch(BranchId::from_bytes(
+                        [0x42; 16],
+                    )),
+                    branch_merge: None,
                     merge_strategy: None,
                 },
                 versions: Vec::new(),
@@ -353,7 +419,8 @@ fn mixed_version_carriers(
                     absent_read_set: None,
                     predicate_read_set: None,
                     user_metadata_json: None,
-                    source_branch: None,
+                    target_lineage: jazz::tx::BranchLineage::Root,
+                    branch_merge: None,
                     merge_strategy: None,
                 },
                 versions: vec![
@@ -470,6 +537,47 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
 // record-layout contract, which is not observable through the public API.
 #[test]
 fn native_row_codec_fixture_round_trips_every_groove_value_type() {
+    if std::env::var_os("JAZZ_UPDATE_NATIVE_CODEC_FIXTURES").is_some() {
+        let (descriptor, values) = exhaustive_native_row_codec_case();
+        let descriptor_fields = descriptor
+            .fields()
+            .iter()
+            .map(|field| (field.name.clone(), field.value_type.clone()))
+            .collect::<Vec<_>>();
+        let descriptor_bytes =
+            postcard::to_allocvec(&descriptor_fields).expect("descriptor encodes");
+        let record = descriptor.create(&values).expect("record encodes");
+        let fields = descriptor
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                let span = descriptor
+                    .field_span(&record, index)
+                    .expect("field span resolves");
+                let encoded = &record[span];
+                NativeRowCodecField {
+                    name: field.name.clone().expect("fixture fields are named"),
+                    encoded_hex: hex(encoded),
+                    decoded_hex: fixture_decoded_hex(encoded, &field.value_type),
+                }
+            })
+            .collect();
+        let fixture = NativeRowCodecFixture {
+            cases: vec![NativeRowCodecCase {
+                name: "all_value_types_depth_three".to_owned(),
+                descriptor_hex: vec![hex(&descriptor_bytes)],
+                record_hex: vec![hex(&record)],
+                fields,
+            }],
+        };
+        std::fs::write(
+            NATIVE_ROW_CODEC_FIXTURE_PATH,
+            serde_json::to_string_pretty(&fixture).expect("native row fixture serializes") + "\n",
+        )
+        .expect("native row fixture writes");
+        return;
+    }
     let fixture: NativeRowCodecFixture =
         serde_json::from_str(include_str!("../fixtures/native_row_codec.json"))
             .expect("native row codec fixture parses");
@@ -521,6 +629,108 @@ fn native_row_codec_fixture_round_trips_every_groove_value_type() {
             field.name
         );
     }
+}
+
+// This is intentionally a codec-level integration fixture: TypeScript emits
+// these exact postcard Query values and Rust independently decodes and emits
+// them. Query preparation is the public boundary; a raw fixture is the
+// narrowest way to protect its positional layout contract.
+#[test]
+fn native_query_codec_fixture_round_trips_relation_shapes() {
+    if std::env::var_os("JAZZ_UPDATE_NATIVE_CODEC_FIXTURES").is_some() {
+        let fixture = NativeQueryCodecFixture {
+            cases: native_query_codec_cases()
+                .into_iter()
+                .map(|(name, query)| NativeQueryCodecCase {
+                    name: name.to_owned(),
+                    query_hex: hex(&postcard::to_allocvec(&query).expect("query encodes")),
+                })
+                .collect(),
+        };
+        std::fs::write(
+            NATIVE_QUERY_CODEC_FIXTURE_PATH,
+            serde_json::to_string_pretty(&fixture).expect("native query fixture serializes") + "\n",
+        )
+        .expect("native query fixture writes");
+        return;
+    }
+    let fixture: NativeQueryCodecFixture =
+        serde_json::from_str(include_str!("../fixtures/native_query_codec.json"))
+            .expect("native query codec fixture parses");
+
+    for (name, expected) in native_query_codec_cases() {
+        let case = fixture
+            .cases
+            .iter()
+            .find(|case| case.name == name)
+            .unwrap_or_else(|| panic!("{name} fixture is present"));
+        assert_eq!(
+            hex(&postcard::to_allocvec(&expected).expect("query encodes")),
+            case.query_hex,
+            "{name} fixture encodes from Rust"
+        );
+        let bytes = parse_hex(&case.query_hex);
+        let decoded: Query = postcard::from_bytes(&bytes).unwrap_or_else(|error| {
+            panic!("{name} fixture decodes: {error}");
+        });
+        assert_eq!(
+            decoded, expected,
+            "{name} fixture decodes to the expected query"
+        );
+    }
+}
+
+fn fixture_decoded_hex(bytes: &[u8], value_type: &groove::records::ValueType) -> Option<String> {
+    match value_type {
+        groove::records::ValueType::Nullable(inner) => match bytes.first() {
+            Some(0) => None,
+            Some(1) => fixture_decoded_hex(&bytes[1..], inner),
+            _ => Some(hex(bytes)),
+        },
+        _ => Some(hex(bytes)),
+    }
+}
+
+fn native_query_codec_cases() -> Vec<(&'static str, Query)> {
+    let forward = Query::from("accounts")
+        .select(["label"])
+        .order_by("label", OrderDirection::Asc);
+    let mut forward = forward;
+    forward.array_subqueries.push(
+        ArraySubquery::new("entries", "entries", "account_id", "id")
+            .select(["label"])
+            .order_by("label", OrderDirection::Asc)
+            .limit(3)
+            .offset(1),
+    );
+
+    let mut reverse = Query::from("groups");
+    reverse.array_subqueries.push(
+        ArraySubquery::new("members", "members", "group_id", "id")
+            .filter(eq(col("state"), lit("active")))
+            .select(["name"])
+            .limit(4)
+            .requirement(ArraySubqueryRequirement::AtLeastOne)
+            .nested(
+                ArraySubquery::new("notes", "notes", "member_id", "id")
+                    .select(["body"])
+                    .limit(2)
+                    .requirement(ArraySubqueryRequirement::MatchCorrelationCardinality),
+            ),
+    );
+
+    let mut unbounded = Query::from("teams");
+    unbounded.array_subqueries.push(
+        ArraySubquery::new("participants", "participants", "team_id", "id")
+            .unbounded()
+            .offset(2),
+    );
+
+    vec![
+        ("forward_include_projected_optional", forward),
+        ("reverse_include_required_nested_projection", reverse),
+        ("unbounded_reverse_include_with_offset", unbounded),
+    ]
 }
 
 fn exhaustive_native_row_codec_case() -> (
