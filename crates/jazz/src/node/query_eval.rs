@@ -13737,7 +13737,8 @@ fn historical_current_graph_full_scan(
     };
     let nullable_deletion_type = ValueType::Nullable(Box::new(ValueType::EnumTag(
         groove::records::ScalarEnumSchema::new("jazz_deletion", ["deleted", "restored"])
-            .expect("valid deletion enum"),
+            .expect("valid deletion enum")
+            .with_system_registry(groove::records::SystemVariantRegistry::deletion_state()),
     )));
     let content_events = changes_for_layer("content").project_fields([
         ProjectField::named("row_uuid"),
