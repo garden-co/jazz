@@ -44,6 +44,7 @@ type PostcardReaderLike = {
 };
 
 type PostcardWriterLike = {
+  u64(value: number): void;
   vec(writeItem: (writer: PostcardWriterLike, index: number) => void, length: number): void;
   some(writeValue: (writer: PostcardWriterLike) => void): void;
   string(value: string): void;
@@ -179,19 +180,18 @@ export function readDescriptor(reader: PostcardReaderLike): DescriptorField[] {
 export function writeValueType(writer: PostcardWriterLike, valueType: ValueType): void {
   writer.enumUnit(valueType.tag);
   if (valueType.tag === 11) {
-    if (!valueType.enumSchema) throw new Error("missing enum schema for ValueType::Enum");
-    writer.u64(valueType.enumSchema.registryId ?? 0);
-    writer.string(valueType.enumSchema.name);
-    writer.vec(
-      (variantWriter, index) => variantWriter.string(valueType.enumSchema!.variants[index]!),
-      valueType.enumSchema.variants?.length ?? 0,
-    );
+    const enumSchema = valueType.enumSchema;
+    const variants = enumSchema?.variants;
+    if (!enumSchema || !variants) throw new Error("missing enum schema for ValueType::Enum");
+    writer.u64(enumSchema.registryId ?? 0);
+    writer.string(enumSchema.name);
+    writer.vec((variantWriter, index) => variantWriter.string(variants[index]!), variants.length);
     return;
   }
   if (valueType.tag === 12) {
     const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
     writer.vec(
-      (memberWriter, index) => writeValueType(memberWriter, members[index]),
+      (memberWriter, index) => writeValueType(memberWriter, members[index]!),
       members.length,
     );
     return;
@@ -207,14 +207,16 @@ export function writeValueType(writer: PostcardWriterLike, valueType: ValueType)
     return;
   }
   if (valueType.tag === 16) {
-    if (!valueType.enumSchema?.cases) throw new Error("missing cases for ValueType::Enum");
-    writer.u64(valueType.enumSchema.registryId ?? 0);
-    writer.string(valueType.enumSchema.name);
+    const enumSchema = valueType.enumSchema;
+    const cases = enumSchema?.cases;
+    if (!enumSchema || !cases) throw new Error("missing cases for ValueType::Enum");
+    writer.u64(enumSchema.registryId ?? 0);
+    writer.string(enumSchema.name);
     writer.vec((caseWriter, index) => {
-      const enumCase = valueType.enumSchema!.cases![index]!;
+      const enumCase = cases[index]!;
       caseWriter.string(enumCase.name);
       writeDescriptor(caseWriter, enumCase.payload);
-    }, valueType.enumSchema.cases.length);
+    }, cases.length);
   }
 }
 
