@@ -14008,6 +14008,103 @@ fn authorization_scope_rejects_unrelated_caller_intent() {
     );
 }
 
+#[test]
+fn authorization_scope_update_receipt_waits_for_every_policy_clause() {
+    let mut schema = schema();
+    schema.tables[0].write_policies = WritePolicies {
+        update_using: Some(Query::from("support_using")),
+        update_check: Some(Query::from("support_check")),
+        ..WritePolicies::default()
+    };
+    schema.tables.push(TableSchema::new(
+        "support_using",
+        Vec::<ColumnSchema>::new(),
+    ));
+    schema.tables.push(TableSchema::new(
+        "support_check",
+        Vec::<ColumnSchema>::new(),
+    ));
+    let identity = AuthorId::from_bytes([0xc3; 16]);
+    let server = open_core(0x60, AuthorId::SYSTEM, &schema);
+    let action = PermissionAdviceAction::Update {
+        table: "todos".to_owned(),
+        row: row(1),
+        patch: BTreeMap::new(),
+    };
+    let expected = server
+        .node()
+        .borrow()
+        .authorization_support_scope(identity, &action)
+        .unwrap();
+    assert_eq!(expected.subscriptions.len(), 2);
+    let entries = expected
+        .subscriptions
+        .iter()
+        .map(|(shape, binding)| {
+            let subscription = SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: RegisterShapeOptions::default().read_view_key(),
+            };
+            (shape.clone(), subscription)
+        })
+        .collect::<Vec<_>>();
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, identity);
+    for (shape, _) in &entries {
+        client_transport
+            .send(SyncMessage::RegisterShape {
+                shape_id: shape.shape_id(),
+                ast: ShapeAst::from_validated(shape),
+                opts: RegisterShapeOptions::default(),
+            })
+            .unwrap();
+    }
+    let send_scope = |client: &mut Box<dyn Transport>, shape: &ValidatedQuery, subscription| {
+        client
+            .send(SyncMessage::AuthorizationScopeSubscribe {
+                subscribe: Subscribe {
+                    shape_id: shape.shape_id(),
+                    subscription,
+                    values: Vec::new(),
+                    known_state: None,
+                },
+                purpose: AuthorizationScopePurpose {
+                    action: action.clone(),
+                },
+            })
+            .unwrap();
+    };
+    send_scope(&mut client_transport, &entries[1].0, entries[1].1);
+    subscriber.borrow_mut().tick().unwrap();
+    while let Some(message) = client_transport.try_recv() {
+        assert!(
+            !matches!(message, SyncMessage::AuthorizationScopeReceipt { .. }),
+            "one update clause must never prove the full update scope"
+        );
+    }
+    send_scope(&mut client_transport, &entries[0].0, entries[0].1);
+    subscriber.borrow_mut().tick().unwrap();
+    let mut saw_second_view = false;
+    let mut saw_receipt = false;
+    while let Some(message) = client_transport.try_recv() {
+        match message {
+            SyncMessage::ViewUpdate { .. } => saw_second_view = true,
+            SyncMessage::AuthorizationScopeReceipt { receipt, .. } => {
+                assert!(
+                    saw_second_view,
+                    "aggregate receipt follows final clause view"
+                );
+                assert_eq!(receipt.key, expected.key);
+                saw_receipt = true;
+            }
+            SyncMessage::CatalogueSnapshot(_) => {}
+            other => panic!("unexpected aggregate-scope response: {other:?}"),
+        }
+    }
+    assert!(saw_receipt);
+}
+
 fn row_ids(rows: &[CurrentRow]) -> Vec<RowUuid> {
     rows.iter().map(CurrentRow::row_uuid).collect()
 }
