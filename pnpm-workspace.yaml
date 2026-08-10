@@ -4,8 +4,7 @@ packages:
   - crates/jazz-rn
   - starters/*
   - examples/*
-  # React Native/Expo surfaces are paused; keep their source archived but out of active workspace installs.
-  - "!examples/todo-client-localfirst-expo"
+  # Documentation and stress-test Expo projects remain source-only fixtures.
   - examples/docs/*
   - "!examples/docs/todo-client-localfirst-expo"
   - dev/stress-tests/*

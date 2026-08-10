@@ -1,6 +1,6 @@
 import * as React from "react";
 import { JazzProvider, type DbConfig } from "jazz-tools/react-native";
-import { ExpoAuthSecretStore } from "jazz-tools/expo";
+import { ExpoAuthSecretStore, withExpoDataDirectory } from "jazz-tools/expo";
 import {
   ActivityIndicator,
   Platform,
@@ -33,15 +33,19 @@ const envAdminSecret = process.env.EXPO_PUBLIC_JAZZ_ADMIN_SECRET;
 function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
   const appId = overrides.appId ?? envAppId ?? defaultAppId;
 
-  return {
+  return withExpoDataDirectory({
     appId,
     env: overrides.env ?? "dev",
     userBranch: overrides.userBranch ?? "main",
+    driver: overrides.driver ?? {
+      type: "persistent",
+      dbName: "todo-client-localfirst-expo-docs",
+    },
     serverUrl: overrides.serverUrl ?? envServerUrl ?? defaultServerUrl,
     secret,
     adminSecret: overrides.adminSecret ?? envAdminSecret,
     ...overrides,
-  };
+  });
 }
 
 const styles = StyleSheet.create({
@@ -88,7 +92,9 @@ type AppProps = {
 
 // #region context-setup-expo
 export default function App({ config, fallback }: AppProps = {}) {
-  const secret = React.use(ExpoAuthSecretStore.getOrCreateSecret());
+  const secret = React.use(
+    ExpoAuthSecretStore.getOrCreateSecret({ appId: envAppId ?? defaultAppId }),
+  );
   const configKey = JSON.stringify(config ?? {});
   const resolvedConfig = React.useMemo(() => defaultConfig(secret, config), [configKey, secret]);
   return (

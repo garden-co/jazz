@@ -31,7 +31,18 @@ function normalizeScopeSegment(value?: string | null): string | null {
   }
 
   const trimmed = value.trim();
-  return trimmed.length > 0 ? encodeURIComponent(trimmed) : null;
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  // Expo SecureStore keys only accept alphanumerics plus `.`, `-`, and `_`.
+  // Fixed-width UTF-16 hex is deterministic, collision-free, and stays inside
+  // that alphabet even for arbitrary user and session identifiers.
+  let encoded = "";
+  for (let index = 0; index < trimmed.length; index += 1) {
+    encoded += trimmed.charCodeAt(index).toString(16).padStart(4, "0");
+  }
+  return encoded;
 }
 
 function resolveExpoAuthSecretKey(options: ExpoAuthSecretStoreOptions = {}): string {
@@ -46,7 +57,7 @@ function resolveExpoAuthSecretKey(options: ExpoAuthSecretStoreOptions = {}): str
     normalizeScopeSegment(options.sessionId),
   ].filter((segment): segment is string => segment !== null);
 
-  return scopeSegments.length === 0 ? DEFAULT_KEY : `${DEFAULT_KEY}:${scopeSegments.join(":")}`;
+  return scopeSegments.length === 0 ? DEFAULT_KEY : `${DEFAULT_KEY}.${scopeSegments.join(".")}`;
 }
 
 export class ExpoAuthSecretStore implements AuthSecretStore {

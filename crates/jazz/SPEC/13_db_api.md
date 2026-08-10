@@ -607,16 +607,17 @@ These are designed but not landed:
   credentials are not specified, and subscriber-side view-update generation still
   needs a deeper peer-state rollback/redo contract before every served update can
   claim retry-perfect delivery under backpressure.
-- 🔶 **Binding storage backends beyond memory.** The first executable local-app
-  slice supports memory storage only. Browser, RocksDB, and host-provided storage
-  need explicit config payloads, migration reporting, corruption behavior, and
-  durability tests before `OpenStorage` may advertise them as supported features.
-- ✅ **React Native storage route (decided 2026-08-07; storage backend landed
-  2026-08-10).** RN persistence is owned by the `crates/jazz-rn` native module
-  over Groove's Rust-side SQLite `OrderedKvStorage` backend, not by
-  `op-sqlite` or `expo-sqlite` TypeScript drivers. The remaining work is the RN
-  binding and product integration tracked as M2–M5 in
-  `dev/RN_BINDING_REWRITE_DESIGN.md`.
+- 🔶 **Binding storage backends beyond memory.** The executable local-app slice
+  supports memory, browser OPFS, and React Native SQLite. RocksDB and
+  host-provided storage still need explicit config payloads, migration reporting,
+  corruption behavior, and durability tests before `OpenStorage` may advertise
+  them as supported features.
+- ✅ **React Native storage route (implemented 2026-08-10).** RN persistence is
+  owned by the `crates/jazz-rn` native actor over Groove's Rust-side SQLite
+  `OrderedKvStorage` backend, not by `op-sqlite` or `expo-sqlite` TypeScript
+  drivers. The full `NativeDb` bridge, deterministic identity, durable pending
+  replay, iOS/Android artifacts, and iOS simulator persistence + sync E2E are
+  recorded in `dev/RN_BINDING_REWRITE_DESIGN.md`.
 - 🔶 **Postcard binding payload evolution.** Row-shaped outputs and target
   write-input variants should be descriptor/raw `Record` payloads carried inside
   postcard envelopes, but the concrete Rust structs should be introduced by the
@@ -644,9 +645,11 @@ These are designed but not landed:
 - 🔶 **Live identity switching.** Changing the authenticated principal on a live
   client needs a teardown/rebind protocol for subscriptions, outbox attribution,
   claims, and local optimistic state.
-- 🔶 **React Native runtime reuse.** RN `connect()` should reuse an owned runtime
-  and expose deterministic connect/disconnect lifecycle signals rather than
-  creating a fresh executor per call.
+- ✅ **React Native owned runtime reuse.** One `jazz-rn` actor owns the database
+  across transport attachments; reconnect bootstraps durable pending uploads
+  without creating a fresh executor. Explicit reconnect/retry policy and richer
+  connect/disconnect lifecycle signals remain part of the transport-lifecycle
+  follow-up above.
 - 🔶 **WASM teardown trap true fix.** The current mitigation hides inert
   teardown traps; the durable fix is an explicit async shutdown and transport
   lifecycle boundary that prevents callbacks into torn-down linear memory.

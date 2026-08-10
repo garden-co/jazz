@@ -1,22 +1,29 @@
 import * as React from "react";
-import { type DbConfig } from "jazz-tools";
-import { JazzProvider } from "jazz-tools/react";
+import { ExpoAuthSecretStore, withExpoDataDirectory } from "jazz-tools/expo";
+import { JazzProvider, type DbConfig } from "jazz-tools/react-native";
 import { ActivityIndicator, SafeAreaView, StatusBar, StyleSheet, Text, View } from "react-native";
-import { ExpoAuthSecretStore } from "./src/expo-auth-secret-store";
 import { TodoList } from "./src/TodoList";
 
 // Expo's Metro bundler inlines process.env.EXPO_PUBLIC_* at bundle time.
 // Set these in the shell that starts Metro.
 declare const process: { env: Record<string, string | undefined> };
+const defaultAppId = "00000000-0000-0000-0000-000000000002";
+const envAppId = process.env.EXPO_PUBLIC_JAZZ_APP_ID;
+const envServerUrl = process.env.EXPO_PUBLIC_JAZZ_SERVER_URL;
+const e2eSeedTitle = process.env.EXPO_PUBLIC_JAZZ_E2E_SEED_TITLE;
+const e2eSecret = process.env.EXPO_PUBLIC_JAZZ_E2E_SECRET;
+const e2eAdminSecret = process.env.EXPO_PUBLIC_JAZZ_E2E_ADMIN_SECRET;
 
 function buildConfig(secret: string): DbConfig {
-  return {
-    appId: process.env.EXPO_PUBLIC_JAZZ_APP_ID!,
-    serverUrl: process.env.EXPO_PUBLIC_JAZZ_SERVER_URL!,
+  return withExpoDataDirectory({
+    appId: envAppId ?? defaultAppId,
     env: "dev",
     userBranch: "main",
+    driver: { type: "persistent", dbName: "todo-client-localfirst-expo" },
     secret,
-  };
+    ...(envServerUrl ? { serverUrl: envServerUrl } : {}),
+    ...(e2eAdminSecret ? { adminSecret: e2eAdminSecret } : {}),
+  });
 }
 
 const styles = StyleSheet.create({
@@ -57,7 +64,10 @@ const fallback = (
 );
 
 export default function App() {
-  const secret = React.use(ExpoAuthSecretStore.getOrCreateSecret());
+  const storedSecret = React.use(
+    ExpoAuthSecretStore.getOrCreateSecret({ appId: envAppId ?? defaultAppId }),
+  );
+  const secret = e2eSecret ?? storedSecret;
   const config = React.useMemo(() => buildConfig(secret), [secret]);
 
   return (
@@ -66,7 +76,7 @@ export default function App() {
         <StatusBar barStyle="dark-content" />
         <View style={styles.content}>
           <Text style={styles.title}>Todos</Text>
-          <TodoList />
+          <TodoList e2eSeedTitle={e2eSeedTitle} />
         </View>
       </SafeAreaView>
     </JazzProvider>

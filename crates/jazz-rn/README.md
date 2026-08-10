@@ -1,47 +1,42 @@
 # jazz-rn
 
-A React Native native module that provides high-performance cryptographic operations for the Jazz framework, built with Rust and UniFFI. This package exposes the same cryptographic primitives as `jazz-napi` and `jazz-wasm` but specifically designed for React Native applications running on iOS and Android.
+React Native Turbo Module for the Jazz database runtime. Rust owns the database,
+transactions, queries, subscriptions, sync protocol, and Groove SQLite storage;
+TypeScript owns the public Jazz API and WebSocket carrier. Hermes never loads
+WASM and no JavaScript SQLite driver is involved.
 
-## What is jazz-rn?
+## Architecture
 
-`jazz-rn` is a React Native Turbo Module that bridges Rust-based cryptographic code to JavaScript/TypeScript. It uses [uniffi-bindgen-react-native](https://jhugman.github.io/uniffi-bindgen-react-native/) that uses [UniFFI](https://mozilla.github.io/uniffi-rs/) (Unified Foreign Function Interface) to automatically generate type-safe bindings between Rust and React Native, enabling you to use high-performance cryptographic operations in your React Native applications.
+- One dedicated Rust actor thread owns each thread-affine `Db`.
+- UniFFI `Send + Sync` handles marshal work to that actor.
+- The generated bindings expose the full `NativeDb` contract consumed by
+  `NativeRuntimeAdapter`, including transactions, permission probes, waiters,
+  subscriptions, and batched wire frames.
+- Persistent opens use bundled SQLite and deterministically reuse node/author
+  identity. Reconnect bootstraps restored pending uploads synchronously.
+- Closing the database cancels waiters, checkpoints storage, and joins the actor.
 
-### Architecture
+The package contains an XCFramework for iOS device and simulator slices and JNI
+libraries for Android arm64-v8a, armeabi-v7a, x86, and x86_64. iOS has a minimum
+deployment target of 15.1; Android artifacts target API 23 and use 16 KiB-safe
+linker settings.
 
-The package consists of:
+## Build and test
 
-- **Rust Core** (`rust/`): The core cryptographic implementation, shared with `jazz` and `jazz-napi`
-- **UniFFI Bindings**: Automatically generated bindings that bridge Rust to React Native
-- **Native Modules**:
-  - **iOS**: XCFramework containing static libraries for arm64 (device) and arm64-simulator
-  - **Android**: CMake-based native library compiled for multiple architectures
-- **TypeScript Wrapper**: Type-safe JavaScript/TypeScript API that wraps the native bindings
-
-## Installation
-
-### In the Jazz Monorepo
-
-If you're working within the Jazz monorepo, the package is already available as a workspace dependency:
-
-```bash
-# From the monorepo root
-pnpm install
-pnpm build:rn
-```
-
-### As a Standalone Package
+From the repository root:
 
 ```bash
-pnpm install jazz-rn
+cargo test -p jazz-rn
+pnpm --filter jazz-rn typecheck
+pnpm --filter jazz-rn test
+pnpm --filter jazz-rn ubrn:ios
+pnpm --filter jazz-rn ubrn:android
 ```
 
-The package includes pre-built native binaries for:
+`ubrn:*` rebuilds the Rust artifacts and regenerates the TypeScript/C++ bridge.
+The iOS command sets `IPHONEOS_DEPLOYMENT_TARGET=15.1`; Android requires an NDK
+configured for the React Native project.
 
-- **iOS**: arm64 (device) and arm64-simulator
-- **Android**: Multiple architectures (arm64, arm, x86_64, etc.)
-
-## Building from Source
-
-### Prerequisites
-
-Before building `jazz-rn`, ensure you followed this [guide](https://jhugman.github.io/uniffi-bindgen-react-native/guides/rn/pre-installation.html).
+Applications must install `jazz-rn` directly, rebuild their native project after
+upgrades, and use `jazz-tools/react-native`. See
+`examples/todo-client-localfirst-expo` for the persistence and sync E2E.

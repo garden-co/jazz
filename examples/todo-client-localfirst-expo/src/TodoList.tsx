@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   FlatList,
   Pressable,
@@ -11,6 +11,11 @@ import {
 } from "react-native";
 import { useAll, useDb, useSession } from "jazz-tools/react";
 import { app, type Todo } from "../schema";
+
+type TodoListProps = {
+  /** Optional deterministic seed used by the simulator persistence/sync receipt. */
+  e2eSeedTitle?: string;
+};
 
 function normalizeText(value: string | null | undefined): string {
   return typeof value === "string" ? value : "";
@@ -26,11 +31,13 @@ function toTestIdSegment(value: string | null | undefined, fallback: string): st
   return normalized || fallback;
 }
 
-export function TodoList() {
+export function TodoList({ e2eSeedTitle }: TodoListProps) {
   const [filterTitle, setFilterTitle] = useState("");
   const [showDoneOnly, setShowDoneOnly] = useState(false);
   const [title, setTitle] = useState("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [e2eSeedStatus, setE2eSeedStatus] = useState<"checking" | "created" | "reused">("checking");
+  const e2eSeedChecked = useRef(false);
 
   const trimmedFilterTitle = normalizeText(filterTitle).trim();
   let todosQuery = app.todos;
@@ -45,6 +52,30 @@ export function TodoList() {
   const { data: todos = [] } = useAll(todosQuery);
   const session = useSession();
   const sessionUserId = session?.user_id ?? null;
+
+  useEffect(() => {
+    const seedTitle = normalizeText(e2eSeedTitle).trim();
+    if (!seedTitle || !sessionUserId || e2eSeedChecked.current) return;
+
+    e2eSeedChecked.current = true;
+    void db
+      .all(app.todos.where({ title: seedTitle }), {
+        tier: "local",
+        propagation: "local-only",
+      })
+      .then((existing) => {
+        if (existing.length > 0) {
+          setE2eSeedStatus("reused");
+          return;
+        }
+        db.insert(app.todos, { title: seedTitle, done: false, owner_id: sessionUserId });
+        setE2eSeedStatus("created");
+      })
+      .catch(() => {
+        e2eSeedChecked.current = false;
+        setErrorMessage("Failed to prepare the E2E seed");
+      });
+  }, [db, e2eSeedTitle, sessionUserId]);
 
   const addTodo = () => {
     const trimmed = normalizeText(title).trim();
@@ -134,6 +165,11 @@ export function TodoList() {
       </View>
 
       {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
+      {e2eSeedTitle ? (
+        <Text testID="e2e-seed-status" style={styles.e2eStatus}>
+          E2E seed: {e2eSeedStatus}; rows: {todos.length}
+        </Text>
+      ) : null}
 
       <FlatList
         data={todos}
@@ -201,6 +237,11 @@ const styles = StyleSheet.create({
   errorText: {
     color: "#b91c1c",
     fontSize: 14,
+    fontWeight: "600",
+  },
+  e2eStatus: {
+    color: "#1d4ed8",
+    fontSize: 13,
     fontWeight: "600",
   },
   separator: {

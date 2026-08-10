@@ -1,19 +1,22 @@
 # React Native binding rewrite — design
 
-Status: in progress (M1 landed 2026-08-10; M2–M5 pending). Owner: RN surface
-owner. Scope: `crates/groove` SQLite storage backend, `crates/jazz-rn` rewrite,
+Status: implemented (M1–M5 landed 2026-08-10). Owner: RN surface owner.
+Scope: `crates/groove` SQLite storage backend, `crates/jazz-rn` rewrite,
 `packages/jazz-tools/src/react-native` wiring, revived Expo example E2E.
+
+Implementation receipts: host Rust/TypeScript tests, iOS device + simulator
+XCFramework, all four Android ABIs, CocoaPods/Xcode simulator build, npm dry-run
+artifact inspection, and a clean iOS simulator run proving offline create,
+process reopen, pending upload, and a remote subscription update.
 
 ## 1. Context
 
-`crates/jazz-rn/rust` still targets the pre-swap runtime
+Before this rewrite, `crates/jazz-rn/rust` targeted the pre-swap runtime
 (`jazz::tools::{runtime_core, schema_manager, sync_manager, binding_support,
-storage, transport_manager, ws_stream}`), none of which exist after the core
-engine swap. The crate is commented out of the workspace and fails to resolve
-either standalone or as a member. Its generated TS bindings are stale, and the
-TS RN scaffold (`packages/jazz-tools/src/react-native`) is compile-level only:
-persistent configs throw `UnimplementedSqliteStorageDriver`, and the fallback
-path loads the WASM runtime, which Hermes cannot execute.
+storage, transport_manager, ws_stream}`), none of which existed after the core
+engine swap. The crate was outside the workspace, its generated bindings were
+stale, and the TS RN scaffold was compile-level only. The implementation now
+routes Hermes through the native actor and Rust-side SQLite backend.
 
 The v2 runtime already has two bindings driven by the same TypeScript adapter
 (`packages/jazz-tools/src/runtime/native-runtime/native-runtime-adapter.ts`),
@@ -561,7 +564,10 @@ builders, then encoded with the same helpers the bindings use.
    composition, error-marker mapping, `nowSeconds` passthrough), plus the
    extracted identity-derivation helpers pinned against the current
    persistent-browser values.
-6. **E2E** (§9): the only tier that exercises Hermes + JSI + real devices.
+6. **E2E** (§9): the only tier that exercises Hermes + JSI + a simulator or
+   real device. The landed receipt covers iOS simulator; Android
+   device/emulator execution remains best-effort while all Android artifacts
+   build.
 
 **Gates.** `crates/jazz-rn/rust` re-enters `workspace.members` (the pause
 comment is resolved by this design). Canonical set additions: `cargo test -p
@@ -575,7 +581,7 @@ and the test targets land in the same PR as the code they cover.
 
 ## 9. E2E slice
 
-- Revive `examples/todo-client-localfirst-expo`: remove its pnpm-workspace
+- Revived `examples/todo-client-localfirst-expo`: removed its pnpm-workspace
   exclusion (and the stress-test app's, only if free), port `App.tsx` /
   `schema.ts` / `permissions.ts` to the current jazz-tools API, point it at
   the RN provider from `jazz-tools/react-native` with the Expo
@@ -588,13 +594,18 @@ and the test targets land in the same PR as the code they cover.
   exists:
   1. Launch with no `serverUrl` (pure local): create todos → kill app →
      relaunch → rows served from SQLite (persistence + reopen).
-  2. Start the local server (`cargo run -p jazz` CLI) **first**, then
-     relaunch the app configured with `serverUrl`: pending local writes
-     upload (`INV-API-30`), new writes reach `edge` tier, a second client
-     (Node script or web) observes them, and subscription deltas re-render
-     live.
+  2. Start the schema-initialized local E2E server **first**, then relaunch
+     the app configured with `serverUrl`: pending local writes upload
+     (`INV-API-30`), a second client observes them, inserts a write that
+     reaches `edge`, and the mobile subscription re-renders live. The landed
+     verifier prints
+     `{"observedOfflineTitle":"offline-seed","insertedRemoteTitle":"remote-seed","rowCount":2}`.
      Automatic reconnect after a failed first connect is explicitly not part of
      the scenario (no retry exists today; see §7).
+- The local E2E server uses the NAPI test harness with the schema supplied at
+  startup. NAPI does not compile a compression codec, so the simulator launch
+  sets `JAZZ_TRANSPORT_COMPRESSION=none`; production CLI/mobile pairs both use
+  zstd and need no override.
 - Android: `ubrn build android` artifact must build; emulator validation
   best-effort.
 
@@ -602,34 +613,31 @@ and the test targets land in the same PR as the code they cover.
 
 Each lands green and independently valuable:
 
-1. **M1 — groove SQLite backend**: `Durability` lift, backend, conformance +
+1. ✅ **M1 — groove SQLite backend**: `Durability` lift, backend, conformance +
    abrupt-termination tests, jazz feature re-point. No jazz-rn changes.
-2. **M2 — shared binding helpers + jazz-rn Rust rewrite**: helper extraction
+2. ✅ **M2 — shared binding helpers + jazz-rn Rust rewrite**: helper extraction
    (napi adopts; wait-state helper renders `ErrorCode` markers), actor +
    full surface + crate tests, workspace re-entry. Host target only.
-3. **M3 — bindings + TS**: ubrn regeneration, `native-db.ts` shim, identity
+3. ✅ **M3 — bindings + TS**: ubrn regeneration, `native-db.ts` shim, identity
    helper extraction, `ReactNativeRuntimeSource` rewire (incl.
    `dataDirectory`), scaffold deletions, shim unit tests.
-4. **M4 — mobile artifacts**: `ubrn build ios` / `android` verified
+4. ✅ **M4 — mobile artifacts**: `ubrn build ios` / `android` verified
    (including cross-compiled `zstd-sys` + bundled SQLite); podspec/gradle
    fixes as needed.
-5. **M5 — E2E**: revived Expo example, gating scenario on iOS simulator,
+5. ✅ **M5 — E2E**: revived Expo example, gating scenario on iOS simulator,
    spec/README/ledger updates recording the outcome.
 
 ## 11. Risks and open questions
 
-- **ubrn 0.30.0-1 ↔ uniffi 0.30 fidelity.** The old crate proved sync
-  methods + callback interfaces + async exports on this pair. The waiter
-  split (§4.2) removes the dependency on eager async-body execution, but M3
-  still starts with a spike binding (waiter handle + tick callback against a
-  live core) before the full surface is generated.
+- ✅ **ubrn 0.30.0-1 ↔ uniffi 0.30 fidelity.** Generated sync methods,
+  callback interfaces, waiter handles, and the live tick callback build and
+  execute through Hermes on the iOS simulator.
 - **Carrier feature advertisement is capability-blind (pre-existing).**
-  `WebSocketCarrier` hard-codes `FEATURE_PAYLOAD_ZSTD` into the Hello for
-  every native runtime; `jazz-napi` builds without any
-  `transport-compression-*` feature, so the napi path advertises a decoder it
-  does not compile. jazz-rn sidesteps it by compiling zstd (§4), and the
-  clean fix — carrier features derived from native capability — is recorded
-  as a follow-up on the shared-helper track, not solved here.
+  `WebSocketCarrier` and the Rust byte adapter do not share the negotiated
+  codec. `jazz-napi` builds without any `transport-compression-*` feature while
+  jazz-rn compiles zstd, so mixed-build local harnesses must explicitly select
+  `none`. The clean fix — carrier features and the Rust adapter both derived
+  from one negotiated native capability — remains a shared-helper follow-up.
 - **Actor round-trip cost on bulk paths.** Initial sync pumps
   (`sendWireFrames`/`recvWireFrames`) are already batched; if per-call hops
   show up in E2E profiling, widen batching at the shim (frames per job), not
@@ -638,9 +646,9 @@ Each lands green and independently valuable:
   jazz-rn per the SPEC matrix while napi remains behind; the matrix row stays
   accurate only if napi's gap is tracked. Out of scope here beyond recording
   it.
-- **Expo 54 / RN 0.81 new-architecture drift.** The scaffold predates the
-  swap; podspec/codegen may need version bumps discovered only in M4. Treat
-  as mechanical, timebox, and record fixes in the crate README.
+- ✅ **Expo 54 / RN 0.81 new-architecture drift.** CocoaPods autolinking,
+  codegen, local signing, Hermes/JSI, and the iOS 15.1 deployment target are
+  verified. The Android project prebuilds and all four native ABIs package.
 - **`rusqlite` 0.34 pin.** Single-crate dependency; no workspace conflict
   today. If groove later wants a shared pin, lift to
   `workspace.dependencies`.

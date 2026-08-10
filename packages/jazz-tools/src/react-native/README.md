@@ -37,11 +37,16 @@ export function App() {
 `withExpoDataDirectory(config)` is also available when constructing config
 outside JSX. A memory driver does not require `dataDirectory` (the general
 Jazz configuration currently requires a `serverUrl` for memory mode).
+Expo's default is the app Documents directory; production apps should apply
+their platform's backup-exclusion policy if the reconstructible database must
+not be included in device backups.
 
 Persistent node and author identities are derived deterministically from the
 application, environment, user branch, authenticated subject, and logical
 database name. Reopening the same database therefore resumes pending local
-writes instead of orphaning its outbox.
+writes instead of orphaning its outbox. Attaching the first upstream transport
+performs a synchronous bootstrap tick so replay does not depend on a foreign
+callback that may have fired before the connection existed.
 
 Native writes are durable by default. `Db.shutdown()` closes transports,
 cancels pending native waiters, checkpoints SQLite, and joins the actor thread.

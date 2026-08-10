@@ -11,7 +11,7 @@ function shim(generated: Record<string, unknown>): RnDbShim {
 
 describe("RnDbShim", () => {
   it("copies Uint8Array views into exact ArrayBuffers at open", () => {
-    const openMemory = vi.fn(() => ({}));
+    const openMemory = vi.fn((_node: ArrayBuffer, _author: ArrayBuffer) => ({}));
     const module = {
       RnDb: { openMemory, openPersistent: vi.fn() },
       mintAnonymousToken: vi.fn(),

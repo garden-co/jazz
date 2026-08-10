@@ -187,7 +187,9 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
 The SQLite `OrderedKvStorage` backend is implemented behind Groove's `sqlite`
 feature. The RN owner's 2026-08-07 decision to go directly to SQLite supersedes
 the RocksDB-first ordering above for React Native; this remains a tooling choice
-behind the existing storage contract rather than a new semantic contract.
+behind the existing storage contract rather than a new semantic contract. The
+`jazz-rn` actor binding, generated iOS/Android artifacts, Expo integration, and
+iOS simulator persistence + bidirectional-sync E2E landed on 2026-08-10.
 
 ## Open Questions
 
@@ -209,9 +211,9 @@ behind the existing storage contract rather than a new semantic contract.
 
 - 🔶 Which TypeScript framework adapter, if any, should be the first blessed
   adapter after the core cross-binding capability gate passes?
-- 🔶 Which native binding comes next after the first direct WASM/NAPI proof:
-  React Native packaging, Go, Swift, or Kotlin, and what fixture parity is the
-  entry criterion?
+- 🔶 React Native packaging is now implemented. Which native binding comes next
+  — Go, direct Swift, or direct Kotlin — and what fixture parity is its entry
+  criterion?
 - 🔶 How should serverless KV storage hosts integrate with the portable storage
   contract without losing ordered range scans, atomic batches, or reopen/migration
   diagnostics?

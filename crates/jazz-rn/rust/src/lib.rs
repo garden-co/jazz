@@ -1307,7 +1307,6 @@ mod tests {
         let transport = db.connect_upstream().expect("attach upstream transport");
         let mut frames = Vec::new();
         for _ in 0..4 {
-            db.tick().expect("tick reopened database");
             transport.tick().expect("tick reopened transport");
             frames.extend(
                 transport

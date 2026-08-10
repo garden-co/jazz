@@ -87,7 +87,9 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
       node,
       author,
       1,
-      true,
+      // App clients hold only a partial history. Keeping this false also restores
+      // durable pending uploads when a persistent database is reopened (INV-API-30).
+      false,
       {
         persistentPath,
         initialSyncFlushEvery: resolveInitialSyncFlushEvery(config),

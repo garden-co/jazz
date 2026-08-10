@@ -662,7 +662,7 @@ impl ActorHandle {
     pub(crate) fn connect_upstream(&self) -> Result<u64, JazzRnError> {
         let id = self.next_id();
         self.call("connect_upstream", move |state| {
-            state.connect_upstream(id);
+            state.connect_upstream(id)?;
             Ok(id)
         })
     }
@@ -1916,7 +1916,7 @@ impl CoreState {
         Ok(receiver)
     }
 
-    fn connect_upstream(&mut self, id: u64) {
+    fn connect_upstream(&mut self, id: u64) -> Result<(), JazzRnError> {
         let queues = WireQueues::default();
         let transport = Box::new(WireTransportAdapter::current(RnWireTransport {
             queues: queues.clone(),
@@ -1934,6 +1934,10 @@ impl CoreState {
             },
         };
         self.transports.insert(id, entry);
+        // Opening persistent storage can restore transaction IDs into the
+        // outbox before a foreign tick callback exists. Bootstrap the newly
+        // attached peer synchronously so replay never depends on that wakeup.
+        self.tick()
     }
 
     fn transport_send(&mut self, id: u64, frames: Vec<Vec<u8>>) -> Result<(), JazzRnError> {
