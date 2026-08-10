@@ -12,7 +12,12 @@ export type ValueType = {
   enumSchema?: EnumSchema;
 };
 export type DescriptorField = { name?: string; valueType: ValueType };
-export type EnumSchema = { name: string; variants: string[] };
+export type EnumSchema = {
+  registryId?: number;
+  name: string;
+  variants?: string[];
+  cases?: { name: string; payload: DescriptorField[] }[];
+};
 export type NativeRow = { rowId: Uint8Array; deleted: boolean; raw: Uint8Array };
 export type NativeRowBatch = { table: string; descriptor: DescriptorField[]; rows: NativeRow[] };
 export type NativeRemovedRow = { table: string; rowId: Uint8Array };
@@ -175,10 +180,11 @@ export function writeValueType(writer: PostcardWriterLike, valueType: ValueType)
   writer.enumUnit(valueType.tag);
   if (valueType.tag === 11) {
     if (!valueType.enumSchema) throw new Error("missing enum schema for ValueType::Enum");
+    writer.u64(valueType.enumSchema.registryId ?? 0);
     writer.string(valueType.enumSchema.name);
     writer.vec(
       (variantWriter, index) => variantWriter.string(valueType.enumSchema!.variants[index]!),
-      valueType.enumSchema.variants.length,
+      valueType.enumSchema.variants?.length ?? 0,
     );
     return;
   }
@@ -198,6 +204,17 @@ export function writeValueType(writer: PostcardWriterLike, valueType: ValueType)
   if (valueType.tag === 15) {
     if (!valueType.record) throw new Error("missing inline record descriptor for tag 15");
     writeDescriptor(writer, valueType.record);
+    return;
+  }
+  if (valueType.tag === 16) {
+    if (!valueType.enumSchema?.cases) throw new Error("missing cases for ValueType::Enum");
+    writer.u64(valueType.enumSchema.registryId ?? 0);
+    writer.string(valueType.enumSchema.name);
+    writer.vec((caseWriter, index) => {
+      const enumCase = valueType.enumSchema!.cases![index]!;
+      caseWriter.string(enumCase.name);
+      writeDescriptor(caseWriter, enumCase.payload);
+    }, valueType.enumSchema.cases.length);
   }
 }
 
@@ -207,6 +224,7 @@ export function readValueType(reader: PostcardReaderLike): ValueType {
     return {
       tag,
       enumSchema: {
+        registryId: reader.u64(),
         name: reader.string(),
         variants: reader.readVec((variantReader) => variantReader.string()),
       },
@@ -221,6 +239,19 @@ export function readValueType(reader: PostcardReaderLike): ValueType {
   }
   if (tag === 15) {
     return { tag, record: readDescriptor(reader) };
+  }
+  if (tag === 16) {
+    return {
+      tag,
+      enumSchema: {
+        registryId: reader.u64(),
+        name: reader.string(),
+        cases: reader.readVec((caseReader) => ({
+          name: caseReader.string(),
+          payload: readDescriptor(caseReader),
+        })),
+      },
+    };
   }
   return { tag };
 }
