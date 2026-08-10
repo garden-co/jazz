@@ -7249,17 +7249,11 @@ where
                                 drop_peer_request(&self.node);
                                 continue;
                             };
-                            if receipt.link != *receipt.key.subject.as_bytes()
-                                || receipt.authority != expected.authority
-                                || receipt.authority_epoch != expected.connection_epoch
-                                || receipt.claims_revision != expected.claims_revision
-                                || receipt.policy_epoch != expected.policy_epoch
-                                || receipt.authorization_progress < expected.authorization_progress
-                                || receipt.settled_through.0 < expected.settled_through
-                                || scope_view_cuts
-                                    .get(&subscription)
-                                    .is_none_or(|cut| *cut < receipt.settled_through)
-                            {
+                            if !authorization_scope_receipt_matches_transport_context(
+                                &receipt,
+                                *expected,
+                                scope_view_cuts.get(&subscription).copied(),
+                            ) {
                                 drop_peer_request(&self.node);
                                 continue;
                             }
@@ -7718,6 +7712,8 @@ where
                                 };
                                 let exact_support = subscription.shape_id == shape.shape_id()
                                     && subscription.binding_id == binding.binding_id()
+                                    && opts == expected.options
+                                    && subscription.read_view == expected.options.read_view_key()
                                     && expected.subscriptions.iter().any(
                                         |(expected_shape, expected_binding)| {
                                             expected_shape.shape_id() == shape.shape_id()
@@ -8581,14 +8577,44 @@ where
     {
         return None;
     }
-    let (settled_through, authorization_progress) = aggregate
-        .applied
-        .values()
-        .copied()
-        .min_by_key(|(settled, progress)| (settled.0, *progress))?;
+    let (settled_through, authorization_progress) =
+        aggregate_authorization_scope_bounds(&aggregate.applied)?;
     receipt.settled_through = settled_through;
     receipt.authorization_progress = authorization_progress;
     Some((subscription, receipt))
+}
+
+/// Every support clause must be current in both dimensions.  They deliberately
+/// have independent lower bounds: cuts and authorization generations do not
+/// form a lexicographically ordered capability.
+fn aggregate_authorization_scope_bounds(
+    applied: &BTreeMap<SubscriptionKey, (crate::time::GlobalSeq, u64)>,
+) -> Option<(crate::time::GlobalSeq, u64)> {
+    Some((
+        applied
+            .values()
+            .map(|(settled, _)| *settled)
+            .min_by_key(|settled| settled.0)?,
+        applied.values().map(|(_, progress)| *progress).min()?,
+    ))
+}
+
+/// Check a transported receipt against the authority identity authenticated by
+/// this connection and the support view already applied locally.
+fn authorization_scope_receipt_matches_transport_context(
+    receipt: &AuthorizationScopeReceipt,
+    expected: AuthorityContext,
+    applied_cut: Option<crate::time::GlobalSeq>,
+) -> bool {
+    receipt.link == expected.link
+        && receipt.link == *receipt.key.subject.as_bytes()
+        && receipt.authority == expected.authority
+        && receipt.authority_epoch == expected.connection_epoch
+        && receipt.claims_revision == expected.claims_revision
+        && receipt.policy_epoch == expected.policy_epoch
+        && receipt.authorization_progress >= expected.authorization_progress
+        && receipt.settled_through.0 >= expected.settled_through
+        && applied_cut.is_some_and(|cut| cut >= receipt.settled_through)
 }
 
 fn move_scope_aggregate_member(
@@ -8640,6 +8666,7 @@ where
         .ok()?;
     let exact_support = subscription.shape_id == shape.shape_id()
         && subscription.binding_id == binding.binding_id()
+        && subscription.read_view == expected.options.read_view_key()
         && expected
             .subscriptions
             .iter()

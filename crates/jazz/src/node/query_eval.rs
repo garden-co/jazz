@@ -72,6 +72,10 @@ const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
 pub(crate) struct AuthorizationSupportScope {
     pub(crate) key: AuthorizationSupportScopeKey,
     pub(crate) operation: AuthorizationOperationKey,
+    /// The sole read/serving semantics under which support can authorize an
+    /// operation.  A scope must never be satisfied by a branch, snapshot, or
+    /// local-tier view that merely happens to have the same query identity.
+    pub(crate) options: RegisterShapeOptions,
     pub(crate) subscriptions: Vec<(ValidatedQuery, Binding)>,
 }
 
@@ -11193,6 +11197,9 @@ where
         if let Some(claims) = claims {
             claim_values.extend(claims.clone());
         }
+        // Authorization support is authority-current: historic/branch views
+        // and weaker durability tiers cannot vouch for the authoritative edge.
+        let options = RegisterShapeOptions::default();
         let subscriptions = policies
             .iter()
             .map(|policy| {
@@ -11210,6 +11217,7 @@ where
             .map_err(|_| Error::InvalidStoredValue("authorization claims serialization failed"))?;
         let support_bytes = postcard::to_allocvec(&(
             operation,
+            &options,
             subscriptions
                 .iter()
                 .map(|(shape, binding)| (shape.shape_id(), binding.binding_id()))
@@ -11229,6 +11237,7 @@ where
                 policy_digest: *blake3::hash(&policy_bytes).as_bytes(),
             },
             operation: operation_key,
+            options,
             subscriptions,
         })
     }

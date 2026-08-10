@@ -9,10 +9,11 @@ use groove::storage::{OrderedKvStorage, ReopenableStorage, RocksDbStorage};
 use super::*;
 use crate::ids::{AuthorId, BranchId, NodeUuid};
 use crate::protocol::{
-    AuthorizationScopePurpose, BindingViewKey, BranchMetadata, CatalogueAck,
-    KnownStateCompleteness, KnownStateDeclaration, LensOp, PermissionAdviceAction,
-    ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef,
-    ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, TableLens,
+    AuthorizationScopePurpose, AuthorizationScopeReceipt, AuthorizationSupportScopeKey,
+    BindingViewKey, BranchMetadata, CatalogueAck, KnownStateCompleteness, KnownStateDeclaration,
+    LensOp, PermissionAdviceAction, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
+    ResultMemberEntry, RowVersionRef, ShapeAst, SnapshotRef, Subscribe, SubscribeRejectReason,
+    SubscribeServerFailureCode, TableLens,
 };
 use crate::protocol_limits::{
     MAX_CONTENT_EXTENT_BYTES, MAX_FETCH_ROW_VERSIONS, MAX_KNOWN_STATE_EXACT_REFS,
@@ -14103,6 +14104,161 @@ fn authorization_scope_update_receipt_waits_for_every_policy_clause() {
         }
     }
     assert!(saw_receipt);
+}
+
+#[test]
+fn authorization_scope_aggregate_bounds_cuts_and_progress_independently() {
+    let subscription = |seed| SubscriptionKey {
+        shape_id: ShapeId(uuid::Uuid::from_bytes([seed; 16])),
+        binding_id: BindingId(uuid::Uuid::from_bytes([seed.wrapping_add(1); 16])),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let mut applied = BTreeMap::new();
+    applied.insert(subscription(1), (GlobalSeq(5), 100));
+    applied.insert(subscription(2), (GlobalSeq(10), 1));
+
+    assert_eq!(
+        aggregate_authorization_scope_bounds(&applied),
+        Some((GlobalSeq(5), 1)),
+        "a later support view may be the limiting authorization generation"
+    );
+}
+
+#[test]
+fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
+    let link = [0x8b; 16];
+    let context = AuthorityContext {
+        authority: [0x8a; 16],
+        link,
+        connection_epoch: 7,
+        claims_revision: 3,
+        policy_epoch: 11,
+        authorization_progress: 9,
+        settled_through: 17,
+    };
+    let key = AuthorizationSupportScopeKey {
+        support_shape_digest: [1; 32],
+        subject: AuthorId::from_bytes(link),
+        claims_digest: [2; 32],
+        policy_digest: [3; 32],
+    };
+    let receipt = AuthorizationScopeReceipt {
+        key,
+        authority: context.authority,
+        link,
+        authority_epoch: context.connection_epoch,
+        claims_revision: context.claims_revision,
+        policy_epoch: context.policy_epoch,
+        settled_through: GlobalSeq(17),
+        authorization_progress: 9,
+    };
+    assert!(authorization_scope_receipt_matches_transport_context(
+        &receipt,
+        context,
+        Some(GlobalSeq(17)),
+    ));
+    assert!(
+        !authorization_scope_receipt_matches_transport_context(
+            &AuthorizationScopeReceipt {
+                authorization_progress: 8,
+                ..receipt.clone()
+            },
+            context,
+            Some(GlobalSeq(17)),
+        ),
+        "a stale authorization generation must not ride a fresh support view"
+    );
+    assert!(
+        !authorization_scope_receipt_matches_transport_context(
+            &AuthorizationScopeReceipt {
+                settled_through: GlobalSeq(16),
+                ..receipt
+            },
+            context,
+            Some(GlobalSeq(17)),
+        ),
+        "a stale support cut must not ride a fresh authorization generation"
+    );
+}
+
+#[test]
+fn authorization_scope_rejects_noncanonical_support_read_views() {
+    let mut schema = schema();
+    schema.tables[0].read_policy = Some(Query::from("todos"));
+    let identity = AuthorId::from_bytes([0xc4; 16]);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let historical = RegisterShapeOptions {
+        tier: DurabilityTier::Global,
+        read_view: ReadViewSpec {
+            source: ReadViewSourceSpec::Snapshot {
+                snapshot: SnapshotRef {
+                    owner: NodeUuid::from_bytes([0x61; 16]),
+                    global_base: GlobalSeq(0),
+                    local_base: TxTime(0),
+                    dots: Vec::new(),
+                },
+            },
+            ..ReadViewSpec::default()
+        },
+    };
+    let variants = [
+        RegisterShapeOptions {
+            tier: DurabilityTier::Global,
+            read_view: ReadViewSpec {
+                source: ReadViewSourceSpec::Branch {
+                    branch: uuid::Uuid::from_bytes([0x62; 16]),
+                },
+                ..ReadViewSpec::default()
+            },
+        },
+        historical,
+        RegisterShapeOptions {
+            tier: DurabilityTier::Local,
+            read_view: ReadViewSpec::default(),
+        },
+    ];
+
+    for opts in variants {
+        let server = open_core(0x63, AuthorId::SYSTEM, &schema);
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: opts.read_view_key(),
+        };
+        let (mut client_transport, server_transport) = duplex();
+        let subscriber = server.accept_subscriber(server_transport, identity);
+        client_transport
+            .send(SyncMessage::RegisterShape {
+                shape_id: shape.shape_id(),
+                ast: ShapeAst::from_validated(&shape),
+                opts,
+            })
+            .unwrap();
+        subscriber.borrow_mut().tick().unwrap();
+        while client_transport.try_recv().is_some() {}
+        client_transport
+            .send(SyncMessage::AuthorizationScopeSubscribe {
+                subscribe: Subscribe {
+                    shape_id: shape.shape_id(),
+                    subscription,
+                    values: Vec::new(),
+                    known_state: None,
+                },
+                purpose: AuthorizationScopePurpose {
+                    action: PermissionAdviceAction::Read {
+                        table: "todos".to_owned(),
+                        row: row(1),
+                    },
+                },
+            })
+            .unwrap();
+        subscriber.borrow_mut().tick().unwrap();
+        assert!(
+            client_transport.try_recv().is_none(),
+            "branch, historic, and local support must never receive a receipt"
+        );
+    }
 }
 
 fn row_ids(rows: &[CurrentRow]) -> Vec<RowUuid> {
