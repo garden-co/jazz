@@ -1184,7 +1184,7 @@ export class NativeRuntimeAdapter implements Runtime {
     values: Record<string, Value>,
   ): RowState {
     const visibleColumns = this.table(table).columns.filter(
-      (column) => !isInternalField(column.name) && !isHiddenIncludeColumn(column.name),
+      (column) => !isHiddenIncludeColumn(column.name),
     );
     const valuesByColumn = new Map<string, Value>();
     for (const column of visibleColumns) {
@@ -4110,9 +4110,7 @@ function subscriptionOutputColumnsAreIdentityProjection(
 }
 
 function publicTableColumns(columns: readonly ColumnDescriptor[]): ColumnDescriptor[] {
-  return columns.filter(
-    (column) => !isInternalField(column.name) && !isHiddenIncludeColumn(column.name),
-  );
+  return columns.filter((column) => !isHiddenIncludeColumn(column.name));
 }
 
 function createRawNativeFrameRowEncoder(
@@ -4399,7 +4397,14 @@ function publicFieldName(name: string): string {
 }
 
 function isInternalField(name?: string): boolean {
-  return name === "row_uuid" || name === "tx_node_id" || name === "tx_time";
+  return (
+    name === "row_uuid" ||
+    name === "tx_node_id" ||
+    name === "tx_time" ||
+    name === "schema_version" ||
+    name === "parents" ||
+    name === "authored_columns"
+  );
 }
 
 function isHiddenIncludeColumn(name: string): boolean {
