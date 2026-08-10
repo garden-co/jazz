@@ -7589,31 +7589,39 @@ where
                                 .session_claim_revision(AuthorId::from_bytes(expected.link));
                             let observed_policy = observed.active_catalogue_seq();
                             drop(observed);
-                            // The authenticated session/catalogue state is the
-                            // source of truth once observed locally.  A fresh
-                            // link has no pre-receipt revision yet; bootstrap
-                            // its monotonic expectation from its first
-                            // admitted authority proof, then reject replays of
-                            // an older context on that same link.
-                            if observed_claims != 0 {
-                                expected.claims_revision = observed_claims;
-                            } else if expected.claims_revision == 0 {
-                                expected.claims_revision = receipt.claims_revision;
-                            }
-                            if observed_policy != 0 {
-                                expected.policy_epoch = observed_policy;
-                            } else if expected.policy_epoch == 0 {
-                                expected.policy_epoch = receipt.policy_epoch;
-                            }
-                            expected.authorization_progress = request
+                            // Context components are monotonic per admitted
+                            // connection. A receipt may advance an otherwise
+                            // opaque authority revision, but it can never
+                            // decrease a component already admitted.
+                            let applied_progress = request
                                 .applied_clauses
                                 .values()
                                 .map(|(_, _, progress)| *progress)
                                 .min()
                                 .unwrap_or_default();
+                            let receipt_decreased = receipt.claims_revision
+                                < expected.claims_revision
+                                || receipt.policy_epoch < expected.policy_epoch
+                                || receipt.authorization_progress < expected.authorization_progress
+                                || receipt.settled_through.0 < expected.settled_through;
+                            if observed_claims > expected.claims_revision {
+                                expected.claims_revision = observed_claims;
+                            } else if observed_claims == 0 {
+                                expected.claims_revision = receipt.claims_revision;
+                            }
+                            if observed_policy > expected.policy_epoch {
+                                expected.policy_epoch = observed_policy;
+                            } else if observed_policy == 0 {
+                                expected.policy_epoch = receipt.policy_epoch;
+                            }
+                            expected.authorization_progress =
+                                expected.authorization_progress.max(applied_progress);
+                            expected.settled_through =
+                                expected.settled_through.max(receipt.settled_through.0);
                             let receipt_current =
                                 request.key.as_ref().is_some_and(|key| key == &receipt.key)
                                     && all_current
+                                    && !receipt_decreased
                                     && authorization_scope_receipt_matches_transport_context(
                                         &receipt,
                                         *expected,
@@ -7772,6 +7780,19 @@ where
                             }
                         }
                         message => {
+                            if matches!(message, SyncMessage::FateUpdate { .. }) {
+                                let admitted = *self.admitted_upstream_authority.borrow();
+                                // Gate fate before any NodeState mutation. A
+                                // parallel, stale, or featureless upstream is
+                                // not merely forbidden from forwarding an
+                                // edge route; it must not settle local state.
+                                if expected_scope_authority.is_none()
+                                    || admitted != *expected_scope_authority
+                                {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                }
+                            }
                             let routed_fate = match &message {
                                 SyncMessage::FateUpdate { tx_id, .. } => {
                                     Some((*tx_id, message.clone()))
@@ -8716,6 +8737,29 @@ where
                                             .ingest_relay_commit_unit(tx, versions)?;
                                         Vec::new()
                                     }
+                                }
+                                SyncMessage::CommitUnit { tx, versions }
+                                    if tx.kind == TxKind::Mergeable
+                                        && matches!(peer.role(), PeerRole::ClientLink { .. }) =>
+                                {
+                                    // This is the terminal Core/hybrid path.
+                                    // Prove the actual wire-version actions
+                                    // through the shared authority aggregate
+                                    // before NodeState assigns its policy fate.
+                                    {
+                                        let mut node = self.node.borrow_mut();
+                                        peer.prove_terminal_commit_authorization(
+                                            &mut node,
+                                            ingest_context.identity,
+                                            &versions,
+                                        )?;
+                                    }
+                                    self.node
+                                        .borrow_mut()
+                                        .apply_sync_message_with_ingest_context(
+                                            SyncMessage::CommitUnit { tx, versions },
+                                            Some(*ingest_context),
+                                        )?
                                 }
                                 other => self
                                     .node

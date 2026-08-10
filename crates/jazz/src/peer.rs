@@ -26,9 +26,9 @@ use crate::node::{Error, NodeState, PreparedQueryPlanHandle};
 use crate::protocol::ResultRowEntry;
 use crate::protocol::{
     ContentExtent, KnownStateCompleteness, KnownStateDeclaration, LargeValueOwnerRef,
-    PermissionAdviceAction, ProgramFactEntry, ReadViewSpec, RegisterShapeOptions,
-    ResultMemberEntry, RowVersionRef, ShapeAst, Subscribe, SubscriptionKey, SyncMessage,
-    VersionBundle, VersionCarrier, VersionRecord, expand_version_carriers,
+    ProgramFactEntry, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef,
+    ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier,
+    VersionRecord, expand_version_carriers,
 };
 use crate::protocol_limits::validate_fetch_row_versions;
 use crate::query::{Binding, ValidatedQuery};
@@ -94,6 +94,9 @@ pub struct PeerState {
     deferred_edge_fates: BTreeMap<TxId, DeferredEdgeFate>,
     edge_scope_subscription_refs: BTreeMap<SubscriptionKey, usize>,
     idle_edge_scope_subscriptions: BTreeMap<SubscriptionKey, u64>,
+    /// Completed authority-local aggregate proofs used by terminal commit
+    /// admission.  This is intentionally separate from ordinary views.
+    authority_scope_proofs: u64,
     announced_catalogue_fingerprint: Option<[u8; 32]>,
     /// Deterministic counters for this peer.
     pub metrics: PeerMetrics,
@@ -268,6 +271,7 @@ impl Default for PeerState {
             deferred_edge_fates: BTreeMap::new(),
             edge_scope_subscription_refs: BTreeMap::new(),
             idle_edge_scope_subscriptions: BTreeMap::new(),
+            authority_scope_proofs: 0,
             announced_catalogue_fingerprint: None,
             metrics: PeerMetrics::default(),
         }
@@ -1864,6 +1868,85 @@ impl PeerState {
             .count() as u64;
     }
 
+    /// Establish the same all-clause aggregate proof used by wire advice
+    /// before a terminal authority admits a client commit.  The action list is
+    /// reconstructed by `NodeState` from the actual version records, so
+    /// insert, update (including candidate patch), and delete each compile the
+    /// correct policy clauses rather than sharing a placeholder update.
+    pub(crate) fn prove_terminal_commit_authorization<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        writer: AuthorId,
+        versions: &[VersionRecord],
+    ) -> Result<(), Error>
+    where
+        S: OrderedKvStorage,
+    {
+        for action in node.authorization_actions_for_versions(versions)? {
+            let scope = node.authorization_support_scope(writer, &action)?;
+            if scope.subscriptions.is_empty() {
+                continue;
+            }
+            let mut aggregate = AuthorityScopeAggregate::new(
+                scope
+                    .subscriptions
+                    .iter()
+                    .map(|(shape, binding)| (shape.shape_id(), binding.binding_id()))
+                    .collect(),
+            );
+            for (shape, binding) in scope.subscriptions {
+                let subscription = SubscriptionKey {
+                    shape_id: shape.shape_id(),
+                    binding_id: binding.binding_id(),
+                    read_view: scope.options.read_view_key(),
+                };
+                if !aggregate.register(subscription, (shape.shape_id(), binding.binding_id())) {
+                    continue;
+                }
+                let (cut, progress) = if self
+                    .subscriptions
+                    .get(&subscription)
+                    .is_some_and(|state| state.maintained_subscription_view.is_some())
+                {
+                    (
+                        node.applied_global_watermark(),
+                        self.authorization_progress_for_subscription(subscription),
+                    )
+                } else {
+                    let previous_role = self.role;
+                    self.role = PeerRole::ClientLink { identity: writer };
+                    let update = self.rehydrate_query(node, &shape, &binding);
+                    self.role = previous_role;
+                    let SyncMessage::ViewUpdate {
+                        settled_through, ..
+                    } = update?
+                    else {
+                        return Err(Error::UnsupportedSyncMessage(
+                            "terminal authority support hydration did not return a view",
+                        ));
+                    };
+                    (
+                        settled_through,
+                        self.authorization_progress_for_subscription(subscription),
+                    )
+                };
+                let _ = aggregate.apply(subscription, cut, progress);
+            }
+            if aggregate.bounds().is_none() {
+                return Err(Error::UnsupportedSyncMessage(
+                    "terminal authority support proof is incomplete",
+                ));
+            }
+            self.authority_scope_proofs = self.authority_scope_proofs.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn terminal_authority_scope_proof_count(&self) -> u64 {
+        self.authority_scope_proofs
+    }
+
     /// Locally hydrate the same action-specific support clauses that an
     /// admitted upstream authority would send in `AuthorizationScopeView`.
     /// Terminal cores do not put those views on a wire, but they must never
@@ -1879,21 +1962,7 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         let mut unsettled = Vec::new();
-        let tables = versions
-            .iter()
-            .map(|version| version.table().to_owned())
-            .collect::<BTreeSet<_>>();
-        for table in tables {
-            // A transaction's encoded version set does not retain its
-            // high-level operation enum.  `Update` is the conservative common
-            // write action: it hydrates both old-row and candidate policy
-            // clauses, so a terminal core cannot bypass a stricter write
-            // predicate while exact operation carriage is being introduced.
-            let action = PermissionAdviceAction::Update {
-                table,
-                row: RowUuid::from_bytes([0; 16]),
-                patch: BTreeMap::new(),
-            };
+        for action in node.authorization_actions_for_versions(versions)? {
             let scope = node.authorization_support_scope(writer, &action)?;
             if scope.subscriptions.is_empty() {
                 // A policy with no support clauses is structurally complete;

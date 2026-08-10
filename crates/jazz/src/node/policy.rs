@@ -6,6 +6,7 @@
 
 use super::query_engine::{NormalizedRowSetShape, RowSetExpr};
 use super::*;
+use crate::protocol::PermissionAdviceAction;
 
 #[derive(Default)]
 pub(super) struct ViewEvaluationContext {
@@ -16,6 +17,51 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Reconstruct the exact policy operation represented by each incoming
+    /// version record.  This is the sole bridge from committed wire data to
+    /// authorization support hydration: callers must not substitute a
+    /// table-wide or placeholder update action.
+    pub(crate) fn authorization_actions_for_versions(
+        &mut self,
+        versions: &[VersionRecord],
+    ) -> Result<Vec<PermissionAdviceAction>, Error> {
+        let mut actions = Vec::with_capacity(versions.len());
+        for version in versions {
+            let (policy_schema_version, table, cells) =
+                self.policy_projection_for_version_record(version)?;
+            if version.deletion() == Some(DeletionEvent::Deleted) {
+                actions.push(PermissionAdviceAction::Delete {
+                    table: table.name.clone(),
+                    row: version.row_uuid(),
+                });
+                continue;
+            }
+            let is_update = self
+                .policy_previous_content_subject_row(policy_schema_version, &table, version)?
+                .is_some();
+            if is_update {
+                let patch = match version.authored_columns() {
+                    Some(authored) => cells
+                        .into_iter()
+                        .filter(|(column, _)| authored.contains(column))
+                        .collect(),
+                    None => cells,
+                };
+                actions.push(PermissionAdviceAction::Update {
+                    table: table.name.clone(),
+                    row: version.row_uuid(),
+                    patch,
+                });
+            } else {
+                actions.push(PermissionAdviceAction::Insert {
+                    table: table.name.clone(),
+                    cells,
+                });
+            }
+        }
+        Ok(actions)
+    }
+
     pub(super) fn write_policy_allows_version_record(
         &mut self,
         version: &VersionRecord,

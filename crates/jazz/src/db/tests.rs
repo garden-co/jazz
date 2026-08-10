@@ -5672,6 +5672,66 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
 }
 
 #[test]
+fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
+    let schema = owner_write_schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xa1, alice, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = client.connect_upstream(client_transport);
+    let subscriber = server.accept_subscriber(server_transport, alice);
+
+    let inserted = client
+        .insert("todos", cells("owned", false, alice))
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    // The previous-row policy may allow Alice, but the update-check candidate
+    // switches ownership to Bob and must be denied by the terminal core.
+    let changed_owner = client
+        .update(
+            "todos",
+            inserted.row_uuid(),
+            BTreeMap::from([("owner".to_owned(), Value::Uuid(bob.0))]),
+        )
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(matches!(
+        changed_owner.write_state().unwrap().fate,
+        Fate::Rejected(_)
+    ));
+
+    let deleted = client.delete("todos", inserted.row_uuid()).unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(matches!(
+        deleted.write_state().unwrap().fate,
+        Fate::Accepted
+    ));
+
+    let proofs = match &subscriber.borrow().link {
+        ConnectionLink::Subscriber { peer, .. } => peer.terminal_authority_scope_proof_count(),
+        ConnectionLink::Upstream { .. } => unreachable!("server link is a subscriber"),
+    };
+    assert_eq!(
+        proofs, 3,
+        "production terminal fate admission must execute one exact aggregate proof per operation"
+    );
+}
+
+#[test]
 fn public_permission_advice_accepts_an_explicit_zero_clause_receipt() {
     let schema = schema();
     let identity = AuthorId::from_bytes([0xa3; 16]);
