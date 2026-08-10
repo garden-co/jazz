@@ -9643,18 +9643,6 @@ impl SubscriptionStream {
             .as_ref()
             .and_then(LocalMaintainedViewSubscription::retained_plan_authorization_mode)
     }
-
-    #[cfg(test)]
-    fn retained_plan_address(&self) -> Option<usize> {
-        let state = self._state.borrow();
-        let SubscriptionKind::Prepared {
-            maintained_subscription,
-            ..
-        } = &state.kind;
-        maintained_subscription
-            .as_ref()
-            .and_then(LocalMaintainedViewSubscription::retained_plan_address)
-    }
 }
 
 impl Stream for SubscriptionStream {

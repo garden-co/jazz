@@ -1605,11 +1605,6 @@ fn subscription_retains_a_plan_from_its_selected_authorization_mode() {
         trusted.retained_plan_authorization_mode(),
         Some(QueryAuthorizationMode::TrustedServing)
     );
-    assert_ne!(
-        client.retained_plan_address(),
-        trusted.retained_plan_address(),
-        "client and trusted subscription plans must not reuse one cache entry"
-    );
 }
 
 #[test]

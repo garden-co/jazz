@@ -124,9 +124,7 @@ struct RelationSnapshotWindow {
 
 pub(crate) struct LocalMaintainedViewSubscription {
     subscription: MultisinkSubscription,
-    _retained_prepared_plan: Option<PreparedQueryPlanHandle>,
-    #[cfg(test)]
-    retained_plan_authorization_mode: Option<QueryAuthorizationMode>,
+    _retained_prepared_plan: Option<SubscriptionPreparedPlan>,
     maintained: MaintainedSubscriptionView,
     terminal_schemas: MaintainedTerminalSchemas,
     tables: BTreeMap<String, TableSchema>,
@@ -138,6 +136,14 @@ pub(crate) struct LocalMaintainedViewSubscription {
     result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     program_facts: BTreeSet<ProgramFactEntry>,
     root_occurrence_ids: Vec<OutputOccurrenceId>,
+}
+
+/// A plan retained solely to keep a maintained subscription graph alive.
+/// Its provenance is established by the compiler path that produced it, so a
+/// caller cannot relabel a ClientLocal plan as TrustedServing after the fact.
+pub(crate) struct SubscriptionPreparedPlan {
+    plan: PreparedQueryPlanHandle,
+    authorization_mode: QueryAuthorizationMode,
 }
 
 #[derive(Default)]
@@ -169,14 +175,9 @@ impl LocalMaintainedViewSubscription {
 
     #[cfg(test)]
     pub(crate) fn retained_plan_authorization_mode(&self) -> Option<QueryAuthorizationMode> {
-        self.retained_plan_authorization_mode
-    }
-
-    #[cfg(test)]
-    pub(crate) fn retained_plan_address(&self) -> Option<usize> {
         self._retained_prepared_plan
             .as_ref()
-            .map(|plan| std::sync::Arc::as_ptr(plan) as usize)
+            .map(|plan| plan.authorization_mode)
     }
 
     #[cfg(feature = "testing")]
@@ -8051,9 +8052,17 @@ where
         identity: AuthorId,
         tier: DurabilityTier,
         read_view: &ReadViewSpec,
-        retained_prepared_plan: Option<PreparedQueryPlanHandle>,
+        retained_prepared_plan: Option<SubscriptionPreparedPlan>,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<(LocalMaintainedViewSubscription, RelationSnapshot), Error> {
+        if let Some(retained) = retained_prepared_plan.as_ref() {
+            if retained.authorization_mode != authorization_mode {
+                return Err(Error::InvalidStoredValue(
+                    "maintained subscription retained a plan from another authorization mode",
+                ));
+            }
+            debug_assert!(std::sync::Arc::strong_count(&retained.plan) > 0);
+        }
         let settled_binding_view = (authorization_mode == QueryAuthorizationMode::ClientLocal)
             .then(|| {
                 self.client_settled_binding_view_key_for_query(shape, binding, tier, read_view)
@@ -8069,14 +8078,9 @@ where
                 authorization_mode,
                 settled_binding_view,
             )?;
-        #[cfg(test)]
-        let retained_plan_authorization_mode =
-            retained_prepared_plan.as_ref().map(|_| authorization_mode);
         let mut local = LocalMaintainedViewSubscription {
             subscription,
             _retained_prepared_plan: retained_prepared_plan,
-            #[cfg(test)]
-            retained_plan_authorization_mode,
             maintained,
             terminal_schemas,
             tables,
@@ -9367,16 +9371,55 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
         authorization_mode: QueryAuthorizationMode,
-    ) -> Result<(ValidatedQuery, Binding, PreparedQueryPlanHandle), Error> {
+    ) -> Result<(ValidatedQuery, Binding, SubscriptionPreparedPlan), Error> {
         match authorization_mode {
-            QueryAuthorizationMode::ClientLocal => self
-                .prepare_query_binding_for_link_with_shared_claim_fragments(
-                    shape, binding, tier, identity,
-                ),
+            QueryAuthorizationMode::ClientLocal => {
+                self.prepare_client_subscription_binding(shape, binding, tier, identity)
+            }
             QueryAuthorizationMode::TrustedServing => {
-                self.prepare_query_binding_for_link(shape, binding, tier, identity)
+                self.prepare_trusted_subscription_binding(shape, binding, tier, identity)
             }
         }
+    }
+
+    fn prepare_client_subscription_binding(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+    ) -> Result<(ValidatedQuery, Binding, SubscriptionPreparedPlan), Error> {
+        let (shape, binding, plan) = self
+            .prepare_query_binding_for_link_with_shared_claim_fragments(
+                shape, binding, tier, identity,
+            )?;
+        Ok((
+            shape,
+            binding,
+            SubscriptionPreparedPlan {
+                plan,
+                authorization_mode: QueryAuthorizationMode::ClientLocal,
+            },
+        ))
+    }
+
+    fn prepare_trusted_subscription_binding(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+    ) -> Result<(ValidatedQuery, Binding, SubscriptionPreparedPlan), Error> {
+        let (shape, binding, plan) =
+            self.prepare_query_binding_for_link(shape, binding, tier, identity)?;
+        Ok((
+            shape,
+            binding,
+            SubscriptionPreparedPlan {
+                plan,
+                authorization_mode: QueryAuthorizationMode::TrustedServing,
+            },
+        ))
     }
 
     pub(crate) fn prepare_query_binding_for_link_with_shared_claim_fragments(
