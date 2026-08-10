@@ -5398,7 +5398,7 @@ fn duplex_with_admitted_session_context(
     use std::collections::VecDeque;
     let left = Rc::new(RefCell::new(VecDeque::new()));
     let right = Rc::new(RefCell::new(VecDeque::new()));
-    let features = crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS;
+    let features = crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS;
     let client = ConnectionSessionContext {
         local: crate::wire::WireAuthorityEndpoint {
             node: client_node,
@@ -5514,7 +5514,13 @@ fn permission_advice_uses_authenticated_link_identity_without_mutating() {
         .row_uuid();
 
     let alice_client = open_db(0xa1, alice, &schema);
-    let (alice_transport, alice_server_transport) = duplex();
+    let (alice_transport, alice_server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
     let _alice_upstream = alice_client.connect_upstream(alice_transport);
     let _alice_subscriber = server.accept_subscriber(alice_server_transport, alice);
     let alice_advice = alice_client.request_permission_advice(PermissionAdviceAction::Read {
@@ -5523,7 +5529,13 @@ fn permission_advice_uses_authenticated_link_identity_without_mutating() {
     });
 
     let mallory_client = open_db(0xb2, mallory, &schema);
-    let (mallory_transport, mallory_server_transport) = duplex();
+    let (mallory_transport, mallory_server_transport) = duplex_with_admitted_session_context(
+        mallory,
+        NodeUuid::from_bytes([0xb2; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        2,
+    );
     let _mallory_upstream = mallory_client.connect_upstream(mallory_transport);
     let _mallory_subscriber = server.accept_subscriber(mallory_server_transport, mallory);
     let mallory_advice = mallory_client.request_permission_advice(PermissionAdviceAction::Read {
@@ -5549,7 +5561,13 @@ fn permission_advice_is_unknown_until_authority_permissions_are_ready() {
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     server.server.set_permissions_ready(false).unwrap();
     let client = open_db(0xa1, author, &schema);
-    let (client_transport, server_transport) = duplex();
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
     let _upstream = client.connect_upstream(client_transport);
     let _subscriber = server.accept_subscriber(server_transport, author);
     let advice = client.request_permission_advice(PermissionAdviceAction::Insert {
@@ -5571,7 +5589,13 @@ fn partial_replica_cannot_act_as_permission_advice_authority() {
     let author = AuthorId::from_bytes([0xa1; 16]);
     let partial = open_db(0x5e, AuthorId::SYSTEM, &schema);
     let client = open_db(0xa1, author, &schema);
-    let (client_transport, partial_transport) = duplex();
+    let (client_transport, partial_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
     let _upstream = client.connect_upstream(client_transport);
     let _subscriber = partial.accept_subscriber(partial_transport, author);
     let advice = client.request_permission_advice(PermissionAdviceAction::Insert {
@@ -5611,7 +5635,13 @@ fn permission_advice_update_evaluates_post_patch_update_check() {
         .unwrap()
         .row_uuid();
     let client = open_db(0xa1, author, &schema);
-    let (client_transport, server_transport) = duplex();
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
     let _upstream = client.connect_upstream(client_transport);
     let _subscriber = server.accept_subscriber(server_transport, author);
     let advice = client.request_permission_advice(PermissionAdviceAction::Update {
@@ -5658,7 +5688,13 @@ fn cancelled_permission_advice_ignores_late_or_replayed_response_ids() {
     let schema = schema();
     let author = AuthorId::from_bytes([0xa1; 16]);
     let client = open_db(0xa1, author, &schema);
-    let (client_transport, mut authority_transport) = duplex();
+    let (client_transport, mut authority_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
     let _upstream = client.connect_upstream(client_transport);
 
     let cancelled = client.request_permission_advice(PermissionAdviceAction::Read {
@@ -5667,8 +5703,8 @@ fn cancelled_permission_advice_ignores_late_or_replayed_response_ids() {
     });
     client.tick().unwrap();
     let cancelled_id = match try_recv_subscriber_payload(authority_transport.as_mut()).unwrap() {
-        SyncMessage::PermissionAdviceRequest { request_id, .. } => request_id,
-        message => panic!("expected permission request, got {message:?}"),
+        SyncMessage::AuthorizationScopeIntent { request_id, .. } => request_id,
+        message => panic!("expected authority scope intent, got {message:?}"),
     };
     drop(cancelled);
 
@@ -5678,32 +5714,24 @@ fn cancelled_permission_advice_ignores_late_or_replayed_response_ids() {
     });
     client.tick().unwrap();
     let current_id = match try_recv_subscriber_payload(authority_transport.as_mut()).unwrap() {
-        SyncMessage::PermissionAdviceRequest { request_id, .. } => request_id,
-        message => panic!("expected permission request, got {message:?}"),
+        SyncMessage::AuthorizationScopeIntent { request_id, .. } => request_id,
+        message => panic!("expected authority scope intent, got {message:?}"),
     };
     assert_ne!(cancelled_id, current_id);
 
     authority_transport
-        .send(SyncMessage::PermissionAdviceResponse {
+        .send(SyncMessage::AuthorizationScopeUnavailable {
             request_id: cancelled_id,
-            advice: PermissionAdvice::Denied,
         })
         .unwrap();
     authority_transport
-        .send(SyncMessage::PermissionAdviceResponse {
-            request_id: cancelled_id,
-            advice: PermissionAdvice::Denied,
-        })
-        .unwrap();
-    authority_transport
-        .send(SyncMessage::PermissionAdviceResponse {
+        .send(SyncMessage::AuthorizationScopeUnavailable {
             request_id: current_id,
-            advice: PermissionAdvice::Allowed,
         })
         .unwrap();
     client.tick().unwrap();
 
-    assert_eq!(block_on(current), PermissionAdvice::Allowed);
+    assert_eq!(block_on(current), PermissionAdvice::Unknown);
 }
 
 #[test]
@@ -5712,7 +5740,13 @@ fn dropped_permission_advice_is_not_sent_and_reopened_nodes_use_fresh_ids() {
     let author = AuthorId::from_bytes([0xa1; 16]);
 
     let first = open_db(0xa1, author, &schema);
-    let (first_transport, mut first_authority) = duplex();
+    let (first_transport, mut first_authority) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
     let _first_upstream = first.connect_upstream(first_transport);
     let cancelled = first.request_permission_advice(PermissionAdviceAction::Insert {
         table: "todos".to_owned(),
@@ -5728,13 +5762,19 @@ fn dropped_permission_advice_is_not_sent_and_reopened_nodes_use_fresh_ids() {
     });
     first.tick().unwrap();
     let first_id = match try_recv_subscriber_payload(first_authority.as_mut()).unwrap() {
-        SyncMessage::PermissionAdviceRequest { request_id, .. } => request_id,
-        message => panic!("expected permission request, got {message:?}"),
+        SyncMessage::AuthorizationScopeIntent { request_id, .. } => request_id,
+        message => panic!("expected authority scope intent, got {message:?}"),
     };
     drop(first_live);
 
     let reopened = open_db(0xa1, author, &schema);
-    let (reopened_transport, mut reopened_authority) = duplex();
+    let (reopened_transport, mut reopened_authority) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa1; 16]),
+        2,
+        NodeUuid::from_bytes([0x5e; 16]),
+        2,
+    );
     let _reopened_upstream = reopened.connect_upstream(reopened_transport);
     let reopened_live = reopened.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
@@ -5742,8 +5782,8 @@ fn dropped_permission_advice_is_not_sent_and_reopened_nodes_use_fresh_ids() {
     });
     reopened.tick().unwrap();
     let reopened_id = match try_recv_subscriber_payload(reopened_authority.as_mut()).unwrap() {
-        SyncMessage::PermissionAdviceRequest { request_id, .. } => request_id,
-        message => panic!("expected permission request, got {message:?}"),
+        SyncMessage::AuthorizationScopeIntent { request_id, .. } => request_id,
+        message => panic!("expected authority scope intent, got {message:?}"),
     };
     drop(reopened_live);
 

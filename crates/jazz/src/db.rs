@@ -28,7 +28,8 @@ use thiserror::Error;
 use web_time::Instant;
 
 use crate::authorization_scope::{
-    AuthorityContext, AuthorizationScopeLease, AuthorizationScopeOwnerToken,
+    AuthorityContext, AuthorizationScopeAcquisition, AuthorizationScopeInstall,
+    AuthorizationScopeLease, AuthorizationScopeOwnerToken, AuthorizationScopeReadiness,
     AuthorizationScopeRegistry,
 };
 use crate::ids::{AuthorId, NodeUuid, RowUuid, SchemaVersionId};
@@ -400,7 +401,7 @@ enum PendingUpstreamCommand {
         owner: LargeValueOwnerRef,
         extent: crate::node::content_store::Extent,
     },
-    PermissionAdvice {
+    AuthorizationScopeIntent {
         request_id: PermissionAdviceRequestId,
         action: PermissionAdviceAction,
     },
@@ -451,25 +452,18 @@ struct ScopeAggregate {
 /// aggregate receipt names only the final completing subscription.
 struct AuthorizationScopeLeaseRequest {
     action: PermissionAdviceAction,
-    lease: AuthorizationScopeLease,
+    key: Option<crate::protocol::AuthorizationSupportScopeKey>,
+    lease: Option<AuthorizationScopeLease>,
     owner: Option<AuthorizationScopeOwnerToken>,
-    support_subscriptions: BTreeSet<SubscriptionKey>,
-    applied_support_cuts: BTreeMap<SubscriptionKey, crate::time::GlobalSeq>,
+    clause_count: Option<u16>,
+    applied_clauses: BTreeMap<u16, (SubscriptionKey, crate::time::GlobalSeq)>,
 }
 
 /// Per-upstream admission manager for scope receipts and their retained leases.
+#[derive(Default)]
 struct AuthorizationScopeLeaseManager {
     registry: AuthorizationScopeRegistry,
     requests: BTreeMap<PermissionAdviceRequestId, AuthorizationScopeLeaseRequest>,
-}
-
-impl Default for AuthorizationScopeLeaseManager {
-    fn default() -> Self {
-        Self {
-            registry: AuthorizationScopeRegistry::default(),
-            requests: BTreeMap::new(),
-        }
-    }
 }
 
 /// Locally-authored transactions awaiting upload, oldest first. Shared with
@@ -4758,7 +4752,7 @@ where
             .insert(request_id, sender);
         self.upstream_subscriptions
             .borrow_mut()
-            .push(PendingUpstreamCommand::PermissionAdvice { request_id, action });
+            .push(PendingUpstreamCommand::AuthorizationScopeIntent { request_id, action });
         self.schedule_tick(TickUrgency::Immediate);
         PermissionAdviceFuture {
             waiters: Rc::clone(&self.permission_advice_waiters),
@@ -4771,6 +4765,16 @@ where
         self.permission_advice_waiters
             .borrow_mut()
             .remove(&request_id);
+        for connection in self.connections.borrow().iter() {
+            let mut connection = connection.borrow_mut();
+            if let ConnectionLink::Upstream {
+                scope_lease_manager,
+                ..
+            } = &mut connection.link
+            {
+                scope_lease_manager.requests.remove(&request_id);
+            }
+        }
     }
 
     fn register_write_state_waiter(&self, tx_id: TxId) -> WriteStateChange {
@@ -4823,7 +4827,7 @@ where
             .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
         let expected_scope_authority = session_context
             .filter(|context| {
-                context.negotiated_features & crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS != 0
+                context.negotiated_features & crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS != 0
             })
             .map(|context| AuthorityContext {
                 authority: *context.remote.node.as_bytes(),
@@ -5076,7 +5080,6 @@ where
                 pending_branch_metadata_repairs: BTreeMap::new(),
                 pending_session_branch_metadata: BTreeMap::new(),
                 branch_metadata_repair_cursor: None,
-                permission_advice_responses: BTreeMap::new(),
                 scope_purposes: BTreeMap::new(),
                 scope_aggregates: BTreeMap::new(),
                 serve_dirty: true,
@@ -6613,9 +6616,6 @@ enum ConnectionLink {
             BTreeMap<crate::ids::BranchId, crate::protocol::BranchMetadata>,
         /// Round-robin cursor so a saturated repair set cannot starve later ids.
         branch_metadata_repair_cursor: Option<crate::ids::BranchId>,
-        /// Bounded replay cache. Duplicate request ids on one authenticated
-        /// link receive the identical payload-free answer.
-        permission_advice_responses: BTreeMap<PermissionAdviceRequestId, PermissionAdvice>,
         /// Authorization-support purposes keyed by their ordinary support view.
         scope_purposes: BTreeMap<SubscriptionKey, AuthorizedScopePurpose>,
         /// Per-scope aggregation state. A full-scope receipt is withheld until
@@ -6997,7 +6997,7 @@ where
                 scope_view_cuts,
                 scope_receipts,
                 expected_scope_authority,
-                scope_lease_manager: _,
+                scope_lease_manager,
             } => {
                 // Repair is deliberately retried on each non-blocked tick. The
                 // request set is bounded and deduplicated; a dropped request or
@@ -7148,25 +7148,45 @@ where
                                 return Err(transport_error(error));
                             }
                         }
-                        PendingUpstreamCommand::PermissionAdvice { request_id, action } => {
-                            if self
+                        PendingUpstreamCommand::AuthorizationScopeIntent { request_id, action } => {
+                            // An old or unauthenticated upstream must never receive a
+                            // downgraded preflight.  Resolve conservatively instead.
+                            if expected_scope_authority.is_none() {
+                                self.permission_advice_waiters
+                                    .borrow_mut()
+                                    .remove(request_id);
+                                scope_lease_manager.requests.remove(request_id);
+                            } else if self
                                 .permission_advice_waiters
                                 .borrow()
                                 .contains_key(request_id)
-                                && let Err(error) =
-                                    self.transport.send(SyncMessage::PermissionAdviceRequest {
+                            {
+                                scope_lease_manager.requests.insert(
+                                    *request_id,
+                                    AuthorizationScopeLeaseRequest {
+                                        action: action.clone(),
+                                        key: None,
+                                        lease: None,
+                                        owner: None,
+                                        clause_count: None,
+                                        applied_clauses: BTreeMap::new(),
+                                    },
+                                );
+                                if let Err(error) =
+                                    self.transport.send(SyncMessage::AuthorizationScopeIntent {
                                         request_id: *request_id,
                                         action: action.clone(),
                                     })
-                            {
-                                if handle_transport_backpressure(
-                                    &self.node,
-                                    &self.scheduler,
-                                    &error,
-                                ) {
-                                    return Ok(stats);
+                                {
+                                    if handle_transport_backpressure(
+                                        &self.node,
+                                        &self.scheduler,
+                                        &error,
+                                    ) {
+                                        return Ok(stats);
+                                    }
+                                    return Err(transport_error(error));
                                 }
-                                return Err(transport_error(error));
                             }
                         }
                     }
@@ -7328,12 +7348,187 @@ where
                             );
                         }
                         SyncMessage::PermissionAdviceResponse { request_id, advice } => {
+                            // Direct answers were the pre-Phase-3 protocol.
+                            // They have no receipt-bound evidence and must
+                            // never influence a modern client.
+                            let _ = (request_id, advice);
+                            drop_peer_request(&self.node);
+                        }
+                        SyncMessage::AuthorizationScopeView {
+                            request_id,
+                            key,
+                            clause_index,
+                            clause_count,
+                            view,
+                        } => {
+                            let Some(expected) = expected_scope_authority else {
+                                drop_peer_request(&self.node);
+                                continue;
+                            };
+                            let SyncMessage::ViewUpdate {
+                                subscription,
+                                settled_through,
+                                ..
+                            } = view.as_ref()
+                            else {
+                                drop_peer_request(&self.node);
+                                continue;
+                            };
+                            let subscription = *subscription;
+                            let settled_through = *settled_through;
+                            if clause_count == 0
+                                || clause_index >= clause_count
+                                || key.subject.as_bytes() != &expected.link
+                            {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
+                            let Some(request) = scope_lease_manager.requests.get_mut(&request_id)
+                            else {
+                                // A cancelled intent cannot be revived by a
+                                // late/replayed authority view.
+                                continue;
+                            };
+                            if request.key.as_ref().is_some_and(|known| known != &key)
+                                || request
+                                    .clause_count
+                                    .is_some_and(|known| known != clause_count)
+                            {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
+                            request.key = Some(key);
+                            request.clause_count = Some(clause_count);
+                            let duplicate = request
+                                .applied_clauses
+                                .get(&clause_index)
+                                .is_some_and(|(prior, _)| *prior != subscription);
+                            if duplicate {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
+                            // The envelope remains a normal ViewUpdate; retain
+                            // existing batching/settlement semantics before a
+                            // receipt can be accepted.
+                            push_view_update_message_for_receiver(
+                                &mut pending_view_updates,
+                                *view,
+                            )?;
+                            scope_view_cuts.insert(subscription, settled_through);
+                            request
+                                .applied_clauses
+                                .insert(clause_index, (subscription, settled_through));
+                        }
+                        SyncMessage::AuthorizationScopeAggregateReceipt {
+                            request_id,
+                            receipt,
+                        } => {
+                            // The authority's FIFO ordering says this receipt
+                            // follows the views, but apply the queued views now
+                            // so receipt admission is never merely queued.
+                            if !pending_view_updates.is_empty() {
+                                self.node.borrow_mut().apply_view_updates_in_batch(
+                                    std::mem::take(&mut pending_view_updates),
+                                )?;
+                            }
+                            let Some(expected) = expected_scope_authority else {
+                                drop_peer_request(&self.node);
+                                continue;
+                            };
+                            let Some(request) = scope_lease_manager.requests.get_mut(&request_id)
+                            else {
+                                continue;
+                            };
+                            let Some(key) = request.key.as_ref() else {
+                                drop_peer_request(&self.node);
+                                continue;
+                            };
+                            let Some(clause_count) = request.clause_count else {
+                                drop_peer_request(&self.node);
+                                continue;
+                            };
+                            let all_current = request.applied_clauses.len()
+                                == usize::from(clause_count)
+                                && request.applied_clauses.iter().all(|(index, (_, cut))| {
+                                    *index < clause_count && *cut >= receipt.settled_through
+                                });
+                            let applied_cut =
+                                request.applied_clauses.values().map(|(_, cut)| *cut).min();
+                            if receipt.key != *key
+                                || !all_current
+                                || !authorization_scope_receipt_matches_transport_context(
+                                    &receipt,
+                                    *expected,
+                                    applied_cut,
+                                )
+                            {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
+                            if request.lease.is_none() {
+                                let Some((lease, acquisition)) =
+                                    scope_lease_manager.registry.acquire(receipt.key.clone())
+                                else {
+                                    self.permission_advice_waiters
+                                        .borrow_mut()
+                                        .remove(&request_id);
+                                    scope_lease_manager.requests.remove(&request_id);
+                                    continue;
+                                };
+                                request.owner = match acquisition {
+                                    AuthorizationScopeAcquisition::Owner(owner) => Some(owner),
+                                    AuthorizationScopeAcquisition::Waiting
+                                    | AuthorizationScopeAcquisition::Proven => None,
+                                };
+                                request.lease = Some(lease);
+                            }
+                            let admitted = match (request.lease.as_ref(), request.owner.take()) {
+                                (Some(lease), Some(owner)) => matches!(
+                                    scope_lease_manager.registry.install(
+                                        lease,
+                                        owner,
+                                        *expected,
+                                        receipt.clone(),
+                                    ),
+                                    AuthorizationScopeInstall::Installed
+                                ),
+                                (Some(lease), None) => matches!(
+                                    scope_lease_manager.registry.receipt(
+                                        lease,
+                                        *expected,
+                                        receipt.authorization_progress,
+                                        receipt.settled_through.0,
+                                    ),
+                                    AuthorizationScopeReadiness::Proven(_)
+                                ),
+                                (None, _) => false,
+                            };
+                            if !admitted {
+                                continue;
+                            }
+                            let action = request.action.clone();
+                            scope_lease_manager.requests.remove(&request_id);
+                            let advice = evaluate_authoritative_permission_advice(
+                                &mut self.node.borrow_mut(),
+                                receipt.key.subject,
+                                action,
+                            );
                             if let Some(waiter) = self
                                 .permission_advice_waiters
                                 .borrow_mut()
                                 .remove(&request_id)
                             {
                                 let _ = waiter.send(advice);
+                            }
+                        }
+                        SyncMessage::AuthorizationScopeUnavailable { request_id } => {
+                            scope_lease_manager.requests.remove(&request_id);
+                            if let Some(waiter) = self
+                                .permission_advice_waiters
+                                .borrow_mut()
+                                .remove(&request_id)
+                            {
+                                let _ = waiter.send(PermissionAdvice::Unknown);
                             }
                         }
                         SyncMessage::AuthorizationScopeReceipt {
@@ -7441,7 +7636,6 @@ where
                 pending_branch_metadata_repairs,
                 pending_session_branch_metadata,
                 branch_metadata_repair_cursor,
-                permission_advice_responses,
                 scope_purposes,
                 scope_aggregates,
                 serve_dirty,
@@ -7508,37 +7702,40 @@ where
                         summarize_sync_message(&message)
                     ));
                     match message {
-                        SyncMessage::PermissionAdviceRequest { request_id, action } => {
-                            let advice = if let Some(advice) =
-                                permission_advice_responses.get(&request_id).copied()
-                            {
-                                advice
-                            } else {
-                                let advice = if self.node.borrow().is_history_complete()
-                                    && subscriber_permissions_ready(
-                                        self.node.borrow().permissions_ready(),
-                                        ingest_context.trust,
-                                    ) {
-                                    evaluate_authoritative_permission_advice(
-                                        &mut self.node.borrow_mut(),
-                                        ingest_context.identity,
-                                        action,
-                                    )
-                                } else {
-                                    PermissionAdvice::Unknown
-                                };
-                                if permission_advice_responses.len() >= 256
-                                    && let Some(oldest) =
-                                        permission_advice_responses.keys().next().copied()
-                                {
-                                    permission_advice_responses.remove(&oldest);
-                                }
-                                permission_advice_responses.insert(request_id, advice);
-                                advice
-                            };
-                            self.transport
-                                .send(SyncMessage::PermissionAdviceResponse { request_id, advice })
-                                .map_err(transport_error)?;
+                        SyncMessage::AuthorizationScopeIntent { request_id, action } => {
+                            let admitted = self.transport.connection_session_context().is_some_and(
+                                |context| {
+                                    context.negotiated_features
+                                        & crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
+                                        != 0
+                                },
+                            );
+                            if !admitted {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
+                            serve_authorization_scope_intent(
+                                &self.node,
+                                peer,
+                                self.transport.as_mut(),
+                                ingest_context.identity,
+                                connection_epoch,
+                                request_id,
+                                action,
+                                ingest_context.trust,
+                            )?;
+                            continue;
+                        }
+                        // Legacy direct answers and caller-authored support
+                        // subscriptions are deliberately fail-closed.
+                        SyncMessage::PermissionAdviceRequest { .. }
+                        | SyncMessage::PermissionAdviceResponse { .. }
+                        | SyncMessage::AuthorizationScopeSubscribe { .. }
+                        | SyncMessage::AuthorizationScopeReceipt { .. }
+                        | SyncMessage::AuthorizationScopeView { .. }
+                        | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
+                        | SyncMessage::AuthorizationScopeUnavailable { .. } => {
+                            drop_peer_request(&self.node);
                             continue;
                         }
                         SyncMessage::RegisterShape {
@@ -8594,6 +8791,141 @@ where
         Ok(false) => PermissionAdvice::Denied,
         Err(_) => PermissionAdvice::Unknown,
     }
+}
+
+/// Compile and serve an authorization scope entirely at the serving authority.
+///
+/// This intentionally does not reuse the subscriber's shape registry or any
+/// caller-provided subscription.  The authority allocates opaque usage-site
+/// keys, registers canonical shapes in the receiver, and only then sends the
+/// ordinary view updates in authority-scope envelopes.
+fn serve_authorization_scope_intent<S>(
+    node: &Rc<RefCell<NodeState<S>>>,
+    peer: &mut PeerState,
+    transport: &mut dyn Transport,
+    identity: AuthorId,
+    connection_epoch: u64,
+    request_id: PermissionAdviceRequestId,
+    action: PermissionAdviceAction,
+    trust: CommitUnitTrust,
+) -> Result<(), Error>
+where
+    S: OrderedKvStorage,
+{
+    if !node.borrow().is_history_complete()
+        || !subscriber_permissions_ready(node.borrow().permissions_ready(), trust)
+    {
+        transport
+            .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
+            .map_err(transport_error)?;
+        return Ok(());
+    }
+    let scope = match node.borrow().authorization_support_scope(identity, &action) {
+        Ok(scope) => scope,
+        Err(_) => {
+            transport
+                .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
+                .map_err(transport_error)?;
+            return Ok(());
+        }
+    };
+    let clause_count = u16::try_from(scope.subscriptions.len()).map_err(|_| {
+        Error::new(
+            ErrorCode::Protocol,
+            "authorization scope has too many clauses",
+        )
+    })?;
+    let mut settled_through = None;
+    let mut authorization_progress = None;
+    for (index, (shape, binding)) in scope.subscriptions.iter().enumerate() {
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            // This usage-site key belongs to the authority, and cannot be
+            // inferred from the canonical binding identity.
+            binding_id: crate::query::BindingId(uuid::Uuid::new_v4()),
+            read_view: scope.options.read_view_key(),
+        };
+        let supported = node
+            .borrow_mut()
+            .ensure_peer_maintained_subscription_view_supported(
+                shape,
+                binding,
+                scope.options.tier,
+                identity,
+                &scope.options.read_view,
+                QueryAuthorizationMode::TrustedServing,
+            );
+        if supported.is_err() {
+            transport
+                .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
+                .map_err(transport_error)?;
+            return Ok(());
+        }
+        let values = binding_values_in_param_order(shape, binding);
+        transport
+            .send(SyncMessage::RegisterShape {
+                shape_id: shape.shape_id(),
+                ast: ShapeAst::from_validated(shape),
+                opts: scope.options.clone(),
+            })
+            .map_err(transport_error)?;
+        transport
+            .send(SyncMessage::Subscribe(Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values,
+                known_state: None,
+            }))
+            .map_err(transport_error)?;
+        peer.declare_known_state(subscription, None);
+        let update = peer.rehydrate_query_for_subscription_with_opts(
+            &mut node.borrow_mut(),
+            subscription,
+            shape,
+            binding,
+            scope.options.clone(),
+        )?;
+        let SyncMessage::ViewUpdate {
+            settled_through: cut,
+            ..
+        } = &update
+        else {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "scope hydration was not a view update",
+            ));
+        };
+        settled_through =
+            Some(settled_through.map_or(*cut, |prior: crate::time::GlobalSeq| prior.min(*cut)));
+        authorization_progress = Some(authorization_progress.map_or(
+            peer.authorization_progress_for_subscription(subscription),
+            |prior: u64| prior.min(peer.authorization_progress_for_subscription(subscription)),
+        ));
+        transport
+            .send(SyncMessage::AuthorizationScopeView {
+                request_id,
+                key: scope.key.clone(),
+                clause_index: index as u16,
+                clause_count,
+                view: Box::new(update),
+            })
+            .map_err(transport_error)?;
+    }
+    transport
+        .send(SyncMessage::AuthorizationScopeAggregateReceipt {
+            request_id,
+            receipt: AuthorizationScopeReceipt {
+                key: scope.key,
+                authority: *node.borrow().node_uuid().as_bytes(),
+                link: *identity.as_bytes(),
+                authority_epoch: connection_epoch,
+                claims_revision: node.borrow().session_claim_revision(identity),
+                policy_epoch: node.borrow().active_catalogue_seq(),
+                settled_through: settled_through.unwrap_or_default(),
+                authorization_progress: authorization_progress.unwrap_or_default(),
+            },
+        })
+        .map_err(transport_error)
 }
 
 fn authorization_scope_receipt_for_view<S>(

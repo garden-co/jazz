@@ -223,6 +223,46 @@ pub enum SyncMessage {
         /// Bound authority receipt.
         receipt: AuthorizationScopeReceipt,
     },
+    /// Minimal request for an authority-owned authorization support scope.
+    ///
+    /// The caller supplies only an opaque correlation id and the hypothetical
+    /// action.  In particular it cannot select a shape, binding, scope key, or
+    /// authenticated subject.
+    AuthorizationScopeIntent {
+        /// Opaque request correlation chosen by the client.
+        request_id: PermissionAdviceRequestId,
+        /// Candidate operation; all support scope details are authority-derived.
+        action: PermissionAdviceAction,
+    },
+    /// One authority-selected support clause for an authorization intent.
+    /// `view` is an ordinary `ViewUpdate`, wrapped only to carry its opaque
+    /// request and server-chosen scope metadata.
+    AuthorizationScopeView {
+        /// Opaque request correlation from the matching intent.
+        request_id: PermissionAdviceRequestId,
+        /// Authority-derived scope identity.
+        key: AuthorizationSupportScopeKey,
+        /// Zero-based authority clause ordinal.
+        clause_index: u16,
+        /// Total number of authority clauses in this hydration.
+        clause_count: u16,
+        /// Ordinary settlement-bearing `ViewUpdate` payload.
+        view: Box<SyncMessage>,
+    },
+    /// Aggregate proof for every clause sent in an authority scope view set.
+    AuthorizationScopeAggregateReceipt {
+        /// Opaque request correlation from the matching intent.
+        request_id: PermissionAdviceRequestId,
+        /// Aggregate authority proof after every clause view.
+        receipt: AuthorizationScopeReceipt,
+    },
+    /// The admitted authority cannot currently hydrate an intent.  This is a
+    /// conservative terminal result: clients resolve the corresponding advice
+    /// as `Unknown` and park normal authority work.
+    AuthorizationScopeUnavailable {
+        /// Opaque request correlation from the matching intent.
+        request_id: PermissionAdviceRequestId,
+    },
 }
 
 /// Opaque identity for one permission-advice exchange.
@@ -385,6 +425,12 @@ impl SyncMessage {
         match self {
             Self::AuthorizationScopeSubscribe { .. } | Self::AuthorizationScopeReceipt { .. } => {
                 crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+            }
+            Self::AuthorizationScopeIntent { .. }
+            | Self::AuthorizationScopeView { .. }
+            | Self::AuthorizationScopeAggregateReceipt { .. }
+            | Self::AuthorizationScopeUnavailable { .. } => {
+                crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
             }
             _ => crate::wire::FEATURE_NONE,
         }

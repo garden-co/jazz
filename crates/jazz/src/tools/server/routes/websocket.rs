@@ -547,7 +547,8 @@ async fn handle_ws_connection(
     // A receipt-capable peer must bind its endpoint in the admission hello.
     // Old hellos retain ordinary sync but never negotiate receipt semantics.
     if remote_hello.authority.is_none() {
-        negotiated.features &= !crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS;
+        negotiated.features &= !(crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+            | crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS);
     }
 
     let Some(core_server_shell) = state.core_server_shell() else {
@@ -563,22 +564,25 @@ async fn handle_ws_connection(
         let _ = socket.close().await;
         return;
     };
-    let session_context =
-        if negotiated.features & crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS != 0 {
-            remote_hello
-                .authority
-                .map(|remote| ConnectionSessionContext {
-                    local: WireAuthorityEndpoint {
-                        node: NodeUuid::from_bytes([0x5e; 16]),
-                        epoch: WS_NEXT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed),
-                    },
-                    remote,
-                    link_identity: admission.identity,
-                    negotiated_features: negotiated.features,
-                })
-        } else {
-            None
-        };
+    let session_context = if negotiated.features
+        & (crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+            | crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)
+        != 0
+    {
+        remote_hello
+            .authority
+            .map(|remote| ConnectionSessionContext {
+                local: WireAuthorityEndpoint {
+                    node: NodeUuid::from_bytes([0x5e; 16]),
+                    epoch: WS_NEXT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed),
+                },
+                remote,
+                link_identity: admission.identity,
+                negotiated_features: negotiated.features,
+            })
+    } else {
+        None
+    };
     let session = match core_server_shell
         .open_with_session_context(
             admission.identity,

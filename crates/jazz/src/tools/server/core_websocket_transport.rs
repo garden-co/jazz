@@ -150,26 +150,30 @@ impl WebSocketTransport {
         // Receipt semantics require an admitted authority endpoint, not merely
         // a feature bit from a legacy hello.
         if server_hello.authority.is_none() {
-            negotiated.features &= !crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS;
+            negotiated.features &= !(crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                | crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS);
         }
         if negotiated.features & WS_CLIENT_REQUIRED_FEATURES != WS_CLIENT_REQUIRED_FEATURES {
             return Err(WebSocketClientError::ServerRejected(
                 "server did not negotiate sync message payload frames".to_owned(),
             ));
         }
-        let session_context =
-            if negotiated.features & crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS != 0 {
-                server_hello
-                    .authority
-                    .map(|remote| ConnectionSessionContext {
-                        local: client_endpoint,
-                        remote,
-                        link_identity: peer_identity,
-                        negotiated_features: negotiated.features,
-                    })
-            } else {
-                None
-            };
+        let session_context = if negotiated.features
+            & (crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                | crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)
+            != 0
+        {
+            server_hello
+                .authority
+                .map(|remote| ConnectionSessionContext {
+                    local: client_endpoint,
+                    remote,
+                    link_identity: peer_identity,
+                    negotiated_features: negotiated.features,
+                })
+        } else {
+            None
+        };
 
         let inbound = Arc::new(Mutex::new(VecDeque::new()));
         let (outbound, outbound_rx) = mpsc::unbounded_channel();

@@ -564,9 +564,15 @@ where
             SyncMessage::PermissionAdviceRequest { .. }
             | SyncMessage::PermissionAdviceResponse { .. }
             | SyncMessage::AuthorizationScopeSubscribe { .. }
-            | SyncMessage::AuthorizationScopeReceipt { .. } => Err(Error::UnsupportedSyncMessage(
-                "permission advice requires authenticated link context",
-            )),
+            | SyncMessage::AuthorizationScopeReceipt { .. }
+            | SyncMessage::AuthorizationScopeIntent { .. }
+            | SyncMessage::AuthorizationScopeView { .. }
+            | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
+            | SyncMessage::AuthorizationScopeUnavailable { .. } => {
+                Err(Error::UnsupportedSyncMessage(
+                    "permission advice requires authenticated link context",
+                ))
+            }
         }
     }
 

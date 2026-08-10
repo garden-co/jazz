@@ -42,6 +42,9 @@ pub const FEATURE_MESSAGE_FRAGMENTATION: WireFeatures = 1 << 5;
 /// still exchange every pre-existing sync message, but must never be asked to
 /// deserialize the new semantic enum variants or extension fields.
 pub const FEATURE_AUTHORIZATION_SCOPE_RECEIPTS: WireFeatures = 1 << 6;
+/// Authority-owned authorization scope hydration.  Unlike the first receipt
+/// experiment this never accepts caller supplied support query identities.
+pub const FEATURE_AUTHORIZATION_SCOPE_VIEWS: WireFeatures = 1 << 7;
 
 const FEATURE_PAYLOAD_COMPRESSION_MASK: WireFeatures = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
 
@@ -424,6 +427,7 @@ pub fn current_wire_features() -> WireFeatures {
         | FEATURE_STRUCTURED_ERRORS
         | FEATURE_MESSAGE_FRAGMENTATION
         | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+        | FEATURE_AUTHORIZATION_SCOPE_VIEWS
         | runtime_transport_compression_features()
 }
 
@@ -691,8 +695,10 @@ pub fn negotiate_wire(
     // Receipt semantics need a handshake-bound issuer epoch.  A peer that
     // merely advertises the bit but cannot provide that endpoint is treated as
     // old for this feature, so semantic receipt variants stay fail-closed.
-    if features & FEATURE_AUTHORIZATION_SCOPE_RECEIPTS != 0 && remote.authority.is_none() {
-        features &= !FEATURE_AUTHORIZATION_SCOPE_RECEIPTS;
+    if features & (FEATURE_AUTHORIZATION_SCOPE_RECEIPTS | FEATURE_AUTHORIZATION_SCOPE_VIEWS) != 0
+        && remote.authority.is_none()
+    {
+        features &= !(FEATURE_AUTHORIZATION_SCOPE_RECEIPTS | FEATURE_AUTHORIZATION_SCOPE_VIEWS);
     }
     Ok(WireNegotiated {
         protocol_version: max,
