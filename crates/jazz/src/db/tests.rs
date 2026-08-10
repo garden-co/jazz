@@ -5692,6 +5692,16 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
     let alice = AuthorId::from_bytes([0xa1; 16]);
     let bob = AuthorId::from_bytes([0xb2; 16]);
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    // A Core may also maintain an upstream relay; that topology fact must not
+    // turn its client ingress into Edge routing or bypass local proof.
+    let (core_upstream, _upstream_peer) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0x5e; 16]),
+        9,
+        NodeUuid::from_bytes([0xc0; 16]),
+        9,
+    );
+    let _core_upstream = server.server.connect_upstream(core_upstream);
     let client = open_db(0xa1, alice, &schema);
     let (client_transport, server_transport) = duplex_with_admitted_session_context(
         alice,
@@ -5781,6 +5791,64 @@ fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
         first,
         "detaching the selected owner must deterministically hand off future routes"
     );
+}
+
+#[test]
+fn edge_route_capacity_rejects_instead_of_reporting_edge_acceptance() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xa1; 16]);
+    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+    let (upstream, _authority) = duplex_with_admitted_session_context(
+        identity,
+        NodeUuid::from_bytes([0xe0; 16]),
+        1,
+        NodeUuid::from_bytes([0xc0; 16]),
+        1,
+    );
+    let _upstream = edge.server.connect_upstream(upstream);
+    let selected = edge
+        .server
+        .admitted_upstream_authority
+        .borrow()
+        .expect("admitted upstream");
+
+    let client = open_db(0xa1, identity, &schema);
+    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
+        identity,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0xe0; 16]),
+        2,
+    );
+    let _client_upstream = client.connect_upstream(client_transport);
+    let _subscriber = edge.server.accept_edge_authority_subscriber_with_claims(
+        edge_transport,
+        identity,
+        BTreeMap::new(),
+    );
+    let write = client
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("bounded".to_owned()))]),
+        )
+        .unwrap();
+    let queue = Rc::new(RefCell::new(Vec::new()));
+    edge.server.edge_fate_routes.borrow_mut().insert(
+        write.mergeable_tx_id(),
+        (0..MAX_EDGE_FATE_ROUTES_PER_TX)
+            .map(|_| EdgeFateRoute {
+                authority: selected,
+                queue: Rc::downgrade(&queue),
+            })
+            .collect(),
+    );
+    client.tick().unwrap();
+    edge.server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(matches!(
+        write.write_state().unwrap().fate,
+        Fate::Rejected(RejectionReason::MalformedCommit(_))
+    ));
 }
 
 #[test]
