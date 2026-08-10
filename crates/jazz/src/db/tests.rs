@@ -5747,6 +5747,43 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
 }
 
 #[test]
+fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xa1; 16]);
+    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+    let edge_node = NodeUuid::from_bytes([0xe0; 16]);
+    let (a_transport, _a_peer) = duplex_with_admitted_session_context(
+        identity,
+        edge_node,
+        10,
+        NodeUuid::from_bytes([0xa2; 16]),
+        20,
+    );
+    let a = edge.server.connect_upstream(a_transport);
+    let first = *edge.server.admitted_upstream_authority.borrow();
+    let (b_transport, _b_peer) = duplex_with_admitted_session_context(
+        identity,
+        edge_node,
+        11,
+        NodeUuid::from_bytes([0xb2; 16]),
+        21,
+    );
+    let _b = edge.server.connect_upstream(b_transport);
+    assert_eq!(
+        *edge.server.admitted_upstream_authority.borrow(),
+        first,
+        "a concurrent admitted upstream must not steal existing route ownership"
+    );
+    assert_eq!(edge.server.admitted_upstream_authorities.borrow().len(), 2);
+    assert!(edge.server.detach_connection(&a));
+    assert_ne!(
+        *edge.server.admitted_upstream_authority.borrow(),
+        first,
+        "detaching the selected owner must deterministically hand off future routes"
+    );
+}
+
+#[test]
 fn public_permission_advice_accepts_an_explicit_zero_clause_receipt() {
     let schema = schema();
     let identity = AuthorId::from_bytes([0xa3; 16]);
