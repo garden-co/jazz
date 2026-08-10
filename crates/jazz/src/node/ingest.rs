@@ -561,6 +561,10 @@ where
                 })?;
                 self.apply_content_extents(extents)
             }
+            SyncMessage::PermissionAdviceRequest { .. }
+            | SyncMessage::PermissionAdviceResponse { .. } => Err(Error::UnsupportedSyncMessage(
+                "permission advice requires authenticated link context",
+            )),
         }
     }
 

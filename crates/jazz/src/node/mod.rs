@@ -3341,6 +3341,11 @@ where
         self.history_complete && position <= self.clock.applied_global_watermark
     }
 
+    /// Whether this node was opened as a complete serving authority.
+    pub(crate) fn is_history_complete(&self) -> bool {
+        self.history_complete
+    }
+
     /// Return current rows for a subscription at the requested tier.
     pub fn subscription_current_rows(
         &mut self,

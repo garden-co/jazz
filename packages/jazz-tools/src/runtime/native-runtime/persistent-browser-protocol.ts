@@ -1,5 +1,5 @@
 import type { InsertValues, Value, WasmSchema } from "../../drivers/types.js";
-import type { RuntimeSourcesConfig } from "../context.js";
+import type { RuntimeSourcesConfig, Session } from "../context.js";
 import type { NativeRowDelta } from "../../drivers/types.js";
 import type { BatchId, OpenBatchId } from "../client.js";
 
@@ -79,6 +79,26 @@ type PersistentBrowserRequest =
       id: number;
       method: "waitForTransaction";
       args: [batchId: BatchId, tier: string];
+    }
+  | {
+      id: number;
+      method: "requestInsertPermissionAdvice";
+      args: [table: string, values: InsertValues, session?: Session];
+    }
+  | {
+      id: number;
+      method: "requestReadPermissionAdvice";
+      args: [table: string, objectId: string, session?: Session];
+    }
+  | {
+      id: number;
+      method: "requestUpdatePermissionAdvice";
+      args: [table: string, objectId: string, values: Record<string, Value>, session?: Session];
+    }
+  | {
+      id: number;
+      method: "requestDeletePermissionAdvice";
+      args: [table: string, objectId: string, session?: Session];
     }
   | {
       id: number;

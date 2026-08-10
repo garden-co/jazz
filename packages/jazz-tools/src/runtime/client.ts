@@ -66,6 +66,27 @@ export interface Runtime {
     session?: Session,
   ): PermissionAdvice;
   canDelete?(table: string, objectId: string, session?: Session): PermissionAdvice;
+  requestInsertPermissionAdvice?(
+    table: string,
+    values: InsertValues,
+    session?: Session,
+  ): Promise<PermissionAdvice>;
+  requestReadPermissionAdvice?(
+    table: string,
+    objectId: string,
+    session?: Session,
+  ): Promise<PermissionAdvice>;
+  requestUpdatePermissionAdvice?(
+    table: string,
+    objectId: string,
+    values: Record<string, Value>,
+    session?: Session,
+  ): Promise<PermissionAdvice>;
+  requestDeletePermissionAdvice?(
+    table: string,
+    objectId: string,
+    session?: Session,
+  ): Promise<PermissionAdvice>;
   waitForTransaction(batchId: BatchId | Promise<BatchId>, tier: string): Promise<void>;
   query(
     query_json: string,
@@ -989,6 +1010,64 @@ export class JazzClient {
       throw new Error("Runtime does not support write-policy dry-run delete checks.");
     }
     return this.runtime.canDelete(table, objectId, session ?? this.resolvedSession ?? undefined);
+  }
+
+  requestInsertPermissionAdvice(
+    table: string,
+    values: InsertValues,
+    session?: Session,
+  ): Promise<PermissionAdvice> {
+    return (
+      this.runtime.requestInsertPermissionAdvice?.(
+        table,
+        values,
+        session ?? this.resolvedSession ?? undefined,
+      ) ?? Promise.resolve("unknown")
+    );
+  }
+
+  requestReadPermissionAdvice(
+    table: string,
+    objectId: string,
+    session?: Session,
+  ): Promise<PermissionAdvice> {
+    return (
+      this.runtime.requestReadPermissionAdvice?.(
+        table,
+        objectId,
+        session ?? this.resolvedSession ?? undefined,
+      ) ?? Promise.resolve("unknown")
+    );
+  }
+
+  requestUpdatePermissionAdvice(
+    table: string,
+    objectId: string,
+    values: Record<string, Value>,
+    session?: Session,
+  ): Promise<PermissionAdvice> {
+    return (
+      this.runtime.requestUpdatePermissionAdvice?.(
+        table,
+        objectId,
+        values,
+        session ?? this.resolvedSession ?? undefined,
+      ) ?? Promise.resolve("unknown")
+    );
+  }
+
+  requestDeletePermissionAdvice(
+    table: string,
+    objectId: string,
+    session?: Session,
+  ): Promise<PermissionAdvice> {
+    return (
+      this.runtime.requestDeletePermissionAdvice?.(
+        table,
+        objectId,
+        session ?? this.resolvedSession ?? undefined,
+      ) ?? Promise.resolve("unknown")
+    );
   }
 
   /**

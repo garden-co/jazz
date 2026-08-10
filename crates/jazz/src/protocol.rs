@@ -189,6 +189,75 @@ pub enum SyncMessage {
     /// Trusted upstream catalogue metadata required to decode immutable
     /// authored-version payloads before their view update arrives.
     CatalogueSnapshot(Box<CatalogueSnapshot>),
+    /// One-shot permission preflight. The authenticated link identity is the
+    /// subject; identity and claims are intentionally absent from the payload.
+    PermissionAdviceRequest {
+        /// Client-generated opaque id, unique among requests on this live link.
+        request_id: PermissionAdviceRequestId,
+        /// Hypothetical operation to evaluate without mutation.
+        action: PermissionAdviceAction,
+    },
+    /// One-shot permission preflight result. No supporting rows or denial
+    /// reason are carried across this boundary.
+    PermissionAdviceResponse {
+        /// Opaque id copied from the request.
+        request_id: PermissionAdviceRequestId,
+        /// Final serving-authority result, or `Unknown` when unavailable.
+        advice: PermissionAdvice,
+    },
+}
+
+/// Opaque identity for one permission-advice exchange.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct PermissionAdviceRequestId(pub [u8; 16]);
+
+/// Hypothetical operation sent to a trusted serving authority.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum PermissionAdviceAction {
+    /// Insert a candidate row.
+    Insert {
+        /// Table name.
+        table: String,
+        /// Candidate cells after client-side value encoding.
+        cells: BTreeMap<String, Value>,
+    },
+    /// Read one current row.
+    Read {
+        /// Table name.
+        table: String,
+        /// Row id.
+        row: RowUuid,
+    },
+    /// Update one current row.
+    Update {
+        /// Table name.
+        table: String,
+        /// Row id.
+        row: RowUuid,
+        /// Candidate patch. It is carried for forward-compatible exact
+        /// update-check evaluation and is never echoed in the response.
+        patch: BTreeMap<String, Value>,
+    },
+    /// Delete one current row.
+    Delete {
+        /// Table name.
+        table: String,
+        /// Row id.
+        row: RowUuid,
+    },
+}
+
+/// Advisory result of a permission preflight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum PermissionAdvice {
+    /// A trusted serving authority determined that the operation is allowed.
+    Allowed,
+    /// A trusted serving authority determined that the operation is denied.
+    Denied,
+    /// No trusted serving authority produced a final decision.
+    Unknown,
 }
 
 /// Ordered schema lineage metadata shipped ahead of authored row payloads.

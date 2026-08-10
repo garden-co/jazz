@@ -1086,6 +1086,47 @@ describe("NativeRuntimeAdapter server transport", () => {
         authMode: "external",
       }),
     ).toBe("unknown");
+    await expect(
+      runtime.requestDeletePermissionAdvice("todos", "00000000-0000-0000-0000-000000000001"),
+    ).resolves.toBe("unknown");
+  });
+
+  it("cancels native permission waiters when authority advice times out", async () => {
+    vi.useFakeTimers();
+    let cancellations = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            requestDeletePermissionAdvice: () => ({
+              promise: new Promise(() => {}),
+              cancel: () => {
+                cancellations += 1;
+              },
+            }),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    Object.assign(runtime as object, { serverTransport: {}, serverCarrier: {} });
+
+    const advice = runtime.requestDeletePermissionAdvice(
+      "todos",
+      "00000000-0000-0000-0000-000000000001",
+    );
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    await expect(advice).resolves.toBe("unknown");
+    expect(cancellations).toBe(1);
+    vi.useRealTimers();
   });
 
   it("does not locally evaluate permission advice even on a serving-configured runtime", () => {

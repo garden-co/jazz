@@ -151,7 +151,7 @@ export class BrowserWorkerSubscriptionChannel implements SubscriptionChannel {
     session?: Session,
   ): Promise<PermissionAdvice> {
     const db = await this.owner.db();
-    return db.__withRuntimeOperationContext({ session }, () => db.canInsert(table, data));
+    return db.__withRuntimeOperationContext({ session }, () => db.requestCanInsert(table, data));
   }
 
   async canUpdate<T, Init>(
@@ -161,7 +161,9 @@ export class BrowserWorkerSubscriptionChannel implements SubscriptionChannel {
     session?: Session,
   ): Promise<PermissionAdvice> {
     const db = await this.owner.db();
-    return db.__withRuntimeOperationContext({ session }, () => db.canUpdate(table, id, data));
+    return db.__withRuntimeOperationContext({ session }, () =>
+      db.requestCanUpdate(table, id, data),
+    );
   }
 
   async canDelete<T, Init>(
@@ -170,7 +172,7 @@ export class BrowserWorkerSubscriptionChannel implements SubscriptionChannel {
     session?: Session,
   ): Promise<PermissionAdvice> {
     const db = await this.owner.db();
-    return db.__withRuntimeOperationContext({ session }, () => db.canDelete(table, id));
+    return db.__withRuntimeOperationContext({ session }, () => db.requestCanDelete(table, id));
   }
 
   async getAuthState(): Promise<AuthState> {

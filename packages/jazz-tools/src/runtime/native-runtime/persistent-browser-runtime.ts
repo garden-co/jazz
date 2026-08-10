@@ -3,11 +3,12 @@ import type {
   InsertResult,
   MutationResult,
   OpenBatchId,
+  PermissionAdvice,
   Runtime,
   TransactionKind,
 } from "../client.js";
 import type { NativeRowDelta } from "../../drivers/types.js";
-import type { RuntimeSourcesConfig } from "../context.js";
+import type { RuntimeSourcesConfig, Session } from "../context.js";
 import type { InsertValues, Value, WasmSchema } from "../../drivers/types.js";
 import type {
   PersistentBrowserSubscriptionMessage,
@@ -424,6 +425,51 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     }).finally(() => {
       if (blocksOnServer) this.shared.blockingServerCommands -= 1;
     });
+  }
+
+  requestInsertPermissionAdvice(
+    table: string,
+    values: InsertValues,
+    session?: Session,
+  ): Promise<PermissionAdvice> {
+    return this.send("requestInsertPermissionAdvice", [table, values, session]).then(
+      (result) => result as PermissionAdvice,
+      () => "unknown",
+    );
+  }
+
+  requestReadPermissionAdvice(
+    table: string,
+    objectId: string,
+    session?: Session,
+  ): Promise<PermissionAdvice> {
+    return this.send("requestReadPermissionAdvice", [table, objectId, session]).then(
+      (result) => result as PermissionAdvice,
+      () => "unknown",
+    );
+  }
+
+  requestUpdatePermissionAdvice(
+    table: string,
+    objectId: string,
+    values: Record<string, Value>,
+    session?: Session,
+  ): Promise<PermissionAdvice> {
+    return this.send("requestUpdatePermissionAdvice", [table, objectId, values, session]).then(
+      (result) => result as PermissionAdvice,
+      () => "unknown",
+    );
+  }
+
+  requestDeletePermissionAdvice(
+    table: string,
+    objectId: string,
+    session?: Session,
+  ): Promise<PermissionAdvice> {
+    return this.send("requestDeletePermissionAdvice", [table, objectId, session]).then(
+      (result) => result as PermissionAdvice,
+      () => "unknown",
+    );
   }
 
   createSubscription(

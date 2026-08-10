@@ -39,13 +39,15 @@ use crate::node::{
     RowProvenance, ViewUpdateParts,
 };
 use crate::peer::{PeerRole, PeerState};
+pub use crate::protocol::PermissionAdvice;
 #[cfg(feature = "sync-autopsy")]
 use crate::protocol::expand_version_carriers;
 use crate::protocol::{
     BindingViewKey, ContentExtent, CoverageKey, CurrentWriteSchema, LargeValueOwnerRef, LensOp,
-    MigrationLens, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
-    SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
-    SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens,
+    MigrationLens, PermissionAdviceAction, PermissionAdviceRequestId, ReadViewKey,
+    ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, SchemaLineagePublication,
+    SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
+    SubscriptionKey, SyncMessage, TableLens,
 };
 use crate::protocol_limits::{
     MAX_FETCH_BRANCH_METADATA, MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES, MAX_INFLIGHT_LOGICAL_MESSAGES,
@@ -54,8 +56,8 @@ use crate::protocol_limits::{
     validate_wire_frame_len,
 };
 use crate::query::{
-    Binding, BindingId, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery,
-    relation_query_to_query,
+    Binding, BindingId, Operand, Predicate, Query, QueryError, RelationQuery, ShapeId,
+    ValidatedQuery, relation_query_to_query,
 };
 #[cfg(test)]
 use crate::query::{
@@ -196,23 +198,6 @@ where
     next_now_ms: Rc<Cell<u64>>,
 }
 
-/// Advisory result of a permission preflight.
-///
-/// `Allowed` and `Denied` are final only when returned by a trusted serving
-/// authority. A client-local replica must return `Unknown` whenever policy
-/// evidence may be incomplete; callers must never treat `Unknown` as an
-/// authorization grant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PermissionAdvice {
-    /// A trusted serving authority determined that the operation is allowed.
-    Allowed,
-    /// A trusted serving authority determined that the operation is denied.
-    Denied,
-    /// The local runtime cannot make a sound final decision.
-    Unknown,
-}
-
 /// Process-local, content-addressed identity for an exact typed schema view.
 ///
 /// Unlike [`SchemaVersionId`], which identifies structural migration lineage,
@@ -244,6 +229,8 @@ type UpstreamSubscriptionOwners =
     Rc<RefCell<BTreeMap<SubscriptionKey, Vec<Weak<RefCell<SubscriptionState>>>>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
 type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
+type PermissionAdviceWaiters =
+    Rc<RefCell<BTreeMap<PermissionAdviceRequestId, oneshot::Sender<PermissionAdvice>>>>;
 type ShapeRegistrationKey = (ShapeId, ReadViewKey);
 
 /// Per-subscriber state for a shape/read-view registration.
@@ -408,6 +395,10 @@ enum PendingUpstreamCommand {
         owner: LargeValueOwnerRef,
         extent: crate::node::content_store::Extent,
     },
+    PermissionAdvice {
+        request_id: PermissionAdviceRequestId,
+        action: PermissionAdviceAction,
+    },
 }
 
 #[derive(Clone)]
@@ -526,6 +517,38 @@ impl Drop for WriteStateChange {
         if empty {
             waiters.remove(&self.tx_id);
         }
+    }
+}
+
+/// Cancel-safe future for one authoritative permission preflight.
+pub struct PermissionAdviceFuture {
+    waiters: PermissionAdviceWaiters,
+    request_id: PermissionAdviceRequestId,
+    receiver: oneshot::Receiver<PermissionAdvice>,
+}
+
+impl Future for PermissionAdviceFuture {
+    type Output = PermissionAdvice;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match Pin::new(&mut self.receiver).poll(cx) {
+            Poll::Ready(Ok(advice)) => Poll::Ready(advice),
+            Poll::Ready(Err(_)) => Poll::Ready(PermissionAdvice::Unknown),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl PermissionAdviceFuture {
+    /// Opaque id used to cancel only this request.
+    pub fn request_id(&self) -> PermissionAdviceRequestId {
+        self.request_id
+    }
+}
+
+impl Drop for PermissionAdviceFuture {
+    fn drop(&mut self) {
+        self.waiters.borrow_mut().remove(&self.request_id);
     }
 }
 
@@ -4054,6 +4077,22 @@ where
         self.node.schedule_tick(urgency);
     }
 
+    /// Request a one-shot permission decision from the authenticated upstream
+    /// serving authority. Dropping the returned future cancels local delivery;
+    /// late or replayed responses are ignored by request id.
+    pub fn request_permission_advice(
+        &self,
+        action: PermissionAdviceAction,
+    ) -> PermissionAdviceFuture {
+        self.node.request_permission_advice(action)
+    }
+
+    /// Resolve outstanding permission preflights as `Unknown` and suppress
+    /// requests that have not reached the transport yet.
+    pub fn cancel_permission_advice_request(&self, request_id: PermissionAdviceRequestId) {
+        self.node.cancel_permission_advice_request(request_id);
+    }
+
     /// Accept a subscriber connection served under `identity`.
     pub fn accept_subscriber(
         &self,
@@ -4511,6 +4550,7 @@ where
     connections: RefCell<Vec<Rc<RefCell<PeerConnection<S>>>>>,
     scheduler: SharedTickScheduler,
     write_state_waiters: WriteStateWaiters,
+    permission_advice_waiters: PermissionAdviceWaiters,
     next_write_state_waiter_id: Cell<u64>,
     next_subscription_nonce: Cell<u64>,
     subscriber_dirty_epoch: Rc<Cell<u64>>,
@@ -4537,6 +4577,7 @@ where
             write_state_waiters: Rc::new(RefCell::new(BTreeMap::new())),
             next_write_state_waiter_id: Cell::new(1),
             next_subscription_nonce: Cell::new(1),
+            permission_advice_waiters: Rc::new(RefCell::new(BTreeMap::new())),
             subscriber_dirty_epoch: Rc::new(Cell::new(0)),
             edge_cache_budget: Cell::new(None),
         }
@@ -4659,6 +4700,29 @@ where
         self.schedule_tick(TickUrgency::Immediate);
     }
 
+    fn request_permission_advice(&self, action: PermissionAdviceAction) -> PermissionAdviceFuture {
+        let request_id = PermissionAdviceRequestId(*uuid::Uuid::new_v4().as_bytes());
+        let (sender, receiver) = oneshot::channel();
+        self.permission_advice_waiters
+            .borrow_mut()
+            .insert(request_id, sender);
+        self.upstream_subscriptions
+            .borrow_mut()
+            .push(PendingUpstreamCommand::PermissionAdvice { request_id, action });
+        self.schedule_tick(TickUrgency::Immediate);
+        PermissionAdviceFuture {
+            waiters: Rc::clone(&self.permission_advice_waiters),
+            request_id,
+            receiver,
+        }
+    }
+
+    fn cancel_permission_advice_request(&self, request_id: PermissionAdviceRequestId) {
+        self.permission_advice_waiters
+            .borrow_mut()
+            .remove(&request_id);
+    }
+
     fn register_write_state_waiter(&self, tx_id: TxId) -> WriteStateChange {
         let waiter_id = self.next_write_state_waiter_id.get();
         self.next_write_state_waiter_id
@@ -4757,6 +4821,7 @@ where
             upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
             scheduler: Rc::clone(&self.scheduler),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
+            permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(0),
@@ -4912,6 +4977,7 @@ where
             upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
             scheduler: Rc::clone(&self.scheduler),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
+            permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(session_claim_revision),
@@ -4933,6 +4999,7 @@ where
                 pending_branch_metadata_repairs: BTreeMap::new(),
                 pending_session_branch_metadata: BTreeMap::new(),
                 branch_metadata_repair_cursor: None,
+                permission_advice_responses: BTreeMap::new(),
                 serve_dirty: true,
             },
             last_resume_bytes: None,
@@ -6352,6 +6419,7 @@ where
     upstream_subscription_owners: UpstreamSubscriptionOwners,
     scheduler: SharedTickScheduler,
     write_state_waiters: WriteStateWaiters,
+    permission_advice_waiters: PermissionAdviceWaiters,
     subscriber_dirty_epoch: Rc<Cell<u64>>,
     observed_subscriber_dirty_epoch: Cell<u64>,
     observed_session_claim_revision: Cell<u64>,
@@ -6417,6 +6485,9 @@ enum ConnectionLink {
             BTreeMap<crate::ids::BranchId, crate::protocol::BranchMetadata>,
         /// Round-robin cursor so a saturated repair set cannot starve later ids.
         branch_metadata_repair_cursor: Option<crate::ids::BranchId>,
+        /// Bounded replay cache. Duplicate request ids on one authenticated
+        /// link receive the identical payload-free answer.
+        permission_advice_responses: BTreeMap<PermissionAdviceRequestId, PermissionAdvice>,
         /// True when this subscriber's maintained views may have queued deltas
         /// to serve. Idle transport ticks must not poll every view.
         serve_dirty: bool,
@@ -6824,6 +6895,27 @@ where
                                 return Err(transport_error(error));
                             }
                         }
+                        PendingUpstreamCommand::PermissionAdvice { request_id, action } => {
+                            if self
+                                .permission_advice_waiters
+                                .borrow()
+                                .contains_key(request_id)
+                                && let Err(error) =
+                                    self.transport.send(SyncMessage::PermissionAdviceRequest {
+                                        request_id: *request_id,
+                                        action: action.clone(),
+                                    })
+                            {
+                                if handle_transport_backpressure(
+                                    &self.node,
+                                    &self.scheduler,
+                                    &error,
+                                ) {
+                                    return Ok(stats);
+                                }
+                                return Err(transport_error(error));
+                            }
+                        }
                     }
                     pending.remove(pending_index);
                 }
@@ -6967,6 +7059,15 @@ where
                                 reason,
                             );
                         }
+                        SyncMessage::PermissionAdviceResponse { request_id, advice } => {
+                            if let Some(waiter) = self
+                                .permission_advice_waiters
+                                .borrow_mut()
+                                .remove(&request_id)
+                            {
+                                let _ = waiter.send(advice);
+                            }
+                        }
                         SyncMessage::BranchMetadata(metadata) => {
                             let branch = metadata.branch_id;
                             self.node
@@ -7043,6 +7144,7 @@ where
                 pending_branch_metadata_repairs,
                 pending_session_branch_metadata,
                 branch_metadata_repair_cursor,
+                permission_advice_responses,
                 serve_dirty,
             } => {
                 let repairs = next_branch_metadata_repairs(
@@ -7101,6 +7203,39 @@ where
                         summarize_sync_message(&message)
                     ));
                     match message {
+                        SyncMessage::PermissionAdviceRequest { request_id, action } => {
+                            let advice = if let Some(advice) =
+                                permission_advice_responses.get(&request_id).copied()
+                            {
+                                advice
+                            } else {
+                                let advice = if self.node.borrow().is_history_complete()
+                                    && subscriber_permissions_ready(
+                                        self.node.borrow().permissions_ready(),
+                                        ingest_context.trust,
+                                    ) {
+                                    evaluate_authoritative_permission_advice(
+                                        &mut self.node.borrow_mut(),
+                                        ingest_context.identity,
+                                        action,
+                                    )
+                                } else {
+                                    PermissionAdvice::Unknown
+                                };
+                                if permission_advice_responses.len() >= 256
+                                    && let Some(oldest) =
+                                        permission_advice_responses.keys().next().copied()
+                                {
+                                    permission_advice_responses.remove(&oldest);
+                                }
+                                permission_advice_responses.insert(request_id, advice);
+                                advice
+                            };
+                            self.transport
+                                .send(SyncMessage::PermissionAdviceResponse { request_id, advice })
+                                .map_err(transport_error)?;
+                            continue;
+                        }
                         SyncMessage::RegisterShape {
                             shape_id,
                             opts,
@@ -7984,6 +8119,108 @@ fn transport_error(error: TransportError) -> Error {
     }
 }
 
+fn evaluate_authoritative_permission_advice<S>(
+    node: &mut NodeState<S>,
+    identity: AuthorId,
+    action: PermissionAdviceAction,
+) -> PermissionAdvice
+where
+    S: OrderedKvStorage,
+{
+    let result = match action {
+        PermissionAdviceAction::Insert { table, cells } => {
+            let id_dependent = node.table(&table).map(|schema| {
+                schema
+                    .write_policies
+                    .insert_check
+                    .as_ref()
+                    .is_some_and(query_root_filters_reference_id)
+            });
+            match id_dependent {
+                Ok(true) => return PermissionAdvice::Unknown,
+                Err(_) => return PermissionAdvice::Unknown,
+                Ok(false) => node.dry_run_insert_allows(
+                    MergeableCommit::new(table, RowUuid::from_bytes([0; 16]), 0)
+                        .made_by(identity)
+                        .permission_subject(identity)
+                        .cells(cells),
+                ),
+            }
+        }
+        PermissionAdviceAction::Read { table, row } => {
+            node.dry_run_read_current_allows(&table, row, identity)
+        }
+        PermissionAdviceAction::Update { table, row, patch } => {
+            match node.current_rows(&table, DurabilityTier::Local) {
+                Ok(rows) if rows.iter().any(|current| current.row_uuid() == row) => node
+                    .dry_run_insert_allows(
+                        MergeableCommit::new(table, row, 0)
+                            .made_by(identity)
+                            .permission_subject(identity)
+                            .cells(patch),
+                    ),
+                Ok(_) => Ok(false),
+                Err(error) => Err(error),
+            }
+        }
+        PermissionAdviceAction::Delete { table, row } => {
+            node.dry_run_delete_current_allows(&table, row, identity)
+        }
+    };
+    match result {
+        Ok(true) => PermissionAdvice::Allowed,
+        Ok(false) => PermissionAdvice::Denied,
+        Err(_) => PermissionAdvice::Unknown,
+    }
+}
+
+fn query_root_filters_reference_id(query: &Query) -> bool {
+    query.filters.iter().any(predicate_references_id)
+        || !query.reachable.is_empty()
+        || query.joins.iter().any(root_join_references_id)
+        || query.policy_branches.iter().any(|branch| {
+            branch.filters.iter().any(predicate_references_id)
+                || !branch.reachable.is_empty()
+                || branch.joins.iter().any(root_join_references_id)
+        })
+}
+
+fn root_join_references_id(join: &crate::query::JoinVia) -> bool {
+    join.source_column
+        .as_deref()
+        .is_none_or(|column| column == "id")
+        || join
+            .source_lookup
+            .as_ref()
+            .is_some_and(|lookup| lookup.row_id_source_column == "id")
+        || join
+            .correlated_filters
+            .iter()
+            .any(|correlation| correlation.source_column == "id")
+}
+
+fn predicate_references_id(predicate: &Predicate) -> bool {
+    match predicate {
+        Predicate::All(items) | Predicate::Any(items) => items.iter().any(predicate_references_id),
+        Predicate::Not(item) => predicate_references_id(item),
+        Predicate::Eq(left, right)
+        | Predicate::Ne(left, right)
+        | Predicate::Gt(left, right)
+        | Predicate::Gte(left, right)
+        | Predicate::Lt(left, right)
+        | Predicate::Lte(left, right)
+        | Predicate::Contains(left, right) => operand_is_id(left) || operand_is_id(right),
+        Predicate::In(operand, values) => {
+            operand_is_id(operand) || values.iter().any(operand_is_id)
+        }
+        Predicate::IsNull(operand) => operand_is_id(operand),
+    }
+}
+
+fn operand_is_id(operand: &Operand) -> bool {
+    matches!(operand, Operand::Column(column) if column == "id")
+}
+
 fn drop_peer_request<S>(node: &Rc<RefCell<NodeState<S>>>)
 where
     S: OrderedKvStorage,
@@ -8102,6 +8339,18 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
         }
         SyncMessage::ContentExtents { extents } => {
             format!("ContentExtents extents={}", extents.len())
+        }
+        SyncMessage::PermissionAdviceRequest { request_id, action } => {
+            let (kind, table) = match action {
+                PermissionAdviceAction::Insert { table, .. } => ("insert", table),
+                PermissionAdviceAction::Read { table, .. } => ("read", table),
+                PermissionAdviceAction::Update { table, .. } => ("update", table),
+                PermissionAdviceAction::Delete { table, .. } => ("delete", table),
+            };
+            format!("PermissionAdviceRequest id={request_id:?} action={kind} table={table}")
+        }
+        SyncMessage::PermissionAdviceResponse { request_id, advice } => {
+            format!("PermissionAdviceResponse id={request_id:?} advice={advice:?}")
         }
         other => format!("{other:?}"),
     }

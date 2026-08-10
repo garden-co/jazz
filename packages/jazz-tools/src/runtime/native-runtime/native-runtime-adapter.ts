@@ -167,6 +167,17 @@ type NativeDb = {
     author: Uint8Array,
     updatedAtMs?: number | null,
   ): Write;
+  requestInsertPermissionAdviceEncoded?(
+    table: string,
+    cells: Uint8Array,
+  ): NativePermissionAdviceRequest;
+  requestReadPermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceRequest;
+  requestUpdatePermissionAdviceEncoded?(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+  ): NativePermissionAdviceRequest;
+  requestDeletePermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceRequest;
   mergeableTx(openBatchId: OpenBatchId): Tx;
   mergeableTxForIdentity?(openBatchId: OpenBatchId, author: Uint8Array): Tx;
   exclusiveTx?(openBatchId: OpenBatchId): Tx;
@@ -186,6 +197,11 @@ type NativeDb = {
   tick(): void;
   close?(): void;
   free?(): void;
+};
+
+type NativePermissionAdviceRequest = {
+  readonly promise: Promise<PermissionAdvice>;
+  cancel(): void;
 };
 
 type PreparedQuery = object;
@@ -683,6 +699,55 @@ export class NativeRuntimeAdapter implements Runtime {
     void objectId;
     void session;
     return "unknown";
+  }
+
+  requestInsertPermissionAdvice(
+    table: string,
+    values: InsertValues,
+    _session?: Session,
+  ): Promise<PermissionAdvice> {
+    const request = this.db.requestInsertPermissionAdviceEncoded;
+    if (!request) return Promise.resolve("unknown");
+    const cells = encodeCellsForRow(this.table(table), values, table);
+    return this.withPermissionAdviceTimeout(() => request.call(this.db, table, cells));
+  }
+
+  requestReadPermissionAdvice(
+    table: string,
+    objectId: string,
+    _session?: Session,
+  ): Promise<PermissionAdvice> {
+    const request = this.db.requestReadPermissionAdvice;
+    if (!request) return Promise.resolve("unknown");
+    return this.withPermissionAdviceTimeout(() =>
+      request.call(this.db, table, parseUuid(objectId)),
+    );
+  }
+
+  requestUpdatePermissionAdvice(
+    table: string,
+    objectId: string,
+    values: Record<string, Value>,
+    _session?: Session,
+  ): Promise<PermissionAdvice> {
+    const request = this.db.requestUpdatePermissionAdviceEncoded;
+    if (!request) return Promise.resolve("unknown");
+    const patch = encodeCellsForPatch(this.table(table), values);
+    return this.withPermissionAdviceTimeout(() =>
+      request.call(this.db, table, parseUuid(objectId), patch),
+    );
+  }
+
+  requestDeletePermissionAdvice(
+    table: string,
+    objectId: string,
+    _session?: Session,
+  ): Promise<PermissionAdvice> {
+    const request = this.db.requestDeletePermissionAdvice;
+    if (!request) return Promise.resolve("unknown");
+    return this.withPermissionAdviceTimeout(() =>
+      request.call(this.db, table, parseUuid(objectId)),
+    );
   }
 
   beginTransaction(
@@ -1468,6 +1533,30 @@ export class NativeRuntimeAdapter implements Runtime {
     for (const [handle, subscription] of this.subscriptions) {
       this.startSubscriptionReader(handle, subscription);
     }
+  }
+
+  private withPermissionAdviceTimeout(
+    start: () => NativePermissionAdviceRequest,
+  ): Promise<PermissionAdvice> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.withPermissionAdviceTimeout(start);
+    if (this.closed || !this.serverTransport || !this.serverCarrier) {
+      return Promise.resolve("unknown");
+    }
+    const request = start();
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (advice: PermissionAdvice) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve(advice);
+      };
+      const timeout = setTimeout(() => {
+        request.cancel();
+        finish("unknown");
+      }, 2_000);
+      request.promise.then(finish, () => finish("unknown"));
+    });
   }
 
   private scheduleCoreWake(urgency: "immediate" | "deferred"): void {

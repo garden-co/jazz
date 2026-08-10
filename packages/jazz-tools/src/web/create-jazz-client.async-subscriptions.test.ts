@@ -318,6 +318,27 @@ function createMockDb(rows: TestRow[] = []) {
         ? "allowed"
         : "denied",
     ),
+    requestCanInsert: vi.fn(() =>
+      Promise.resolve(
+        !runtimeContext?.session || runtimeContext.session.user_id === "user-1"
+          ? ("allowed" as const)
+          : ("denied" as const),
+      ),
+    ),
+    requestCanUpdate: vi.fn(() =>
+      Promise.resolve(
+        !runtimeContext?.session || runtimeContext.session.user_id === "user-1"
+          ? ("allowed" as const)
+          : ("denied" as const),
+      ),
+    ),
+    requestCanDelete: vi.fn(() =>
+      Promise.resolve(
+        !runtimeContext?.session || runtimeContext.session.user_id === "user-1"
+          ? ("allowed" as const)
+          : ("denied" as const),
+      ),
+    ),
     __withRuntimeOperationContext: vi.fn((context, operation) => {
       const previous = runtimeContext;
       runtimeContext = context;
@@ -584,9 +605,9 @@ describe("web/createJazzClient async subscription channel", () => {
     expect(db.insert).toHaveBeenCalledWith(table, { value: "worker-created" }, undefined);
     expect(db.update).toHaveBeenCalledWith(table, "row-1", { value: "worker-updated" }, undefined);
     expect(db.delete).toHaveBeenCalledWith(table, "row-1", undefined);
-    expect(db.canInsert).toHaveBeenCalledWith(table, { value: "worker-created" });
-    expect(db.canUpdate).toHaveBeenCalledWith(table, "row-1", { value: "worker-updated" });
-    expect(db.canDelete).toHaveBeenCalledWith(table, "row-1");
+    expect(db.requestCanInsert).toHaveBeenCalledWith(table, { value: "worker-created" });
+    expect(db.requestCanUpdate).toHaveBeenCalledWith(table, "row-1", { value: "worker-updated" });
+    expect(db.requestCanDelete).toHaveBeenCalledWith(table, "row-1");
 
     await expect(
       channel.insert(table, { value: "session-created" }, undefined, TEST_AUTH_STATE.session!),

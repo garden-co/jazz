@@ -5378,6 +5378,254 @@ fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
     )
 }
 
+#[test]
+fn permission_advice_uses_authenticated_link_identity_without_mutating() {
+    let schema = owner_read_schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let mallory = AuthorId::from_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owned = server
+        .insert("todos", cells("secret", false, alice))
+        .unwrap()
+        .row_uuid();
+
+    let alice_client = open_db(0xa1, alice, &schema);
+    let (alice_transport, alice_server_transport) = duplex();
+    let _alice_upstream = alice_client.connect_upstream(alice_transport);
+    let _alice_subscriber = server.accept_subscriber(alice_server_transport, alice);
+    let alice_advice = alice_client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: owned,
+    });
+
+    let mallory_client = open_db(0xb2, mallory, &schema);
+    let (mallory_transport, mallory_server_transport) = duplex();
+    let _mallory_upstream = mallory_client.connect_upstream(mallory_transport);
+    let _mallory_subscriber = server.accept_subscriber(mallory_server_transport, mallory);
+    let mallory_advice = mallory_client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: owned,
+    });
+
+    alice_client.tick().unwrap();
+    mallory_client.tick().unwrap();
+    server.tick().unwrap();
+    alice_client.tick().unwrap();
+    mallory_client.tick().unwrap();
+
+    assert_eq!(block_on(alice_advice), PermissionAdvice::Allowed);
+    assert_eq!(block_on(mallory_advice), PermissionAdvice::Denied);
+    assert_eq!(server.read(&Query::from("todos")).unwrap().len(), 1);
+}
+
+#[test]
+fn permission_advice_is_unknown_until_authority_permissions_are_ready() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    server.server.set_permissions_ready(false).unwrap();
+    let client = open_db(0xa1, author, &schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    let advice = client.request_permission_advice(PermissionAdviceAction::Insert {
+        table: "todos".to_owned(),
+        cells: cells("candidate", false, author),
+    });
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    assert_eq!(block_on(advice), PermissionAdvice::Unknown);
+    assert!(server.read(&Query::from("todos")).unwrap().is_empty());
+}
+
+#[test]
+fn partial_replica_cannot_act_as_permission_advice_authority() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xa1; 16]);
+    let partial = open_db(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xa1, author, &schema);
+    let (client_transport, partial_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = partial.accept_subscriber(partial_transport, author);
+    let advice = client.request_permission_advice(PermissionAdviceAction::Insert {
+        table: "todos".to_owned(),
+        cells: cells("candidate", false, author),
+    });
+
+    client.tick().unwrap();
+    partial.tick().unwrap();
+    client.tick().unwrap();
+
+    assert_eq!(block_on(advice), PermissionAdvice::Unknown);
+}
+
+#[test]
+fn permission_advice_update_evaluates_post_patch_update_check() {
+    let policy = Query::from("todos").filter(eq(col("done"), lit(false)));
+    let schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("done", ColumnType::Bool),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policies(WritePolicies {
+        insert_check: Policy::public(),
+        update_using: Policy::public(),
+        update_check: Some(policy),
+        delete_using: Policy::public(),
+    })]);
+    let author = AuthorId::from_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let target = server
+        .insert("todos", cells("target", false, author))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa1, author, &schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    let advice = client.request_permission_advice(PermissionAdviceAction::Update {
+        table: "todos".to_owned(),
+        row: target,
+        patch: BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+    });
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    assert_eq!(block_on(advice), PermissionAdvice::Denied);
+
+    let missing = client.request_permission_advice(PermissionAdviceAction::Update {
+        table: "todos".to_owned(),
+        row: row(0xee),
+        patch: BTreeMap::from([("done".to_owned(), Value::Bool(false))]),
+    });
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(block_on(missing), PermissionAdvice::Denied);
+}
+
+#[test]
+fn permission_advice_response_wire_cannot_carry_policy_rows_or_reasons() {
+    let request_id = PermissionAdviceRequestId([7; 16]);
+    let message = SyncMessage::PermissionAdviceResponse {
+        request_id,
+        advice: PermissionAdvice::Denied,
+    };
+    assert_eq!(
+        message,
+        SyncMessage::PermissionAdviceResponse {
+            request_id,
+            advice: PermissionAdvice::Denied,
+        }
+    );
+}
+
+#[test]
+fn cancelled_permission_advice_ignores_late_or_replayed_response_ids() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xa1; 16]);
+    let client = open_db(0xa1, author, &schema);
+    let (client_transport, mut authority_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+
+    let cancelled = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: row(1),
+    });
+    client.tick().unwrap();
+    let cancelled_id = match try_recv_subscriber_payload(authority_transport.as_mut()).unwrap() {
+        SyncMessage::PermissionAdviceRequest { request_id, .. } => request_id,
+        message => panic!("expected permission request, got {message:?}"),
+    };
+    drop(cancelled);
+
+    let current = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: row(2),
+    });
+    client.tick().unwrap();
+    let current_id = match try_recv_subscriber_payload(authority_transport.as_mut()).unwrap() {
+        SyncMessage::PermissionAdviceRequest { request_id, .. } => request_id,
+        message => panic!("expected permission request, got {message:?}"),
+    };
+    assert_ne!(cancelled_id, current_id);
+
+    authority_transport
+        .send(SyncMessage::PermissionAdviceResponse {
+            request_id: cancelled_id,
+            advice: PermissionAdvice::Denied,
+        })
+        .unwrap();
+    authority_transport
+        .send(SyncMessage::PermissionAdviceResponse {
+            request_id: cancelled_id,
+            advice: PermissionAdvice::Denied,
+        })
+        .unwrap();
+    authority_transport
+        .send(SyncMessage::PermissionAdviceResponse {
+            request_id: current_id,
+            advice: PermissionAdvice::Allowed,
+        })
+        .unwrap();
+    client.tick().unwrap();
+
+    assert_eq!(block_on(current), PermissionAdvice::Allowed);
+}
+
+#[test]
+fn dropped_permission_advice_is_not_sent_and_reopened_nodes_use_fresh_ids() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xa1; 16]);
+
+    let first = open_db(0xa1, author, &schema);
+    let (first_transport, mut first_authority) = duplex();
+    let _first_upstream = first.connect_upstream(first_transport);
+    let cancelled = first.request_permission_advice(PermissionAdviceAction::Insert {
+        table: "todos".to_owned(),
+        cells: cells("sensitive", false, author),
+    });
+    drop(cancelled);
+    first.tick().unwrap();
+    assert!(try_recv_subscriber_payload(first_authority.as_mut()).is_none());
+
+    let first_live = first.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: row(1),
+    });
+    first.tick().unwrap();
+    let first_id = match try_recv_subscriber_payload(first_authority.as_mut()).unwrap() {
+        SyncMessage::PermissionAdviceRequest { request_id, .. } => request_id,
+        message => panic!("expected permission request, got {message:?}"),
+    };
+    drop(first_live);
+
+    let reopened = open_db(0xa1, author, &schema);
+    let (reopened_transport, mut reopened_authority) = duplex();
+    let _reopened_upstream = reopened.connect_upstream(reopened_transport);
+    let reopened_live = reopened.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: row(1),
+    });
+    reopened.tick().unwrap();
+    let reopened_id = match try_recv_subscriber_payload(reopened_authority.as_mut()).unwrap() {
+        SyncMessage::PermissionAdviceRequest { request_id, .. } => request_id,
+        message => panic!("expected permission request, got {message:?}"),
+    };
+    drop(reopened_live);
+
+    assert_ne!(first_id, reopened_id);
+}
+
 /// Receive the next subscriber payload relevant to direct protocol assertions.
 /// A subscriber begins by publishing its trusted catalogue prerequisite; tests
 /// that do not model a receiving `Db` still need to consume that control-plane

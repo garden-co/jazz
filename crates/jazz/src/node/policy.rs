@@ -237,7 +237,6 @@ where
         self.write_policy_query_allows_current_row(&policy, row.row_uuid(), author)
     }
 
-    #[cfg(test)]
     pub(crate) fn dry_run_delete_current_allows(
         &mut self,
         table_name: &str,

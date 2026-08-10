@@ -1391,10 +1391,36 @@ export class Db {
     return client.canInsert(table._table, values, context?.session);
   }
 
+  async requestCanInsert<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+  ): Promise<PermissionAdvice> {
+    const client = this.getClient(table._schema);
+    const transformedData = transformInputColumns(table, data);
+    const values = toWriteRecordForOperation(
+      "Insert",
+      transformedData,
+      table._schema,
+      table._table,
+    );
+    const context = this.getRuntimeOperationContext();
+    return client.requestInsertPermissionAdvice(table._table, values, context?.session);
+  }
+
   canRead<T, Init>(table: TableProxy<T, Init>, id: string): PermissionAdvice {
     const client = this.getClient(table._schema);
     const context = this.getRuntimeOperationContext();
     return client.canRead(table._table, id, context?.readSession ?? context?.session);
+  }
+
+  requestCanRead<T, Init>(table: TableProxy<T, Init>, id: string): Promise<PermissionAdvice> {
+    const client = this.getClient(table._schema);
+    const context = this.getRuntimeOperationContext();
+    return client.requestReadPermissionAdvice(
+      table._table,
+      id,
+      context?.readSession ?? context?.session,
+    );
   }
 
   canUpdate<T, Init>(
@@ -1414,10 +1440,33 @@ export class Db {
     return client.canUpdate(table._table, id, updates, context?.session);
   }
 
+  requestCanUpdate<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+  ): Promise<PermissionAdvice> {
+    const client = this.getClient(table._schema);
+    const transformedData = transformInputColumns(table, data);
+    const updates = toWriteRecordForOperation(
+      "Update",
+      transformedData,
+      table._schema,
+      table._table,
+    );
+    const context = this.getRuntimeOperationContext();
+    return client.requestUpdatePermissionAdvice(table._table, id, updates, context?.session);
+  }
+
   canDelete<T, Init>(table: TableProxy<T, Init>, id: string): PermissionAdvice {
     const client = this.getClient(table._schema);
     const context = this.getRuntimeOperationContext();
     return client.canDelete(table._table, id, context?.session);
+  }
+
+  requestCanDelete<T, Init>(table: TableProxy<T, Init>, id: string): Promise<PermissionAdvice> {
+    const client = this.getClient(table._schema);
+    const context = this.getRuntimeOperationContext();
+    return client.requestDeletePermissionAdvice(table._table, id, context?.session);
   }
 
   private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {

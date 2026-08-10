@@ -19,6 +19,10 @@ declare module "jazz-wasm" {
 
   export class WasmPreparedQuery {}
   export class QueryAttachment {}
+  export class WasmPermissionAdviceRequest {
+    readonly promise: Promise<"allowed" | "denied" | "unknown">;
+    cancel(): void;
+  }
 
   export class WasmWrite {
     readonly batchId: string;
@@ -102,6 +106,11 @@ declare module "jazz-wasm" {
 
     insertEncoded(table: string, cells: Uint8Array): WasmWrite;
     canInsertEncoded(table: string, cells: Uint8Array): "allowed" | "denied" | "unknown";
+    requestInsertPermissionAdviceEncoded(
+      table: string,
+      cells: Uint8Array,
+    ): WasmPermissionAdviceRequest;
+    requestReadPermissionAdvice(table: string, rowId: Uint8Array): WasmPermissionAdviceRequest;
     insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
     insertWithIdEncodedForIdentity(
       table: string,
@@ -116,6 +125,12 @@ declare module "jazz-wasm" {
       patch: Uint8Array,
       author: Uint8Array,
     ): WasmWrite;
+    requestUpdatePermissionAdviceEncoded(
+      table: string,
+      rowId: Uint8Array,
+      patch: Uint8Array,
+    ): WasmPermissionAdviceRequest;
+    requestDeletePermissionAdvice(table: string, rowId: Uint8Array): WasmPermissionAdviceRequest;
     upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
     upsertEncodedForIdentity(
       table: string,
