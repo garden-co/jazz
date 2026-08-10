@@ -1606,8 +1606,7 @@ where
             self.ingest_rejected_transaction(stored.tx, fate)?;
             return Ok(());
         }
-        let global_seq = self.clock.next_global_seq;
-        self.clock.next_global_seq = self.clock.next_global_seq.next();
+        let global_seq = self.clock.allocate_global_seq()?;
         self.apply_fate_update(
             tx_id,
             Fate::Accepted,
@@ -1654,8 +1653,7 @@ where
             self.ingest_rejected_transaction(tx, fate.clone())?;
             return Ok(fate);
         }
-        let global_seq = self.clock.next_global_seq;
-        self.clock.next_global_seq = self.clock.next_global_seq.next();
+        let global_seq = self.clock.allocate_global_seq()?;
         self.apply_fate_update(
             tx_id,
             Fate::Accepted,
@@ -1822,8 +1820,7 @@ where
                 durability: None,
             }]);
         }
-        let global_seq = self.clock.next_global_seq;
-        self.clock.next_global_seq = self.clock.next_global_seq.next();
+        let global_seq = self.clock.allocate_global_seq()?;
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
         let root_target = tx.target_lineage == crate::tx::BranchLineage::Root;
@@ -2127,8 +2124,7 @@ where
         if tx.kind != TxKind::Mergeable && tx.kind != TxKind::Exclusive {
             return Err(Error::UnsupportedCommitUnit("unsupported commit unit kind"));
         }
-        let global_seq = self.clock.next_global_seq;
-        self.clock.next_global_seq = self.clock.next_global_seq.next();
+        let global_seq = self.clock.allocate_global_seq()?;
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
         let root_target = tx.target_lineage == crate::tx::BranchLineage::Root;
@@ -3793,8 +3789,7 @@ where
             merge_commit = merge_commit.merge_strategy(strategy);
         }
         let merge_tx = self.commit_mergeable_at(merge_commit, made_at)?;
-        let global_seq = self.clock.next_global_seq;
-        self.clock.next_global_seq = self.clock.next_global_seq.next();
+        let global_seq = self.clock.allocate_global_seq()?;
         self.apply_fate_update(
             merge_tx,
             Fate::Accepted,
