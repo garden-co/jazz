@@ -4910,6 +4910,15 @@ where
             }
             if self.admitted_upstream_authority.borrow().is_none() {
                 *self.admitted_upstream_authority.borrow_mut() = Some(context);
+                // Routes parked while no authority was connected retain their
+                // downstream obligation. Bind them to this first successor;
+                // its upload suppression is cleared by the normal handoff
+                // lifecycle when it next services the shared outbox.
+                for pending in self.edge_fate_routes.borrow_mut().values_mut() {
+                    for route in pending.iter_mut() {
+                        route.authority = context;
+                    }
+                }
             }
         }
         // Carry queued and already-registered subscriptions upstream immediately.
@@ -5240,7 +5249,13 @@ where
                         }
                     }
                 } else {
-                    prune_edge_fate_routes(&mut routes, None);
+                    // No successor yet: preserve bounded live downstream
+                    // routes for a later admitted authority.  Clearing them
+                    // after an Edge acceptance would strand the caller.
+                    routes.retain(|_, pending| {
+                        pending.retain(|route| route.queue.upgrade().is_some());
+                        !pending.is_empty()
+                    });
                 }
             }
         }
