@@ -5555,6 +5555,37 @@ fn permission_advice_uses_authenticated_link_identity_without_mutating() {
 }
 
 #[test]
+fn public_permission_advice_accepts_an_explicit_zero_clause_receipt() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xa3; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let target = server
+        .insert("todos", cells("public", false, identity))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa3, identity, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        identity,
+        NodeUuid::from_bytes([0xa3; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, identity);
+    let advice = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: target,
+    });
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    assert_eq!(block_on(advice), PermissionAdvice::Allowed);
+}
+
+#[test]
 fn permission_advice_is_unknown_until_authority_permissions_are_ready() {
     let schema = schema();
     let author = AuthorId::from_bytes([0xa1; 16]);
@@ -5732,6 +5763,43 @@ fn cancelled_permission_advice_ignores_late_or_replayed_response_ids() {
     client.tick().unwrap();
 
     assert_eq!(block_on(current), PermissionAdvice::Unknown);
+}
+
+#[test]
+fn identical_permission_advice_requests_share_one_authority_intent() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xa4; 16]);
+    let client = open_db(0xa4, author, &schema);
+    let (client_transport, mut authority_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa4; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = client.connect_upstream(client_transport);
+    let action = PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: row(1),
+    };
+    let first = client.request_permission_advice(action.clone());
+    let second = client.request_permission_advice(action);
+    client.tick().unwrap();
+
+    let request_id = match try_recv_subscriber_payload(authority_transport.as_mut()).unwrap() {
+        SyncMessage::AuthorizationScopeIntent { request_id, .. } => request_id,
+        message => panic!("expected one authority scope intent, got {message:?}"),
+    };
+    assert!(
+        try_recv_subscriber_payload(authority_transport.as_mut()).is_none(),
+        "coalesced advice must not allocate a second support hydration"
+    );
+    authority_transport
+        .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
+        .unwrap();
+    client.tick().unwrap();
+    assert_eq!(block_on(first), PermissionAdvice::Unknown);
+    assert_eq!(block_on(second), PermissionAdvice::Unknown);
 }
 
 #[test]
@@ -14060,7 +14128,7 @@ fn db_query_builder_expresses_s1_shaped_filters_and_include_modes() {
 }
 
 #[test]
-fn authorization_scope_receipt_follows_its_support_view() {
+fn legacy_authorization_scope_subscribe_is_rejected_before_shape_admission() {
     let mut schema = schema();
     schema.tables[0].read_policy = Some(Query::from("todos"));
     let identity = AuthorId::from_bytes([0xc1; 16]);
@@ -14124,9 +14192,13 @@ fn authorization_scope_receipt_follows_its_support_view() {
             other => panic!("unexpected authorization-scope response: {other:?}"),
         }
     }
-    assert!(received_view);
-    assert!(received_receipt);
+    assert!(!received_view);
+    assert!(!received_receipt);
+}
 
+/* Retired with the caller-authored scope protocol.  Authority-owned intent
+ * coverage lives with the permission advice tests above.
+fn legacy_authorization_scope_subscribe_refreshes_claims() {
     server.node().borrow_mut().set_session_claims(
         identity,
         BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
@@ -14150,6 +14222,7 @@ fn authorization_scope_receipt_follows_its_support_view() {
     let refreshed_receipt = refreshed_receipt.expect("claims change must reissue receipt");
     assert_eq!(refreshed_receipt.claims_revision, 1);
 }
+*/
 
 #[test]
 fn authorization_scope_rejects_unrelated_caller_intent() {
@@ -14198,7 +14271,7 @@ fn authorization_scope_rejects_unrelated_caller_intent() {
 }
 
 #[test]
-fn authorization_scope_update_receipt_waits_for_every_policy_clause() {
+fn legacy_authorization_scope_subscribe_never_assembles_multiple_clauses() {
     let mut schema = schema();
     schema.tables[0].write_policies = WritePolicies {
         update_using: Some(Query::from("support_using")),
@@ -14291,7 +14364,7 @@ fn authorization_scope_update_receipt_waits_for_every_policy_clause() {
             other => panic!("unexpected aggregate-scope response: {other:?}"),
         }
     }
-    assert!(saw_receipt);
+    assert!(!saw_receipt);
 }
 
 #[test]
@@ -14499,7 +14572,7 @@ fn authorization_scope_requires_canonical_current_global_support_options() {
 }
 
 #[test]
-fn authorization_scope_rejects_noncanonical_support_read_views() {
+fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
     let mut schema = schema();
     schema.tables[0].read_policy = Some(Query::from("todos"));
     let identity = AuthorId::from_bytes([0xc4; 16]);
@@ -14586,8 +14659,8 @@ fn authorization_scope_rejects_noncanonical_support_read_views() {
         }
     }
     assert!(
-        saw_view && saw_receipt,
-        "canonical support is the positive control"
+        !saw_view && !saw_receipt,
+        "the authority-owned protocol rejects client-selected support even at the canonical view"
     );
 
     for opts in variants {

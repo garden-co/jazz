@@ -263,6 +263,14 @@ pub enum SyncMessage {
         /// Opaque request correlation from the matching intent.
         request_id: PermissionAdviceRequestId,
     },
+    /// Decision for an action with no policy-support clauses.  It deliberately
+    /// carries no support rows, shape identifiers, or binding identifiers.
+    AuthorizationScopeDecision {
+        /// Opaque request correlation from the matching intent.
+        request_id: PermissionAdviceRequestId,
+        /// Final authority result for the zero-support action.
+        advice: PermissionAdvice,
+    },
 }
 
 /// Opaque identity for one permission-advice exchange.
@@ -429,7 +437,8 @@ impl SyncMessage {
             Self::AuthorizationScopeIntent { .. }
             | Self::AuthorizationScopeView { .. }
             | Self::AuthorizationScopeAggregateReceipt { .. }
-            | Self::AuthorizationScopeUnavailable { .. } => {
+            | Self::AuthorizationScopeUnavailable { .. }
+            | Self::AuthorizationScopeDecision { .. } => {
                 crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
             }
             _ => crate::wire::FEATURE_NONE,

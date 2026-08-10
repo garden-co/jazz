@@ -568,11 +568,10 @@ where
             | SyncMessage::AuthorizationScopeIntent { .. }
             | SyncMessage::AuthorizationScopeView { .. }
             | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
-            | SyncMessage::AuthorizationScopeUnavailable { .. } => {
-                Err(Error::UnsupportedSyncMessage(
-                    "permission advice requires authenticated link context",
-                ))
-            }
+            | SyncMessage::AuthorizationScopeUnavailable { .. }
+            | SyncMessage::AuthorizationScopeDecision { .. } => Err(Error::UnsupportedSyncMessage(
+                "permission advice requires authenticated link context",
+            )),
         }
     }
 

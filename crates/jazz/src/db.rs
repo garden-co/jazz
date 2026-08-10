@@ -237,6 +237,8 @@ type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
 type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
 type PermissionAdviceWaiters =
     Rc<RefCell<BTreeMap<PermissionAdviceRequestId, oneshot::Sender<PermissionAdvice>>>>;
+type PendingDownstreamFates = Rc<RefCell<Vec<SyncMessage>>>;
+type EdgeFateRoutes = Rc<RefCell<BTreeMap<TxId, Vec<Weak<RefCell<Vec<SyncMessage>>>>>>>;
 type ShapeRegistrationKey = (ShapeId, ReadViewKey);
 
 /// Per-subscriber state for a shape/read-view registration.
@@ -452,11 +454,14 @@ struct ScopeAggregate {
 /// aggregate receipt names only the final completing subscription.
 struct AuthorizationScopeLeaseRequest {
     action: PermissionAdviceAction,
+    /// Every local caller sharing this authority hydration.  The first id is
+    /// the wire correlation id; later ids never cause another support view.
+    waiters: BTreeSet<PermissionAdviceRequestId>,
     key: Option<crate::protocol::AuthorizationSupportScopeKey>,
     lease: Option<AuthorizationScopeLease>,
     owner: Option<AuthorizationScopeOwnerToken>,
     clause_count: Option<u16>,
-    applied_clauses: BTreeMap<u16, (SubscriptionKey, crate::time::GlobalSeq)>,
+    applied_clauses: BTreeMap<u16, (SubscriptionKey, crate::time::GlobalSeq, u64)>,
 }
 
 /// Per-upstream admission manager for scope receipts and their retained leases.
@@ -3704,6 +3709,12 @@ where
         Ok(DurabilityTier::Local)
     }
 
+    fn next_now_ms(&self) -> u64 {
+        let next = self.next_now_ms.get();
+        self.next_now_ms.set(next + 1);
+        next
+    }
+
     fn current_write_schema_for_query(&self) -> Result<(JazzSchema, SchemaVersionId), Error> {
         if self.schema_view_is_fixed {
             return Ok((self.schema.clone(), self.schema_version_id));
@@ -3725,12 +3736,6 @@ where
                     ),
                 )
             })
-    }
-
-    fn next_now_ms(&self) -> u64 {
-        let next = self.next_now_ms.get();
-        self.next_now_ms.set(next + 1);
-        next
     }
 
     fn table_schema(&self, table: &str) -> Result<&TableSchema, Error> {
@@ -4595,6 +4600,8 @@ where
     scheduler: SharedTickScheduler,
     write_state_waiters: WriteStateWaiters,
     permission_advice_waiters: PermissionAdviceWaiters,
+    edge_fate_routes: EdgeFateRoutes,
+    has_upstream_authority: Rc<Cell<bool>>,
     next_write_state_waiter_id: Cell<u64>,
     next_subscription_nonce: Cell<u64>,
     subscriber_dirty_epoch: Rc<Cell<u64>>,
@@ -4622,6 +4629,8 @@ where
             next_write_state_waiter_id: Cell::new(1),
             next_subscription_nonce: Cell::new(1),
             permission_advice_waiters: Rc::new(RefCell::new(BTreeMap::new())),
+            edge_fate_routes: Rc::new(RefCell::new(BTreeMap::new())),
+            has_upstream_authority: Rc::new(Cell::new(false)),
             subscriber_dirty_epoch: Rc::new(Cell::new(0)),
             edge_cache_budget: Cell::new(None),
         }
@@ -4772,7 +4781,17 @@ where
                 ..
             } = &mut connection.link
             {
-                scope_lease_manager.requests.remove(&request_id);
+                let mut empty = false;
+                for request in scope_lease_manager.requests.values_mut() {
+                    if request.waiters.remove(&request_id) {
+                        empty |= request.waiters.is_empty();
+                    }
+                }
+                if empty {
+                    scope_lease_manager
+                        .requests
+                        .retain(|_, request| !request.waiters.is_empty());
+                }
             }
         }
     }
@@ -4821,6 +4840,7 @@ where
         &self,
         transport: Box<dyn Transport>,
     ) -> Rc<RefCell<PeerConnection<S>>> {
+        self.has_upstream_authority.set(true);
         let session_context = transport.connection_session_context();
         let connection_epoch = session_context
             .map(|context| context.local.epoch)
@@ -4893,6 +4913,9 @@ where
             scheduler: Rc::clone(&self.scheduler),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
+            edge_fate_routes: Rc::clone(&self.edge_fate_routes),
+            has_upstream_authority: Rc::clone(&self.has_upstream_authority),
+            downstream_fates: Rc::new(RefCell::new(Vec::new())),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(0),
@@ -5058,6 +5081,9 @@ where
             scheduler: Rc::clone(&self.scheduler),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
+            edge_fate_routes: Rc::clone(&self.edge_fate_routes),
+            has_upstream_authority: Rc::clone(&self.has_upstream_authority),
+            downstream_fates: Rc::new(RefCell::new(Vec::new())),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(session_claim_revision),
@@ -6537,6 +6563,9 @@ where
     scheduler: SharedTickScheduler,
     write_state_waiters: WriteStateWaiters,
     permission_advice_waiters: PermissionAdviceWaiters,
+    edge_fate_routes: EdgeFateRoutes,
+    has_upstream_authority: Rc<Cell<bool>>,
+    downstream_fates: PendingDownstreamFates,
     subscriber_dirty_epoch: Rc<Cell<u64>>,
     observed_subscriber_dirty_epoch: Cell<u64>,
     observed_session_claim_revision: Cell<u64>,
@@ -6833,23 +6862,6 @@ where
     /// sent by this connection.
     pub fn last_resume_bytes(&self) -> Option<usize> {
         self.last_resume_bytes
-    }
-
-    /// Bind scope receipts to the authority context authenticated by the
-    /// transport handshake. Changing it clears every locally cached proof.
-    pub fn set_expected_authorization_scope_authority(&mut self, context: AuthorityContext) {
-        let ConnectionLink::Upstream {
-            expected_scope_authority,
-            scope_receipts,
-            scope_view_cuts,
-            ..
-        } = &mut self.link
-        else {
-            return;
-        };
-        *expected_scope_authority = Some(context);
-        scope_receipts.clear();
-        scope_view_cuts.clear();
     }
 
     /// Return a receipt only after this connection applied its matching
@@ -7161,31 +7173,40 @@ where
                                 .borrow()
                                 .contains_key(request_id)
                             {
-                                scope_lease_manager.requests.insert(
-                                    *request_id,
-                                    AuthorizationScopeLeaseRequest {
-                                        action: action.clone(),
-                                        key: None,
-                                        lease: None,
-                                        owner: None,
-                                        clause_count: None,
-                                        applied_clauses: BTreeMap::new(),
-                                    },
-                                );
-                                if let Err(error) =
-                                    self.transport.send(SyncMessage::AuthorizationScopeIntent {
-                                        request_id: *request_id,
-                                        action: action.clone(),
-                                    })
+                                if let Some(existing) = scope_lease_manager
+                                    .requests
+                                    .values_mut()
+                                    .find(|request| request.action == *action)
                                 {
-                                    if handle_transport_backpressure(
-                                        &self.node,
-                                        &self.scheduler,
-                                        &error,
-                                    ) {
-                                        return Ok(stats);
+                                    existing.waiters.insert(*request_id);
+                                } else {
+                                    scope_lease_manager.requests.insert(
+                                        *request_id,
+                                        AuthorizationScopeLeaseRequest {
+                                            action: action.clone(),
+                                            waiters: BTreeSet::from([*request_id]),
+                                            key: None,
+                                            lease: None,
+                                            owner: None,
+                                            clause_count: None,
+                                            applied_clauses: BTreeMap::new(),
+                                        },
+                                    );
+                                    if let Err(error) =
+                                        self.transport.send(SyncMessage::AuthorizationScopeIntent {
+                                            request_id: *request_id,
+                                            action: action.clone(),
+                                        })
+                                    {
+                                        if handle_transport_backpressure(
+                                            &self.node,
+                                            &self.scheduler,
+                                            &error,
+                                        ) {
+                                            return Ok(stats);
+                                        }
+                                        return Err(transport_error(error));
                                     }
-                                    return Err(transport_error(error));
                                 }
                             }
                         }
@@ -7368,6 +7389,7 @@ where
                             let SyncMessage::ViewUpdate {
                                 subscription,
                                 settled_through,
+                                peer_payload_inventory,
                                 ..
                             } = view.as_ref()
                             else {
@@ -7376,6 +7398,9 @@ where
                             };
                             let subscription = *subscription;
                             let settled_through = *settled_through;
+                            let authorization_progress = peer_payload_inventory
+                                .authorization_progress
+                                .unwrap_or_default();
                             if clause_count == 0
                                 || clause_index >= clause_count
                                 || key.subject.as_bytes() != &expected.link
@@ -7402,7 +7427,7 @@ where
                             let duplicate = request
                                 .applied_clauses
                                 .get(&clause_index)
-                                .is_some_and(|(prior, _)| *prior != subscription);
+                                .is_some_and(|(prior, _, _)| *prior != subscription);
                             if duplicate {
                                 drop_peer_request(&self.node);
                                 continue;
@@ -7415,9 +7440,10 @@ where
                                 *view,
                             )?;
                             scope_view_cuts.insert(subscription, settled_through);
-                            request
-                                .applied_clauses
-                                .insert(clause_index, (subscription, settled_through));
+                            request.applied_clauses.insert(
+                                clause_index,
+                                (subscription, settled_through, authorization_progress),
+                            );
                         }
                         SyncMessage::AuthorizationScopeAggregateReceipt {
                             request_id,
@@ -7431,7 +7457,7 @@ where
                                     std::mem::take(&mut pending_view_updates),
                                 )?;
                             }
-                            let Some(expected) = expected_scope_authority else {
+                            let Some(expected) = expected_scope_authority.as_mut() else {
                                 drop_peer_request(&self.node);
                                 continue;
                             };
@@ -7439,22 +7465,53 @@ where
                             else {
                                 continue;
                             };
-                            let Some(key) = request.key.as_ref() else {
-                                drop_peer_request(&self.node);
-                                continue;
-                            };
-                            let Some(clause_count) = request.clause_count else {
-                                drop_peer_request(&self.node);
-                                continue;
-                            };
+                            // An empty compiled support set is a valid public
+                            // policy proof.  It has no views by construction;
+                            // the authority receipt itself supplies the
+                            // server-chosen key and current context.
+                            let clause_count = request.clause_count.unwrap_or(0);
                             let all_current = request.applied_clauses.len()
                                 == usize::from(clause_count)
-                                && request.applied_clauses.iter().all(|(index, (_, cut))| {
+                                && request.applied_clauses.iter().all(|(index, (_, cut, _))| {
                                     *index < clause_count && *cut >= receipt.settled_through
                                 });
-                            let applied_cut =
-                                request.applied_clauses.values().map(|(_, cut)| *cut).min();
-                            if receipt.key != *key
+                            let applied_cut = if clause_count == 0 {
+                                Some(receipt.settled_through)
+                            } else {
+                                request
+                                    .applied_clauses
+                                    .values()
+                                    .map(|(_, cut, _)| *cut)
+                                    .min()
+                            };
+                            let observed = self.node.borrow();
+                            let observed_claims = observed
+                                .session_claim_revision(AuthorId::from_bytes(expected.link));
+                            let observed_policy = observed.active_catalogue_seq();
+                            drop(observed);
+                            // The authenticated session/catalogue state is the
+                            // source of truth once observed locally.  A fresh
+                            // link has no pre-receipt revision yet; bootstrap
+                            // its monotonic expectation from its first
+                            // admitted authority proof, then reject replays of
+                            // an older context on that same link.
+                            if observed_claims != 0 {
+                                expected.claims_revision = observed_claims;
+                            } else if expected.claims_revision == 0 {
+                                expected.claims_revision = receipt.claims_revision;
+                            }
+                            if observed_policy != 0 {
+                                expected.policy_epoch = observed_policy;
+                            } else if expected.policy_epoch == 0 {
+                                expected.policy_epoch = receipt.policy_epoch;
+                            }
+                            expected.authorization_progress = request
+                                .applied_clauses
+                                .values()
+                                .map(|(_, _, progress)| *progress)
+                                .min()
+                                .unwrap_or_default();
+                            if request.key.as_ref().is_some_and(|key| key != &receipt.key)
                                 || !all_current
                                 || !authorization_scope_receipt_matches_transport_context(
                                     &receipt,
@@ -7507,28 +7564,53 @@ where
                                 continue;
                             }
                             let action = request.action.clone();
+                            let waiter_ids = request.waiters.clone();
                             scope_lease_manager.requests.remove(&request_id);
                             let advice = evaluate_authoritative_permission_advice(
                                 &mut self.node.borrow_mut(),
                                 receipt.key.subject,
                                 action,
                             );
-                            if let Some(waiter) = self
-                                .permission_advice_waiters
-                                .borrow_mut()
-                                .remove(&request_id)
-                            {
-                                let _ = waiter.send(advice);
+                            for waiter_id in waiter_ids {
+                                if let Some(waiter) = self
+                                    .permission_advice_waiters
+                                    .borrow_mut()
+                                    .remove(&waiter_id)
+                                {
+                                    let _ = waiter.send(advice);
+                                }
                             }
                         }
                         SyncMessage::AuthorizationScopeUnavailable { request_id } => {
-                            scope_lease_manager.requests.remove(&request_id);
-                            if let Some(waiter) = self
-                                .permission_advice_waiters
-                                .borrow_mut()
-                                .remove(&request_id)
+                            if let Some(request) = scope_lease_manager.requests.remove(&request_id)
                             {
-                                let _ = waiter.send(PermissionAdvice::Unknown);
+                                for waiter_id in request.waiters {
+                                    if let Some(waiter) = self
+                                        .permission_advice_waiters
+                                        .borrow_mut()
+                                        .remove(&waiter_id)
+                                    {
+                                        let _ = waiter.send(PermissionAdvice::Unknown);
+                                    }
+                                }
+                            }
+                        }
+                        SyncMessage::AuthorizationScopeDecision { request_id, advice } => {
+                            if expected_scope_authority.is_none() {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
+                            if let Some(request) = scope_lease_manager.requests.remove(&request_id)
+                            {
+                                for waiter_id in request.waiters {
+                                    if let Some(waiter) = self
+                                        .permission_advice_waiters
+                                        .borrow_mut()
+                                        .remove(&waiter_id)
+                                    {
+                                        let _ = waiter.send(advice);
+                                    }
+                                }
                             }
                         }
                         SyncMessage::AuthorizationScopeReceipt {
@@ -7579,6 +7661,12 @@ where
                             }
                         }
                         message => {
+                            let routed_fate = match &message {
+                                SyncMessage::FateUpdate { tx_id, .. } => {
+                                    Some((*tx_id, message.clone()))
+                                }
+                                _ => None,
+                            };
                             if let SyncMessage::CommitUnit { tx, .. } = &message
                                 && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage
                                 && self.node.borrow().branch_record(branch).is_none()
@@ -7602,6 +7690,14 @@ where
                             self.node
                                 .borrow_mut()
                                 .apply_sync_message_with_ingest_context(message, None)?;
+                            if let Some((tx_id, fate)) = routed_fate {
+                                let routes = self.edge_fate_routes.borrow_mut().remove(&tx_id);
+                                for route in routes.into_iter().flatten() {
+                                    if let Some(queue) = route.upgrade() {
+                                        queue.borrow_mut().push(fate.clone());
+                                    }
+                                }
+                            }
                         }
                     }
                     if let Some(tx_id) = write_state_tx_id {
@@ -7684,13 +7780,14 @@ where
                 let mut applied_inbound = false;
                 let mut scheduled_immediate = false;
                 let mut sent_view_update = false;
+                for fate in std::mem::take(&mut *self.downstream_fates.borrow_mut()) {
+                    send_with_content_extents(&self.node, peer, self.transport.as_mut(), fate)?;
+                }
                 while let Some(message) = self.transport.try_recv() {
-                    let (message, scope_purpose) = match message {
-                        SyncMessage::AuthorizationScopeSubscribe { subscribe, purpose } => {
-                            (SyncMessage::Subscribe(subscribe), Some(purpose))
-                        }
-                        message => (message, None),
-                    };
+                    // Authorization support is authority-owned in Phase 3.
+                    // A subscriber must never be able to smuggle a support
+                    // purpose alongside its own shape/binding subscription.
+                    let scope_purpose: Option<crate::protocol::AuthorizationScopePurpose> = None;
                     applied_inbound = true;
                     let admitted_metadata = match &message {
                         SyncMessage::BranchMetadata(metadata) => Some(metadata.branch_id),
@@ -7734,7 +7831,8 @@ where
                         | SyncMessage::AuthorizationScopeReceipt { .. }
                         | SyncMessage::AuthorizationScopeView { .. }
                         | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
-                        | SyncMessage::AuthorizationScopeUnavailable { .. } => {
+                        | SyncMessage::AuthorizationScopeUnavailable { .. }
+                        | SyncMessage::AuthorizationScopeDecision { .. } => {
                             drop_peer_request(&self.node);
                             continue;
                         }
@@ -8433,12 +8531,42 @@ where
                                         && matches!(peer.role(), PeerRole::ClientLink { .. }) =>
                                 {
                                     if tx.kind == TxKind::Mergeable {
-                                        peer.ingest_edge_mergeable_commit_unit(
-                                            &mut self.node.borrow_mut(),
-                                            tx,
-                                            versions,
-                                            tick_now_ms,
-                                        )?
+                                        if !self.has_upstream_authority.get() {
+                                            // The terminal core is the sole
+                                            // local authority.  Edges below
+                                            // always take the relay path.
+                                            peer.ingest_edge_mergeable_commit_unit(
+                                                &mut self.node.borrow_mut(),
+                                                tx,
+                                                versions,
+                                                tick_now_ms,
+                                            )?
+                                        } else {
+                                            // An edge never settles a write
+                                            // from its own locally-maintained
+                                            // policy scope. Relay it to the
+                                            // admitted upstream authority and
+                                            // retain the exact downstream route
+                                            // for its eventual fate.
+                                            let tx_id = tx.tx_id;
+                                            self.node
+                                                .borrow_mut()
+                                                .ingest_relay_commit_unit(tx, versions)?;
+                                            self.edge_fate_routes
+                                                .borrow_mut()
+                                                .entry(tx_id)
+                                                .or_default()
+                                                .push(Rc::downgrade(&self.downstream_fates));
+                                            // Edge persistence is observable,
+                                            // but the final policy fate remains
+                                            // parked for the upstream authority.
+                                            vec![SyncMessage::FateUpdate {
+                                                tx_id,
+                                                fate: Fate::Accepted,
+                                                global_seq: None,
+                                                durability: Some(DurabilityTier::Edge),
+                                            }]
+                                        }
                                     } else {
                                         self.node
                                             .borrow_mut()
@@ -8617,12 +8745,19 @@ where
                         .map_err(transport_error)?;
                     }
                 }
-                let fate_updates = {
-                    let mut node = self.node.borrow_mut();
-                    peer.drain_deferred_edge_fates(&mut node, tick_now_ms)?
-                };
-                for update in fate_updates {
-                    send_with_content_extents(&self.node, peer, self.transport.as_mut(), update)?;
+                if !self.has_upstream_authority.get() {
+                    let fate_updates = {
+                        let mut node = self.node.borrow_mut();
+                        peer.drain_deferred_edge_fates(&mut node, tick_now_ms)?
+                    };
+                    for update in fate_updates {
+                        send_with_content_extents(
+                            &self.node,
+                            peer,
+                            self.transport.as_mut(),
+                            update,
+                        )?;
+                    }
                 }
             }
         }
@@ -8835,8 +8970,17 @@ where
             "authorization scope has too many clauses",
         )
     })?;
+    if clause_count == 0 {
+        let advice =
+            evaluate_authoritative_permission_advice(&mut node.borrow_mut(), identity, action);
+        transport
+            .send(SyncMessage::AuthorizationScopeDecision { request_id, advice })
+            .map_err(transport_error)?;
+        return Ok(());
+    }
     let mut settled_through = None;
     let mut authorization_progress = None;
+    let mut support_subscriptions = Vec::new();
     for (index, (shape, binding)) in scope.subscriptions.iter().enumerate() {
         let subscription = SubscriptionKey {
             shape_id: shape.shape_id(),
@@ -8910,6 +9054,7 @@ where
                 view: Box::new(update),
             })
             .map_err(transport_error)?;
+        support_subscriptions.push(subscription);
     }
     transport
         .send(SyncMessage::AuthorizationScopeAggregateReceipt {
@@ -8925,7 +9070,17 @@ where
                 authorization_progress: authorization_progress.unwrap_or_default(),
             },
         })
-        .map_err(transport_error)
+        .map_err(transport_error)?;
+    // Scope views are proof material, not application subscriptions.  Their
+    // lifetime ends after the receipt; FIFO keeps the receiver's local
+    // evaluation ahead of this cleanup.
+    for subscription in support_subscriptions {
+        transport
+            .send(SyncMessage::Unsubscribe { subscription })
+            .map_err(transport_error)?;
+        peer.forget_subscription_with_node(&mut node.borrow_mut(), subscription);
+    }
+    Ok(())
 }
 
 fn authorization_scope_receipt_for_view<S>(
