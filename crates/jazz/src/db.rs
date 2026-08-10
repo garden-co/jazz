@@ -5209,6 +5209,36 @@ where
                         }
                         !pending.is_empty()
                     });
+                    let routed_txs = routes.keys().copied().collect::<Vec<_>>();
+                    drop(routes);
+                    // Re-drive through the successor even when it had sent
+                    // the unit before becoming owner. Its per-link uploaded
+                    // set is an optimization, never a fate authority token.
+                    for candidate in self.connections.borrow().iter() {
+                        let mut candidate = candidate.borrow_mut();
+                        let ConnectionLink::Upstream {
+                            expected_scope_authority,
+                            uploaded,
+                            outbox,
+                            ..
+                        } = &mut candidate.link
+                        else {
+                            continue;
+                        };
+                        if *expected_scope_authority != Some(handoff) {
+                            continue;
+                        }
+                        for tx_id in &routed_txs {
+                            uploaded.remove(tx_id);
+                            let mut outbox = outbox.borrow_mut();
+                            if !outbox.iter().any(|pending| pending.tx_id == *tx_id) {
+                                outbox.push(PendingUpload {
+                                    tx_id: *tx_id,
+                                    unit: self.node.borrow_mut().commit_unit_for(*tx_id).ok(),
+                                });
+                            }
+                        }
+                    }
                 } else {
                     prune_edge_fate_routes(&mut routes, None);
                 }
