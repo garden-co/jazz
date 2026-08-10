@@ -814,9 +814,9 @@ fn exhaustive_native_row_codec_case() -> (
     groove::records::RecordDescriptor,
     Vec<groove::records::Value>,
 ) {
-    use groove::records::{EnumSchema, OwnedRecord, RecordDescriptor, Value, ValueType};
+    use groove::records::{OwnedRecord, RecordDescriptor, ScalarEnumSchema, Value, ValueType};
 
-    let mode = EnumSchema::new("mode", ["low", "high"]).expect("enum schema is valid");
+    let mode = ScalarEnumSchema::new("mode", ["low", "high"]).expect("enum schema is valid");
     let child = RecordDescriptor::new([
         ("child_count", ValueType::I32),
         (
@@ -845,7 +845,7 @@ fn exhaustive_native_row_codec_case() -> (
         ("string_value", ValueType::String),
         ("bytes_value", ValueType::Bytes),
         ("uuid_value", ValueType::Uuid),
-        ("enum_value", ValueType::Enum(mode)),
+        ("enum_value", ValueType::EnumTag(mode)),
         (
             "mixed_tuple",
             ValueType::Tuple(vec![
@@ -909,7 +909,7 @@ fn exhaustive_native_row_codec_case() -> (
         Value::String("synthetic".to_owned()),
         Value::Bytes(vec![0xde, 0xad]),
         Value::Uuid(uuid::Uuid::from_bytes([0x11; 16])),
-        Value::Enum(1),
+        Value::EnumTag(1),
         Value::Tuple(vec![
             Value::U8(9),
             Value::I64(-3),

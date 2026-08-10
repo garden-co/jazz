@@ -2895,11 +2895,11 @@ fn independent_enum_schema(a: &[&str], b: &[&str]) -> JazzSchema {
         [
             ColumnSchema::new(
                 "a",
-                ColumnType::Enum(groove::records::EnumSchema::new("a", a.iter().copied()).unwrap()),
+                ColumnType::EnumTag(groove::records::ScalarEnumSchema::new("a", a.iter().copied()).unwrap()),
             ),
             ColumnSchema::new(
                 "b",
-                ColumnType::Enum(groove::records::EnumSchema::new("b", b.iter().copied()).unwrap()),
+                ColumnType::EnumTag(groove::records::ScalarEnumSchema::new("b", b.iter().copied()).unwrap()),
             ),
         ],
     )])
@@ -2915,8 +2915,8 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
     let (dir, mut core) = open_node_with_schema(node(0x72), base.clone());
     core.commit_mergeable(
         MergeableCommit::new("items", row(0x72), 1).cells(BTreeMap::from([
-            ("a".to_owned(), Value::Enum(0)),
-            ("b".to_owned(), Value::Enum(0)),
+            ("a".to_owned(), Value::EnumTag(0)),
+            ("b".to_owned(), Value::EnumTag(0)),
         ])),
     )
     .unwrap();
@@ -2952,8 +2952,8 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
     .unwrap();
     core.commit_mergeable(
         MergeableCommit::new("items", row(0x73), 2).cells(BTreeMap::from([
-            ("a".to_owned(), Value::Enum(1)),
-            ("b".to_owned(), Value::Enum(0)),
+            ("a".to_owned(), Value::EnumTag(1)),
+            ("b".to_owned(), Value::EnumTag(0)),
         ])),
     )
     .unwrap();
@@ -2975,8 +2975,8 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
         .iter()
         .filter(|(id, _)| enum_registry_ids.contains(id))
         .map(|(_, registry)| match registry {
-            groove::records::VariantRegistry::Enum { variants } => variants.len(),
-            groove::records::VariantRegistry::Union { cases } => cases.len(),
+            groove::records::VariantRegistry::EnumTag { variants } => variants.len(),
+            groove::records::VariantRegistry::Enum { cases } => cases.len(),
         })
         .collect::<BTreeSet<_>>();
     assert_eq!(after_a_sizes, BTreeSet::from([1, 2]));
@@ -2998,8 +2998,8 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
     .unwrap();
     core.commit_mergeable(
         MergeableCommit::new("items", row(0x74), 3).cells(BTreeMap::from([
-            ("a".to_owned(), Value::Enum(1)),
-            ("b".to_owned(), Value::Enum(1)),
+            ("a".to_owned(), Value::EnumTag(1)),
+            ("b".to_owned(), Value::EnumTag(1)),
         ])),
     )
     .unwrap();
@@ -3029,8 +3029,8 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
         user_registries
             .values()
             .map(|registry| match registry {
-                groove::records::VariantRegistry::Enum { variants } => variants.len(),
-                groove::records::VariantRegistry::Union { .. } => 0,
+                groove::records::VariantRegistry::EnumTag { variants } => variants.len(),
+                groove::records::VariantRegistry::Enum { .. } => 0,
             })
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([2])

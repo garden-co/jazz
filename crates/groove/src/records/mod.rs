@@ -91,7 +91,7 @@ use thiserror::Error;
 
 pub use macros::{FieldKind, RecordField, assert_record_field_layout};
 pub use values::{
-    EnumSchema, SystemVariantRegistry, UnionCase, UnionSchema, UnionValue, Value, ValueType,
+    EnumCase, EnumSchema, EnumValue, ScalarEnumSchema, SystemVariantRegistry, Value, ValueType,
     VariantRegistry, variant_registry_id_for_path,
 };
 
@@ -1188,7 +1188,7 @@ impl<'a> BorrowedRecord<'a> {
                 index: field_idx,
                 len: self.descriptor.fields.len(),
             })?;
-        if !matches!(field.value_type, ValueType::Enum(_)) {
+        if !matches!(field.value_type, ValueType::EnumTag(_)) {
             return Err(Error::TypeMismatch {
                 expected: ValueType::U8,
             });
@@ -1206,7 +1206,7 @@ impl<'a> BorrowedRecord<'a> {
                 index: field_idx,
                 len: self.descriptor.fields.len(),
             })?;
-        let ValueType::Enum(schema) = &field.value_type else {
+        let ValueType::EnumTag(schema) = &field.value_type else {
             return Err(Error::TypeMismatch {
                 expected: ValueType::U8,
             });
@@ -1270,7 +1270,7 @@ impl<'a> BorrowedRecord<'a> {
                 expected: ValueType::Nullable(Box::new(ValueType::U8)),
             });
         };
-        if !matches!(inner.as_ref(), ValueType::Enum(_)) {
+        if !matches!(inner.as_ref(), ValueType::EnumTag(_)) {
             return Err(Error::TypeMismatch {
                 expected: ValueType::Nullable(Box::new(ValueType::U8)),
             });
@@ -1606,7 +1606,7 @@ pub struct OwnedRecord {
 ///
 /// The tag travels with the row through batching and is written as a canonical
 /// bounded varint prefix. Its meaning belongs to the table registry. Groove
-/// does not distinguish user-declared union cases from storage-layout cases;
+/// does not distinguish user-declared enum cases from storage-layout cases;
 /// a lowering layer may allocate one tag for every `(layout, user_case)` pair.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VariantRecord {
@@ -1864,16 +1864,16 @@ pub enum Error {
     InvalidOffset,
     #[error("invalid schema-version header")]
     InvalidSchemaVersionHeader,
-    #[error("invalid union value header")]
-    InvalidUnionHeader,
-    #[error("union {name} has {cases} cases; maximum is u32::MAX + 1")]
-    UnionTooManyCases { name: String, cases: usize },
-    #[error("duplicate case {case} in union {union_name}")]
-    DuplicateUnionCaseName { union_name: String, case: String },
-    #[error("unknown case {case} in union {union_name}")]
-    UnknownUnionCase { union_name: String, case: String },
-    #[error("unknown tag {tag} in union {union_name}")]
-    UnknownUnionTag { union_name: String, tag: u32 },
+    #[error("invalid enum value header")]
+    InvalidEnumHeader,
+    #[error("enum {name} has {cases} cases; maximum is u32::MAX + 1")]
+    EnumTooManyCases { name: String, cases: usize },
+    #[error("duplicate case {case} in enum {enum_name}")]
+    DuplicateEnumCaseName { enum_name: String, case: String },
+    #[error("unknown case {case} in enum {enum_name}")]
+    UnknownEnumCase { enum_name: String, case: String },
+    #[error("unknown tag {tag} in enum {enum_name}")]
+    UnknownEnumTag { enum_name: String, tag: u32 },
     #[error("table variant tag {0} exceeds the bounded u32 tag space")]
     VariantTagOutOfRange(u64),
     #[error("nested record bytes are not canonical")]

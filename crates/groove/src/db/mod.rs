@@ -22,7 +22,7 @@ use crate::ivm::{
 };
 use crate::queries::Query;
 use crate::records::{
-    self, BorrowedRecord, OwnedRecord, Record, RecordDescriptor, UnionSchema, Value, VariantRecord,
+    self, BorrowedRecord, EnumSchema, OwnedRecord, Record, RecordDescriptor, Value, VariantRecord,
     encode_variant_record, split_variant_record,
 };
 use crate::schema::{
@@ -313,7 +313,7 @@ where
             .map_err(Error::IvmRuntime)
     }
 
-    /// Append cases to nested enum/union registries without changing physical
+    /// Append cases to nested enum registries without changing physical
     /// column identity or rewriting existing row payload descriptors.
     pub fn evolve_table_variant_registries(
         &mut self,
@@ -432,31 +432,31 @@ where
         self.register_variant_projection_case(table, target, variant_tag, fields)
     }
 
-    /// Append a physical source case that constructs one stable logical union
+    /// Append a physical source case that constructs one stable logical enum
     /// value in the projection's fixed output descriptor.
     ///
-    /// The output must consist of `union_field: Union(union_schema)`. `fields`
+    /// The output must consist of `enum_field: Enum(enum_schema)`. `fields`
     /// select and name the dense source payload for the selected named case.
     #[allow(clippy::too_many_arguments)]
-    pub fn register_variant_projection_union_case(
+    pub fn register_variant_projection_enum_case(
         &mut self,
         table: &str,
         target: &str,
         variant_tag: u32,
-        union_field: &str,
-        union_schema: &UnionSchema,
+        enum_field: &str,
+        enum_schema: &EnumSchema,
         case: &str,
         fields: impl IntoIterator<Item = ProjectField>,
     ) -> Result<(), Error> {
         self.ensure_not_poisoned()?;
         let fields = fields.into_iter().collect::<Vec<_>>();
         self.ivm_runtime
-            .register_variant_projection_union_case(
+            .register_variant_projection_enum_case(
                 table,
                 target,
                 variant_tag,
-                union_field,
-                union_schema,
+                enum_field,
+                enum_schema,
                 case,
                 &fields,
             )
@@ -465,22 +465,22 @@ where
 
     /// `u32`-tag convenience alias for generic table variants.
     #[allow(clippy::too_many_arguments)]
-    pub fn register_variant_union_case(
+    pub fn register_variant_enum_case(
         &mut self,
         table: &str,
         target: &str,
         variant_tag: u32,
-        union_field: &str,
-        union_schema: &UnionSchema,
+        enum_field: &str,
+        enum_schema: &EnumSchema,
         case: &str,
         fields: impl IntoIterator<Item = ProjectField>,
     ) -> Result<(), Error> {
-        self.register_variant_projection_union_case(
+        self.register_variant_projection_enum_case(
             table,
             target,
             variant_tag,
-            union_field,
-            union_schema,
+            enum_field,
+            enum_schema,
             case,
             fields,
         )
@@ -3731,7 +3731,7 @@ fn encode_primary_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Error
             key.push(6);
             encode_ordered_bytes(key, value.as_bytes());
         }
-        Value::Enum(value) => {
+        Value::EnumTag(value) => {
             key.push(0);
             key.push(*value);
         }
@@ -3753,8 +3753,8 @@ fn encode_primary_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Error
         | Value::Array(_)
         | Value::Nullable(_)
         | Value::Record(_)
-        // Direct-store keys require a declared total order; unions do not have one.
-        | Value::Union(_) => {
+        // Direct-store keys require a declared total order; enums do not have one.
+        | Value::Enum(_) => {
             return Err(Error::InvalidDirectRecordStoreKey(
                 "unsupported direct record store key type".to_owned(),
             ));
@@ -3865,17 +3865,17 @@ fn decode_primary_key_part(
             );
             Ok(Value::Uuid(value))
         }
-        records::ValueType::Enum(_) => {
+        records::ValueType::EnumTag(_) => {
             expect_key_tag(bytes, 0)?;
             let value = take_key_bytes(bytes, 1)?[0];
-            Ok(Value::Enum(value))
+            Ok(Value::EnumTag(value))
         }
         records::ValueType::F64
         | records::ValueType::Array(_)
         | records::ValueType::Nullable(_)
         | records::ValueType::Tuple(_)
         | records::ValueType::Record(_)
-        | records::ValueType::Union(_) => Err(Error::InvalidDirectRecordStoreKey(
+        | records::ValueType::Enum(_) => Err(Error::InvalidDirectRecordStoreKey(
             "unsupported direct record store key type".to_owned(),
         )),
     }
@@ -3980,13 +3980,13 @@ fn decode_index_key_part(
                     .expect("slice has uuid length"),
             )))
         }
-        ColumnType::Enum(schema) => {
+        ColumnType::EnumTag(schema) => {
             expect_persisted_index_key_tag(bytes, index_name, 0)?;
             let discriminant = take_persisted_index_key_bytes(bytes, index_name, 1)?[0];
             schema
                 .variant(discriminant)
                 .map_err(|_| Error::InvalidPersistedIndex(index_name.to_owned()))?;
-            Ok(Value::Enum(discriminant))
+            Ok(Value::EnumTag(discriminant))
         }
         ColumnType::Tuple(members) => {
             expect_persisted_index_key_tag(bytes, index_name, 11)?;
@@ -4005,7 +4005,7 @@ fn decode_index_key_part(
                 _ => Err(Error::InvalidPersistedIndex(index_name.to_owned())),
             }
         }
-        ColumnType::Array(_) | ColumnType::Record(_) | ColumnType::Union(_) => {
+        ColumnType::Array(_) | ColumnType::Record(_) | ColumnType::Enum(_) => {
             Err(Error::InvalidPersistedIndex(index_name.to_owned()))
         }
     }
@@ -4106,11 +4106,11 @@ fn encode_index_prefix_part(
     column_type: &ColumnType,
 ) -> Result<(), Error> {
     match (value, column_type) {
-        (Value::String(variant), ColumnType::Enum(schema)) => {
+        (Value::String(variant), ColumnType::EnumTag(schema)) => {
             encode_key_part(key, &Value::U8(schema.discriminant(variant)?))
                 .map_err(Error::IvmRuntime)
         }
-        (Value::Enum(discriminant), ColumnType::Enum(schema)) => {
+        (Value::EnumTag(discriminant), ColumnType::EnumTag(schema)) => {
             schema
                 .variant(*discriminant)
                 .map_err(Error::RecordEncoding)?;

@@ -33,8 +33,8 @@ use crate::ivm::{
     VariantProjectOp, VariantProjectionTarget,
 };
 use crate::records::{
-    self, BorrowedRecord, OwnedRecord, RawProjectionField, RawProjectionScratch, RecordDescriptor,
-    UnionSchema, UnionValue, Value, ValueType,
+    self, BorrowedRecord, EnumSchema, EnumValue, OwnedRecord, RawProjectionField,
+    RawProjectionScratch, RecordDescriptor, Value, ValueType,
 };
 use crate::schema::{DatabaseSchema, IndexSchema, TableSchema};
 use crate::storage::{
@@ -79,7 +79,7 @@ enum VariantProjectionCase {
     Ignore {
         source: RecordDescriptor,
     },
-    Union {
+    Enum {
         source: RecordDescriptor,
         tag: u32,
         payload: RecordDescriptor,
@@ -91,7 +91,7 @@ enum VariantProjectionCase {
 impl VariantProjectionCase {
     fn source(&self) -> RecordDescriptor {
         match self {
-            Self::Project { source, .. } | Self::Ignore { source } | Self::Union { source, .. } => {
+            Self::Project { source, .. } | Self::Ignore { source } | Self::Enum { source, .. } => {
                 *source
             }
         }
@@ -408,18 +408,18 @@ impl IvmRuntime {
         )
     }
 
-    /// Append a physical source case that constructs one stable logical union
-    /// value. The outer projection descriptor stays fixed; the selected union
+    /// Append a physical source case that constructs one stable logical enum
+    /// value. The outer projection descriptor stays fixed; the selected enum
     /// case owns the dense payload descriptor used for this source layout.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn register_variant_projection_union_case(
+    pub(crate) fn register_variant_projection_enum_case(
         &mut self,
         table: &str,
         target: &str,
         variant_tag: u32,
-        union_field: &str,
-        union_schema: &UnionSchema,
-        union_case: &str,
+        enum_field: &str,
+        enum_schema: &EnumSchema,
+        enum_case: &str,
         fields: &[ProjectField],
     ) -> Result<(), IvmRuntimeError> {
         let source = self
@@ -442,43 +442,43 @@ impl IvmRuntime {
             }
         })?;
         let output_fields = projection.output.fields();
-        let Some(union_idx) = projection.output.field_index(union_field) else {
-            return Err(IvmRuntimeError::VariantProjectionUnionFieldNotFound {
+        let Some(union_idx) = projection.output.field_index(enum_field) else {
+            return Err(IvmRuntimeError::VariantProjectionEnumFieldNotFound {
                 table: table.to_owned(),
                 target: target.to_owned(),
-                field: union_field.to_owned(),
+                field: enum_field.to_owned(),
             });
         };
         if output_fields.len() != 1 {
             return Err(
-                IvmRuntimeError::VariantProjectionUnionOutputMustBeSingleField {
+                IvmRuntimeError::VariantProjectionEnumOutputMustBeSingleField {
                     table: table.to_owned(),
                     target: target.to_owned(),
                 },
             );
         }
-        let ValueType::Union(output_schema) = &output_fields[union_idx].value_type else {
-            return Err(IvmRuntimeError::VariantProjectionUnionFieldTypeMismatch {
+        let ValueType::Enum(output_schema) = &output_fields[union_idx].value_type else {
+            return Err(IvmRuntimeError::VariantProjectionEnumFieldTypeMismatch {
                 table: table.to_owned(),
                 target: target.to_owned(),
-                field: union_field.to_owned(),
+                field: enum_field.to_owned(),
             });
         };
-        if output_schema.as_ref() != union_schema {
-            return Err(IvmRuntimeError::VariantProjectionUnionSchemaMismatch {
+        if output_schema.as_ref() != enum_schema {
+            return Err(IvmRuntimeError::VariantProjectionEnumSchemaMismatch {
                 table: table.to_owned(),
                 target: target.to_owned(),
-                field: union_field.to_owned(),
+                field: enum_field.to_owned(),
             });
         }
-        let tag = union_schema.tag(union_case)?;
-        let payload = union_schema.case(tag)?.payload;
+        let tag = enum_schema.tag(enum_case)?;
+        let payload = enum_schema.case(tag)?.payload;
         let projected = project_descriptor(&source, fields)?;
         if projected != payload {
-            return Err(IvmRuntimeError::VariantProjectionUnionPayloadMismatch {
+            return Err(IvmRuntimeError::VariantProjectionEnumPayloadMismatch {
                 table: table.to_owned(),
                 target: target.to_owned(),
-                case: union_case.to_owned(),
+                case: enum_case.to_owned(),
             });
         }
         let mapping = fields
@@ -503,7 +503,7 @@ impl IvmRuntime {
         };
         let raw_projection = raw_projection_fields(&project, &source, payload)?
             .map(Arc::<[RawProjectionField]>::from);
-        let case = VariantProjectionCase::Union {
+        let case = VariantProjectionCase::Enum {
             source,
             tag,
             payload,
@@ -592,13 +592,13 @@ impl IvmRuntime {
                 &input,
                 raw_projection.as_deref(),
             )?,
-            VariantProjectionCase::Union {
+            VariantProjectionCase::Enum {
                 tag,
                 payload,
                 project,
                 raw_projection,
                 ..
-            } => NodeState::update_variant_union_project(
+            } => NodeState::update_variant_enum_project(
                 *tag,
                 *payload,
                 project,
@@ -3169,7 +3169,7 @@ impl IvmRuntime {
                 let input_node = compiled_input.node;
                 let input_output = compiled_input.output;
                 let field_idx = resolve_field_ref(&input_output, field)?;
-                let ValueType::Union(schema) = &input_output.fields()[field_idx].value_type else {
+                let ValueType::Enum(schema) = &input_output.fields()[field_idx].value_type else {
                     return Err(IvmRuntimeError::VariantProjectFieldTypeMismatch {
                         field: field_ref_name(&input_output, field)?,
                     });
@@ -5958,14 +5958,14 @@ impl NodeState {
                         )?;
                         &projected.deltas
                     }
-                    VariantProjectionCase::Union {
+                    VariantProjectionCase::Enum {
                         tag,
                         payload,
                         project,
                         raw_projection,
                         ..
                     } => {
-                        projected = Self::update_variant_union_project(
+                        projected = Self::update_variant_enum_project(
                             *tag,
                             *payload,
                             project,
@@ -6178,7 +6178,7 @@ impl NodeState {
         })
     }
 
-    fn update_variant_union_project(
+    fn update_variant_enum_project(
         tag: u32,
         payload_desc: RecordDescriptor,
         project: &MapProjectOp,
@@ -6189,7 +6189,7 @@ impl NodeState {
         let payloads = Self::update_map_project(project, payload_desc, input, raw_projection)?;
         let mut deltas = Vec::with_capacity(payloads.deltas.len());
         for payload in payloads.deltas {
-            let value = Value::Union(UnionValue::new(
+            let value = Value::Enum(EnumValue::new(
                 tag,
                 OwnedRecord::new(payload.record.to_vec(), payload_desc),
             ));
@@ -6214,7 +6214,7 @@ impl NodeState {
             let value = delta
                 .borrowed(&input.descriptor)
                 .get_idx(variant_project.field_idx)?;
-            let Value::Union(value) = value else {
+            let Value::Enum(value) = value else {
                 return Err(IvmRuntimeError::VariantProjectFieldTypeMismatch {
                     field: variant_project.field.clone(),
                 });
@@ -8940,7 +8940,7 @@ fn validate_collect_by_key_types(
             | ValueType::String
             | ValueType::Bytes
             | ValueType::Uuid
-            | ValueType::Enum(_) => true,
+            | ValueType::EnumTag(_) => true,
             _ => false,
         }
     }
@@ -9269,11 +9269,11 @@ fn variant_project_descriptor(
     case: &str,
 ) -> Result<RecordDescriptor, IvmRuntimeError> {
     let field_idx = resolve_field_ref(input, field)?;
-    let union_field = input
+    let enum_field = input
         .fields()
         .get(field_idx)
         .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?;
-    let ValueType::Union(schema) = &union_field.value_type else {
+    let ValueType::Enum(schema) = &enum_field.value_type else {
         return Err(IvmRuntimeError::VariantProjectFieldTypeMismatch {
             field: field_ref_name(input, field)?,
         });
@@ -9720,7 +9720,7 @@ fn encode_record_field_key_part(
             key.extend_from_slice(borrowed.get_uuid(field_idx)?.as_bytes());
             Ok(())
         }
-        ValueType::Enum(_) => {
+        ValueType::EnumTag(_) => {
             let value = borrowed.get_enum(field_idx)?;
             encode_key_part(key, &Value::U8(value))
         }
@@ -9806,7 +9806,7 @@ fn encode_record_field_key_part(
             }
             Ok(())
         }
-        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::Enum(_)) => {
+        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::EnumTag(_)) => {
             match borrowed.get_nullable_enum(field_idx)? {
                 Some(value) => {
                     encode_key_part(key, &Value::Nullable(Some(Box::new(Value::U8(value)))))
@@ -9965,7 +9965,7 @@ fn record_field_literal_ordering(
             .partial_cmp(expected.as_bytes())
             .map(FieldLiteralOrdering::Compared)
             .unwrap_or(FieldLiteralOrdering::SqlNull)),
-        (ValueType::Enum(_), LiteralValue::Enum(expected)) => {
+        (ValueType::EnumTag(_), LiteralValue::EnumTag(expected)) => {
             Ok(ordering(&record.get_enum(field_idx)?, expected))
         }
         (ValueType::Nullable(inner), LiteralValue::Nullable(Some(expected))) => {
@@ -10016,7 +10016,7 @@ fn nullable_record_field_literal_ordering(
             .and_then(|actual| actual.as_bytes().partial_cmp(expected.as_bytes()))
             .map(FieldLiteralOrdering::Compared)
             .unwrap_or(FieldLiteralOrdering::SqlNull)),
-        (ValueType::Enum(_), LiteralValue::Enum(expected)) => Ok(record
+        (ValueType::EnumTag(_), LiteralValue::EnumTag(expected)) => Ok(record
             .get_nullable_enum(field_idx)?
             .map(|actual| ordering(&actual, expected))
             .unwrap_or(FieldLiteralOrdering::SqlNull)),
@@ -10121,7 +10121,7 @@ fn compare_values(
         (Value::I64(left), Value::I64(right)) => left.partial_cmp(right),
         (Value::F64(left), Value::F64(right)) => left.partial_cmp(right),
         (Value::Bool(left), Value::Bool(right)) => left.partial_cmp(right),
-        (Value::Enum(left), Value::Enum(right)) => left.partial_cmp(right),
+        (Value::EnumTag(left), Value::EnumTag(right)) => left.partial_cmp(right),
         (Value::String(left), Value::String(right)) => left.partial_cmp(right),
         (Value::Bytes(left), Value::Bytes(right)) => left.partial_cmp(right),
         (Value::Uuid(left), Value::Uuid(right)) => left.as_bytes().partial_cmp(right.as_bytes()),
@@ -10233,7 +10233,7 @@ pub(crate) fn encode_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Iv
                 encode_key_part(key, value)?;
             }
         }
-        Value::Enum(value) => {
+        Value::EnumTag(value) => {
             key.push(0);
             key.push(*value);
         }
@@ -10244,7 +10244,7 @@ pub(crate) fn encode_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Iv
             key.push(9);
             encode_key_part(key, value)?;
         }
-        Value::Array(_) | Value::Record(_) | Value::Union(_) => {
+        Value::Array(_) | Value::Record(_) | Value::Enum(_) => {
             return Err(IvmRuntimeError::UnsupportedJoinKey);
         }
     }
@@ -11674,7 +11674,7 @@ fn encode_runtime_primary_key_part(
             key.push(6);
             encode_runtime_ordered_bytes(key, value.as_bytes());
         }
-        Value::Enum(value) => {
+        Value::EnumTag(value) => {
             key.push(0);
             key.push(*value);
         }
@@ -11701,7 +11701,7 @@ fn encode_runtime_primary_key_part(
             key.push(1);
             encode_runtime_primary_key_part(key, value)?;
         }
-        Value::Array(_) | Value::Record(_) | Value::Union(_) => {
+        Value::Array(_) | Value::Record(_) | Value::Enum(_) => {
             return Err(IvmRuntimeError::UnsupportedJoinKey);
         }
     }
@@ -11830,37 +11830,35 @@ pub enum IvmRuntimeError {
         target: String,
         version: u64,
     },
-    #[error("variant projection union field not found: {table}.{target}.{field}")]
-    VariantProjectionUnionFieldNotFound {
+    #[error("variant projection enum field not found: {table}.{target}.{field}")]
+    VariantProjectionEnumFieldNotFound {
         table: String,
         target: String,
         field: String,
     },
-    #[error("variant projection union output must contain exactly one field: {table}.{target}")]
-    VariantProjectionUnionOutputMustBeSingleField { table: String, target: String },
-    #[error("variant projection field is not a union: {table}.{target}.{field}")]
-    VariantProjectionUnionFieldTypeMismatch {
+    #[error("variant projection enum output must contain exactly one field: {table}.{target}")]
+    VariantProjectionEnumOutputMustBeSingleField { table: String, target: String },
+    #[error("variant projection field is not an enum: {table}.{target}.{field}")]
+    VariantProjectionEnumFieldTypeMismatch {
         table: String,
         target: String,
         field: String,
     },
-    #[error(
-        "variant projection union schema does not match fixed output: {table}.{target}.{field}"
-    )]
-    VariantProjectionUnionSchemaMismatch {
+    #[error("variant projection enum schema does not match fixed output: {table}.{target}.{field}")]
+    VariantProjectionEnumSchemaMismatch {
         table: String,
         target: String,
         field: String,
     },
-    #[error("variant projection payload does not match union case: {table}.{target}.{case}")]
-    VariantProjectionUnionPayloadMismatch {
+    #[error("variant projection payload does not match enum case: {table}.{target}.{case}")]
+    VariantProjectionEnumPayloadMismatch {
         table: String,
         target: String,
         case: String,
     },
-    #[error("union match field is not a union: {field}")]
+    #[error("enum match field is not an enum: {field}")]
     VariantProjectFieldTypeMismatch { field: String },
-    #[error("union match payload descriptor does not match its declared case: {field}")]
+    #[error("enum match payload descriptor does not match its declared case: {field}")]
     VariantProjectPayloadMismatch { field: String },
     #[error("unique index violation: {index}")]
     UniqueIndexViolation { index: String },

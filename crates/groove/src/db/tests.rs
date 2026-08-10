@@ -19,7 +19,7 @@ use crate::queries::{
     BinaryOp, ColumnRef, Cte, Expr, JoinConstraint, JoinKind, Query, Select, SelectItem, TableRef,
     UnaryOp, WithQuery,
 };
-use crate::records::{EnumSchema, RecordDescriptor, ValueType};
+use crate::records::{RecordDescriptor, ScalarEnumSchema, ValueType};
 use crate::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType,
     PrimaryKey, PrimaryKeyColumn, PrimaryKeyType,
@@ -452,8 +452,9 @@ fn nullable_routed_docs_schema() -> DatabaseSchema {
 }
 
 fn enum_tasks_schema() -> DatabaseSchema {
-    let status =
-        ColumnType::Enum(EnumSchema::new("task_status", ["todo", "doing", "done"]).unwrap());
+    let status = ColumnType::EnumTag(
+        ScalarEnumSchema::new("task_status", ["todo", "doing", "done"]).unwrap(),
+    );
     DatabaseSchema::new([TableSchema::new(
         "tasks",
         [
@@ -469,14 +470,14 @@ fn enum_tasks_schema() -> DatabaseSchema {
 
 #[test]
 fn enum_registry_identity_is_owned_by_each_physical_column_occurrence() {
-    let supplied = EnumSchema::new("state", ["new", "done"])
+    let supplied = ScalarEnumSchema::new("state", ["new", "done"])
         .unwrap()
         .with_registry_id(7);
     let table = TableSchema::new(
         "items",
         [
-            ColumnSchema::new("a", ColumnType::Enum(supplied.clone())),
-            ColumnSchema::new("b", ColumnType::Enum(supplied)),
+            ColumnSchema::new("a", ColumnType::EnumTag(supplied.clone())),
+            ColumnSchema::new("b", ColumnType::EnumTag(supplied)),
         ],
     );
     assert_eq!(table.value_variant_registries.len(), 2);
@@ -484,7 +485,7 @@ fn enum_registry_identity_is_owned_by_each_physical_column_occurrence() {
         .columns
         .iter()
         .map(|column| match &column.column_type {
-            ColumnType::Enum(schema) => schema.registry_id(),
+            ColumnType::EnumTag(schema) => schema.registry_id(),
             _ => unreachable!(),
         })
         .collect::<HashSet<_>>();
@@ -494,21 +495,21 @@ fn enum_registry_identity_is_owned_by_each_physical_column_occurrence() {
 
 #[test]
 fn ordinary_enum_registry_ids_cannot_claim_the_reserved_system_marker() {
-    let supplied = EnumSchema::new("state", ["new", "done"])
+    let supplied = ScalarEnumSchema::new("state", ["new", "done"])
         .unwrap()
         .with_registry_id(1 << 63);
     let table = TableSchema::new(
         "items",
         [
-            ColumnSchema::new("a", ColumnType::Enum(supplied.clone())),
-            ColumnSchema::new("b", ColumnType::Enum(supplied)),
+            ColumnSchema::new("a", ColumnType::EnumTag(supplied.clone())),
+            ColumnSchema::new("b", ColumnType::EnumTag(supplied)),
         ],
     );
     let ids = table
         .columns
         .iter()
         .map(|column| match &column.column_type {
-            ColumnType::Enum(schema) => schema.registry_id(),
+            ColumnType::EnumTag(schema) => schema.registry_id(),
             _ => unreachable!(),
         })
         .collect::<HashSet<_>>();
@@ -4096,7 +4097,7 @@ fn enum_index_keys_follow_declaration_order() {
         .into_iter()
         .map(|values| values[1].clone())
         .collect::<Vec<_>>(),
-        vec![Value::Enum(0), Value::Enum(1), Value::Enum(2)]
+        vec![Value::EnumTag(0), Value::EnumTag(1), Value::EnumTag(2)]
     );
     assert_eq!(
         record_values(

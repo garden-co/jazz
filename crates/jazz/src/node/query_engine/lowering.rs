@@ -5009,9 +5009,9 @@ fn coerce_literal_for_value_type(value: LiteralValue, value_type: &ValueType) ->
             .map(LiteralValue::Uuid)
             .unwrap_or(LiteralValue::String(value)),
         (LiteralValue::Uuid(value), ValueType::String) => LiteralValue::String(value.to_string()),
-        (LiteralValue::String(value), ValueType::Enum(schema)) => schema
+        (LiteralValue::String(value), ValueType::EnumTag(schema)) => schema
             .discriminant(&value)
-            .map(LiteralValue::Enum)
+            .map(LiteralValue::EnumTag)
             .unwrap_or(LiteralValue::String(value)),
         (LiteralValue::Nullable(Some(value)), value_type) => LiteralValue::Nullable(Some(
             Box::new(coerce_literal_for_value_type(*value, value_type)),

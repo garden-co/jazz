@@ -783,7 +783,7 @@ impl GraphBuilder {
         }
     }
 
-    /// Select one named case from a union field. Nonmatching rows emit no
+    /// Select one named case from an enum field. Nonmatching rows emit no
     /// delta; matching rows emit the case's fixed payload descriptor.
     pub fn variant_project(self, field: impl Into<String>, case: impl Into<String>) -> Self {
         Self::VariantProject {
@@ -1637,7 +1637,7 @@ fn collect_by_ordered_scalar(value_type: &ValueType) -> bool {
         | ValueType::String
         | ValueType::Bytes
         | ValueType::Uuid
-        | ValueType::Enum(_) => true,
+        | ValueType::EnumTag(_) => true,
         _ => false,
     }
 }

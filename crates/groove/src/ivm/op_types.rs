@@ -163,10 +163,10 @@ pub struct UnnestOp {
     pub element_field: String,
 }
 
-/// Select one named case from a union field and emit its fixed payload record.
+/// Select one named case from an enum field and emit its fixed payload record.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct VariantProjectOp {
-    /// Field containing `Union(schema)` values.
+    /// Field containing `Enum(schema)` values.
     pub field: String,
     /// Resolved logical field index.
     pub field_idx: usize,
@@ -443,7 +443,7 @@ pub enum LiteralValue {
     /// Stored as raw bits so predicates remain `Eq + Hash + Ord`.
     F64(u64),
     Bool(bool),
-    Enum(u8),
+    EnumTag(u8),
     String(String),
     Bytes(Vec<u8>),
     Uuid(uuid::Uuid),
@@ -465,7 +465,7 @@ impl From<Value> for LiteralValue {
             Value::I32(value) => Self::I32(value),
             Value::F64(value) => Self::F64(value.to_bits()),
             Value::Bool(value) => Self::Bool(value),
-            Value::Enum(value) => Self::Enum(value),
+            Value::EnumTag(value) => Self::EnumTag(value),
             Value::String(value) => Self::String(value),
             Value::Bytes(value) => Self::Bytes(value),
             Value::Uuid(value) => Self::Uuid(value),
@@ -473,7 +473,7 @@ impl From<Value> for LiteralValue {
             Value::Array(values) => Self::Array(values.into_iter().map(Into::into).collect()),
             Value::Nullable(value) => Self::Nullable(value.map(|value| Box::new((*value).into()))),
             // Neither records nor tagged payload unions are supported predicate literals.
-            Value::Record(_) | Value::Union(_) => Self::Record,
+            Value::Record(_) | Value::Enum(_) => Self::Record,
         }
     }
 }
@@ -489,7 +489,7 @@ impl LiteralValue {
             Self::I32(_) => Some(ValueType::I32),
             Self::F64(_) => Some(ValueType::F64),
             Self::Bool(_) => Some(ValueType::Bool),
-            Self::Enum(_) => Some(ValueType::U8),
+            Self::EnumTag(_) => Some(ValueType::U8),
             Self::String(_) => Some(ValueType::String),
             Self::Bytes(_) => Some(ValueType::Bytes),
             Self::Uuid(_) => Some(ValueType::Uuid),
@@ -520,7 +520,7 @@ impl LiteralValue {
             Self::I32(value) => Value::I32(*value),
             Self::F64(value) => Value::F64(f64::from_bits(*value)),
             Self::Bool(value) => Value::Bool(*value),
-            Self::Enum(value) => Value::Enum(*value),
+            Self::EnumTag(value) => Value::EnumTag(*value),
             Self::String(value) => Value::String(value.clone()),
             Self::Bytes(value) => Value::Bytes(value.clone()),
             Self::Uuid(value) => Value::Uuid(*value),

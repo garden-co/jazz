@@ -8,7 +8,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use groove::records::{EnumSchema, RecordDescriptor, SystemVariantRegistry, Value, ValueType};
+use groove::records::{
+    RecordDescriptor, ScalarEnumSchema, SystemVariantRegistry, Value, ValueType,
+};
 use groove::schema::{
     ColumnType as GrooveColumnType, DatabaseSchema as GrooveDatabaseSchema,
     DirectRecordStoreSchema, IndexSchema as GrooveIndexSchema, IntegerKeyType, PrimaryKey,
@@ -1121,8 +1123,8 @@ impl Policy {
 }
 
 fn storage_enum(name: &str, variants: &[&str]) -> GrooveColumnType {
-    GrooveColumnType::Enum(
-        EnumSchema::new(name, variants.iter().copied()).expect("valid enum schema"),
+    GrooveColumnType::EnumTag(
+        ScalarEnumSchema::new(name, variants.iter().copied()).expect("valid enum schema"),
     )
 }
 
@@ -1135,8 +1137,8 @@ fn fate_column() -> GrooveColumnType {
 }
 
 fn deletion_column() -> GrooveColumnType {
-    GrooveColumnType::Enum(
-        EnumSchema::new("jazz_deletion", ["deleted", "restored"])
+    GrooveColumnType::EnumTag(
+        ScalarEnumSchema::new("jazz_deletion", ["deleted", "restored"])
             .expect("valid deletion enum")
             .with_system_registry(SystemVariantRegistry::deletion_state()),
     )
@@ -1288,7 +1290,7 @@ fn put_column_type(bytes: &mut Vec<u8>, column_type: &GrooveColumnType) {
         GrooveColumnType::String => bytes.push(8),
         GrooveColumnType::Bytes => bytes.push(9),
         GrooveColumnType::Uuid => bytes.push(10),
-        GrooveColumnType::Enum(schema) => {
+        GrooveColumnType::EnumTag(schema) => {
             bytes.push(11);
             put_str(bytes, &schema.name);
             put_u64(bytes, schema.variants.len() as u64);
@@ -1325,7 +1327,7 @@ fn put_column_type(bytes: &mut Vec<u8>, column_type: &GrooveColumnType) {
                 put_column_type(bytes, &field.value_type);
             }
         }
-        GrooveColumnType::Union(schema) => {
+        GrooveColumnType::Enum(schema) => {
             bytes.push(16);
             put_str(bytes, &schema.name);
             put_u64(bytes, schema.cases.len() as u64);
@@ -1720,14 +1722,17 @@ mod tests {
 
     #[test]
     fn system_deletion_registry_survives_storage_rebinding_but_user_enums_do_not() {
-        let state = EnumSchema::new("state", ["open", "done"]).unwrap();
+        let state = ScalarEnumSchema::new("state", ["open", "done"]).unwrap();
         let left = TableSchema::new(
             "left",
-            [ColumnSchema::new("state", ColumnType::Enum(state.clone()))],
+            [ColumnSchema::new(
+                "state",
+                ColumnType::EnumTag(state.clone()),
+            )],
         );
         let right = TableSchema::new(
             "right",
-            [ColumnSchema::new("state", ColumnType::Enum(state))],
+            [ColumnSchema::new("state", ColumnType::EnumTag(state))],
         );
         let registry = |table: GrooveTableSchema, name: &str| match &table
             .columns
@@ -1736,9 +1741,9 @@ mod tests {
             .unwrap()
             .column_type
         {
-            GrooveColumnType::Enum(schema) => schema.registry_id(),
+            GrooveColumnType::EnumTag(schema) => schema.registry_id(),
             GrooveColumnType::Nullable(inner) => match inner.as_ref() {
-                GrooveColumnType::Enum(schema) => schema.registry_id(),
+                GrooveColumnType::EnumTag(schema) => schema.registry_id(),
                 other => panic!("expected enum field, got {other:?}"),
             },
             other => panic!("expected enum field, got {other:?}"),

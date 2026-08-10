@@ -1222,7 +1222,7 @@ fn tagged_deletion(value: Value) -> Result<Option<crate::tx::DeletionEvent>, sup
         Value::Nullable(None) => Ok(None),
         Value::Nullable(Some(value)) => {
             let value = match *value {
-                Value::U8(discriminant) => Value::Enum(discriminant),
+                Value::U8(discriminant) => Value::EnumTag(discriminant),
                 value => value,
             };
             deletion_event_from_value(value).map(Some)

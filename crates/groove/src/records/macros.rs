@@ -45,7 +45,7 @@ impl FieldKind {
                 | (Self::Bytes, ValueType::Bytes)
                 | (Self::Uuid, ValueType::Uuid)
                 | (Self::String, ValueType::String)
-                | (Self::Enum, ValueType::Enum(_))
+                | (Self::Enum, ValueType::EnumTag(_))
                 | (Self::Tuple, ValueType::Tuple(_))
                 | (Self::Array, ValueType::Array(_))
                 | (Self::Nullable, ValueType::Nullable(_))
@@ -656,7 +656,7 @@ macro_rules! impl_record_field_enum {
             }
 
             fn to_value(&self) -> $crate::records::Value {
-                $crate::records::Value::Enum((*self).discriminant())
+                $crate::records::Value::EnumTag((*self).discriminant())
             }
 
             const COLUMN_KIND: $crate::records::FieldKind = $crate::records::FieldKind::Enum;
@@ -666,7 +666,7 @@ macro_rules! impl_record_field_enum {
                 value_type: &$crate::records::ValueType,
             ) -> Result<Self, $crate::records::Error> {
                 match value_type {
-                    $crate::records::ValueType::Enum(schema) => {
+                    $crate::records::ValueType::EnumTag(schema) => {
                         let discriminant = <u8 as $crate::records::RecordField>::read_raw(
                             bytes,
                             &$crate::records::ValueType::U8,

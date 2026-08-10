@@ -151,6 +151,15 @@ renames remain entirely in Jazz's projection layer. This abstraction could also
 model other heterogeneous stores in the future, such as object-table subtypes or
 inherited table rows, by assigning their concrete row shapes local `u64` discriminators.
 
+Each user-column enum and the hidden whole-row enum owns a separate durable
+Groove registry identity. The catalogue persists those identities with the
+physical mapping, and append-only case evolution is checked per occurrence.
+Jazz never flattens nested enum cases into whole-row layouts or maintains a
+central cross-column registry: a change to one column cannot multiply or alter
+another column's cases. Whole-row enum tags remain implementation details;
+`VariantProject` is the only boundary that converts them to opaque logical Jazz
+rows.
+
 Groove can implement this incrementally: first discriminator-aware record
 encoding and primary-key reads/scans, then variant-aware IVM ingress and query
 field resolution, and finally variant-aware index maintenance and rebuilding.

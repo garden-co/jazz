@@ -3430,7 +3430,7 @@ fn column_types_comparable(left: &ColumnType, right: &ColumnType) -> bool {
     left == right
         || matches!(
             (&left, &right),
-            (ColumnType::Enum(_), ColumnType::U8) | (ColumnType::U8, ColumnType::Enum(_))
+            (ColumnType::EnumTag(_), ColumnType::U8) | (ColumnType::U8, ColumnType::EnumTag(_))
         )
 }
 
@@ -3440,7 +3440,8 @@ fn in_operand_types_compatible(left: &ColumnType, right: &ColumnType) -> bool {
     }
     let left = non_null_column_type(left);
     let right = non_null_column_type(right);
-    if matches!(left, ColumnType::Enum(_)) && matches!(right, ColumnType::String | ColumnType::Uuid)
+    if matches!(left, ColumnType::EnumTag(_))
+        && matches!(right, ColumnType::String | ColumnType::Uuid)
     {
         return true;
     }
@@ -3465,7 +3466,7 @@ fn in_literal_value_coercible(left: &ColumnType, value: &Operand) -> bool {
     };
     match non_null_column_type(left) {
         ColumnType::String => matches!(value, Value::Uuid(_)),
-        ColumnType::Enum(_) => matches!(value, Value::String(_) | Value::Uuid(_)),
+        ColumnType::EnumTag(_) => matches!(value, Value::String(_) | Value::Uuid(_)),
         ColumnType::Array(member) => matches!(value, Value::Array(values)
         if values.iter().all(|value| {
             in_literal_value_coercible(&member, &Operand::Literal(value.clone()))
@@ -4187,7 +4188,7 @@ fn value_type(value: &Value) -> ColumnType {
         Value::String(_) => ColumnType::String,
         Value::Bytes(_) => ColumnType::Bytes,
         Value::Uuid(_) => ColumnType::Uuid,
-        Value::Enum(_) => ColumnType::U8,
+        Value::EnumTag(_) => ColumnType::U8,
         Value::Tuple(values) => ColumnType::Tuple(values.iter().map(value_type).collect()),
         Value::Array(values) => values
             .first()
@@ -4198,7 +4199,7 @@ fn value_type(value: &Value) -> ColumnType {
         Value::Record(_) => {
             panic!("record-valued query bindings are not part of the current Jazz query surface")
         }
-        Value::Union(_) => {
+        Value::Enum(_) => {
             panic!("union-valued query bindings are an internal Groove representation")
         }
     }
@@ -4217,7 +4218,7 @@ fn value_matches_type(value: &Value, column_type: &ColumnType) -> bool {
         | (Value::String(_), ColumnType::String)
         | (Value::Bytes(_), ColumnType::Bytes)
         | (Value::Uuid(_), ColumnType::Uuid) => true,
-        (Value::Enum(_), ColumnType::Enum(_)) => true,
+        (Value::EnumTag(_), ColumnType::EnumTag(_)) => true,
         (Value::Tuple(values), ColumnType::Tuple(types)) => {
             values.len() == types.len()
                 && values
@@ -4235,7 +4236,7 @@ fn value_matches_type(value: &Value, column_type: &ColumnType) -> bool {
         // Jazz has no public record column type in this step, so records are
         // never accepted as query-bound values.
         (Value::Record(_), _) => false,
-        (Value::Union(_), _) => false,
+        (Value::Enum(_), _) => false,
         _ => false,
     }
 }
@@ -4286,7 +4287,7 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             bytes.push(9);
             bytes.extend_from_slice(value.as_bytes());
         }
-        Value::Enum(value) => {
+        Value::EnumTag(value) => {
             bytes.push(10);
             bytes.push(*value);
         }
@@ -4316,7 +4317,7 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
         Value::Record(_) => {
             panic!("record-valued query bindings have no current canonical encoding")
         }
-        Value::Union(_) => {
+        Value::Enum(_) => {
             panic!("union-valued query bindings are an internal Groove representation")
         }
     }
@@ -4335,7 +4336,7 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
         ColumnType::String => bytes.push(8),
         ColumnType::Bytes => bytes.push(9),
         ColumnType::Uuid => bytes.push(10),
-        ColumnType::Enum(schema) => {
+        ColumnType::EnumTag(schema) => {
             bytes.push(11);
             put_str(bytes, &schema.name);
             put_len(bytes, schema.variants.len());
@@ -4372,7 +4373,7 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
                 put_column_type(bytes, &field.value_type);
             }
         }
-        ColumnType::Union(_) => {
+        ColumnType::Enum(_) => {
             panic!(
                 "union column types are internal to Groove and have no Jazz query binding encoding"
             )

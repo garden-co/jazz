@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::groove::records::{EnumSchema, Value as GrooveValue};
+use crate::groove::records::{ScalarEnumSchema, Value as GrooveValue};
 use crate::groove::schema::ColumnType as GrooveColumnType;
 use crate::query::{
     InheritsOperation, JoinCorrelation, JoinSourceLookup, JoinTarget, JoinVia, Operand,
@@ -264,7 +264,7 @@ fn coerce_operand_pair_typed_literal(
     if let Some(discriminant) =
         column_enum_literal_discriminant(table, column, literal_operand, column_types)
     {
-        *literal_operand = Operand::Literal(GrooveValue::Enum(discriminant));
+        *literal_operand = Operand::Literal(GrooveValue::EnumTag(discriminant));
         return false;
     }
     if column_is_enum(table, column, column_types) {
@@ -380,7 +380,7 @@ fn column_enum_schema<'a>(
     table: &str,
     column: &str,
     column_types: &'a BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
-) -> Option<&'a EnumSchema> {
+) -> Option<&'a ScalarEnumSchema> {
     let column_type = match column_types
         .get(table)
         .and_then(|columns| columns.get(column))?
@@ -391,9 +391,9 @@ fn column_enum_schema<'a>(
     groove_column_type_enum_schema(column_type)
 }
 
-fn groove_column_type_enum_schema(column_type: &GrooveColumnType) -> Option<&EnumSchema> {
+fn groove_column_type_enum_schema(column_type: &GrooveColumnType) -> Option<&ScalarEnumSchema> {
     match column_type {
-        GrooveColumnType::Enum(schema) => Some(schema),
+        GrooveColumnType::EnumTag(schema) => Some(schema),
         GrooveColumnType::Nullable(inner) => groove_column_type_enum_schema(inner),
         _ => None,
     }
@@ -2532,7 +2532,7 @@ mod tests {
             crate::groove::records::ValueType::String => GrooveValue::String("value".to_owned()),
             crate::groove::records::ValueType::Bytes => GrooveValue::Bytes(vec![8]),
             crate::groove::records::ValueType::Uuid => GrooveValue::Uuid(Uuid::from_bytes([9; 16])),
-            crate::groove::records::ValueType::Enum(_) => GrooveValue::Enum(0),
+            crate::groove::records::ValueType::EnumTag(_) => GrooveValue::EnumTag(0),
             crate::groove::records::ValueType::Tuple(members) => {
                 GrooveValue::Tuple(members.iter().map(sample_groove_value).collect::<Vec<_>>())
             }
@@ -2554,8 +2554,8 @@ mod tests {
                     **descriptor,
                 ))
             }
-            crate::groove::records::ValueType::Union(_) => {
-                panic!("Jazz public schema conversion must not receive whole-row Groove unions")
+            crate::groove::records::ValueType::Enum(_) => {
+                panic!("Jazz public schema conversion must not receive whole-row Groove enums")
             }
         }
     }

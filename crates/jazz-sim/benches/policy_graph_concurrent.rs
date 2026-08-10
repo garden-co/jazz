@@ -10,7 +10,7 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, Node, ReadOpts, SeededRowIdSource, SubscriptionEvent,
     SubscriptionStream, Transport,
 };
-use jazz::groove::records::{UnionValue, Value};
+use jazz::groove::records::{EnumValue, Value};
 use jazz::groove::schema::ColumnType;
 use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
@@ -706,11 +706,11 @@ fn json_to_cell_value(value: &JsonValue, column_type: &ColumnType) -> Value {
             )
             .unwrap_or_else(|error| panic!("invalid uuid cell {value:?}: {error}")),
         ),
-        ColumnType::Enum(schema) => {
+        ColumnType::EnumTag(schema) => {
             let label = value
                 .as_str()
                 .unwrap_or_else(|| panic!("expected enum string cell, got {value:?}"));
-            Value::Enum(
+            Value::EnumTag(
                 schema
                     .discriminant(label)
                     .unwrap_or_else(|error| panic!("enum label {label} missing: {error}")),
@@ -744,20 +744,20 @@ fn json_to_cell_value(value: &JsonValue, column_type: &ColumnType) -> Value {
         ColumnType::Record(_) => {
             panic!("policy-graph JSON seed fixtures do not support inline record columns")
         }
-        ColumnType::Union(schema) => {
+        ColumnType::Enum(schema) => {
             let object = value
                 .as_object()
                 .unwrap_or_else(|| panic!("expected union object cell, got {value:?}"));
             let case_name = object
                 .get("case")
                 .and_then(JsonValue::as_str)
-                .unwrap_or_else(|| panic!("expected union case string cell, got {value:?}"));
+                .unwrap_or_else(|| panic!("expected enum case string cell, got {value:?}"));
             let (tag, case) = schema
                 .cases
                 .iter()
                 .enumerate()
                 .find(|(_, case)| case.name == case_name)
-                .unwrap_or_else(|| panic!("union case {case_name} missing"));
+                .unwrap_or_else(|| panic!("enum case {case_name} missing"));
             let payload = object
                 .get("payload")
                 .and_then(JsonValue::as_object)
@@ -777,8 +777,8 @@ fn json_to_cell_value(value: &JsonValue, column_type: &ColumnType) -> Value {
                     json_to_cell_value(value, &field.value_type)
                 })
                 .collect::<Vec<_>>();
-            Value::Union(
-                UnionValue::create(tag as u32, case.payload.clone(), &values).unwrap_or_else(
+            Value::Enum(
+                EnumValue::create(tag as u32, case.payload.clone(), &values).unwrap_or_else(
                     |error| panic!("invalid union payload for case {case_name}: {error}"),
                 ),
             )

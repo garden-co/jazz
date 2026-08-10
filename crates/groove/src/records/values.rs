@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 /// internal relational boundary.
 const SYSTEM_REGISTRY_MARKER: u64 = 1 << 63;
 
-/// Stable compact identity for a physical enum/union occurrence.
+/// Stable compact identity for a physical enum occurrence.
 pub fn variant_registry_id_for_path(path: &str) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in path.bytes() {
@@ -36,27 +36,27 @@ pub enum Value {
     String(String),
     Bytes(Vec<u8>),
     Uuid(uuid::Uuid),
-    Enum(u8),
+    EnumTag(u8),
     Tuple(Vec<Value>),
     Array(Vec<Value>),
     Nullable(Option<Box<Value>>),
     I64(i64),
     I32(i32),
     Record(OwnedRecord),
-    Union(UnionValue),
+    Enum(EnumValue),
 }
 
-/// One selected case of a [`UnionSchema`].
+/// One selected case of a [`EnumSchema`].
 ///
-/// The tag is the declaration-order index of the case in its union schema.
+/// The tag is the declaration-order index of the case in its enum schema.
 /// It is encoded with the payload record as a bounded canonical `u32` varint.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
-pub struct UnionValue {
+pub struct EnumValue {
     tag: u32,
     record: OwnedRecord,
 }
 
-impl UnionValue {
+impl EnumValue {
     pub fn new(tag: u32, record: OwnedRecord) -> Self {
         Self { tag, record }
     }
@@ -176,7 +176,7 @@ impl From<Option<Value>> for Value {
 /// Declaration order is sort order. Appending variants is compatible with
 /// existing stored rows; reordering or removing variants changes meaning.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
-pub struct EnumSchema {
+pub struct ScalarEnumSchema {
     /// Durable identity of this enum occurrence. The enclosing table stamps
     /// unstamped schemas from their physical field path before persistence.
     #[serde(default)]
@@ -198,23 +198,23 @@ impl SystemVariantRegistry {
     }
 }
 
-/// Named union schema whose declaration-order cases have stable `u32` tags.
+/// Named enum schema whose declaration-order cases have stable `u32` tags.
 ///
 /// A case name and its payload descriptor are part of the persistent schema.
 /// Appending a case preserves existing tags; reordering, removing, or renaming
 /// a case changes the meaning of stored values and is therefore incompatible.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
-pub struct UnionSchema {
-    /// Durable identity of this union occurrence.
+pub struct EnumSchema {
+    /// Durable identity of this enum occurrence.
     #[serde(default)]
     pub registry_id: u64,
     pub name: String,
-    pub cases: Vec<UnionCase>,
+    pub cases: Vec<EnumCase>,
 }
 
-/// One named payload layout in a [`UnionSchema`].
+/// One named payload layout in a [`EnumSchema`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
-pub struct UnionCase {
+pub struct EnumCase {
     pub name: String,
     pub payload: RecordDescriptor,
 }
@@ -222,11 +222,11 @@ pub struct UnionCase {
 /// Persisted append-only case registry for one nested value occurrence.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub enum VariantRegistry {
-    Enum { variants: Vec<String> },
-    Union { cases: Vec<String> },
+    EnumTag { variants: Vec<String> },
+    Enum { cases: Vec<String> },
 }
 
-impl UnionCase {
+impl EnumCase {
     pub fn new(name: impl Into<String>, payload: RecordDescriptor) -> Self {
         Self {
             name: name.into(),
@@ -235,10 +235,10 @@ impl UnionCase {
     }
 }
 
-impl UnionSchema {
+impl EnumSchema {
     pub fn new(
         name: impl Into<String>,
-        cases: impl IntoIterator<Item = UnionCase>,
+        cases: impl IntoIterator<Item = EnumCase>,
     ) -> Result<Self, Error> {
         let name = name.into();
         let cases = cases.into_iter().collect::<Vec<_>>();
@@ -255,9 +255,9 @@ impl UnionSchema {
         self
     }
 
-    fn validate_cases(name: &str, cases: &[UnionCase]) -> Result<(), Error> {
+    fn validate_cases(name: &str, cases: &[EnumCase]) -> Result<(), Error> {
         if !cases.is_empty() && u32::try_from(cases.len() - 1).is_err() {
-            return Err(Error::UnionTooManyCases {
+            return Err(Error::EnumTooManyCases {
                 name: name.to_owned(),
                 cases: cases.len(),
             });
@@ -267,8 +267,8 @@ impl UnionSchema {
                 .iter()
                 .any(|candidate| candidate.name == case.name)
             {
-                return Err(Error::DuplicateUnionCaseName {
-                    union_name: name.to_owned(),
+                return Err(Error::DuplicateEnumCaseName {
+                    enum_name: name.to_owned(),
                     case: case.name.clone(),
                 });
             }
@@ -280,11 +280,11 @@ impl UnionSchema {
         Self::validate_cases(&self.name, &self.cases)
     }
 
-    pub fn case(&self, tag: u32) -> Result<&UnionCase, Error> {
+    pub fn case(&self, tag: u32) -> Result<&EnumCase, Error> {
         self.cases
             .get(tag as usize)
-            .ok_or_else(|| Error::UnknownUnionTag {
-                union_name: self.name.clone(),
+            .ok_or_else(|| Error::UnknownEnumTag {
+                enum_name: self.name.clone(),
                 tag,
             })
     }
@@ -294,8 +294,8 @@ impl UnionSchema {
             .iter()
             .position(|candidate| candidate.name == case)
             .and_then(|index| u32::try_from(index).ok())
-            .ok_or_else(|| Error::UnknownUnionCase {
-                union_name: self.name.clone(),
+            .ok_or_else(|| Error::UnknownEnumCase {
+                enum_name: self.name.clone(),
                 case: case.to_owned(),
             })
     }
@@ -323,7 +323,7 @@ fn assign_record_variant_registries(
     )
 }
 
-impl EnumSchema {
+impl ScalarEnumSchema {
     pub fn new(
         name: impl Into<String>,
         variants: impl IntoIterator<Item = impl Into<String>>,
@@ -394,7 +394,7 @@ pub enum ValueType {
     String,
     Bytes,
     Uuid,
-    Enum(EnumSchema),
+    EnumTag(ScalarEnumSchema),
     /// Fixed-width composite value encoded as concatenated member encodings.
     /// Variable-width members are deliberately rejected at schema construction.
     Tuple(Vec<ValueType>),
@@ -402,15 +402,15 @@ pub enum ValueType {
     Nullable(Box<ValueType>),
     /// A variable-width nested record interpreted by this inline descriptor.
     Record(Box<RecordDescriptor>),
-    /// A variable-width tagged payload record selected by a stable union case.
-    Union(Box<UnionSchema>),
+    /// A variable-width tagged payload record selected by a stable enum case.
+    Enum(Box<EnumSchema>),
 }
 
 impl ValueType {
     pub(crate) fn variant_registry_occurrence_count(&self) -> usize {
         match self {
-            Self::Enum(_) => 1,
-            Self::Union(schema) => {
+            Self::EnumTag(_) => 1,
+            Self::Enum(schema) => {
                 1 + schema
                     .cases
                     .iter()
@@ -434,11 +434,13 @@ impl ValueType {
 
     pub(crate) fn registry_compatible_with(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Enum(left), Self::Enum(right)) if left.registry_id == right.registry_id => {
+            (Self::EnumTag(left), Self::EnumTag(right))
+                if left.registry_id == right.registry_id =>
+            {
                 left.variants.starts_with(&right.variants)
                     || right.variants.starts_with(&left.variants)
             }
-            (Self::Union(left), Self::Union(right)) if left.registry_id == right.registry_id => {
+            (Self::Enum(left), Self::Enum(right)) if left.registry_id == right.registry_id => {
                 let shared = left.cases.len().min(right.cases.len());
                 left.cases[..shared]
                     .iter()
@@ -477,10 +479,10 @@ impl ValueType {
 
     pub(crate) fn collect_variant_registries(&self, output: &mut BTreeMap<u64, VariantRegistry>) {
         match self {
-            Self::Enum(schema) => {
+            Self::EnumTag(schema) => {
                 output.insert(
                     schema.registry_id,
-                    VariantRegistry::Enum {
+                    VariantRegistry::EnumTag {
                         variants: schema.variants.clone(),
                     },
                 );
@@ -498,10 +500,10 @@ impl ValueType {
                     field.value_type.collect_variant_registries(output);
                 }
             }
-            Self::Union(schema) => {
+            Self::Enum(schema) => {
                 output.insert(
                     schema.registry_id,
-                    VariantRegistry::Union {
+                    VariantRegistry::Enum {
                         cases: schema.cases.iter().map(|case| case.name.clone()).collect(),
                     },
                 );
@@ -515,7 +517,7 @@ impl ValueType {
         }
     }
 
-    /// Stamp every nested enum/union occurrence with its durable physical path.
+    /// Stamp every nested enum occurrence with its durable physical path.
     /// Existing explicit identities are retained so schema evolution can carry
     /// them across renames and descriptor reconstruction.
     pub(crate) fn stamp_variant_registries(mut self, path: &str) -> Self {
@@ -532,7 +534,7 @@ impl ValueType {
 
     fn assign_variant_registries(&mut self, path: &str, replace: bool) {
         match self {
-            Self::Enum(schema) => {
+            Self::EnumTag(schema) => {
                 if schema.registry_id & SYSTEM_REGISTRY_MARKER == 0
                     && (replace || schema.registry_id == 0)
                 {
@@ -557,7 +559,7 @@ impl ValueType {
                     replace,
                 );
             }
-            Self::Union(schema) => {
+            Self::Enum(schema) => {
                 if replace || schema.registry_id == 0 {
                     schema.registry_id = variant_registry_id_for_path(path);
                 }
@@ -588,7 +590,7 @@ impl ValueType {
         match self {
             Self::Tuple(members) => members.iter().any(Self::contains_record),
             Self::Array(inner) | Self::Nullable(inner) => inner.contains_record(),
-            Self::Record(_) | Self::Union(_) => true,
+            Self::Record(_) | Self::Enum(_) => true,
             _ => false,
         }
     }
@@ -601,12 +603,12 @@ impl ValueType {
             Self::U32 | Self::I32 => Some(4),
             Self::F64 => Some(8),
             Self::Uuid => Some(16),
-            Self::Enum(_) => Some(1),
+            Self::EnumTag(_) => Some(1),
             Self::Tuple(members) => members
                 .iter()
                 .try_fold(0usize, |total, member| Some(total + member.fixed_size()?)),
             Self::Nullable(value_type) => value_type.fixed_size().map(|size| size + 1),
-            Self::String | Self::Bytes | Self::Array(_) | Self::Record(_) | Self::Union(_) => None,
+            Self::String | Self::Bytes | Self::Array(_) | Self::Record(_) | Self::Enum(_) => None,
         }
     }
 
@@ -621,8 +623,10 @@ pub(super) fn encode_value(value: &Value, value_type: &ValueType) -> Result<Vec<
         (Value::String(value), ValueType::String) => bytes.extend(value.as_bytes()),
         (Value::Bytes(value), ValueType::Bytes) => bytes.extend(value),
         (Value::Uuid(value), ValueType::Uuid) => bytes.extend_from_slice(value.as_bytes()),
-        (Value::String(value), ValueType::Enum(schema)) => bytes.push(schema.discriminant(value)?),
-        (Value::Enum(value), ValueType::Enum(_)) => bytes.push(*value),
+        (Value::String(value), ValueType::EnumTag(schema)) => {
+            bytes.push(schema.discriminant(value)?)
+        }
+        (Value::EnumTag(value), ValueType::EnumTag(_)) => bytes.push(*value),
         (Value::Tuple(values), ValueType::Tuple(members)) => {
             encode_tuple(&mut bytes, values, members)?;
         }
@@ -636,9 +640,12 @@ pub(super) fn encode_value(value: &Value, value_type: &ValueType) -> Result<Vec<
             ensure_value_type(value, value_type)?;
             bytes.extend_from_slice(record.raw());
         }
-        (Value::Union(union), ValueType::Union(schema)) => {
-            ensure_union_value(union, schema)?;
-            bytes.extend(super::encode_variant_record(union.tag, union.record.raw()));
+        (Value::Enum(enum_value), ValueType::Enum(schema)) => {
+            ensure_enum_value(enum_value, schema)?;
+            bytes.extend(super::encode_variant_record(
+                enum_value.tag,
+                enum_value.record.raw(),
+            ));
         }
         _ if value_type.is_fixed_size() => encode_fixed_value(&mut bytes, value, value_type)?,
         _ => {
@@ -670,8 +677,10 @@ pub(super) fn encode_fixed_value(
         }
         (Value::Bool(value), ValueType::Bool) => bytes.push(u8::from(*value)),
         (Value::Uuid(value), ValueType::Uuid) => bytes.extend_from_slice(value.as_bytes()),
-        (Value::String(value), ValueType::Enum(schema)) => bytes.push(schema.discriminant(value)?),
-        (Value::Enum(value), ValueType::Enum(_)) => bytes.push(*value),
+        (Value::String(value), ValueType::EnumTag(schema)) => {
+            bytes.push(schema.discriminant(value)?)
+        }
+        (Value::EnumTag(value), ValueType::EnumTag(_)) => bytes.push(*value),
         (Value::Tuple(values), ValueType::Tuple(members)) => {
             encode_tuple(bytes, values, members)?;
         }
@@ -683,7 +692,7 @@ pub(super) fn encode_fixed_value(
                 expected: value_type.clone(),
             });
         }
-        (_, ValueType::Union(_)) => {
+        (_, ValueType::Enum(_)) => {
             return Err(Error::TypeMismatch {
                 expected: value_type.clone(),
             });
@@ -718,11 +727,11 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
         ValueType::Uuid => Ok(Value::Uuid(uuid::Uuid::from_bytes(read_exact::<16>(
             bytes,
         )?))),
-        ValueType::Enum(schema) => {
+        ValueType::EnumTag(schema) => {
             let discriminant = read_exact::<1>(bytes)?[0];
             schema
                 .variant(discriminant)
-                .map(|_| Value::Enum(discriminant))
+                .map(|_| Value::EnumTag(discriminant))
         }
         ValueType::Tuple(members) => decode_tuple(bytes, members),
         ValueType::Array(element_type) => decode_array(bytes, element_type),
@@ -738,10 +747,10 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
                 **descriptor,
             )))
         }
-        ValueType::Union(schema) => {
+        ValueType::Enum(schema) => {
             let (tag, payload) =
                 super::split_variant_record(bytes).map_err(|error| match error {
-                    Error::InvalidSchemaVersionHeader => Error::InvalidUnionHeader,
+                    Error::InvalidSchemaVersionHeader => Error::InvalidEnumHeader,
                     other => other,
                 })?;
             let case = schema.case(tag)?;
@@ -750,7 +759,7 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
             if canonical != payload {
                 return Err(Error::NonCanonicalRecord);
             }
-            Ok(Value::Union(UnionValue::new(
+            Ok(Value::Enum(EnumValue::new(
                 tag,
                 OwnedRecord::new(payload.to_vec(), case.payload),
             )))
@@ -891,8 +900,10 @@ pub(super) fn ensure_value_type(value: &Value, value_type: &ValueType) -> Result
         | (Value::Uuid(_), ValueType::Uuid) => Ok(()),
         (Value::F64(value), ValueType::F64) if !value.is_nan() => Ok(()),
         (Value::F64(_), ValueType::F64) => Err(Error::InvalidF64NaN),
-        (Value::String(value), ValueType::Enum(schema)) => schema.discriminant(value).map(|_| ()),
-        (Value::Enum(value), ValueType::Enum(schema)) => schema.variant(*value).map(|_| ()),
+        (Value::String(value), ValueType::EnumTag(schema)) => {
+            schema.discriminant(value).map(|_| ())
+        }
+        (Value::EnumTag(value), ValueType::EnumTag(schema)) => schema.variant(*value).map(|_| ()),
         (Value::Tuple(values), ValueType::Tuple(members)) => {
             if values.len() != members.len() {
                 return Err(Error::ArityMismatch {
@@ -932,18 +943,18 @@ pub(super) fn ensure_value_type(value: &Value, value_type: &ValueType) -> Result
             }
             Ok(())
         }
-        (Value::Union(union), ValueType::Union(schema)) => ensure_union_value(union, schema),
+        (Value::Enum(enum_value), ValueType::Enum(schema)) => ensure_enum_value(enum_value, schema),
         _ => Err(Error::TypeMismatch {
             expected: value_type.clone(),
         }),
     }
 }
 
-fn ensure_union_value(value: &UnionValue, schema: &UnionSchema) -> Result<(), Error> {
+fn ensure_enum_value(value: &EnumValue, schema: &EnumSchema) -> Result<(), Error> {
     let case = schema.case(value.tag)?;
     if value.record.descriptor() != &case.payload {
         return Err(Error::TypeMismatch {
-            expected: ValueType::Union(Box::new(schema.clone())),
+            expected: ValueType::Enum(Box::new(schema.clone())),
         });
     }
     let values = value.record.to_values()?;
@@ -973,7 +984,7 @@ pub(super) fn validate_schema_value_type(value_type: &ValueType) -> Result<(), E
             }
             Ok(())
         }
-        ValueType::Union(schema) => {
+        ValueType::Enum(schema) => {
             schema.validate()?;
             for case in &schema.cases {
                 for field in case.payload.fields() {
@@ -1013,8 +1024,10 @@ fn encode_tuple_member(
         (Value::I64(value), ValueType::I64) => bytes.extend(order_preserving_i64(*value)),
         (Value::Bool(value), ValueType::Bool) => bytes.push(u8::from(*value)),
         (Value::Uuid(value), ValueType::Uuid) => bytes.extend_from_slice(value.as_bytes()),
-        (Value::String(value), ValueType::Enum(schema)) => bytes.push(schema.discriminant(value)?),
-        (Value::Enum(value), ValueType::Enum(_)) => bytes.push(*value),
+        (Value::String(value), ValueType::EnumTag(schema)) => {
+            bytes.push(schema.discriminant(value)?)
+        }
+        (Value::EnumTag(value), ValueType::EnumTag(_)) => bytes.push(*value),
         (Value::Tuple(values), ValueType::Tuple(members)) => encode_tuple(bytes, values, members)?,
         (Value::Nullable(value), ValueType::Nullable(inner_type)) => {
             bytes.push(u8::from(value.is_some()));
@@ -1077,11 +1090,11 @@ fn decode_tuple_member(bytes: &[u8], value_type: &ValueType) -> Result<Value, Er
         ValueType::Uuid => Ok(Value::Uuid(uuid::Uuid::from_bytes(read_exact::<16>(
             bytes,
         )?))),
-        ValueType::Enum(schema) => {
+        ValueType::EnumTag(schema) => {
             let discriminant = read_exact::<1>(bytes)?[0];
             schema
                 .variant(discriminant)
-                .map(|_| Value::Enum(discriminant))
+                .map(|_| Value::EnumTag(discriminant))
         }
         ValueType::Tuple(members) => decode_tuple(bytes, members),
         ValueType::Nullable(inner_type) => decode_nullable(bytes, inner_type),
@@ -1090,7 +1103,7 @@ fn decode_tuple_member(bytes: &[u8], value_type: &ValueType) -> Result<Value, Er
         | ValueType::Bytes
         | ValueType::Array(_)
         | ValueType::Record(_)
-        | ValueType::Union(_) => Err(Error::InvalidTupleMember {
+        | ValueType::Enum(_) => Err(Error::InvalidTupleMember {
             member_type: value_type.clone(),
         }),
     }

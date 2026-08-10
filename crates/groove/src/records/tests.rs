@@ -18,11 +18,11 @@ fn descriptor(value_types: impl IntoIterator<Item = ValueType>) -> RecordDescrip
 
 #[test]
 fn system_enum_registry_identity_survives_trusted_serde_round_trip() {
-    let schema = EnumSchema::new("jazz_deletion", ["deleted", "restored"])
+    let schema = ScalarEnumSchema::new("jazz_deletion", ["deleted", "restored"])
         .unwrap()
         .with_system_registry(SystemVariantRegistry::deletion_state());
     let encoded = serde_json::to_string(&schema).unwrap();
-    let restored: EnumSchema = serde_json::from_str(&encoded).unwrap();
+    let restored: ScalarEnumSchema = serde_json::from_str(&encoded).unwrap();
 
     assert_eq!(restored.registry_id(), schema.registry_id());
     assert_ne!(restored.registry_id() & (1 << 63), 0);
@@ -327,13 +327,13 @@ fn patch_field_uses_logical_index_for_physically_relocated_field() {
 
 #[test]
 fn logical_order_reads_match_full_decode_for_interleaved_seeded_schemas() {
-    let status = EnumSchema::new("status", ["new", "seen", "done"]).unwrap();
+    let status = ScalarEnumSchema::new("status", ["new", "seen", "done"]).unwrap();
     let schemas = [
         RecordDescriptor::new([
             ("text", ValueType::String),
             ("id", ValueType::U64),
             ("maybe", ValueType::Nullable(Box::new(ValueType::String))),
-            ("status", ValueType::Enum(status.clone())),
+            ("status", ValueType::EnumTag(status.clone())),
             ("bytes", ValueType::Bytes),
         ]),
         RecordDescriptor::new([
@@ -357,7 +357,7 @@ fn logical_order_reads_match_full_decode_for_interleaved_seeded_schemas() {
                     } else {
                         Value::Nullable(Some(Box::new(Value::String(format!("m-{rng:x}")))))
                     },
-                    Value::Enum((rng % 3) as u8),
+                    Value::EnumTag((rng % 3) as u8),
                     Value::Bytes(rng.to_be_bytes()[..(step % 8)].to_vec()),
                 ]
             } else {
@@ -479,13 +479,13 @@ fn encoded_record_accessors_read_only_requested_fields() {
 
 #[test]
 fn enum_values_decode_as_discriminants_and_store_discriminants() {
-    let status = EnumSchema::new("status", ["draft", "ready", "done"]).unwrap();
+    let status = ScalarEnumSchema::new("status", ["draft", "ready", "done"]).unwrap();
     let schema = RecordDescriptor::new([
         ("id", ValueType::U64),
-        ("status", ValueType::Enum(status.clone())),
+        ("status", ValueType::EnumTag(status.clone())),
         (
             "maybe_status",
-            ValueType::Nullable(Box::new(ValueType::Enum(status))),
+            ValueType::Nullable(Box::new(ValueType::EnumTag(status))),
         ),
     ]);
     let record = schema
@@ -497,10 +497,10 @@ fn enum_values_decode_as_discriminants_and_store_discriminants() {
         .unwrap();
     let encoded = schema.bind(&record);
 
-    assert_eq!(schema.get(&record, "status").unwrap(), Value::Enum(1));
+    assert_eq!(schema.get(&record, "status").unwrap(), Value::EnumTag(1));
     assert_eq!(
         schema.get(&record, "maybe_status").unwrap(),
-        Value::Nullable(Some(Box::new(Value::Enum(2))))
+        Value::Nullable(Some(Box::new(Value::EnumTag(2))))
     );
     assert_eq!(
         encoded
@@ -524,12 +524,12 @@ fn enum_values_decode_as_discriminants_and_store_discriminants() {
 
 #[test]
 fn enum_nullable_layout_stays_fixed_width_and_patchable() {
-    let status = EnumSchema::new("status", ["draft", "ready", "done"]).unwrap();
+    let status = ScalarEnumSchema::new("status", ["draft", "ready", "done"]).unwrap();
     let schema = RecordDescriptor::new([
         ("id", ValueType::U64),
         (
             "maybe_status",
-            ValueType::Nullable(Box::new(ValueType::Enum(status))),
+            ValueType::Nullable(Box::new(ValueType::EnumTag(status))),
         ),
         ("body", ValueType::String),
     ]);
@@ -941,7 +941,7 @@ fn tuple_round_trip_matches_seeded_oracle() {
 
 #[test]
 fn exhaustive_value_type_matrix_round_trips_through_codec_projection_and_postcard() {
-    let status = EnumSchema::new("status", ["draft", "ready", "done"]).unwrap();
+    let status = ScalarEnumSchema::new("status", ["draft", "ready", "done"]).unwrap();
     let id = uuid::Uuid::from_bytes([0x31; 16]);
     let nested_id = uuid::Uuid::from_bytes([0x42; 16]);
     let descriptor = RecordDescriptor::new([
@@ -955,7 +955,7 @@ fn exhaustive_value_type_matrix_round_trips_through_codec_projection_and_postcar
         ("string", ValueType::String),
         ("bytes", ValueType::Bytes),
         ("uuid", ValueType::Uuid),
-        ("enum", ValueType::Enum(status.clone())),
+        ("enum", ValueType::EnumTag(status.clone())),
         (
             "nullable_none",
             ValueType::Nullable(Box::new(ValueType::String)),
@@ -994,7 +994,7 @@ fn exhaustive_value_type_matrix_round_trips_through_codec_projection_and_postcar
         Value::String("all value types".to_owned()),
         Value::Bytes(vec![0, 1, 2, 3, 254, 255]),
         Value::Uuid(id),
-        Value::Enum(2),
+        Value::EnumTag(2),
         Value::Nullable(None),
         Value::Nullable(Some(Box::new(Value::Tuple(vec![
             Value::Uuid(nested_id),
@@ -1038,7 +1038,7 @@ fn exhaustive_value_type_matrix_round_trips_through_codec_projection_and_postcar
             .to_values()
             .unwrap(),
         vec![
-            Value::Enum(2),
+            Value::EnumTag(2),
             Value::Array(vec![
                 Value::Tuple(vec![Value::Uuid(id), Value::U64(1)]),
                 Value::Tuple(vec![Value::Uuid(nested_id), Value::U64(u64::MAX)]),
@@ -1232,7 +1232,7 @@ fn project_preserves_logical_mapping_order() {
 
 #[test]
 fn record_projector_copies_encoded_spans_equivalent_to_decode_reencode() {
-    let status = EnumSchema::new("status", ["draft", "ready", "done"]).unwrap();
+    let status = ScalarEnumSchema::new("status", ["draft", "ready", "done"]).unwrap();
     let source = RecordDescriptor::new([
         ("payload", ValueType::Bytes),
         ("id", ValueType::U64),
@@ -1240,22 +1240,22 @@ fn record_projector_copies_encoded_spans_equivalent_to_decode_reencode() {
             "maybe_title",
             ValueType::Nullable(Box::new(ValueType::String)),
         ),
-        ("status", ValueType::Enum(status.clone())),
+        ("status", ValueType::EnumTag(status.clone())),
         ("title", ValueType::String),
         (
             "maybe_status",
-            ValueType::Nullable(Box::new(ValueType::Enum(status.clone()))),
+            ValueType::Nullable(Box::new(ValueType::EnumTag(status.clone()))),
         ),
         ("flag", ValueType::Bool),
     ]);
     let target = RecordDescriptor::new([
         ("title", ValueType::String),
-        ("status", ValueType::Enum(status.clone())),
+        ("status", ValueType::EnumTag(status.clone())),
         ("id", ValueType::U64),
         ("payload", ValueType::Bytes),
         (
             "maybe_status",
-            ValueType::Nullable(Box::new(ValueType::Enum(status))),
+            ValueType::Nullable(Box::new(ValueType::EnumTag(status))),
         ),
         (
             "maybe_title",
@@ -1306,13 +1306,13 @@ fn record_projector_copies_encoded_spans_equivalent_to_decode_reencode() {
         let maybe_status = if rng.is_multiple_of(4) {
             Value::Nullable(None)
         } else {
-            Value::Nullable(Some(Box::new(Value::Enum((rng % 3) as u8))))
+            Value::Nullable(Some(Box::new(Value::EnumTag((rng % 3) as u8))))
         };
         let source_values = vec![
             Value::Bytes(rng.to_be_bytes()[..(idx % 8)].to_vec()),
             Value::U64(rng),
             maybe_title.clone(),
-            Value::Enum(((rng >> 8) % 3) as u8),
+            Value::EnumTag(((rng >> 8) % 3) as u8),
             Value::String(title),
             maybe_status.clone(),
             Value::Bool(rng & 1 == 1),

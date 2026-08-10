@@ -67,7 +67,7 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
             groove::schema::ColumnType::String => Value::String(format!("fixture-value-{seed}")),
             groove::schema::ColumnType::Bytes => Value::Bytes(vec![seed, seed.wrapping_add(1)]),
             groove::schema::ColumnType::Uuid => Value::Uuid(uuid::Uuid::from_bytes([seed; 16])),
-            groove::schema::ColumnType::Enum(_) => Value::Enum(0),
+            groove::schema::ColumnType::EnumTag(_) => Value::EnumTag(0),
             groove::schema::ColumnType::Tuple(members) => Value::Tuple(
                 members
                     .iter()
@@ -94,8 +94,8 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
                     **descriptor,
                 ))
             }
-            groove::schema::ColumnType::Union(_) => {
-                panic!("Jazz public schemas do not expose whole-row Groove unions")
+            groove::schema::ColumnType::Enum(_) => {
+                panic!("Jazz public schemas do not expose whole-row Groove enums")
             }
         }
     }

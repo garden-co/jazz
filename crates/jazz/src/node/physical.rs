@@ -1344,8 +1344,8 @@ fn widen_projection_value_type(
 ) -> records::ValueType {
     use records::ValueType;
     match (logical, physical) {
+        (ValueType::EnumTag(_), ValueType::EnumTag(schema)) => ValueType::EnumTag(schema.clone()),
         (ValueType::Enum(_), ValueType::Enum(schema)) => ValueType::Enum(schema.clone()),
-        (ValueType::Union(_), ValueType::Union(schema)) => ValueType::Union(schema.clone()),
         (logical, ValueType::Nullable(physical)) if !matches!(logical, ValueType::Nullable(_)) => {
             widen_projection_value_type(logical, physical)
         }
@@ -1668,7 +1668,7 @@ fn merge_physical_value_type(
 ) -> Result<records::ValueType, Error> {
     use records::ValueType;
     match (existing, incoming) {
-        (ValueType::Enum(left), ValueType::Enum(right))
+        (ValueType::EnumTag(left), ValueType::EnumTag(right))
             if left.registry_id() == right.registry_id() =>
         {
             let (shorter, longer) = if left.variants.len() <= right.variants.len() {
@@ -1681,9 +1681,9 @@ fn merge_physical_value_type(
                     "physical enum registry changed non-additively",
                 ));
             }
-            Ok(ValueType::Enum(longer.clone()))
+            Ok(ValueType::EnumTag(longer.clone()))
         }
-        (ValueType::Union(left), ValueType::Union(right))
+        (ValueType::Enum(left), ValueType::Enum(right))
             if left.registry_id == right.registry_id =>
         {
             let max_len = left.cases.len().max(right.cases.len());
@@ -1696,7 +1696,7 @@ fn merge_physical_value_type(
                                 "physical union registry changed non-additively",
                             ));
                         }
-                        cases.push(records::UnionCase::new(
+                        cases.push(records::EnumCase::new(
                             a.name.clone(),
                             merge_physical_record_descriptor(&a.payload, &b.payload)?,
                         ));
@@ -1705,8 +1705,8 @@ fn merge_physical_value_type(
                     (None, None) => unreachable!(),
                 }
             }
-            Ok(ValueType::Union(Box::new(
-                records::UnionSchema::new(right.name.clone(), cases)
+            Ok(ValueType::Enum(Box::new(
+                records::EnumSchema::new(right.name.clone(), cases)
                     .map_err(|_| Error::InvalidStoredValue("invalid physical union registry"))?
                     .with_registry_id(left.registry_id),
             )))
@@ -2002,10 +2002,10 @@ pub(super) fn physical_value_epoch_is_compatible(
 ) -> bool {
     use records::ValueType;
     match (source, target) {
-        (ValueType::Enum(left), ValueType::Enum(right)) => {
+        (ValueType::EnumTag(left), ValueType::EnumTag(right)) => {
             right.variants.starts_with(&left.variants)
         }
-        (ValueType::Union(left), ValueType::Union(right)) => {
+        (ValueType::Enum(left), ValueType::Enum(right)) => {
             right.cases.len() >= left.cases.len()
                 && left.cases.iter().zip(&right.cases).all(|(a, b)| {
                     a.name == b.name && physical_record_epoch_is_compatible(&a.payload, &b.payload)
@@ -2129,8 +2129,8 @@ mod variant_case_tests {
     #[test]
     fn nested_enum_epoch_accepts_only_append_only_case_growth() {
         let value_type = |variants: &[&str]| {
-            records::ValueType::Enum(
-                records::EnumSchema::new("state", variants.iter().copied()).unwrap(),
+            records::ValueType::EnumTag(
+                records::ScalarEnumSchema::new("state", variants.iter().copied()).unwrap(),
             )
         };
         let old = value_type(&["new", "done"]);

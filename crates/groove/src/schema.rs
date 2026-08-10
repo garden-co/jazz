@@ -222,7 +222,7 @@ pub struct TableSchema {
     /// Explicit secondary indices to maintain as durable IVM nodes.
     pub indices: Vec<IndexSchema>,
     pub foreign_keys: Vec<ForeignKey>,
-    /// Top-level union cases selected by the leading canonical varint stored in
+    /// Top-level enum cases selected by the leading canonical varint stored in
     /// each row. A case owns one immutable dense payload descriptor.
     /// An empty registry denotes one homogeneous layout in catalogue order.
     /// Value-based writes use the reserved discriminator `0`; callers may bind
@@ -310,11 +310,11 @@ impl TableSchema {
         self
     }
 
-    /// Register one generic top-level union case.
+    /// Register one generic top-level enum case.
     ///
     /// The case tag is table-local and has no schema-version meaning to
     /// Groove. Jazz may allocate cases for physical schema layouts; direct
-    /// Groove users may allocate them for domain union variants.
+    /// Groove users may allocate them for domain enum variants.
     pub fn with_variant(
         mut self,
         tag: u32,
@@ -411,7 +411,7 @@ impl TableSchema {
     }
 }
 
-/// One top-level table union case and its ordered dense payload layout.
+/// One top-level table enum case and its ordered dense payload layout.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct TableVariant {
     pub tag: u32,

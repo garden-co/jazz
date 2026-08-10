@@ -1175,7 +1175,7 @@ pub(super) fn rejected_version_values(
                 .collect(),
         ),
         Value::Nullable(version.deletion().map(|deletion| {
-            Box::new(Value::Enum(match deletion {
+            Box::new(Value::EnumTag(match deletion {
                 DeletionEvent::Deleted => 0,
                 DeletionEvent::Restored => 1,
             }))
@@ -1431,7 +1431,7 @@ fn register_values_from_wire(
 }
 
 pub(super) fn deletion_event_value(deletion: DeletionEvent) -> Value {
-    Value::Enum(match deletion {
+    Value::EnumTag(match deletion {
         DeletionEvent::Deleted => 0,
         DeletionEvent::Restored => 1,
     })
@@ -1597,10 +1597,10 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
             GraphBuilder::table("jazz_transactions")
                 .filter(
                     PredicateExpr::And(vec![
-                        PredicateExpr::eq("fate", Value::Enum(FateTag::Accepted as u8)),
+                        PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
                         PredicateExpr::Or(vec![
-                            PredicateExpr::eq("durability", Value::Enum(2)),
-                            PredicateExpr::eq("durability", Value::Enum(3)),
+                            PredicateExpr::eq("durability", Value::EnumTag(2)),
+                            PredicateExpr::eq("durability", Value::EnumTag(3)),
                         ])
                         .canonicalize(),
                     ])
@@ -1623,7 +1623,7 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
         let content = GraphBuilder::table(global_current_table_name(&table.name))
             .project(content_fields.clone());
         let deleted = GraphBuilder::table(register_global_current_table_name(&table.name))
-            .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
             .project(["row_uuid"]);
         (content, deleted)
     } else {
@@ -1674,7 +1674,7 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
             ["row_uuid"],
             ["tx_time", "tx_node_id"],
         )
-        .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+        .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
         .project(["row_uuid"]);
         (content, deleted)
     };
@@ -2142,8 +2142,8 @@ pub(super) fn durability_from_discriminant(value: u8) -> Result<DurabilityTier, 
 
 pub(super) fn deletion_event_from_value(value: Value) -> Result<DeletionEvent, Error> {
     match value {
-        Value::Enum(0) => Ok(DeletionEvent::Deleted),
-        Value::Enum(1) => Ok(DeletionEvent::Restored),
+        Value::EnumTag(0) => Ok(DeletionEvent::Deleted),
+        Value::EnumTag(1) => Ok(DeletionEvent::Restored),
         _ => Err(Error::InvalidStoredValue("unknown deletion event")),
     }
 }

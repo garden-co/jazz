@@ -1612,7 +1612,7 @@ where
         }
         let deleted_winners = self
             .projected_deletion_register_current_source_graph(request, tier)?
-            .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
             .project(["row_uuid"]);
         Ok(GraphBuilder::anti_join(
             content,
@@ -1714,10 +1714,10 @@ fn edge_visible_ahead_current_source_graph(
         GraphBuilder::table("jazz_transactions")
             .filter(
                 PredicateExpr::And(vec![
-                    PredicateExpr::eq("fate", Value::Enum(FateTag::Accepted as u8)),
+                    PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
                     PredicateExpr::Or(vec![
-                        PredicateExpr::eq("durability", Value::Enum(2)),
-                        PredicateExpr::eq("durability", Value::Enum(3)),
+                        PredicateExpr::eq("durability", Value::EnumTag(2)),
+                        PredicateExpr::eq("durability", Value::EnumTag(3)),
                     ])
                     .canonicalize(),
                 ])
@@ -1752,8 +1752,8 @@ fn content_version_current_source_graph(
             GraphBuilder::table("jazz_transactions")
                 .filter(
                     PredicateExpr::Or(vec![
-                        PredicateExpr::eq("durability", Value::Enum(2)),
-                        PredicateExpr::eq("durability", Value::Enum(3)),
+                        PredicateExpr::eq("durability", Value::EnumTag(2)),
+                        PredicateExpr::eq("durability", Value::EnumTag(3)),
                     ])
                     .canonicalize(),
                 )
@@ -1792,8 +1792,8 @@ fn deletion_register_current_keys_graph(table: &str, tier: DurabilityTier) -> Gr
             GraphBuilder::table("jazz_transactions")
                 .filter(
                     PredicateExpr::Or(vec![
-                        PredicateExpr::eq("durability", Value::Enum(2)),
-                        PredicateExpr::eq("durability", Value::Enum(3)),
+                        PredicateExpr::eq("durability", Value::EnumTag(2)),
+                        PredicateExpr::eq("durability", Value::EnumTag(3)),
                     ])
                     .canonicalize(),
                 )
@@ -1853,10 +1853,10 @@ fn selected_visible_current_primary_key_graph(
             GraphBuilder::table("jazz_transactions")
                 .filter(
                     PredicateExpr::And(vec![
-                        PredicateExpr::eq("fate", Value::Enum(FateTag::Accepted as u8)),
+                        PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
                         PredicateExpr::Or(vec![
-                            PredicateExpr::eq("durability", Value::Enum(2)),
-                            PredicateExpr::eq("durability", Value::Enum(3)),
+                            PredicateExpr::eq("durability", Value::EnumTag(2)),
+                            PredicateExpr::eq("durability", Value::EnumTag(3)),
                         ])
                         .canonicalize(),
                     ])
@@ -1880,7 +1880,7 @@ fn selected_visible_current_primary_key_graph(
                 register_global_current_table_name(&table.name),
                 deletion_scan,
             )
-            .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
             .project(["row_uuid"]),
         )
     } else {
@@ -1940,7 +1940,7 @@ fn selected_visible_current_primary_key_graph(
                 ["row_uuid"],
                 ["tx_time", "tx_node_id"],
             )
-            .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
             .project(["row_uuid"]),
         )
     };
@@ -8047,7 +8047,7 @@ where
             let tx_node = NodeAlias(record.get_u64(GlobalChangeRowRecord::FIELD_TX_NODE_ID_IDX)?);
             let deletion = record
                 .get_nullable_enum(GlobalChangeRowRecord::FIELD__DELETION_IDX)?
-                .map(|value| deletion_event_from_value(Value::Enum(value)))
+                .map(|value| deletion_event_from_value(Value::EnumTag(value)))
                 .transpose()?;
             let entry = rows_by_uuid.entry(row_uuid).or_insert((None, None));
             if layer == version_layer_string(VersionLayer::Content).as_bytes() {
@@ -11196,7 +11196,7 @@ where
             )
         };
         let deleted = deletion
-            .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
             .project(["row_uuid"]);
         Ok(GraphBuilder::anti_join(
             content,
@@ -13160,7 +13160,7 @@ fn compare_order_values(left: &Value, right: &Value) -> Ordering {
         (Value::String(left), Value::String(right)) => left.cmp(right),
         (Value::Bytes(left), Value::Bytes(right)) => left.cmp(right),
         (Value::Uuid(left), Value::Uuid(right)) => left.as_bytes().cmp(right.as_bytes()),
-        (Value::Enum(left), Value::Enum(right)) => left.cmp(right),
+        (Value::EnumTag(left), Value::EnumTag(right)) => left.cmp(right),
         (Value::Tuple(left), Value::Tuple(right)) | (Value::Array(left), Value::Array(right)) => {
             compare_order_value_slices(left, right)
         }
@@ -13707,8 +13707,8 @@ fn historical_current_graph_full_scan(
             .canonicalize(),
         )
     };
-    let nullable_deletion_type = ValueType::Nullable(Box::new(ValueType::Enum(
-        groove::records::EnumSchema::new("jazz_deletion", ["deleted", "restored"])
+    let nullable_deletion_type = ValueType::Nullable(Box::new(ValueType::EnumTag(
+        groove::records::ScalarEnumSchema::new("jazz_deletion", ["deleted", "restored"])
             .expect("valid deletion enum"),
     )));
     let content_events = changes_for_layer("content").project_fields([
@@ -13776,7 +13776,10 @@ fn historical_current_graph_full_scan(
     let latest_restore = latest_event.filter(
         PredicateExpr::And(vec![
             PredicateExpr::eq("event_layer", Value::String("deletion".to_owned())),
-            PredicateExpr::eq("deletion", Value::Nullable(Some(Box::new(Value::Enum(1))))),
+            PredicateExpr::eq(
+                "deletion",
+                Value::Nullable(Some(Box::new(Value::EnumTag(1)))),
+            ),
         ])
         .canonicalize(),
     );
@@ -13852,8 +13855,8 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
             GraphBuilder::table("jazz_transactions")
                 .filter(
                     PredicateExpr::Or(vec![
-                        PredicateExpr::eq("durability", Value::Enum(2)),
-                        PredicateExpr::eq("durability", Value::Enum(3)),
+                        PredicateExpr::eq("durability", Value::EnumTag(2)),
+                        PredicateExpr::eq("durability", Value::EnumTag(3)),
                     ])
                     .canonicalize(),
                 )
@@ -13931,7 +13934,7 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
         )
     };
     let deleted_winners = deletion_current
-        .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+        .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
         .project_fields([
             ProjectField::named("row_uuid"),
             ProjectField::named("tx_time"),

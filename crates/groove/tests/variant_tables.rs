@@ -1,7 +1,7 @@
 use groove::db::{Database, GraphBuilder, ProjectField};
 use groove::records::{
-    RecordDescriptor, UnionCase, UnionSchema, Value, ValueType, VariantRecord,
-    encode_variant_record, split_variant_record,
+    EnumCase, EnumSchema, RecordDescriptor, Value, ValueType, VariantRecord, encode_variant_record,
+    split_variant_record,
 };
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema,
@@ -9,7 +9,7 @@ use groove::schema::{
 };
 use groove::storage::MemoryStorage;
 
-fn union_schema() -> DatabaseSchema {
+fn enum_schema() -> DatabaseSchema {
     DatabaseSchema::new([TableSchema::new(
         "entries",
         [
@@ -24,7 +24,7 @@ fn union_schema() -> DatabaseSchema {
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     .with_index(IndexSchema::new("entries_by_owner", ["owner"]))
     // The four physical cases are the product of two Jazz storage layouts
-    // and two user-declared union cases. The tag is deliberately opaque to
+    // and two user-declared enum cases. The tag is deliberately opaque to
     // Groove; Jazz retains the semantic pair in its catalogue.
     .with_variant(1, ["id", "owner", "body"])
     .with_variant(2, ["id", "owner", "url"])
@@ -32,7 +32,7 @@ fn union_schema() -> DatabaseSchema {
     .with_variant(4, ["id", "owner", "url", "alt"])])
 }
 
-fn union_projection_schema() -> DatabaseSchema {
+fn enum_projection_schema() -> DatabaseSchema {
     let table = TableSchema::new("events", [ColumnSchema::new("id", ColumnType::U64)])
         .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
         // Two layout generations × two logical cases. `value` is deliberately
@@ -71,25 +71,25 @@ fn union_projection_schema() -> DatabaseSchema {
 }
 
 #[test]
-fn variant_union_projection_normalizes_layout_tags_and_matches_named_case()
+fn variant_enum_projection_normalizes_layout_tags_and_matches_named_case()
 -> Result<(), Box<dyn std::error::Error>> {
-    let schema = union_projection_schema();
+    let schema = enum_projection_schema();
     let storage = MemoryStorage::new(&schema.column_families());
     let mut database = Database::new(schema.clone(), storage)?;
-    let event = UnionSchema::new(
+    let event = EnumSchema::new(
         "event",
         [
-            UnionCase::new(
+            EnumCase::new(
                 "text",
                 RecordDescriptor::new([("value", ValueType::String)]),
             ),
-            UnionCase::new("metric", RecordDescriptor::new([("value", ValueType::U64)])),
+            EnumCase::new("metric", RecordDescriptor::new([("value", ValueType::U64)])),
         ],
     )?;
-    let normalized = RecordDescriptor::new([("event", ValueType::Union(Box::new(event.clone())))]);
+    let normalized = RecordDescriptor::new([("event", ValueType::Enum(Box::new(event.clone())))]);
     database.define_variant_projection("events", "logical-event", normalized)?;
     for (tag, case) in [(1, "text"), (2, "metric"), (3, "text"), (4, "metric")] {
-        database.register_variant_union_case(
+        database.register_variant_enum_case(
             "events",
             "logical-event",
             tag,
@@ -154,8 +154,8 @@ fn variant_union_projection_normalizes_layout_tags_and_matches_named_case()
     let mut tags = all
         .iter()
         .map(|(values, _)| match &values[0] {
-            Value::Union(value) => value.tag(),
-            value => panic!("expected union, got {value:?}"),
+            Value::Enum(value) => value.tag(),
+            value => panic!("expected enum, got {value:?}"),
         })
         .collect::<Vec<_>>();
     tags.sort_unstable();
@@ -260,7 +260,7 @@ fn case_local_same_name_may_have_different_types_when_not_shared()
 }
 
 fn variant_row(tag: u32, values: &[Value]) -> VariantRecord {
-    let schema = union_schema();
+    let schema = enum_schema();
     let descriptor = schema
         .table("entries")
         .unwrap()
@@ -270,9 +270,9 @@ fn variant_row(tag: u32, values: &[Value]) -> VariantRecord {
 }
 
 #[test]
-fn user_union_nested_in_layout_union_normalizes_immediately()
--> Result<(), Box<dyn std::error::Error>> {
-    let schema = union_schema();
+fn user_enum_nested_in_layout_enum_normalizes_immediately() -> Result<(), Box<dyn std::error::Error>>
+{
+    let schema = enum_schema();
     let storage = MemoryStorage::new(&schema.column_families());
     let mut database = Database::new(schema, storage)?;
     let normalized = RecordDescriptor::new([
@@ -393,7 +393,7 @@ fn table_variant_tags_use_canonical_bounded_varints() {
     assert!(split_variant_record(&[0xff, 0xff, 0xff, 0xff, 0x10]).is_err());
 }
 
-/// Manual receipt for comparing the generic-union spelling with the existing
+/// Manual receipt for comparing the generic-enum spelling with the existing
 /// schema-version path. The IVM path is intentionally the same implementation;
 /// this exercises write, index maintenance, immediate projection, and delivery
 /// together while the codec test above isolates the changed prefix.
@@ -401,7 +401,7 @@ fn table_variant_tags_use_canonical_bounded_varints() {
 #[ignore = "manual performance receipt"]
 fn measure_variant_write_projection_and_index_path() -> Result<(), Box<dyn std::error::Error>> {
     const ROWS: u64 = 20_000;
-    let schema = union_schema();
+    let schema = enum_schema();
     let descriptors = (1..=4)
         .map(|tag| {
             schema
@@ -473,7 +473,7 @@ fn measure_variant_write_projection_and_index_path() -> Result<(), Box<dyn std::
     );
     drop(subscription);
     let storage = database.into_storage();
-    let schema = union_schema();
+    let schema = enum_schema();
     let mut reopened = Database::new(schema, storage)?;
     let normalized = RecordDescriptor::new([
         ("id", ColumnType::U64),

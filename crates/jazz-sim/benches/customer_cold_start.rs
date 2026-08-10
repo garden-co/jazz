@@ -11,7 +11,7 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, InitialSyncFlushCadence, Node, ReadOpts, SeededRowIdSource,
     SubscriptionEvent, SubscriptionStream, Transport,
 };
-use jazz::groove::records::{EnumSchema, Value};
+use jazz::groove::records::{ScalarEnumSchema, Value};
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
@@ -977,7 +977,7 @@ fn resource_columns() -> [ColumnSchema; 13] {
 }
 
 fn role_type(name: &str) -> ColumnType {
-    ColumnType::Enum(EnumSchema::new(name, ["viewer", "editor", "manager"]).unwrap())
+    ColumnType::EnumTag(ScalarEnumSchema::new(name, ["viewer", "editor", "manager"]).unwrap())
 }
 
 fn resource_policy(table: &str, access_table: &str) -> Option<Query> {
@@ -1997,7 +1997,7 @@ fn group_access_cells(group: RowUuid, user: RowUuid, i: usize) -> BTreeMap<Strin
     BTreeMap::from([
         ("group_id".to_owned(), Value::Uuid(group.0)),
         ("user_id".to_owned(), Value::Uuid(user.0)),
-        ("role".to_owned(), Value::Enum((i % 3) as u8)),
+        ("role".to_owned(), Value::EnumTag((i % 3) as u8)),
     ])
 }
 
@@ -2072,7 +2072,7 @@ fn resource_access_cells(resource: RowUuid, group: RowUuid, i: usize) -> BTreeMa
     BTreeMap::from([
         ("resource".to_owned(), Value::Uuid(resource.0)),
         ("team".to_owned(), Value::Uuid(group.0)),
-        ("grant_role".to_owned(), Value::Enum((i % 3) as u8)),
+        ("grant_role".to_owned(), Value::EnumTag((i % 3) as u8)),
         ("administrator".to_owned(), Value::Bool(false)),
     ])
 }
