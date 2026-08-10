@@ -85,6 +85,8 @@ export interface NativeRowDelta {
   updatedOccurrenceKeys?: Uint8Array[];
   removedOccurrenceKeys?: Uint8Array[];
   terminalOperations?: NativeTerminalOperation[];
+  /** Root terminal payloads retain Jazz CurrentRow nullable cell carriers. */
+  terminalCurrentRowCarrier?: boolean;
 }
 
 export type SubscriptionWireDelta = RowDelta | NativeRowDelta;

@@ -313,6 +313,7 @@ export class SubscriptionManager<T extends { id: string }> {
             delta.terminalOperations,
             transform,
             nativeColumns,
+            delta.terminalCurrentRowCarrier === true,
           );
           return reset
             ? { delta: terminalResult.delta, all: terminalResult.all ?? this.all(), reset: true }
@@ -352,6 +353,7 @@ export class SubscriptionManager<T extends { id: string }> {
     operations: NativeTerminalOperation[],
     transform: (row: WasmRow) => T,
     rootColumns: readonly ColumnDescriptor[],
+    rootUsesCurrentRowCarrier: boolean,
   ): SubscriptionDelta<T> {
     const beforeIndices = new Map(this.orderedIdIndex);
     const affectedRoots = new Set<string>();
@@ -373,7 +375,7 @@ export class SubscriptionManager<T extends { id: string }> {
         rootId,
         decodeNativeTerminalRow(
           rootRowId,
-          rootTerminalCurrentRowColumns(rootColumns),
+          rootUsesCurrentRowCarrier ? rootTerminalCurrentRowColumns(rootColumns) : rootColumns,
           Uint8Array.from(edit.Insert.value),
         ),
       );
@@ -399,7 +401,7 @@ export class SubscriptionManager<T extends { id: string }> {
             rootId,
             decodeNativeTerminalRow(
               terminalPayloadRowId(operation.root_key),
-              rootTerminalCurrentRowColumns(rootColumns),
+              rootUsesCurrentRowCarrier ? rootTerminalCurrentRowColumns(rootColumns) : rootColumns,
               Uint8Array.from(edit.Update.value),
             ),
           );
