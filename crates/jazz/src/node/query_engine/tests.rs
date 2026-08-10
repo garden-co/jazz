@@ -3424,6 +3424,129 @@ fn equality_filter_param_lowers_to_prepared_binding_join() {
     assert!(graph.contains("title"), "{graph}");
 }
 
+// Internal compiler-boundary test: the public query API cannot expose which
+// union arm carried a route. Inspecting the lowered graph pins the prepared
+// binding join that keeps a claimless arm in the policy subplan's route domain.
+#[test]
+fn prepared_policy_union_joins_claimless_arm_to_binding_route() {
+    let root_source = source("todos", SourceRole::Root);
+    let public = RowSetNodeId("public".to_owned());
+    let claimed_source = RowSetNodeId("claimed_source".to_owned());
+    let claimed = RowSetNodeId("claimed".to_owned());
+    let union = RowSetNodeId("policy_union".to_owned());
+    let claim_field = claim_param_field(&ClaimPath(vec!["sub".to_owned()]));
+    let mut input = row_set_input(0xa8);
+    input.shape.root = union.clone();
+    input.shape.nodes = BTreeMap::from([
+        (
+            public.clone(),
+            RowSetExpr::Source {
+                source: root_source.clone(),
+                visibility: RowVisibility::Visible,
+            },
+        ),
+        (
+            claimed_source.clone(),
+            RowSetExpr::Source {
+                source: root_source.clone(),
+                visibility: RowVisibility::Visible,
+            },
+        ),
+        (
+            claimed.clone(),
+            RowSetExpr::Filter {
+                input: claimed_source,
+                predicate: PredicateExpr::Compare {
+                    left: NormalizedValueRef::SourceField {
+                        source: root_source.clone(),
+                        field: "title".to_owned(),
+                    },
+                    op: ComparisonOp::Eq,
+                    right: NormalizedValueRef::Param(claim_field.clone()),
+                },
+            },
+        ),
+        (
+            union,
+            RowSetExpr::Union {
+                inputs: vec![
+                    UnionInput {
+                        node: public,
+                        label: "public".to_owned(),
+                    },
+                    UnionInput {
+                        node: claimed,
+                        label: "claim-sub".to_owned(),
+                    },
+                ],
+            },
+        ),
+    ]);
+    input.binding.source_shape = Some("prepared-policy-binding".to_owned());
+    input.binding.claim_params = BTreeMap::from([(
+        claim_field.clone(),
+        ProgramClaimParam {
+            path: ClaimPath(vec!["sub".to_owned()]),
+            ty: ColumnType::String,
+        },
+    )]);
+
+    let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
+        reads: QueryReadSet::primary(current_read_view()),
+        policy: PolicyContext::AuthorizationSubplan {
+            protected_source: root_source,
+            role: PolicyDecisionRole::Read,
+            mode: PolicyEnforcementMode::Enforcing,
+            permission_subject: author(0xa8),
+            claims: BTreeMap::new(),
+            attribution: None,
+        },
+        input,
+        output: RowSetOutputRequest {
+            app_rows: None,
+            facts: BTreeSet::from([ProgramFactKey::AuthorizedRows]),
+        },
+    };
+
+    let program = lower_query_program(request, &mut FakeSourceResolver::default())
+        .expect("prepared policy union lowers");
+    let terminal = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "policy.authorized_rows")
+        .expect("authorized-rows terminal");
+    assert!(matches!(
+        &terminal.graph,
+        GraphBuilder::Project { fields, .. }
+            if fields.iter().map(|field| field.output_name.as_str()).collect::<BTreeSet<_>>()
+                == BTreeSet::from(["row_uuid", claim_field.as_str()])
+    ));
+    assert!(graph_any(&terminal.graph, &|graph| matches!(
+        graph,
+        GraphBuilder::Project { input, fields }
+            if fields.iter().any(|field| field.output_name == claim_field)
+                && matches!(
+                    input.as_ref(),
+                    GraphBuilder::Join {
+                        right,
+                        left_on,
+                        right_on,
+                        comparison: groove::ivm::ValueComparison::Policy,
+                        ..
+                    } if left_on.is_empty()
+                        && right_on.is_empty()
+                        && matches!(
+                            right.as_ref(),
+                            GraphBuilder::BindingSource { shape, output }
+                                if shape == "prepared-policy-binding"
+                                    && output.field_index(claim_field.as_str()).is_some()
+                        )
+                )
+    )));
+}
+
 #[test]
 fn claim_filter_lowers_from_identity_policy_context() {
     let request = QueryProgramRequest {
