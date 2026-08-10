@@ -5658,6 +5658,21 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
     client.tick().unwrap();
     assert_eq!(block_on(refreshed), PermissionAdvice::Allowed);
 
+    server.node().borrow_mut().set_session_claims(
+        alice,
+        BTreeMap::from([("fresh".to_owned(), Value::Bool(false))]),
+    );
+    server.tick().unwrap();
+    client.tick().unwrap();
+    let advanced = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: target,
+    });
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(block_on(advanced), PermissionAdvice::Allowed);
+
     let hydration_count = match &subscriber.borrow().link {
         ConnectionLink::Subscriber {
             authority_scope_hydration_count,
@@ -5666,8 +5681,8 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
         ConnectionLink::Upstream { .. } => unreachable!("server link is a subscriber"),
     };
     assert_eq!(
-        hydration_count, 2,
-        "new claims must not reuse stale evidence"
+        hydration_count, 3,
+        "each 0→1→2 authority claim transition must reject stale evidence and rehydrate"
     );
 }
 
