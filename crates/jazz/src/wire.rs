@@ -15,7 +15,7 @@ use ruzstd::io::Read;
 use postcard::{from_bytes, to_allocvec};
 use serde::{Deserialize, Serialize};
 
-use crate::ids::AuthorId;
+use crate::ids::{AuthorId, NodeUuid};
 use crate::protocol::SyncMessage;
 use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_len};
 
@@ -36,6 +36,15 @@ pub const FEATURE_PAYLOAD_LZ4: WireFeatures = 1 << 3;
 pub const FEATURE_PAYLOAD_ZSTD: WireFeatures = 1 << 4;
 /// Logical sync messages may be decomposed into bounded physical frames.
 pub const FEATURE_MESSAGE_FRAGMENTATION: WireFeatures = 1 << 5;
+/// Semantic frames may carry authorization-support purposes and receipts.
+///
+/// This feature is deliberately separate from framing: an older peer can
+/// still exchange every pre-existing sync message, but must never be asked to
+/// deserialize the new semantic enum variants or extension fields.
+pub const FEATURE_AUTHORIZATION_SCOPE_RECEIPTS: WireFeatures = 1 << 6;
+/// Authority-owned authorization scope hydration.  Unlike the first receipt
+/// experiment this never accepts caller supplied support query identities.
+pub const FEATURE_AUTHORIZATION_SCOPE_VIEWS: WireFeatures = 1 << 7;
 
 const FEATURE_PAYLOAD_COMPRESSION_MASK: WireFeatures = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
 
@@ -101,6 +110,23 @@ pub struct WireHello {
     pub features: WireFeatures,
     /// Runtime/link role for topology and admission decisions.
     pub role: WirePeerRole,
+    /// Authority endpoint bound by the authenticated handshake when the
+    /// authorization-scope receipt feature is offered.  Semantic sync frames
+    /// never self-assert this identity.
+    #[serde(default)]
+    pub authority: Option<WireAuthorityEndpoint>,
+}
+
+/// Fresh, authenticated authority endpoint identity for one negotiated link.
+///
+/// The session/admission layer allocates this nonce before constructing the
+/// eventual sync connection; receipts use it to reject reconnect replay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireAuthorityEndpoint {
+    /// Stable authority node identity authenticated by the transport.
+    pub node: NodeUuid,
+    /// Fresh non-resumable epoch for this accepted connection.
+    pub epoch: u64,
 }
 
 impl WireHello {
@@ -111,7 +137,14 @@ impl WireHello {
             max_protocol_version: WIRE_PROTOCOL_VERSION,
             features,
             role,
+            authority: None,
         }
+    }
+
+    /// Attach the endpoint allocated by authenticated session admission.
+    pub fn with_authority(mut self, node: NodeUuid, epoch: u64) -> Self {
+        self.authority = Some(WireAuthorityEndpoint { node, epoch });
+        self
     }
 }
 
@@ -273,6 +306,27 @@ pub fn encode_sync_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::E
     to_allocvec(message)
 }
 
+/// Serialize a semantic message only when its required capabilities were
+/// negotiated for this link.
+///
+/// Keep this check immediately adjacent to the canonical codec.  Postcard
+/// encodes Rust enums by ordinal, so allowing an unsupported variant past this
+/// seam would make an older peer decode a different message (or fail after it
+/// has already accepted a semantic frame).
+pub fn encode_sync_message_for_features(
+    message: &SyncMessage,
+    negotiated_features: WireFeatures,
+) -> Result<Vec<u8>, WireError> {
+    ensure_sync_message_features(message, negotiated_features)?;
+    encode_sync_message(message).map_err(|error| {
+        WireError::new(
+            WireErrorCode::MalformedFrame,
+            WireRetry::Never,
+            format!("failed to encode sync message payload: {error}"),
+        )
+    })
+}
+
 /// Decode a semantic sync message serialized by [`encode_sync_message`].
 pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error> {
     if validate_logical_message_len(bytes.len()).is_err() {
@@ -285,9 +339,43 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
     Ok(message)
 }
 
+/// Decode a semantic message only when its required capabilities were
+/// negotiated for this link.
+pub fn decode_sync_message_for_features(
+    bytes: &[u8],
+    negotiated_features: WireFeatures,
+) -> Result<SyncMessage, WireError> {
+    let message = decode_sync_message(bytes).map_err(|error| {
+        WireError::new(
+            WireErrorCode::MalformedFrame,
+            WireRetry::Never,
+            format!("failed to decode sync message payload: {error}"),
+        )
+    })?;
+    ensure_sync_message_features(&message, negotiated_features)?;
+    Ok(message)
+}
+
 /// Decode a semantic sync message for receiver apply.
 pub fn decode_sync_message_for_receive(bytes: &[u8]) -> Result<SyncMessage, postcard::Error> {
     decode_sync_message(bytes)
+}
+
+/// Reject semantic extensions that this connection did not negotiate.
+pub fn ensure_sync_message_features(
+    message: &SyncMessage,
+    negotiated_features: WireFeatures,
+) -> Result<(), WireError> {
+    let required = message.required_wire_features();
+    let missing = required & !negotiated_features;
+    if missing == 0 {
+        return Ok(());
+    }
+    Err(WireError::new(
+        WireErrorCode::UnsupportedFeature,
+        WireRetry::AfterResume,
+        format!("sync message requires unnegotiated features {missing:#x}"),
+    ))
 }
 
 /// Optional transport compression features enabled for this process.
@@ -338,6 +426,8 @@ pub fn current_wire_features() -> WireFeatures {
     FEATURE_SYNC_MESSAGE_PAYLOAD
         | FEATURE_STRUCTURED_ERRORS
         | FEATURE_MESSAGE_FRAGMENTATION
+        | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+        | FEATURE_AUTHORIZATION_SCOPE_VIEWS
         | runtime_transport_compression_features()
 }
 
@@ -601,9 +691,18 @@ pub fn negotiate_wire(
             ),
         ));
     }
+    let mut features = remote.features & local_features;
+    // Receipt semantics need a handshake-bound issuer epoch.  A peer that
+    // merely advertises the bit but cannot provide that endpoint is treated as
+    // old for this feature, so semantic receipt variants stay fail-closed.
+    if features & (FEATURE_AUTHORIZATION_SCOPE_RECEIPTS | FEATURE_AUTHORIZATION_SCOPE_VIEWS) != 0
+        && remote.authority.is_none()
+    {
+        features &= !(FEATURE_AUTHORIZATION_SCOPE_RECEIPTS | FEATURE_AUTHORIZATION_SCOPE_VIEWS);
+    }
     Ok(WireNegotiated {
         protocol_version: max,
-        features: remote.features & local_features,
+        features,
     })
 }
 
@@ -619,9 +718,10 @@ mod tests {
     use crate::ids::SchemaVersionId;
     use crate::ids::{NodeUuid, RowUuid};
     use crate::protocol::{
-        RegisterShapeOptions, ResultRowEntry, ShapeAst, Subscribe, SubscribeRejectReason,
-        SubscriptionKey, VersionBundle, VersionBundleRun, VersionBundleRunError, VersionCarrier,
-        VersionRecord, build_version_bundle_runs_from_singletons,
+        AuthorizationScopePurpose, PermissionAdviceAction, RegisterShapeOptions, ResultRowEntry,
+        ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, VersionBundle,
+        VersionBundleRun, VersionBundleRunError, VersionCarrier, VersionRecord,
+        build_version_bundle_runs_from_singletons,
     };
     use crate::protocol_limits::MAX_WIRE_FRAME_BYTES;
     use crate::query::{BindingId, Query, ShapeId};
@@ -1207,6 +1307,7 @@ mod tests {
             max_protocol_version: 3,
             features: FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_SESSION_FRAME,
             role: WirePeerRole::Relay,
+            authority: None,
         };
 
         let negotiated = negotiate_wire(
@@ -1233,11 +1334,81 @@ mod tests {
             max_protocol_version: 1,
             features: FEATURE_NONE,
             role: WirePeerRole::Core,
+            authority: None,
         };
 
         let err = negotiate_wire(&remote, 2, 2, FEATURE_NONE).unwrap_err();
 
         assert_eq!(err.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(err.retry, WireRetry::Never);
+    }
+
+    #[test]
+    fn receipt_feature_requires_handshake_bound_authority_endpoint() {
+        let feature = FEATURE_AUTHORIZATION_SCOPE_RECEIPTS;
+        let old = WireHello::current(WirePeerRole::Core, feature);
+        assert_eq!(
+            negotiate_wire(&old, WIRE_PROTOCOL_VERSION, WIRE_PROTOCOL_VERSION, feature)
+                .unwrap()
+                .features
+                & feature,
+            0
+        );
+        let accepted = WireHello::current(WirePeerRole::Core, feature)
+            .with_authority(NodeUuid::from_bytes([0x71; 16]), 9);
+        assert_ne!(
+            negotiate_wire(
+                &accepted,
+                WIRE_PROTOCOL_VERSION,
+                WIRE_PROTOCOL_VERSION,
+                feature,
+            )
+            .unwrap()
+            .features
+                & feature,
+            0
+        );
+    }
+
+    #[test]
+    fn authorization_scope_semantics_fail_closed_without_negotiated_feature() {
+        let subscription = SubscriptionKey {
+            shape_id: ShapeId(uuid::Uuid::from_bytes([1; 16])),
+            binding_id: BindingId(uuid::Uuid::from_bytes([2; 16])),
+            read_view: Default::default(),
+        };
+        let message = SyncMessage::AuthorizationScopeSubscribe {
+            subscribe: Subscribe {
+                shape_id: subscription.shape_id,
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+            },
+            purpose: AuthorizationScopePurpose {
+                action: PermissionAdviceAction::Read {
+                    table: "todos".to_owned(),
+                    row: RowUuid::from_bytes([7; 16]),
+                },
+            },
+        };
+        let old_features = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
+        assert_eq!(
+            encode_sync_message_for_features(&message, old_features)
+                .unwrap_err()
+                .code,
+            WireErrorCode::UnsupportedFeature
+        );
+
+        let encoded = encode_sync_message_for_features(
+            &message,
+            old_features | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS,
+        )
+        .unwrap();
+        assert_eq!(
+            decode_sync_message_for_features(&encoded, old_features)
+                .unwrap_err()
+                .code,
+            WireErrorCode::UnsupportedFeature
+        );
     }
 }

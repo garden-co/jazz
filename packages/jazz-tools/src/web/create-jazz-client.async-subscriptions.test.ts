@@ -160,13 +160,13 @@ function createChannel(rows: TestRow[]): SubscriptionChannel & {
       };
     },
     async canInsert() {
-      return true;
+      return "allowed" as const;
     },
     async canUpdate() {
-      return true;
+      return "allowed" as const;
     },
     async canDelete() {
-      return true;
+      return "allowed" as const;
     },
     async getAuthState() {
       return TEST_AUTH_STATE;
@@ -250,13 +250,13 @@ function createTypedChannel(rows: TestRow[]): SubscriptionChannel & {
       };
     },
     async canInsert() {
-      return true;
+      return "allowed" as const;
     },
     async canUpdate() {
-      return true;
+      return "allowed" as const;
     },
     async canDelete() {
-      return true;
+      return "allowed" as const;
     },
     async getAuthState() {
       return TEST_AUTH_STATE;
@@ -303,9 +303,27 @@ function createMockDb(rows: TestRow[] = []) {
       session: runtimeContext?.session,
       wait: vi.fn(async () => undefined),
     })),
-    canInsert: vi.fn(() => !runtimeContext?.session || runtimeContext.session.user_id === "user-1"),
-    canUpdate: vi.fn(() => !runtimeContext?.session || runtimeContext.session.user_id === "user-1"),
-    canDelete: vi.fn(() => !runtimeContext?.session || runtimeContext.session.user_id === "user-1"),
+    canInsert: vi.fn(() =>
+      Promise.resolve(
+        !runtimeContext?.session || runtimeContext.session.user_id === "user-1"
+          ? ("allowed" as const)
+          : ("denied" as const),
+      ),
+    ),
+    canUpdate: vi.fn(() =>
+      Promise.resolve(
+        !runtimeContext?.session || runtimeContext.session.user_id === "user-1"
+          ? ("allowed" as const)
+          : ("denied" as const),
+      ),
+    ),
+    canDelete: vi.fn(() =>
+      Promise.resolve(
+        !runtimeContext?.session || runtimeContext.session.user_id === "user-1"
+          ? ("allowed" as const)
+          : ("denied" as const),
+      ),
+    ),
     __withRuntimeOperationContext: vi.fn((context, operation) => {
       const previous = runtimeContext;
       runtimeContext = context;
@@ -433,9 +451,11 @@ describe("web/createJazzClient async subscription channel", () => {
     await expect(client.db.delete(table, "row-1")).resolves.toMatchObject({
       batchId: expect.any(Promise),
     });
-    await expect(client.db.canInsert(table, { value: "created" })).resolves.toBe(true);
-    await expect(client.db.canUpdate(table, "row-1", { value: "updated" })).resolves.toBe(true);
-    await expect(client.db.canDelete(table, "row-1")).resolves.toBe(true);
+    await expect(client.db.canInsert(table, { value: "created" })).resolves.toBe("allowed");
+    await expect(client.db.canUpdate(table, "row-1", { value: "updated" })).resolves.toBe(
+      "allowed",
+    );
+    await expect(client.db.canDelete(table, "row-1")).resolves.toBe("allowed");
 
     expect(channel.writes).toEqual([
       { operation: "insert", session: TEST_AUTH_STATE.session },
@@ -561,11 +581,11 @@ describe("web/createJazzClient async subscription channel", () => {
     await expect(channel.delete(table, "row-1")).resolves.toMatchObject({
       batchId: expect.any(Promise),
     });
-    await expect(channel.canInsert(table, { value: "worker-created" })).resolves.toBe(true);
+    await expect(channel.canInsert(table, { value: "worker-created" })).resolves.toBe("allowed");
     await expect(channel.canUpdate(table, "row-1", { value: "worker-updated" })).resolves.toBe(
-      true,
+      "allowed",
     );
-    await expect(channel.canDelete(table, "row-1")).resolves.toBe(true);
+    await expect(channel.canDelete(table, "row-1")).resolves.toBe("allowed");
 
     expect(db.insert).toHaveBeenCalledWith(table, { value: "worker-created" }, undefined);
     expect(db.update).toHaveBeenCalledWith(table, "row-1", { value: "worker-updated" }, undefined);
@@ -581,7 +601,7 @@ describe("web/createJazzClient async subscription channel", () => {
     });
     await expect(
       channel.canInsert(table, { value: "session-created" }, TEST_AUTH_STATE.session!),
-    ).resolves.toBe(true);
+    ).resolves.toBe("allowed");
 
     await channel.shutdown();
   });

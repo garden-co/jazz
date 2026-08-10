@@ -405,8 +405,16 @@ fn spawn_edge_upstream_connector(
             .await
             {
                 Ok(transport) => {
+                    let (protocol_version, features, session_context) =
+                        transport.negotiated_transport_metadata();
                     if shell
-                        .connect_upstream(Box::new(WireTransportAdapter::current(transport)))
+                        .connect_upstream(Box::new(WireTransportAdapter::new_with_session_context(
+                            transport,
+                            protocol_version,
+                            features,
+                            None,
+                            session_context,
+                        )))
                         .await
                         .is_ok()
                     {

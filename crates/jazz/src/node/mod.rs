@@ -913,6 +913,11 @@ where
         self.clock.applied_global_watermark
     }
 
+    /// Stable identity of the authority issuing wire-level receipts.
+    pub(crate) fn node_uuid(&self) -> NodeUuid {
+        self.node_uuid
+    }
+
     /// Attach process-local auth claims to an accepted subscriber identity.
     pub(crate) fn set_session_claims(
         &mut self,
@@ -3339,6 +3344,11 @@ where
     /// so callers route the one-shot read to a server in a later protocol slice.
     pub fn is_history_complete_for(&self, _shape: &ValidatedQuery, position: GlobalSeq) -> bool {
         self.history_complete && position <= self.clock.applied_global_watermark
+    }
+
+    /// Whether this node was opened as a complete serving authority.
+    pub(crate) fn is_history_complete(&self) -> bool {
+        self.history_complete
     }
 
     /// Return current rows for a subscription at the requested tier.

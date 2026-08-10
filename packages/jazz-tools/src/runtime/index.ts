@@ -4,6 +4,7 @@ export {
   type LocalTransactionRecord,
   type TransactionFate,
   type LocalUpdatesMode,
+  type PermissionAdvice,
   PersistedWriteRejectedError,
   loadWasmModule,
   type DurabilityTier,

@@ -8,8 +8,8 @@ use base64::Engine;
 use futures_util::{Stream, StreamExt};
 use jazz::db::{
     block_on, Db, DbConfig, DbIdentity, ExclusiveTxOps, InitialSyncFlushCadence, LocalUpdates,
-    MergeableTxOps, PeerConnection, PreparedQuery, Propagation, QueryAttachment, ReadOpts,
-    RowCells, SeededRowIdSource, SubscriptionEvent, TickScheduler, TickUrgency,
+    MergeableTxOps, PeerConnection, PermissionAdvice, PreparedQuery, Propagation, QueryAttachment,
+    ReadOpts, RowCells, SeededRowIdSource, SubscriptionEvent, TickScheduler, TickUrgency,
     WireTransportAdapter, WriteHandle,
 };
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
@@ -17,6 +17,7 @@ use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 use jazz::groove::storage::OpfsStorage;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::protocol::PermissionAdviceAction;
 use jazz::query::{Query, RelationExpr, RelationQuery};
 use jazz::schema::JazzSchema;
 use jazz::tools::{BatchId, OpenBatchId};
@@ -100,6 +101,15 @@ fn decode_seed(seed_b64: &str) -> Result<[u8; 32], JsValue> {
     bytes
         .try_into()
         .map_err(|_| JsValue::from_str("seed must be exactly 32 bytes"))
+}
+
+fn advice_string(advice: PermissionAdvice) -> String {
+    match advice {
+        PermissionAdvice::Allowed => "allowed",
+        PermissionAdvice::Denied => "denied",
+        PermissionAdvice::Unknown => "unknown",
+    }
+    .to_owned()
 }
 
 /// Mint a local-first identity JWT from a base64url-encoded 32-byte seed.
@@ -431,7 +441,53 @@ macro_rules! with_wasm_db {
     };
 }
 
+#[wasm_bindgen]
+pub struct WasmPermissionAdviceRequest {
+    promise: js_sys::Promise,
+    cancel: Box<dyn Fn()>,
+}
+
+#[wasm_bindgen]
+impl WasmPermissionAdviceRequest {
+    #[wasm_bindgen(getter)]
+    pub fn promise(&self) -> js_sys::Promise {
+        self.promise.clone()
+    }
+
+    pub fn cancel(&self) {
+        (self.cancel)();
+    }
+}
+
 impl WasmDbInner {
+    fn request_permission_advice(
+        &self,
+        action: PermissionAdviceAction,
+    ) -> Result<WasmPermissionAdviceRequest, JsValue> {
+        macro_rules! request {
+            ($db:expr) => {{
+                let db = Rc::clone($db);
+                let future = db.request_permission_advice(action);
+                let request_id = future.request_id();
+                let cancel_db = Rc::clone(&db);
+                WasmPermissionAdviceRequest {
+                    promise: future_to_promise(async move {
+                        Ok(JsValue::from_str(&advice_string(future.await)))
+                    }),
+                    cancel: Box::new(move || {
+                        cancel_db.cancel_permission_advice_request(request_id)
+                    }),
+                }
+            }};
+        }
+        Ok(match self {
+            WasmDbInner::Memory(db) => request!(db),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => request!(db),
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        })
+    }
+
     fn register_schema_view(&self, schema: JazzSchema) -> Result<Self, String> {
         match self {
             Self::Memory(db) => Ok(Self::Memory(Rc::new(
@@ -1613,56 +1669,46 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = canInsertEncoded)]
-    pub fn can_insert_encoded(&self, table: String, cells: Vec<u8>) -> Result<bool, JsValue> {
+    pub fn can_insert_encoded(&self, table: String, cells: Vec<u8>) -> Result<String, JsValue> {
         let cells = decode_cells(&cells)?;
         match &self.inner {
-            WasmDbInner::Memory(db) => db.can_insert(&table, cells).map_err(to_js_error),
+            WasmDbInner::Memory(db) => db
+                .can_insert(&table, cells)
+                .map(advice_string)
+                .map_err(to_js_error),
             #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => db.can_insert(&table, cells).map_err(to_js_error),
+            WasmDbInner::Browser(db) => db
+                .can_insert(&table, cells)
+                .map(advice_string)
+                .map_err(to_js_error),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
     }
 
-    #[wasm_bindgen(js_name = canInsertEncodedForIdentity)]
-    pub fn can_insert_encoded_for_identity(
+    #[wasm_bindgen(js_name = requestInsertPermissionAdviceEncoded)]
+    pub fn request_insert_permission_advice_encoded(
         &self,
         table: String,
         cells: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<bool, JsValue> {
-        let cells = decode_cells(&cells)?;
-        let author = author_id_from_bytes(&author)?;
-        match &self.inner {
-            WasmDbInner::Memory(db) => db
-                .can_insert_for_identity(&table, cells, author)
-                .map_err(to_js_error),
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => db
-                .can_insert_for_identity(&table, cells, author)
-                .map_err(to_js_error),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
-        }
+    ) -> Result<WasmPermissionAdviceRequest, JsValue> {
+        self.inner
+            .request_permission_advice(PermissionAdviceAction::Insert {
+                table,
+                cells: decode_cells(&cells)?,
+            })
     }
 
-    #[wasm_bindgen(js_name = canReadForIdentity)]
-    pub fn can_read_for_identity(
+    #[wasm_bindgen(js_name = requestReadPermissionAdvice)]
+    pub fn request_read_permission_advice(
         &self,
         table: String,
         row_id: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<bool, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let author = author_id_from_bytes(&author)?;
-        match &self.inner {
-            WasmDbInner::Memory(db) => db
-                .can_read_for_identity(&table, row_id, author)
-                .map_err(to_js_error),
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => db
-                .can_read_for_identity(&table, row_id, author)
-                .map_err(to_js_error),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
-        }
+    ) -> Result<WasmPermissionAdviceRequest, JsValue> {
+        self.inner
+            .request_permission_advice(PermissionAdviceAction::Read {
+                table,
+                row: row_uuid_from_bytes(&row_id)?,
+            })
     }
 
     #[wasm_bindgen(js_name = insertWithIdEncoded)]
@@ -1722,6 +1768,21 @@ impl WasmDb {
         )
     }
 
+    #[wasm_bindgen(js_name = requestUpdatePermissionAdviceEncoded)]
+    pub fn request_update_permission_advice_encoded(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        patch: Vec<u8>,
+    ) -> Result<WasmPermissionAdviceRequest, JsValue> {
+        self.inner
+            .request_permission_advice(PermissionAdviceAction::Update {
+                table,
+                row: row_uuid_from_bytes(&row_id)?,
+                patch: decode_cells(&patch)?,
+            })
+    }
+
     #[wasm_bindgen(js_name = updateEncodedForIdentity)]
     pub fn update_encoded_for_identity(
         &self,
@@ -1741,49 +1802,6 @@ impl WasmDb {
             patch,
             updated_at_ms.map(|value| value as u64),
         )
-    }
-
-    #[wasm_bindgen(js_name = canUpdateEncodedForIdentity)]
-    pub fn can_update_encoded_for_identity(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        _patch: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<bool, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let author = author_id_from_bytes(&author)?;
-        match &self.inner {
-            WasmDbInner::Memory(db) => db
-                .can_update_for_identity(&table, row_id, author)
-                .map_err(to_js_error),
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => db
-                .can_update_for_identity(&table, row_id, author)
-                .map_err(to_js_error),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
-        }
-    }
-
-    #[wasm_bindgen(js_name = canDeleteForIdentity)]
-    pub fn can_delete_for_identity(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<bool, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let author = author_id_from_bytes(&author)?;
-        match &self.inner {
-            WasmDbInner::Memory(db) => db
-                .can_delete_for_identity(&table, row_id, author)
-                .map_err(to_js_error),
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => db
-                .can_delete_for_identity(&table, row_id, author)
-                .map_err(to_js_error),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
-        }
     }
 
     #[wasm_bindgen(js_name = upsertEncoded)]
@@ -1835,6 +1853,19 @@ impl WasmDb {
         let row_id = row_uuid_from_bytes(&row_id)?;
         self.inner
             .delete(&table, row_id, updated_at_ms.map(|value| value as u64))
+    }
+
+    #[wasm_bindgen(js_name = requestDeletePermissionAdvice)]
+    pub fn request_delete_permission_advice(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+    ) -> Result<WasmPermissionAdviceRequest, JsValue> {
+        self.inner
+            .request_permission_advice(PermissionAdviceAction::Delete {
+                table,
+                row: row_uuid_from_bytes(&row_id)?,
+            })
     }
 
     #[wasm_bindgen(js_name = deleteForIdentity)]

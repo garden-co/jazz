@@ -39,6 +39,7 @@ import {
   type AuthConfig,
   type OpenBatchId,
   type BatchId,
+  type PermissionAdvice,
 } from "./client.js";
 import { type RuntimeSource, type RuntimeTokenOptions } from "./runtime-source.js";
 import { DefaultRuntimeSource } from "./default-runtime-source.js";
@@ -1377,7 +1378,8 @@ export class Db {
     return client.delete(table._table, id, options, context?.session, context?.attribution);
   }
 
-  canInsert<T, Init>(table: TableProxy<T, Init>, data: Init): boolean {
+  /** Request authoritative permission advice for inserting a row. */
+  async canInsert<T, Init>(table: TableProxy<T, Init>, data: Init): Promise<PermissionAdvice> {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecordForOperation(
@@ -1387,16 +1389,26 @@ export class Db {
       table._table,
     );
     const context = this.getRuntimeOperationContext();
-    return client.canInsert(table._table, values, context?.session);
+    return client.requestInsertPermissionAdvice(table._table, values, context?.session);
   }
 
-  canRead<T, Init>(table: TableProxy<T, Init>, id: string): boolean {
+  /** Request authoritative permission advice for reading a row. */
+  async canRead<T, Init>(table: TableProxy<T, Init>, id: string): Promise<PermissionAdvice> {
     const client = this.getClient(table._schema);
     const context = this.getRuntimeOperationContext();
-    return client.canRead(table._table, id, context?.readSession ?? context?.session);
+    return client.requestReadPermissionAdvice(
+      table._table,
+      id,
+      context?.readSession ?? context?.session,
+    );
   }
 
-  canUpdate<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): boolean {
+  /** Request authoritative permission advice for updating a row. */
+  async canUpdate<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+  ): Promise<PermissionAdvice> {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
     const updates = toWriteRecordForOperation(
@@ -1406,13 +1418,14 @@ export class Db {
       table._table,
     );
     const context = this.getRuntimeOperationContext();
-    return client.canUpdate(table._table, id, updates, context?.session);
+    return client.requestUpdatePermissionAdvice(table._table, id, updates, context?.session);
   }
 
-  canDelete<T, Init>(table: TableProxy<T, Init>, id: string): boolean {
+  /** Request authoritative permission advice for deleting a row. */
+  async canDelete<T, Init>(table: TableProxy<T, Init>, id: string): Promise<PermissionAdvice> {
     const client = this.getClient(table._schema);
     const context = this.getRuntimeOperationContext();
-    return client.canDelete(table._table, id, context?.session);
+    return client.requestDeletePermissionAdvice(table._table, id, context?.session);
   }
 
   private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {

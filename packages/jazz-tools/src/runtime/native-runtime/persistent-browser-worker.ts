@@ -93,6 +93,34 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
         postResult(message.id, result);
         return;
       }
+      case "requestInsertPermissionAdvice": {
+        const result = await getRuntime(message.viewId).requestInsertPermissionAdvice(
+          ...message.args,
+        );
+        postResult(message.id, result);
+        return;
+      }
+      case "requestReadPermissionAdvice": {
+        const result = await getRuntime(message.viewId).requestReadPermissionAdvice(
+          ...message.args,
+        );
+        postResult(message.id, result);
+        return;
+      }
+      case "requestUpdatePermissionAdvice": {
+        const result = await getRuntime(message.viewId).requestUpdatePermissionAdvice(
+          ...message.args,
+        );
+        postResult(message.id, result);
+        return;
+      }
+      case "requestDeletePermissionAdvice": {
+        const result = await getRuntime(message.viewId).requestDeletePermissionAdvice(
+          ...message.args,
+        );
+        postResult(message.id, result);
+        return;
+      }
       case "beginTransaction": {
         const [kind, id, sessionJson] = message.args;
         const result = getRuntime().beginTransaction(kind, id, sessionJson);

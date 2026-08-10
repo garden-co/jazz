@@ -561,6 +561,17 @@ where
                 })?;
                 self.apply_content_extents(extents)
             }
+            SyncMessage::PermissionAdviceRequest { .. }
+            | SyncMessage::PermissionAdviceResponse { .. }
+            | SyncMessage::AuthorizationScopeSubscribe { .. }
+            | SyncMessage::AuthorizationScopeReceipt { .. }
+            | SyncMessage::AuthorizationScopeIntent { .. }
+            | SyncMessage::AuthorizationScopeView { .. }
+            | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
+            | SyncMessage::AuthorizationScopeUnavailable { .. }
+            | SyncMessage::AuthorizationScopeDecision { .. } => Err(Error::UnsupportedSyncMessage(
+                "permission advice requires authenticated link context",
+            )),
         }
     }
 

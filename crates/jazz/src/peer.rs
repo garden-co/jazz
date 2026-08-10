@@ -13,6 +13,7 @@ use groove::ivm::MultisinkSubscription;
 use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use web_time::Instant;
 
+use crate::authorization_scope::AuthorityScopeAggregate;
 use crate::ids::{AuthorId, RowUuid};
 use crate::node::content_store::Extent;
 use crate::node::maintained_subscription_view::{
@@ -106,6 +107,9 @@ pub struct PeerState {
     deferred_edge_fates: BTreeMap<TxId, DeferredEdgeFate>,
     edge_scope_subscription_refs: BTreeMap<SubscriptionKey, usize>,
     idle_edge_scope_subscriptions: BTreeMap<SubscriptionKey, u64>,
+    /// Completed authority-local aggregate proofs used by terminal commit
+    /// admission.  This is intentionally separate from ordinary views.
+    authority_scope_proofs: u64,
     announced_catalogue_fingerprint: Option<[u8; 32]>,
     /// Deterministic counters for this peer.
     pub metrics: PeerMetrics,
@@ -281,6 +285,7 @@ impl Default for PeerState {
             deferred_edge_fates: BTreeMap::new(),
             edge_scope_subscription_refs: BTreeMap::new(),
             idle_edge_scope_subscriptions: BTreeMap::new(),
+            authority_scope_proofs: 0,
             announced_catalogue_fingerprint: None,
             metrics: PeerMetrics::default(),
         }
@@ -1809,7 +1814,7 @@ impl PeerState {
             ));
         }
         let permission_identity = self.identity();
-        if let Some(scope_subscriptions) = self.unsettled_permission_scope_subscriptions(
+        if let Some(scope_subscriptions) = self.unsettled_authority_scope_subscriptions(
             node,
             permission_identity,
             &versions,
@@ -1860,7 +1865,7 @@ impl PeerState {
         let mut updates = Vec::new();
         for (tx_id, fate) in deferred {
             if self
-                .unsettled_permission_scope_subscriptions(
+                .unsettled_authority_scope_subscriptions(
                     node,
                     fate.permission_identity,
                     &fate.versions,
@@ -1925,7 +1930,90 @@ impl PeerState {
             .count() as u64;
     }
 
-    fn unsettled_permission_scope_subscriptions<S>(
+    /// Establish the same all-clause aggregate proof used by wire advice
+    /// before a terminal authority admits a client commit.  The action list is
+    /// reconstructed by `NodeState` from the actual version records, so
+    /// insert, update (including candidate patch), and delete each compile the
+    /// correct policy clauses rather than sharing a placeholder update.
+    pub(crate) fn prove_terminal_commit_authorization<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        writer: AuthorId,
+        versions: &[VersionRecord],
+    ) -> Result<(), Error>
+    where
+        S: OrderedKvStorage,
+    {
+        for action in node.authorization_actions_for_versions(versions)? {
+            let scope = node.authorization_support_scope(writer, &action)?;
+            if scope.subscriptions.is_empty() {
+                continue;
+            }
+            let mut aggregate = AuthorityScopeAggregate::new(
+                scope
+                    .subscriptions
+                    .iter()
+                    .map(|(shape, binding)| (shape.shape_id(), binding.binding_id()))
+                    .collect(),
+            );
+            for (shape, binding) in scope.subscriptions {
+                let subscription = SubscriptionKey {
+                    shape_id: shape.shape_id(),
+                    binding_id: binding.binding_id(),
+                    read_view: scope.options.read_view_key(),
+                };
+                if !aggregate.register(subscription, (shape.shape_id(), binding.binding_id())) {
+                    continue;
+                }
+                let (cut, progress) = if self
+                    .subscriptions
+                    .get(&subscription)
+                    .is_some_and(|state| state.maintained_subscription_view.is_some())
+                {
+                    (
+                        node.applied_global_watermark(),
+                        self.authorization_progress_for_subscription(subscription),
+                    )
+                } else {
+                    let previous_role = self.role;
+                    self.role = PeerRole::ClientLink { identity: writer };
+                    let update = self.rehydrate_query(node, &shape, &binding);
+                    self.role = previous_role;
+                    let SyncMessage::ViewUpdate {
+                        settled_through, ..
+                    } = update?
+                    else {
+                        return Err(Error::UnsupportedSyncMessage(
+                            "terminal authority support hydration did not return a view",
+                        ));
+                    };
+                    (
+                        settled_through,
+                        self.authorization_progress_for_subscription(subscription),
+                    )
+                };
+                let _ = aggregate.apply(subscription, cut, progress);
+            }
+            if aggregate.bounds().is_none() {
+                return Err(Error::UnsupportedSyncMessage(
+                    "terminal authority support proof is incomplete",
+                ));
+            }
+            self.authority_scope_proofs = self.authority_scope_proofs.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn terminal_authority_scope_proof_count(&self) -> u64 {
+        self.authority_scope_proofs
+    }
+
+    /// Locally hydrate the same action-specific support clauses that an
+    /// admitted upstream authority would send in `AuthorizationScopeView`.
+    /// Terminal cores do not put those views on a wire, but they must never
+    /// fall back to the historical table-wide permission query.
+    fn unsettled_authority_scope_subscriptions<S>(
         &mut self,
         node: &mut NodeState<S>,
         writer: AuthorId,
@@ -1936,41 +2024,94 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         let mut unsettled = Vec::new();
-        let tables = versions
-            .iter()
-            .map(|version| version.table().to_owned())
-            .collect::<BTreeSet<_>>();
-        for table in tables {
-            let Some((shape, binding)) = node.permission_scope_shape_binding(&table, writer)?
-            else {
+        for action in node.authorization_actions_for_versions(versions)? {
+            let scope = node.authorization_support_scope(writer, &action)?;
+            if scope.subscriptions.is_empty() {
+                // A policy with no support clauses is structurally complete;
+                // its terminal decision is evaluated by the same authority
+                // path without inventing an empty receipt.
                 continue;
-            };
-            let subscription = SubscriptionKey {
-                shape_id: shape.shape_id(),
-                binding_id: binding.binding_id(),
-                read_view: Default::default(),
-            };
-            if retained_scope_is_unsettled
-                && self
-                    .edge_scope_subscription_refs
-                    .contains_key(&subscription)
-            {
+            }
+            let mut aggregate = AuthorityScopeAggregate::new(
+                scope
+                    .subscriptions
+                    .iter()
+                    .map(|(shape, binding)| (shape.shape_id(), binding.binding_id()))
+                    .collect(),
+            );
+            for (shape, binding) in scope.subscriptions {
+                let subscription = SubscriptionKey {
+                    shape_id: shape.shape_id(),
+                    binding_id: binding.binding_id(),
+                    read_view: scope.options.read_view_key(),
+                };
+                if !aggregate.register(subscription, (shape.shape_id(), binding.binding_id())) {
+                    // The compiler may reach the same canonical clause through
+                    // more than one policy edge.  It remains one support
+                    // proof clause, never a second maintained subscription.
+                    continue;
+                }
+                if retained_scope_is_unsettled
+                    && self
+                        .edge_scope_subscription_refs
+                        .contains_key(&subscription)
+                {
+                    unsettled.push(subscription);
+                    continue;
+                }
+                if self
+                    .subscriptions
+                    .get(&subscription)
+                    .is_some_and(|state| state.maintained_subscription_view.is_some())
+                {
+                    let _ = aggregate.apply(
+                        subscription,
+                        node.applied_global_watermark(),
+                        self.authorization_progress_for_subscription(subscription),
+                    );
+                    continue;
+                }
+                let previous_role = self.role;
+                self.role = PeerRole::ClientLink { identity: writer };
+                let rehydrate = self.rehydrate_query(node, &shape, &binding);
+                self.role = previous_role;
+                let update = rehydrate?;
+                let SyncMessage::ViewUpdate {
+                    settled_through, ..
+                } = update
+                else {
+                    return Err(Error::UnsupportedSyncMessage(
+                        "authority support hydration did not return a view",
+                    ));
+                };
+                let _ = aggregate.apply(
+                    subscription,
+                    settled_through,
+                    self.authorization_progress_for_subscription(subscription),
+                );
+                // This legacy direct-PeerState entry point is retained only
+                // for compatibility tests.  Db edge admission uses the
+                // authority-owned upstream receipt path; a caller already
+                // parked here still waits for its next drain turn.
                 unsettled.push(subscription);
-                continue;
             }
-            if self
-                .subscriptions
-                .get(&subscription)
-                .is_some_and(|state| state.maintained_subscription_view.is_some())
-            {
-                continue;
+            if aggregate.bounds().is_none() {
+                // Preserve the exact subscriptions that still need a newer
+                // clause view so an existing parked caller can retain them.
+                let missing = aggregate
+                    .expected_support()
+                    .iter()
+                    .filter_map(|(shape_id, binding_id)| {
+                        let subscription = SubscriptionKey {
+                            shape_id: *shape_id,
+                            binding_id: *binding_id,
+                            read_view: scope.options.read_view_key(),
+                        };
+                        (!unsettled.contains(&subscription)).then_some(subscription)
+                    })
+                    .collect::<Vec<_>>();
+                unsettled.extend(missing);
             }
-            let previous_role = self.role;
-            self.role = PeerRole::ClientLink { identity: writer };
-            let rehydrate = self.rehydrate_query(node, &shape, &binding);
-            self.role = previous_role;
-            let _ = rehydrate?;
-            unsettled.push(subscription);
         }
         if unsettled.is_empty() {
             Ok(None)

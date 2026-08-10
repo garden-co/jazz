@@ -14,6 +14,7 @@ import type {
   InsertResult,
   MutationResult,
   OpenBatchId,
+  PermissionAdvice,
   Runtime,
   TransactionKind,
 } from "../client.js";
@@ -166,16 +167,17 @@ type NativeDb = {
     author: Uint8Array,
     updatedAtMs?: number | null,
   ): Write;
-  canInsertEncoded?(table: string, cells: Uint8Array): boolean;
-  canInsertEncodedForIdentity?(table: string, cells: Uint8Array, author: Uint8Array): boolean;
-  canReadForIdentity?(table: string, rowId: Uint8Array, author: Uint8Array): boolean;
-  canUpdateEncodedForIdentity?(
+  requestInsertPermissionAdviceEncoded?(
+    table: string,
+    cells: Uint8Array,
+  ): NativePermissionAdviceRequest;
+  requestReadPermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceRequest;
+  requestUpdatePermissionAdviceEncoded?(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
-    author: Uint8Array,
-  ): boolean;
-  canDeleteForIdentity?(table: string, rowId: Uint8Array, author: Uint8Array): boolean;
+  ): NativePermissionAdviceRequest;
+  requestDeletePermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceRequest;
   mergeableTx(openBatchId: OpenBatchId): Tx;
   mergeableTxForIdentity?(openBatchId: OpenBatchId, author: Uint8Array): Tx;
   exclusiveTx?(openBatchId: OpenBatchId): Tx;
@@ -195,6 +197,11 @@ type NativeDb = {
   tick(): void;
   close?(): void;
   free?(): void;
+};
+
+type NativePermissionAdviceRequest = {
+  readonly promise: Promise<PermissionAdvice>;
+  cancel(): void;
 };
 
 type PreparedQuery = object;
@@ -660,59 +667,87 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.finishMutation(write);
   }
 
-  canInsert(table: string, values: InsertValues, session?: Session): boolean {
-    const cells = encodeCellsForRow(this.table(table), values, table);
-    const runtimeSession = runtimeSessionFromPublicSession(session);
-    this.applySessionClaims(runtimeSession);
-    const identity = runtimeSession?.identity ?? this.peerIdentity ?? parseUuid(SYSTEM_AUTHOR_ID);
-    if (this.db.canInsertEncodedForIdentity) {
-      return this.db.canInsertEncodedForIdentity(table, cells, identity);
-    }
-    if (!runtimeSession && this.db.canInsertEncoded) {
-      return this.db.canInsertEncoded(table, cells);
-    }
-    throw new Error("Runtime does not support write-policy dry-run insert checks.");
+  canInsertLocally(table: string, values: InsertValues, session?: Session): PermissionAdvice {
+    void table;
+    void values;
+    void session;
+    return "unknown";
   }
 
-  canRead(table: string, objectId: string, session?: Session): boolean {
-    this.table(table);
-    const rowId = parseUuid(objectId);
-    const runtimeSession = runtimeSessionFromPublicSession(session);
-    this.applySessionClaims(runtimeSession);
-    const identity = runtimeSession?.identity ?? this.peerIdentity ?? parseUuid(SYSTEM_AUTHOR_ID);
-    if (!this.db.canReadForIdentity) {
-      throw new Error("Runtime does not support read-policy dry-run checks.");
-    }
-    return this.db.canReadForIdentity(table, rowId, identity);
+  canReadLocally(table: string, objectId: string, session?: Session): PermissionAdvice {
+    void table;
+    void objectId;
+    void session;
+    return "unknown";
   }
 
-  canUpdate(
+  canUpdateLocally(
     table: string,
     objectId: string,
     values: Record<string, Value>,
     session?: Session,
-  ): boolean {
-    const rowId = parseUuid(objectId);
-    const patch = encodeCellsForPatch(this.table(table), values);
-    const runtimeSession = runtimeSessionFromPublicSession(session);
-    this.applySessionClaims(runtimeSession);
-    const identity = runtimeSession?.identity ?? this.peerIdentity ?? parseUuid(SYSTEM_AUTHOR_ID);
-    if (!this.db.canUpdateEncodedForIdentity) {
-      throw new Error("Runtime does not support write-policy dry-run update checks.");
-    }
-    return this.db.canUpdateEncodedForIdentity(table, rowId, patch, identity);
+  ): PermissionAdvice {
+    void table;
+    void objectId;
+    void values;
+    void session;
+    return "unknown";
   }
 
-  canDelete(table: string, objectId: string, session?: Session): boolean {
-    this.table(table);
-    const rowId = parseUuid(objectId);
-    const runtimeSession = runtimeSessionFromPublicSession(session);
-    this.applySessionClaims(runtimeSession);
-    const identity = runtimeSession?.identity ?? this.peerIdentity ?? parseUuid(SYSTEM_AUTHOR_ID);
-    if (!this.db.canDeleteForIdentity) {
-      throw new Error("Runtime does not support write-policy dry-run delete checks.");
-    }
-    return this.db.canDeleteForIdentity(table, rowId, identity);
+  canDeleteLocally(table: string, objectId: string, session?: Session): PermissionAdvice {
+    void table;
+    void objectId;
+    void session;
+    return "unknown";
+  }
+
+  requestInsertPermissionAdvice(
+    table: string,
+    values: InsertValues,
+    _session?: Session,
+  ): Promise<PermissionAdvice> {
+    const request = this.db.requestInsertPermissionAdviceEncoded;
+    if (!request) return Promise.resolve("unknown");
+    const cells = encodeCellsForRow(this.table(table), values, table);
+    return this.withPermissionAdviceTimeout(() => request.call(this.db, table, cells));
+  }
+
+  requestReadPermissionAdvice(
+    table: string,
+    objectId: string,
+    _session?: Session,
+  ): Promise<PermissionAdvice> {
+    const request = this.db.requestReadPermissionAdvice;
+    if (!request) return Promise.resolve("unknown");
+    return this.withPermissionAdviceTimeout(() =>
+      request.call(this.db, table, parseUuid(objectId)),
+    );
+  }
+
+  requestUpdatePermissionAdvice(
+    table: string,
+    objectId: string,
+    values: Record<string, Value>,
+    _session?: Session,
+  ): Promise<PermissionAdvice> {
+    const request = this.db.requestUpdatePermissionAdviceEncoded;
+    if (!request) return Promise.resolve("unknown");
+    const patch = encodeCellsForPatch(this.table(table), values);
+    return this.withPermissionAdviceTimeout(() =>
+      request.call(this.db, table, parseUuid(objectId), patch),
+    );
+  }
+
+  requestDeletePermissionAdvice(
+    table: string,
+    objectId: string,
+    _session?: Session,
+  ): Promise<PermissionAdvice> {
+    const request = this.db.requestDeletePermissionAdvice;
+    if (!request) return Promise.resolve("unknown");
+    return this.withPermissionAdviceTimeout(() =>
+      request.call(this.db, table, parseUuid(objectId)),
+    );
   }
 
   beginTransaction(
@@ -1498,6 +1533,30 @@ export class NativeRuntimeAdapter implements Runtime {
     for (const [handle, subscription] of this.subscriptions) {
       this.startSubscriptionReader(handle, subscription);
     }
+  }
+
+  private withPermissionAdviceTimeout(
+    start: () => NativePermissionAdviceRequest,
+  ): Promise<PermissionAdvice> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.withPermissionAdviceTimeout(start);
+    if (this.closed || !this.serverTransport || !this.serverCarrier) {
+      return Promise.resolve("unknown");
+    }
+    const request = start();
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (advice: PermissionAdvice) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve(advice);
+      };
+      const timeout = setTimeout(() => {
+        request.cancel();
+        finish("unknown");
+      }, 2_000);
+      request.promise.then(finish, () => finish("unknown"));
+    });
   }
 
   private scheduleCoreWake(urgency: "immediate" | "deferred"): void {

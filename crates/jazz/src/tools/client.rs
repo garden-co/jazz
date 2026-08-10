@@ -1266,7 +1266,17 @@ impl ClientDbInner {
         )
         .await
         .map_err(|error| JazzError::Connection(error.to_string()))?;
-        Ok(db.connect_upstream(Box::new(WireTransportAdapter::current(transport))))
+        let (protocol_version, features, session_context) =
+            transport.negotiated_transport_metadata();
+        Ok(
+            db.connect_upstream(Box::new(WireTransportAdapter::new_with_session_context(
+                transport,
+                protocol_version,
+                features,
+                None,
+                session_context,
+            ))),
+        )
     }
 
     fn ensure_transaction_open(&self, batch_id: OpenBatchId) -> Result<()> {

@@ -57,15 +57,36 @@ export interface Runtime {
     write_context_json?: string | null,
   ): MutationResult;
   delete(table: string, object_id: string, write_context_json?: string | null): MutationResult;
-  canInsert?(table: string, values: InsertValues, session?: Session): boolean;
-  canRead?(table: string, objectId: string, session?: Session): boolean;
-  canUpdate?(
+  canInsertLocally?(table: string, values: InsertValues, session?: Session): PermissionAdvice;
+  canReadLocally?(table: string, objectId: string, session?: Session): PermissionAdvice;
+  canUpdateLocally?(
     table: string,
     objectId: string,
     values: Record<string, Value>,
     session?: Session,
-  ): boolean;
-  canDelete?(table: string, objectId: string, session?: Session): boolean;
+  ): PermissionAdvice;
+  canDeleteLocally?(table: string, objectId: string, session?: Session): PermissionAdvice;
+  requestInsertPermissionAdvice?(
+    table: string,
+    values: InsertValues,
+    session?: Session,
+  ): Promise<PermissionAdvice>;
+  requestReadPermissionAdvice?(
+    table: string,
+    objectId: string,
+    session?: Session,
+  ): Promise<PermissionAdvice>;
+  requestUpdatePermissionAdvice?(
+    table: string,
+    objectId: string,
+    values: Record<string, Value>,
+    session?: Session,
+  ): Promise<PermissionAdvice>;
+  requestDeletePermissionAdvice?(
+    table: string,
+    objectId: string,
+    session?: Session,
+  ): Promise<PermissionAdvice>;
   waitForTransaction(batchId: BatchId | Promise<BatchId>, tier: string): Promise<void>;
   query(
     query_json: string,
@@ -98,6 +119,13 @@ export interface Runtime {
   /** Register a callback invoked when the Rust transport rejects the JWT. */
   onAuthFailure(callback: (reason: string) => void): void;
 }
+
+/**
+ * Advisory result for a permission preflight. `allowed` and `denied` are
+ * final only when a trusted-serving authority evaluated the request;
+ * `unknown` means that a local replica or unavailable authority cannot decide.
+ */
+export type PermissionAdvice = "allowed" | "denied" | "unknown";
 
 export interface TransactionalRuntime extends Runtime {
   beginTransaction(
@@ -946,30 +974,38 @@ export class JazzClient {
     return new WriteHandle(committedBatchId(result), this);
   }
 
-  canInsert(table: string, values: InsertValues, session?: Session): boolean {
-    if (!this.runtime.canInsert) {
+  canInsertLocally(table: string, values: InsertValues, session?: Session): PermissionAdvice {
+    if (!this.runtime.canInsertLocally) {
       throw new Error("Runtime does not support write-policy dry-run insert checks.");
     }
-    return this.runtime.canInsert(table, values, session ?? this.resolvedSession ?? undefined);
+    return this.runtime.canInsertLocally(
+      table,
+      values,
+      session ?? this.resolvedSession ?? undefined,
+    );
   }
 
-  canRead(table: string, objectId: string, session?: Session): boolean {
-    if (!this.runtime.canRead) {
+  canReadLocally(table: string, objectId: string, session?: Session): PermissionAdvice {
+    if (!this.runtime.canReadLocally) {
       throw new Error("Runtime does not support read-policy dry-run checks.");
     }
-    return this.runtime.canRead(table, objectId, session ?? this.resolvedSession ?? undefined);
+    return this.runtime.canReadLocally(
+      table,
+      objectId,
+      session ?? this.resolvedSession ?? undefined,
+    );
   }
 
-  canUpdate(
+  canUpdateLocally(
     table: string,
     objectId: string,
     values: Record<string, Value>,
     session?: Session,
-  ): boolean {
-    if (!this.runtime.canUpdate) {
+  ): PermissionAdvice {
+    if (!this.runtime.canUpdateLocally) {
       throw new Error("Runtime does not support write-policy dry-run update checks.");
     }
-    return this.runtime.canUpdate(
+    return this.runtime.canUpdateLocally(
       table,
       objectId,
       values,
@@ -977,11 +1013,73 @@ export class JazzClient {
     );
   }
 
-  canDelete(table: string, objectId: string, session?: Session): boolean {
-    if (!this.runtime.canDelete) {
+  canDeleteLocally(table: string, objectId: string, session?: Session): PermissionAdvice {
+    if (!this.runtime.canDeleteLocally) {
       throw new Error("Runtime does not support write-policy dry-run delete checks.");
     }
-    return this.runtime.canDelete(table, objectId, session ?? this.resolvedSession ?? undefined);
+    return this.runtime.canDeleteLocally(
+      table,
+      objectId,
+      session ?? this.resolvedSession ?? undefined,
+    );
+  }
+
+  requestInsertPermissionAdvice(
+    table: string,
+    values: InsertValues,
+    session?: Session,
+  ): Promise<PermissionAdvice> {
+    return (
+      this.runtime.requestInsertPermissionAdvice?.(
+        table,
+        values,
+        session ?? this.resolvedSession ?? undefined,
+      ) ?? Promise.resolve("unknown")
+    );
+  }
+
+  requestReadPermissionAdvice(
+    table: string,
+    objectId: string,
+    session?: Session,
+  ): Promise<PermissionAdvice> {
+    return (
+      this.runtime.requestReadPermissionAdvice?.(
+        table,
+        objectId,
+        session ?? this.resolvedSession ?? undefined,
+      ) ?? Promise.resolve("unknown")
+    );
+  }
+
+  requestUpdatePermissionAdvice(
+    table: string,
+    objectId: string,
+    values: Record<string, Value>,
+    session?: Session,
+  ): Promise<PermissionAdvice> {
+    return (
+      this.runtime.requestUpdatePermissionAdvice?.(
+        table,
+        objectId,
+        values,
+        session ?? this.resolvedSession ?? undefined,
+      ) ?? Promise.resolve("unknown")
+    );
+  }
+
+  requestDeletePermissionAdvice(
+    table: string,
+    objectId: string,
+    session?: Session,
+  ): Promise<PermissionAdvice> {
+    return (
+      this.runtime.requestDeletePermissionAdvice?.(
+        table,
+        objectId,
+        session ?? this.resolvedSession ?? undefined,
+      ) ?? Promise.resolve("unknown")
+    );
   }
 
   /**

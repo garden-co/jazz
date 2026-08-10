@@ -11,7 +11,7 @@ authorization, read narrowing, and policy composition. It builds on queries
 
 Invariant digest:
 
-- `INV-API-28`: Db::caninsert, canread, canupdate, and candelete MUST evaluate permissions under the current DbIdentity.author without committing writes, changing local rows, or using...
+- `INV-API-28`: Permission advice is a three-valued, authority-scoped dry run: only the serving authority may issue definitive Allowed/Denied; client-local, offline, incomplete, not-ready, and timed-out requests yield Unknown. Advice is non-mutating and does not reserve a later mutation; its authenticated request/response exchange exposes no policy evidence and is correlation-, cancellation-, replay-, and dedup-safe.
 - `INV-API-29`: A Db is a client: facade writes MUST keep permissionsubject == madeby, and a Db MUST reject any attempt to attribute a write to another author. Cross-author attributio...
 - `INV-BRANCH-15`: Branch overlay data MUST NOT ship to a session that cannot read the branch metadata row; branch readability gates overlay visibility before ordinary per-row policy che...
 - `INV-RLS-1`: A non-system commit unit MUST be rejected with Fate::Rejected(RejectionReason::AuthorizationDenied) and MUST NOT ingest accepted version rows when any version in the u...
@@ -370,12 +370,21 @@ client-supplied values must not widen those facts.
   checks are valid policy atoms, how to bound them, and how to lower them
   without creating accidental whole-table authority scans. Exposed by
   `world-tour`'s band-member policy.
-- ✅ **Permission introspection is a dry-run API, not magic columns.** `$can*`
-  columns cannot express _can-insert_ or richer probes; a dry-run is policy
-  evaluation _without ingest_ — the write-validation machinery applied
-  hypothetically, with local-preview semantics. The facade methods (`can_insert`,
-  `can_read`, `can_update`, `can_delete`, ch. 13) are implemented as dry-runs
-  (`INV-API-28`).
+- ✅ **Permission introspection is an authority dry-run API, not magic
+  columns.** `$can*` columns cannot express _can-insert_ or richer probes. The
+  facade methods (`can_insert`, `can_read`, `can_update`, `can_delete`, ch. 13)
+  produce `Allowed`, `Denied`, or `Unknown`; only the serving authority may
+  issue a definitive result. A local, offline, incomplete, not-ready, or timed
+  out client receives `Unknown`, never a local policy decision. Requests are
+  evaluated under the authenticated link identity and return only an opaque
+  correlation id plus the advice value, never supporting rows, policy reasons,
+  or hidden dependency facts. Advice is non-mutating and does not reserve or
+  authorize the ordinary optimistic write that may follow (`INV-API-28`).
+- 🔶 **Safe local permission fail-fast.** A future client-local `Denied` may be
+  added only when it is mechanically proven that every fact required for that
+  rejection is locally complete (for example, proposed-row or structural facts).
+  Missing policy support is never denial proof. Local `Allowed` remains
+  forbidden without the serving authority.
 - 🔶 **Principal authorship migration.** Decide the stable `AuthorId`/principal
   representation for commit authorship, how old self-authored commit encodings
   are rejected or migrated, and where backend attribution helpers are permitted.

@@ -189,6 +189,212 @@ pub enum SyncMessage {
     /// Trusted upstream catalogue metadata required to decode immutable
     /// authored-version payloads before their view update arrives.
     CatalogueSnapshot(Box<CatalogueSnapshot>),
+    /// One-shot permission preflight. The authenticated link identity is the
+    /// subject; identity and claims are intentionally absent from the payload.
+    PermissionAdviceRequest {
+        /// Client-generated opaque id, unique among requests on this live link.
+        request_id: PermissionAdviceRequestId,
+        /// Hypothetical operation to evaluate without mutation.
+        action: PermissionAdviceAction,
+    },
+    /// One-shot permission preflight result. No supporting rows or denial
+    /// reason are carried across this boundary.
+    PermissionAdviceResponse {
+        /// Opaque id copied from the request.
+        request_id: PermissionAdviceRequestId,
+        /// Final serving-authority result, or `Unknown` when unavailable.
+        advice: PermissionAdvice,
+    },
+    /// Register and hydrate a support view for one authorization scope.
+    ///
+    /// Appended to preserve every pre-existing postcard enum discriminant.
+    /// This wraps the existing subscription pipeline rather than creating a
+    /// second query transport, and is feature-gated for old peers.
+    AuthorizationScopeSubscribe {
+        /// Ordinary shape/binding subscription carrying the support view.
+        subscribe: Subscribe,
+        /// Scope and non-secret operation purpose of that support view.
+        purpose: AuthorizationScopePurpose,
+    },
+    /// Authority proof emitted after the matching support `ViewUpdate`.
+    AuthorizationScopeReceipt {
+        /// Support view that the receiver must apply before accepting proof.
+        subscription: SubscriptionKey,
+        /// Bound authority receipt.
+        receipt: AuthorizationScopeReceipt,
+    },
+    /// Minimal request for an authority-owned authorization support scope.
+    ///
+    /// The caller supplies only an opaque correlation id and the hypothetical
+    /// action.  In particular it cannot select a shape, binding, scope key, or
+    /// authenticated subject.
+    AuthorizationScopeIntent {
+        /// Opaque request correlation chosen by the client.
+        request_id: PermissionAdviceRequestId,
+        /// Candidate operation; all support scope details are authority-derived.
+        action: PermissionAdviceAction,
+    },
+    /// One authority-selected support clause for an authorization intent.
+    /// `view` is an ordinary `ViewUpdate`, wrapped only to carry its opaque
+    /// request and server-chosen scope metadata.
+    AuthorizationScopeView {
+        /// Opaque request correlation from the matching intent.
+        request_id: PermissionAdviceRequestId,
+        /// Authority-derived scope identity.
+        key: AuthorizationSupportScopeKey,
+        /// Zero-based authority clause ordinal.
+        clause_index: u16,
+        /// Total number of authority clauses in this hydration.
+        clause_count: u16,
+        /// Ordinary settlement-bearing `ViewUpdate` payload.
+        view: Box<SyncMessage>,
+    },
+    /// Aggregate proof for every clause sent in an authority scope view set.
+    AuthorizationScopeAggregateReceipt {
+        /// Opaque request correlation from the matching intent.
+        request_id: PermissionAdviceRequestId,
+        /// Aggregate authority proof after every clause view.
+        receipt: AuthorizationScopeReceipt,
+    },
+    /// The admitted authority cannot currently hydrate an intent.  This is a
+    /// conservative terminal result: clients resolve the corresponding advice
+    /// as `Unknown` and park normal authority work.
+    AuthorizationScopeUnavailable {
+        /// Opaque request correlation from the matching intent.
+        request_id: PermissionAdviceRequestId,
+    },
+    /// Decision for an action with no policy-support clauses.  It deliberately
+    /// carries no support rows, shape identifiers, or binding identifiers.
+    AuthorizationScopeDecision {
+        /// Opaque request correlation from the matching intent.
+        request_id: PermissionAdviceRequestId,
+        /// Final authority result for the zero-support action.
+        advice: PermissionAdvice,
+    },
+}
+
+/// Opaque identity for one permission-advice exchange.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct PermissionAdviceRequestId(pub [u8; 16]);
+
+/// Hypothetical operation sent to a trusted serving authority.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum PermissionAdviceAction {
+    /// Insert a candidate row.
+    Insert {
+        /// Table name.
+        table: String,
+        /// Candidate cells after client-side value encoding.
+        cells: BTreeMap<String, Value>,
+    },
+    /// Read one current row.
+    Read {
+        /// Table name.
+        table: String,
+        /// Row id.
+        row: RowUuid,
+    },
+    /// Update one current row.
+    Update {
+        /// Table name.
+        table: String,
+        /// Row id.
+        row: RowUuid,
+        /// Candidate patch. It is carried for forward-compatible exact
+        /// update-check evaluation and is never echoed in the response.
+        patch: BTreeMap<String, Value>,
+    },
+    /// Delete one current row.
+    Delete {
+        /// Table name.
+        table: String,
+        /// Row id.
+        row: RowUuid,
+    },
+}
+
+/// The policy operation proven by an authorization-scope receipt.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
+)]
+pub enum AuthorizationScopeOperation {
+    /// Read-policy evaluation.
+    Read,
+    /// Insert-check evaluation.
+    Insert,
+    /// Update-using and update-check evaluation.
+    Update,
+    /// Delete-using evaluation.
+    Delete,
+}
+
+/// Stable, action-specific identity for one authority-hydrated policy scope.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct AuthorizationSupportScopeKey {
+    /// Compiled policy support shape, including the selected operation clause.
+    pub support_shape_digest: [u8; 32],
+    /// Authenticated subject, never caller-supplied on a serving link.
+    pub subject: AuthorId,
+    /// Canonical digest of authenticated claims.
+    pub claims_digest: [u8; 32],
+    /// Compiled policy shape and selected policy epoch.
+    pub policy_digest: [u8; 32],
+}
+
+/// Ephemeral candidate-specific key used only for final evaluation.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct AuthorizationOperationKey {
+    /// Exact operation to evaluate.
+    pub operation: AuthorizationScopeOperation,
+    /// Protected table.
+    pub table: String,
+    /// Target row when applicable.
+    pub row: Option<RowUuid>,
+    /// Canonical candidate/patch digest when applicable.
+    pub candidate_digest: [u8; 32],
+}
+
+/// Minimal caller intent for a regular subscription opened as authorization
+/// support. The authority derives the scope key and operation itself from this
+/// intent, its authenticated link identity, and the registered shape/binding.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct AuthorizationScopePurpose {
+    /// Candidate operation whose policy support is being hydrated.
+    pub action: PermissionAdviceAction,
+}
+
+/// Authority-issued receipt proving one scope was hydrated through its stated cut.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct AuthorizationScopeReceipt {
+    /// Scope covered by this receipt.
+    pub key: AuthorizationSupportScopeKey,
+    /// Authenticated authority identity that issued this receipt.
+    pub authority: [u8; 16],
+    /// Authenticated subscriber link to which this proof is restricted.
+    pub link: [u8; 16],
+    /// Authority-local connection/process epoch.
+    pub authority_epoch: u64,
+    /// Authenticated-claims revision paired with this proof.
+    pub claims_revision: u64,
+    /// Policy/schema epoch used to compile the scope.
+    pub policy_epoch: u64,
+    /// Complete authoritative history cut reflected by the support view.
+    pub settled_through: GlobalSeq,
+    /// Authority authorization generation paired with that cut.
+    pub authorization_progress: u64,
+}
+
+/// Advisory result of a permission preflight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum PermissionAdvice {
+    /// A trusted serving authority determined that the operation is allowed.
+    Allowed,
+    /// A trusted serving authority determined that the operation is denied.
+    Denied,
+    /// No trusted serving authority produced a final decision.
+    Unknown,
 }
 
 /// Ordered schema lineage metadata shipped ahead of authored row payloads.
@@ -218,6 +424,27 @@ pub struct BranchMetadata {
 }
 
 impl SyncMessage {
+    /// Optional wire capabilities required to serialize this semantic message.
+    ///
+    /// Kept on the semantic type so every codec caller uses one exhaustive
+    /// classification rather than accidentally sending a future enum variant
+    /// to an older peer.
+    pub fn required_wire_features(&self) -> crate::wire::WireFeatures {
+        match self {
+            Self::AuthorizationScopeSubscribe { .. } | Self::AuthorizationScopeReceipt { .. } => {
+                crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+            }
+            Self::AuthorizationScopeIntent { .. }
+            | Self::AuthorizationScopeView { .. }
+            | Self::AuthorizationScopeAggregateReceipt { .. }
+            | Self::AuthorizationScopeUnavailable { .. }
+            | Self::AuthorizationScopeDecision { .. } => {
+                crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
+            }
+            _ => crate::wire::FEATURE_NONE,
+        }
+    }
+
     /// Validate any packed view-update carrier runs in this message.
     pub fn validate_version_carriers(&self) -> Result<(), VersionBundleRunError> {
         match self {

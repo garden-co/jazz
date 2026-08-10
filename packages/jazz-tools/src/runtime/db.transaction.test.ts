@@ -422,13 +422,15 @@ describe("Db mergeable transactions", () => {
     await expect(allTodos()).resolves.toHaveLength(2);
   });
 
-  it("keeps write-policy dry-runs independent from uncommitted transaction rows", async () => {
-    expect(db.canInsert(app.todos, { title: "allowed", done: false })).toBe(true);
+  it("keeps client permission advice unknown across uncommitted transaction rows", async () => {
+    await expect(db.canInsert(app.todos, { title: "allowed", done: false })).resolves.toBe(
+      "unknown",
+    );
 
     const tx = db.beginTransaction();
     const staged = tx.insert(app.todos, { title: "staged dry-run", done: false });
 
-    expect(db.canUpdate(app.todos, staged.id, { done: true })).toBe(false);
+    await expect(db.canUpdate(app.todos, staged.id, { done: true })).resolves.toBe("unknown");
     expect(tx.kind).toBe("mergeable");
 
     await tx.rollback();

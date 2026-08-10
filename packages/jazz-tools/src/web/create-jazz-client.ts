@@ -1,7 +1,12 @@
 import type { Session } from "../runtime/context.js";
 import { acquireClient, releaseClient } from "../runtime/client-registry.js";
 import type { Db, DbConfig, QueryBuilder, QueryOptions, TableProxy } from "../runtime/db.js";
-import type { CreateOptions, DeleteOptions, UpdateOptions } from "../runtime/client.js";
+import type {
+  CreateOptions,
+  DeleteOptions,
+  PermissionAdvice,
+  UpdateOptions,
+} from "../runtime/client.js";
 import type { AuthState } from "../runtime/auth-state.js";
 import type {
   BinaryLargeValueFileApp,
@@ -89,9 +94,13 @@ export interface AsyncChannelDb {
     id: string,
     options?: DeleteOptions,
   ): Promise<AsyncWriteHandle>;
-  canInsert<T, Init>(table: TableProxy<T, Init>, data: Init): Promise<boolean>;
-  canUpdate<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): Promise<boolean>;
-  canDelete<T, Init>(table: TableProxy<T, Init>, id: string): Promise<boolean>;
+  canInsert<T, Init>(table: TableProxy<T, Init>, data: Init): Promise<PermissionAdvice>;
+  canUpdate<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+  ): Promise<PermissionAdvice>;
+  canDelete<T, Init>(table: TableProxy<T, Init>, id: string): Promise<PermissionAdvice>;
   createFileFromBlob<TApp extends BinaryLargeValueFileApp<any, any>>(
     app: TApp,
     blob: Blob,
@@ -223,7 +232,7 @@ class AsyncChannelDbFacade implements AsyncChannelDb {
     );
   }
 
-  canInsert<T, Init>(table: TableProxy<T, Init>, data: Init): Promise<boolean> {
+  canInsert<T, Init>(table: TableProxy<T, Init>, data: Init): Promise<PermissionAdvice> {
     return Promise.resolve(
       this.channel.canInsert(table, data, this.authState.session ?? undefined),
     );
@@ -233,13 +242,13 @@ class AsyncChannelDbFacade implements AsyncChannelDb {
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
-  ): Promise<boolean> {
+  ): Promise<PermissionAdvice> {
     return Promise.resolve(
       this.channel.canUpdate(table, id, data, this.authState.session ?? undefined),
     );
   }
 
-  canDelete<T, Init>(table: TableProxy<T, Init>, id: string): Promise<boolean> {
+  canDelete<T, Init>(table: TableProxy<T, Init>, id: string): Promise<PermissionAdvice> {
     return Promise.resolve(this.channel.canDelete(table, id, this.authState.session ?? undefined));
   }
 
