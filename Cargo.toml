@@ -8,9 +8,7 @@ members = [
   "crates/opfs-btree",
   "crates/jazz-wasm",
   "crates/jazz-napi",
-  # React Native is paused while we decide whether the new core runtime should
-  # use RocksDB on mobile or a dedicated mobile storage backend.
-  # "crates/jazz-rn/rust",
+  "crates/jazz-rn/rust",
   "crates/wasm-tracing",
   # The old Axum todo server examples expect a Send + Sync JazzClient in shared
   # router state. Core Db ownership is currently local-thread by design;

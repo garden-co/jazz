@@ -96,6 +96,8 @@
 /// Re-export of the underlying groove crate used for storage setup.
 pub use groove;
 
+/// Binding-neutral codecs and database-open helpers shared by native runtimes.
+pub mod binding_support;
 /// Disabled-by-default counters used by the native cold-settle attribution bench.
 #[cfg(feature = "cold-settle-attribution")]
 pub mod cold_settle_attribution;

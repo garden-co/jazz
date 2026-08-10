@@ -34,35 +34,27 @@ use napi_derive::napi;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use jazz::binding_support as core_binding;
 use jazz::db::{
-    Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity,
-    InitialSyncFlushCadence as CoreInitialSyncFlushCadence, LocalUpdates as CoreLocalUpdates,
-    MergeableTxOps, PeerConnection as CorePeerConnection, PreparedQuery as PreparedQueryInner,
-    Propagation as CorePropagation, QueryAttachment as CoreQueryAttachment,
-    ReadOpts as CoreReadOpts, RowCells as CoreRowCells, SeededRowIdSource as CoreSeededRowIdSource,
-    SubscriptionEvent, SubscriptionStream, TickScheduler as CoreTickScheduler,
-    TickUrgency as CoreTickUrgency, WireTransportAdapter as CoreWireTransportAdapter, WriteHandle,
-    block_on as core_block_on,
-};
-use jazz::groove::records::{
-    BorrowedRecord as CoreBorrowedRecord, RecordDescriptor, Value as CoreValue,
+    Db as CoreDb, MergeableTxOps, PeerConnection as CorePeerConnection,
+    PreparedQuery as PreparedQueryInner, QueryAttachment as CoreQueryAttachment,
+    ReadOpts as CoreReadOpts, RowCells as CoreRowCells, SubscriptionEvent, SubscriptionStream,
+    TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
+    WireTransportAdapter as CoreWireTransportAdapter, WriteHandle, block_on as core_block_on,
 };
 use jazz::groove::storage::{
     MemoryStorage as CoreMemoryStorage, OrderedKvStorage as CoreOrderedKvStorage,
     ReopenableStorage as CoreReopenableStorage, RocksDbStorage as CoreRocksDbStorage,
 };
-use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
+use jazz::ids::{AuthorId as CoreAuthorId, RowUuid as CoreRowUuid};
 use jazz::node::OpenTxId as CoreOpenTxId;
-use jazz::query::{
-    Query as CoreQuery, RelationExpr as CoreRelationExpr, RelationQuery as CoreRelationQuery,
-};
 use jazz::schema::JazzSchema;
 use jazz::tools::AppId;
 use jazz::tools::identity;
@@ -71,92 +63,8 @@ use jazz::tools::server::{
     JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend,
     TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
 };
-use jazz::tx::{DurabilityTier as CoreDurabilityTier, Fate as CoreFate, TxId};
+use jazz::tx::{DurabilityTier as CoreDurabilityTier, TxId};
 use jazz::wire::{TransportError, WireTransport as CoreWireTransport};
-
-#[derive(Clone, Debug, Deserialize)]
-struct CoreOpenDbConfig {
-    identity: CoreOpenDbIdentity,
-    row_id_seed: Option<u64>,
-    history_complete: bool,
-    initial_sync_flush_every: Option<u32>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize)]
-struct CoreOpenDbIdentity {
-    node: CoreNodeUuid,
-    author: CoreAuthorId,
-}
-
-impl From<CoreOpenDbIdentity> for CoreDbIdentity {
-    fn from(identity: CoreOpenDbIdentity) -> Self {
-        Self {
-            node: identity.node,
-            author: identity.author,
-        }
-    }
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-struct CoreRowBatch<'a> {
-    table: &'a str,
-    descriptor: RecordDescriptor,
-    rows: Vec<CoreRow<'a>>,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-struct CoreRow<'a> {
-    row_id: CoreRowUuid,
-    deleted: bool,
-    raw: &'a [u8],
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-struct CoreRelationSnapshot<'a> {
-    cursor: u64,
-    root_count: u64,
-    rows: Vec<CoreRowBatch<'a>>,
-    edges: Vec<CoreRelationEdge>,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-struct CoreSubscriptionDelta<'a> {
-    added: Vec<CoreRowBatch<'a>>,
-    updated: Vec<CoreRowBatch<'a>>,
-    removed: Vec<CoreRemovedRow>,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-struct CoreRelationSubscriptionDelta<'a> {
-    base_cursor: Option<u64>,
-    cursor: u64,
-    added: Vec<CoreRowBatch<'a>>,
-    updated: Vec<CoreRowBatch<'a>>,
-    removed: Vec<CoreRemovedRow>,
-    added_edges: Vec<CoreRelationEdge>,
-    removed_edges: Vec<CoreRelationEdge>,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-struct CoreRemovedRow {
-    table: String,
-    row_id: CoreRowUuid,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-struct CoreRelationEdge {
-    source_table: String,
-    source_row_id: CoreRowUuid,
-    relation: String,
-    target_table: String,
-    target_row_id: CoreRowUuid,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-struct WriteResult {
-    row_id: CoreRowUuid,
-    tx_id: TxId,
-}
 
 type NapiDbInner = Rc<RefCell<Option<NapiDbInnerStorage>>>;
 
@@ -620,8 +528,7 @@ impl NapiDb {
 
     #[napi(js_name = "prepareQuery")]
     pub fn prepare_query(&self, query: Uint8Array) -> napi::Result<PreparedQuery> {
-        let query: CoreQuery = postcard::from_bytes(&query)
-            .map_err(|error| napi::Error::from_reason(format!("decode query: {error}")))?;
+        let query = core_binding::decode_query(&query).map_err(binding_to_napi)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1500,88 +1407,38 @@ impl NapiDb {
     }
 }
 
+fn binding_to_napi(error: core_binding::BindingError) -> napi::Error {
+    napi::Error::from_reason(error.to_string())
+}
+
 fn decode_core_open_args(
     schema: &[u8],
     config: &[u8],
-) -> napi::Result<(JazzSchema, CoreOpenDbConfig)> {
-    let schema: JazzSchema = postcard::from_bytes(schema)
-        .map_err(|error| napi::Error::from_reason(format!("decode schema: {error}")))?;
-    let config: CoreOpenDbConfig = postcard::from_bytes(config)
-        .map_err(|error| napi::Error::from_reason(format!("decode open config: {error}")))?;
-    Ok((schema, config))
+) -> napi::Result<(JazzSchema, core_binding::OpenDbConfig)> {
+    core_binding::decode_open_args(schema, config).map_err(binding_to_napi)
 }
 
 fn open_core_db<S>(
     schema: JazzSchema,
     storage: S,
-    config: CoreOpenDbConfig,
+    config: core_binding::OpenDbConfig,
 ) -> std::result::Result<CoreDb<S>, jazz::db::Error>
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
-    let mut db_config = CoreDbConfig::new(schema, storage, config.identity.into());
-    if let Some(seed) = config.row_id_seed {
-        db_config = db_config.with_id_source(CoreSeededRowIdSource::new(seed));
-    }
-    let initial_sync_flush_every = config.initial_sync_flush_every;
-    if config.history_complete {
-        let db = core_block_on(CoreDb::open_history_complete(db_config))?;
-        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
-        Ok(db)
-    } else {
-        let db = core_block_on(CoreDb::open(db_config))?;
-        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
-        Ok(db)
-    }
-}
-
-fn configure_initial_sync_flush_cadence<S>(
-    db: &CoreDb<S>,
-    every: Option<u32>,
-) -> std::result::Result<(), jazz::db::Error>
-where
-    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
-{
-    let Some(every) = every else {
-        return Ok(());
-    };
-    let Some(every) = std::num::NonZeroUsize::new(every as usize) else {
-        return Ok(());
-    };
-    db.set_initial_sync_flush_cadence(CoreInitialSyncFlushCadence::every(every))
+    core_binding::open_db(schema, storage, config)
 }
 
 fn decode_core_cells(bytes: &[u8]) -> napi::Result<CoreRowCells> {
-    let (descriptor, raw): (RecordDescriptor, Vec<u8>) = postcard::from_bytes(bytes)
-        .map_err(|error| napi::Error::from_reason(format!("decode cells: {error}")))?;
-    let record = CoreBorrowedRecord::new(&raw, &descriptor);
-    let values = record
-        .to_values()
-        .map_err(|error| napi::Error::from_reason(format!("decode cell record: {error}")))?;
-    let mut cells = CoreRowCells::new();
-    for (field, value) in descriptor.fields().iter().zip(values) {
-        let Some(name) = &field.name else {
-            return Err(napi::Error::from_reason(
-                "encoded cells must use named fields",
-            ));
-        };
-        cells.insert(name.clone(), value);
-    }
-    Ok(cells)
+    core_binding::decode_cells(bytes).map_err(binding_to_napi)
 }
 
 fn core_row_uuid_from_bytes(bytes: &[u8]) -> napi::Result<CoreRowUuid> {
-    let bytes: [u8; 16] = bytes
-        .try_into()
-        .map_err(|_| napi::Error::from_reason("row id must be 16 bytes"))?;
-    Ok(CoreRowUuid::from_bytes(bytes))
+    core_binding::row_uuid_from_bytes(bytes).map_err(binding_to_napi)
 }
 
 fn core_author_id_from_bytes(bytes: &[u8]) -> napi::Result<CoreAuthorId> {
-    let bytes: [u8; 16] = bytes
-        .try_into()
-        .map_err(|_| napi::Error::from_reason("author id must be 16 bytes"))?;
-    Ok(CoreAuthorId::from_bytes(bytes))
+    core_binding::author_id_from_bytes(bytes).map_err(binding_to_napi)
 }
 
 fn core_write_memory(
@@ -1589,13 +1446,9 @@ fn core_write_memory(
     write: WriteHandle<CoreMemoryStorage>,
 ) -> napi::Result<Write> {
     let tx_id = write.mergeable_tx_id();
-    let result = WriteResult {
-        row_id: write.row_uuid(),
-        tx_id,
-    };
     Ok(Write {
-        payload: postcard::to_allocvec(&result)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        payload: core_binding::encode_write_result(write.row_uuid(), tx_id)
+            .map_err(binding_to_napi)?,
         inner: Some(NapiWrite::Memory { db, tx_id }),
     })
 }
@@ -1605,13 +1458,9 @@ fn core_write_persistent(
     write: WriteHandle<CoreRocksDbStorage>,
 ) -> napi::Result<Write> {
     let tx_id = write.mergeable_tx_id();
-    let result = WriteResult {
-        row_id: write.row_uuid(),
-        tx_id,
-    };
     Ok(Write {
-        payload: postcard::to_allocvec(&result)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        payload: core_binding::encode_write_result(write.row_uuid(), tx_id)
+            .map_err(binding_to_napi)?,
         inner: Some(NapiWrite::Persistent { db, tx_id }),
     })
 }
@@ -1619,68 +1468,14 @@ fn core_write_persistent(
 fn core_claims_from_json(
     author: CoreAuthorId,
     claims: Option<JsonValue>,
-) -> napi::Result<BTreeMap<String, CoreValue>> {
-    let mut claims = match claims {
-        None | Some(JsonValue::Null) => BTreeMap::new(),
-        Some(JsonValue::Object(map)) => map
-            .into_iter()
-            .map(|(key, value)| Ok((key, core_claim_value_from_json(value)?)))
-            .collect::<napi::Result<BTreeMap<_, _>>>()?,
-        Some(_) => {
-            return Err(napi::Error::from_reason(
-                "identity claims must be an object",
-            ));
-        }
-    };
-    let subject = author.0.to_string();
-    claims
-        .entry("subject".to_owned())
-        .or_insert_with(|| CoreValue::String(subject.clone()));
-    claims
-        .entry("sub".to_owned())
-        .or_insert_with(|| CoreValue::String(subject.clone()));
-    claims
-        .entry("user_id".to_owned())
-        .or_insert_with(|| CoreValue::String(subject));
-    Ok(claims)
-}
-
-fn core_claim_value_from_json(value: JsonValue) -> napi::Result<CoreValue> {
-    Ok(match value {
-        JsonValue::Null => CoreValue::Nullable(None),
-        JsonValue::Bool(value) => CoreValue::Bool(value),
-        JsonValue::Number(value) => {
-            if let Some(value) = value.as_u64() {
-                CoreValue::U64(value)
-            } else if let Some(value) = value.as_f64() {
-                CoreValue::F64(value)
-            } else {
-                return Err(napi::Error::from_reason("unsupported numeric claim value"));
-            }
-        }
-        JsonValue::String(value) => CoreValue::String(value),
-        JsonValue::Array(values) => CoreValue::Array(
-            values
-                .into_iter()
-                .map(core_claim_value_from_json)
-                .collect::<napi::Result<Vec<_>>>()?,
-        ),
-        JsonValue::Object(_) => {
-            return Err(napi::Error::from_reason(
-                "nested object claims are not supported",
-            ));
-        }
-    })
+) -> napi::Result<std::collections::BTreeMap<String, jazz::groove::records::Value>> {
+    core_binding::claims_from_json(author, claims).map_err(binding_to_napi)
 }
 
 fn core_tx_write(tx_id: TxId, inner: Option<NapiWrite>) -> napi::Result<Write> {
-    let result = WriteResult {
-        row_id: CoreRowUuid::from_bytes([0; 16]),
-        tx_id,
-    };
     Ok(Write {
-        payload: postcard::to_allocvec(&result)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        payload: core_binding::encode_write_result(CoreRowUuid::from_bytes([0; 16]), tx_id)
+            .map_err(binding_to_napi)?,
         inner,
     })
 }
@@ -1705,35 +1500,11 @@ fn core_wait_for_tx<S>(db: &CoreDb<S>, tx_id: TxId, tier: CoreDurabilityTier) ->
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
-    if tier <= CoreDurabilityTier::Local {
-        return Ok(());
-    }
-    let state = db
-        .write_state(tx_id)
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-    match state.fate {
-        CoreFate::Rejected(reason) => {
-            return Err(napi::Error::from_reason(format!(
-                "transaction was rejected: {reason:?}"
-            )));
-        }
-        CoreFate::Pending if tier >= CoreDurabilityTier::Edge => {
-            return Err(napi::Error::from_reason(format!(
-                "transaction has not been accepted at requested tier {tier:?}"
-            )));
-        }
-        CoreFate::Pending | CoreFate::Accepted => {}
-    }
-    if state.durability >= tier {
-        return Ok(());
-    }
-    Err(napi::Error::from_reason(format!(
-        "transaction has not reached requested tier {tier:?}"
-    )))
+    core_binding::wait_for_tx(db, tx_id, tier).map_err(binding_to_napi)
 }
 
 fn core_write_state_to_json(state: &jazz::db::WriteState) -> serde_json::Value {
-    serde_json::to_value(state).unwrap_or_else(|_| serde_json::json!({}))
+    core_binding::write_state_to_json(state)
 }
 
 fn resolve_raw_promise(env: sys::napi_env, deferred: sys::napi_deferred) {
@@ -1781,273 +1552,31 @@ fn core_commit_tx_persistent(
 }
 
 fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOpts> {
-    let mut opts = CoreReadOpts::default();
-    let Some(value) = value else {
-        return Ok(opts);
-    };
-    if value.is_null() {
-        return Ok(opts);
-    }
-    if let Some(tier) = optional_json_string_prop(&value, "tier")? {
-        opts.tier = core_durability_tier_from_str(&tier)?;
-    }
-    if let Some(local_updates) = optional_json_string_prop(&value, "local_updates")? {
-        opts.local_updates = match local_updates.as_str() {
-            "Immediate" | "immediate" => CoreLocalUpdates::Immediate,
-            "Deferred" | "deferred" => CoreLocalUpdates::Deferred,
-            other => {
-                return Err(napi::Error::from_reason(format!(
-                    "unknown local_updates {other}"
-                )));
-            }
-        };
-    }
-    if optional_json_bool_prop(&value, "propagate")? == Some(false) {
-        opts.propagation = CorePropagation::LocalOnly;
-    }
-    if let Some(propagation) = optional_json_string_prop(&value, "propagation")? {
-        opts.propagation = match propagation.as_str() {
-            "Full" | "full" => CorePropagation::Full,
-            "LocalOnly" | "local_only" | "localOnly" | "local-only" => CorePropagation::LocalOnly,
-            other => {
-                return Err(napi::Error::from_reason(format!(
-                    "unknown propagation {other}"
-                )));
-            }
-        };
-    }
-    if let Some(include_deleted) = optional_json_bool_prop(&value, "include_deleted")? {
-        opts.include_deleted = include_deleted;
-    }
-    if value
-        .get("read_view")
-        .or_else(|| value.get("readView"))
-        .filter(|read_view| !read_view.is_null())
-        .is_some()
-    {
-        return Err(napi::Error::from_reason(
-            "non-default read_view is not supported yet",
-        ));
-    }
-    Ok(opts)
+    core_binding::read_opts_from_json(value).map_err(binding_to_napi)
 }
 
 fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier> {
-    match tier {
-        "None" | "none" => Ok(CoreDurabilityTier::None),
-        "Local" | "local" => Ok(CoreDurabilityTier::Local),
-        "Edge" | "edge" => Ok(CoreDurabilityTier::Edge),
-        "Global" | "global" => Ok(CoreDurabilityTier::Global),
-        other => Err(napi::Error::from_reason(format!(
-            "unknown durability tier {other}"
-        ))),
-    }
-}
-
-fn optional_json_string_prop(value: &JsonValue, name: &str) -> napi::Result<Option<String>> {
-    match value.get(name) {
-        Some(JsonValue::String(value)) => Ok(Some(value.clone())),
-        Some(JsonValue::Null) | None => Ok(None),
-        Some(_) => Err(napi::Error::from_reason(format!("{name} must be a string"))),
-    }
-}
-
-fn optional_json_bool_prop(value: &JsonValue, name: &str) -> napi::Result<Option<bool>> {
-    match value.get(name) {
-        Some(JsonValue::Bool(value)) => Ok(Some(*value)),
-        Some(JsonValue::Null) | None => Ok(None),
-        Some(_) => Err(napi::Error::from_reason(format!(
-            "{name} must be a boolean"
-        ))),
-    }
+    core_binding::durability_tier_from_str(tier).map_err(binding_to_napi)
 }
 
 fn encode_core_rows(
     rows: &[jazz::node::CurrentRow],
-) -> std::result::Result<Vec<u8>, postcard::Error> {
-    postcard::to_allocvec(&core_row_batches(rows))
+) -> std::result::Result<Vec<u8>, core_binding::BindingError> {
+    core_binding::encode_rows(rows)
 }
 
 fn encode_core_relation_snapshot(
     snapshot: &jazz::node::RelationSnapshot,
-) -> std::result::Result<Vec<u8>, postcard::Error> {
-    postcard::to_allocvec(&CoreRelationSnapshot {
-        cursor: 0,
-        root_count: snapshot.root_count as u64,
-        rows: core_row_batches(&snapshot.rows),
-        edges: snapshot.edges.iter().map(core_relation_edge).collect(),
-    })
-}
-
-fn encode_core_subscription_delta<'a>(
-    added: &'a [jazz::node::CurrentRow],
-    updated: &'a [jazz::node::CurrentRow],
-    removed: &[jazz::db::RemovedRow],
-) -> std::result::Result<Vec<u8>, postcard::Error> {
-    postcard::to_allocvec(&CoreSubscriptionDelta {
-        added: core_row_batches(added),
-        updated: core_row_batches(updated),
-        removed: removed
-            .iter()
-            .map(|row| CoreRemovedRow {
-                table: row.table.clone(),
-                row_id: row.row_uuid,
-            })
-            .collect(),
-    })
-}
-
-fn encode_core_relation_subscription_delta<'a>(
-    added: &'a [jazz::node::CurrentRow],
-    updated: &'a [jazz::node::CurrentRow],
-    removed: &[jazz::db::RemovedRow],
-    added_related: &'a [jazz::node::CurrentRow],
-    added_edges: &[jazz::node::RelationEdge],
-    removed_edges: &[jazz::db::RemovedRelationEdge],
-) -> std::result::Result<Vec<u8>, postcard::Error> {
-    let mut relation_added = Vec::with_capacity(added.len() + added_related.len());
-    relation_added.extend_from_slice(added);
-    relation_added.extend_from_slice(added_related);
-    postcard::to_allocvec(&CoreRelationSubscriptionDelta {
-        base_cursor: None,
-        cursor: 0,
-        added: core_row_batches(&relation_added),
-        updated: core_row_batches(updated),
-        removed: removed
-            .iter()
-            .map(|row| CoreRemovedRow {
-                table: row.table.clone(),
-                row_id: row.row_uuid,
-            })
-            .collect(),
-        added_edges: added_edges.iter().map(core_relation_edge).collect(),
-        removed_edges: removed_edges.iter().map(core_relation_edge).collect(),
-    })
-}
-
-fn core_row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<CoreRowBatch<'_>> {
-    let mut batches: Vec<CoreRowBatch<'_>> = Vec::new();
-    for row in rows {
-        let (descriptor, raw) = row.encoded_record();
-        match batches.last_mut() {
-            Some(batch) if batch.table == row.table() && batch.descriptor == *descriptor => {
-                batch.rows.push(core_row(row, raw));
-            }
-            _ => batches.push(CoreRowBatch {
-                table: row.table(),
-                descriptor: *descriptor,
-                rows: vec![core_row(row, raw)],
-            }),
-        }
-    }
-    batches
-}
-
-fn core_relation_edge(edge: &jazz::node::RelationEdge) -> CoreRelationEdge {
-    CoreRelationEdge {
-        source_table: edge.source_table.clone(),
-        source_row_id: edge.source_row,
-        relation: edge.relation.clone(),
-        target_table: edge.target_table.clone(),
-        target_row_id: edge.target_row,
-    }
-}
-
-fn core_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> CoreRow<'a> {
-    CoreRow {
-        row_id: row.row_uuid(),
-        deleted: row.is_deleted(),
-        raw,
-    }
+) -> std::result::Result<Vec<u8>, core_binding::BindingError> {
+    core_binding::encode_relation_snapshot(snapshot)
 }
 
 fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<serde_json::Value> {
-    match event {
-        SubscriptionEvent::Delta {
-            reset,
-            added,
-            updated,
-            removed,
-            added_related,
-            added_edges,
-            removed_edges,
-            settled,
-            tier,
-            ..
-        } => {
-            // Keep the current native wire source-row addressed until a later
-            // revision carries occurrence identity explicitly.
-            let added = added
-                .iter()
-                .map(|output| output.row.clone())
-                .collect::<Vec<_>>();
-            let updated = updated
-                .iter()
-                .map(|output| output.row.clone())
-                .collect::<Vec<_>>();
-            let delta = encode_core_subscription_delta(&added, &updated, removed)
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-            let relation_delta = encode_core_relation_subscription_delta(
-                &added,
-                &updated,
-                removed,
-                added_related,
-                added_edges,
-                removed_edges,
-            )
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-            Ok(serde_json::json!({
-                "type": "delta",
-                "reset": reset,
-                "delta": delta,
-                "relation_delta": relation_delta,
-                "settled": settled,
-                "tier": format!("{tier:?}"),
-            }))
-        }
-        SubscriptionEvent::Rejected { reason } => {
-            let reason = match reason {
-                jazz::protocol::SubscribeRejectReason::UnsupportedShapeCapability { detail } => {
-                    serde_json::json!({
-                        "type": "UnsupportedShapeCapability",
-                        "detail": detail,
-                    })
-                }
-                // Transient: the shape is awaiting catalogue admission and may
-                // yet be served. Surfaced distinctly so a caller cannot mistake
-                // it for an unsupported capability, which is permanent — that
-                // conflation is the bug this variant was introduced to fix.
-                jazz::protocol::SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission => {
-                    serde_json::json!({
-                        "type": "ShapeRegistrationPendingCatalogueAdmission",
-                    })
-                }
-                jazz::protocol::SubscribeRejectReason::ServerFailure { code } => {
-                    serde_json::json!({
-                        "type": "ServerFailure",
-                        "code": format!("{code:?}"),
-                    })
-                }
-            };
-            Ok(serde_json::json!({
-                "type": "rejected",
-                "reason": reason,
-            }))
-        }
-        SubscriptionEvent::Closed => Ok(serde_json::json!({ "type": "closed" })),
-    }
+    core_binding::subscription_event_to_json(event).map_err(binding_to_napi)
 }
 
-fn core_relation_query_from_json(query_json: &str) -> napi::Result<CoreRelationQuery> {
-    let value: serde_json::Value = serde_json::from_str(query_json)
-        .map_err(|err| napi::Error::from_reason(format!("decode query json: {err}")))?;
-    let relation_ir = value
-        .get("relation_ir")
-        .ok_or_else(|| napi::Error::from_reason("relation query json is missing relation_ir"))?
-        .clone();
-    let rel: CoreRelationExpr = serde_json::from_value(relation_ir)
-        .map_err(|err| napi::Error::from_reason(format!("decode relation_ir: {err}")))?;
-    Ok(CoreRelationQuery { rel })
+fn core_relation_query_from_json(query_json: &str) -> napi::Result<jazz::query::RelationQuery> {
+    core_binding::relation_query_from_json(query_json).map_err(binding_to_napi)
 }
 
 // ============================================================================

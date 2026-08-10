@@ -32,6 +32,7 @@ use crate::protocol::{
 use crate::schema::JazzSchema;
 use crate::wire::{TransportError, WireTransport};
 
+#[cfg(any(feature = "server", test))]
 mod admin_schema_convert;
 pub mod auth_admission;
 #[cfg(feature = "server")]
