@@ -7,15 +7,15 @@
     "ios",
     "react-native"
   ],
-  "homepage": "https://github.com/antoniomuso/jazz-rn#readme",
+  "homepage": "https://github.com/garden-co/jazz/tree/main/crates/jazz-rn#readme",
   "bugs": {
-    "url": "https://github.com/antoniomuso/jazz-rn/issues"
+    "url": "https://github.com/garden-co/jazz/issues"
   },
   "license": "MIT",
   "author": "Antonio Musolino <antoniomusolino007@gmail.com> (https://github.com/antoniomuso)",
   "repository": {
     "type": "git",
-    "url": "git+https://https://github.com/garden-co/jazz.git"
+    "url": "git+https://github.com/garden-co/jazz.git"
   },
   "files": [
     "src",
@@ -53,7 +53,7 @@
     "tag": "alpha"
   },
   "scripts": {
-    "ubrn:ios": "ubrn build ios --and-generate --release",
+    "ubrn:ios": "IPHONEOS_DEPLOYMENT_TARGET=15.1 ubrn build ios --and-generate --release",
     "ubrn:android": "ubrn build android --and-generate --release",
     "ubrn:checkout": "ubrn checkout",
     "ubrn:clean": "rm -rfv cpp/ android/CMakeLists.txt android/src/main/java android/*.cpp ios/ src/Native* src/index.*ts* src/generated/",
