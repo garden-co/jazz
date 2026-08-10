@@ -5964,8 +5964,8 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
         NodeUuid::from_bytes([0xb2; 16]),
         21,
     );
-    let _edge_b = edge.server.connect_upstream(edge_b_transport);
-    let b = authority_b.accept_subscriber(b_transport, identity);
+    let edge_b = edge.server.connect_upstream(edge_b_transport);
+    let _b = authority_b.accept_subscriber(b_transport, identity);
 
     let client = open_db(0xc1, identity, &schema);
     let (client_transport, edge_transport) = duplex_with_admitted_session_context(
@@ -5997,18 +5997,12 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
         DurabilityTier::Edge
     );
 
-    // B is a real connected authority but it is not the selected one.  An
-    // early terminal message from that link must not settle or forward the
+    // B is a real connected authority but it is not the selected one.  Have
+    // it consume the same upload and reject it while permission state is
+    // unavailable; that real early fate must not settle or forward the
     // parked downstream write.
-    b.borrow_mut()
-        .transport
-        .send(SyncMessage::FateUpdate {
-            tx_id: write.mergeable_tx_id(),
-            fate: Fate::Rejected(RejectionReason::MalformedCommit("early B".to_owned())),
-            global_seq: None,
-            durability: None,
-        })
-        .unwrap();
+    authority_b.server.set_permissions_ready(false).unwrap();
+    authority_b.tick().unwrap();
     edge.tick().unwrap();
     client.tick().unwrap();
     assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
@@ -6016,10 +6010,32 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
         write.write_state().unwrap().durability,
         DurabilityTier::Edge
     );
+    {
+        let edge_b = edge_b.borrow();
+        let ConnectionLink::Upstream { uploaded, .. } = &edge_b.link else {
+            panic!("B must be an upstream connection");
+        };
+        assert!(
+            uploaded.contains(&write.mergeable_tx_id()),
+            "B must have already uploaded the write before it becomes owner"
+        );
+    }
 
     assert!(edge.server.detach_connection(&edge_a));
     // The detach schedules a handoff immediately, and the successor must
     // re-upload even though it was already connected before selection.
+    {
+        let edge_b = edge_b.borrow();
+        let ConnectionLink::Upstream { uploaded, .. } = &edge_b.link else {
+            panic!("B must remain the upstream handoff connection");
+        };
+        assert!(
+            !uploaded.contains(&write.mergeable_tx_id()),
+            "handoff must clear B's prior upload suppression before redriving"
+        );
+    }
+    authority_b.server.set_permissions_ready(true).unwrap();
+    edge.tick().unwrap();
     authority_b.tick().unwrap();
     edge.tick().unwrap();
     client.tick().unwrap();
