@@ -4300,7 +4300,7 @@ fn edge_read_opts_and_wait_honor_edge_durability() {
         DurabilityTier::Edge
     );
     assert!(
-        doctest_support::block_on(db.all(
+        doctest_support::block_on(db.all_for_identity(
             &prepared_query,
             ReadOpts {
                 tier: DurabilityTier::Edge,
@@ -4309,6 +4309,7 @@ fn edge_read_opts_and_wait_honor_edge_durability() {
                 include_deleted: false,
                 ..ReadOpts::default()
             },
+            AuthorId::SYSTEM,
         ))
         .unwrap()
         .is_empty()
@@ -4334,7 +4335,7 @@ fn edge_read_opts_and_wait_honor_edge_durability() {
     );
     assert_eq!(
         row_ids(
-            &doctest_support::block_on(db.all(
+            &doctest_support::block_on(db.all_for_identity(
                 &prepared_query,
                 ReadOpts {
                     tier: DurabilityTier::Edge,
@@ -4343,6 +4344,7 @@ fn edge_read_opts_and_wait_honor_edge_durability() {
                     include_deleted: false,
                     ..ReadOpts::default()
                 },
+                AuthorId::SYSTEM,
             ))
             .unwrap()
         ),
@@ -4902,7 +4904,7 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
 }
 
 #[test]
-fn db_facade_subscription_reports_initial_and_changed_results() {
+fn db_facade_local_subscription_reports_initial_and_changed_results() {
     let schema = doctest_support::schema();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -4923,9 +4925,9 @@ fn db_facade_subscription_reports_initial_and_changed_results() {
     let mut subscription = doctest_support::block_on(db.subscribe(
         &prepared_query,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: DurabilityTier::Local,
             local_updates: LocalUpdates::Deferred,
-            propagation: Propagation::Full,
+            propagation: Propagation::LocalOnly,
             include_deleted: false,
             ..ReadOpts::default()
         },
@@ -6391,7 +6393,7 @@ fn prepared_current_write_query_installs_and_reads_non_simple_plan() {
 }
 
 #[test]
-fn subscribe_uses_prepared_non_simple_plan() {
+fn local_subscribe_uses_prepared_non_simple_plan() {
     let schema = issue_schema();
     let author = AuthorId::from_bytes([0xa1; 16]);
     let db = open_db(0xa2, author, &schema);
@@ -6406,9 +6408,9 @@ fn subscribe_uses_prepared_non_simple_plan() {
     let mut subscription = block_on(db.subscribe(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: DurabilityTier::Local,
             local_updates: LocalUpdates::Deferred,
-            propagation: Propagation::Full,
+            propagation: Propagation::LocalOnly,
             include_deleted: false,
             ..ReadOpts::default()
         },
@@ -6447,7 +6449,18 @@ fn subscription_reset_preserves_ordered_window_rank() {
         .order_by("title", OrderDirection::Asc)
         .offset(1)
         .limit(2);
-    let mut subscription = prepared_subscribe(&db, &query, global_subscribe_opts()).unwrap();
+    let mut subscription = prepared_subscribe(
+        &db,
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            local_updates: LocalUpdates::Deferred,
+            propagation: Propagation::LocalOnly,
+            include_deleted: false,
+            ..ReadOpts::default()
+        },
+    )
+    .unwrap();
 
     assert_eq!(
         row_ids(&opened_rows(block_on(subscription.next_event()).unwrap())),
