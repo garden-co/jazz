@@ -1694,11 +1694,12 @@ where
             .node
             .node
             .borrow_mut()
-            .prepare_query_binding_for_link_with_shared_claim_fragments(
+            .prepare_query_binding_for_link_in_authorization_mode(
                 &prepared.shape,
                 &prepared.binding,
                 read_tier,
                 author,
+                authorization_mode,
             )?;
         let (subscription, snapshot) = self
             .node
@@ -1747,11 +1748,12 @@ where
                     .node
                     .node
                     .borrow_mut()
-                    .prepare_query_binding_for_link_with_shared_claim_fragments(
+                    .prepare_query_binding_for_link_in_authorization_mode(
                         &prepared.shape,
                         &prepared.binding,
                         upstream_opts.tier,
                         author,
+                        authorization_mode,
                     )?;
                 (shape, binding)
             };
@@ -9628,6 +9630,30 @@ impl SubscriptionStream {
     /// Return the next queued materialized subscription event without waiting.
     pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
         self.receiver.try_recv().ok()
+    }
+
+    #[cfg(test)]
+    fn retained_plan_authorization_mode(&self) -> Option<QueryAuthorizationMode> {
+        let state = self._state.borrow();
+        let SubscriptionKind::Prepared {
+            maintained_subscription,
+            ..
+        } = &state.kind;
+        maintained_subscription
+            .as_ref()
+            .and_then(LocalMaintainedViewSubscription::retained_plan_authorization_mode)
+    }
+
+    #[cfg(test)]
+    fn retained_plan_address(&self) -> Option<usize> {
+        let state = self._state.borrow();
+        let SubscriptionKind::Prepared {
+            maintained_subscription,
+            ..
+        } = &state.kind;
+        maintained_subscription
+            .as_ref()
+            .and_then(LocalMaintainedViewSubscription::retained_plan_address)
     }
 }
 

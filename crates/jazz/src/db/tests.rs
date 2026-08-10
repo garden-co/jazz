@@ -1580,6 +1580,39 @@ fn session_scoped_subscription_emits_removed_row_for_owned_delete() {
 }
 
 #[test]
+fn subscription_retains_a_plan_from_its_selected_authorization_mode() {
+    let schema = owner_id_public_schema();
+    let author = AuthorId::from_bytes([0x33; 16]);
+    let db = open_db(0x33, author, &schema);
+    db.set_identity_claims(
+        author,
+        BTreeMap::from([("user_id".to_owned(), Value::String("alice".to_owned()))]),
+    );
+    let prepared = prepared(
+        &db,
+        &Query::from("messages").filter(eq(col("owner_id"), claim("user_id"))),
+    );
+
+    let client = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    assert_eq!(
+        client.retained_plan_authorization_mode(),
+        Some(QueryAuthorizationMode::ClientLocal)
+    );
+
+    let trusted =
+        block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), author)).unwrap();
+    assert_eq!(
+        trusted.retained_plan_authorization_mode(),
+        Some(QueryAuthorizationMode::TrustedServing)
+    );
+    assert_ne!(
+        client.retained_plan_address(),
+        trusted.retained_plan_address(),
+        "client and trusted subscription plans must not reuse one cache entry"
+    );
+}
+
+#[test]
 fn db_close_is_idempotent() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     db.insert("todos", doctest_support::todo_cells("close me", false))

@@ -125,6 +125,8 @@ struct RelationSnapshotWindow {
 pub(crate) struct LocalMaintainedViewSubscription {
     subscription: MultisinkSubscription,
     _retained_prepared_plan: Option<PreparedQueryPlanHandle>,
+    #[cfg(test)]
+    retained_plan_authorization_mode: Option<QueryAuthorizationMode>,
     maintained: MaintainedSubscriptionView,
     terminal_schemas: MaintainedTerminalSchemas,
     tables: BTreeMap<String, TableSchema>,
@@ -163,6 +165,18 @@ impl LocalMaintainedViewSubscription {
 
     pub(crate) fn root_occurrence_ids(&self) -> &[OutputOccurrenceId] {
         &self.root_occurrence_ids
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_plan_authorization_mode(&self) -> Option<QueryAuthorizationMode> {
+        self.retained_plan_authorization_mode
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_plan_address(&self) -> Option<usize> {
+        self._retained_prepared_plan
+            .as_ref()
+            .map(|plan| std::sync::Arc::as_ptr(plan) as usize)
     }
 
     #[cfg(feature = "testing")]
@@ -8055,9 +8069,14 @@ where
                 authorization_mode,
                 settled_binding_view,
             )?;
+        #[cfg(test)]
+        let retained_plan_authorization_mode =
+            retained_prepared_plan.as_ref().map(|_| authorization_mode);
         let mut local = LocalMaintainedViewSubscription {
             subscription,
             _retained_prepared_plan: retained_prepared_plan,
+            #[cfg(test)]
+            retained_plan_authorization_mode,
             maintained,
             terminal_schemas,
             tables,
@@ -9341,6 +9360,25 @@ where
         Ok((shape, binding, plan))
     }
 
+    pub(crate) fn prepare_query_binding_for_link_in_authorization_mode(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<(ValidatedQuery, Binding, PreparedQueryPlanHandle), Error> {
+        match authorization_mode {
+            QueryAuthorizationMode::ClientLocal => self
+                .prepare_query_binding_for_link_with_shared_claim_fragments(
+                    shape, binding, tier, identity,
+                ),
+            QueryAuthorizationMode::TrustedServing => {
+                self.prepare_query_binding_for_link(shape, binding, tier, identity)
+            }
+        }
+    }
+
     pub(crate) fn prepare_query_binding_for_link_with_shared_claim_fragments(
         &mut self,
         shape: &ValidatedQuery,
@@ -9366,7 +9404,10 @@ where
             let key = (
                 shape.shape_id(),
                 tier,
-                policy_plan_cache_signature(&binding, identity),
+                format!(
+                    "client-local:{}",
+                    policy_plan_cache_signature(&binding, identity)
+                ),
             );
             if let Some(plan) = self.query.query_shape_cache.get(&key) {
                 plan.clone()
