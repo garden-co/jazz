@@ -4911,12 +4911,25 @@ where
             if self.admitted_upstream_authority.borrow().is_none() {
                 *self.admitted_upstream_authority.borrow_mut() = Some(context);
                 // Routes parked while no authority was connected retain their
-                // downstream obligation. Bind them to this first successor;
-                // its upload suppression is cleared by the normal handoff
-                // lifecycle when it next services the shared outbox.
-                for pending in self.edge_fate_routes.borrow_mut().values_mut() {
+                // downstream obligation. Bind them to this first successor
+                // and restore each commit to the shared outbox: the former
+                // authority may already have suppressed its upload, while
+                // this newly connected successor has not seen it.
+                let mut routes = self.edge_fate_routes.borrow_mut();
+                let routed_txs = routes.keys().copied().collect::<Vec<_>>();
+                for pending in routes.values_mut() {
                     for route in pending.iter_mut() {
                         route.authority = context;
+                    }
+                }
+                drop(routes);
+                let mut outbox = self.outbox.borrow_mut();
+                for tx_id in routed_txs {
+                    if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
+                        outbox.push(PendingUpload {
+                            tx_id,
+                            unit: self.node.borrow_mut().commit_unit_for(tx_id).ok(),
+                        });
                     }
                 }
             }

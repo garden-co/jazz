@@ -5940,6 +5940,281 @@ fn stale_upstream_epoch_cannot_settle_routed_local_fate_before_selected_epoch() 
 }
 
 #[test]
+fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xa1; 16]);
+    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+    let authority_a = open_core(0xa2, AuthorId::SYSTEM, &schema);
+    let authority_b = open_core(0xb2, AuthorId::SYSTEM, &schema);
+    let edge_node = NodeUuid::from_bytes([0xe0; 16]);
+
+    let (edge_a_transport, a_transport) = duplex_with_admitted_session_context(
+        identity,
+        edge_node,
+        10,
+        NodeUuid::from_bytes([0xa2; 16]),
+        20,
+    );
+    let edge_a = edge.server.connect_upstream(edge_a_transport);
+    let a = authority_a.accept_subscriber(a_transport, identity);
+    let (edge_b_transport, b_transport) = duplex_with_admitted_session_context(
+        identity,
+        edge_node,
+        11,
+        NodeUuid::from_bytes([0xb2; 16]),
+        21,
+    );
+    let _edge_b = edge.server.connect_upstream(edge_b_transport);
+    let b = authority_b.accept_subscriber(b_transport, identity);
+
+    let client = open_db(0xc1, identity, &schema);
+    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
+        identity,
+        NodeUuid::from_bytes([0xc1; 16]),
+        1,
+        edge_node,
+        2,
+    );
+    let _client_upstream = client.connect_upstream(client_transport);
+    let _edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
+        edge_transport,
+        identity,
+        BTreeMap::new(),
+    );
+
+    let write = client
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("handoff".to_owned()))]),
+        )
+        .unwrap();
+    client.tick().unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Edge
+    );
+
+    // B is a real connected authority but it is not the selected one.  An
+    // early terminal message from that link must not settle or forward the
+    // parked downstream write.
+    b.borrow_mut()
+        .transport
+        .send(SyncMessage::FateUpdate {
+            tx_id: write.mergeable_tx_id(),
+            fate: Fate::Rejected(RejectionReason::MalformedCommit("early B".to_owned())),
+            global_seq: None,
+            durability: None,
+        })
+        .unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Edge
+    );
+
+    assert!(edge.server.detach_connection(&edge_a));
+    // The detach schedules a handoff immediately, and the successor must
+    // re-upload even though it was already connected before selection.
+    authority_b.tick().unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Global
+    );
+
+    // A late packet from the detached authority has no route and cannot add a
+    // second terminal notification for the original downstream handle.
+    a.borrow_mut()
+        .transport
+        .send(SyncMessage::FateUpdate {
+            tx_id: write.mergeable_tx_id(),
+            fate: Fate::Rejected(RejectionReason::MalformedCommit("late A".to_owned())),
+            global_seq: None,
+            durability: None,
+        })
+        .unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Global
+    );
+}
+
+#[test]
+fn edge_parks_downstream_fate_until_a_later_authority_connects() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xa1; 16]);
+    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+    let authority_a = open_core(0xa2, AuthorId::SYSTEM, &schema);
+    let edge_node = NodeUuid::from_bytes([0xe0; 16]);
+    let (edge_a_transport, a_transport) = duplex_with_admitted_session_context(
+        identity,
+        edge_node,
+        10,
+        NodeUuid::from_bytes([0xa2; 16]),
+        20,
+    );
+    let edge_a = edge.server.connect_upstream(edge_a_transport);
+    let _a = authority_a.accept_subscriber(a_transport, identity);
+
+    let client = open_db(0xc1, identity, &schema);
+    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
+        identity,
+        NodeUuid::from_bytes([0xc1; 16]),
+        1,
+        edge_node,
+        2,
+    );
+    let _client_upstream = client.connect_upstream(client_transport);
+    let _edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
+        edge_transport,
+        identity,
+        BTreeMap::new(),
+    );
+    let write = client
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("parked".to_owned()))]),
+        )
+        .unwrap();
+    client.tick().unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Edge
+    );
+
+    assert!(edge.server.detach_connection(&edge_a));
+    assert_eq!(edge.server.edge_fate_routes.borrow().len(), 1);
+
+    let authority_c = open_core(0xc2, AuthorId::SYSTEM, &schema);
+    let (edge_c_transport, c_transport) = duplex_with_admitted_session_context(
+        identity,
+        edge_node,
+        12,
+        NodeUuid::from_bytes([0xc2; 16]),
+        22,
+    );
+    let _edge_c = edge.server.connect_upstream(edge_c_transport);
+    let _c = authority_c.accept_subscriber(c_transport, identity);
+    edge.tick().unwrap();
+    authority_c.tick().unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Global
+    );
+    assert!(edge.server.edge_fate_routes.borrow().is_empty());
+}
+
+#[test]
+fn stale_same_authority_session_cannot_settle_or_forward_a_routed_fate() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xa1; 16]);
+    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+    let edge_node = NodeUuid::from_bytes([0xe0; 16]);
+    let authority_node = NodeUuid::from_bytes([0xa2; 16]);
+    let old_authority = open_core(0xa2, AuthorId::SYSTEM, &schema);
+    let current_authority = open_core(0xa2, AuthorId::SYSTEM, &schema);
+
+    let (edge_old_transport, old_transport) =
+        duplex_with_admitted_session_context(identity, edge_node, 10, authority_node, 20);
+    let _edge_old = edge.server.connect_upstream(edge_old_transport);
+    let old = old_authority.accept_subscriber(old_transport, identity);
+    let (edge_current_transport, current_transport) =
+        duplex_with_admitted_session_context(identity, edge_node, 11, authority_node, 21);
+    let _edge_current = edge.server.connect_upstream(edge_current_transport);
+    let current = current_authority.accept_subscriber(current_transport, identity);
+
+    let client = open_db(0xc1, identity, &schema);
+    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
+        identity,
+        NodeUuid::from_bytes([0xc1; 16]),
+        1,
+        edge_node,
+        2,
+    );
+    let _client_upstream = client.connect_upstream(client_transport);
+    let _edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
+        edge_transport,
+        identity,
+        BTreeMap::new(),
+    );
+    let write = client
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("epoch".to_owned()))]),
+        )
+        .unwrap();
+    client.tick().unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Edge
+    );
+
+    // Model the already-admitted successor taking ownership while the old
+    // same-UUID socket still has an in-flight frame.  UUID equality alone is
+    // deliberately insufficient: connection id and remote epoch bind the
+    // route to the current authenticated session.
+    let current_context = edge.server.admitted_upstream_authorities.borrow()[1];
+    *edge.server.admitted_upstream_authority.borrow_mut() = Some(current_context);
+    edge.server
+        .edge_fate_routes
+        .borrow_mut()
+        .get_mut(&write.mergeable_tx_id())
+        .expect("routed edge write")[0]
+        .authority = current_context;
+    old.borrow_mut()
+        .transport
+        .send(SyncMessage::FateUpdate {
+            tx_id: write.mergeable_tx_id(),
+            fate: Fate::Rejected(RejectionReason::MalformedCommit("old session".to_owned())),
+            global_seq: None,
+            durability: None,
+        })
+        .unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Edge
+    );
+
+    current
+        .borrow_mut()
+        .transport
+        .send(SyncMessage::FateUpdate {
+            tx_id: write.mergeable_tx_id(),
+            fate: Fate::Accepted,
+            global_seq: Some(GlobalSeq(1)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Global
+    );
+}
+
+#[test]
 fn public_permission_advice_accepts_an_explicit_zero_clause_receipt() {
     let schema = schema();
     let identity = AuthorId::from_bytes([0xa3; 16]);
