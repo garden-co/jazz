@@ -107,8 +107,10 @@ function validTypedResultKey(bytes: Uint8Array): boolean {
   cursor += joined * 16;
   const discriminators = readU32(cursor);
   cursor += 4;
-  if (discriminators > joined) return false;
-  const positions = new Set<number>();
+  // v2 is reserved for typed union occurrences. A zero-arm v2 value would
+  // normalize to the same ordered UUID key as a v1 occurrence.
+  if (discriminators === 0 || discriminators > joined) return false;
+  let previousPosition = -1;
   for (let index = 0; index < discriminators; index++) {
     if (cursor + 8 > bytes.length) return false;
     const position = readU32(cursor);
@@ -116,14 +118,14 @@ function validTypedResultKey(bytes: Uint8Array): boolean {
     cursor += 8;
     if (
       position >= joined ||
-      positions.has(position) ||
+      position <= previousPosition ||
       length === 0 ||
       length > 4096 ||
       cursor + length > bytes.length
     ) {
       return false;
     }
-    positions.add(position);
+    previousPosition = position;
     cursor += length;
   }
   return cursor === bytes.length;

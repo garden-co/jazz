@@ -285,7 +285,9 @@ export class SubscriptionManager<T extends { id: string }> {
         ]) {
           const orderedKey = orderedTerminalKeyForTypedOccurrence(key);
           if (orderedKey) {
-            this.terminalOccurrenceAddresses.set(bytesKey(orderedKey), publicResultKey(key));
+            this.registerTerminalOccurrenceAddress(orderedKey, publicResultKey(key));
+          } else if (key[0] === 2) {
+            throw new Error("malformed or noncanonical typed terminal occurrence key");
           }
         }
         // Packed row deltas have already been normalized to the public logical
@@ -488,6 +490,18 @@ export class SubscriptionManager<T extends { id: string }> {
     return this.terminalOccurrenceAddresses.get(bytesKey(encoded)) ?? terminalKeyId(encoded);
   }
 
+  private registerTerminalOccurrenceAddress(
+    orderedKey: Uint8Array,
+    occurrenceAddress: string,
+  ): void {
+    const address = bytesKey(orderedKey);
+    const existing = this.terminalOccurrenceAddresses.get(address);
+    if (existing !== undefined && existing !== occurrenceAddress) {
+      throw new Error("conflicting typed terminal occurrence keys share an ordered root key");
+    }
+    this.terminalOccurrenceAddresses.set(address, occurrenceAddress);
+  }
+
   seed(rows: T[]): SubscriptionDelta<T> {
     return this.handleTypedDelta(
       rows.map((item, index) => ({
@@ -686,8 +700,11 @@ function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array |
   });
   const discriminatorCount = readU32Be(sidecar, cursor);
   cursor += 4;
-  if (discriminatorCount > joinedCount) return undefined;
+  // ResultKey v2 exists only for union-discriminated output. Allowing no arms
+  // aliases the UUID-only v1 ordered key, so it is deliberately noncanonical.
+  if (discriminatorCount === 0 || discriminatorCount > joinedCount) return undefined;
   const arms = new Map<number, Uint8Array>();
+  let previousPosition = -1;
   for (let index = 0; index < discriminatorCount; index += 1) {
     if (cursor + 8 > sidecar.byteLength) return undefined;
     const position = readU32Be(sidecar, cursor);
@@ -695,12 +712,15 @@ function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array |
     cursor += 8;
     if (
       position >= joinedCount ||
+      position <= previousPosition ||
       length === 0 ||
+      length > 4096 ||
       cursor + length > sidecar.byteLength ||
       arms.has(position)
     ) {
       return undefined;
     }
+    previousPosition = position;
     arms.set(position, sidecar.subarray(cursor, (cursor += length)));
   }
   if (cursor !== sidecar.byteLength) return undefined;

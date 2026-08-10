@@ -6270,6 +6270,21 @@ it("rejects malformed or misaligned subscription occurrence sidecars", () => {
   expect(() => readNativeSubscriptionDelta(new PostcardReader(malformed))).toThrow(
     "malformed v2 ResultKey",
   );
+
+  const zeroArm = new Uint8Array(41);
+  zeroArm[0] = 2;
+  zeroArm.fill(1, 1, 17);
+  new DataView(zeroArm.buffer).setUint32(17, 1);
+  zeroArm.fill(2, 21, 37);
+  const aliasedV1 = encodeSubscriptionDelta({
+    added: [],
+    updated: [],
+    removed: [{ table: "todos", rowId: new Uint8Array(16) }],
+    removedOccurrenceKeys: [zeroArm],
+  });
+  expect(() => readNativeSubscriptionDelta(new PostcardReader(aliasedV1))).toThrow(
+    "malformed v2 ResultKey",
+  );
 });
 
 it("keeps same-row union occurrences distinct through apply, removal, and reopen", () => {

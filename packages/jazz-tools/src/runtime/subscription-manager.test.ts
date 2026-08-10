@@ -63,6 +63,28 @@ function uuidBytes(id: string): Uint8Array {
   );
 }
 
+function pushU32Be(target: number[], value: number): void {
+  target.push((value >>> 24) & 0xff, (value >>> 16) & 0xff, (value >>> 8) & 0xff, value & 0xff);
+}
+
+function typedResultKey(
+  root: Uint8Array,
+  joined: readonly Uint8Array[],
+  discriminators: ReadonlyArray<readonly [number, string]>,
+): Uint8Array {
+  const bytes = [2, ...root];
+  pushU32Be(bytes, joined.length);
+  for (const value of joined) bytes.push(...value);
+  pushU32Be(bytes, discriminators.length);
+  for (const [position, label] of discriminators) {
+    const encoded = new TextEncoder().encode(label);
+    pushU32Be(bytes, position);
+    pushU32Be(bytes, encoded.byteLength);
+    bytes.push(...encoded);
+  }
+  return Uint8Array.from(bytes);
+}
+
 function pushU32(target: number[], value: number): void {
   target.push(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
 }
@@ -374,6 +396,72 @@ describe("SubscriptionManager", () => {
       ),
     ).toEqual({ delta: [], all: [{ id, name: "typed", count: 8 }] });
     expect(manager.all()).toEqual([{ id, name: "typed", count: 8 }]);
+  });
+
+  it("rejects noncanonical typed terminal occurrence sidecars and ordered-key collisions", () => {
+    const id = "00000000-0000-4000-8000-000000000001";
+    const joinedId = "00000000-0000-4000-8000-000000000002";
+    const joinedSecondId = "00000000-0000-4000-8000-000000000003";
+    const root = uuidBytes(id);
+    const joined = uuidBytes(joinedId);
+    const secondJoined = uuidBytes(joinedSecondId);
+    const emptyNative = {
+      __jazzNativeRowDelta: true as const,
+      added: new Uint8Array(),
+      removed: new Uint8Array(),
+      updated: new Uint8Array(),
+      addedCount: 0,
+      removedCount: 0,
+      updatedCount: 0,
+    };
+    const rejectSidecar = (sidecar: Uint8Array) => {
+      const manager = new SubscriptionManager<TestItem>();
+      expect(() =>
+        manager.handleDelta(
+          {
+            ...emptyNative,
+            added: nativeAddedRecord(id, 0, "typed", 1),
+            addedCount: 1,
+            addedOccurrenceKeys: [sidecar],
+          },
+          transform,
+          nativeColumns,
+        ),
+      ).toThrow(/malformed or noncanonical typed terminal occurrence key/);
+      expect(manager.all()).toEqual([]);
+    };
+
+    rejectSidecar(typedResultKey(root, [joined], []));
+    rejectSidecar(
+      typedResultKey(
+        root,
+        [joined, secondJoined],
+        [
+          [1, "second"],
+          [0, "first"],
+        ],
+      ),
+    );
+    rejectSidecar(
+      typedResultKey(
+        root,
+        [joined, secondJoined],
+        [
+          [0, "first"],
+          [0, "duplicate"],
+        ],
+      ),
+    );
+
+    const manager = new SubscriptionManager<TestItem>();
+    const registry = manager as unknown as {
+      registerTerminalOccurrenceAddress(ordered: Uint8Array, occurrence: string): void;
+    };
+    const ordered = Uint8Array.from([10, ...root, 6, 0x61, 0x00, 0x00, 10, ...joined]);
+    registry.registerTerminalOccurrenceAddress(ordered, "result:02first");
+    expect(() => registry.registerTerminalOccurrenceAddress(ordered, "result:02second")).toThrow(
+      /conflicting typed terminal occurrence keys share an ordered root key/,
+    );
   });
 
   it("applies typed-v2 terminal update, removal, and reopen through its exact ordered key", () => {
