@@ -512,7 +512,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const cells = encodeCellsForRow(this.table(table), values);
     const writeSession = sessionFromWriteContext(_writeContext);
     this.applySessionClaims(writeSession);
-    const writeIdentity = writeSession?.identity;
+    const writeIdentity = this.trustedWriteIdentity(writeSession);
     const updatedAtMs = effectiveUpdatedAtMs(_writeContext);
     const tx = this.currentTx(_writeContext, "Insert");
     if (tx) {
@@ -544,7 +544,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const cells = encodeCellsForRow(this.table(table), values);
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
-    const writeIdentity = writeSession?.identity;
+    const writeIdentity = this.trustedWriteIdentity(writeSession);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Restore");
     if (tx) {
@@ -576,7 +576,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const patch = encodeCellsForPatch(this.table(table), values);
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
-    const writeIdentity = writeSession?.identity;
+    const writeIdentity = this.trustedWriteIdentity(writeSession);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Update");
     if (tx) {
@@ -606,7 +606,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const definition = this.table(table);
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
-    const writeIdentity = writeSession?.identity;
+    const writeIdentity = this.trustedWriteIdentity(writeSession);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Upsert");
     const existing = tx
@@ -644,7 +644,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
-    const writeIdentity = writeSession?.identity;
+    const writeIdentity = this.trustedWriteIdentity(writeSession);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Delete");
     if (tx) {
@@ -726,8 +726,9 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.pendingTxs.has(id) || this.completedTxs.has(id)) {
       throw new Error(`Begin transaction failed: batch ${id} has already been opened`);
     }
-    const identity =
-      kind === "mergeable" ? sessionFromWriteContext(sessionJson)?.identity : undefined;
+    const session = sessionFromWriteContext(sessionJson);
+    this.applySessionClaims(session);
+    const identity = kind === "mergeable" ? this.trustedWriteIdentity(session) : undefined;
     this.db.beginTransaction(id, kind, identity);
     this.pendingTxs.set(id, { id, kind, identity, writes: [], txByView: new Map() });
     return id;
@@ -1254,6 +1255,16 @@ export class NativeRuntimeAdapter implements Runtime {
       : this.db.all(query, opts);
   }
 
+  /**
+   * A session supplies the subject for a trusted-serving host; it never turns
+   * an ordinary client mutation into a policy-enforcing local admission.
+   */
+  private trustedWriteIdentity(session: RuntimeSession | null | undefined): Uint8Array | undefined {
+    return this.readAuthorizationHost === "trusted-serving"
+      ? (session?.identity ?? this.peerIdentity)
+      : undefined;
+  }
+
   private stagedRowForWriteMerge(
     tx: PendingTx,
     table: string,
@@ -1330,11 +1341,15 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!this.db.attachQuery) return;
     const opts = readOptions(tier, false, optionsJson);
     let attachment: unknown;
-    if (session) {
+    if (this.readAuthorizationHost === "trusted-serving") {
       if (!this.db.attachQueryForIdentity) {
-        throw new Error("Native runtime does not support session-scoped query coverage");
+        throw new Error("Native runtime does not support trusted-serving query coverage");
       }
-      attachment = this.db.attachQueryForIdentity(query, session.identity, opts);
+      attachment = this.db.attachQueryForIdentity(
+        query,
+        session?.identity ?? this.peerIdentity,
+        opts,
+      );
     } else {
       attachment = this.db.attachQuery(query, opts);
     }

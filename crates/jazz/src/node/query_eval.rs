@@ -5931,6 +5931,7 @@ where
         identity: AuthorId,
         output: CurrentQueryProgramOutput,
         include_deleted: bool,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
         let read_schema = self
@@ -5960,7 +5961,7 @@ where
             shape: input_shape,
         };
         let request = QueryProgramRequest {
-            authorization_mode: QueryAuthorizationMode::TrustedServing,
+            authorization_mode,
             reads: tx_query_read_set(
                 &input.shape,
                 lowered_shape.schema_version(),
@@ -8028,7 +8029,7 @@ where
         Ok(rows)
     }
 
-    pub(crate) fn open_local_maintained_view_subscription(
+    pub(crate) fn open_maintained_view_subscription_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -8036,9 +8037,13 @@ where
         tier: DurabilityTier,
         read_view: &ReadViewSpec,
         retained_prepared_plan: Option<PreparedQueryPlanHandle>,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<(LocalMaintainedViewSubscription, RelationSnapshot), Error> {
-        let settled_binding_view =
-            self.client_settled_binding_view_key_for_query(shape, binding, tier, read_view);
+        let settled_binding_view = (authorization_mode == QueryAuthorizationMode::ClientLocal)
+            .then(|| {
+                self.client_settled_binding_view_key_for_query(shape, binding, tier, read_view)
+            })
+            .flatten();
         let (subscription, maintained, terminal_schemas, transitions, tables) = self
             .open_seeded_maintained_subscription_view_in_authorization_mode(
                 shape,
@@ -8046,7 +8051,7 @@ where
                 identity,
                 tier,
                 read_view,
-                QueryAuthorizationMode::ClientLocal,
+                authorization_mode,
                 settled_binding_view,
             )?;
         let mut local = LocalMaintainedViewSubscription {
@@ -9463,7 +9468,6 @@ where
         )
     }
 
-    #[cfg(test)]
     pub(crate) fn query_relation_snapshot_for_serving_in_read_view(
         &mut self,
         shape: &ValidatedQuery,
@@ -9745,30 +9749,42 @@ where
         Ok(rows)
     }
 
-    pub(crate) fn subscription_snapshot_for_client(
+    pub(crate) fn subscription_snapshot_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
         identity: AuthorId,
+        read_view: &ReadViewSpec,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<RelationSnapshot, Error> {
         #[cfg(test)]
         record_subscription_snapshot_for_link_call();
         if shape.query().array_subqueries.is_empty() {
-            let rows = self.query_rows_for_client(shape, binding, tier, identity)?;
+            let rows = match authorization_mode {
+                QueryAuthorizationMode::ClientLocal => {
+                    self.query_rows_for_client(shape, binding, tier, identity)?
+                }
+                QueryAuthorizationMode::TrustedServing => self
+                    .query_rows_with_prepared_plan_for_identity(
+                        shape, binding, tier, None, identity,
+                    )?,
+            };
             return Ok(RelationSnapshot {
                 root_count: rows.len(),
                 rows,
                 edges: Vec::new(),
             });
         }
-        self.query_relation_snapshot_for_client(
-            shape,
-            binding,
-            tier,
-            identity,
-            &ReadViewSpec::default(),
-        )
+        match authorization_mode {
+            QueryAuthorizationMode::ClientLocal => {
+                self.query_relation_snapshot_for_client(shape, binding, tier, identity, read_view)
+            }
+            QueryAuthorizationMode::TrustedServing => self
+                .query_relation_snapshot_for_serving_in_read_view(
+                    shape, binding, tier, identity, read_view,
+                ),
+        }
     }
 
     #[allow(dead_code)] // Slice 2 wires this into API-level routing.
@@ -10012,7 +10028,26 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.tx_query_for_identity(tx_id, shape, binding, AuthorId::SYSTEM)
+        self.tx_query_with_options(tx_id, shape, binding, false)
+    }
+
+    /// Evaluate a validated query inside an open transaction using the local
+    /// client read boundary with explicit root-row deletion visibility.
+    pub fn tx_query_with_options(
+        &mut self,
+        tx_id: OpenBatchId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        include_deleted: bool,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.tx_query_in_authorization_mode(
+            tx_id,
+            shape,
+            binding,
+            AuthorId::SYSTEM,
+            include_deleted,
+            QueryAuthorizationMode::ClientLocal,
+        )
     }
 
     /// Evaluate a validated query inside an open exclusive transaction as `identity`.
@@ -10036,6 +10071,25 @@ where
         identity: AuthorId,
         include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.tx_query_in_authorization_mode(
+            tx_id,
+            shape,
+            binding,
+            identity,
+            include_deleted,
+            QueryAuthorizationMode::TrustedServing,
+        )
+    }
+
+    fn tx_query_in_authorization_mode(
+        &mut self,
+        tx_id: OpenBatchId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorId,
+        include_deleted: bool,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<Vec<CurrentRow>, Error> {
         let query = shape.query();
         let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
         let table = self.table_in_schema(&query.table, shape.schema_version())?;
@@ -10046,6 +10100,7 @@ where
             identity,
             CurrentQueryProgramOutput::AppRows,
             include_deleted,
+            authorization_mode,
         )?;
         let deltas = self
             .database

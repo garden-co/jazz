@@ -1039,7 +1039,46 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(authors).toEqual(["00000000-0000-0000-0000-0000000000a1"]);
   });
 
-  it("stages session-scoped mergeable transaction writes through identity-aware core txs", () => {
+  it("stages authenticated client mutations through the optimistic local core path", () => {
+    const staged: string[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => encodeRows([]),
+            allForIdentity: () => encodeRows([]),
+            insertWithIdEncoded: (table: string) => {
+              staged.push(table);
+              return fakeWrite();
+            },
+            insertWithIdEncodedForIdentity: () => {
+              throw new Error("ordinary client mutation must not use trusted serving");
+            },
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "optimistic" } },
+      JSON.stringify({ session: { user_id: "00000000-0000-0000-0000-0000000000a1" } }),
+      "00000000-0000-0000-0000-000000000001",
+    );
+
+    expect(staged).toEqual(["todos"]);
+  });
+
+  it("uses identity-aware core txs only on an explicit trusted-serving host", () => {
     const alice = "00000000-0000-0000-0000-0000000000a1";
     const authors: string[] = [];
     const staged: string[] = [];
@@ -1067,6 +1106,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       new Uint8Array(16),
       1,
       true,
+      { readAuthorizationHost: "trusted-serving" },
     );
 
     const tx = beginTestBatch(runtime, alice);
@@ -1226,7 +1266,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
   });
 
-  it("rejects mixed identities within one mergeable transaction", () => {
+  it("rejects mixed identities within one trusted-serving mergeable transaction", () => {
     const alice = "00000000-0000-0000-0000-0000000000a1";
     const runtime = new NativeRuntimeAdapter(
       {
@@ -1247,6 +1287,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       new Uint8Array(16),
       1,
       true,
+      { readAuthorizationHost: "trusted-serving" },
     );
 
     const tx = beginTestBatch(runtime, alice);
@@ -1296,7 +1337,7 @@ describe("NativeRuntimeAdapter server transport", () => {
             allInTransactionForIdentity: () => {
               throw new Error("ordinary client transaction reads must not use trusted serving");
             },
-            mergeableTxForIdentity: () => tx,
+            mergeableTx: () => tx,
             prepareQuery: () => ({}),
             tick: () => undefined,
           }),
@@ -2385,6 +2426,58 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(readOptions).toEqual([{ tier: "edge", propagation: "local_only" }]);
     expect(attachments).toEqual([]);
     expect(detached).toEqual([]);
+  });
+
+  it("keeps concurrent client coverage attachments on the raw client path", async () => {
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const attachedSubjects: string[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => encodeRows([]),
+            allForIdentity: () => {
+              throw new Error("client coverage must not compile trusted-serving queries");
+            },
+            connectUpstream: () => new FakeTransport([]),
+            prepareQuery: () => ({}),
+            attachQuery: () => {
+              attachedSubjects.push("client");
+              return {};
+            },
+            attachQueryForIdentity: () => {
+              throw new Error("client coverage must not select attachQueryForIdentity");
+            },
+            queryAttachmentIsCovered: () => true,
+            detachQuery: () => undefined,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    await runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+
+    await Promise.all([
+      runtime.query(
+        JSON.stringify({ table: "todos" }),
+        JSON.stringify({ user_id: "00000000-0000-0000-0000-0000000000a1" }),
+        "edge",
+      ),
+      runtime.query(
+        JSON.stringify({ table: "todos" }),
+        JSON.stringify({ user_id: "00000000-0000-0000-0000-0000000000b2" }),
+        "edge",
+      ),
+    ]);
+
+    expect(attachedSubjects).toEqual(["client", "client"]);
   });
 
   it("passes supported read tiers through and fails fast for unsupported read options", async () => {

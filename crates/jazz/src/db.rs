@@ -1300,8 +1300,25 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<RelationSnapshot, Error> {
-        self.all_relation_snapshot_for_identity(prepared, opts, self.identity.author)
-            .await
+        ensure_supported_read_view(&opts)?;
+        if opts.include_deleted {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "relation snapshots do not support include_deleted yet",
+            ));
+        }
+        let tier = effective_read_tier(&opts);
+        self.node
+            .node
+            .borrow_mut()
+            .query_relation_snapshot_for_client(
+                &prepared.shape,
+                &prepared.binding,
+                tier,
+                self.identity.author,
+                &opts.read_view,
+            )
+            .map_err(Into::into)
     }
 
     /// Tier-gated one-shot relation read evaluated as `author`.
@@ -1322,7 +1339,7 @@ where
         self.node
             .node
             .borrow_mut()
-            .query_relation_snapshot_for_client(
+            .query_relation_snapshot_for_serving_in_read_view(
                 &prepared.shape,
                 &prepared.binding,
                 tier,
@@ -1429,8 +1446,13 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
-        self.subscribe_for_identity(prepared, opts, self.identity.author)
-            .await
+        self.open_subscription(
+            prepared,
+            opts,
+            self.identity.author,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .await
     }
 
     /// Subscribe to a query evaluated as `author`.
@@ -1440,7 +1462,13 @@ where
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<SubscriptionStream, Error> {
-        self.open_subscription(prepared, opts, author).await
+        self.open_subscription(
+            prepared,
+            opts,
+            author,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .await
     }
 
     /// Subscribe to an output-changing relation query.
@@ -1449,8 +1477,13 @@ where
         query: &RelationQuery,
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
-        self.subscribe_relation_query_for_identity(query, opts, self.identity.author)
-            .await
+        self.open_relation_subscription(
+            query,
+            opts,
+            self.identity.author,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .await
     }
 
     /// Subscribe to an output-changing relation query evaluated as `author`.
@@ -1460,7 +1493,8 @@ where
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<SubscriptionStream, Error> {
-        self.open_relation_subscription(query, opts, author).await
+        self.open_relation_subscription(query, opts, author, QueryAuthorizationMode::TrustedServing)
+            .await
     }
 
     /// Attach a one-shot usage-site query coverage request.
@@ -1640,6 +1674,7 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
         author: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<SubscriptionStream, Error> {
         ensure_supported_subscription_read_opts(&opts)?;
         self.validate_prepared_shape_for_registration(prepared)?;
@@ -1668,13 +1703,14 @@ where
             .node
             .node
             .borrow_mut()
-            .open_local_maintained_view_subscription(
+            .open_maintained_view_subscription_in_authorization_mode(
                 &local_shape,
                 &local_binding,
                 author,
                 read_tier,
                 &opts.read_view,
                 Some(_local_plan),
+                authorization_mode,
             )?;
         let root_occurrence_ids = subscription.root_occurrence_ids().to_vec();
         let local_subscription_id = subscription.subscription_id();
@@ -1754,6 +1790,7 @@ where
             local_subscription_cleanup,
             propagates_upstream,
             author,
+            authorization_mode,
             read_tier,
             remote_read_tier,
             read_view: opts.read_view.clone(),
@@ -1821,11 +1858,13 @@ where
         query: &RelationQuery,
         opts: ReadOpts,
         author: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<SubscriptionStream, Error> {
         ensure_supported_subscription_read_opts(&opts)?;
         let query = relation_query_to_query(query)?;
         let prepared = self.prepare_query(&query)?;
-        self.open_subscription(&prepared, opts, author).await
+        self.open_subscription(&prepared, opts, author, authorization_mode)
+            .await
     }
 
     fn open_subscription_upstream_coverage(
@@ -2151,7 +2190,7 @@ where
         patch: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
         if patch.is_empty() {
-            return self.no_op_update_handle(table, row, self.identity.author);
+            return self.no_op_update_handle_for_client(table, row, self.identity.author);
         }
         let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
         self.write_mergeable_with_authored_columns(
@@ -2175,7 +2214,7 @@ where
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
         if patch.is_empty() {
-            return self.no_op_update_handle(table, row, self.identity.author);
+            return self.no_op_update_handle_for_client(table, row, self.identity.author);
         }
         let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
         self.write_mergeable_at_ms_with_authorship(
@@ -2203,7 +2242,7 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         self.check_attribution_allowed(made_by)?;
         if patch.is_empty() {
-            return self.no_op_update_handle(table, row, self.identity.author);
+            return self.no_op_update_handle_for_client(table, row, self.identity.author);
         }
         let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
         self.write_mergeable_as_session_subject_with_authored_columns(
@@ -2226,7 +2265,7 @@ where
         patch: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
         if patch.is_empty() {
-            return self.no_op_update_handle(table, row, identity);
+            return self.no_op_update_handle_for_identity(table, row, identity);
         }
         let (cells, parent, authored_columns) =
             self.merge_existing_cells_for_identity(table, row, patch, identity)?;
@@ -2253,7 +2292,7 @@ where
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
         if patch.is_empty() {
-            return self.no_op_update_handle(table, row, identity);
+            return self.no_op_update_handle_for_identity(table, row, identity);
         }
         let (cells, parent, authored_columns) =
             self.merge_existing_cells_for_identity(table, row, patch, identity)?;
@@ -2330,7 +2369,7 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
         let (cells, parents, authored_columns) = if self
-            .upsert_target_for_identity(table, row, self.identity.author)?
+            .upsert_target_for_client_identity(table, row, self.identity.author)?
             .is_some()
         {
             let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, cells)?;
@@ -2361,7 +2400,7 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
         let (cells, parents, authored_columns) = if self
-            .upsert_target_for_identity(table, row, self.identity.author)?
+            .upsert_target_for_client_identity(table, row, self.identity.author)?
             .is_some()
         {
             let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, cells)?;
@@ -2392,7 +2431,7 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
         let (cells, parents, authored_columns) = if self
-            .upsert_target_for_identity(table, row, identity)?
+            .upsert_target_for_trusted_identity(table, row, identity)?
             .is_some()
         {
             let (cells, parent, authored_columns) =
@@ -2425,7 +2464,7 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
         let (cells, parents, authored_columns) = if self
-            .upsert_target_for_identity(table, row, identity)?
+            .upsert_target_for_trusted_identity(table, row, identity)?
             .is_some()
         {
             let (cells, parent, authored_columns) =
@@ -3028,7 +3067,13 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.transaction_all_for_identity(tx_id, prepared, self.identity.author, opts)
+        self.transaction_all_in_authorization_mode(
+            tx_id,
+            prepared,
+            self.identity.author,
+            opts,
+            QueryAuthorizationMode::ClientLocal,
+        )
     }
 
     pub(crate) fn transaction_all_for_identity(
@@ -3038,18 +3083,44 @@ where
         author: AuthorId,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.transaction_all_in_authorization_mode(
+            tx_id,
+            prepared,
+            author,
+            opts,
+            QueryAuthorizationMode::TrustedServing,
+        )
+    }
+
+    fn transaction_all_in_authorization_mode(
+        &self,
+        tx_id: OpenBatchId,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+        opts: ReadOpts,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<Vec<CurrentRow>, Error> {
         ensure_default_read_view(&opts)?;
-        self.node
-            .node
-            .borrow_mut()
-            .tx_query_for_identity_with_options(
-                tx_id,
-                &prepared.shape,
-                &prepared.binding,
-                author,
-                opts.include_deleted,
-            )
-            .map_err(Into::into)
+        let mut node = self.node.node.borrow_mut();
+        match authorization_mode {
+            QueryAuthorizationMode::ClientLocal => node
+                .tx_query_with_options(
+                    tx_id,
+                    &prepared.shape,
+                    &prepared.binding,
+                    opts.include_deleted,
+                )
+                .map_err(Into::into),
+            QueryAuthorizationMode::TrustedServing => node
+                .tx_query_for_identity_with_options(
+                    tx_id,
+                    &prepared.shape,
+                    &prepared.binding,
+                    author,
+                    opts.include_deleted,
+                )
+                .map_err(Into::into),
+        }
     }
 
     fn stage_exclusive_insert(
@@ -3582,14 +3653,20 @@ where
         Ok(cells)
     }
 
-    fn upsert_target_for_identity(
+    fn upsert_target_for_client_identity(
         &self,
         table: &str,
         row: RowUuid,
         identity: AuthorId,
     ) -> Result<Option<CurrentRow>, Error> {
-        let target = self.local_row_for_identity(table, row, identity)?;
+        let target = self.local_row_for_client_identity(table, row, identity)?;
         if target.is_some() {
+            // Upsert may need to merge omitted cells. Even though a client
+            // local read is policy-elided, staging that merge must not turn a
+            // hidden target into an observable read-for-write path.
+            if !self.can_read_for_identity(table, row, identity)? {
+                return Err(read_for_write_denied("UPSERT", table));
+            }
             return Ok(target);
         }
         // A policy-filtered point read cannot by itself distinguish an absent
@@ -3597,6 +3674,28 @@ where
         // exactly that distinction: a genuinely absent target follows INSERT
         // policy and does not require read permission, while merging into an
         // existing target must not expose or copy hidden cells.
+        if self.local_current_row(table, row)?.is_none() {
+            return Ok(None);
+        }
+        if identity == AuthorId::SYSTEM || self.table_schema(table)?.read_policy.is_none() {
+            return Ok(None);
+        }
+        Err(read_for_write_denied("UPSERT", table))
+    }
+
+    fn upsert_target_for_trusted_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        identity: AuthorId,
+    ) -> Result<Option<CurrentRow>, Error> {
+        let target = self.local_row_for_trusted_identity(table, row, identity)?;
+        if target.is_some() {
+            return Ok(target);
+        }
+        // Trusted serving evaluates the identity's real read policy before
+        // merging an existing row. A hidden existing row must not be treated
+        // as an insert target.
         if self.local_current_row(table, row)?.is_none() {
             return Ok(None);
         }
@@ -3700,7 +3799,7 @@ where
         Ok((content_parents, deletion_parents))
     }
 
-    fn local_row_for_identity(
+    fn local_row_for_client_identity(
         &self,
         table: &str,
         row: RowUuid,
@@ -3721,7 +3820,29 @@ where
             .find(|candidate| candidate.row_uuid() == row))
     }
 
-    fn no_op_update_handle(
+    fn local_row_for_trusted_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        identity: AuthorId,
+    ) -> Result<Option<CurrentRow>, Error> {
+        let query = self.prepare_query(&Query::from(table))?;
+        Ok(self
+            .node
+            .node
+            .borrow_mut()
+            .query_rows_with_prepared_plan_for_identity(
+                &query.shape,
+                &query.binding,
+                DurabilityTier::Local,
+                None,
+                identity,
+            )?
+            .into_iter()
+            .find(|candidate| candidate.row_uuid() == row))
+    }
+
+    fn no_op_update_handle_for_client(
         &self,
         table: &str,
         row: RowUuid,
@@ -3729,7 +3850,32 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
         let existing = self
-            .local_row_for_identity(table, row, identity)?
+            .local_row_for_client_identity(table, row, identity)?
+            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+        let tx_id = self
+            .node
+            .node
+            .borrow_mut()
+            .current_row_tx_id(&existing)
+            .ok_or_else(|| Error::new(ErrorCode::NotObserved, "current row has no transaction"))?;
+        let local_tier = self.write_state(tx_id)?.durability;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier,
+        })
+    }
+
+    fn no_op_update_handle_for_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        identity: AuthorId,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_row_not_deleted(table, row)?;
+        let existing = self
+            .local_row_for_trusted_identity(table, row, identity)?
             .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
         let tx_id = self
             .node
@@ -3752,10 +3898,10 @@ where
         row: RowUuid,
         patch: RowCells,
     ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
-        self.merge_existing_cells_for_identity(table, row, patch, self.identity.author)
+        self.merge_existing_cells_for_client_identity(table, row, patch, self.identity.author)
     }
 
-    fn merge_existing_cells_for_identity(
+    fn merge_existing_cells_for_client_identity(
         &self,
         table: &str,
         row: RowUuid,
@@ -3784,7 +3930,52 @@ where
         }
         let mut cells = BTreeMap::new();
         let existing = self
-            .local_row_for_identity(table, row, identity)?
+            .local_row_for_client_identity(table, row, identity)?
+            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+        for column in &table_schema.columns {
+            if column.large_value.is_some() {
+                continue;
+            }
+            if let Some(value) = existing.cell(table_schema, &column.name) {
+                cells.insert(
+                    column.name.clone(),
+                    default_cell_for_column_type(&column.column_type, &value),
+                );
+            }
+        }
+        let parent = self.node.node.borrow_mut().current_row_tx_id(&existing);
+        let authored_columns = patch.keys().cloned().collect();
+        cells.extend(patch);
+        Ok((cells, parent, authored_columns))
+    }
+
+    fn merge_existing_cells_for_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        identity: AuthorId,
+    ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
+        let table_schema = self.table_schema(table)?;
+        self.ensure_row_not_deleted(table, row)?;
+        if table_schema
+            .columns
+            .iter()
+            .all(|column| patch.contains_key(&column.name))
+        {
+            let parent = self
+                .local_current_row(table, row)?
+                .as_ref()
+                .and_then(|existing| self.node.node.borrow_mut().current_row_tx_id(existing));
+            let authored_columns = patch.keys().cloned().collect();
+            return Ok((patch, parent, authored_columns));
+        }
+        if !self.can_read_for_identity(table, row, identity)? {
+            return Err(read_for_write_denied("partial UPDATE", table));
+        }
+        let mut cells = BTreeMap::new();
+        let existing = self
+            .local_row_for_trusted_identity(table, row, identity)?
             .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
         for column in &table_schema.columns {
             if column.large_value.is_some() {
@@ -4808,6 +4999,7 @@ where
             previous_source,
             previous_settled,
             author,
+            authorization_mode,
             terminal_rows,
         ) = {
             let state = state.borrow();
@@ -4818,6 +5010,7 @@ where
                 state.snapshot_source,
                 state.settled,
                 state.author,
+                state.authorization_mode,
                 state.terminal_rows,
             )
         };
@@ -4831,9 +5024,16 @@ where
                     }
                 }
             };
-            let (maintained, mut snapshot) =
-                node.borrow_mut().open_local_maintained_view_subscription(
-                    &shape, &binding, author, read_tier, &read_view, None,
+            let (maintained, mut snapshot) = node
+                .borrow_mut()
+                .open_maintained_view_subscription_in_authorization_mode(
+                    &shape,
+                    &binding,
+                    author,
+                    read_tier,
+                    &read_view,
+                    None,
+                    authorization_mode,
                 )?;
             let delivered_binding_view = BindingViewKey {
                 shape_id: shape.shape_id(),
@@ -5047,9 +5247,16 @@ where
                         // Groove terminal at an authoritative boundary so the
                         // reset is a fresh complete value and subsequent FIFO
                         // patches are relative to exactly that value.
-                        let (replacement, snapshot) =
-                            node.borrow_mut().open_local_maintained_view_subscription(
-                                &shape, &binding, author, read_tier, &read_view, None,
+                        let (replacement, snapshot) = node
+                            .borrow_mut()
+                            .open_maintained_view_subscription_in_authorization_mode(
+                                &shape,
+                                &binding,
+                                author,
+                                read_tier,
+                                &read_view,
+                                None,
+                                authorization_mode,
                             )?;
                         *maintained = replacement;
                         let settled = subscription_is_settled(
@@ -5128,11 +5335,13 @@ where
                             } else {
                                 let fallback = {
                                     let mut node_ref = node.borrow_mut();
-                                    match node_ref.subscription_snapshot_for_client(
+                                    match node_ref.subscription_snapshot_in_authorization_mode(
                                         &shape,
                                         &binding,
                                         snapshot_tier,
                                         author,
+                                        &read_view,
+                                        authorization_mode,
                                     ) {
                                         Ok(snapshot) => snapshot,
                                         Err(crate::node::Error::MissingTransaction(_)) => {
@@ -5359,11 +5568,13 @@ where
                                 } else {
                                     let fallback = {
                                         let mut node_ref = node.borrow_mut();
-                                        match node_ref.subscription_snapshot_for_client(
+                                        match node_ref.subscription_snapshot_in_authorization_mode(
                                             &shape,
                                             &binding,
                                             snapshot_tier,
                                             author,
+                                            &read_view,
+                                            authorization_mode,
                                         ) {
                                             Ok(snapshot) => snapshot,
                                             Err(crate::node::Error::MissingTransaction(_)) => {
@@ -5384,11 +5595,13 @@ where
                             } else {
                                 let remote_snapshot = {
                                     let mut node_ref = node.borrow_mut();
-                                    match node_ref.subscription_snapshot_for_client(
+                                    match node_ref.subscription_snapshot_in_authorization_mode(
                                         &shape,
                                         &binding,
                                         snapshot_tier,
                                         author,
+                                        &read_view,
+                                        authorization_mode,
                                     ) {
                                         Ok(snapshot) => snapshot,
                                         Err(crate::node::Error::MissingTransaction(_)) => {
@@ -5419,9 +5632,15 @@ where
                             (previous.clone(), previous_source)
                         } else {
                             (
-                                node.borrow_mut().subscription_snapshot_for_client(
-                                    &shape, &binding, read_tier, author,
-                                )?,
+                                node.borrow_mut()
+                                    .subscription_snapshot_in_authorization_mode(
+                                        &shape,
+                                        &binding,
+                                        read_tier,
+                                        author,
+                                        &read_view,
+                                        authorization_mode,
+                                    )?,
                                 SubscriptionSnapshotSource::LinkSnapshot,
                             )
                         };
@@ -9245,6 +9464,7 @@ struct SubscriptionState {
     local_subscription_cleanup: Rc<Cell<Option<(u64, groove::ivm::SubscriptionId)>>>,
     propagates_upstream: bool,
     author: AuthorId,
+    authorization_mode: QueryAuthorizationMode,
     read_tier: DurabilityTier,
     remote_read_tier: Option<DurabilityTier>,
     read_view: ReadViewSpec,
