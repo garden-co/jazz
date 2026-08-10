@@ -778,9 +778,9 @@ fn json_to_cell_value(value: &JsonValue, column_type: &ColumnType) -> Value {
                 })
                 .collect::<Vec<_>>();
             Value::Enum(
-                EnumValue::create(tag as u32, case.payload.clone(), &values).unwrap_or_else(
-                    |error| panic!("invalid union payload for case {case_name}: {error}"),
-                ),
+                EnumValue::create(tag as u32, case.payload, &values).unwrap_or_else(|error| {
+                    panic!("invalid union payload for case {case_name}: {error}")
+                }),
             )
         }
     }

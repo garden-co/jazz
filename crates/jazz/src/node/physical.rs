@@ -228,16 +228,14 @@ pub(super) fn allocate_physical_variant_cases(
                     "physical table variant tag collision",
                 ));
             }
-        } else {
-            if table.variant_cases.len() != 1
-                || used
-                    .insert(table.variant_cases[0].tag, *candidate_schema)
-                    .is_some()
-            {
-                return Err(Error::InvalidStoredValue(
-                    "physical table variant tag collision",
-                ));
-            }
+        } else if table.variant_cases.len() != 1
+            || used
+                .insert(table.variant_cases[0].tag, *candidate_schema)
+                .is_some()
+        {
+            return Err(Error::InvalidStoredValue(
+                "physical table variant tag collision",
+            ));
         }
     }
     let tag = groove_variant_tag(*aliases.get(&schema_version).ok_or(

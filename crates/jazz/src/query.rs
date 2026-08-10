@@ -2618,9 +2618,9 @@ pub enum QueryError {
         /// Column on the left side of the `in` predicate.
         column: String,
         /// Declared type of that column.
-        column_type: ColumnType,
+        column_type: Box<ColumnType>,
         /// Type of the mismatched candidate.
-        candidate_type: ColumnType,
+        candidate_type: Box<ColumnType>,
     },
     /// Claim and column operand types do not match.
     #[error(
@@ -3483,8 +3483,8 @@ fn in_candidate_type_mismatch_error(
     match left {
         Operand::Column(column) => QueryError::InCandidateTypeMismatch {
             column: column.clone(),
-            column_type,
-            candidate_type,
+            column_type: Box::new(column_type),
+            candidate_type: Box::new(candidate_type),
         },
         _ => QueryError::OperandTypeMismatch,
     }

@@ -6539,8 +6539,8 @@ pub enum Error {
     #[error(transparent)]
     Storage(#[from] storage::Error),
     /// Error returned by query validation or binding.
-    #[error(transparent)]
-    Query(#[from] QueryError),
+    #[error("{0}")]
+    Query(#[source] Box<QueryError>),
     /// Query could not be represented by the unified query engine.
     #[error("query lowering failed: {0}")]
     QueryLowering(String),
@@ -6640,4 +6640,26 @@ pub enum Error {
     /// A prepared point-read subscription closed before its initial snapshot.
     #[error("prepared point-read subscription closed")]
     SubscriptionClosed,
+}
+
+impl From<QueryError> for Error {
+    fn from(error: QueryError) -> Self {
+        Self::Query(Box::new(error))
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn query_errors_keep_display_source_and_matching_after_node_conversion() {
+    let error = Error::from(QueryError::UnknownTable("missing".to_owned()));
+
+    assert_eq!(error.to_string(), "unknown table missing");
+    assert_eq!(
+        std::error::Error::source(&error).unwrap().to_string(),
+        "unknown table missing"
+    );
+    assert!(matches!(
+        error,
+        Error::Query(source) if matches!(*source, QueryError::UnknownTable(ref table) if table == "missing")
+    ));
 }

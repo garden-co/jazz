@@ -10522,8 +10522,8 @@ fn send_subscription_rejection(
 
 fn server_failure_code(error: &crate::node::Error) -> SubscribeServerFailureCode {
     match error {
-        crate::node::Error::TableNotFound(_)
-        | crate::node::Error::Query(QueryError::UnknownTable(_)) => {
+        crate::node::Error::TableNotFound(_) => SubscribeServerFailureCode::TableNotFound,
+        crate::node::Error::Query(error) if matches!(**error, QueryError::UnknownTable(_)) => {
             SubscribeServerFailureCode::TableNotFound
         }
         crate::node::Error::Query(_) => SubscribeServerFailureCode::QueryValidation,
