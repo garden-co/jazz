@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::mpsc;
 use std::thread;
 
-use crate::db::{CommitUnitTrust, DbIdentity, RowCells, Transport};
+use crate::db::{CommitUnitTrust, ConnectionSessionContext, DbIdentity, RowCells, Transport};
 use crate::groove::records::Value;
 use crate::ids::{AuthorId, BranchId, NodeUuid, RowUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
@@ -128,15 +128,23 @@ impl ServerShellHandle {
         self.activity_tx.subscribe()
     }
 
-    pub(crate) async fn open(
+    pub(crate) async fn open_with_session_context(
         &self,
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
+        negotiated_features: crate::wire::WireFeatures,
+        session_context: Option<ConnectionSessionContext>,
     ) -> Result<ServerSession, String> {
         self.run(move |shell| {
             shell
-                .accept_subscriber_session_with_claims_and_trust(identity, claims, trust)
+                .accept_subscriber_session_with_claims_and_trust_and_context(
+                    identity,
+                    claims,
+                    trust,
+                    negotiated_features,
+                    session_context,
+                )
                 .map_err(|error| error.to_string())
         })
         .await

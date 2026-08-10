@@ -5350,6 +5350,7 @@ fn db_facade_runs_saas_shaped_local_lane_end_to_end() {
 struct DuplexTransport {
     outbound: Rc<RefCell<std::collections::VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<std::collections::VecDeque<SyncMessage>>>,
+    session_context: Option<ConnectionSessionContext>,
 }
 
 impl Transport for DuplexTransport {
@@ -5361,6 +5362,10 @@ impl Transport for DuplexTransport {
     fn try_recv(&mut self) -> Option<SyncMessage> {
         self.inbound.borrow_mut().pop_front()
     }
+
+    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+        self.session_context
+    }
 }
 
 fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
@@ -5371,12 +5376,130 @@ fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
         Box::new(DuplexTransport {
             outbound: Rc::clone(&left),
             inbound: Rc::clone(&right),
+            session_context: None,
         }),
         Box::new(DuplexTransport {
             outbound: right,
             inbound: left,
+            session_context: None,
         }),
     )
+}
+
+/// In-memory handshake pairing needs an internal test because it verifies the
+/// transport/admission boundary before any user-visible sync payload exists.
+fn duplex_with_admitted_session_context(
+    identity: AuthorId,
+    client_node: NodeUuid,
+    client_epoch: u64,
+    server_node: NodeUuid,
+    server_epoch: u64,
+) -> (Box<dyn Transport>, Box<dyn Transport>) {
+    use std::collections::VecDeque;
+    let left = Rc::new(RefCell::new(VecDeque::new()));
+    let right = Rc::new(RefCell::new(VecDeque::new()));
+    let features = crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS;
+    let client = ConnectionSessionContext {
+        local: crate::wire::WireAuthorityEndpoint {
+            node: client_node,
+            epoch: client_epoch,
+        },
+        remote: crate::wire::WireAuthorityEndpoint {
+            node: server_node,
+            epoch: server_epoch,
+        },
+        link_identity: identity,
+        negotiated_features: features,
+    };
+    let server = ConnectionSessionContext {
+        local: client.remote,
+        remote: client.local,
+        link_identity: identity,
+        negotiated_features: features,
+    };
+    (
+        Box::new(DuplexTransport {
+            outbound: Rc::clone(&left),
+            inbound: Rc::clone(&right),
+            session_context: Some(client),
+        }),
+        Box::new(DuplexTransport {
+            outbound: right,
+            inbound: left,
+            session_context: Some(server),
+        }),
+    )
+}
+
+#[test]
+fn admitted_duplex_context_binds_peer_epochs_and_rejects_cross_wiring() {
+    let identity = AuthorId::from_bytes([0x71; 16]);
+    let schema = schema();
+    let client = open_db(0x72, identity, &schema);
+    let server = open_core(0x73, AuthorId::SYSTEM, &schema);
+    let client_node = NodeUuid::from_bytes([0x72; 16]);
+    let server_node = NodeUuid::from_bytes([0x73; 16]);
+    let (client_transport, server_transport) =
+        duplex_with_admitted_session_context(identity, client_node, 41, server_node, 97);
+    let upstream = client.connect_upstream(client_transport);
+    let subscriber = server.accept_subscriber(server_transport, identity);
+    assert_eq!(upstream.borrow().connection_epoch, 41);
+    assert_eq!(subscriber.borrow().connection_epoch, 97);
+
+    let expected = AuthorityContext {
+        authority: *server_node.as_bytes(),
+        link: *identity.as_bytes(),
+        connection_epoch: 97,
+        claims_revision: 0,
+        policy_epoch: 0,
+        authorization_progress: 0,
+        settled_through: 0,
+    };
+    let receipt = AuthorizationScopeReceipt {
+        key: AuthorizationSupportScopeKey {
+            support_shape_digest: [1; 32],
+            subject: identity,
+            claims_digest: [2; 32],
+            policy_digest: [3; 32],
+        },
+        authority: expected.authority,
+        link: expected.link,
+        authority_epoch: expected.connection_epoch,
+        claims_revision: 0,
+        policy_epoch: 0,
+        settled_through: GlobalSeq(0),
+        authorization_progress: 0,
+    };
+    assert!(authorization_scope_receipt_matches_transport_context(
+        &receipt,
+        expected,
+        Some(GlobalSeq(0)),
+    ));
+    assert!(
+        !authorization_scope_receipt_matches_transport_context(
+            &AuthorizationScopeReceipt {
+                authority: *client_node.as_bytes(),
+                authority_epoch: 41,
+                ..receipt.clone()
+            },
+            expected,
+            Some(GlobalSeq(0)),
+        ),
+        "a receipt from the opposite duplex endpoint must not cross-wire"
+    );
+
+    let (reconnected_client, reconnected_server) =
+        duplex_with_admitted_session_context(identity, client_node, 42, server_node, 98);
+    let reconnect = client.connect_upstream(reconnected_client);
+    let resumed = server.accept_subscriber(reconnected_server, identity);
+    assert_ne!(
+        upstream.borrow().connection_epoch,
+        reconnect.borrow().connection_epoch
+    );
+    assert_ne!(
+        subscriber.borrow().connection_epoch,
+        resumed.borrow().connection_epoch
+    );
 }
 
 #[test]

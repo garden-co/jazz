@@ -10,13 +10,14 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::db::CommitUnitTrust;
+use crate::db::{CommitUnitTrust, ConnectionSessionContext};
 use crate::groove::records::Value as CoreValue;
-use crate::ids::AuthorId;
+use crate::ids::{AuthorId, NodeUuid};
 use crate::protocol_limits::{MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
 use crate::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireError, WireErrorCode, WireFrame,
-    WireHello, WirePeerRole, WireRetry, current_wire_features, encode_frame, negotiate_wire,
+    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireAuthorityEndpoint, WireError,
+    WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry, current_wire_features,
+    encode_frame, negotiate_wire,
 };
 use axum::{
     extract::State,
@@ -37,6 +38,7 @@ const WS_MAX_FRAME_BYTES: usize = 1 << 20;
 const WS_MAX_MESSAGE_BYTES: usize = WS_MAX_FRAME_BYTES;
 
 static WS_NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+static WS_NEXT_CONNECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
 static WS_ADMISSIONS: OnceLock<std::sync::Mutex<WebSocketAdmissionRegistry>> = OnceLock::new();
 
 /// Jazz WebSocket endpoint.
@@ -516,7 +518,7 @@ async fn handle_ws_connection(
         return;
     };
 
-    let negotiated = match negotiate_wire(
+    let mut negotiated = match negotiate_wire(
         &remote_hello,
         WIRE_PROTOCOL_VERSION,
         WIRE_PROTOCOL_VERSION,
@@ -542,6 +544,11 @@ async fn handle_ws_connection(
             return;
         }
     };
+    // A receipt-capable peer must bind its endpoint in the admission hello.
+    // Old hellos retain ordinary sync but never negotiate receipt semantics.
+    if remote_hello.authority.is_none() {
+        negotiated.features &= !crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS;
+    }
 
     let Some(core_server_shell) = state.core_server_shell() else {
         send_ws_error(
@@ -556,8 +563,30 @@ async fn handle_ws_connection(
         let _ = socket.close().await;
         return;
     };
+    let session_context =
+        if negotiated.features & crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS != 0 {
+            remote_hello
+                .authority
+                .map(|remote| ConnectionSessionContext {
+                    local: WireAuthorityEndpoint {
+                        node: NodeUuid::from_bytes([0x5e; 16]),
+                        epoch: WS_NEXT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed),
+                    },
+                    remote,
+                    link_identity: admission.identity,
+                    negotiated_features: negotiated.features,
+                })
+        } else {
+            None
+        };
     let session = match core_server_shell
-        .open(admission.identity, admission.claims, admission.trust)
+        .open_with_session_context(
+            admission.identity,
+            admission.claims,
+            admission.trust,
+            negotiated.features,
+            session_context,
+        )
         .await
     {
         Ok(session) => session,
@@ -571,8 +600,11 @@ async fn handle_ws_connection(
             return;
         }
     };
-    let server_hello =
-        WireFrame::Hello(WireHello::current(WirePeerRole::Core, negotiated.features));
+    let server_hello = WireFrame::Hello(match session_context {
+        Some(context) => WireHello::current(WirePeerRole::Core, negotiated.features)
+            .with_authority(context.local.node, context.local.epoch),
+        None => WireHello::current(WirePeerRole::Core, negotiated.features),
+    });
     let server_hello = match encode_frame(&server_hello) {
         Ok(frame) => frame,
         Err(error) => {
@@ -1179,6 +1211,14 @@ mod tests {
         )
         .await
         .expect("websocket helper should negotiate server hello");
+        let (protocol_version, features, session_context) =
+            transport.negotiated_transport_metadata();
+        let context = session_context.expect("receipt-capable route admission context");
+        assert_eq!(context.link_identity, AuthorId::from_bytes([0x41; 16]));
+        assert_eq!(context.local.node, NodeUuid::from_bytes([0x41; 16]));
+        assert_eq!(context.remote.node, NodeUuid::from_bytes([0x5e; 16]));
+        assert_ne!(context.local.epoch, 0);
+        assert_ne!(context.remote.epoch, 0);
 
         let schema = ws_public_schema_convert();
         let column_families = schema.column_families();
@@ -1199,7 +1239,13 @@ mod tests {
         )
         .await
         .expect("open client helper client db");
-        db.connect_upstream(Box::new(WireTransportAdapter::current(transport)));
+        db.connect_upstream(Box::new(WireTransportAdapter::new_with_session_context(
+            transport,
+            protocol_version,
+            features,
+            None,
+            Some(context),
+        )));
         db.tick()
             .expect("client helper transport should accept db upstream frames");
     }

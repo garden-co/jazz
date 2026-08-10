@@ -17,8 +17,8 @@ use std::rc::Rc;
 use std::time::SystemTime;
 
 use crate::db::{
-    CommitUnitTrust, Db, DbConfig, DbIdentity, Error as DbError, PeerConnection, ResumeCursor,
-    RowCells, SeededRowIdSource, Transport, WireTransportAdapter,
+    CommitUnitTrust, ConnectionSessionContext, Db, DbConfig, DbIdentity, Error as DbError,
+    PeerConnection, ResumeCursor, RowCells, SeededRowIdSource, Transport, WireTransportAdapter,
 };
 use crate::groove::records::Value;
 use crate::groove::storage::MemoryStorage;
@@ -834,6 +834,25 @@ impl InMemoryServerShell {
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
     ) -> ShellResult<ServerSession> {
+        self.accept_subscriber_session_with_claims_and_trust_and_context(
+            identity,
+            claims,
+            trust,
+            crate::wire::current_wire_features(),
+            None,
+        )
+    }
+
+    /// Accept one subscriber session after wire/session admission bound its
+    /// endpoint context. Callers without receipt-capable negotiation pass None.
+    pub fn accept_subscriber_session_with_claims_and_trust_and_context(
+        &mut self,
+        identity: AuthorId,
+        claims: BTreeMap<String, Value>,
+        trust: CommitUnitTrust,
+        negotiated_features: crate::wire::WireFeatures,
+        session_context: Option<ConnectionSessionContext>,
+    ) -> ShellResult<ServerSession> {
         if self.is_draining() {
             self.metrics.rejected_sessions += 1;
             return Err(ShellError::SessionRejected {
@@ -841,7 +860,13 @@ impl InMemoryServerShell {
             });
         }
         let transport = SharedWireTransport::default();
-        let transport_adapter = Box::new(WireTransportAdapter::current(transport.clone()));
+        let transport_adapter = Box::new(WireTransportAdapter::new_with_session_context(
+            transport.clone(),
+            crate::wire::WIRE_PROTOCOL_VERSION,
+            negotiated_features,
+            None,
+            session_context,
+        ));
         let connection = if self.role == NodeRole::Edge && trust == CommitUnitTrust::Session {
             self.db.accept_edge_authority_subscriber_with_claims(
                 transport_adapter,
