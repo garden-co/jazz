@@ -9422,6 +9422,267 @@ fn authoritative_reset_skips_stale_member_without_falling_back() {
 }
 
 #[test]
+fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_edge() {
+    // The client holds an extra raw row locally while the serving host has
+    // only the published row. This guards against an Edge facade widening
+    // server scope by re-scanning a broad local transport cache.
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let db = open_db(0xc1, client_author, &schema);
+    let published = seed(&server, "todos", cells("published", false, client_author));
+    let server_overemitted = row(0x72);
+    let published_tx = db
+        .node
+        .node
+        .borrow_mut()
+        .commit_mergeable(
+            MergeableCommit::new("todos", published, db.next_now_ms())
+                .made_by(client_author)
+                .permission_subject(client_author)
+                .cells(cells("not published", false, client_author)),
+        )
+        .unwrap();
+    let overemitted_tx = db
+        .node
+        .node
+        .borrow_mut()
+        .commit_mergeable(
+            MergeableCommit::new("todos", server_overemitted, db.next_now_ms())
+                .made_by(client_author)
+                .permission_subject(client_author)
+                .cells(cells("published", false, client_author)),
+        )
+        .unwrap();
+    {
+        let mut node = db.node.node.borrow_mut();
+        node.apply_fate_update(
+            published_tx,
+            Fate::Accepted,
+            None,
+            Some(DurabilityTier::Edge),
+        )
+        .unwrap();
+        node.apply_fate_update(
+            overemitted_tx,
+            Fate::Accepted,
+            None,
+            Some(DurabilityTier::Edge),
+        )
+        .unwrap();
+    }
+
+    let query = Query::from("todos").filter(in_list(
+        col("id"),
+        [lit(published.0), lit(server_overemitted.0)],
+    ));
+    let prepared = prepared(&db, &query);
+    let ids = |rows: Vec<CurrentRow>| {
+        rows.into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>()
+    };
+    let none_opts = ReadOpts {
+        tier: DurabilityTier::None,
+        local_updates: LocalUpdates::Deferred,
+        propagation: Propagation::LocalOnly,
+        include_deleted: false,
+        ..ReadOpts::default()
+    };
+    let local_opts = ReadOpts {
+        tier: DurabilityTier::Local,
+        local_updates: LocalUpdates::Deferred,
+        propagation: Propagation::LocalOnly,
+        include_deleted: false,
+        ..ReadOpts::default()
+    };
+    assert_eq!(
+        ids(block_on(db.all(&prepared, none_opts)).unwrap()),
+        BTreeSet::from([published, server_overemitted]),
+        "None reads scan the complete process-local overlay"
+    );
+    assert_eq!(
+        ids(block_on(db.all(&prepared, local_opts)).unwrap()),
+        BTreeSet::from([published, server_overemitted]),
+        "Local reads scan the complete durable local overlay"
+    );
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = db.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let attachment = db
+        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .expect("attach Edge coverage");
+    db.tick().unwrap();
+    server.tick().unwrap();
+    db.tick().unwrap();
+    assert!(db.query_attachment_is_covered(&attachment));
+
+    // Coverage acknowledgements are usage-site scoped. A second attachment
+    // shares the canonical Global result set, but must wait for its own server
+    // response rather than treating the older attachment's empty/non-empty
+    // state as fresh coverage.
+    let fresh_attachment = db
+        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .expect("attach a second Edge coverage request");
+    db.tick().unwrap();
+    let concurrent_attachment = db
+        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .expect("attach concurrent Edge coverage");
+    db.tick().unwrap();
+    assert!(
+        !db.query_attachment_is_covered(&fresh_attachment),
+        "a prior canonical result set must not acknowledge a new attachment"
+    );
+    assert!(
+        !db.query_attachment_is_covered(&concurrent_attachment),
+        "concurrent attachments require a later shared receipt"
+    );
+    db.tick().unwrap();
+    server.tick().unwrap();
+    db.tick().unwrap();
+    assert!(db.query_attachment_is_covered(&fresh_attachment));
+    assert!(db.query_attachment_is_covered(&concurrent_attachment));
+    db.detach_query(fresh_attachment);
+    db.detach_query(concurrent_attachment);
+
+    assert_eq!(
+        ids(block_on(db.all(&prepared, edge_subscribe_opts())).unwrap()),
+        BTreeSet::from([published]),
+        "Edge reads consume the canonical Global settled member set"
+    );
+    assert_eq!(
+        ids(block_on(db.all(&prepared, global_subscribe_opts())).unwrap()),
+        BTreeSet::from([published]),
+        "Global reads consume the canonical Global settled member set"
+    );
+    db.detach_query(attachment);
+    let reattached = db
+        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .expect("re-attach Edge coverage after unsubscribe");
+    db.tick().unwrap();
+    assert!(
+        !db.query_attachment_is_covered(&reattached),
+        "unsubscribe then re-attach requires a newer receipt"
+    );
+    server.tick().unwrap();
+    db.tick().unwrap();
+    assert!(db.query_attachment_is_covered(&reattached));
+    db.detach_query(reattached);
+    let mut edge_subscription =
+        block_on(db.subscribe(&prepared, edge_subscribe_opts())).expect("open edge subscription");
+    assert!(opened_rows(block_on(edge_subscription.next_event()).unwrap()).is_empty());
+    db.tick().unwrap();
+    server.tick().unwrap();
+    db.tick().unwrap();
+    assert_eq!(
+        ids(opened_rows(
+            block_on(edge_subscription.next_event()).unwrap()
+        )),
+        BTreeSet::from([published]),
+        "Edge maintained facades consume Global result members instead of raw local rows"
+    );
+    let refresh_attachment = db
+        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .expect("refresh a deduplicated Edge attachment");
+    db.tick().unwrap();
+    assert!(
+        !db.query_attachment_is_covered(&refresh_attachment),
+        "a deduplicated attachment must request a later logical receipt"
+    );
+    server.tick().unwrap();
+    db.tick().unwrap();
+    assert!(db.query_attachment_is_covered(&refresh_attachment));
+    db.detach_query(refresh_attachment);
+    assert_eq!(
+        ids(
+            block_on(db.all_for_identity(&prepared, edge_subscribe_opts(), AuthorId::SYSTEM,))
+                .unwrap()
+        ),
+        BTreeSet::from([published, server_overemitted]),
+        "serving hosts remain TrustedServing and do not consume a client result cache"
+    );
+}
+
+#[test]
+fn client_settled_file_member_materializes_bundle_for_bound_id_read() {
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "files",
+            [
+                crate::schema::ColumnSchema::new("mime_type", ColumnType::String),
+                crate::schema::ColumnSchema::blob("data"),
+            ],
+        )
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "attachments",
+            [crate::schema::ColumnSchema::new(
+                "file_id",
+                ColumnType::Uuid,
+            )],
+        )
+        .with_reference("file_id", "files")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+    ]);
+    let client_author = AuthorId::from_bytes([0xc2; 16]);
+    let server = open_core(0x5f, AuthorId::SYSTEM, &schema);
+    let db = open_db(0xc2, client_author, &schema);
+    let bytes = vec![0, 1, 9, 3, 255, 64, 128, 200];
+    let file = seed(
+        &server,
+        "files",
+        BTreeMap::from([
+            (
+                "mime_type".to_owned(),
+                Value::String("application/x-proof".to_owned()),
+            ),
+            ("data".to_owned(), Value::Bytes(bytes.clone())),
+        ]),
+    );
+    // Keep an attachment-shaped policy-evidence row in the serving snapshot:
+    // the file payload must still be materialized from the file member itself.
+    seed(
+        &server,
+        "attachments",
+        BTreeMap::from([("file_id".to_owned(), Value::Uuid(file.0))]),
+    );
+    let query = Query::from("files").filter(eq(col("id"), lit(file.0)));
+    let prepared = prepared(&db, &query);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = db.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let attachment = db
+        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .expect("attach file coverage");
+    db.tick().unwrap();
+    server.tick().unwrap();
+    db.tick().unwrap();
+    assert!(db.query_attachment_is_covered(&attachment));
+    let rows = block_on(db.all(&prepared, edge_subscribe_opts())).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "settled file member must materialize as an Edge row"
+    );
+    assert_eq!(rows[0].row_uuid(), file);
+    let table = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "files")
+        .unwrap();
+    let Value::Bytes(handle) = rows[0].cell(table, "data").unwrap() else {
+        panic!("file data must be a large-value handle");
+    };
+    assert!(
+        !handle.is_empty(),
+        "the received file row retains its content handle"
+    );
+}
+
+#[test]
 fn propagated_authoritative_reset_uses_delivered_binding_view() {
     let schema = schema();
     let client_author = AuthorId::from_bytes([0xc1; 16]);

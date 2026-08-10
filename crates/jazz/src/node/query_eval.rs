@@ -5000,6 +5000,14 @@ where
             .contains_key(&binding_view_key)
     }
 
+    pub(crate) fn applied_view_update_generation(&self, binding_view_key: BindingViewKey) -> u64 {
+        self.query
+            .applied_view_update_generations
+            .get(&binding_view_key)
+            .copied()
+            .unwrap_or_default()
+    }
+
     #[cfg(test)]
     pub(crate) fn reset_subscription_snapshot_for_link_call_count(&mut self) {
         SUBSCRIPTION_SNAPSHOT_FOR_LINK_CALLS.with(|calls| calls.set(0));
@@ -7260,10 +7268,27 @@ where
             self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
             return Ok(rows);
         }
-        let settled_binding_view = (tier == DurabilityTier::Global)
-            .then(|| self.settled_binding_view_key_for_query(shape, binding))
-            .transpose()?
-            .flatten();
+        let settled_binding_view = match authorization_mode {
+            QueryAuthorizationMode::ClientLocal => self.client_settled_binding_view_key_for_query(
+                shape,
+                binding,
+                tier,
+                &ReadViewSpec::default(),
+            ),
+            QueryAuthorizationMode::TrustedServing => (tier == DurabilityTier::Global)
+                .then(|| self.settled_binding_view_key_for_query(shape, binding))
+                .transpose()?
+                .flatten(),
+        };
+        // Ordinary Edge/Global reads are allowed to consume only a source
+        // binding view registered by upstream coverage. A client-local plan
+        // without that host-owned route must not fall back to its raw overlay.
+        if authorization_mode == QueryAuthorizationMode::ClientLocal
+            && tier >= DurabilityTier::Edge
+            && settled_binding_view.is_none()
+        {
+            return Ok(Vec::new());
+        }
         // A concrete one-shot access path is binding-specific. Inline that
         // binding so execution keeps the selected graph instead of replacing it
         // with the generic cached parameterized plan.
@@ -7558,6 +7583,33 @@ where
             .settled_result_sets
             .contains_key(&binding_view_key)
             .then_some(binding_view_key))
+    }
+
+    /// Select the server-owned result boundary for an ordinary client read.
+    ///
+    /// Local and process-only reads intentionally scan the complete local
+    /// overlay. Edge/global reads consume only the identity-scoped result
+    /// members emitted by the serving host. This is host-owned routing, not
+    /// request-controlled authorization.
+    fn client_settled_binding_view_key_for_query(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        read_view: &ReadViewSpec,
+    ) -> Option<BindingViewKey> {
+        (tier >= DurabilityTier::Edge).then(|| {
+            BindingViewKey::new(
+                shape.shape_id(),
+                binding.binding_id(),
+                RegisterShapeOptions {
+                    // Upstream client coverage is canonicalized to Global.
+                    tier: DurabilityTier::Global,
+                    read_view: read_view.clone(),
+                }
+                .read_view_key(),
+            )
+        })
     }
 
     fn can_use_prepared_current_query_plan(&self, shape: &ValidatedQuery) -> bool {
@@ -7985,6 +8037,8 @@ where
         read_view: &ReadViewSpec,
         retained_prepared_plan: Option<PreparedQueryPlanHandle>,
     ) -> Result<(LocalMaintainedViewSubscription, RelationSnapshot), Error> {
+        let settled_binding_view =
+            self.client_settled_binding_view_key_for_query(shape, binding, tier, read_view);
         let (subscription, maintained, terminal_schemas, transitions, tables) = self
             .open_seeded_maintained_subscription_view_in_authorization_mode(
                 shape,
@@ -7993,6 +8047,7 @@ where
                 tier,
                 read_view,
                 QueryAuthorizationMode::ClientLocal,
+                settled_binding_view,
             )?;
         let mut local = LocalMaintainedViewSubscription {
             subscription,
@@ -8002,15 +8057,17 @@ where
             tables,
             result_query: shape.query().clone(),
             result_table: shape.query().table.clone(),
-            binding_view_key: BindingViewKey::new(
-                shape.shape_id(),
-                binding.binding_id(),
-                RegisterShapeOptions {
-                    tier,
-                    read_view: read_view.clone(),
-                }
-                .read_view_key(),
-            ),
+            binding_view_key: settled_binding_view.unwrap_or_else(|| {
+                BindingViewKey::new(
+                    shape.shape_id(),
+                    binding.binding_id(),
+                    RegisterShapeOptions {
+                        tier,
+                        read_view: read_view.clone(),
+                    }
+                    .read_view_key(),
+                )
+            }),
             result_select: shape.query().select.clone(),
             result_set: BTreeSet::new(),
             result_payloads: BTreeMap::new(),
@@ -10169,6 +10226,7 @@ where
             tier,
             read_view,
             QueryAuthorizationMode::TrustedServing,
+            None,
         )
     }
 
@@ -10180,6 +10238,7 @@ where
         tier: DurabilityTier,
         read_view: &ReadViewSpec,
         authorization_mode: QueryAuthorizationMode,
+        settled_binding_view: Option<BindingViewKey>,
     ) -> Result<
         (
             MultisinkSubscription,
@@ -10202,13 +10261,14 @@ where
             ParamBindingMode::RetainAllParams,
         )?;
         let binding = shape.bind(binding.values().clone())?;
-        let program = self.compile_current_query_program_for_read_view_in_authorization_mode(
+        let program = self.compile_current_query_program_with_settled_view(
             &shape,
             &binding,
             tier,
             identity,
             CurrentQueryProgramOutput::MaintainedView,
             read_view,
+            settled_binding_view,
             authorization_mode,
         )?;
         let tables = program.lowered.maintained_terminal_tables.clone();

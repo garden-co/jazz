@@ -395,6 +395,10 @@ struct QueryServing {
     registered_shapes: BTreeMap<ShapeId, ValidatedQuery>,
     /// Registered query binding values keyed by shape and usage-site binding ID.
     registered_bindings: BTreeMap<ShapeId, BTreeMap<BindingId, RegisteredBinding>>,
+    /// Monotonically increasing receiver receipts for applied authoritative
+    /// updates. Attachments capture the current receipt and require a later
+    /// one; this remains logical binding-view state, never a wire nonce.
+    applied_view_update_generations: BTreeMap<BindingViewKey, u64>,
     /// Subscriber-side settled result-member/completeness state by canonical query binding/view.
     settled_result_sets: BTreeMap<BindingViewKey, BTreeSet<ResultMemberEntry>>,
     /// Point index for settled real-row output occurrences.
@@ -779,6 +783,7 @@ where
                 version_storage_sources_cache: BTreeMap::new(),
                 registered_shapes: BTreeMap::new(),
                 registered_bindings: BTreeMap::new(),
+                applied_view_update_generations: BTreeMap::new(),
                 settled_result_sets: BTreeMap::new(),
                 settled_result_row_index: BTreeMap::new(),
                 settled_program_facts: BTreeMap::new(),

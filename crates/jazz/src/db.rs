@@ -222,6 +222,7 @@ type SubscriptionList = Rc<RefCell<Vec<Weak<RefCell<SubscriptionState>>>>>;
 type PendingUpstreamCommands = Rc<RefCell<Vec<PendingUpstreamCommand>>>;
 type LatestCoverageSubscriptions = Rc<RefCell<BTreeMap<CoverageKey, SubscriptionKey>>>;
 type UpstreamCoverageRefCounts = Rc<RefCell<BTreeMap<CoverageKey, usize>>>;
+type CoverageRefreshGenerations = Rc<RefCell<BTreeMap<CoverageKey, u64>>>;
 type UpstreamSubscriptionOwners =
     Rc<RefCell<BTreeMap<SubscriptionKey, Vec<Weak<RefCell<SubscriptionState>>>>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
@@ -462,6 +463,9 @@ impl InitialSyncFlushCadence {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryAttachment {
     subscriptions: Vec<SubscriptionKey>,
+    owned_subscriptions: Vec<SubscriptionKey>,
+    required_after: Vec<(BindingViewKey, u64)>,
+    refreshes: Vec<(CoverageKey, u64)>,
 }
 
 impl QueryAttachment {
@@ -1348,8 +1352,19 @@ where
         query: &RelationQuery,
         opts: ReadOpts,
     ) -> Result<RelationSnapshot, Error> {
-        self.all_relation_query_for_identity(query, opts, self.identity.author)
-            .await
+        ensure_default_read_view(&opts)?;
+        let query = relation_query_to_query(query)?;
+        let prepared = self.prepare_query(&query)?;
+        // Output-changing relation queries currently normalize to a single
+        // root row set. They have no array payload edges, so request ordinary
+        // app rows instead of the relation-snapshot fact output (which is
+        // reserved for correlated array/path materialization).
+        let rows = self.all(&prepared, opts).await?;
+        Ok(RelationSnapshot {
+            root_count: rows.len(),
+            rows,
+            edges: Vec::new(),
+        })
     }
 
     /// Tier-gated one-shot output-changing relation read evaluated as `author`.
@@ -1461,14 +1476,12 @@ where
         ensure_supported_read_view(&opts)?;
         let upstream_opts =
             upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
-        Ok(QueryAttachment {
-            subscriptions: vec![self.attach_query_shape_binding_with_opts(
-                &prepared.shape,
-                &prepared.binding,
-                upstream_opts,
-                self.identity.author,
-            )?],
-        })
+        self.attach_or_refresh_query_coverage(
+            &prepared.shape,
+            &prepared.binding,
+            upstream_opts,
+            self.identity.author,
+        )
     }
 
     /// Attach a one-shot usage-site query coverage request evaluated as `author`.
@@ -1487,13 +1500,67 @@ where
             upstream_opts.tier,
             author,
         )?;
+        self.attach_or_refresh_query_coverage(&shape, &binding, upstream_opts, author)
+    }
+
+    fn attach_or_refresh_query_coverage(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        upstream_opts: RegisterShapeOptions,
+        identity: AuthorId,
+    ) -> Result<QueryAttachment, Error> {
+        let binding_view = BindingViewKey::new(
+            shape.shape_id(),
+            binding.binding_id(),
+            upstream_opts.read_view_key(),
+        );
+        let required_after = self
+            .node
+            .node
+            .borrow()
+            .applied_view_update_generation(binding_view);
+        let coverage = coverage_key(shape, binding, upstream_opts.clone());
+        if self
+            .node
+            .upstream_coverage_refcounts
+            .borrow()
+            .contains_key(&coverage)
+            && let Some(subscription) = self
+                .node
+                .latest_coverage_subscriptions
+                .borrow()
+                .get(&coverage)
+                .copied()
+        {
+            let mut refreshes = self.node.coverage_refresh_generations.borrow_mut();
+            if refreshes.get(&coverage).copied() != Some(required_after) {
+                refreshes.insert(coverage.clone(), required_after);
+                self.node.upstream_subscriptions.borrow_mut().push(
+                    PendingUpstreamCommand::Subscribe(PendingUpstreamSubscription {
+                        subscription,
+                        shape: shape.clone(),
+                        binding: binding.clone(),
+                        opts: upstream_opts,
+                        identity,
+                    }),
+                );
+                self.node.schedule_tick(TickUrgency::Immediate);
+            }
+            return Ok(QueryAttachment {
+                subscriptions: vec![subscription],
+                owned_subscriptions: Vec::new(),
+                required_after: vec![(binding_view, required_after)],
+                refreshes: vec![(coverage, required_after)],
+            });
+        }
+        let subscription =
+            self.attach_query_shape_binding_with_opts(shape, binding, upstream_opts, identity)?;
         Ok(QueryAttachment {
-            subscriptions: vec![self.attach_query_shape_binding_with_opts(
-                &shape,
-                &binding,
-                upstream_opts,
-                author,
-            )?],
+            subscriptions: vec![subscription],
+            owned_subscriptions: vec![subscription],
+            required_after: vec![(binding_view, required_after)],
+            refreshes: Vec::new(),
         })
     }
 
@@ -1530,18 +1597,31 @@ where
         self.attach_query_with_opts(prepared, ReadOpts::default())
     }
 
-    /// Return whether a query attachment has received at least one upstream view update.
+    /// Return whether each usage-site attachment has observed a newer logical
+    /// server receipt than the one it captured during registration.
     pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
         let node = self.node.node.borrow();
-        attachment.subscriptions.iter().all(|subscription| {
-            node.binding_view_key_for_subscription(*subscription)
-                .is_ok_and(|binding_view_key| node.has_settled_result_set(binding_view_key))
-        })
+        let covered = attachment
+            .required_after
+            .iter()
+            .all(|(binding_view, required_after)| {
+                node.applied_view_update_generation(*binding_view) > *required_after
+            });
+        drop(node);
+        if covered {
+            let mut refreshes = self.node.coverage_refresh_generations.borrow_mut();
+            for (coverage, generation) in &attachment.refreshes {
+                if refreshes.get(coverage).copied() == Some(*generation) {
+                    refreshes.remove(coverage);
+                }
+            }
+        }
+        covered
     }
 
     /// Detach a one-shot query coverage request.
     pub fn detach_query(&self, attachment: QueryAttachment) {
-        for subscription in attachment.subscriptions {
+        for subscription in attachment.owned_subscriptions {
             self.node.node.borrow_mut().apply_unsubscribe(subscription);
             self.node
                 .latest_coverage_subscriptions
@@ -1641,9 +1721,8 @@ where
             state_shape = shape.clone();
             state_binding = binding.clone();
             remote_read_tier = Some(upstream_opts.tier);
-            let upstream_subscriptions =
+            upstream_subscription_handles =
                 self.open_subscription_upstream_coverage(&shape, &binding, upstream_opts, author)?;
-            upstream_subscription_handles = upstream_subscriptions;
         }
         let settled_tier = remote_read_tier.unwrap_or(read_tier);
         let settled = subscription_is_settled(
@@ -3628,15 +3707,15 @@ where
         identity: AuthorId,
     ) -> Result<Option<CurrentRow>, Error> {
         let query = self.prepare_query(&Query::from(table))?;
-        let mut node = self.node.node.borrow_mut();
-        let groove_runtime_token = node.groove_runtime_token();
-        Ok(node
-            .query_rows_for_link_with_prepared_plan(
+        Ok(self
+            .node
+            .node
+            .borrow_mut()
+            .query_rows_for_client(
                 &query.shape,
                 &query.binding,
                 DurabilityTier::Local,
                 identity,
-                query.plan_for_tier(DurabilityTier::Local, groove_runtime_token),
             )?
             .into_iter()
             .find(|candidate| candidate.row_uuid() == row))
@@ -4209,6 +4288,7 @@ where
     upstream_subscriptions: PendingUpstreamCommands,
     latest_coverage_subscriptions: LatestCoverageSubscriptions,
     upstream_coverage_refcounts: UpstreamCoverageRefCounts,
+    coverage_refresh_generations: CoverageRefreshGenerations,
     upstream_subscription_owners: UpstreamSubscriptionOwners,
     connections: RefCell<Vec<Rc<RefCell<PeerConnection<S>>>>>,
     scheduler: SharedTickScheduler,
@@ -4232,6 +4312,7 @@ where
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             latest_coverage_subscriptions: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_coverage_refcounts: Rc::new(RefCell::new(BTreeMap::new())),
+            coverage_refresh_generations: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_subscription_owners: Rc::new(RefCell::new(BTreeMap::new())),
             connections: RefCell::new(Vec::new()),
             scheduler: Rc::new(RefCell::new(None)),
