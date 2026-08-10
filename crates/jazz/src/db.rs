@@ -6670,8 +6670,8 @@ where
                         subscription,
                     );
                     scope_purposes.insert(subscription, refreshed.clone());
-                } else {
-                    scope_purposes.remove(&subscription);
+                } else if let Some(prior) = scope_purposes.remove(&subscription) {
+                    remove_scope_aggregate_member(scope_aggregates, &prior.key, subscription);
                 }
                 let receipt = refreshed_scope.as_ref().and_then(|purpose| {
                     aggregate_authorization_scope_receipt_for_view(
@@ -6850,8 +6850,8 @@ where
                         subscription,
                     );
                     scope_purposes.insert(subscription, refreshed.clone());
-                } else {
-                    scope_purposes.remove(&subscription);
+                } else if let Some(prior) = scope_purposes.remove(&subscription) {
+                    remove_scope_aggregate_member(scope_aggregates, &prior.key, subscription);
                 }
                 let receipt = refreshed_scope.as_ref().and_then(|purpose| {
                     aggregate_authorization_scope_receipt_for_view(
@@ -7964,14 +7964,12 @@ where
                         }
                         SyncMessage::Unsubscribe { subscription } => {
                             self.node.borrow_mut().apply_unsubscribe(subscription);
-                            if let Some(purpose) = scope_purposes.remove(&subscription)
-                                && let Some(aggregate) = scope_aggregates.get_mut(&purpose.key)
-                            {
-                                aggregate.members.remove(&subscription);
-                                aggregate.applied.remove(&subscription);
-                                if aggregate.members.is_empty() {
-                                    scope_aggregates.remove(&purpose.key);
-                                }
+                            if let Some(purpose) = scope_purposes.remove(&subscription) {
+                                remove_scope_aggregate_member(
+                                    scope_aggregates,
+                                    &purpose.key,
+                                    subscription,
+                                );
                             }
                             if let Some(coverage) = served.remove(&subscription) {
                                 if let Some(group) = coverage_groups.get_mut(&coverage) {
@@ -8647,6 +8645,26 @@ fn move_scope_aggregate_member(
         );
         // A changed scope identity must never reuse the old support cut.
         aggregate.applied.remove(&subscription);
+    }
+}
+
+/// Forget a support subscription when its authority-derived purpose ceases to
+/// exist.  In particular, do not retain an applied cut across a policy/claims
+/// transition that later returns to the same scope key.
+fn remove_scope_aggregate_member(
+    aggregates: &mut BTreeMap<crate::protocol::AuthorizationSupportScopeKey, ScopeAggregate>,
+    key: &crate::protocol::AuthorizationSupportScopeKey,
+    subscription: SubscriptionKey,
+) {
+    let empty = if let Some(aggregate) = aggregates.get_mut(key) {
+        aggregate.members.remove(&subscription);
+        aggregate.applied.remove(&subscription);
+        aggregate.members.is_empty()
+    } else {
+        false
+    };
+    if empty {
+        aggregates.remove(key);
     }
 }
 

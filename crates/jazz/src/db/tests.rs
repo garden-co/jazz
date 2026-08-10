@@ -14125,6 +14125,81 @@ fn authorization_scope_aggregate_bounds_cuts_and_progress_independently() {
 }
 
 #[test]
+fn authorization_scope_claims_or_policy_away_and_back_requires_fresh_every_clause() {
+    let subscription = |seed| SubscriptionKey {
+        shape_id: ShapeId(uuid::Uuid::from_bytes([seed; 16])),
+        binding_id: BindingId(uuid::Uuid::from_bytes([seed.wrapping_add(1); 16])),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let first = subscription(0x21);
+    let second = subscription(0x31);
+    let expected_support = BTreeSet::from([
+        (first.shape_id, first.binding_id),
+        (second.shape_id, second.binding_id),
+    ]);
+    let key = AuthorizationSupportScopeKey {
+        support_shape_digest: [0x41; 32],
+        subject: AuthorId::from_bytes([0x42; 16]),
+        claims_digest: [0x43; 32],
+        policy_digest: [0x44; 32],
+    };
+    let mut aggregates = BTreeMap::from([(
+        key.clone(),
+        ScopeAggregate {
+            expected_support: expected_support.clone(),
+            members: BTreeMap::from([
+                (first, (first.shape_id, first.binding_id)),
+                (second, (second.shape_id, second.binding_id)),
+            ]),
+            applied: BTreeMap::from([(first, (GlobalSeq(5), 5)), (second, (GlobalSeq(5), 5))]),
+        },
+    )]);
+
+    // A claims or policy transition can make both compiled clauses disappear.
+    // Returning to the same digest must not revive either previous cut.
+    remove_scope_aggregate_member(&mut aggregates, &key, first);
+    remove_scope_aggregate_member(&mut aggregates, &key, second);
+    assert!(aggregates.is_empty());
+
+    let aggregate = aggregates.entry(key).or_insert_with(|| ScopeAggregate {
+        expected_support,
+        members: BTreeMap::new(),
+        applied: BTreeMap::new(),
+    });
+    aggregate
+        .members
+        .insert(first, (first.shape_id, first.binding_id));
+    aggregate
+        .members
+        .insert(second, (second.shape_id, second.binding_id));
+    assert!(
+        aggregate.applied.is_empty(),
+        "the first returning clause has no receipt until its replacement view arrives"
+    );
+    aggregate.applied.insert(first, (GlobalSeq(6), 6));
+    assert!(
+        aggregate
+            .members
+            .keys()
+            .any(|member| !aggregate.applied.contains_key(member)),
+        "one refreshed clause still cannot prove the aggregate"
+    );
+    assert!(
+        aggregate
+            .members
+            .keys()
+            .any(|member| !aggregate.applied.contains_key(member))
+    );
+    aggregate.applied.insert(second, (GlobalSeq(6), 6));
+    assert!(
+        aggregate
+            .members
+            .keys()
+            .all(|member| aggregate.applied.contains_key(member))
+    );
+}
+
+#[test]
 fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
     let link = [0x8b; 16];
     let context = AuthorityContext {
@@ -14218,6 +14293,60 @@ fn authorization_scope_rejects_noncanonical_support_read_views() {
             read_view: ReadViewSpec::default(),
         },
     ];
+
+    // This is the matching positive control: the same shape/binding receives
+    // a proof under the sole canonical current/global registration. Removing
+    // both admission guards below makes the noncanonical cases fail instead.
+    let canonical_opts = RegisterShapeOptions::default();
+    let canonical_subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: canonical_opts.read_view_key(),
+    };
+    let canonical_server = open_core(0x64, AuthorId::SYSTEM, &schema);
+    let (mut canonical_client, canonical_transport) = duplex();
+    let canonical_subscriber = canonical_server.accept_subscriber(canonical_transport, identity);
+    canonical_client
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: canonical_opts,
+        })
+        .unwrap();
+    canonical_client
+        .send(SyncMessage::AuthorizationScopeSubscribe {
+            subscribe: Subscribe {
+                shape_id: shape.shape_id(),
+                subscription: canonical_subscription,
+                values: Vec::new(),
+                known_state: None,
+            },
+            purpose: AuthorizationScopePurpose {
+                action: PermissionAdviceAction::Read {
+                    table: "todos".to_owned(),
+                    row: row(1),
+                },
+            },
+        })
+        .unwrap();
+    canonical_subscriber.borrow_mut().tick().unwrap();
+    let mut saw_view = false;
+    let mut saw_receipt = false;
+    while let Some(message) = canonical_client.try_recv() {
+        match message {
+            SyncMessage::CatalogueSnapshot(_) => {}
+            SyncMessage::ViewUpdate { .. } => saw_view = true,
+            SyncMessage::AuthorizationScopeReceipt { .. } => {
+                assert!(saw_view, "canonical receipt follows its support view");
+                saw_receipt = true;
+            }
+            other => panic!("unexpected canonical support response: {other:?}"),
+        }
+    }
+    assert!(
+        saw_view && saw_receipt,
+        "canonical support is the positive control"
+    );
 
     for opts in variants {
         let server = open_core(0x63, AuthorId::SYSTEM, &schema);
