@@ -66,7 +66,7 @@ pub(super) struct VariantProjectionKey {
 #[derive(Clone, Debug)]
 pub(super) struct VariantProjection {
     output: RecordDescriptor,
-    cases: HashMap<u64, VariantProjectionCase>,
+    cases: HashMap<u32, VariantProjectionCase>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,7 +152,7 @@ impl IvmRuntime {
         let table_descriptors = schema
             .tables
             .iter()
-            .filter(|table| !table.has_schema_variants())
+            .filter(|table| !table.has_variants())
             .map(|table| (table.name.clone(), table.record_schema()))
             .collect();
         let mut runtime = Self {
@@ -216,7 +216,7 @@ impl IvmRuntime {
         if self.schema.table(&table.name).is_some() {
             return Err(IvmRuntimeError::TableAlreadyExists(table.name));
         }
-        if !table.has_schema_variants() {
+        if !table.has_variants() {
             self.table_descriptors
                 .insert(table.name.clone(), table.record_schema());
         }
@@ -226,11 +226,11 @@ impl IvmRuntime {
         Ok(())
     }
 
-    pub(crate) fn register_table_schema_version_with_columns(
+    pub(crate) fn register_table_variant_with_columns(
         &mut self,
         table: &str,
         columns: Vec<crate::schema::ColumnSchema>,
-        schema_version: crate::schema::TableSchemaVersion,
+        variant_tag: crate::schema::TableVariant,
     ) -> Result<(), IvmRuntimeError> {
         let table_schema = self
             .schema
@@ -238,10 +238,10 @@ impl IvmRuntime {
             .iter_mut()
             .find(|candidate| candidate.name == table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(table.to_owned()))?;
-        if table_schema.schema_version(schema_version.tag).is_some() {
-            return Err(IvmRuntimeError::DuplicateTableSchemaVersion {
+        if table_schema.variant(variant_tag.tag).is_some() {
+            return Err(IvmRuntimeError::DuplicateTableVariant {
                 table: table.to_owned(),
-                version: schema_version.tag,
+                version: u64::from(variant_tag.tag),
             });
         }
         for column in columns {
@@ -257,8 +257,8 @@ impl IvmRuntime {
             }
             table_schema.columns.push(column);
         }
-        let version = schema_version.tag;
-        table_schema.variants.push(schema_version);
+        let version = variant_tag.tag;
+        table_schema.variants.push(variant_tag);
         let table_schema = table_schema.clone();
         for index in &table_schema.indices {
             self.register_schema_index_variant_case(&table_schema, index, version)?;
@@ -286,15 +286,15 @@ impl IvmRuntime {
             .indices
             .push(index.clone());
         let table_schema = self.schema.tables[table_position].clone();
-        if table_schema.has_schema_variants() {
+        if table_schema.has_variants() {
             let target = VariantProjectionTarget::SchemaIndex(index.name.clone());
             self.define_variant_projection_target(
                 table,
                 target,
                 schema_index_input_descriptor(&table_schema, &index)?,
             )?;
-            for schema_version in &table_schema.variants {
-                self.register_schema_index_variant_case(&table_schema, &index, schema_version.tag)?;
+            for variant_tag in &table_schema.variants {
+                self.register_schema_index_variant_case(&table_schema, &index, variant_tag.tag)?;
             }
         }
         let persist = self.add_dedup_schema_index(&table_schema, &index)?;
@@ -351,13 +351,13 @@ impl IvmRuntime {
         &mut self,
         table: &str,
         target: &str,
-        schema_version: u64,
+        variant_tag: u32,
         fields: &[ProjectField],
     ) -> Result<(), IvmRuntimeError> {
         self.register_variant_projection_target_case(
             table,
             VariantProjectionTarget::Named(target.to_owned()),
-            schema_version,
+            variant_tag,
             Some(fields),
         )
     }
@@ -370,7 +370,7 @@ impl IvmRuntime {
         &mut self,
         table: &str,
         target: &str,
-        schema_version: u64,
+        variant_tag: u32,
         union_field: &str,
         union_schema: &UnionSchema,
         union_case: &str,
@@ -380,10 +380,10 @@ impl IvmRuntime {
             .schema
             .table(table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(table.to_owned()))?
-            .record_schema_for_version(schema_version)
-            .ok_or_else(|| IvmRuntimeError::UnknownTableSchemaVersion {
+            .record_schema_for_variant(variant_tag)
+            .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
                 table: table.to_owned(),
-                version: schema_version,
+                version: u64::from(variant_tag),
             })?;
         let key = VariantProjectionKey {
             table: table.to_owned(),
@@ -464,7 +464,7 @@ impl IvmRuntime {
             project,
             raw_projection,
         };
-        match projection.cases.entry(schema_version) {
+        match projection.cases.entry(variant_tag) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(case);
             }
@@ -473,7 +473,7 @@ impl IvmRuntime {
                 return Err(IvmRuntimeError::VariantProjectionCaseAlreadyRegistered {
                     table: table.to_owned(),
                     target: target.to_owned(),
-                    version: schema_version,
+                    version: u64::from(variant_tag),
                 });
             }
         }
@@ -485,12 +485,12 @@ impl IvmRuntime {
         &mut self,
         table: &str,
         target: &str,
-        schema_version: u64,
+        variant_tag: u32,
     ) -> Result<(), IvmRuntimeError> {
         self.register_variant_projection_target_case(
             table,
             VariantProjectionTarget::Named(target.to_owned()),
-            schema_version,
+            variant_tag,
             None,
         )
     }
@@ -499,7 +499,7 @@ impl IvmRuntime {
         &self,
         table: &str,
         target: &str,
-        record: &records::VersionedRecord,
+        record: &records::VariantRecord,
     ) -> Result<Option<OwnedRecord>, IvmRuntimeError> {
         let key = VariantProjectionKey {
             table: table.to_owned(),
@@ -513,17 +513,17 @@ impl IvmRuntime {
         })?;
         let case = projection
             .cases
-            .get(&record.schema_version())
+            .get(&record.variant_tag())
             .ok_or_else(|| IvmRuntimeError::VariantProjectionCaseNotFound {
                 table: table.to_owned(),
                 target: target.to_owned(),
-                version: record.schema_version(),
+                version: u64::from(record.variant_tag()),
             })?;
         if case.source() != *record.record().descriptor() {
             return Err(IvmRuntimeError::VariantProjectionSourceMismatch {
                 table: table.to_owned(),
                 target: target.to_owned(),
-                version: record.schema_version(),
+                version: u64::from(record.variant_tag()),
             });
         }
         let input = RecordDeltas {
@@ -575,17 +575,17 @@ impl IvmRuntime {
         &mut self,
         table: &str,
         target: VariantProjectionTarget,
-        schema_version: u64,
+        variant_tag: u32,
         fields: Option<&[ProjectField]>,
     ) -> Result<(), IvmRuntimeError> {
         let source = self
             .schema
             .table(table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(table.to_owned()))?
-            .record_schema_for_version(schema_version)
-            .ok_or_else(|| IvmRuntimeError::UnknownTableSchemaVersion {
+            .record_schema_for_variant(variant_tag)
+            .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
                 table: table.to_owned(),
-                version: schema_version,
+                version: u64::from(variant_tag),
             })?;
         let key = VariantProjectionKey {
             table: table.to_owned(),
@@ -635,7 +635,7 @@ impl IvmRuntime {
         } else {
             VariantProjectionCase::Ignore { source }
         };
-        match projection.cases.entry(schema_version) {
+        match projection.cases.entry(variant_tag) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(case);
             }
@@ -644,7 +644,7 @@ impl IvmRuntime {
                 return Err(IvmRuntimeError::VariantProjectionCaseAlreadyRegistered {
                     table: table.to_owned(),
                     target: variant_projection_target_name(&target).to_owned(),
-                    version: schema_version,
+                    version: u64::from(variant_tag),
                 });
             }
         }
@@ -654,7 +654,7 @@ impl IvmRuntime {
 
     fn define_schema_index_variant_projections(&mut self) -> Result<(), IvmRuntimeError> {
         for table in self.schema.tables.clone() {
-            if !table.has_schema_variants() {
+            if !table.has_variants() {
                 continue;
             }
             for index in &table.indices {
@@ -664,8 +664,8 @@ impl IvmRuntime {
                     target,
                     schema_index_input_descriptor(&table, index)?,
                 )?;
-                for schema_version in &table.variants {
-                    self.register_schema_index_variant_case(&table, index, schema_version.tag)?;
+                for variant_tag in &table.variants {
+                    self.register_schema_index_variant_case(&table, index, variant_tag.tag)?;
                 }
             }
         }
@@ -676,12 +676,12 @@ impl IvmRuntime {
         &mut self,
         table: &TableSchema,
         index: &IndexSchema,
-        schema_version: u64,
+        variant_tag: u32,
     ) -> Result<(), IvmRuntimeError> {
-        let version = table.schema_version(schema_version).ok_or_else(|| {
-            IvmRuntimeError::UnknownTableSchemaVersion {
+        let version = table.variant(variant_tag).ok_or_else(|| {
+            IvmRuntimeError::UnknownTableVariant {
                 table: table.name.clone(),
-                version: schema_version,
+                version: u64::from(variant_tag),
             }
         })?;
         let fields = schema_index_input_fields(table, index)?
@@ -695,7 +695,7 @@ impl IvmRuntime {
         self.register_variant_projection_target_case(
             &table.name,
             VariantProjectionTarget::SchemaIndex(index.name.clone()),
-            schema_version,
+            variant_tag,
             fields.as_deref(),
         )
     }
@@ -1948,7 +1948,7 @@ impl IvmRuntime {
                     .schema
                     .table(table)
                     .ok_or_else(|| IvmRuntimeError::TableNotFound(table.clone()))?;
-                if table_schema.has_schema_variants() {
+                if table_schema.has_variants() {
                     return Err(IvmRuntimeError::VariantProjectionRequired(table.clone()));
                 }
                 Ok(table_schema.record_schema())
@@ -3567,7 +3567,7 @@ impl IvmRuntime {
         index: &IndexSchema,
     ) -> Result<NodeId, IvmRuntimeError> {
         self.logical_nodes_requested += 3;
-        let (table_descriptor, variant_projection) = if table.has_schema_variants() {
+        let (table_descriptor, variant_projection) = if table.has_variants() {
             (
                 schema_index_input_descriptor(table, index)?,
                 Some(VariantProjectionTarget::SchemaIndex(index.name.clone())),
@@ -3627,7 +3627,7 @@ impl IvmRuntime {
         index: &IndexSchema,
         scan: Option<StaticScanSpec>,
     ) -> Result<IndexSourceOp, IvmRuntimeError> {
-        let (table_descriptor, variant_projection) = if table.has_schema_variants() {
+        let (table_descriptor, variant_projection) = if table.has_variants() {
             (
                 schema_index_input_descriptor(table, index)?,
                 Some(VariantProjectionTarget::SchemaIndex(index.name.clone())),
@@ -4584,7 +4584,7 @@ pub struct TableDelta {
     pub table: String,
     /// Table-local discriminator selecting the descriptor for every encoded
     /// payload in this homogeneous delta group.
-    pub schema_version: u64,
+    pub variant_tag: u32,
     pub descriptor: RecordDescriptor,
     pub deltas: Vec<RecordDelta>,
 }
@@ -5852,7 +5852,7 @@ impl NodeState {
                 if projection.output != *output_desc {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
-                let case = projection.cases.get(&delta.schema_version).ok_or_else(|| {
+                let case = projection.cases.get(&delta.variant_tag).ok_or_else(|| {
                     IvmRuntimeError::VariantProjectionCaseNotFound {
                         table: input.table.clone(),
                         target: input
@@ -5861,7 +5861,7 @@ impl NodeState {
                             .map(variant_projection_target_name)
                             .unwrap_or_default()
                             .to_owned(),
-                        version: delta.schema_version,
+                        version: u64::from(delta.variant_tag),
                     }
                 })?;
                 if case.source() != delta.descriptor {
@@ -5873,7 +5873,7 @@ impl NodeState {
                             .map(variant_projection_target_name)
                             .unwrap_or_default()
                             .to_owned(),
-                        version: delta.schema_version,
+                        version: u64::from(delta.variant_tag),
                     });
                 }
                 match case {
@@ -11715,7 +11715,7 @@ pub enum IvmRuntimeError {
     #[error("binding source descriptor mismatch: {0}")]
     BindingSourceDescriptorMismatch(String),
     #[error("duplicate schema version {version} for table {table}")]
-    DuplicateTableSchemaVersion { table: String, version: u64 },
+    DuplicateTableVariant { table: String, version: u64 },
     #[error(transparent)]
     RecordEncoding(#[from] records::Error),
     #[error("recursive node {node:?} exceeded iteration limit {max_iters}")]
@@ -11738,7 +11738,7 @@ pub enum IvmRuntimeError {
     #[error("field already exists in the live catalogue: {table}.{field}")]
     TableFieldAlreadyExists { table: String, field: String },
     #[error("unknown schema version {version} for table {table}")]
-    UnknownTableSchemaVersion { table: String, version: u64 },
+    UnknownTableVariant { table: String, version: u64 },
     #[error("variant projection not found: {table}.{target}")]
     VariantProjectionNotFound { table: String, target: String },
     #[error("schema-variant table requires a fixed-output projection: {0}")]
@@ -12181,7 +12181,7 @@ mod tests {
         runtime
             .tick(
                 vec![TableDelta {
-                    schema_version: 0,
+                    variant_tag: 0,
                     table: "albums".to_owned(),
                     descriptor: albums,
                     deltas: vec![
@@ -12237,7 +12237,7 @@ mod tests {
         runtime
             .tick(
                 vec![TableDelta {
-                    schema_version: 0,
+                    variant_tag: 0,
                     table: "albums".to_owned(),
                     descriptor: albums,
                     deltas: vec![RecordDelta {
@@ -12262,8 +12262,8 @@ mod tests {
         let second = albums
             .create(&[Value::U64(2), Value::String("two".to_owned())])
             .unwrap();
-        let first = crate::records::encode_versioned_record(0, &first);
-        let second = crate::records::encode_versioned_record(0, &second);
+        let first = crate::records::encode_variant_record(0, &first);
+        let second = crate::records::encode_variant_record(0, &second);
         store
             .write_many(&[store.set(b"1", &first), store.set(b"2", &second)])
             .unwrap();
@@ -12378,7 +12378,7 @@ mod tests {
             runtime
                 .tick(
                     vec![TableDelta {
-                        schema_version: 0,
+                        variant_tag: 0,
                         table: "albums".to_owned(),
                         descriptor: albums,
                         deltas: vec![RecordDelta {
@@ -12482,7 +12482,7 @@ mod tests {
         runtime
             .tick(
                 vec![TableDelta {
-                    schema_version: 0,
+                    variant_tag: 0,
                     table: "albums".to_owned(),
                     descriptor: albums,
                     deltas: vec![
@@ -12555,7 +12555,7 @@ mod tests {
         runtime
             .tick(
                 vec![TableDelta {
-                    schema_version: 0,
+                    variant_tag: 0,
                     table: "albums".to_owned(),
                     descriptor: albums,
                     deltas: vec![RecordDelta {
@@ -12595,8 +12595,8 @@ mod tests {
         let second = albums
             .create(&[Value::U64(2), Value::String("two".to_owned())])
             .unwrap();
-        let first = crate::records::encode_versioned_record(0, &first);
-        let second = crate::records::encode_versioned_record(0, &second);
+        let first = crate::records::encode_variant_record(0, &first);
+        let second = crate::records::encode_variant_record(0, &second);
 
         store
             .write_many(&[store.set(b"1", &first), store.set(b"2", &second)])
@@ -12708,7 +12708,7 @@ mod tests {
         runtime
             .tick(
                 vec![TableDelta {
-                    schema_version: 0,
+                    variant_tag: 0,
                     table: "records".to_owned(),
                     descriptor,
                     deltas: vec![
@@ -12804,7 +12804,7 @@ mod tests {
         let labels = schema.table("labels").unwrap().record_schema();
         let deltas = vec![
             TableDelta {
-                schema_version: 0,
+                variant_tag: 0,
                 table: "artists".to_owned(),
                 descriptor: artists,
                 deltas: vec![RecordDelta {
@@ -12816,7 +12816,7 @@ mod tests {
                 }],
             },
             TableDelta {
-                schema_version: 0,
+                variant_tag: 0,
                 table: "labels".to_owned(),
                 descriptor: labels,
                 deltas: vec![RecordDelta {
@@ -12832,7 +12832,7 @@ mod tests {
                 }],
             },
             TableDelta {
-                schema_version: 0,
+                variant_tag: 0,
                 table: "albums".to_owned(),
                 descriptor: albums,
                 deltas: vec![RecordDelta {
@@ -12864,7 +12864,7 @@ mod tests {
         let schema = edges_schema();
         let edges = schema.table("edges").unwrap().record_schema();
         let deltas = vec![TableDelta {
-            schema_version: 0,
+            variant_tag: 0,
             table: "edges".to_owned(),
             descriptor: edges,
             deltas: vec![
@@ -12925,7 +12925,7 @@ mod tests {
         };
         let scores = schema.table("scores").unwrap().record_schema();
         let deltas = vec![TableDelta {
-            schema_version: 0,
+            variant_tag: 0,
             table: "scores".to_owned(),
             descriptor: scores,
             deltas: vec![
@@ -13206,7 +13206,7 @@ mod tests {
             .tick(
                 vec![
                     TableDelta {
-                        schema_version: 0,
+                        variant_tag: 0,
                         table: "albums".to_owned(),
                         descriptor: albums,
                         deltas: vec![RecordDelta {
@@ -13222,7 +13222,7 @@ mod tests {
                         }],
                     },
                     TableDelta {
-                        schema_version: 0,
+                        variant_tag: 0,
                         table: "artists".to_owned(),
                         descriptor: artists,
                         deltas: vec![RecordDelta {
@@ -13280,7 +13280,7 @@ mod tests {
 
         let edges = schema.table("edges").unwrap().record_schema();
         let table_delta = TableDelta {
-            schema_version: 0,
+            variant_tag: 0,
             table: "edges".to_owned(),
             descriptor: edges,
             deltas: vec![

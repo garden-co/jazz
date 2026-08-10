@@ -2,7 +2,7 @@
 //! run against both the fixed-u64 A commit and generic-varint B commit.
 
 use groove::db::{Database, GraphBuilder, ProjectField};
-use groove::records::{RecordDescriptor, Value, VersionedRecord};
+use groove::records::{RecordDescriptor, Value, VariantRecord};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
@@ -23,10 +23,10 @@ fn schema() -> DatabaseSchema {
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     .with_index(IndexSchema::new("entries_by_owner", ["owner"]))
-    .with_schema_version(1, ["id", "owner", "body"])
-    .with_schema_version(2, ["id", "owner", "body", "extra"])
-    .with_schema_version(3, ["id", "owner", "body"])
-    .with_schema_version(4, ["id", "owner", "body", "extra"])])
+    .with_variant(1, ["id", "owner", "body"])
+    .with_variant(2, ["id", "owner", "body", "extra"])
+    .with_variant(3, ["id", "owner", "body"])
+    .with_variant(4, ["id", "owner", "body", "extra"])])
 }
 
 fn register_projection(database: &mut Database<MemoryStorage>) -> Result<(), groove::db::Error> {
@@ -67,7 +67,7 @@ fn repeated_release_write_ivm_and_cold_scan_receipt() -> Result<(), Box<dyn std:
                 schema
                     .table("entries")
                     .unwrap()
-                    .record_schema_for_version(tag)
+                    .record_schema_for_variant(tag)
                     .unwrap()
             })
             .collect::<Vec<_>>()
@@ -85,7 +85,7 @@ fn repeated_release_write_ivm_and_cold_scan_receipt() -> Result<(), Box<dyn std:
         let started = std::time::Instant::now();
         let mut batch = database.open_batch();
         for id in 0..ROWS {
-            let tag = id % 4 + 1;
+            let tag = (id % 4 + 1) as u32;
             let mut values = vec![
                 Value::U64(id),
                 Value::U64(id % 100),
@@ -96,7 +96,7 @@ fn repeated_release_write_ivm_and_cold_scan_receipt() -> Result<(), Box<dyn std:
             }
             batch.insert(
                 "entries",
-                VersionedRecord::create(tag, descriptors[tag as usize - 1].clone(), &values)?,
+                VariantRecord::create(tag, descriptors[tag as usize - 1].clone(), &values)?,
             );
         }
         database.commit_batch(batch)?;

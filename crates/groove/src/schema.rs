@@ -221,7 +221,6 @@ pub struct TableSchema {
     /// Value-based writes use the reserved discriminator `0`; callers may bind
     /// the same layout to another discriminator when it is useful metadata.
     #[serde(default)]
-    #[serde(alias = "schema_versions")]
     pub variants: Vec<TableVariant>,
 }
 
@@ -252,19 +251,6 @@ impl TableSchema {
         self
     }
 
-    /// Register one row layout for a schema-variant table.
-    ///
-    /// Field names select an ordered subset of the stable [`Self::columns`]
-    /// catalogue. The database validates the completed registry when opened.
-    pub fn with_schema_version(
-        mut self,
-        version: u64,
-        fields: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
-        self.variants.push(TableVariant::new(version, fields));
-        self
-    }
-
     /// Register one generic top-level union case.
     ///
     /// The case tag is table-local and has no schema-version meaning to
@@ -276,7 +262,7 @@ impl TableSchema {
         fields: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         self.variants
-            .push(TableVariant::new(u64::from(tag), fields));
+            .push(TableVariant::new(tag, fields));
         self
     }
 
@@ -289,30 +275,26 @@ impl TableSchema {
         fields: impl IntoIterator<Item = TableVariantField>,
     ) -> Self {
         self.variants
-            .push(TableVariant::with_payload(u64::from(tag), fields));
+            .push(TableVariant::with_payload(tag, fields));
         self
     }
 
-    pub fn has_schema_variants(&self) -> bool {
+    pub fn has_variants(&self) -> bool {
         !self.variants.is_empty()
     }
 
-    pub fn schema_version(&self, version: u64) -> Option<&TableSchemaVersion> {
-        self.variants.iter().find(|variant| variant.tag == version)
-    }
-
     pub fn variant(&self, tag: u32) -> Option<&TableVariant> {
-        self.schema_version(u64::from(tag))
+        self.variants.iter().find(|variant| variant.tag == tag)
     }
 
-    /// Build the descriptor registered for one row schema version.
-    pub fn record_schema_for_version(&self, version: u64) -> Option<RecordDescriptor> {
+    /// Build the dense descriptor registered for one whole-row enum case.
+    pub fn record_schema_for_variant(&self, tag: u32) -> Option<RecordDescriptor> {
         if self.variants.is_empty() {
             return Some(self.record_schema());
         }
-        let schema_version = self.schema_version(version)?;
-        let fields = if schema_version.payload_fields.is_empty() {
-            schema_version
+        let variant = self.variant(tag)?;
+        let fields = if variant.payload_fields.is_empty() {
+            variant
                 .fields
                 .iter()
                 .map(|field_name| {
@@ -324,17 +306,13 @@ impl TableSchema {
                 })
                 .collect::<Option<Vec<_>>>()?
         } else {
-            schema_version
+            variant
                 .payload_fields
                 .iter()
                 .map(|field| (field.name.clone(), field.value_type.clone()))
                 .collect()
         };
         Some(RecordDescriptor::new(fields))
-    }
-
-    pub fn record_schema_for_variant(&self, tag: u32) -> Option<RecordDescriptor> {
-        self.record_schema_for_version(u64::from(tag))
     }
 
     pub fn record_schema(&self) -> RecordDescriptor {
@@ -349,15 +327,14 @@ impl TableSchema {
 /// One top-level table union case and its ordered dense payload layout.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct TableVariant {
-    #[serde(alias = "version")]
-    pub tag: u64,
+    pub tag: u32,
     pub fields: Vec<String>,
     #[serde(default)]
     pub payload_fields: Vec<TableVariantField>,
 }
 
 impl TableVariant {
-    pub fn new(tag: u64, fields: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(tag: u32, fields: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             tag,
             fields: fields.into_iter().map(Into::into).collect(),
@@ -365,7 +342,7 @@ impl TableVariant {
         }
     }
 
-    pub fn with_payload(tag: u64, fields: impl IntoIterator<Item = TableVariantField>) -> Self {
+    pub fn with_payload(tag: u32, fields: impl IntoIterator<Item = TableVariantField>) -> Self {
         Self {
             tag,
             fields: Vec::new(),
@@ -417,9 +394,6 @@ impl TableVariantField {
         }
     }
 }
-
-/// Compatibility name for Jazz's schema-layout lowering.
-pub type TableSchemaVersion = TableVariant;
 
 /// Column name and type in declaration order.
 ///

@@ -27,7 +27,7 @@ use crate::schema::{
 use crate::storage::{MemoryStorage, OrderedKvStorage, RocksDbStorage, StorageLayout};
 
 fn version_zero_payload(stored: &[u8]) -> &[u8] {
-    let (version, payload) = crate::records::split_versioned_record(stored).unwrap();
+    let (version, payload) = crate::records::split_variant_record(stored).unwrap();
     assert_eq!(version, 0);
     payload
 }
@@ -1103,7 +1103,7 @@ fn commits_insert_update_and_delete_batches() {
             .storage
             .get("albums", &PrimaryKeyValue::U64(7).into_bytes())
             .unwrap(),
-        Some(crate::records::encode_versioned_record(
+        Some(crate::records::encode_variant_record(
             0,
             &database
                 .ivm_runtime
@@ -11538,7 +11538,7 @@ fn table_pairs_from_query(
         .collect()
 }
 
-fn record_values(records: Vec<VersionedRecord>) -> Vec<Vec<Value>> {
+fn record_values(records: Vec<VariantRecord>) -> Vec<Vec<Value>> {
     records
         .into_iter()
         .map(|record| record.to_values().unwrap())

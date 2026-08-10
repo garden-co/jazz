@@ -401,17 +401,17 @@ pub(super) fn snapshot_table_deltas(
                 }
             },
         }
-        let mut by_variant = HashMap::<(u64, RecordDescriptor), Vec<RecordDelta>>::default();
+        let mut by_variant = HashMap::<(u32, RecordDescriptor), Vec<RecordDelta>>::default();
         for stored in stored_records {
-            let (schema_version, payload) = crate::records::split_versioned_record(&stored)?;
+            let (variant_tag, payload) = crate::records::split_variant_record(&stored)?;
             let descriptor = table_schema
-                .record_schema_for_version(schema_version)
-                .ok_or_else(|| IvmRuntimeError::UnknownTableSchemaVersion {
+                .record_schema_for_variant(variant_tag)
+                .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
                     table: source.table.clone(),
-                    version: schema_version,
+                    version: u64::from(variant_tag),
                 })?;
             by_variant
-                .entry((schema_version, descriptor))
+                .entry((variant_tag, descriptor))
                 .or_default()
                 .push(RecordDelta {
                     record: Bytes::copy_from_slice(payload),
@@ -421,9 +421,9 @@ pub(super) fn snapshot_table_deltas(
         output.extend(
             by_variant
                 .into_iter()
-                .map(|((schema_version, descriptor), deltas)| TableDelta {
+                .map(|((variant_tag, descriptor), deltas)| TableDelta {
                     table: source.table.clone(),
-                    schema_version,
+                    variant_tag,
                     descriptor,
                     deltas,
                 }),
@@ -947,17 +947,17 @@ where
             stored_records.push(record.to_vec());
             Ok(())
         })?;
-        let mut grouped = HashMap::<(u64, RecordDescriptor), Vec<RecordDelta>>::default();
+        let mut grouped = HashMap::<(u32, RecordDescriptor), Vec<RecordDelta>>::default();
         for stored in stored_records {
-            let (schema_version, payload) = crate::records::split_versioned_record(&stored)?;
+            let (variant_tag, payload) = crate::records::split_variant_record(&stored)?;
             let descriptor = table_schema
-                .record_schema_for_version(schema_version)
-                .ok_or_else(|| IvmRuntimeError::UnknownTableSchemaVersion {
+                .record_schema_for_variant(variant_tag)
+                .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
                     table: table.table.clone(),
-                    version: schema_version,
+                    version: u64::from(variant_tag),
                 })?;
             grouped
-                .entry((schema_version, descriptor))
+                .entry((variant_tag, descriptor))
                 .or_default()
                 .push(RecordDelta {
                     record: Bytes::copy_from_slice(payload),
@@ -966,9 +966,9 @@ where
         }
         let table_deltas = grouped
             .into_iter()
-            .map(|((schema_version, descriptor), deltas)| TableDelta {
+            .map(|((variant_tag, descriptor), deltas)| TableDelta {
                 table: table.table.clone(),
-                schema_version,
+                variant_tag,
                 descriptor,
                 deltas,
             })

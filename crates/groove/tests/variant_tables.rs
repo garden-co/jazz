@@ -266,7 +266,7 @@ fn variant_row(tag: u32, values: &[Value]) -> VariantRecord {
         .unwrap()
         .record_schema_for_variant(tag)
         .unwrap();
-    VariantRecord::create(u64::from(tag), descriptor, values).unwrap()
+    VariantRecord::create(tag, descriptor, values).unwrap()
 }
 
 #[test]
@@ -458,7 +458,7 @@ fn measure_variant_write_projection_and_index_path() -> Result<(), Box<dyn std::
         }
         batch.insert(
             "entries",
-            VariantRecord::create(tag as u64, descriptors[tag - 1].clone(), &values)?,
+            VariantRecord::create(tag as u32, descriptors[tag - 1].clone(), &values)?,
         );
     }
     database.commit_batch(batch)?;

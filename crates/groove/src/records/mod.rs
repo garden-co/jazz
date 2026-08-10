@@ -1605,36 +1605,21 @@ pub struct VariantRecord {
 }
 
 impl VariantRecord {
-    /// Compatibility constructor for already-validated schema-version aliases.
-    /// Generic callers should prefer [`Self::try_new`].
-    pub fn new(variant_tag: u64, record: OwnedRecord) -> Self {
-        Self::try_new(variant_tag, record).expect("table variant tag exceeds u32")
-    }
-
-    pub fn try_new(variant_tag: u64, record: OwnedRecord) -> Result<Self, Error> {
-        Ok(Self {
-            variant_tag: u32::try_from(variant_tag)
-                .map_err(|_| Error::VariantTagOutOfRange(variant_tag))?,
-            record,
-        })
+    pub fn new(variant_tag: u32, record: OwnedRecord) -> Self {
+        Self { variant_tag, record }
     }
 
     pub fn variant_tag(&self) -> u32 {
         self.variant_tag
     }
 
-    /// Compatibility spelling for schema-version lowering clients.
-    pub fn schema_version(&self) -> u64 {
-        u64::from(self.variant_tag)
-    }
-
     pub fn create(
-        variant_tag: u64,
+        variant_tag: u32,
         descriptor: RecordDescriptor,
         values: &[Value],
     ) -> Result<Self, Error> {
         let raw = descriptor.create(values)?;
-        Self::try_new(variant_tag, OwnedRecord::new(raw, descriptor))
+        Ok(Self::new(variant_tag, OwnedRecord::new(raw, descriptor)))
     }
 
     pub fn record(&self) -> &OwnedRecord {
@@ -1674,10 +1659,6 @@ impl VariantRecord {
     }
 }
 
-/// Backwards-compatible Jazz-facing name. The generic Groove abstraction is
-/// [`VariantRecord`].
-pub type VersionedRecord = VariantRecord;
-
 pub fn encode_variant_record(variant_tag: u32, payload: &[u8]) -> Vec<u8> {
     let mut stored = Vec::with_capacity(MAX_VARIANT_TAG_LEN + payload.len());
     put_canonical_u32_varint(&mut stored, variant_tag);
@@ -1688,18 +1669,6 @@ pub fn encode_variant_record(variant_tag: u32, payload: &[u8]) -> Vec<u8> {
 pub fn split_variant_record(stored: &[u8]) -> Result<(u32, &[u8]), Error> {
     let (tag, header_len) = read_canonical_u32_varint(stored)?;
     Ok((tag, &stored[header_len..]))
-}
-
-/// Compatibility codec used by existing schema-version lowering. New generic
-/// callers should use [`encode_variant_record`].
-pub fn encode_versioned_record(schema_version: u64, payload: &[u8]) -> Vec<u8> {
-    let tag = u32::try_from(schema_version).expect("table variant tag exceeds u32");
-    encode_variant_record(tag, payload)
-}
-
-pub fn split_versioned_record(stored: &[u8]) -> Result<(u64, &[u8]), Error> {
-    let (tag, payload) = split_variant_record(stored)?;
-    Ok((u64::from(tag), payload))
 }
 
 fn put_canonical_u32_varint(out: &mut Vec<u8>, mut value: u32) {

@@ -23,11 +23,11 @@ use crate::ivm::{
 use crate::queries::Query;
 use crate::records::{
     self, BorrowedRecord, OwnedRecord, Record, RecordDescriptor, UnionSchema, Value,
-    VersionedRecord, encode_versioned_record, split_versioned_record,
+    VariantRecord, encode_variant_record, split_variant_record,
 };
 use crate::schema::{
     ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType, PrimaryKey,
-    PrimaryKeyColumn, PrimaryKeyType, TableSchema, TableSchemaVersion,
+    PrimaryKeyColumn, PrimaryKeyType, TableSchema, TableVariant,
 };
 use crate::storage::{
     LayoutStorage, OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay,
@@ -69,7 +69,7 @@ fn validate_durable_key_schema(schema: &DatabaseSchema) -> Result<(), Error> {
 }
 
 fn validate_table_schema_variants(table: &TableSchema) -> Result<(), Error> {
-    if !table.has_schema_variants() {
+    if !table.has_variants() {
         return Ok(());
     }
     if !table.foreign_keys.is_empty() {
@@ -83,42 +83,36 @@ fn validate_table_schema_variants(table: &TableSchema) -> Result<(), Error> {
         .as_ref()
         .ok_or_else(|| Error::MissingPrimaryKey(table.name.clone()))?;
     let mut versions = HashSet::new();
-    for schema_version in &table.variants {
-        if schema_version.tag == 0 {
-            return Err(Error::ReservedTableSchemaVersion(table.name.clone()));
+    for variant_tag in &table.variants {
+        if variant_tag.tag == 0 {
+            return Err(Error::ReservedTableVariant(table.name.clone()));
         }
-        if schema_version.tag > u64::from(u32::MAX) {
-            return Err(Error::TableVariantTagOutOfRange {
+        if !versions.insert(variant_tag.tag) {
+            return Err(Error::DuplicateTableVariant {
                 table: table.name.clone(),
-                tag: schema_version.tag,
-            });
-        }
-        if !versions.insert(schema_version.tag) {
-            return Err(Error::DuplicateTableSchemaVersion {
-                table: table.name.clone(),
-                version: schema_version.tag,
+                version: u64::from(variant_tag.tag),
             });
         }
         let mut fields = HashSet::new();
-        if schema_version.payload_fields.is_empty() {
-            for field in &schema_version.fields {
+        if variant_tag.payload_fields.is_empty() {
+            for field in &variant_tag.fields {
                 if !fields.insert(field.as_str())
                     || !table.columns.iter().any(|column| column.name == *field)
                 {
-                    return Err(Error::InvalidTableSchemaVersionField {
+                    return Err(Error::InvalidTableVariantField {
                         table: table.name.clone(),
-                        version: schema_version.tag,
+                        version: u64::from(variant_tag.tag),
                         field: field.clone(),
                     });
                 }
             }
         } else {
             let mut local = HashSet::new();
-            for field in &schema_version.payload_fields {
+            for field in &variant_tag.payload_fields {
                 if !local.insert(field.name.as_str()) {
-                    return Err(Error::InvalidTableSchemaVersionField {
+                    return Err(Error::InvalidTableVariantField {
                         table: table.name.clone(),
-                        version: schema_version.tag,
+                        version: u64::from(variant_tag.tag),
                         field: field.name.clone(),
                     });
                 }
@@ -130,9 +124,9 @@ fn validate_table_schema_variants(table: &TableSchema) -> Result<(), Error> {
                     .iter()
                     .any(|column| column.name == *shared && column.column_type == field.value_type);
                 if !valid || !fields.insert(shared.as_str()) {
-                    return Err(Error::InvalidTableSchemaVersionField {
+                    return Err(Error::InvalidTableVariantField {
                         table: table.name.clone(),
-                        version: schema_version.tag,
+                        version: u64::from(variant_tag.tag),
                         field: shared.clone(),
                     });
                 }
@@ -142,7 +136,7 @@ fn validate_table_schema_variants(table: &TableSchema) -> Result<(), Error> {
             if !fields.contains(column.column.as_str()) {
                 return Err(Error::SchemaVersionMissingPrimaryKey {
                     table: table.name.clone(),
-                    version: schema_version.tag,
+                    version: u64::from(variant_tag.tag),
                     column: column.column.clone(),
                 });
             }
@@ -258,27 +252,18 @@ where
             .map_err(Error::IvmRuntime)
     }
 
-    /// Append one row layout to an already schema-variant table.
+    /// Append one whole-row enum case to an already variant table.
     ///
     /// Registration is process-local schema metadata. Callers must restore all
     /// durable variants before opening reads after restart, and must register
     /// every required projection case before writing the first row of a newly
     /// registered version.
-    pub fn register_table_schema_version(
-        &mut self,
-        table: &str,
-        schema_version: TableSchemaVersion,
-    ) -> Result<(), Error> {
-        self.register_table_schema_version_with_columns(table, [], schema_version)
-    }
-
-    /// Append one generic top-level table union case.
     pub fn register_table_variant(
         &mut self,
         table: &str,
-        variant: crate::schema::TableVariant,
+        variant: TableVariant,
     ) -> Result<(), Error> {
-        self.register_table_schema_version(table, variant)
+        self.register_table_variant_with_columns(table, [], variant)
     }
 
     /// Append stable catalogue fields and one row layout to a live variant table.
@@ -286,15 +271,15 @@ where
     /// Existing fields and layouts remain immutable. This is the live-schema
     /// path for stores whose variant registry grows before the first row of a
     /// newly registered version is written.
-    pub fn register_table_schema_version_with_columns(
+    pub fn register_table_variant_with_columns(
         &mut self,
         table: &str,
         columns: impl IntoIterator<Item = crate::schema::ColumnSchema>,
-        schema_version: TableSchemaVersion,
+        variant: TableVariant,
     ) -> Result<(), Error> {
         self.ensure_not_poisoned()?;
         let mut updated = self.table(table)?.clone();
-        if !updated.has_schema_variants() {
+        if !updated.has_variants() {
             return Err(Error::CannotPromoteLiveTableToSchemaVariants(
                 table.to_owned(),
             ));
@@ -319,10 +304,10 @@ where
                 }
             }
         }
-        updated.variants.push(schema_version.clone());
+        updated.variants.push(variant.clone());
         validate_table_schema_variants(&updated)?;
         self.ivm_runtime
-            .register_table_schema_version_with_columns(table, added_columns, schema_version)
+            .register_table_variant_with_columns(table, added_columns, variant)
             .map_err(Error::IvmRuntime)
     }
 
@@ -395,13 +380,13 @@ where
         &mut self,
         table: &str,
         target: &str,
-        schema_version: u64,
+        variant_tag: u32,
         fields: impl IntoIterator<Item = ProjectField>,
     ) -> Result<(), Error> {
         self.ensure_not_poisoned()?;
         let fields = fields.into_iter().collect::<Vec<_>>();
         self.ivm_runtime
-            .register_variant_projection_case(table, target, schema_version, &fields)
+            .register_variant_projection_case(table, target, variant_tag, &fields)
             .map_err(Error::IvmRuntime)
     }
 
@@ -413,7 +398,7 @@ where
         variant_tag: u32,
         fields: impl IntoIterator<Item = ProjectField>,
     ) -> Result<(), Error> {
-        self.register_variant_projection_case(table, target, u64::from(variant_tag), fields)
+        self.register_variant_projection_case(table, target, variant_tag, fields)
     }
 
     /// Append a physical source case that constructs one stable logical union
@@ -426,7 +411,7 @@ where
         &mut self,
         table: &str,
         target: &str,
-        schema_version: u64,
+        variant_tag: u32,
         union_field: &str,
         union_schema: &UnionSchema,
         case: &str,
@@ -438,7 +423,7 @@ where
             .register_variant_projection_union_case(
                 table,
                 target,
-                schema_version,
+                variant_tag,
                 union_field,
                 union_schema,
                 case,
@@ -462,7 +447,7 @@ where
         self.register_variant_projection_union_case(
             table,
             target,
-            u64::from(variant_tag),
+            variant_tag,
             union_field,
             union_schema,
             case,
@@ -480,11 +465,11 @@ where
         &mut self,
         table: &str,
         target: &str,
-        schema_version: u64,
+        variant_tag: u32,
     ) -> Result<(), Error> {
         self.ensure_not_poisoned()?;
         self.ivm_runtime
-            .register_variant_projection_ignore_case(table, target, schema_version)
+            .register_variant_projection_ignore_case(table, target, variant_tag)
             .map_err(Error::IvmRuntime)
     }
 
@@ -494,7 +479,7 @@ where
         target: &str,
         variant_tag: u32,
     ) -> Result<(), Error> {
-        self.register_variant_projection_ignore_case(table, target, u64::from(variant_tag))
+        self.register_variant_projection_ignore_case(table, target, variant_tag)
     }
 
     /// Apply one registered fixed-output projection to an already decoded
@@ -503,7 +488,7 @@ where
         &self,
         table: &str,
         target: &str,
-        record: &VersionedRecord,
+        record: &VariantRecord,
     ) -> Result<Option<OwnedRecord>, Error> {
         self.ensure_not_poisoned()?;
         self.ivm_runtime
@@ -1067,7 +1052,7 @@ where
         table: &str,
         index_name: &str,
         key: &[Value],
-    ) -> Result<Vec<VersionedRecord>, Error> {
+    ) -> Result<Vec<VariantRecord>, Error> {
         let index = self.index(table, index_name)?;
         if key.len() != index.columns.len() {
             return Err(Error::IndexKeyArity {
@@ -1112,7 +1097,7 @@ where
         table: &str,
         index_name: &str,
         prefix: &[Value],
-    ) -> Result<Vec<VersionedRecord>, Error> {
+    ) -> Result<Vec<VariantRecord>, Error> {
         let index = self.index(table, index_name)?;
         if prefix.len() > index.columns.len() {
             return Err(Error::IndexKeyArity {
@@ -1172,7 +1157,7 @@ where
         index_name: &str,
         start: &[Value],
         end: &[Value],
-    ) -> Result<Vec<VersionedRecord>, Error> {
+    ) -> Result<Vec<VariantRecord>, Error> {
         let index = self.index(table, index_name)?;
         if start.len() > index.columns.len() {
             return Err(Error::IndexKeyArity {
@@ -1197,12 +1182,12 @@ where
         table: &str,
         index_name: &str,
         raw_entries: Vec<EncodedKeyValue<'_>>,
-    ) -> Result<Vec<VersionedRecord>, Error> {
+    ) -> Result<Vec<VariantRecord>, Error> {
         self.table(table)?;
         let _ = index_name;
         Ok(raw_entries
             .into_iter()
-            .map(|entry| entry.into_versioned_parts().1)
+            .map(|entry| entry.into_variant_parts().1)
             .collect())
     }
 
@@ -1215,7 +1200,7 @@ where
         &self,
         table: &str,
         prefix: &[Value],
-    ) -> Result<Vec<VersionedRecord>, Error> {
+    ) -> Result<Vec<VariantRecord>, Error> {
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.primary_key_scan_with_storage(&storage, table, prefix)
     }
@@ -1225,14 +1210,14 @@ where
         storage: &T,
         table: &str,
         prefix: &[Value],
-    ) -> Result<Vec<VersionedRecord>, Error>
+    ) -> Result<Vec<VariantRecord>, Error>
     where
         T: OrderedKvStorage,
     {
         let raw = self.primary_key_scan_raw_with_storage(storage, table, prefix)?;
         Ok(raw
             .into_iter()
-            .map(|entry| entry.into_versioned_parts().1)
+            .map(|entry| entry.into_variant_parts().1)
             .collect())
     }
 
@@ -1283,10 +1268,10 @@ where
         &self,
         table: &str,
         key: &[Value],
-    ) -> Result<Option<VersionedRecord>, Error> {
+    ) -> Result<Option<VariantRecord>, Error> {
         Ok(self
             .primary_key_get_raw(table, key)?
-            .map(|entry| entry.into_versioned_parts().1))
+            .map(|entry| entry.into_variant_parts().1))
     }
 
     /// Return one encoded primary-key record while also observing writes
@@ -1997,67 +1982,67 @@ where
         match operation {
             BatchOperation::Insert { table, record } => {
                 let table_schema = self.table(table)?;
-                let (schema_version, descriptor, record) =
+                let (variant_tag, descriptor, record) =
                     resolve_record_input(table_schema, record)?;
-                let key = primary_key_bytes(table_schema, schema_version, descriptor, &record)?;
+                let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Insert,
                     table: table.clone(),
                     key,
-                    schema_version,
+                    variant_tag,
                     descriptor,
                     record,
                 })
             }
             BatchOperation::InsertRaw { table, key, record } => {
                 let table_schema = self.table(table)?;
-                let (schema_version, descriptor, record) =
+                let (variant_tag, descriptor, record) =
                     resolve_raw_record_input(table_schema, record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Insert,
                     table: table.clone(),
                     key: key.clone().into_bytes(),
-                    schema_version,
+                    variant_tag,
                     descriptor,
                     record: record.clone(),
                 })
             }
             BatchOperation::InsertRawFresh { table, key, record } => {
                 let table_schema = self.table(table)?;
-                let (schema_version, descriptor, record) =
+                let (variant_tag, descriptor, record) =
                     resolve_raw_record_input(table_schema, record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::InsertFresh,
                     table: table.clone(),
                     key: key.clone().into_bytes(),
-                    schema_version,
+                    variant_tag,
                     descriptor,
                     record: record.clone(),
                 })
             }
             BatchOperation::Update { table, record } => {
                 let table_schema = self.table(table)?;
-                let (schema_version, descriptor, record) =
+                let (variant_tag, descriptor, record) =
                     resolve_record_input(table_schema, record)?;
-                let key = primary_key_bytes(table_schema, schema_version, descriptor, &record)?;
+                let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Update,
                     table: table.clone(),
                     key,
-                    schema_version,
+                    variant_tag,
                     descriptor,
                     record,
                 })
             }
             BatchOperation::UpdateRaw { table, key, record } => {
                 let table_schema = self.table(table)?;
-                let (schema_version, descriptor, record) =
+                let (variant_tag, descriptor, record) =
                     resolve_raw_record_input(table_schema, record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Update,
                     table: table.clone(),
                     key: key.clone().into_bytes(),
-                    schema_version,
+                    variant_tag,
                     descriptor,
                     record: record.clone(),
                 })
@@ -2657,7 +2642,7 @@ where
 #[derive(Clone, Debug)]
 pub struct EncodedKeyValue<'a> {
     key: Vec<u8>,
-    record: VersionedRecord,
+    record: VariantRecord,
     marker: std::marker::PhantomData<&'a ()>,
 }
 
@@ -2665,12 +2650,12 @@ impl<'a> EncodedKeyValue<'a> {
     pub fn new(key: Vec<u8>, value: Vec<u8>, descriptor: &'a RecordDescriptor) -> Self {
         Self {
             key,
-            record: VersionedRecord::new(0, OwnedRecord::new(value, *descriptor)),
+            record: VariantRecord::new(0, OwnedRecord::new(value, *descriptor)),
             marker: std::marker::PhantomData,
         }
     }
 
-    fn from_versioned(key: Vec<u8>, record: VersionedRecord) -> Self {
+    fn from_variant(key: Vec<u8>, record: VariantRecord) -> Self {
         Self {
             key,
             record,
@@ -2686,11 +2671,11 @@ impl<'a> EncodedKeyValue<'a> {
         self.record.record().raw()
     }
 
-    pub fn schema_version(&self) -> u64 {
-        self.record.schema_version()
+    pub fn variant_tag(&self) -> u32 {
+        self.record.variant_tag()
     }
 
-    pub fn versioned_record(&self) -> &VersionedRecord {
+    pub fn variant_record(&self) -> &VariantRecord {
         &self.record
     }
 
@@ -2698,7 +2683,7 @@ impl<'a> EncodedKeyValue<'a> {
         (self.key, self.record.into_record().into_raw())
     }
 
-    pub fn into_versioned_parts(self) -> (Vec<u8>, VersionedRecord) {
+    pub fn into_variant_parts(self) -> (Vec<u8>, VariantRecord) {
         (self.key, self.record)
     }
 
@@ -2860,7 +2845,7 @@ enum PendingTableWrite {
         mode: WriteMode,
         table: String,
         key: Vec<u8>,
-        schema_version: u64,
+        variant_tag: u32,
         descriptor: RecordDescriptor,
         record: Vec<u8>,
     },
@@ -2900,10 +2885,10 @@ impl PendingTableWrite {
     fn stored_record(&self) -> Option<Vec<u8>> {
         match self {
             Self::Set {
-                schema_version,
+                variant_tag,
                 record,
                 ..
-            } => Some(encode_versioned_record(*schema_version, record)),
+            } => Some(encode_variant_record(*variant_tag, record)),
             Self::Delete { .. } => None,
         }
     }
@@ -2958,7 +2943,7 @@ where
             table_deltas.push(table_delta_from_stored(table_schema, current, -1)?);
         }
         if let PendingTableWrite::Set {
-            schema_version,
+            variant_tag,
             descriptor,
             record,
             ..
@@ -2966,7 +2951,7 @@ where
         {
             table_deltas.push(TableDelta {
                 table: write.table().to_owned(),
-                schema_version: *schema_version,
+                variant_tag: *variant_tag,
                 descriptor: *descriptor,
                 deltas: vec![RecordDelta {
                     record: record.clone().into(),
@@ -2986,16 +2971,16 @@ fn table_delta_from_stored(
     stored: &[u8],
     weight: i64,
 ) -> Result<TableDelta, Error> {
-    let (schema_version, payload) = split_versioned_record(stored)?;
+    let (variant_tag, payload) = split_variant_record(stored)?;
     let descriptor = table
-        .record_schema_for_version(schema_version)
-        .ok_or_else(|| Error::UnknownTableSchemaVersion {
+        .record_schema_for_variant(variant_tag)
+        .ok_or_else(|| Error::UnknownTableVariant {
             table: table.name.clone(),
-            version: schema_version,
+            version: u64::from(variant_tag),
         })?;
     Ok(TableDelta {
         table: table.name.clone(),
-        schema_version,
+        variant_tag,
         descriptor,
         deltas: vec![RecordDelta {
             record: bytes::Bytes::copy_from_slice(payload),
@@ -3028,12 +3013,12 @@ fn primary_key_descriptor(primary_key: &PrimaryKey) -> RecordDescriptor {
 
 fn consolidate_table_deltas(table_deltas: Vec<TableDelta>) -> Vec<TableDelta> {
     let mut by_table =
-        HashMap::<(String, u64, RecordDescriptor), HashMap<bytes::Bytes, i64>>::new();
+        HashMap::<(String, u32, RecordDescriptor), HashMap<bytes::Bytes, i64>>::new();
     for table_delta in table_deltas {
         let records = by_table
             .entry((
                 table_delta.table,
-                table_delta.schema_version,
+                table_delta.variant_tag,
                 table_delta.descriptor,
             ))
             .or_default();
@@ -3043,7 +3028,7 @@ fn consolidate_table_deltas(table_deltas: Vec<TableDelta>) -> Vec<TableDelta> {
     }
     by_table
         .into_iter()
-        .filter_map(|((table, schema_version, descriptor), records)| {
+        .filter_map(|((table, variant_tag, descriptor), records)| {
             let deltas = records
                 .into_iter()
                 .filter_map(|(record, weight)| {
@@ -3052,7 +3037,7 @@ fn consolidate_table_deltas(table_deltas: Vec<TableDelta>) -> Vec<TableDelta> {
                 .collect::<Vec<_>>();
             (!deltas.is_empty()).then_some(TableDelta {
                 table,
-                schema_version,
+                variant_tag,
                 descriptor,
                 deltas,
             })
@@ -3117,7 +3102,7 @@ where
         &self,
         table: &str,
         prefix: &[Value],
-    ) -> Result<Vec<VersionedRecord>, Error> {
+    ) -> Result<Vec<VariantRecord>, Error> {
         self.database.ensure_batch_storage_txn(&self.batch)?;
         let overlay = StagedWriteOverlay::new(&self.database.storage, &self.batch.txn_operations);
         let storage = MeteredStorage::new(&overlay, &self.database.storage_read_metrics);
@@ -3251,11 +3236,11 @@ impl DatabaseBatch {
 ///
 /// `Vec<Value>` converts to the reserved single-layout schema version `0`.
 /// Callers that need another discriminator bind an [`OwnedRecord`] to it once
-/// and pass the resulting [`VersionedRecord`] through the same write API.
+/// and pass the resulting [`VariantRecord`] through the same write API.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RecordInput {
     Values(Vec<Value>),
-    Record(VersionedRecord),
+    Record(VariantRecord),
 }
 
 impl From<Vec<Value>> for RecordInput {
@@ -3264,8 +3249,8 @@ impl From<Vec<Value>> for RecordInput {
     }
 }
 
-impl From<VersionedRecord> for RecordInput {
-    fn from(record: VersionedRecord) -> Self {
+impl From<VariantRecord> for RecordInput {
+    fn from(record: VariantRecord) -> Self {
         Self::Record(record)
     }
 }
@@ -3274,7 +3259,7 @@ impl From<VersionedRecord> for RecordInput {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RawRecordInput {
     Payload(Vec<u8>),
-    Record(VersionedRecord),
+    Record(VariantRecord),
 }
 
 impl From<Vec<u8>> for RawRecordInput {
@@ -3283,8 +3268,8 @@ impl From<Vec<u8>> for RawRecordInput {
     }
 }
 
-impl From<VersionedRecord> for RawRecordInput {
-    fn from(record: VersionedRecord) -> Self {
+impl From<VariantRecord> for RawRecordInput {
+    fn from(record: VariantRecord) -> Self {
         Self::Record(record)
     }
 }
@@ -3366,61 +3351,61 @@ impl PrimaryKeyValue {
 fn resolve_record_input(
     table: &TableSchema,
     input: &RecordInput,
-) -> Result<(u64, RecordDescriptor, Vec<u8>), Error> {
+) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
     match input {
         RecordInput::Values(values) => {
-            let schema_version = 0;
+            let variant_tag = 0;
             let descriptor = table
-                .record_schema_for_version(schema_version)
-                .ok_or_else(|| Error::UnknownTableSchemaVersion {
+                .record_schema_for_variant(variant_tag)
+                .ok_or_else(|| Error::UnknownTableVariant {
                     table: table.name.clone(),
-                    version: schema_version,
+                    version: u64::from(variant_tag),
                 })?;
             let record = encode_record(table, descriptor, values)?;
-            Ok((schema_version, descriptor, record))
+            Ok((variant_tag, descriptor, record))
         }
-        RecordInput::Record(record) => resolve_versioned_record(table, record),
+        RecordInput::Record(record) => resolve_variant_record(table, record),
     }
 }
 
 fn resolve_raw_record_input(
     table: &TableSchema,
     input: &RawRecordInput,
-) -> Result<(u64, RecordDescriptor, Vec<u8>), Error> {
+) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
     match input {
         RawRecordInput::Payload(payload) => {
-            let schema_version = 0;
+            let variant_tag = 0;
             let descriptor = table
-                .record_schema_for_version(schema_version)
-                .ok_or_else(|| Error::UnknownTableSchemaVersion {
+                .record_schema_for_variant(variant_tag)
+                .ok_or_else(|| Error::UnknownTableVariant {
                     table: table.name.clone(),
-                    version: schema_version,
+                    version: u64::from(variant_tag),
                 })?;
-            Ok((schema_version, descriptor, payload.clone()))
+            Ok((variant_tag, descriptor, payload.clone()))
         }
-        RawRecordInput::Record(record) => resolve_versioned_record(table, record),
+        RawRecordInput::Record(record) => resolve_variant_record(table, record),
     }
 }
 
-fn resolve_versioned_record(
+fn resolve_variant_record(
     table: &TableSchema,
-    record: &VersionedRecord,
-) -> Result<(u64, RecordDescriptor, Vec<u8>), Error> {
-    let schema_version = record.schema_version();
+    record: &VariantRecord,
+) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
+    let variant_tag = record.variant_tag();
     let descriptor = table
-        .record_schema_for_version(schema_version)
-        .ok_or_else(|| Error::UnknownTableSchemaVersion {
+        .record_schema_for_variant(variant_tag)
+        .ok_or_else(|| Error::UnknownTableVariant {
             table: table.name.clone(),
-            version: schema_version,
+            version: u64::from(variant_tag),
         })?;
     if record.record().descriptor() != &descriptor {
         return Err(Error::SchemaVersionDescriptorMismatch {
             table: table.name.clone(),
-            version: schema_version,
+            version: u64::from(variant_tag),
         });
     }
     record.record().to_values()?;
-    Ok((schema_version, descriptor, record.record().raw().to_vec()))
+    Ok((variant_tag, descriptor, record.record().raw().to_vec()))
 }
 
 fn encode_record(
@@ -3464,7 +3449,7 @@ fn encode_record(
 
 fn primary_key_bytes(
     table: &TableSchema,
-    schema_version: u64,
+    variant_tag: u32,
     record_schema: RecordDescriptor,
     record: &[u8],
 ) -> Result<Vec<u8>, Error> {
@@ -3479,11 +3464,11 @@ fn primary_key_bytes(
             column.column.as_str()
         } else {
             table
-                .schema_version(schema_version)
+                .variant(variant_tag)
                 .and_then(|variant| variant.payload_name_for_shared(&column.column))
                 .ok_or_else(|| Error::SchemaVersionMissingPrimaryKey {
                     table: table.name.clone(),
-                    version: schema_version,
+                    version: u64::from(variant_tag),
                     column: column.column.clone(),
                 })?
         };
@@ -3497,16 +3482,16 @@ fn primary_key_bytes(
 fn decode_stored_table_record(
     table: &TableSchema,
     stored: Vec<u8>,
-) -> Result<VersionedRecord, Error> {
-    let (schema_version, payload) = split_versioned_record(&stored)?;
+) -> Result<VariantRecord, Error> {
+    let (variant_tag, payload) = split_variant_record(&stored)?;
     let descriptor = table
-        .record_schema_for_version(schema_version)
-        .ok_or_else(|| Error::UnknownTableSchemaVersion {
+        .record_schema_for_variant(variant_tag)
+        .ok_or_else(|| Error::UnknownTableVariant {
             table: table.name.clone(),
-            version: schema_version,
+            version: u64::from(variant_tag),
         })?;
     let record = OwnedRecord::new(payload.to_vec(), descriptor);
-    Ok(VersionedRecord::new(schema_version, record))
+    Ok(VariantRecord::new(variant_tag, record))
 }
 
 fn decode_stored_key_value<'a>(
@@ -3514,7 +3499,7 @@ fn decode_stored_key_value<'a>(
     key: Vec<u8>,
     stored: Vec<u8>,
 ) -> Result<EncodedKeyValue<'a>, Error> {
-    Ok(EncodedKeyValue::from_versioned(
+    Ok(EncodedKeyValue::from_variant(
         key,
         decode_stored_table_record(table, stored)?,
     ))
@@ -4121,7 +4106,7 @@ pub enum Error {
     #[error("duplicate primary key for table {table}: {key:?}")]
     DuplicatePrimaryKey { table: String, key: Vec<u8> },
     #[error("duplicate schema version {version} for table {table}")]
-    DuplicateTableSchemaVersion { table: String, version: u64 },
+    DuplicateTableVariant { table: String, version: u64 },
     #[error("table {table} variant tag {tag} exceeds the bounded u32 tag space")]
     TableVariantTagOutOfRange { table: String, tag: u64 },
     #[error("duplicate query parameter binding: {0}")]
@@ -4143,7 +4128,7 @@ pub enum Error {
     #[error("table has no primary key: {0}")]
     MissingPrimaryKey(String),
     #[error("invalid field {field} in schema version {version} for table {table}")]
-    InvalidTableSchemaVersionField {
+    InvalidTableVariantField {
         table: String,
         version: u64,
         field: String,
@@ -4191,11 +4176,11 @@ pub enum Error {
     #[error("record descriptor does not match schema version {version} for table {table}")]
     SchemaVersionDescriptorMismatch { table: String, version: u64 },
     #[error("schema version 0 is reserved for Groove's implicit table layout: {0}")]
-    ReservedTableSchemaVersion(String),
+    ReservedTableVariant(String),
     #[error("cannot add the first explicit schema version to a live homogeneous table: {0}")]
     CannotPromoteLiveTableToSchemaVariants(String),
     #[error("unknown schema version {version} for table {table}")]
-    UnknownTableSchemaVersion { table: String, version: u64 },
+    UnknownTableVariant { table: String, version: u64 },
     #[error("unknown query parameter binding: {0}")]
     UnknownParameter(String),
 }
