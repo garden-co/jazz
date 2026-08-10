@@ -647,8 +647,8 @@ impl RecordProjector {
                 return Err(Error::ProjectTypeMismatch {
                     source_idx,
                     target_idx,
-                    source_type: source_field.value_type.clone(),
-                    target_type: target_field.value_type.clone(),
+                    source_type: Box::new(source_field.value_type.clone()),
+                    target_type: Box::new(target_field.value_type.clone()),
                 });
             }
             target_to_source[target_idx] = Some(source_idx);
@@ -1898,8 +1898,8 @@ pub enum Error {
     ProjectTypeMismatch {
         source_idx: usize,
         target_idx: usize,
-        source_type: ValueType,
-        target_type: ValueType,
+        source_type: Box<ValueType>,
+        target_type: Box<ValueType>,
     },
     #[error("projection source record descriptor does not match projector source descriptor")]
     ProjectSourceDescriptorMismatch,

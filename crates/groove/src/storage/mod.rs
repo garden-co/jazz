@@ -1540,12 +1540,18 @@ pub enum Error {
     #[error("invalid storage delta: {0}")]
     InvalidStorageDelta(String),
     #[error("record error: {0}")]
-    Record(#[from] crate::records::Error),
+    Record(#[source] Box<crate::records::Error>),
     #[cfg(feature = "rocksdb")]
     #[error(transparent)]
     RocksDb(#[from] ::rocksdb::Error),
     #[error(transparent)]
     Opfs(#[from] opfs_btree::BTreeError),
+}
+
+impl From<crate::records::Error> for Error {
+    fn from(error: crate::records::Error) -> Self {
+        Self::Record(Box::new(error))
+    }
 }
 
 #[cfg(test)]
@@ -1697,6 +1703,19 @@ mod tests {
     use super::*;
     use crate::records::{ScalarEnumSchema, Value, ValueType};
     use std::cell::Cell;
+    use std::error::Error as _;
+
+    #[test]
+    fn record_errors_keep_display_and_source_after_storage_conversion() {
+        let error = Error::from(crate::records::Error::InvalidOffset);
+
+        assert_eq!(error.to_string(), "record error: invalid offset");
+        assert_eq!(error.source().unwrap().to_string(), "invalid offset");
+        assert!(matches!(
+            error,
+            Error::Record(source) if *source == crate::records::Error::InvalidOffset
+        ));
+    }
 
     fn reverse_prefix_values<S: OrderedKvStorage>(
         storage: &S,

@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use groove::db::Database;
-use groove::records::{Value, VersionedRecord};
+use groove::records::{Value, VariantRecord};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
@@ -28,14 +28,10 @@ fn schema() -> DatabaseSchema {
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))])
 }
 
-fn row(id: u64, revision: u64) -> VersionedRecord {
+fn row(id: u64, revision: u64) -> VariantRecord {
     let schema = schema();
-    let descriptor = schema
-        .table("rows")
-        .unwrap()
-        .record_schema_for_version(0)
-        .unwrap();
-    VersionedRecord::create(
+    let descriptor = schema.table("rows").unwrap().record_schema();
+    VariantRecord::create(
         0,
         descriptor,
         &[
@@ -46,7 +42,7 @@ fn row(id: u64, revision: u64) -> VersionedRecord {
     .unwrap()
 }
 
-fn checksum_record(record: &VersionedRecord) -> Result<u64, groove::records::Error> {
+fn checksum_record(record: &VariantRecord) -> Result<u64, groove::records::Error> {
     let mut hash = 0xcbf29ce484222325u64;
     for value in record.to_values()? {
         let bytes = match value {

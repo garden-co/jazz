@@ -91,12 +91,12 @@ fn repeated_release_write_ivm_and_cold_scan_receipt() -> Result<(), Box<dyn std:
                 Value::U64(id % 100),
                 Value::String(format!("value-{id}")),
             ];
-            if tag % 2 == 0 {
+            if tag.is_multiple_of(2) {
                 values.push(Value::Bool(id % 2 == 0));
             }
             batch.insert(
                 "entries",
-                VariantRecord::create(tag, descriptors[tag as usize - 1].clone(), &values)?,
+                VariantRecord::create(tag, descriptors[tag as usize - 1], &values)?,
             );
         }
         database.commit_batch(batch)?;
