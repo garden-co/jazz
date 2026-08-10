@@ -4198,6 +4198,9 @@ fn value_type(value: &Value) -> ColumnType {
         Value::Record(_) => {
             panic!("record-valued query bindings are not part of the current Jazz query surface")
         }
+        Value::Union(_) => {
+            panic!("union-valued query bindings are an internal Groove representation")
+        }
     }
 }
 
@@ -4232,6 +4235,7 @@ fn value_matches_type(value: &Value, column_type: &ColumnType) -> bool {
         // Jazz has no public record column type in this step, so records are
         // never accepted as query-bound values.
         (Value::Record(_), _) => false,
+        (Value::Union(_), _) => false,
         _ => false,
     }
 }
@@ -4312,6 +4316,9 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
         Value::Record(_) => {
             panic!("record-valued query bindings have no current canonical encoding")
         }
+        Value::Union(_) => {
+            panic!("union-valued query bindings are an internal Groove representation")
+        }
     }
 }
 
@@ -4364,6 +4371,9 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
                 }
                 put_column_type(bytes, &field.value_type);
             }
+        }
+        ColumnType::Union(_) => {
+            panic!("union column types are internal to Groove and have no Jazz query binding encoding")
         }
     }
 }

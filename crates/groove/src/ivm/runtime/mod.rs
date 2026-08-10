@@ -3134,7 +3134,11 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: compiled_input.root_ordering_node,
+                })
             }
             GraphBuilder::Union { inputs } => {
                 let mut input_nodes = Vec::with_capacity(inputs.len());

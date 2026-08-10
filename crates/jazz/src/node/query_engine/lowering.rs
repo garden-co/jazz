@@ -269,6 +269,7 @@ pub(crate) fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTree
         ),
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::UnionMatch { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
@@ -565,6 +566,7 @@ fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDom
         }
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::UnionMatch { input, .. }
         | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }

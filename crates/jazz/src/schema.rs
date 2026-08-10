@@ -1321,6 +1321,25 @@ fn put_column_type(bytes: &mut Vec<u8>, column_type: &GrooveColumnType) {
                 put_column_type(bytes, &field.value_type);
             }
         }
+        GrooveColumnType::Union(schema) => {
+            bytes.push(16);
+            put_str(bytes, &schema.name);
+            put_u64(bytes, schema.cases.len() as u64);
+            for case in &schema.cases {
+                put_str(bytes, &case.name);
+                put_u64(bytes, case.payload.fields().len() as u64);
+                for field in case.payload.fields() {
+                    match &field.name {
+                        Some(name) => {
+                            bytes.push(1);
+                            put_str(bytes, name);
+                        }
+                        None => bytes.push(0),
+                    }
+                    put_column_type(bytes, &field.value_type);
+                }
+            }
+        }
     }
 }
 
