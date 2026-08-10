@@ -76,7 +76,7 @@ fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
     )?;
 
     let subscription =
-        database.subscribe_one_sink(GraphBuilder::variant_project("items", "reader-v1"))?;
+        database.subscribe_one_sink(GraphBuilder::variant_source("items", "reader-v1"))?;
     let subscription_id = subscription.id();
     assert!(subscription.recv()?.is_empty());
 
@@ -139,7 +139,7 @@ fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
     );
     assert_eq!(
         database
-            .query_graph(GraphBuilder::variant_project("items", "reader-v1"))?
+            .query_graph(GraphBuilder::variant_source("items", "reader-v1"))?
             .to_values()?,
         vec![(
             vec![Value::U64(1), Value::String("first, revised".into())],
@@ -166,7 +166,7 @@ fn ignored_variant_projection_case_is_distinct_from_an_unregistered_case()
     database.register_variant_projection_ignore_case("items", "v1-only", 2)?;
 
     let subscription =
-        database.subscribe_one_sink(GraphBuilder::variant_project("items", "v1-only"))?;
+        database.subscribe_one_sink(GraphBuilder::variant_source("items", "v1-only"))?;
     assert!(subscription.recv()?.is_empty());
 
     let mut batch = database.open_batch();
@@ -186,13 +186,13 @@ fn ignored_variant_projection_case_is_distinct_from_an_unregistered_case()
     assert!(subscription.try_recv().is_err());
     assert!(
         database
-            .query_graph(GraphBuilder::variant_project("items", "v1-only"))?
+            .query_graph(GraphBuilder::variant_source("items", "v1-only"))?
             .is_empty()
     );
 
     database.define_variant_projection("items", "unregistered", output)?;
     assert!(matches!(
-        database.query_graph(GraphBuilder::variant_project("items", "unregistered")),
+        database.query_graph(GraphBuilder::variant_source("items", "unregistered")),
         Err(Error::IvmRuntime(
             IvmRuntimeError::VariantProjectionCaseNotFound { version: 2, .. }
         ))
@@ -466,7 +466,7 @@ fn live_variant_index_backfills_existing_rows_without_perturbing_subscriptions()
         )?;
     }
     let subscription =
-        database.subscribe_one_sink(GraphBuilder::variant_project("items", "reader"))?;
+        database.subscribe_one_sink(GraphBuilder::variant_source("items", "reader"))?;
     assert!(subscription.recv()?.is_empty());
 
     let mut batch = database.open_batch();

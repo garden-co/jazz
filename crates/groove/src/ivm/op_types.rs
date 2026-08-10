@@ -15,7 +15,7 @@ use crate::schema::IndexSchema;
 // Operator categories:
 // - Sources: TableSourceOp, InlineRecordsOp, FrontierSourceOp, BindingSourceOp.
 // - Stateless transformations: PersistOp, FilterOp, MapProjectOp,
-//   UnwrapNullableOp, UnnestOp, UnionMatchOp, IndexByOp.
+//   UnwrapNullableOp, UnnestOp, VariantProjectOp, IndexByOp.
 // - Stateful transformations: JoinOp (join/semi-join/anti-join), RecursiveOp.
 // - Aggregate/window: ArgMaxByOp, ArgMinByOp, TopByOp, AggregateOp.
 
@@ -165,7 +165,7 @@ pub struct UnnestOp {
 
 /// Select one named case from a union field and emit its fixed payload record.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct UnionMatchOp {
+pub struct VariantProjectOp {
     /// Field containing `Union(schema)` values.
     pub field: String,
     /// Resolved logical field index.

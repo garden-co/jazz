@@ -175,7 +175,7 @@ pub enum GraphBuilder {
         array_field: FieldRef,
         element_field: String,
     },
-    UnionMatch {
+    VariantProject {
         input: Box<GraphBuilder>,
         field: FieldRef,
         case: String,
@@ -366,7 +366,7 @@ impl GraphBuilder {
     /// Projection cases live in the runtime registry rather than this builder,
     /// so registering another source discriminator does not replace the graph
     /// node or disturb active subscriptions.
-    pub fn variant_project(table: impl Into<String>, projection_target: impl Into<String>) -> Self {
+    pub fn variant_source(table: impl Into<String>, projection_target: impl Into<String>) -> Self {
         Self::Table {
             table: table.into(),
             scan: None,
@@ -376,7 +376,7 @@ impl GraphBuilder {
 
     /// Read a bounded range of a heterogeneous table through one fixed-output
     /// projection target.
-    pub fn variant_project_scan(
+    pub fn variant_source_scan(
         table: impl Into<String>,
         projection_target: impl Into<String>,
         scan: StaticScanSpec,
@@ -785,8 +785,8 @@ impl GraphBuilder {
 
     /// Select one named case from a union field. Nonmatching rows emit no
     /// delta; matching rows emit the case's fixed payload descriptor.
-    pub fn union_match(self, field: impl Into<String>, case: impl Into<String>) -> Self {
-        Self::UnionMatch {
+    pub fn variant_project(self, field: impl Into<String>, case: impl Into<String>) -> Self {
+        Self::VariantProject {
             input: Box::new(self),
             field: FieldRef::name(field),
             case: case.into(),
@@ -1495,11 +1495,11 @@ impl NodeDescriptor {
                 }
                 Ok(())
             }
-            OpType::UnionMatch(union_match) => {
+            OpType::VariantProject(variant_project) => {
                 expect_arity(&self.inputs, 1)?;
-                if union_match.field_idx >= input_outputs[0].fields().len() {
+                if variant_project.field_idx >= input_outputs[0].fields().len() {
                     return Err(GraphValidationError::FieldIndexOutOfBounds {
-                        index: union_match.field_idx,
+                        index: variant_project.field_idx,
                         len: input_outputs[0].fields().len(),
                     });
                 }
@@ -1685,7 +1685,7 @@ pub enum OpType {
     MapProject(MapProjectOp),
     UnwrapNullable(UnwrapNullableOp),
     Unnest(UnnestOp),
-    UnionMatch(UnionMatchOp),
+    VariantProject(VariantProjectOp),
     IndexBy(IndexByOp),
     Join(JoinOp),
     SemiJoin(JoinOp),

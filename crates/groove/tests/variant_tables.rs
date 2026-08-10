@@ -100,9 +100,9 @@ fn variant_union_projection_normalizes_layout_tags_and_matches_named_case()
         )?;
     }
 
-    let projected = GraphBuilder::variant_project("events", "logical-event");
+    let projected = GraphBuilder::variant_source("events", "logical-event");
     let subscription =
-        database.subscribe_one_sink(projected.clone().union_match("event", "text"))?;
+        database.subscribe_one_sink(projected.clone().variant_project("event", "text"))?;
     assert!(subscription.recv()?.is_empty());
 
     let descriptors = (1..=4)
@@ -323,7 +323,7 @@ fn user_union_nested_in_layout_union_normalizes_immediately()
     )?;
 
     let subscription =
-        database.subscribe_one_sink(GraphBuilder::variant_project("entries", "public-entry"))?;
+        database.subscribe_one_sink(GraphBuilder::variant_source("entries", "public-entry"))?;
     assert!(subscription.recv()?.is_empty());
 
     let mut batch = database.open_batch();
@@ -437,7 +437,7 @@ fn measure_variant_write_projection_and_index_path() -> Result<(), Box<dyn std::
         )?;
     }
     let subscription =
-        database.subscribe_one_sink(GraphBuilder::variant_project("entries", "receipt"))?;
+        database.subscribe_one_sink(GraphBuilder::variant_source("entries", "receipt"))?;
     assert!(subscription.recv()?.is_empty());
 
     let started = std::time::Instant::now();
@@ -500,7 +500,7 @@ fn measure_variant_write_projection_and_index_path() -> Result<(), Box<dyn std::
     }
     let scan_started = std::time::Instant::now();
     let hydration = reopened
-        .subscribe_one_sink(GraphBuilder::variant_project("entries", "receipt"))?
+        .subscribe_one_sink(GraphBuilder::variant_source("entries", "receipt"))?
         .recv()?;
     assert_eq!(hydration.deltas.len(), ROWS as usize);
     eprintln!(

@@ -29,7 +29,7 @@ use crate::ivm::{
     JoinOpKind, LiteralValue, MAX_COLLECT_BY_TREE_DEPTH, MapProjectOp, NodeDescriptor,
     NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField,
     ProjectionExpr, RecursiveOp, Retainer, StaticScanSpec, TableSourceOp, TopByDirection,
-    TopByLimit, TopByOp, TopByOrderField, UnionMatchOp, UnnestOp, UnwrapNullableOp,
+    TopByLimit, TopByOp, TopByOrderField, VariantProjectOp, UnnestOp, UnwrapNullableOp,
     ValueComparison, VariantProjectionTarget,
 };
 use crate::records::{
@@ -2008,9 +2008,9 @@ impl IvmRuntime {
                 let field_idx = resolve_field_ref(&input, array_field)?;
                 unnest_descriptor(&input, field_idx, element_field)
             }
-            GraphBuilder::UnionMatch { input, field, case } => {
+            GraphBuilder::VariantProject { input, field, case } => {
                 let input = self.infer_builder_output_cached(input, output_memo)?;
-                union_match_descriptor(&input, field, case)
+                variant_project_descriptor(&input, field, case)
             }
             GraphBuilder::Project { input, fields } => {
                 let input = self.infer_builder_output_cached(input, output_memo)?;
@@ -2520,7 +2520,7 @@ impl IvmRuntime {
             | GraphBuilder::Project { .. }
             | GraphBuilder::UnwrapNullable { .. }
             | GraphBuilder::Unnest { .. }
-            | GraphBuilder::UnionMatch { .. }
+            | GraphBuilder::VariantProject { .. }
             | GraphBuilder::Union { .. } => {
                 self.add_dedup_unary_graph(graph, inferred_output, output_memo)
             }
@@ -3109,13 +3109,13 @@ impl IvmRuntime {
                     root_ordering_node: compiled_input.root_ordering_node,
                 })
             }
-            GraphBuilder::UnionMatch { input, field, case } => {
+            GraphBuilder::VariantProject { input, field, case } => {
                 let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
                 let input_node = compiled_input.node;
                 let input_output = compiled_input.output;
                 let field_idx = resolve_field_ref(&input_output, field)?;
                 let ValueType::Union(schema) = &input_output.fields()[field_idx].value_type else {
-                    return Err(IvmRuntimeError::UnionMatchFieldTypeMismatch {
+                    return Err(IvmRuntimeError::VariantProjectFieldTypeMismatch {
                         field: field_ref_name(&input_output, field)?,
                     });
                 };
@@ -3123,7 +3123,7 @@ impl IvmRuntime {
                 let output = inferred_output;
                 let node = self.graph.dedup_node(
                     NodeDescriptor::new(
-                        OpType::UnionMatch(UnionMatchOp {
+                        OpType::VariantProject(VariantProjectOp {
                             field: field_ref_name(&input_output, field)?,
                             field_idx,
                             tag,
@@ -4851,7 +4851,7 @@ fn count_builder_nodes(graph: &GraphBuilder) -> usize {
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
-        | GraphBuilder::UnionMatch { input, .. }
+        | GraphBuilder::VariantProject { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
@@ -4876,7 +4876,7 @@ fn builder_contains_binding_source(graph: &GraphBuilder) -> bool {
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
-        | GraphBuilder::UnionMatch { input, .. }
+        | GraphBuilder::VariantProject { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
@@ -4946,7 +4946,7 @@ fn collect_builder_field_names(
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
-        | GraphBuilder::UnionMatch { input, .. }
+        | GraphBuilder::VariantProject { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
@@ -5235,7 +5235,7 @@ fn lift_literal_filter(
             }))
         }
         GraphBuilder::Recursive { .. } => Ok(None),
-        GraphBuilder::Union { .. } | GraphBuilder::UnionMatch { .. } => Ok(None),
+        GraphBuilder::Union { .. } | GraphBuilder::VariantProject { .. } => Ok(None),
         GraphBuilder::UnwrapNullable { input, field } => {
             let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? else {
                 return Ok(None);
@@ -5509,7 +5509,7 @@ fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
             .any(|input| graph_outputs_binding(input, binding_field)),
         GraphBuilder::Table { .. }
         | GraphBuilder::Index { .. }
-        | GraphBuilder::UnionMatch { .. } => false,
+        | GraphBuilder::VariantProject { .. } => false,
     }
 }
 
@@ -5657,7 +5657,7 @@ fn propagate_binding_through_frontier(
         | GraphBuilder::CollectBy { .. }
         | GraphBuilder::Aggregate { .. }
         | GraphBuilder::Union { .. }
-        | GraphBuilder::UnionMatch { .. } => None,
+        | GraphBuilder::VariantProject { .. } => None,
     }
 }
 
@@ -6139,8 +6139,8 @@ impl NodeState {
         })
     }
 
-    fn update_union_match(
-        union_match: &UnionMatchOp,
+    fn update_variant_project(
+        variant_project: &VariantProjectOp,
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
@@ -6148,16 +6148,16 @@ impl NodeState {
         for delta in &input.deltas {
             let value = delta
                 .borrowed(&input.descriptor)
-                .get_idx(union_match.field_idx)?;
+                .get_idx(variant_project.field_idx)?;
             let Value::Union(value) = value else {
-                return Err(IvmRuntimeError::UnionMatchFieldTypeMismatch {
-                    field: union_match.field.clone(),
+                return Err(IvmRuntimeError::VariantProjectFieldTypeMismatch {
+                    field: variant_project.field.clone(),
                 });
             };
-            if value.tag() == union_match.tag {
+            if value.tag() == variant_project.tag {
                 if *value.record().descriptor() != output_desc {
-                    return Err(IvmRuntimeError::UnionMatchPayloadMismatch {
-                        field: union_match.field.clone(),
+                    return Err(IvmRuntimeError::VariantProjectPayloadMismatch {
+                        field: variant_project.field.clone(),
                     });
                 }
                 deltas.push(RecordDelta {
@@ -6371,7 +6371,7 @@ fn builder_contains_recursive(graph: &GraphBuilder) -> bool {
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
-        | GraphBuilder::UnionMatch { input, .. }
+        | GraphBuilder::VariantProject { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
@@ -6920,9 +6920,9 @@ where
                 let input = self.update_unary_input(graph_node, node)?;
                 NodeState::update_unnest(unnest, output_desc, &input)
             }
-            OpType::UnionMatch(union_match) => {
+            OpType::VariantProject(variant_project) => {
                 let input = self.update_unary_input(graph_node, node)?;
-                NodeState::update_union_match(union_match, output_desc, &input)
+                NodeState::update_variant_project(variant_project, output_desc, &input)
             }
             OpType::ArgMaxBy(arg_max_by) => {
                 let input = self.update_unary_input(graph_node, node)?;
@@ -8906,7 +8906,7 @@ fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<(), IvmRuntim
             | GraphBuilder::Project { input, .. }
             | GraphBuilder::UnwrapNullable { input, .. }
             | GraphBuilder::Unnest { input, .. }
-            | GraphBuilder::UnionMatch { input, .. }
+            | GraphBuilder::VariantProject { input, .. }
             | GraphBuilder::ArgMaxBy { input, .. }
             | GraphBuilder::ArgMinBy { input, .. }
             | GraphBuilder::TopBy { input, .. }
@@ -8944,7 +8944,7 @@ fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<(), IvmRuntim
         }
         GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
-        | GraphBuilder::UnionMatch { input, .. }
+        | GraphBuilder::VariantProject { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
@@ -9198,7 +9198,7 @@ fn unnest_descriptor(
     Ok(RecordDescriptor::new(fields))
 }
 
-fn union_match_descriptor(
+fn variant_project_descriptor(
     input: &RecordDescriptor,
     field: &FieldRef,
     case: &str,
@@ -9209,7 +9209,7 @@ fn union_match_descriptor(
         .get(field_idx)
         .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?;
     let ValueType::Union(schema) = &union_field.value_type else {
-        return Err(IvmRuntimeError::UnionMatchFieldTypeMismatch {
+        return Err(IvmRuntimeError::VariantProjectFieldTypeMismatch {
             field: field_ref_name(input, field)?,
         });
     };
@@ -11794,9 +11794,9 @@ pub enum IvmRuntimeError {
         case: String,
     },
     #[error("union match field is not a union: {field}")]
-    UnionMatchFieldTypeMismatch { field: String },
+    VariantProjectFieldTypeMismatch { field: String },
     #[error("union match payload descriptor does not match its declared case: {field}")]
-    UnionMatchPayloadMismatch { field: String },
+    VariantProjectPayloadMismatch { field: String },
     #[error("unique index violation: {index}")]
     UniqueIndexViolation { index: String },
     #[error("unsupported join key")]

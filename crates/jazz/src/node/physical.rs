@@ -649,7 +649,7 @@ where
             logical_table,
             class,
         )?;
-        Ok(GraphBuilder::variant_project(
+        Ok(GraphBuilder::variant_source(
             binding.storage_table,
             physical_current_projection_target(alias, logical_table),
         ))
@@ -677,7 +677,7 @@ where
             logical_table,
             class,
         )?;
-        Ok(GraphBuilder::variant_project_scan(
+        Ok(GraphBuilder::variant_source_scan(
             binding.storage_table,
             physical_current_projection_target(alias, logical_table),
             scan,
@@ -735,7 +735,7 @@ where
             schema_version,
             logical_table,
         )?;
-        Ok(GraphBuilder::variant_project(
+        Ok(GraphBuilder::variant_source(
             binding.storage_table,
             physical_history_projection_target(alias, logical_table),
         ))
