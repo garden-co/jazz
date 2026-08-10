@@ -347,6 +347,15 @@ pub struct BranchMetadata {
 }
 
 impl SyncMessage {
+    /// Optional wire capabilities required to serialize this semantic message.
+    ///
+    /// Kept on the semantic type so every codec caller uses one exhaustive
+    /// classification rather than accidentally sending a future enum variant
+    /// to an older peer.
+    pub fn required_wire_features(&self) -> crate::wire::WireFeatures {
+        crate::wire::FEATURE_NONE
+    }
+
     /// Validate any packed view-update carrier runs in this message.
     pub fn validate_version_carriers(&self) -> Result<(), VersionBundleRunError> {
         match self {

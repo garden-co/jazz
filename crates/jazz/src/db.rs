@@ -74,7 +74,8 @@ use crate::wire::{
     FEATURE_MESSAGE_FRAGMENTATION, TransportError, WIRE_PROTOCOL_VERSION, WireEnvelope, WireError,
     WireErrorCode, WireFeatures, WireFrame, WireMessageFragment, WireRetry, WireSession,
     WireStreamDecoder, WireStreamEncoder, WireTransport, current_wire_features, decode_frame,
-    decode_sync_message_for_receive, encode_frame, encode_sync_message,
+    decode_sync_message_for_features, encode_frame, encode_sync_message,
+    encode_sync_message_for_features,
 };
 
 const WIRE_FRAGMENT_PAYLOAD_BYTES: usize = 512 * 1024;
@@ -6199,17 +6200,19 @@ where
         validate_logical_message_len(payload.len()).map_err(|message| {
             WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, message)
         })?;
-        let message = decode_sync_message_for_receive(&payload).map_err(|error| {
-            WireError::new(
-                WireErrorCode::MalformedFrame,
-                WireRetry::Never,
-                format!(
-                    "failed to decode sync message payload: {error}; payload_bytes={}; payload_hex={}",
-                    payload.len(),
-                    hex_diagnostic(&payload)
-                ),
-            )
-        })?;
+        let message =
+            decode_sync_message_for_features(&payload, self.features).map_err(|error| {
+                WireError::new(
+                    error.code,
+                    error.retry,
+                    format!(
+                        "{}; payload_bytes={}; payload_hex={}",
+                        error.message,
+                        payload.len(),
+                        hex_diagnostic(&payload)
+                    ),
+                )
+            })?;
         Ok(message)
     }
 }
@@ -6220,14 +6223,10 @@ where
 {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         self.flush_pending_outbound()?;
-        let payload = match encode_sync_message(&message) {
+        let payload = match encode_sync_message_for_features(&message, self.features) {
             Ok(payload) => payload,
-            Err(err) => {
-                self.send_wire_error(WireError::new(
-                    WireErrorCode::Internal,
-                    WireRetry::Never,
-                    format!("failed to encode sync message: {err}"),
-                ));
+            Err(error) => {
+                self.send_wire_error(error);
                 return Ok(());
             }
         };

@@ -36,6 +36,12 @@ pub const FEATURE_PAYLOAD_LZ4: WireFeatures = 1 << 3;
 pub const FEATURE_PAYLOAD_ZSTD: WireFeatures = 1 << 4;
 /// Logical sync messages may be decomposed into bounded physical frames.
 pub const FEATURE_MESSAGE_FRAGMENTATION: WireFeatures = 1 << 5;
+/// Semantic frames may carry authorization-support purposes and receipts.
+///
+/// This feature is deliberately separate from framing: an older peer can
+/// still exchange every pre-existing sync message, but must never be asked to
+/// deserialize the new semantic enum variants or extension fields.
+pub const FEATURE_AUTHORIZATION_SCOPE_RECEIPTS: WireFeatures = 1 << 6;
 
 const FEATURE_PAYLOAD_COMPRESSION_MASK: WireFeatures = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
 
@@ -273,6 +279,27 @@ pub fn encode_sync_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::E
     to_allocvec(message)
 }
 
+/// Serialize a semantic message only when its required capabilities were
+/// negotiated for this link.
+///
+/// Keep this check immediately adjacent to the canonical codec.  Postcard
+/// encodes Rust enums by ordinal, so allowing an unsupported variant past this
+/// seam would make an older peer decode a different message (or fail after it
+/// has already accepted a semantic frame).
+pub fn encode_sync_message_for_features(
+    message: &SyncMessage,
+    negotiated_features: WireFeatures,
+) -> Result<Vec<u8>, WireError> {
+    ensure_sync_message_features(message, negotiated_features)?;
+    encode_sync_message(message).map_err(|error| {
+        WireError::new(
+            WireErrorCode::MalformedFrame,
+            WireRetry::Never,
+            format!("failed to encode sync message payload: {error}"),
+        )
+    })
+}
+
 /// Decode a semantic sync message serialized by [`encode_sync_message`].
 pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error> {
     if validate_logical_message_len(bytes.len()).is_err() {
@@ -285,9 +312,43 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
     Ok(message)
 }
 
+/// Decode a semantic message only when its required capabilities were
+/// negotiated for this link.
+pub fn decode_sync_message_for_features(
+    bytes: &[u8],
+    negotiated_features: WireFeatures,
+) -> Result<SyncMessage, WireError> {
+    let message = decode_sync_message(bytes).map_err(|error| {
+        WireError::new(
+            WireErrorCode::MalformedFrame,
+            WireRetry::Never,
+            format!("failed to decode sync message payload: {error}"),
+        )
+    })?;
+    ensure_sync_message_features(&message, negotiated_features)?;
+    Ok(message)
+}
+
 /// Decode a semantic sync message for receiver apply.
 pub fn decode_sync_message_for_receive(bytes: &[u8]) -> Result<SyncMessage, postcard::Error> {
     decode_sync_message(bytes)
+}
+
+/// Reject semantic extensions that this connection did not negotiate.
+pub fn ensure_sync_message_features(
+    message: &SyncMessage,
+    negotiated_features: WireFeatures,
+) -> Result<(), WireError> {
+    let required = message.required_wire_features();
+    let missing = required & !negotiated_features;
+    if missing == 0 {
+        return Ok(());
+    }
+    Err(WireError::new(
+        WireErrorCode::UnsupportedFeature,
+        WireRetry::AfterResume,
+        format!("sync message requires unnegotiated features {missing:#x}"),
+    ))
 }
 
 /// Optional transport compression features enabled for this process.
@@ -338,6 +399,7 @@ pub fn current_wire_features() -> WireFeatures {
     FEATURE_SYNC_MESSAGE_PAYLOAD
         | FEATURE_STRUCTURED_ERRORS
         | FEATURE_MESSAGE_FRAGMENTATION
+        | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
         | runtime_transport_compression_features()
 }
 
