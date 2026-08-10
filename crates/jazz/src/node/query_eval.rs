@@ -5566,6 +5566,7 @@ where
         )
     }
 
+    #[cfg(test)]
     fn compile_current_query_program_for_read_view(
         &mut self,
         shape: &ValidatedQuery,
@@ -10161,19 +10162,21 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
         read_view: &ReadViewSpec,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<(), Error> {
         // `JoinVia` is an existential constraint on this query's root-row
         // result, not flat joined output: maintained membership and delivery
         // remain addressed by the selected root row. Flat public join output
         // carries its source tuple through the maintained terminal, so it can
         // safely address several occurrences for one root as well.
-        self.compile_current_query_program_for_read_view(
+        self.compile_current_query_program_for_read_view_in_authorization_mode(
             shape,
             binding,
             tier,
             identity,
             CurrentQueryProgramOutput::MaintainedView,
             read_view,
+            authorization_mode,
         )
         .map(|_| ())
     }

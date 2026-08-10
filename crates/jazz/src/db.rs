@@ -1688,6 +1688,7 @@ where
                 read_tier,
                 author,
                 &opts.read_view,
+                authorization_mode,
             )?;
         let (local_shape, local_binding, _local_plan) = self
             .node
@@ -1757,8 +1758,13 @@ where
             state_shape = shape.clone();
             state_binding = binding.clone();
             remote_read_tier = Some(upstream_opts.tier);
-            upstream_subscription_handles =
-                self.open_subscription_upstream_coverage(&shape, &binding, upstream_opts, author)?;
+            upstream_subscription_handles = self.open_subscription_upstream_coverage(
+                &shape,
+                &binding,
+                upstream_opts,
+                author,
+                authorization_mode,
+            )?;
         }
         let settled_tier = remote_read_tier.unwrap_or(read_tier);
         let settled = subscription_is_settled(
@@ -1873,6 +1879,7 @@ where
         binding: &Binding,
         opts: RegisterShapeOptions,
         identity: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<UpstreamCoverageHandle>, Error> {
         self.node
             .node
@@ -1883,6 +1890,7 @@ where
                 opts.tier,
                 identity,
                 &opts.read_view,
+                authorization_mode,
             )?;
         let coverage = coverage_key(shape, binding, opts.clone());
         if self
@@ -3661,12 +3669,6 @@ where
     ) -> Result<Option<CurrentRow>, Error> {
         let target = self.local_row_for_client_identity(table, row, identity)?;
         if target.is_some() {
-            // Upsert may need to merge omitted cells. Even though a client
-            // local read is policy-elided, staging that merge must not turn a
-            // hidden target into an observable read-for-write path.
-            if !self.can_read_for_identity(table, row, identity)? {
-                return Err(read_for_write_denied("UPSERT", table));
-            }
             return Ok(target);
         }
         // A policy-filtered point read cannot by itself distinguish an absent
@@ -3924,9 +3926,6 @@ where
                 .and_then(|existing| self.node.node.borrow_mut().current_row_tx_id(existing));
             let authored_columns = patch.keys().cloned().collect();
             return Ok((patch, parent, authored_columns));
-        }
-        if !self.can_read_for_identity(table, row, identity)? {
-            return Err(read_for_write_denied("partial UPDATE", table));
         }
         let mut cells = BTreeMap::new();
         let existing = self
@@ -7159,6 +7158,7 @@ where
                                             opts.tier,
                                             subscriber_permission_subject(*ingest_context),
                                             &opts.read_view,
+                                            QueryAuthorizationMode::TrustedServing,
                                         );
                                     if let Err(crate::node::Error::QueryCapability(detail)) =
                                         supported
@@ -7333,6 +7333,7 @@ where
                                     opts.tier,
                                     subscriber_permission_subject(*ingest_context),
                                     &opts.read_view,
+                                    QueryAuthorizationMode::TrustedServing,
                                 );
                             if let Err(crate::node::Error::QueryCapability(detail)) = supported {
                                 send_unsupported_shape_capability_rejection(
