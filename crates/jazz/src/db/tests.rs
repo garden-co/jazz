@@ -5852,6 +5852,73 @@ fn edge_route_capacity_rejects_instead_of_reporting_edge_acceptance() {
 }
 
 #[test]
+fn stale_upstream_epoch_cannot_settle_routed_local_fate_before_selected_epoch() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xa1; 16]);
+    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+    let (a_transport, mut a_peer) = duplex_with_admitted_session_context(
+        identity,
+        NodeUuid::from_bytes([0xe0; 16]),
+        1,
+        NodeUuid::from_bytes([0xa2; 16]),
+        1,
+    );
+    let _a = edge.server.connect_upstream(a_transport);
+    let selected = edge.server.admitted_upstream_authority.borrow().unwrap();
+    let (b_transport, mut b_peer) = duplex_with_admitted_session_context(
+        identity,
+        NodeUuid::from_bytes([0xe0; 16]),
+        2,
+        NodeUuid::from_bytes([0xb2; 16]),
+        2,
+    );
+    let _b = edge.server.connect_upstream(b_transport);
+    let tx_id = edge
+        .node()
+        .borrow_mut()
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0x44), 1).cells(cells("pending", false, identity)),
+        )
+        .unwrap();
+    let downstream = Rc::new(RefCell::new(Vec::new()));
+    edge.server.edge_fate_routes.borrow_mut().insert(
+        tx_id,
+        vec![EdgeFateRoute {
+            authority: selected,
+            queue: Rc::downgrade(&downstream),
+        }],
+    );
+    b_peer
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_seq: Some(GlobalSeq(1)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    edge.server.tick().unwrap();
+    assert!(matches!(
+        edge.node().borrow_mut().transaction_state(tx_id).unwrap().0,
+        Fate::Pending
+    ));
+    assert!(downstream.borrow().is_empty());
+    a_peer
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_seq: Some(GlobalSeq(1)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    edge.server.tick().unwrap();
+    assert!(matches!(
+        edge.node().borrow_mut().transaction_state(tx_id).unwrap().0,
+        Fate::Accepted
+    ));
+    assert_eq!(downstream.borrow().len(), 1);
+}
+
+#[test]
 fn public_permission_advice_accepts_an_explicit_zero_clause_receipt() {
     let schema = schema();
     let identity = AuthorId::from_bytes([0xa3; 16]);
