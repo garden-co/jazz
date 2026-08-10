@@ -1,6 +1,7 @@
 //! Manual plain-row RocksDB receipt. Its JSON line is intended to be captured
 //! by `dev/benchmarks/run-receipt.mjs`.
 
+use std::cell::Cell;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
@@ -74,13 +75,43 @@ fn recursive_disk_bytes(path: &Path) -> std::io::Result<u64> {
     })
 }
 
+fn fresh_open_after_exclusive_drop(
+    storage: RocksDbStorage,
+    path: &Path,
+    column_families: &[&str],
+) -> Result<(RocksDbStorage, usize), Box<dyn std::error::Error>> {
+    let fresh_open_attempts = Cell::new(0usize);
+    let reopened = fresh_open_after_exclusive_drop_with(storage, path, column_families, || {
+        fresh_open_attempts.set(fresh_open_attempts.get() + 1);
+        RocksDbStorage::open(path, column_families)
+    })?;
+    Ok((reopened, fresh_open_attempts.get()))
+}
+
+fn fresh_open_after_exclusive_drop_with(
+    storage: RocksDbStorage,
+    path: &Path,
+    column_families: &[&str],
+    mut fresh_open: impl FnMut() -> Result<RocksDbStorage, groove::storage::Error>,
+) -> Result<RocksDbStorage, Box<dyn std::error::Error>> {
+    assert!(
+        RocksDbStorage::open(path, column_families).is_err(),
+        "RocksDB must reject a competing open while the original handle is alive"
+    );
+    storage.close()?;
+    drop(storage);
+
+    Ok(fresh_open()?)
+}
+
 #[test]
 #[ignore = "manual storage receipt; noisy and host-specific"]
 fn plain_row_write_point_scan_and_reopen_receipt() -> Result<(), Box<dyn std::error::Error>> {
     jazz_benchmark_guard::refuse_contaminated_measurement();
     let dir = tempfile::tempdir()?;
     let schema = schema();
-    let storage = RocksDbStorage::open(dir.path(), &schema.column_families())?;
+    let column_families = schema.column_families();
+    let storage = RocksDbStorage::open(dir.path(), &column_families)?;
     let mut db = Database::new(schema.clone(), storage)?;
 
     let write_started = Instant::now();
@@ -127,14 +158,14 @@ fn plain_row_write_point_scan_and_reopen_receipt() -> Result<(), Box<dyn std::er
 
     let storage = db.into_storage();
     let before = storage.metrics()?;
-    storage.close()?;
-    drop(storage);
-    let disk_bytes = recursive_disk_bytes(dir.path())?;
 
     let reopen_started = Instant::now();
-    let storage = RocksDbStorage::open(dir.path(), &schema.column_families())?;
+    let (storage, fresh_open_attempts) =
+        fresh_open_after_exclusive_drop(storage, dir.path(), &column_families)?;
+    assert_eq!(fresh_open_attempts, 1);
     let reopened = Database::new(schema, storage)?;
     let reopen = reopen_started.elapsed();
+    let disk_bytes = recursive_disk_bytes(dir.path())?;
     let mut checksum_after = 0u64;
     for id in 0..ROWS {
         let record = reopened
@@ -161,6 +192,7 @@ fn plain_row_write_point_scan_and_reopen_receipt() -> Result<(), Box<dyn std::er
             "point_read_us": point.as_micros(),
             "scan_us": scan.as_micros(),
             "reopen_and_database_init_us": reopen.as_micros(),
+            "fresh_open_attempts": fresh_open_attempts,
             "disk_bytes_recursive": disk_bytes,
             "logical_point_reads": format!("{point_reads:?}"),
             "logical_scan_reads": format!("{scan_reads:?}"),
@@ -186,5 +218,30 @@ fn checksum_is_sensitive_to_returned_row_content() {
     assert_ne!(
         checksum_record(&row(7, 0)).unwrap(),
         checksum_record(&row(7, 1)).unwrap()
+    );
+}
+
+#[test]
+fn fresh_open_requires_dropping_the_original_exclusive_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let column_families = vec!["records"];
+    let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+    storage.set("records", b"key", b"persisted").unwrap();
+
+    let attempts = Cell::new(0usize);
+    let reopened =
+        fresh_open_after_exclusive_drop_with(storage, dir.path(), &column_families, || {
+            attempts.set(attempts.get() + 1);
+            RocksDbStorage::open(dir.path(), &column_families)
+        })
+        .unwrap();
+    assert_eq!(
+        attempts.get(),
+        1,
+        "fresh open callback must run exactly once"
+    );
+    assert_eq!(
+        reopened.get("records", b"key").unwrap().as_deref(),
+        Some(b"persisted".as_slice())
     );
 }
