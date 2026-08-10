@@ -1049,9 +1049,8 @@ export class Db {
   }
 
   /**
-   * @internal Use {@link createDb()} instead.
    * Create a Db instance with a loaded runtime source.
-   * @internal Use createDb() instead.
+   * @internal Use {@link createDb()} instead.
    */
   static create(config: DbConfig, runtimeSource: AnyRuntimeSource): Db {
     return new Db(config, runtimeSource);
