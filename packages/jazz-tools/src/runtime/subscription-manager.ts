@@ -371,7 +371,11 @@ export class SubscriptionManager<T extends { id: string }> {
       if (!("Insert" in edit)) throw new Error("terminal root insert partition is invalid");
       this.terminalRows.set(
         rootId,
-        decodeNativeTerminalRow(rootRowId, rootColumns, Uint8Array.from(edit.Insert.value)),
+        decodeNativeTerminalRow(
+          rootRowId,
+          rootTerminalCurrentRowColumns(rootColumns),
+          Uint8Array.from(edit.Insert.value),
+        ),
       );
     }
 
@@ -395,7 +399,7 @@ export class SubscriptionManager<T extends { id: string }> {
             rootId,
             decodeNativeTerminalRow(
               terminalPayloadRowId(operation.root_key),
-              rootColumns,
+              rootTerminalCurrentRowColumns(rootColumns),
               Uint8Array.from(edit.Update.value),
             ),
           );
@@ -907,6 +911,20 @@ function terminalCollection(
     columns = childColumns;
   }
   return undefined;
+}
+
+// Root terminal edit records are encoded as canonical CurrentRow payloads: every
+// application cell has one nullable envelope, including non-nullable public
+// columns. This differs from packed row deltas, which have already been
+// normalized to the public logical layout.
+function rootTerminalCurrentRowColumns(
+  columns: readonly ColumnDescriptor[],
+): readonly ColumnDescriptor[] {
+  return columns.map((column) => ({
+    ...column,
+    nullable: true,
+    sparse: undefined,
+  }));
 }
 
 function readUuid(bytes: Uint8Array, offset: number): string {
