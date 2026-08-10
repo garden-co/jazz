@@ -32,8 +32,8 @@ use super::query_engine::{
     PathCardinality, PathHolePolicy, PayloadProjection, PolicyContext, PolicyDecisionRole,
     PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr, ProgramBinding,
     ProgramClaimParam, ProgramFactKey, ProgramOutputSchemas, ProgramPathId, ProvenanceField,
-    QueryProgram, QueryProgramRequest, QueryReadSet, ReachableContribution, ReadView,
-    RequestedReadSet, RequestedSourceStage, ResolvedSource, ResultId,
+    QueryAuthorizationMode, QueryProgram, QueryProgramRequest, QueryReadSet, ReachableContribution,
+    ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource, ResultId,
     ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
     RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
     RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
@@ -124,7 +124,7 @@ struct RelationSnapshotWindow {
 
 pub(crate) struct LocalMaintainedViewSubscription {
     subscription: MultisinkSubscription,
-    _retained_prepared_plan: Option<PreparedQueryPlanHandle>,
+    _retained_prepared_plan: Option<SubscriptionPreparedPlan>,
     maintained: MaintainedSubscriptionView,
     terminal_schemas: MaintainedTerminalSchemas,
     tables: BTreeMap<String, TableSchema>,
@@ -136,6 +136,14 @@ pub(crate) struct LocalMaintainedViewSubscription {
     result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     program_facts: BTreeSet<ProgramFactEntry>,
     root_occurrence_ids: Vec<OutputOccurrenceId>,
+}
+
+/// A plan retained solely to keep a maintained subscription graph alive.
+/// Its provenance is established by the compiler path that produced it, so a
+/// caller cannot relabel a ClientLocal plan as TrustedServing after the fact.
+pub(crate) struct SubscriptionPreparedPlan {
+    plan: PreparedQueryPlanHandle,
+    authorization_mode: QueryAuthorizationMode,
 }
 
 #[derive(Default)]
@@ -163,6 +171,13 @@ impl LocalMaintainedViewSubscription {
 
     pub(crate) fn root_occurrence_ids(&self) -> &[OutputOccurrenceId] {
         &self.root_occurrence_ids
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_plan_authorization_mode(&self) -> Option<QueryAuthorizationMode> {
+        self._retained_prepared_plan
+            .as_ref()
+            .map(|plan| plan.authorization_mode)
     }
 
     #[cfg(feature = "testing")]
@@ -811,14 +826,13 @@ where
             .node
             .table_in_schema_or_branch_metadata(&request.source.table, self.read_view.read_schema)
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-        // A public membership table contributes directly to the proof. Avoid
-        // wrapping it in another trivial authorization graph, which keeps deep
-        // (but acyclic) policy chains bounded on the Rust stack.
+        // Policy-proof dependencies are raw evidence for the outer policy.
+        // Re-applying their own read policy recursively both changes the
+        // outer predicate's meaning and can manufacture a proof cycle.
         let authorization = if matches!(
             request.authorization,
             SourceAuthorizationRequest::PolicyProof { .. }
-        ) && table.read_policy.is_none()
-        {
+        ) {
             SourceAuthorizationRequest::System
         } else {
             request.authorization.clone()
@@ -5001,6 +5015,14 @@ where
             .contains_key(&binding_view_key)
     }
 
+    pub(crate) fn applied_view_update_generation(&self, binding_view_key: BindingViewKey) -> u64 {
+        self.query
+            .applied_view_update_generations
+            .get(&binding_view_key)
+            .copied()
+            .unwrap_or_default()
+    }
+
     #[cfg(test)]
     pub(crate) fn reset_subscription_snapshot_for_link_call_count(&mut self) {
         SUBSCRIPTION_SNAPSHOT_FOR_LINK_CALLS.with(|calls| calls.set(0));
@@ -5528,6 +5550,25 @@ where
         identity: AuthorId,
         output: CurrentQueryProgramOutput,
     ) -> Result<QueryProgram, Error> {
+        self.compile_current_query_program_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            output,
+            QueryAuthorizationMode::TrustedServing,
+        )
+    }
+
+    fn compile_current_query_program_in_authorization_mode(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        output: CurrentQueryProgramOutput,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<QueryProgram, Error> {
         self.compile_current_query_program_with_settled_view(
             shape,
             binding,
@@ -5536,9 +5577,11 @@ where
             output,
             &ReadViewSpec::default(),
             None,
+            authorization_mode,
         )
     }
 
+    #[cfg(test)]
     fn compile_current_query_program_for_read_view(
         &mut self,
         shape: &ValidatedQuery,
@@ -5548,8 +5591,36 @@ where
         output: CurrentQueryProgramOutput,
         read_view: &ReadViewSpec,
     ) -> Result<QueryProgram, Error> {
+        self.compile_current_query_program_for_read_view_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            output,
+            read_view,
+            QueryAuthorizationMode::TrustedServing,
+        )
+    }
+
+    fn compile_current_query_program_for_read_view_in_authorization_mode(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        output: CurrentQueryProgramOutput,
+        read_view: &ReadViewSpec,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<QueryProgram, Error> {
         self.compile_current_query_program_with_settled_view(
-            shape, binding, tier, identity, output, read_view, None,
+            shape,
+            binding,
+            tier,
+            identity,
+            output,
+            read_view,
+            None,
+            authorization_mode,
         )
     }
 
@@ -5562,6 +5633,7 @@ where
         output: CurrentQueryProgramOutput,
         read_view: &ReadViewSpec,
         settled_binding_view: Option<BindingViewKey>,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
         let request = self.current_query_program_request(
             shape,
@@ -5571,6 +5643,7 @@ where
             output,
             read_view,
             settled_binding_view,
+            authorization_mode,
         )?;
         self.compile_query_program_request(request)
     }
@@ -5582,6 +5655,7 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
         settled_binding_view: Option<BindingViewKey>,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
         let access_paths = self.one_shot_access_paths(shape, binding, tier)?;
         let request = self.current_query_program_request(
@@ -5592,6 +5666,7 @@ where
             CurrentQueryProgramOutput::AppRows,
             &ReadViewSpec::default(),
             settled_binding_view,
+            authorization_mode,
         )?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
     }
@@ -5613,6 +5688,7 @@ where
             output,
             &ReadViewSpec::default(),
             None,
+            QueryAuthorizationMode::TrustedServing,
         )?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
     }
@@ -5812,6 +5888,7 @@ where
             shape: input_shape,
         };
         let request = QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: historical_query_read_set(&input.shape, shape.schema_version(), position),
             policy: self.query_program_policy_context(identity),
             input,
@@ -5820,12 +5897,13 @@ where
         self.compile_query_program_request(request)
     }
 
-    fn compile_include_deleted_query_program(
+    fn compile_include_deleted_query_program_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
         identity: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
         let input_shape = self.normalized_include_deleted_row_set_shape(shape, binding)?;
         let input = RowSetProgramInput {
@@ -5842,6 +5920,7 @@ where
             shape: input_shape,
         };
         let request = QueryProgramRequest {
+            authorization_mode,
             reads: current_query_read_set(
                 &input.shape,
                 shape.schema_version(),
@@ -5868,6 +5947,7 @@ where
         identity: AuthorId,
         output: CurrentQueryProgramOutput,
         include_deleted: bool,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
         let read_schema = self
@@ -5897,6 +5977,7 @@ where
             shape: input_shape,
         };
         let request = QueryProgramRequest {
+            authorization_mode,
             reads: tx_query_read_set(
                 &input.shape,
                 lowered_shape.schema_version(),
@@ -5910,13 +5991,14 @@ where
         self.compile_query_program_request(request)
     }
 
-    fn compile_branch_query_program(
+    fn compile_branch_query_program_in_authorization_mode(
         &mut self,
         branch_id: BranchId,
         shape: &ValidatedQuery,
         binding: &Binding,
         identity: AuthorId,
         output: CurrentQueryProgramOutput,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
         let read_schema = self
             .catalogue
@@ -5941,6 +6023,7 @@ where
             shape: input_shape,
         };
         let request = QueryProgramRequest {
+            authorization_mode,
             reads: branch_query_read_set(
                 &input.shape,
                 lowered_shape.schema_version(),
@@ -5961,13 +6044,47 @@ where
         binding: &Binding,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.query_rows_on_branch_query_engine_in_authorization_mode(
+            branch_id,
+            shape,
+            binding,
+            identity,
+            QueryAuthorizationMode::TrustedServing,
+        )
+    }
+
+    pub(super) fn query_rows_on_branch_query_engine_for_client(
+        &mut self,
+        branch_id: BranchId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.query_rows_on_branch_query_engine_in_authorization_mode(
+            branch_id,
+            shape,
+            binding,
+            identity,
+            QueryAuthorizationMode::ClientLocal,
+        )
+    }
+
+    fn query_rows_on_branch_query_engine_in_authorization_mode(
+        &mut self,
+        branch_id: BranchId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<Vec<CurrentRow>, Error> {
         let table = self.query_output_table(shape.query(), shape.schema_version())?;
-        let program = self.compile_branch_query_program(
+        let program = self.compile_branch_query_program_in_authorization_mode(
             branch_id,
             shape,
             binding,
             identity,
             CurrentQueryProgramOutput::AppRows,
+            authorization_mode,
         )?;
         let deltas = self
             .database
@@ -6138,6 +6255,7 @@ where
             shape: input_shape,
         };
         let request = QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: current_query_read_set(
                 &input.shape,
                 policy_shape.schema_version(),
@@ -6195,10 +6313,17 @@ where
         output: CurrentQueryProgramOutput,
         read_view: &ReadViewSpec,
         settled_binding_view: Option<BindingViewKey>,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgramRequest, Error> {
         let lowered_shape;
         let lowered_binding;
-        let use_prepared_binding_source = self.can_use_prepared_current_query_plan(shape)
+        // Prepared binding sources are a serving-side optimization. Client
+        // local execution must lower concrete bindings into its locally
+        // available (already upstream-scoped at Edge/Global) data, rather
+        // than trying to evaluate a server-maintained binding graph.
+        let use_prepared_binding_source = authorization_mode
+            == QueryAuthorizationMode::TrustedServing
+            && self.can_use_prepared_current_query_plan(shape)
             && settled_binding_view.is_none()
             && !matches!(output, CurrentQueryProgramOutput::RelationSnapshot);
         let (shape, binding) = if !use_prepared_binding_source {
@@ -6257,6 +6382,7 @@ where
             shape: input_shape,
         };
         Ok(QueryProgramRequest {
+            authorization_mode,
             reads: query_read_set_for_read_view(
                 &input.shape,
                 shape.schema_version(),
@@ -6927,6 +7053,7 @@ where
             other => other,
         };
         let request = QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: match branch_id {
                 Some(branch_id) => branch_query_read_set(
                     &input.shape,
@@ -7067,6 +7194,27 @@ where
             prepared_plan,
             identity,
             false,
+            QueryAuthorizationMode::TrustedServing,
+        )
+    }
+
+    /// Execute an ordinary local client read. The upstream serving edge is the
+    /// confidentiality boundary; this path must not re-evaluate row policy.
+    pub(crate) fn query_rows_for_client(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.query_rows_with_options_for_identity(
+            shape,
+            binding,
+            tier,
+            None,
+            identity,
+            false,
+            QueryAuthorizationMode::ClientLocal,
         )
     }
 
@@ -7094,13 +7242,14 @@ where
         )
     }
 
-    pub(crate) fn query_rows_including_deleted_for_identity(
+    pub(crate) fn query_rows_including_deleted_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
         prepared_plan: Option<&PreparedQueryPlanHandle>,
         identity: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.query_rows_with_options_for_identity(
             shape,
@@ -7109,6 +7258,7 @@ where
             prepared_plan,
             identity,
             true,
+            authorization_mode,
         )
     }
 
@@ -7120,19 +7270,42 @@ where
         prepared_plan: Option<&PreparedQueryPlanHandle>,
         identity: AuthorId,
         include_deleted: bool,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         if include_deleted {
-            let mut rows = self
-                .query_rows_including_deleted_with_query_engine(shape, binding, tier, identity)?;
+            let mut rows = self.query_rows_including_deleted_with_query_engine(
+                shape,
+                binding,
+                tier,
+                identity,
+                authorization_mode,
+            )?;
             let query = shape.query();
             self.finish_engine_query_rows(query, &mut rows)?;
             self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
             return Ok(rows);
         }
-        let settled_binding_view = (tier == DurabilityTier::Global)
-            .then(|| self.settled_binding_view_key_for_query(shape, binding))
-            .transpose()?
-            .flatten();
+        let settled_binding_view = match authorization_mode {
+            QueryAuthorizationMode::ClientLocal => self.client_settled_binding_view_key_for_query(
+                shape,
+                binding,
+                tier,
+                &ReadViewSpec::default(),
+            ),
+            QueryAuthorizationMode::TrustedServing => (tier == DurabilityTier::Global)
+                .then(|| self.settled_binding_view_key_for_query(shape, binding))
+                .transpose()?
+                .flatten(),
+        };
+        // Ordinary Edge/Global reads are allowed to consume only a source
+        // binding view registered by upstream coverage. A client-local plan
+        // without that host-owned route must not fall back to its raw overlay.
+        if authorization_mode == QueryAuthorizationMode::ClientLocal
+            && tier >= DurabilityTier::Edge
+            && settled_binding_view.is_none()
+        {
+            return Ok(Vec::new());
+        }
         // A concrete one-shot access path is binding-specific. Inline that
         // binding so execution keeps the selected graph instead of replacing it
         // with the generic cached parameterized plan.
@@ -7167,6 +7340,7 @@ where
                 tier,
                 identity,
                 settled_binding_view,
+                authorization_mode,
             )?)
         };
         let needs_binding = || {
@@ -7180,21 +7354,27 @@ where
         let plan = match prepared_plan {
             Some(plan) if settled_binding_view.is_none() => Some(plan.clone()),
             Some(_) => None,
-            None if settled_binding_view.is_none()
+            None if authorization_mode == QueryAuthorizationMode::TrustedServing
+                && settled_binding_view.is_none()
                 && self.can_use_prepared_current_query_plan(shape)
                 && needs_binding() =>
             {
                 Some(self.prepared_query_plan(shape, binding, tier, identity)?)
             }
-            None if settled_binding_view.is_none() && needs_binding() => Some(std::sync::Arc::new(
-                self.prepared_query_plan_from_program(
-                    program
-                        .as_ref()
-                        .expect("program is compiled when no prepared plan is supplied"),
-                    shape,
-                    binding,
-                )?,
-            )),
+            None if authorization_mode == QueryAuthorizationMode::TrustedServing
+                && settled_binding_view.is_none()
+                && needs_binding() =>
+            {
+                Some(std::sync::Arc::new(
+                    self.prepared_query_plan_from_program(
+                        program
+                            .as_ref()
+                            .expect("program is compiled when no prepared plan is supplied"),
+                        shape,
+                        binding,
+                    )?,
+                ))
+            }
             None => None,
         };
         let policy = self.query_program_policy_context(identity);
@@ -7307,6 +7487,7 @@ where
                 tier,
                 identity,
                 settled_binding_view,
+                QueryAuthorizationMode::TrustedServing,
             )?)
         };
         profile.compile_program = phase_started.elapsed();
@@ -7419,6 +7600,33 @@ where
             .settled_result_sets
             .contains_key(&binding_view_key)
             .then_some(binding_view_key))
+    }
+
+    /// Select the server-owned result boundary for an ordinary client read.
+    ///
+    /// Local and process-only reads intentionally scan the complete local
+    /// overlay. Edge/global reads consume only the identity-scoped result
+    /// members emitted by the serving host. This is host-owned routing, not
+    /// request-controlled authorization.
+    fn client_settled_binding_view_key_for_query(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        read_view: &ReadViewSpec,
+    ) -> Option<BindingViewKey> {
+        (tier >= DurabilityTier::Edge).then(|| {
+            BindingViewKey::new(
+                shape.shape_id(),
+                binding.binding_id(),
+                RegisterShapeOptions {
+                    // Upstream client coverage is canonicalized to Global.
+                    tier: DurabilityTier::Global,
+                    read_view: read_view.clone(),
+                }
+                .read_view_key(),
+            )
+        })
     }
 
     fn can_use_prepared_current_query_plan(&self, shape: &ValidatedQuery) -> bool {
@@ -7622,6 +7830,7 @@ where
         binding: &Binding,
         tier: DurabilityTier,
         identity: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         let read_schema = self
             .catalogue
@@ -7638,8 +7847,13 @@ where
                 .clone()
         };
         let binding = lowered_shape.bind(BTreeMap::new())?;
-        let program =
-            self.compile_include_deleted_query_program(&lowered_shape, &binding, tier, identity)?;
+        let program = self.compile_include_deleted_query_program_in_authorization_mode(
+            &lowered_shape,
+            &binding,
+            tier,
+            identity,
+            authorization_mode,
+        )?;
         let deltas = self
             .database
             .query_graph(lowered_materialization_app_rows_graph(&program)?)
@@ -7831,17 +8045,39 @@ where
         Ok(rows)
     }
 
-    pub(crate) fn open_local_maintained_view_subscription(
+    pub(crate) fn open_maintained_view_subscription_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         identity: AuthorId,
         tier: DurabilityTier,
         read_view: &ReadViewSpec,
-        retained_prepared_plan: Option<PreparedQueryPlanHandle>,
+        retained_prepared_plan: Option<SubscriptionPreparedPlan>,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<(LocalMaintainedViewSubscription, RelationSnapshot), Error> {
+        if let Some(retained) = retained_prepared_plan.as_ref() {
+            if retained.authorization_mode != authorization_mode {
+                return Err(Error::InvalidStoredValue(
+                    "maintained subscription retained a plan from another authorization mode",
+                ));
+            }
+            debug_assert!(std::sync::Arc::strong_count(&retained.plan) > 0);
+        }
+        let settled_binding_view = (authorization_mode == QueryAuthorizationMode::ClientLocal)
+            .then(|| {
+                self.client_settled_binding_view_key_for_query(shape, binding, tier, read_view)
+            })
+            .flatten();
         let (subscription, maintained, terminal_schemas, transitions, tables) = self
-            .open_seeded_maintained_subscription_view(shape, binding, identity, tier, read_view)?;
+            .open_seeded_maintained_subscription_view_in_authorization_mode(
+                shape,
+                binding,
+                identity,
+                tier,
+                read_view,
+                authorization_mode,
+                settled_binding_view,
+            )?;
         let mut local = LocalMaintainedViewSubscription {
             subscription,
             _retained_prepared_plan: retained_prepared_plan,
@@ -7850,15 +8086,17 @@ where
             tables,
             result_query: shape.query().clone(),
             result_table: shape.query().table.clone(),
-            binding_view_key: BindingViewKey::new(
-                shape.shape_id(),
-                binding.binding_id(),
-                RegisterShapeOptions {
-                    tier,
-                    read_view: read_view.clone(),
-                }
-                .read_view_key(),
-            ),
+            binding_view_key: settled_binding_view.unwrap_or_else(|| {
+                BindingViewKey::new(
+                    shape.shape_id(),
+                    binding.binding_id(),
+                    RegisterShapeOptions {
+                        tier,
+                        read_view: read_view.clone(),
+                    }
+                    .read_view_key(),
+                )
+            }),
             result_select: shape.query().select.clone(),
             result_set: BTreeSet::new(),
             result_payloads: BTreeMap::new(),
@@ -9135,6 +9373,64 @@ where
         Ok((shape, binding, plan))
     }
 
+    pub(crate) fn prepare_query_binding_for_link_in_authorization_mode(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<(ValidatedQuery, Binding, SubscriptionPreparedPlan), Error> {
+        match authorization_mode {
+            QueryAuthorizationMode::ClientLocal => {
+                self.prepare_client_subscription_binding(shape, binding, tier, identity)
+            }
+            QueryAuthorizationMode::TrustedServing => {
+                self.prepare_trusted_subscription_binding(shape, binding, tier, identity)
+            }
+        }
+    }
+
+    fn prepare_client_subscription_binding(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+    ) -> Result<(ValidatedQuery, Binding, SubscriptionPreparedPlan), Error> {
+        let (shape, binding, plan) = self
+            .prepare_query_binding_for_link_with_shared_claim_fragments(
+                shape, binding, tier, identity,
+            )?;
+        Ok((
+            shape,
+            binding,
+            SubscriptionPreparedPlan {
+                plan,
+                authorization_mode: QueryAuthorizationMode::ClientLocal,
+            },
+        ))
+    }
+
+    fn prepare_trusted_subscription_binding(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+    ) -> Result<(ValidatedQuery, Binding, SubscriptionPreparedPlan), Error> {
+        let (shape, binding, plan) =
+            self.prepare_query_binding_for_link(shape, binding, tier, identity)?;
+        Ok((
+            shape,
+            binding,
+            SubscriptionPreparedPlan {
+                plan,
+                authorization_mode: QueryAuthorizationMode::TrustedServing,
+            },
+        ))
+    }
+
     pub(crate) fn prepare_query_binding_for_link_with_shared_claim_fragments(
         &mut self,
         shape: &ValidatedQuery,
@@ -9143,19 +9439,27 @@ where
         identity: AuthorId,
     ) -> Result<(ValidatedQuery, Binding, PreparedQueryPlanHandle), Error> {
         let (shape, binding) = self.query_binding_for_link(shape, binding)?;
-        let program = self.compile_current_query_program(
+        // This plan only keeps the local maintained subscription's graph alive.
+        // The upstream shape is registered separately below, where serving
+        // compilation stays TrustedServing. Do not lower local policy here:
+        // locally stored rows are already scoped by that upstream boundary.
+        let program = self.compile_current_query_program_in_authorization_mode(
             &shape,
             &binding,
             tier,
             identity,
             CurrentQueryProgramOutput::AppRows,
+            QueryAuthorizationMode::ClientLocal,
         )?;
         let has_claim_binding = !program.lowered.parameters.claim_params.is_empty();
         let plan = if has_claim_binding {
             let key = (
                 shape.shape_id(),
                 tier,
-                policy_plan_cache_signature(&binding, identity),
+                format!(
+                    "client-local:{}",
+                    policy_plan_cache_signature(&binding, identity)
+                ),
             );
             if let Some(plan) = self.query.query_shape_cache.get(&key) {
                 plan.clone()
@@ -9221,6 +9525,7 @@ where
             CurrentQueryProgramOutput::AppRows,
             &ReadViewSpec::default(),
             None,
+            QueryAuthorizationMode::TrustedServing,
         )?;
         let program =
             self.compile_query_program_request_with_access_paths(request, BTreeMap::new())?;
@@ -9238,33 +9543,17 @@ where
         Ok(rows)
     }
 
-    pub(crate) fn query_rows_for_link_with_prepared_plan(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        tier: DurabilityTier,
-        identity: AuthorId,
-        prepared_plan: Option<&PreparedQueryPlanHandle>,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        self.query_rows_with_prepared_plan_for_identity(
-            shape,
-            binding,
-            tier,
-            prepared_plan,
-            identity,
-        )
-    }
-
     /// Evaluate a query plus its array-subquery relation payload against local
     /// visible-current knowledge for one identity.
-    pub(crate) fn query_relation_snapshot_for_link(
+    #[cfg(test)]
+    pub(crate) fn query_relation_snapshot_for_serving(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
         identity: AuthorId,
     ) -> Result<RelationSnapshot, Error> {
-        self.query_relation_snapshot_for_link_in_read_view(
+        self.query_relation_snapshot_for_serving_in_read_view(
             shape,
             binding,
             tier,
@@ -9273,7 +9562,7 @@ where
         )
     }
 
-    pub(crate) fn query_relation_snapshot_for_link_in_read_view(
+    pub(crate) fn query_relation_snapshot_for_serving_in_read_view(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -9281,13 +9570,51 @@ where
         identity: AuthorId,
         read_view: &ReadViewSpec,
     ) -> Result<RelationSnapshot, Error> {
-        let program = self.compile_current_query_program_for_read_view(
+        self.query_relation_snapshot_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            read_view,
+            QueryAuthorizationMode::TrustedServing,
+        )
+    }
+
+    pub(crate) fn query_relation_snapshot_for_client(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        read_view: &ReadViewSpec,
+    ) -> Result<RelationSnapshot, Error> {
+        self.query_relation_snapshot_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            read_view,
+            QueryAuthorizationMode::ClientLocal,
+        )
+    }
+
+    fn query_relation_snapshot_in_authorization_mode(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        read_view: &ReadViewSpec,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<RelationSnapshot, Error> {
+        let program = self.compile_current_query_program_for_read_view_in_authorization_mode(
             shape,
             binding,
             tier,
             identity,
             CurrentQueryProgramOutput::RelationSnapshot,
             read_view,
+            authorization_mode,
         )?;
         let snapshots = self
             .database
@@ -9516,51 +9843,42 @@ where
         Ok(rows)
     }
 
-    pub(crate) fn subscription_snapshot_for_link(
+    pub(crate) fn subscription_snapshot_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
         identity: AuthorId,
+        read_view: &ReadViewSpec,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<RelationSnapshot, Error> {
         #[cfg(test)]
         record_subscription_snapshot_for_link_call();
-        self.subscription_snapshot_for_link_with_prepared_plan(shape, binding, tier, identity, None)
-    }
-
-    pub(crate) fn subscription_snapshot_for_link_with_prepared_plan(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        tier: DurabilityTier,
-        identity: AuthorId,
-        prepared_plan: Option<&PreparedQueryPlanHandle>,
-    ) -> Result<RelationSnapshot, Error> {
         if shape.query().array_subqueries.is_empty() {
-            let rows = self.query_rows_for_link_with_prepared_plan(
-                shape,
-                binding,
-                tier,
-                identity,
-                prepared_plan,
-            )?;
+            let rows = match authorization_mode {
+                QueryAuthorizationMode::ClientLocal => {
+                    self.query_rows_for_client(shape, binding, tier, identity)?
+                }
+                QueryAuthorizationMode::TrustedServing => self
+                    .query_rows_with_prepared_plan_for_identity(
+                        shape, binding, tier, None, identity,
+                    )?,
+            };
             return Ok(RelationSnapshot {
                 root_count: rows.len(),
                 rows,
                 edges: Vec::new(),
             });
         }
-        self.query_relation_snapshot_for_link(shape, binding, tier, identity)
-    }
-
-    pub(crate) fn query_rows_for_link_including_deleted(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        tier: DurabilityTier,
-        identity: AuthorId,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        self.query_rows_including_deleted_for_identity(shape, binding, tier, None, identity)
+        match authorization_mode {
+            QueryAuthorizationMode::ClientLocal => {
+                self.query_relation_snapshot_for_client(shape, binding, tier, identity, read_view)
+            }
+            QueryAuthorizationMode::TrustedServing => self
+                .query_relation_snapshot_for_serving_in_read_view(
+                    shape, binding, tier, identity, read_view,
+                ),
+        }
     }
 
     #[allow(dead_code)] // Slice 2 wires this into API-level routing.
@@ -9804,7 +10122,26 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.tx_query_for_identity(tx_id, shape, binding, AuthorId::SYSTEM)
+        self.tx_query_with_options(tx_id, shape, binding, false)
+    }
+
+    /// Evaluate a validated query inside an open transaction using the local
+    /// client read boundary with explicit root-row deletion visibility.
+    pub fn tx_query_with_options(
+        &mut self,
+        tx_id: OpenBatchId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        include_deleted: bool,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.tx_query_in_authorization_mode(
+            tx_id,
+            shape,
+            binding,
+            AuthorId::SYSTEM,
+            include_deleted,
+            QueryAuthorizationMode::ClientLocal,
+        )
     }
 
     /// Evaluate a validated query inside an open exclusive transaction as `identity`.
@@ -9828,6 +10165,25 @@ where
         identity: AuthorId,
         include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.tx_query_in_authorization_mode(
+            tx_id,
+            shape,
+            binding,
+            identity,
+            include_deleted,
+            QueryAuthorizationMode::TrustedServing,
+        )
+    }
+
+    fn tx_query_in_authorization_mode(
+        &mut self,
+        tx_id: OpenBatchId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorId,
+        include_deleted: bool,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<Vec<CurrentRow>, Error> {
         let query = shape.query();
         let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
         let table = self.table_in_schema(&query.table, shape.schema_version())?;
@@ -9838,6 +10194,7 @@ where
             identity,
             CurrentQueryProgramOutput::AppRows,
             include_deleted,
+            authorization_mode,
         )?;
         let deltas = self
             .database
@@ -9898,19 +10255,21 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
         read_view: &ReadViewSpec,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<(), Error> {
         // `JoinVia` is an existential constraint on this query's root-row
         // result, not flat joined output: maintained membership and delivery
         // remain addressed by the selected root row. Flat public join output
         // carries its source tuple through the maintained terminal, so it can
         // safely address several occurrences for one root as well.
-        self.compile_current_query_program_for_read_view(
+        self.compile_current_query_program_for_read_view_in_authorization_mode(
             shape,
             binding,
             tier,
             identity,
             CurrentQueryProgramOutput::MaintainedView,
             read_view,
+            authorization_mode,
         )
         .map(|_| ())
     }
@@ -10011,6 +10370,36 @@ where
         ),
         Error,
     > {
+        self.open_seeded_maintained_subscription_view_in_authorization_mode(
+            shape,
+            binding,
+            identity,
+            tier,
+            read_view,
+            QueryAuthorizationMode::TrustedServing,
+            None,
+        )
+    }
+
+    fn open_seeded_maintained_subscription_view_in_authorization_mode(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorId,
+        tier: DurabilityTier,
+        read_view: &ReadViewSpec,
+        authorization_mode: QueryAuthorizationMode,
+        settled_binding_view: Option<BindingViewKey>,
+    ) -> Result<
+        (
+            MultisinkSubscription,
+            MaintainedSubscriptionView,
+            MaintainedTerminalSchemas,
+            super::maintained_subscription_view::ResultTransitions,
+            BTreeMap<String, TableSchema>,
+        ),
+        Error,
+    > {
         let schema = self
             .catalogue
             .catalogue_schemas
@@ -10023,13 +10412,15 @@ where
             ParamBindingMode::RetainAllParams,
         )?;
         let binding = shape.bind(binding.values().clone())?;
-        let program = self.compile_current_query_program_for_read_view(
+        let program = self.compile_current_query_program_with_settled_view(
             &shape,
             &binding,
             tier,
             identity,
             CurrentQueryProgramOutput::MaintainedView,
             read_view,
+            settled_binding_view,
+            authorization_mode,
         )?;
         let tables = program.lowered.maintained_terminal_tables.clone();
         let terminal_schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
@@ -10361,6 +10752,7 @@ where
             shape: input_shape,
         };
         Ok(QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: historical_query_read_set(&input.shape, policy_schema_version, position),
             policy,
             input,
@@ -10525,6 +10917,7 @@ where
             shape: input_shape,
         };
         let request = QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: current_query_read_set(
                 &input.shape,
                 policy_schema_version,
@@ -10615,6 +11008,7 @@ where
             shape: input_shape,
         };
         Ok(QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: branch_query_read_set(
                 &input.shape,
                 policy_shape.schema_version(),
@@ -13303,6 +13697,7 @@ mod tests {
                 CurrentQueryProgramOutput::MaintainedView,
                 &ReadViewSpec::default(),
                 None,
+                QueryAuthorizationMode::TrustedServing,
             )
             .unwrap();
         let read_view = query_request.reads.primary;
@@ -14324,12 +14719,13 @@ mod tests {
         );
 
         let error = node
-            .compile_branch_query_program(
+            .compile_branch_query_program_in_authorization_mode(
                 branch_id,
                 &shape,
                 &binding,
                 AuthorId::SYSTEM,
                 CurrentQueryProgramOutput::MaintainedView,
+                QueryAuthorizationMode::TrustedServing,
             )
             .unwrap_err();
         let Error::QueryCapability(report) = error else {
@@ -15935,6 +16331,7 @@ mod tests {
                 CurrentQueryProgramOutput::AppRows,
                 &ReadViewSpec::default(),
                 Some(settled_binding_view),
+                QueryAuthorizationMode::TrustedServing,
             )
             .unwrap();
         request
@@ -16011,6 +16408,7 @@ mod tests {
                 CurrentQueryProgramOutput::MaintainedView,
                 &ReadViewSpec::default(),
                 Some(settled_binding_view),
+                QueryAuthorizationMode::TrustedServing,
             )
             .unwrap();
         let mut request = request;

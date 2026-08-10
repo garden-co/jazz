@@ -7371,7 +7371,7 @@ where
         let mut touched_groups = BTreeMap::<Vec<u8>, Vec<RecordDelta>>::new();
         for delta in &input.deltas {
             let group_key =
-                encoded_record_key_part(output_desc, delta.raw(), spec.group_field_indices)?;
+                encoded_arrangement_key_part(output_desc, delta.raw(), spec.group_field_indices)?;
             touched_groups
                 .entry(group_key)
                 .or_default()
@@ -11270,6 +11270,18 @@ pub(super) fn encoded_record_key_part(
     for field_idx in field_indices {
         let value = descriptor.get_idx(record, *field_idx)?;
         encode_runtime_primary_key_part(&mut key, &value)?;
+    }
+    Ok(key)
+}
+
+fn encoded_arrangement_key_part(
+    descriptor: RecordDescriptor,
+    record: &[u8],
+    field_indices: &[usize],
+) -> Result<Vec<u8>, IvmRuntimeError> {
+    let mut key = Vec::new();
+    for field_idx in field_indices {
+        encode_key_part(&mut key, &descriptor.get_idx(record, *field_idx)?)?;
     }
     Ok(key)
 }

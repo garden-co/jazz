@@ -154,8 +154,8 @@ where
         self.write_policy_allows_version_record(&version, commit.effective_permission_subject())
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn dry_run_mergeable_write_allows(
+    #[cfg(test)]
+    pub(crate) fn advisory_mergeable_write_allows(
         &mut self,
         commit: MergeableCommit,
     ) -> Result<bool, Error> {

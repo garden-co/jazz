@@ -31,6 +31,7 @@ use crate::ids::{AuthorId, NodeUuid, RowUuid, SchemaVersionId};
 pub use crate::node::CommitUnitTrust;
 #[cfg(feature = "testing")]
 pub use crate::node::NodeOpenReceipt as DbOpenReceipt;
+use crate::node::query_engine::QueryAuthorizationMode;
 use crate::node::{
     CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LargeValueEditCommit, LargeValueEditOp,
     LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate, MergeableCommit,
@@ -221,6 +222,7 @@ type SubscriptionList = Rc<RefCell<Vec<Weak<RefCell<SubscriptionState>>>>>;
 type PendingUpstreamCommands = Rc<RefCell<Vec<PendingUpstreamCommand>>>;
 type LatestCoverageSubscriptions = Rc<RefCell<BTreeMap<CoverageKey, SubscriptionKey>>>;
 type UpstreamCoverageRefCounts = Rc<RefCell<BTreeMap<CoverageKey, usize>>>;
+type CoverageRefreshGenerations = Rc<RefCell<BTreeMap<CoverageKey, u64>>>;
 type UpstreamSubscriptionOwners =
     Rc<RefCell<BTreeMap<SubscriptionKey, Vec<Weak<RefCell<SubscriptionState>>>>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
@@ -461,6 +463,9 @@ impl InitialSyncFlushCadence {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryAttachment {
     subscriptions: Vec<SubscriptionKey>,
+    owned_subscriptions: Vec<SubscriptionKey>,
+    required_after: Vec<(BindingViewKey, u64)>,
+    refreshes: Vec<(CoverageKey, u64)>,
 }
 
 impl QueryAttachment {
@@ -1201,49 +1206,90 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.all_for_identity(prepared, opts, self.identity.author)
-            .await
+        self.all_for_identity_in_authorization_mode(
+            prepared,
+            opts,
+            self.identity.author,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .await
     }
 
-    /// Tier-gated one-shot read evaluated as `author`.
+    /// Tier-gated one-shot read evaluated by a trusted host as `author`.
+    ///
+    /// Ordinary client reads use [`Db::all`] and never re-run read policy over
+    /// locally received data. This explicit identity entry point is reserved
+    /// for serving/request hosts that own policy enforcement before emission.
     pub async fn all_for_identity(
         &self,
         prepared: &PreparedQuery,
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.all_for_identity_in_authorization_mode(
+            prepared,
+            opts,
+            author,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .await
+    }
+
+    async fn all_for_identity_in_authorization_mode(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<Vec<CurrentRow>, Error> {
         let tier = effective_read_tier(&opts);
         let mut node = self.node.node.borrow_mut();
         match &opts.read_view.source {
             ReadViewSourceSpec::Current => {}
             ReadViewSourceSpec::Branch { branch } if !opts.include_deleted => {
-                return node
-                    .query_rows_on_branch_for_link(
-                        crate::ids::BranchId(*branch),
-                        &prepared.shape,
-                        &prepared.binding,
-                        author,
-                    )
-                    .map_err(Into::into);
+                return match authorization_mode {
+                    QueryAuthorizationMode::TrustedServing => node
+                        .query_rows_on_branch_for_link(
+                            crate::ids::BranchId(*branch),
+                            &prepared.shape,
+                            &prepared.binding,
+                            author,
+                        )
+                        .map_err(Into::into),
+                    QueryAuthorizationMode::ClientLocal => node
+                        .query_rows_on_branch_for_client(
+                            crate::ids::BranchId(*branch),
+                            &prepared.shape,
+                            &prepared.binding,
+                            author,
+                        )
+                        .map_err(Into::into),
+                };
             }
             _ => ensure_default_read_view(&opts)?,
         }
-        if opts.include_deleted {
-            node.query_rows_for_link_including_deleted(
+        match (opts.include_deleted, authorization_mode) {
+            (true, mode) => node.query_rows_including_deleted_in_authorization_mode(
                 &prepared.shape,
                 &prepared.binding,
                 tier,
+                None,
                 author,
-            )
-        } else {
-            let (shape, binding, _plan) = node
-                .prepare_query_binding_for_link_with_shared_claim_fragments(
+                mode,
+            ),
+            (false, QueryAuthorizationMode::TrustedServing) => node
+                .query_rows_with_prepared_plan_for_identity(
                     &prepared.shape,
                     &prepared.binding,
                     tier,
+                    None,
                     author,
-                )?;
-            node.query_rows_for_link_with_prepared_plan(&shape, &binding, tier, author, None)
+                ),
+            (false, QueryAuthorizationMode::ClientLocal) => {
+                // A client consumes identity-scoped rows emitted by its
+                // trusted upstream; local reads must not apply policy again.
+                node.query_rows_for_client(&prepared.shape, &prepared.binding, tier, author)
+            }
         }
         .map_err(Into::into)
     }
@@ -1254,8 +1300,25 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<RelationSnapshot, Error> {
-        self.all_relation_snapshot_for_identity(prepared, opts, self.identity.author)
-            .await
+        ensure_supported_read_view(&opts)?;
+        if opts.include_deleted {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "relation snapshots do not support include_deleted yet",
+            ));
+        }
+        let tier = effective_read_tier(&opts);
+        self.node
+            .node
+            .borrow_mut()
+            .query_relation_snapshot_for_client(
+                &prepared.shape,
+                &prepared.binding,
+                tier,
+                self.identity.author,
+                &opts.read_view,
+            )
+            .map_err(Into::into)
     }
 
     /// Tier-gated one-shot relation read evaluated as `author`.
@@ -1276,7 +1339,7 @@ where
         self.node
             .node
             .borrow_mut()
-            .query_relation_snapshot_for_link_in_read_view(
+            .query_relation_snapshot_for_serving_in_read_view(
                 &prepared.shape,
                 &prepared.binding,
                 tier,
@@ -1306,8 +1369,19 @@ where
         query: &RelationQuery,
         opts: ReadOpts,
     ) -> Result<RelationSnapshot, Error> {
-        self.all_relation_query_for_identity(query, opts, self.identity.author)
-            .await
+        ensure_default_read_view(&opts)?;
+        let query = relation_query_to_query(query)?;
+        let prepared = self.prepare_query(&query)?;
+        // Output-changing relation queries currently normalize to a single
+        // root row set. They have no array payload edges, so request ordinary
+        // app rows instead of the relation-snapshot fact output (which is
+        // reserved for correlated array/path materialization).
+        let rows = self.all(&prepared, opts).await?;
+        Ok(RelationSnapshot {
+            root_count: rows.len(),
+            rows,
+            edges: Vec::new(),
+        })
     }
 
     /// Tier-gated one-shot output-changing relation read evaluated as `author`.
@@ -1372,8 +1446,13 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
-        self.subscribe_for_identity(prepared, opts, self.identity.author)
-            .await
+        self.open_subscription(
+            prepared,
+            opts,
+            self.identity.author,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .await
     }
 
     /// Subscribe to a query evaluated as `author`.
@@ -1383,7 +1462,13 @@ where
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<SubscriptionStream, Error> {
-        self.open_subscription(prepared, opts, author).await
+        self.open_subscription(
+            prepared,
+            opts,
+            author,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .await
     }
 
     /// Subscribe to an output-changing relation query.
@@ -1392,8 +1477,13 @@ where
         query: &RelationQuery,
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
-        self.subscribe_relation_query_for_identity(query, opts, self.identity.author)
-            .await
+        self.open_relation_subscription(
+            query,
+            opts,
+            self.identity.author,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .await
     }
 
     /// Subscribe to an output-changing relation query evaluated as `author`.
@@ -1403,7 +1493,8 @@ where
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<SubscriptionStream, Error> {
-        self.open_relation_subscription(query, opts, author).await
+        self.open_relation_subscription(query, opts, author, QueryAuthorizationMode::TrustedServing)
+            .await
     }
 
     /// Attach a one-shot usage-site query coverage request.
@@ -1419,14 +1510,12 @@ where
         ensure_supported_read_view(&opts)?;
         let upstream_opts =
             upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
-        Ok(QueryAttachment {
-            subscriptions: vec![self.attach_query_shape_binding_with_opts(
-                &prepared.shape,
-                &prepared.binding,
-                upstream_opts,
-                self.identity.author,
-            )?],
-        })
+        self.attach_or_refresh_query_coverage(
+            &prepared.shape,
+            &prepared.binding,
+            upstream_opts,
+            self.identity.author,
+        )
     }
 
     /// Attach a one-shot usage-site query coverage request evaluated as `author`.
@@ -1445,13 +1534,67 @@ where
             upstream_opts.tier,
             author,
         )?;
+        self.attach_or_refresh_query_coverage(&shape, &binding, upstream_opts, author)
+    }
+
+    fn attach_or_refresh_query_coverage(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        upstream_opts: RegisterShapeOptions,
+        identity: AuthorId,
+    ) -> Result<QueryAttachment, Error> {
+        let binding_view = BindingViewKey::new(
+            shape.shape_id(),
+            binding.binding_id(),
+            upstream_opts.read_view_key(),
+        );
+        let required_after = self
+            .node
+            .node
+            .borrow()
+            .applied_view_update_generation(binding_view);
+        let coverage = coverage_key(shape, binding, upstream_opts.clone());
+        if self
+            .node
+            .upstream_coverage_refcounts
+            .borrow()
+            .contains_key(&coverage)
+            && let Some(subscription) = self
+                .node
+                .latest_coverage_subscriptions
+                .borrow()
+                .get(&coverage)
+                .copied()
+        {
+            let mut refreshes = self.node.coverage_refresh_generations.borrow_mut();
+            if refreshes.get(&coverage).copied() != Some(required_after) {
+                refreshes.insert(coverage.clone(), required_after);
+                self.node.upstream_subscriptions.borrow_mut().push(
+                    PendingUpstreamCommand::Subscribe(PendingUpstreamSubscription {
+                        subscription,
+                        shape: shape.clone(),
+                        binding: binding.clone(),
+                        opts: upstream_opts,
+                        identity,
+                    }),
+                );
+                self.node.schedule_tick(TickUrgency::Immediate);
+            }
+            return Ok(QueryAttachment {
+                subscriptions: vec![subscription],
+                owned_subscriptions: Vec::new(),
+                required_after: vec![(binding_view, required_after)],
+                refreshes: vec![(coverage, required_after)],
+            });
+        }
+        let subscription =
+            self.attach_query_shape_binding_with_opts(shape, binding, upstream_opts, identity)?;
         Ok(QueryAttachment {
-            subscriptions: vec![self.attach_query_shape_binding_with_opts(
-                &shape,
-                &binding,
-                upstream_opts,
-                author,
-            )?],
+            subscriptions: vec![subscription],
+            owned_subscriptions: vec![subscription],
+            required_after: vec![(binding_view, required_after)],
+            refreshes: Vec::new(),
         })
     }
 
@@ -1488,18 +1631,31 @@ where
         self.attach_query_with_opts(prepared, ReadOpts::default())
     }
 
-    /// Return whether a query attachment has received at least one upstream view update.
+    /// Return whether each usage-site attachment has observed a newer logical
+    /// server receipt than the one it captured during registration.
     pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
         let node = self.node.node.borrow();
-        attachment.subscriptions.iter().all(|subscription| {
-            node.binding_view_key_for_subscription(*subscription)
-                .is_ok_and(|binding_view_key| node.has_settled_result_set(binding_view_key))
-        })
+        let covered = attachment
+            .required_after
+            .iter()
+            .all(|(binding_view, required_after)| {
+                node.applied_view_update_generation(*binding_view) > *required_after
+            });
+        drop(node);
+        if covered {
+            let mut refreshes = self.node.coverage_refresh_generations.borrow_mut();
+            for (coverage, generation) in &attachment.refreshes {
+                if refreshes.get(coverage).copied() == Some(*generation) {
+                    refreshes.remove(coverage);
+                }
+            }
+        }
+        covered
     }
 
     /// Detach a one-shot query coverage request.
     pub fn detach_query(&self, attachment: QueryAttachment) {
-        for subscription in attachment.subscriptions {
+        for subscription in attachment.owned_subscriptions {
             self.node.node.borrow_mut().apply_unsubscribe(subscription);
             self.node
                 .latest_coverage_subscriptions
@@ -1518,6 +1674,7 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
         author: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<SubscriptionStream, Error> {
         ensure_supported_subscription_read_opts(&opts)?;
         self.validate_prepared_shape_for_registration(prepared)?;
@@ -1531,28 +1688,31 @@ where
                 read_tier,
                 author,
                 &opts.read_view,
+                authorization_mode,
             )?;
         let (local_shape, local_binding, _local_plan) = self
             .node
             .node
             .borrow_mut()
-            .prepare_query_binding_for_link_with_shared_claim_fragments(
+            .prepare_query_binding_for_link_in_authorization_mode(
                 &prepared.shape,
                 &prepared.binding,
                 read_tier,
                 author,
+                authorization_mode,
             )?;
         let (subscription, snapshot) = self
             .node
             .node
             .borrow_mut()
-            .open_local_maintained_view_subscription(
+            .open_maintained_view_subscription_in_authorization_mode(
                 &local_shape,
                 &local_binding,
                 author,
                 read_tier,
                 &opts.read_view,
                 Some(_local_plan),
+                authorization_mode,
             )?;
         let root_occurrence_ids = subscription.root_occurrence_ids().to_vec();
         let local_subscription_id = subscription.subscription_id();
@@ -1588,20 +1748,25 @@ where
                     .node
                     .node
                     .borrow_mut()
-                    .prepare_query_binding_for_link_with_shared_claim_fragments(
+                    .prepare_query_binding_for_link_in_authorization_mode(
                         &prepared.shape,
                         &prepared.binding,
                         upstream_opts.tier,
                         author,
+                        authorization_mode,
                     )?;
                 (shape, binding)
             };
             state_shape = shape.clone();
             state_binding = binding.clone();
             remote_read_tier = Some(upstream_opts.tier);
-            let upstream_subscriptions =
-                self.open_subscription_upstream_coverage(&shape, &binding, upstream_opts, author)?;
-            upstream_subscription_handles = upstream_subscriptions;
+            upstream_subscription_handles = self.open_subscription_upstream_coverage(
+                &shape,
+                &binding,
+                upstream_opts,
+                author,
+                authorization_mode,
+            )?;
         }
         let settled_tier = remote_read_tier.unwrap_or(read_tier);
         let settled = subscription_is_settled(
@@ -1633,6 +1798,7 @@ where
             local_subscription_cleanup,
             propagates_upstream,
             author,
+            authorization_mode,
             read_tier,
             remote_read_tier,
             read_view: opts.read_view.clone(),
@@ -1700,11 +1866,13 @@ where
         query: &RelationQuery,
         opts: ReadOpts,
         author: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<SubscriptionStream, Error> {
         ensure_supported_subscription_read_opts(&opts)?;
         let query = relation_query_to_query(query)?;
         let prepared = self.prepare_query(&query)?;
-        self.open_subscription(&prepared, opts, author).await
+        self.open_subscription(&prepared, opts, author, authorization_mode)
+            .await
     }
 
     fn open_subscription_upstream_coverage(
@@ -1713,6 +1881,7 @@ where
         binding: &Binding,
         opts: RegisterShapeOptions,
         identity: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<UpstreamCoverageHandle>, Error> {
         self.node
             .node
@@ -1723,6 +1892,7 @@ where
                 opts.tier,
                 identity,
                 &opts.read_view,
+                authorization_mode,
             )?;
         let coverage = coverage_key(shape, binding, opts.clone());
         if self
@@ -1932,24 +2102,8 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_absent(table, row, identity)?;
         let cells = self.apply_insert_defaults(table, cells)?;
-        let allowed = self
-            .node
-            .node
-            .borrow_mut()
-            .dry_run_mergeable_write_allows_for_view(
-                &self.schema,
-                MergeableCommit::new(table, row, self.next_now_ms())
-                    .made_by(identity)
-                    .permission_subject(identity)
-                    .cells(cells.clone()),
-            )
-            .map_err(Error::from)?;
-        if !allowed {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                format!("policy denied INSERT on table {table}"),
-            ));
-        }
+        // Client writes are admitted structurally and staged optimistically.
+        // A trusted serving authority evaluates policy and returns the fate.
         self.write_mergeable(
             identity,
             Some(identity),
@@ -1972,24 +2126,8 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_absent(table, row, identity)?;
         let cells = self.apply_insert_defaults(table, cells)?;
-        let allowed = self
-            .node
-            .node
-            .borrow_mut()
-            .dry_run_mergeable_write_allows_for_view(
-                &self.schema,
-                MergeableCommit::new(table, row, now_ms)
-                    .made_by(identity)
-                    .permission_subject(identity)
-                    .cells(cells.clone()),
-            )
-            .map_err(Error::from)?;
-        if !allowed {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                format!("policy denied INSERT on table {table}"),
-            ));
-        }
+        // See `insert_with_id_for_identity`: policy fate belongs to the
+        // trusted serving authority, not this local client admission path.
         self.write_mergeable_at_ms(
             identity,
             Some(identity),
@@ -2062,7 +2200,7 @@ where
         patch: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
         if patch.is_empty() {
-            return self.no_op_update_handle(table, row, self.identity.author);
+            return self.no_op_update_handle_for_client(table, row, self.identity.author);
         }
         let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
         self.write_mergeable_with_authored_columns(
@@ -2086,7 +2224,7 @@ where
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
         if patch.is_empty() {
-            return self.no_op_update_handle(table, row, self.identity.author);
+            return self.no_op_update_handle_for_client(table, row, self.identity.author);
         }
         let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
         self.write_mergeable_at_ms_with_authorship(
@@ -2114,7 +2252,7 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         self.check_attribution_allowed(made_by)?;
         if patch.is_empty() {
-            return self.no_op_update_handle(table, row, self.identity.author);
+            return self.no_op_update_handle_for_client(table, row, self.identity.author);
         }
         let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
         self.write_mergeable_as_session_subject_with_authored_columns(
@@ -2137,28 +2275,11 @@ where
         patch: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
         if patch.is_empty() {
-            return self.no_op_update_handle(table, row, identity);
+            return self.no_op_update_handle_for_identity(table, row, identity);
         }
         let (cells, parent, authored_columns) =
             self.merge_existing_cells_for_identity(table, row, patch, identity)?;
         let parents = parent.into_iter().collect::<Vec<_>>();
-        let dry_run = MergeableCommit::new(table, row, self.next_now_ms())
-            .made_by(identity)
-            .permission_subject(identity)
-            .cells(cells.clone())
-            .parents(parents.clone());
-        let allowed = self
-            .node
-            .node
-            .borrow_mut()
-            .dry_run_mergeable_write_allows_for_view(&self.schema, dry_run)
-            .map_err(Error::from)?;
-        if !allowed {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                format!("policy denied UPDATE on table {table}"),
-            ));
-        }
         self.write_mergeable_with_authored_columns(
             identity,
             Some(identity),
@@ -2181,28 +2302,11 @@ where
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
         if patch.is_empty() {
-            return self.no_op_update_handle(table, row, identity);
+            return self.no_op_update_handle_for_identity(table, row, identity);
         }
         let (cells, parent, authored_columns) =
             self.merge_existing_cells_for_identity(table, row, patch, identity)?;
         let parents = parent.into_iter().collect::<Vec<_>>();
-        let dry_run = MergeableCommit::new(table, row, now_ms)
-            .made_by(identity)
-            .permission_subject(identity)
-            .cells(cells.clone())
-            .parents(parents.clone());
-        let allowed = self
-            .node
-            .node
-            .borrow_mut()
-            .dry_run_mergeable_write_allows_for_view(&self.schema, dry_run)
-            .map_err(Error::from)?;
-        if !allowed {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                format!("policy denied UPDATE on table {table}"),
-            ));
-        }
         self.write_mergeable_at_ms_with_authorship(
             identity,
             Some(identity),
@@ -2275,7 +2379,7 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
         let (cells, parents, authored_columns) = if self
-            .upsert_target_for_identity(table, row, self.identity.author)?
+            .upsert_target_for_client_identity(table, row, self.identity.author)?
             .is_some()
         {
             let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, cells)?;
@@ -2306,7 +2410,7 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
         let (cells, parents, authored_columns) = if self
-            .upsert_target_for_identity(table, row, self.identity.author)?
+            .upsert_target_for_client_identity(table, row, self.identity.author)?
             .is_some()
         {
             let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, cells)?;
@@ -2337,7 +2441,7 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
         let (cells, parents, authored_columns) = if self
-            .upsert_target_for_identity(table, row, identity)?
+            .upsert_target_for_trusted_identity(table, row, identity)?
             .is_some()
         {
             let (cells, parent, authored_columns) =
@@ -2370,7 +2474,7 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
         let (cells, parents, authored_columns) = if self
-            .upsert_target_for_identity(table, row, identity)?
+            .upsert_target_for_trusted_identity(table, row, identity)?
             .is_some()
         {
             let (cells, parent, authored_columns) =
@@ -2501,12 +2605,6 @@ where
         now_ms: Option<u64>,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        if !self.can_delete_for_identity(table, row, identity)? {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                format!("policy denied DELETE on table {table}"),
-            ));
-        }
         let (parents, _) = self.row_layer_parents(table, row)?;
         match now_ms {
             Some(now_ms) => self.write_mergeable_at_ms(
@@ -2979,7 +3077,13 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.transaction_all_for_identity(tx_id, prepared, self.identity.author, opts)
+        self.transaction_all_in_authorization_mode(
+            tx_id,
+            prepared,
+            self.identity.author,
+            opts,
+            QueryAuthorizationMode::ClientLocal,
+        )
     }
 
     pub(crate) fn transaction_all_for_identity(
@@ -2989,18 +3093,44 @@ where
         author: AuthorId,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.transaction_all_in_authorization_mode(
+            tx_id,
+            prepared,
+            author,
+            opts,
+            QueryAuthorizationMode::TrustedServing,
+        )
+    }
+
+    fn transaction_all_in_authorization_mode(
+        &self,
+        tx_id: OpenBatchId,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+        opts: ReadOpts,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<Vec<CurrentRow>, Error> {
         ensure_default_read_view(&opts)?;
-        self.node
-            .node
-            .borrow_mut()
-            .tx_query_for_identity_with_options(
-                tx_id,
-                &prepared.shape,
-                &prepared.binding,
-                author,
-                opts.include_deleted,
-            )
-            .map_err(Into::into)
+        let mut node = self.node.node.borrow_mut();
+        match authorization_mode {
+            QueryAuthorizationMode::ClientLocal => node
+                .tx_query_with_options(
+                    tx_id,
+                    &prepared.shape,
+                    &prepared.binding,
+                    opts.include_deleted,
+                )
+                .map_err(Into::into),
+            QueryAuthorizationMode::TrustedServing => node
+                .tx_query_for_identity_with_options(
+                    tx_id,
+                    &prepared.shape,
+                    &prepared.binding,
+                    author,
+                    opts.include_deleted,
+                )
+                .map_err(Into::into),
+        }
     }
 
     fn stage_exclusive_insert(
@@ -3428,18 +3558,8 @@ where
         if let Some(deletion) = deletion {
             commit = commit.deletion(deletion);
         }
-        let allowed = self
-            .node
-            .node
-            .borrow_mut()
-            .dry_run_mergeable_write_allows_for_view(&self.schema, commit.clone())
-            .map_err(Error::from)?;
-        if !allowed {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                format!("policy denied {operation} on table {table}"),
-            ));
-        }
+        // Db is an untrusted client: structurally valid writes are staged and
+        // sent optimistically. A serving authority assigns the policy fate.
         let tx_id = self.node.node.borrow_mut().commit_mergeable(commit)?;
         let local_tier = self.finalize_local_commit(tx_id)?;
         self.refresh_subscriptions()?;
@@ -3543,13 +3663,13 @@ where
         Ok(cells)
     }
 
-    fn upsert_target_for_identity(
+    fn upsert_target_for_client_identity(
         &self,
         table: &str,
         row: RowUuid,
         identity: AuthorId,
     ) -> Result<Option<CurrentRow>, Error> {
-        let target = self.local_row_for_identity(table, row, identity)?;
+        let target = self.local_row_for_client_identity(table, row, identity)?;
         if target.is_some() {
             return Ok(target);
         }
@@ -3558,6 +3678,28 @@ where
         // exactly that distinction: a genuinely absent target follows INSERT
         // policy and does not require read permission, while merging into an
         // existing target must not expose or copy hidden cells.
+        if self.local_current_row(table, row)?.is_none() {
+            return Ok(None);
+        }
+        if identity == AuthorId::SYSTEM || self.table_schema(table)?.read_policy.is_none() {
+            return Ok(None);
+        }
+        Err(read_for_write_denied("UPSERT", table))
+    }
+
+    fn upsert_target_for_trusted_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        identity: AuthorId,
+    ) -> Result<Option<CurrentRow>, Error> {
+        let target = self.local_row_for_trusted_identity(table, row, identity)?;
+        if target.is_some() {
+            return Ok(target);
+        }
+        // Trusted serving evaluates the identity's real read policy before
+        // merging an existing row. A hidden existing row must not be treated
+        // as an insert target.
         if self.local_current_row(table, row)?.is_none() {
             return Ok(None);
         }
@@ -3661,28 +3803,50 @@ where
         Ok((content_parents, deletion_parents))
     }
 
-    fn local_row_for_identity(
+    fn local_row_for_client_identity(
         &self,
         table: &str,
         row: RowUuid,
         identity: AuthorId,
     ) -> Result<Option<CurrentRow>, Error> {
         let query = self.prepare_query(&Query::from(table))?;
-        let mut node = self.node.node.borrow_mut();
-        let groove_runtime_token = node.groove_runtime_token();
-        Ok(node
-            .query_rows_for_link_with_prepared_plan(
+        Ok(self
+            .node
+            .node
+            .borrow_mut()
+            .query_rows_for_client(
                 &query.shape,
                 &query.binding,
                 DurabilityTier::Local,
                 identity,
-                query.plan_for_tier(DurabilityTier::Local, groove_runtime_token),
             )?
             .into_iter()
             .find(|candidate| candidate.row_uuid() == row))
     }
 
-    fn no_op_update_handle(
+    fn local_row_for_trusted_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        identity: AuthorId,
+    ) -> Result<Option<CurrentRow>, Error> {
+        let query = self.prepare_query(&Query::from(table))?;
+        Ok(self
+            .node
+            .node
+            .borrow_mut()
+            .query_rows_with_prepared_plan_for_identity(
+                &query.shape,
+                &query.binding,
+                DurabilityTier::Local,
+                None,
+                identity,
+            )?
+            .into_iter()
+            .find(|candidate| candidate.row_uuid() == row))
+    }
+
+    fn no_op_update_handle_for_client(
         &self,
         table: &str,
         row: RowUuid,
@@ -3690,7 +3854,32 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
         let existing = self
-            .local_row_for_identity(table, row, identity)?
+            .local_row_for_client_identity(table, row, identity)?
+            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+        let tx_id = self
+            .node
+            .node
+            .borrow_mut()
+            .current_row_tx_id(&existing)
+            .ok_or_else(|| Error::new(ErrorCode::NotObserved, "current row has no transaction"))?;
+        let local_tier = self.write_state(tx_id)?.durability;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier,
+        })
+    }
+
+    fn no_op_update_handle_for_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        identity: AuthorId,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_row_not_deleted(table, row)?;
+        let existing = self
+            .local_row_for_trusted_identity(table, row, identity)?
             .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
         let tx_id = self
             .node
@@ -3713,10 +3902,10 @@ where
         row: RowUuid,
         patch: RowCells,
     ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
-        self.merge_existing_cells_for_identity(table, row, patch, self.identity.author)
+        self.merge_existing_cells_for_client_identity(table, row, patch, self.identity.author)
     }
 
-    fn merge_existing_cells_for_identity(
+    fn merge_existing_cells_for_client_identity(
         &self,
         table: &str,
         row: RowUuid,
@@ -3740,12 +3929,54 @@ where
             let authored_columns = patch.keys().cloned().collect();
             return Ok((patch, parent, authored_columns));
         }
+        let mut cells = BTreeMap::new();
+        let existing = self
+            .local_row_for_client_identity(table, row, identity)?
+            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+        for column in &table_schema.columns {
+            if column.large_value.is_some() {
+                continue;
+            }
+            if let Some(value) = existing.cell(table_schema, &column.name) {
+                cells.insert(
+                    column.name.clone(),
+                    default_cell_for_column_type(&column.column_type, &value),
+                );
+            }
+        }
+        let parent = self.node.node.borrow_mut().current_row_tx_id(&existing);
+        let authored_columns = patch.keys().cloned().collect();
+        cells.extend(patch);
+        Ok((cells, parent, authored_columns))
+    }
+
+    fn merge_existing_cells_for_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        identity: AuthorId,
+    ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
+        let table_schema = self.table_schema(table)?;
+        self.ensure_row_not_deleted(table, row)?;
+        if table_schema
+            .columns
+            .iter()
+            .all(|column| patch.contains_key(&column.name))
+        {
+            let parent = self
+                .local_current_row(table, row)?
+                .as_ref()
+                .and_then(|existing| self.node.node.borrow_mut().current_row_tx_id(existing));
+            let authored_columns = patch.keys().cloned().collect();
+            return Ok((patch, parent, authored_columns));
+        }
         if !self.can_read_for_identity(table, row, identity)? {
             return Err(read_for_write_denied("partial UPDATE", table));
         }
         let mut cells = BTreeMap::new();
         let existing = self
-            .local_row_for_identity(table, row, identity)?
+            .local_row_for_trusted_identity(table, row, identity)?
             .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
         for column in &table_schema.columns {
             if column.large_value.is_some() {
@@ -4249,6 +4480,7 @@ where
     upstream_subscriptions: PendingUpstreamCommands,
     latest_coverage_subscriptions: LatestCoverageSubscriptions,
     upstream_coverage_refcounts: UpstreamCoverageRefCounts,
+    coverage_refresh_generations: CoverageRefreshGenerations,
     upstream_subscription_owners: UpstreamSubscriptionOwners,
     connections: RefCell<Vec<Rc<RefCell<PeerConnection<S>>>>>,
     scheduler: SharedTickScheduler,
@@ -4272,6 +4504,7 @@ where
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             latest_coverage_subscriptions: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_coverage_refcounts: Rc::new(RefCell::new(BTreeMap::new())),
+            coverage_refresh_generations: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_subscription_owners: Rc::new(RefCell::new(BTreeMap::new())),
             connections: RefCell::new(Vec::new()),
             scheduler: Rc::new(RefCell::new(None)),
@@ -4767,6 +5000,7 @@ where
             previous_source,
             previous_settled,
             author,
+            authorization_mode,
             terminal_rows,
         ) = {
             let state = state.borrow();
@@ -4777,6 +5011,7 @@ where
                 state.snapshot_source,
                 state.settled,
                 state.author,
+                state.authorization_mode,
                 state.terminal_rows,
             )
         };
@@ -4790,9 +5025,16 @@ where
                     }
                 }
             };
-            let (maintained, mut snapshot) =
-                node.borrow_mut().open_local_maintained_view_subscription(
-                    &shape, &binding, author, read_tier, &read_view, None,
+            let (maintained, mut snapshot) = node
+                .borrow_mut()
+                .open_maintained_view_subscription_in_authorization_mode(
+                    &shape,
+                    &binding,
+                    author,
+                    read_tier,
+                    &read_view,
+                    None,
+                    authorization_mode,
                 )?;
             let delivered_binding_view = BindingViewKey {
                 shape_id: shape.shape_id(),
@@ -5006,9 +5248,16 @@ where
                         // Groove terminal at an authoritative boundary so the
                         // reset is a fresh complete value and subsequent FIFO
                         // patches are relative to exactly that value.
-                        let (replacement, snapshot) =
-                            node.borrow_mut().open_local_maintained_view_subscription(
-                                &shape, &binding, author, read_tier, &read_view, None,
+                        let (replacement, snapshot) = node
+                            .borrow_mut()
+                            .open_maintained_view_subscription_in_authorization_mode(
+                                &shape,
+                                &binding,
+                                author,
+                                read_tier,
+                                &read_view,
+                                None,
+                                authorization_mode,
                             )?;
                         *maintained = replacement;
                         let settled = subscription_is_settled(
@@ -5087,11 +5336,13 @@ where
                             } else {
                                 let fallback = {
                                     let mut node_ref = node.borrow_mut();
-                                    match node_ref.subscription_snapshot_for_link(
+                                    match node_ref.subscription_snapshot_in_authorization_mode(
                                         &shape,
                                         &binding,
                                         snapshot_tier,
                                         author,
+                                        &read_view,
+                                        authorization_mode,
                                     ) {
                                         Ok(snapshot) => snapshot,
                                         Err(crate::node::Error::MissingTransaction(_)) => {
@@ -5318,11 +5569,13 @@ where
                                 } else {
                                     let fallback = {
                                         let mut node_ref = node.borrow_mut();
-                                        match node_ref.subscription_snapshot_for_link(
+                                        match node_ref.subscription_snapshot_in_authorization_mode(
                                             &shape,
                                             &binding,
                                             snapshot_tier,
                                             author,
+                                            &read_view,
+                                            authorization_mode,
                                         ) {
                                             Ok(snapshot) => snapshot,
                                             Err(crate::node::Error::MissingTransaction(_)) => {
@@ -5343,11 +5596,13 @@ where
                             } else {
                                 let remote_snapshot = {
                                     let mut node_ref = node.borrow_mut();
-                                    match node_ref.subscription_snapshot_for_link(
+                                    match node_ref.subscription_snapshot_in_authorization_mode(
                                         &shape,
                                         &binding,
                                         snapshot_tier,
                                         author,
+                                        &read_view,
+                                        authorization_mode,
                                     ) {
                                         Ok(snapshot) => snapshot,
                                         Err(crate::node::Error::MissingTransaction(_)) => {
@@ -5378,9 +5633,15 @@ where
                             (previous.clone(), previous_source)
                         } else {
                             (
-                                node.borrow_mut().subscription_snapshot_for_link(
-                                    &shape, &binding, read_tier, author,
-                                )?,
+                                node.borrow_mut()
+                                    .subscription_snapshot_in_authorization_mode(
+                                        &shape,
+                                        &binding,
+                                        read_tier,
+                                        author,
+                                        &read_view,
+                                        authorization_mode,
+                                    )?,
                                 SubscriptionSnapshotSource::LinkSnapshot,
                             )
                         };
@@ -6899,6 +7160,7 @@ where
                                             opts.tier,
                                             subscriber_permission_subject(*ingest_context),
                                             &opts.read_view,
+                                            QueryAuthorizationMode::TrustedServing,
                                         );
                                     if let Err(crate::node::Error::QueryCapability(detail)) =
                                         supported
@@ -7073,6 +7335,7 @@ where
                                     opts.tier,
                                     subscriber_permission_subject(*ingest_context),
                                     &opts.read_view,
+                                    QueryAuthorizationMode::TrustedServing,
                                 );
                             if let Err(crate::node::Error::QueryCapability(detail)) = supported {
                                 send_unsupported_shape_capability_rejection(
@@ -9204,6 +9467,7 @@ struct SubscriptionState {
     local_subscription_cleanup: Rc<Cell<Option<(u64, groove::ivm::SubscriptionId)>>>,
     propagates_upstream: bool,
     author: AuthorId,
+    authorization_mode: QueryAuthorizationMode,
     read_tier: DurabilityTier,
     remote_read_tier: Option<DurabilityTier>,
     read_view: ReadViewSpec,
@@ -9366,6 +9630,18 @@ impl SubscriptionStream {
     /// Return the next queued materialized subscription event without waiting.
     pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
         self.receiver.try_recv().ok()
+    }
+
+    #[cfg(test)]
+    fn retained_plan_authorization_mode(&self) -> Option<QueryAuthorizationMode> {
+        let state = self._state.borrow();
+        let SubscriptionKind::Prepared {
+            maintained_subscription,
+            ..
+        } = &state.kind;
+        maintained_subscription
+            .as_ref()
+            .and_then(LocalMaintainedViewSubscription::retained_plan_authorization_mode)
     }
 }
 

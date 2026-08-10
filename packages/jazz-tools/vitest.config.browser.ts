@@ -52,7 +52,10 @@ export default defineConfig({
     alias: {
       // Needed because jazz-tools browser tests import from source (../../src/),
       // bypassing node_modules resolution. Consumers don't need this.
-      "jazz-wasm": resolve(__dirname, "../../crates/jazz-wasm/pkg"),
+      // Point Vite at the workspace package, rather than its generated
+      // directory. The package manifest selects pkg/jazz_wasm.js; wasm-pack's
+      // web target intentionally does not emit a second manifest in pkg/.
+      "jazz-wasm": resolve(__dirname, "../../crates/jazz-wasm"),
     },
   },
   worker: {

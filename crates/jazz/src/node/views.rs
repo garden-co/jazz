@@ -1030,6 +1030,12 @@ where
                 .initial_hydration_binding_views
                 .remove(&binding_view_key);
         }
+        let generation = self
+            .query
+            .applied_view_update_generations
+            .entry(binding_view_key)
+            .or_default();
+        *generation = generation.wrapping_add(1);
         Ok(())
     }
 

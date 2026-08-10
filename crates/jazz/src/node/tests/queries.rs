@@ -1148,7 +1148,7 @@ fn array_subquery_match_correlation_cardinality_requires_every_referenced_member
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let snapshot = node
-        .query_relation_snapshot_for_link(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
         .unwrap();
 
     assert_eq!(
@@ -1233,7 +1233,7 @@ fn rows_skipped_by_require_includes_affect_limit_offset_pagination() {
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let snapshot = node
-        .query_relation_snapshot_for_link(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
         .unwrap();
 
     assert_eq!(
@@ -1290,7 +1290,7 @@ fn relation_snapshot_single_level_array_uses_query_engine_edges() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let snapshot = node
-        .query_relation_snapshot_for_link(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
         .unwrap();
 
     assert_eq!(snapshot.rows.len(), 1);
@@ -1363,7 +1363,7 @@ fn relation_snapshot_materializes_reverse_array_edges() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let snapshot = node
-        .query_relation_snapshot_for_link(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
         .unwrap();
 
     assert_eq!(snapshot.rows.len(), 1);
@@ -1441,7 +1441,7 @@ fn relation_snapshot_array_subquery_filters_use_parent_binding_params() {
         .unwrap();
 
     let snapshot = node
-        .query_relation_snapshot_for_link(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
         .unwrap();
 
     assert_eq!(
@@ -1496,7 +1496,7 @@ fn relation_snapshot_filters_unreadable_children_and_required_parents() {
     let optional_binding = optional_shape.bind(BTreeMap::new()).unwrap();
 
     let optional = node
-        .query_relation_snapshot_for_link(
+        .query_relation_snapshot_for_serving(
             &optional_shape,
             &optional_binding,
             DurabilityTier::Local,
@@ -1524,7 +1524,7 @@ fn relation_snapshot_filters_unreadable_children_and_required_parents() {
     let required_binding = required_shape.bind(BTreeMap::new()).unwrap();
 
     let required = node
-        .query_relation_snapshot_for_link(
+        .query_relation_snapshot_for_serving(
             &required_shape,
             &required_binding,
             DurabilityTier::Local,
@@ -1710,12 +1710,13 @@ fn include_deleted_one_shot_read_uses_lowered_literal_filters() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let rows = node
-        .query_rows_including_deleted_for_identity(
+        .query_rows_including_deleted_in_authorization_mode(
             &shape,
             &binding,
             DurabilityTier::Local,
             None,
             AuthorId::SYSTEM,
+            QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
 
@@ -1753,12 +1754,13 @@ fn include_deleted_one_shot_read_uses_lowered_param_filters() {
         .unwrap();
 
     let rows = node
-        .query_rows_including_deleted_for_identity(
+        .query_rows_including_deleted_in_authorization_mode(
             &shape,
             &binding,
             DurabilityTier::Local,
             None,
             AuthorId::SYSTEM,
+            QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
 
@@ -1809,12 +1811,13 @@ fn include_deleted_one_shot_read_join_matches_visible_join_rows() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let rows = node
-        .query_rows_including_deleted_for_identity(
+        .query_rows_including_deleted_in_authorization_mode(
             &shape,
             &binding,
             DurabilityTier::Local,
             None,
             AuthorId::SYSTEM,
+            QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
 
@@ -1856,12 +1859,13 @@ fn include_deleted_one_shot_read_join_ignores_deleted_join_rows() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let rows = node
-        .query_rows_including_deleted_for_identity(
+        .query_rows_including_deleted_in_authorization_mode(
             &shape,
             &binding,
             DurabilityTier::Local,
             None,
             AuthorId::SYSTEM,
+            QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
 
@@ -1955,12 +1959,13 @@ fn include_deleted_one_shot_read_reachable_matches_deleted_roots_through_visible
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let rows = node
-        .query_rows_including_deleted_for_identity(
+        .query_rows_including_deleted_in_authorization_mode(
             &shape,
             &binding,
             DurabilityTier::Local,
             None,
             AuthorId::SYSTEM,
+            QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
 
@@ -2018,12 +2023,13 @@ fn include_deleted_one_shot_read_reachable_ignores_deleted_edge_rows() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let rows = node
-        .query_rows_including_deleted_for_identity(
+        .query_rows_including_deleted_in_authorization_mode(
             &shape,
             &binding,
             DurabilityTier::Local,
             None,
             AuthorId::SYSTEM,
+            QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
 
