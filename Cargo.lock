@@ -1415,6 +1415,7 @@ dependencies = [
  "rust-rocksdb",
  "rustc-hash",
  "serde",
+ "serde_json",
  "smallvec",
  "tempfile",
  "thiserror",
