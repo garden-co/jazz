@@ -764,10 +764,11 @@ where
                         SourceGap::SchemaProjection,
                     ));
                 }
-                match self
-                    .node
-                    .settled_binding_view_source_rows(&request.source.table, *binding_view)
-                {
+                match self.node.settled_binding_view_source_rows(
+                    &request.source.table,
+                    self.read_view.read_schema,
+                    *binding_view,
+                ) {
                     Ok(rows) => {
                         let table = self
                             .node
@@ -7854,6 +7855,7 @@ where
     fn settled_binding_view_source_rows(
         &mut self,
         table: &str,
+        read_schema: SchemaVersionId,
         binding_view: BindingViewKey,
     ) -> Result<Vec<CurrentRow>, Error> {
         let Some(row_result_set) = self.query.settled_result_sets.get(&binding_view) else {
@@ -7879,7 +7881,7 @@ where
                     .flatten()
             }));
         }
-        let table_schema = self.table(table)?.clone();
+        let read_table = self.table_in_schema(table, read_schema)?.clone();
         let mut rows = Vec::with_capacity(row_entries.len());
         for (row_uuid, tx_id) in row_entries {
             let tx_node_alias = self
@@ -7896,7 +7898,27 @@ where
                     tx_node_alias,
                 )?
                 .ok_or(Error::MissingTransaction(tx_id))?;
-            rows.push(self.current_row_from_materialized_version(&table_schema, &version)?);
+            let authored_schema = self
+                .schema_version_for_alias(version.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "settled view row schema version alias missing",
+                ))?;
+            let authored_table = self
+                .table_in_schema(version.table(), authored_schema)?
+                .clone();
+            let mut cells = self.materialized_cells_for_version(&authored_table, &version)?;
+            let Some(projected_table) =
+                self.translate_cells(authored_schema, read_schema, version.table(), &mut cells)?
+            else {
+                continue;
+            };
+            if projected_table == table {
+                rows.push(current_row_from_materialized_cells(
+                    &read_table,
+                    &version,
+                    &cells,
+                )?);
+            }
         }
         Ok(rows)
     }

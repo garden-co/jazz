@@ -98,6 +98,162 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
     );
 }
 
+#[test]
+fn catalogue_snapshot_preserves_active_schema_storage_identity() {
+    // Internal because schema aliases are node-local storage identities; the
+    // public behavior is that writes remain valid after catalogue bootstrap.
+    let base = schema();
+    let evolved = SchemaVersion::new(catalogue_evolved_schema());
+    let (_authority_dir, mut authority) = open_node_with_schema(node(0x60), base.clone());
+    publish_schema_lineage(
+        &mut authority,
+        evolved.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: v(""),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    authority
+        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: evolved.id,
+            },
+        })
+        .unwrap();
+
+    let (_receiver_dir, mut receiver) =
+        open_node_with_schema(node(0x61), evolved.schema.clone());
+    let local_alias = receiver.catalogue.current_schema_version_alias.unwrap();
+    let local_mapping = receiver.catalogue.physical_mappings[&evolved.id].clone();
+    let (tx_id, _) = receiver
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0x62), 10).cells(BTreeMap::from([
+                ("title".to_owned(), v("before-snapshot")),
+                ("body".to_owned(), v("authored-evolved")),
+            ])),
+        )
+        .unwrap();
+    receiver
+        .apply_trusted_catalogue_snapshot(authority.catalogue_snapshot())
+        .unwrap();
+
+    assert_eq!(
+        receiver.catalogue.current_schema_version_alias,
+        Some(local_alias)
+    );
+    assert_eq!(receiver.catalogue.physical_mappings[&evolved.id], local_mapping);
+    let stored = receiver.query_versions_for_tx(tx_id).unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].schema_version_alias(), local_alias);
+    receiver.physical_table_id_for_version(&stored[0]).unwrap();
+}
+
+#[test]
+fn settled_view_projects_authored_row_into_clients_active_schema() {
+    // Internal because settled result-set installation is a sync receiver
+    // boundary; schema projection itself is asserted through the query API.
+    let base = schema();
+    let evolved = SchemaVersion::new(catalogue_evolved_schema());
+    let (_authority_dir, mut authority) = open_node_with_schema(node(0x63), base.clone());
+    publish_schema_lineage(
+        &mut authority,
+        evolved.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: v("default-body"),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    authority
+        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: evolved.id,
+            },
+        })
+        .unwrap();
+
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0x64), base);
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0x65), 10).cells(title_cells("authored-base")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("commit unit expected");
+    };
+
+    let (_receiver_dir, mut receiver) =
+        open_node_with_schema(node(0x66), evolved.schema.clone());
+    receiver
+        .apply_trusted_catalogue_snapshot(authority.catalogue_snapshot())
+        .unwrap();
+    receiver
+        .ingest_known_transaction(
+            tx,
+            versions,
+            Fate::Accepted,
+            Some(GlobalSeq(1)),
+            DurabilityTier::Global,
+        )
+        .unwrap();
+
+    let shape = Query::from("todos").validate(&evolved.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    receiver.query.settled_result_sets.insert(
+        crate::protocol::BindingViewKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: Default::default(),
+        },
+        BTreeSet::from([crate::protocol::ResultMemberEntry::row((
+            groove::Intern::from("todos".to_owned()),
+            row(0x65),
+            tx_id,
+        ))]),
+    );
+
+    let rows = receiver
+        .query_rows(&shape, &binding, DurabilityTier::Global)
+        .unwrap();
+    assert_eq!(
+        rows.into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(
+            row(0x65),
+            BTreeMap::from([
+                ("title".to_owned(), v("authored-base")),
+                ("body".to_owned(), v("default-body")),
+            ]),
+        )])
+    );
+}
+
 fn catalogue_snapshot_fixture() -> crate::protocol::CatalogueSnapshot {
     let base = schema();
     let evolved = SchemaVersion::new(catalogue_evolved_schema());
@@ -1368,10 +1524,7 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
     let base = schema();
     let evolved = catalogue_evolved_schema();
     let evolved_id = evolved.version_id();
-    let evolved_cells = BTreeMap::from([
-        ("body".to_owned(), Value::String(String::new())),
-        ("title".to_owned(), Value::String("parked".to_owned())),
-    ]);
+    let authored_cells = title_cells("parked");
     let (_writer_dir, mut writer) = open_node_with_schema(node(0x36), base.clone());
     let (core_dir, mut core) = open_node_with_schema(node(0x37), base.clone());
     let (_tx_id, unit) = writer
@@ -1449,7 +1602,7 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>()
             .get(&row(0x55)),
-        Some(&evolved_cells)
+        Some(&authored_cells)
     );
     drop(core);
     let mut reopened = reopen_node_at(&core_dir, node(0x37), base);
@@ -1467,7 +1620,7 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>()
             .get(&row(0x55)),
-        Some(&evolved_cells)
+        Some(&authored_cells)
     );
 }
 
@@ -1687,6 +1840,61 @@ fn parked_branch_ingress_role_keeps_authority_precedence_in_both_orders() {
                 .all(|current| current.row_uuid() != row(0x57))
         );
     }
+}
+
+#[test]
+fn commit_arrival_preserves_known_noncurrent_authored_variant() {
+    // Internal because the authored physical discriminator is not meaningfully
+    // distinguishable through the public read surface.
+    let base = schema();
+    let evolved = catalogue_evolved_schema();
+    let evolved_payload = SchemaVersion::new(evolved.clone());
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0x5a), evolved.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0x5b), base.clone());
+    publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved_payload.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: v(""),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    assert_eq!(core.current_write_schema().schema, base.version_id());
+
+    let row = row(0x5c);
+    let (_tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([
+                ("title".to_owned(), v("newer-client")),
+                ("body".to_owned(), v("authored-v2")),
+            ])),
+        )
+        .unwrap();
+    core.apply_sync_message(unit).unwrap();
+
+    assert_eq!(core.current_write_schema().schema, base.version_id());
+    let stored = core.query_table_versions("todos").unwrap();
+    assert_eq!(stored.len(), 1);
+    let stored_wire = core.version_record_from_row(&stored[0]).unwrap();
+    assert_eq!(stored_wire.schema_version(), evolved_payload.id);
+    assert_eq!(
+        version_record_cells(&stored_wire, &evolved.tables[0]),
+        BTreeMap::from([
+            ("title".to_owned(), v("newer-client")),
+            ("body".to_owned(), v("authored-v2")),
+        ])
+    );
 }
 #[test]
 fn catalogue_current_write_schema_revision_is_core_ordered() {
@@ -2308,7 +2516,7 @@ fn agreeing_cross_lens_keeps_the_authoritative_physical_mapping() {
 }
 
 #[test]
-fn old_schema_commit_units_copy_on_write_into_current_physical_lineage() {
+fn old_schema_commit_units_stay_in_authored_variant_after_pointer_flip() {
     let base = schema();
     let evolved = JazzSchema::new([TableSchema::new(
         "todos",
@@ -2365,13 +2573,10 @@ fn old_schema_commit_units_copy_on_write_into_current_physical_lineage() {
     let stored = core.query_table_versions("todos").unwrap();
     assert_eq!(stored.len(), 1);
     let stored_wire = core.version_record_from_row(&stored[0]).unwrap();
-    assert_eq!(stored_wire.schema_version(), evolved_payload.id);
+    assert_eq!(stored_wire.schema_version(), base.version_id());
     assert_eq!(
-        version_record_cells(&stored_wire, &evolved.tables[0]),
-        BTreeMap::from([
-            ("name".to_owned(), v("old-writer")),
-            ("body".to_owned(), v("default-body")),
-        ])
+        version_record_cells(&stored_wire, &base.tables[0]),
+        title_cells("old-writer")
     );
 
     let v2_shape = Query::from("todos").validate(&evolved).unwrap();

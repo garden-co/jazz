@@ -190,6 +190,17 @@ where
             .iter()
             .map(|(_, publication)| publication.schema.id)
             .collect::<BTreeSet<_>>();
+        let local_schema_storage_anchor = self
+            .catalogue
+            .schema_version_aliases
+            .get(&self.catalogue.current_schema_version_id)
+            .copied()
+            .zip(
+                self.catalogue
+                    .physical_mappings
+                    .get(&self.catalogue.current_schema_version_id)
+                    .cloned(),
+            );
 
         let mut planned = self.catalogue.clone();
         let mut activated_lineages = Vec::new();
@@ -299,6 +310,94 @@ where
             planned.catalogue_schemas.insert(schema.id, schema);
         }
 
+        // Schema aliases and physical ids are node-local. A client may have
+        // authored durable work under its opening schema before the authority
+        // snapshot arrives, so keep that schema's local storage identity and
+        // reconcile the received lineage around it rather than orphaning the
+        // pending rows by adopting a newly allocated alias/mapping.
+        if let Some((local_alias, local_mapping)) = local_schema_storage_anchor {
+            let anchor = planned.current_schema_version_id;
+            planned.schema_version_aliases.insert(anchor, local_alias);
+            planned.physical_mappings.insert(anchor, local_mapping);
+
+            let mut cursor = anchor;
+            let mut visited = BTreeSet::new();
+            while visited.insert(cursor) {
+                let Some(lineage) = planned.active_lineages_by_target.get(&cursor).cloned() else {
+                    break;
+                };
+                let source_schema = planned
+                    .catalogue_schemas
+                    .get(&lineage.publication.lens.source)
+                    .ok_or(Error::InvalidStoredValue(
+                        "snapshot source schema missing during local mapping reconciliation",
+                    ))?;
+                let target_schema = planned
+                    .catalogue_schemas
+                    .get(&lineage.publication.lens.target)
+                    .ok_or(Error::InvalidStoredValue(
+                        "snapshot target schema missing during local mapping reconciliation",
+                    ))?;
+                let provisional_source = planned
+                    .physical_mappings
+                    .get(&lineage.publication.lens.source)
+                    .ok_or(Error::InvalidStoredValue(
+                        "snapshot source mapping missing during local mapping reconciliation",
+                    ))?;
+                let target_mapping =
+                    planned
+                        .physical_mappings
+                        .get(&cursor)
+                        .ok_or(Error::InvalidStoredValue(
+                            "snapshot target mapping missing during local mapping reconciliation",
+                        ))?;
+                let source_mapping = Self::reconcile_source_physical_mapping_for_lens_payload(
+                    &lineage.publication.lens,
+                    source_schema,
+                    target_schema,
+                    provisional_source,
+                    target_mapping,
+                )?;
+                planned
+                    .physical_mappings
+                    .insert(lineage.publication.lens.source, source_mapping);
+                cursor = lineage.publication.lens.source;
+            }
+
+            let mut ordered_lineages = planned
+                .active_lineages_by_target
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            ordered_lineages.sort_by_key(|lineage| lineage.catalogue_seq);
+            for lineage in ordered_lineages {
+                let provisional_target = planned
+                    .physical_mappings
+                    .get(&lineage.publication.schema.id)
+                    .ok_or(Error::InvalidStoredValue(
+                        "snapshot target mapping missing during forward reconciliation",
+                    ))?
+                    .clone();
+                let mapping = Self::reconcile_physical_mapping_for_lens_payload_in_catalogue(
+                    &planned,
+                    &lineage.publication.lens,
+                    &lineage.publication.schema,
+                    &provisional_target,
+                )?;
+                planned
+                    .physical_mappings
+                    .insert(lineage.publication.schema.id, mapping);
+            }
+            for lineage in planned.active_lineages_by_target.values_mut() {
+                lineage.alias = planned.schema_version_aliases[&lineage.publication.schema.id];
+                lineage.mapping = planned.physical_mappings[&lineage.publication.schema.id].clone();
+            }
+            for lineage in &mut activated_lineages {
+                lineage.alias = planned.schema_version_aliases[&lineage.publication.schema.id];
+                lineage.mapping = planned.physical_mappings[&lineage.publication.schema.id].clone();
+            }
+        }
+
         if snapshot.current_write_schema.revision < planned.current_write_schema.revision
             || (snapshot.current_write_schema.revision == planned.current_write_schema.revision
                 && snapshot.current_write_schema != planned.current_write_schema)
@@ -323,6 +422,10 @@ where
             ))?
             .schema
             .clone();
+        planned.current_schema_version_alias = planned
+            .schema_version_aliases
+            .get(&planned.current_schema_version_id)
+            .copied();
         Ok(PlannedCatalogueSnapshot {
             catalogue: planned,
             activated_lineages,
@@ -1699,19 +1802,6 @@ where
                 durability: None,
             }]);
         }
-        if let Some(reason) = self.reject_source_delta_reason(&versions) {
-            let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
-            self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
-            let mut updates = vec![SyncMessage::FateUpdate {
-                tx_id: tx.tx_id,
-                fate,
-                global_seq: None,
-                durability: None,
-            }];
-            updates.extend(self.cascade_rejections_from(tx.tx_id)?);
-            return Ok(updates);
-        }
-
         let global_seq = self.clock.next_global_seq;
         self.clock.next_global_seq = self.clock.next_global_seq.next();
         let fate = Fate::Accepted;
@@ -1811,6 +1901,7 @@ where
         )? {
             return Ok(());
         }
+        self.prepare_authored_schema_variants_for_commit(&versions)?;
 
         let mut memo = IngestMemo::default();
         if self.park_commit_unit_if_missing_parents_with_mode(
@@ -1921,6 +2012,7 @@ where
         )? {
             return Ok(Vec::new());
         }
+        self.prepare_authored_schema_variants_for_commit(&versions)?;
         if self.park_commit_unit_if_missing_parents_with_mode(
             &tx,
             &versions,
@@ -1978,18 +2070,6 @@ where
                 global_seq: None,
                 durability: None,
             }]);
-        }
-        if let Some(reason) = self.reject_source_delta_reason(&versions) {
-            let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
-            self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
-            let mut updates = vec![SyncMessage::FateUpdate {
-                tx_id: tx.tx_id,
-                fate,
-                global_seq: None,
-                durability: None,
-            }];
-            updates.extend(self.cascade_rejections_from(tx.tx_id)?);
-            return Ok(updates);
         }
         if !self.commit_unit_satisfies_write_policies(&tx, &versions, ingest_context)? {
             let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
@@ -2134,6 +2214,7 @@ where
         )? {
             return Ok(Vec::new());
         }
+        self.prepare_authored_schema_variants_for_commit(&versions)?;
         if self.park_commit_unit_if_missing_parents_with_mode(
             &tx,
             &versions,
@@ -2191,18 +2272,6 @@ where
                 durability: None,
             }]);
         }
-        if let Some(reason) = self.reject_source_delta_reason(&versions) {
-            let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
-            self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
-            let mut updates = vec![SyncMessage::FateUpdate {
-                tx_id: tx.tx_id,
-                fate,
-                global_seq: None,
-                durability: None,
-            }];
-            updates.extend(self.cascade_rejections_from(tx.tx_id)?);
-            return Ok(updates);
-        }
         if !self.commit_unit_satisfies_write_policies(&tx, &versions, ingest_context)? {
             let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
             self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
@@ -2242,6 +2311,7 @@ where
         );
         self.merge_tx_time(tx.tx_id.time);
         let versions = canonical_versions(versions);
+        self.prepare_authored_schema_variants_for_commit(&versions)?;
         if let Some(existing) = self.query_transaction(tx.tx_id)? {
             let mut existing_versions = self
                 .query_versions_for_tx(tx.tx_id)?
@@ -2411,6 +2481,12 @@ where
         if eligible.is_empty() {
             return Ok(loaded_tx_ids);
         }
+        let eligible_versions = eligible
+            .iter()
+            .flat_map(|tx_bundles| tx_bundles.iter().flat_map(|bundle| bundle.versions))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.prepare_authored_schema_variants_for_commit(&eligible_versions)?;
         self.sync_metrics.receiver_bulk_ingest_commits += 1;
         self.sync_metrics.receiver_bulk_bundle_ingests += eligible.len() as u64;
 
@@ -2466,60 +2542,16 @@ where
             for version in versions {
                 let author_schema = version.schema_version();
                 let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
-                let stored = if author_schema != self.catalogue.current_write_schema.schema {
-                    let mut target_table = version.table().to_owned();
-                    let mut target_cells = source_table_schema
-                        .columns
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(idx, column)| {
-                            version
-                                .optional_cell_at(idx)
-                                .map(|value| (column.name.clone(), value))
-                        })
-                        .collect::<BTreeMap<_, _>>();
-                    let (target_schema, translated_table) = self
-                        .translate_cells_to_current_write_schema(
-                            author_schema,
-                            &target_table,
-                            &mut target_cells,
-                        )?;
-                    target_table = translated_table;
-                    let table_schema = self.table_in_schema(&target_table, target_schema)?;
-                    let schema_version_alias = self.ensure_schema_version_alias(target_schema)?;
-                    VersionRow::from_parts_with_schema_version(
-                        &table_schema,
-                        VersionRowParts {
-                            table: target_table,
-                            row_uuid: version.row_uuid(),
-                            tx_node_alias,
-                            schema_version_alias,
-                            tx_time: tx.tx_id.time,
-                            parents: version.parents(),
-                            created_by: version.created_by(),
-                            created_at: version.created_at(),
-                            updated_by: version.updated_by(),
-                            updated_at: version.updated_at(),
-                            cells: target_cells,
-                            // Lens translation lacks authored-presence semantics.
-                            authored_columns: None,
-                            deletion: version.deletion(),
-                        },
-                        (target_schema != self.catalogue.current_schema_version_id)
-                            .then_some(target_schema),
-                    )?
-                } else {
-                    let schema_version_alias = self.ensure_schema_version_alias(author_schema)?;
-                    VersionRow::from_wire_with_schema_version(
-                        &source_table_schema,
-                        version,
-                        tx_node_alias,
-                        schema_version_alias,
-                        tx.tx_id.time,
-                        (author_schema != self.catalogue.current_schema_version_id)
-                            .then_some(author_schema),
-                    )?
-                };
+                let schema_version_alias = self.ensure_schema_version_alias(author_schema)?;
+                let stored = VersionRow::from_wire_with_schema_version(
+                    &source_table_schema,
+                    version,
+                    tx_node_alias,
+                    schema_version_alias,
+                    tx.tx_id.time,
+                    (author_schema != self.catalogue.current_schema_version_id)
+                        .then_some(author_schema),
+                )?;
                 let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
                 batch.insert_raw(
                     history_table.as_ref(),
@@ -5513,63 +5545,17 @@ where
         for version in versions {
             let author_schema = version.schema_version();
             let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
-            let (table_schema, _target_schema, stored) =
-                if author_schema != self.catalogue.current_write_schema.schema {
-                    let mut target_table = version.table().to_owned();
-                    let mut target_cells = source_table_schema
-                        .columns
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(idx, column)| {
-                            version
-                                .optional_cell_at(idx)
-                                .map(|value| (column.name.clone(), value))
-                        })
-                        .collect::<BTreeMap<_, _>>();
-                    let (target_schema, translated_table) = self
-                        .translate_cells_to_current_write_schema(
-                            author_schema,
-                            &target_table,
-                            &mut target_cells,
-                        )?;
-                    target_table = translated_table;
-                    let table_schema = self.table_in_schema(&target_table, target_schema)?;
-                    let schema_version_alias = self.ensure_schema_version_alias(target_schema)?;
-                    let stored = VersionRow::from_parts_with_schema_version(
-                        &table_schema,
-                        VersionRowParts {
-                            table: target_table,
-                            row_uuid: version.row_uuid(),
-                            tx_node_alias,
-                            schema_version_alias,
-                            tx_time: tx.tx_id.time,
-                            parents: version.parents(),
-                            created_by: version.created_by(),
-                            created_at: version.created_at(),
-                            updated_by: version.updated_by(),
-                            updated_at: version.updated_at(),
-                            cells: target_cells,
-                            // Lens translation lacks authored-presence semantics.
-                            authored_columns: None,
-                            deletion: version.deletion(),
-                        },
-                        (target_schema != self.catalogue.current_schema_version_id)
-                            .then_some(target_schema),
-                    )?;
-                    (table_schema, target_schema, stored)
-                } else {
-                    let schema_version_alias = self.ensure_schema_version_alias(author_schema)?;
-                    let stored = VersionRow::from_wire_with_schema_version(
-                        &source_table_schema,
-                        &version,
-                        tx_node_alias,
-                        schema_version_alias,
-                        tx.tx_id.time,
-                        (author_schema != self.catalogue.current_schema_version_id)
-                            .then_some(author_schema),
-                    )?;
-                    (source_table_schema, author_schema, stored)
-                };
+            let table_schema = source_table_schema;
+            let schema_version_alias = self.ensure_schema_version_alias(author_schema)?;
+            let stored = VersionRow::from_wire_with_schema_version(
+                &table_schema,
+                &version,
+                tx_node_alias,
+                schema_version_alias,
+                tx.tx_id.time,
+                (author_schema != self.catalogue.current_schema_version_id)
+                    .then_some(author_schema),
+            )?;
             let layer = VersionLayer::for_record(&version);
             let previous_current =
                 self.query_local_layer_winner(&table_schema.name, version.row_uuid(), layer)?;
@@ -5741,41 +5727,43 @@ where
         Ok((source, table.to_owned()))
     }
 
-    fn reject_source_delta_reason(&mut self, versions: &[VersionRecord]) -> Option<String> {
-        for version in versions {
-            let target_schema = self.catalogue.current_write_schema.schema;
-            if version.schema_version() == target_schema {
-                continue;
-            }
-            let mut current_table = version.table().to_owned();
-            let Some(path) = self.shortest_lens_path_ids_cached(
-                version.schema_version(),
-                target_schema,
-                LensPathDirection::Forward,
-            ) else {
-                continue;
-            };
-            for lens_id in path {
-                let lens = self.catalogue.catalogue_lenses.get(&lens_id)?;
-                let table_lens = lens
-                    .table_lenses
-                    .iter()
-                    .find(|candidate| candidate.source_table == current_table)?;
-                for op in &table_lens.ops {
-                    match op {
-                        LensOp::RejectSourceDelta { reason } => return Some(reason.clone()),
-                        LensOp::TransformColumn { transform, .. } => {
-                            if validate_registered_transform(transform).is_err() {
-                                return Some("transform column is not registered".to_owned());
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                current_table = table_lens.target_table.clone();
-            }
+    /// Ensure every known authored schema named by an arriving commit has a
+    /// local alias and registered shared-storage variant. Unknown schemas stay
+    /// parked until their catalogue lineage arrives and re-enters this path.
+    fn prepare_authored_schema_variants_for_commit(
+        &mut self,
+        versions: &[VersionRecord],
+    ) -> Result<(), Error> {
+        if versions.iter().any(|version| {
+            !self
+                .catalogue
+                .catalogue_schemas
+                .contains_key(&version.schema_version())
+        }) {
+            return Ok(());
         }
-        None
+
+        let authored_variants = versions
+            .iter()
+            .map(|version| (version.table().to_owned(), version.schema_version()))
+            .collect::<BTreeSet<_>>();
+        let mut registered_mapping = false;
+        for (table, schema_version) in authored_variants {
+            self.table_in_schema(&table, schema_version)?;
+            registered_mapping |= !self
+                .catalogue
+                .schema_version_aliases
+                .contains_key(&schema_version)
+                || !self
+                    .catalogue
+                    .physical_mappings
+                    .contains_key(&schema_version);
+            self.ensure_schema_version_alias(schema_version)?;
+        }
+        if registered_mapping {
+            self.synchronize_physical_version_tables()?;
+        }
+        Ok(())
     }
 
     pub(super) fn ingest_rejected_transaction(

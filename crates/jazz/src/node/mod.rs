@@ -1281,6 +1281,10 @@ where
     }
 
     fn rebuild_database_slot(&mut self) -> Result<(), Error> {
+        // Reopening the database refreshes Groove's physical table catalogue.
+        // Parking is in-memory delivery state, not derivable from storage, so a
+        // live refresh must retain it for the caller to drain afterwards.
+        let parking = self.parking.clone();
         let old_database = self.database.take();
         let storage = old_database.into_storage();
         let database = Self::open_full_database(
@@ -1296,6 +1300,7 @@ where
         self.register_physical_current_variant_projections()?;
         self.groove_runtime_token = next_groove_runtime_token();
         self.invalidate_runtime_handles_after_database_rebuild();
+        self.parking = parking;
         Ok(())
     }
 
@@ -4966,6 +4971,132 @@ where
         Ok(target_mapping)
     }
 
+    fn reconcile_source_physical_mapping_for_lens_payload(
+        lens: &MigrationLens,
+        source_schema_version: &SchemaVersion,
+        target_schema_version: &SchemaVersion,
+        provisional_source_mapping: &SchemaPhysicalMapping,
+        target_mapping: &SchemaPhysicalMapping,
+    ) -> Result<SchemaPhysicalMapping, Error> {
+        let mut source_mapping = provisional_source_mapping.clone();
+        for table_lens in &lens.table_lenses {
+            let provisional_source_table = source_mapping
+                .tables
+                .get(&table_lens.source_table)
+                .ok_or(Error::InvalidStoredValue(
+                    "source provisional physical table mapping missing",
+                ))?
+                .clone();
+            let target_table = target_mapping.tables.get(&table_lens.target_table).ok_or(
+                Error::InvalidStoredValue("target physical table mapping missing"),
+            )?;
+            let source_table_schema = source_schema_version
+                .schema
+                .tables
+                .iter()
+                .find(|table| table.name == table_lens.source_table)
+                .ok_or(Error::InvalidStoredValue(
+                    "source physical table schema missing",
+                ))?;
+            let target_table_schema = target_schema_version
+                .schema
+                .tables
+                .iter()
+                .find(|table| table.name == table_lens.target_table)
+                .ok_or(Error::InvalidStoredValue(
+                    "target physical table schema missing",
+                ))?;
+
+            let mut target_name_by_source = source_table_schema
+                .columns
+                .iter()
+                .map(|column| (column.name.clone(), Some(column.name.clone())))
+                .collect::<BTreeMap<_, _>>();
+            for op in &table_lens.ops {
+                match op {
+                    LensOp::RenameColumn { from, to } => {
+                        for target_name in target_name_by_source.values_mut() {
+                            if target_name.as_deref() == Some(from.as_str()) {
+                                *target_name = Some(to.clone());
+                                break;
+                            }
+                        }
+                    }
+                    LensOp::DropColumn { column, .. } => {
+                        for target_name in target_name_by_source.values_mut() {
+                            if target_name.as_deref() == Some(column.as_str()) {
+                                *target_name = None;
+                                break;
+                            }
+                        }
+                    }
+                    LensOp::RenameTable { .. }
+                    | LensOp::CopyColumn { .. }
+                    | LensOp::AddColumn { .. }
+                    | LensOp::TransformColumn { .. }
+                    | LensOp::RejectSourceDelta { .. } => {}
+                }
+            }
+
+            let columns = source_table_schema
+                .columns
+                .iter()
+                .map(|source_column| {
+                    let provisional_id = provisional_source_table
+                        .columns
+                        .get(&source_column.name)
+                        .copied()
+                        .ok_or(Error::InvalidStoredValue(
+                            "source provisional physical column mapping missing",
+                        ))?;
+                    let column_id = target_name_by_source
+                        .get(&source_column.name)
+                        .and_then(|target_name| target_name.as_deref())
+                        .and_then(|target_name| {
+                            physical_column_epoch_is_compatible(
+                                source_table_schema,
+                                &source_column.name,
+                                target_table_schema,
+                                target_name,
+                            )
+                            .then(|| target_table.columns.get(target_name).copied())
+                            .flatten()
+                        })
+                        .unwrap_or(provisional_id);
+                    Ok((source_column.name.clone(), column_id))
+                })
+                .collect::<Result<BTreeMap<_, _>, Error>>()?;
+            let live_column_ids = columns.values().copied().collect::<BTreeSet<_>>();
+            let mut scalar_enum_cases = provisional_source_table.scalar_enum_cases.clone();
+            scalar_enum_cases.extend(target_table.scalar_enum_cases.clone());
+            scalar_enum_cases.retain(|id, _| live_column_ids.contains(id));
+            let mut payload_enum_cases = provisional_source_table.payload_enum_cases.clone();
+            payload_enum_cases.extend(target_table.payload_enum_cases.clone());
+            payload_enum_cases.retain(|id, _| live_column_ids.contains(id));
+            let mut nested_scalar_enum_cases =
+                provisional_source_table.nested_scalar_enum_cases.clone();
+            nested_scalar_enum_cases.extend(target_table.nested_scalar_enum_cases.clone());
+            nested_scalar_enum_cases.retain(|id, _| live_column_ids.contains(id));
+            let mut nested_payload_enum_cases =
+                provisional_source_table.nested_payload_enum_cases.clone();
+            nested_payload_enum_cases.extend(target_table.nested_payload_enum_cases.clone());
+            nested_payload_enum_cases.retain(|id, _| live_column_ids.contains(id));
+            source_mapping.tables.insert(
+                table_lens.source_table.clone(),
+                TablePhysicalMapping {
+                    table_id: target_table.table_id,
+                    columns,
+                    variant_cases: target_table.variant_cases.clone(),
+                    scalar_enum_cases,
+                    payload_enum_cases,
+                    nested_scalar_enum_cases,
+                    nested_payload_enum_cases,
+                },
+            );
+        }
+        Ok(source_mapping)
+    }
+
     fn persist_catalogue_schema_lineage(
         &mut self,
         staged: &StagedSchemaLineage,
@@ -5182,11 +5313,6 @@ where
         &mut self,
         schema_version_id: SchemaVersionId,
     ) -> Result<SchemaVersionAlias, Error> {
-        if schema_version_id == self.catalogue.current_schema_version_id
-            && let Some(alias) = self.catalogue.current_schema_version_alias
-        {
-            return Ok(alias);
-        }
         if let Some(alias) = self
             .catalogue
             .schema_version_aliases

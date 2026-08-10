@@ -990,7 +990,7 @@ where
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue(
-                "stored row schema version alias missing",
+                "stored row schema version alias missing while resolving physical table",
             ))?;
         self.physical_table_id_for_schema(schema_version, version.table())
     }
@@ -2108,7 +2108,7 @@ where
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue(
-                "stored row schema version alias missing",
+                "stored row schema version alias missing while resolving storage table",
             ))?;
         if version.layer() == VersionLayer::Deletion {
             return Ok(groove::Intern::new(
@@ -2301,7 +2301,7 @@ where
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue(
-                "stored row schema version alias missing",
+                "stored row schema version alias missing while preparing storage write",
             ))?;
         if version.layer() == VersionLayer::Deletion {
             let table = self.version_storage_table_for_row(version)?;
