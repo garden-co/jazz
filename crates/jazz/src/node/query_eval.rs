@@ -7901,7 +7901,7 @@ where
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         binding_view_key: BindingViewKey,
-    ) {
+    ) -> Result<(), Error> {
         local.result_set = self
             .query
             .settled_result_sets
@@ -7935,6 +7935,15 @@ where
                 _ => None,
             })
             .collect();
+        // An authoritative reset replaces membership without flowing through
+        // the ordinary local transition reducer. Rebuild the occurrence
+        // sidecar from exactly that new state before the caller pairs it with
+        // the reset snapshot; retaining the opening vector makes a later
+        // reset fail its root-count invariant (or, worse, pair wrong roots).
+        local.root_occurrence_ids = self
+            .materialize_local_maintained_relation_snapshot_with_occurrences(local)?
+            .root_occurrence_ids;
+        Ok(())
     }
 
     fn drain_local_maintained_view_subscription_transitions(

@@ -2,6 +2,7 @@ import type { ColumnDescriptor, ColumnType, Value, WasmRow } from "../../drivers
 import { isProvenanceMagicTimestampColumn } from "../../magic-columns.js";
 
 const textDecoder = new TextDecoder();
+const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 export type ValueType = {
   tag: number;
@@ -107,8 +108,10 @@ function validTypedResultKey(bytes: Uint8Array): boolean {
   cursor += joined * 16;
   const discriminators = readU32(cursor);
   cursor += 4;
-  if (discriminators > joined) return false;
-  const positions = new Set<number>();
+  // v2 is reserved for typed union occurrences. A zero-arm v2 value would
+  // normalize to the same ordered UUID key as a v1 occurrence.
+  if (discriminators === 0 || discriminators > joined) return false;
+  let previousPosition = -1;
   for (let index = 0; index < discriminators; index++) {
     if (cursor + 8 > bytes.length) return false;
     const position = readU32(cursor);
@@ -116,17 +119,27 @@ function validTypedResultKey(bytes: Uint8Array): boolean {
     cursor += 8;
     if (
       position >= joined ||
-      positions.has(position) ||
+      position <= previousPosition ||
       length === 0 ||
       length > 4096 ||
-      cursor + length > bytes.length
+      cursor + length > bytes.length ||
+      !isValidUtf8(bytes.subarray(cursor, cursor + length))
     ) {
       return false;
     }
-    positions.add(position);
+    previousPosition = position;
     cursor += length;
   }
   return cursor === bytes.length;
+}
+
+function isValidUtf8(bytes: Uint8Array): boolean {
+  try {
+    fatalUtf8Decoder.decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function readNativeRelationSubscriptionSnapshot(
@@ -340,7 +353,7 @@ export function decodeNativeTerminalRow(
   raw: Uint8Array,
 ): WasmRow {
   const terminalColumns = [terminalRowKeyColumn, ...columns];
-  const decoded = decodeNativeRowValues(terminalColumns, raw);
+  const decoded = decodeNativeTerminalRowValues(terminalColumns, raw);
   const embeddedKey = decoded[0];
   if (embeddedKey?.type !== "Uuid" || embeddedKey.value !== id) {
     throw new Error(
@@ -356,6 +369,45 @@ export function decodeNativeTerminalRow(
     configurable: true,
   });
   return row;
+}
+
+/**
+ * Groove terminal payloads retain `Record` values for nested relation rows.
+ * Ordinary packed transport deliberately represents those rows as byte arrays
+ * with an id/length envelope instead. Both outer records have the same layout,
+ * but decoding a terminal tree through the ordinary path makes the first UUID
+ * of a child look like that envelope's flag and length.
+ */
+function decodeNativeTerminalRowValues(
+  columns: readonly ColumnDescriptor[],
+  raw: Uint8Array,
+): Value[] {
+  const descriptor = descriptorFromColumns(columns);
+  return columns.map((column, index) => {
+    const bytes = decodeRecordValue(descriptor, raw, index);
+    if (bytes == null) return { type: "Null" };
+    return decodeTerminalBytes(column.column_type, bytes);
+  });
+}
+
+function decodeTerminalBytes(type: ColumnType, bytes: Uint8Array): Value {
+  switch (type.type) {
+    case "Array":
+      return { type: "Array", value: decodeTerminalArray(type.element, bytes) };
+    case "Row": {
+      if (bytes.byteLength < 16) throw new Error("terminal nested row is missing its physical key");
+      const id = formatUuid(bytes.subarray(0, 16));
+      return { type: "Row", value: decodeNativeTerminalRow(id, type.columns, bytes) };
+    }
+    default:
+      return decodeBytes(type, bytes);
+  }
+}
+
+function decodeTerminalArray(elementType: ColumnType, bytes: Uint8Array): Value[] {
+  return decodeArrayElements(elementType, bytes, (element) =>
+    decodeTerminalBytes(elementType, element),
+  );
 }
 
 export function encodeNativeRowValues(

@@ -274,10 +274,14 @@ fn decode_typed_result_key(identity: &[u8]) -> Option<ResultKey> {
     }
     let discriminator_count =
         u32::from_be_bytes(take(identity, &mut cursor, 4)?.try_into().ok()?) as usize;
-    if discriminator_count > joined_count {
+    // v2 is reserved for union-discriminated occurrences. A zero-arm v2
+    // representation would deserialize to a plain occurrence that serializes
+    // as v1, so reject it rather than accepting a noncanonical alias.
+    if discriminator_count == 0 || discriminator_count > joined_count {
         return None;
     }
     let mut union_arms = Vec::with_capacity(discriminator_count);
+    let mut previous_position = None;
     for _ in 0..discriminator_count {
         let position =
             u32::from_be_bytes(take(identity, &mut cursor, 4)?.try_into().ok()?) as usize;
@@ -286,9 +290,15 @@ fn decode_typed_result_key(identity: &[u8]) -> Option<ResultKey> {
         {
             return None;
         }
+        if position >= joined_count
+            || previous_position.is_some_and(|previous| position <= previous)
+        {
+            return None;
+        }
         let label = std::str::from_utf8(take(identity, &mut cursor, len)?)
             .ok()?
             .to_owned();
+        previous_position = Some(position);
         union_arms.push((position, label));
     }
     if cursor != identity.len() {
@@ -494,6 +504,40 @@ mod tests {
         malformed.extend_from_slice(&valid.typed_canonical_bytes());
         malformed.push(0);
         assert!(serde_json::from_value::<ResultKey>(serde_json::json!(malformed)).is_err());
+
+        let mut zero_arm = vec![TYPED_RESULT_KEY_WIRE_VERSION];
+        zero_arm.extend_from_slice(&valid.typed_canonical_bytes());
+        zero_arm[37..41].copy_from_slice(&0_u32.to_be_bytes());
+        assert!(
+            serde_json::from_value::<ResultKey>(serde_json::json!(zero_arm)).is_err(),
+            "zero-arm v2 aliases the v1 occurrence representation"
+        );
+
+        let second_joined = ObjectId::from_uuid(Uuid::from_u128(3));
+        let mut reordered = vec![TYPED_RESULT_KEY_WIRE_VERSION];
+        reordered.extend_from_slice(root.uuid().as_bytes());
+        reordered.extend_from_slice(&2_u32.to_be_bytes());
+        reordered.extend_from_slice(joined.uuid().as_bytes());
+        reordered.extend_from_slice(second_joined.uuid().as_bytes());
+        reordered.extend_from_slice(&2_u32.to_be_bytes());
+        reordered.extend_from_slice(&1_u32.to_be_bytes());
+        reordered.extend_from_slice(&1_u32.to_be_bytes());
+        reordered.push(b"b"[0]);
+        reordered.extend_from_slice(&0_u32.to_be_bytes());
+        reordered.extend_from_slice(&1_u32.to_be_bytes());
+        reordered.push(b"a"[0]);
+        assert!(
+            serde_json::from_value::<ResultKey>(serde_json::json!(reordered)).is_err(),
+            "typed discriminator records must use strictly ascending positions"
+        );
+
+        let mut invalid_utf8 = vec![TYPED_RESULT_KEY_WIRE_VERSION];
+        invalid_utf8.extend_from_slice(&valid.typed_canonical_bytes());
+        *invalid_utf8.last_mut().expect("typed key has arm label") = 0xff;
+        assert!(
+            serde_json::from_value::<ResultKey>(serde_json::json!(invalid_utf8)).is_err(),
+            "typed discriminator labels must be valid UTF-8"
+        );
 
         let typed = ResultKey(valid);
         let mut oversized: Vec<u8> =

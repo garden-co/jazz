@@ -93,6 +93,43 @@ describe("nested row physical carriers", () => {
     expect(row.id).toBe(id);
     expect(row.values).toEqual([{ type: "Text", value: "terminal" }]);
   });
+
+  it("decodes the complete raw Record element carried by a terminal array", () => {
+    const todoColumns: ColumnDescriptor[] = [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      { name: "priority", column_type: { type: "Integer" }, nullable: true },
+      { name: "owner_id", column_type: { type: "Uuid" }, nullable: true },
+      { name: "tags", column_type: { type: "Array", element: { type: "Text" } }, nullable: false },
+    ];
+    const todoDescriptor = [
+      { name: "row_uuid", valueType: { tag: 10 } as const },
+      { name: "title", valueType: { tag: 8 } as const },
+      { name: "done", valueType: { tag: 7 } as const },
+      { name: "priority", valueType: { tag: 14, inner: { tag: 4 } } as const },
+      { name: "owner_id", valueType: { tag: 14, inner: { tag: 10 } } as const },
+      { name: "tags", valueType: { tag: 13, inner: { tag: 8 } } as const },
+    ];
+    const bytes = createRecord(todoDescriptor, [
+      uuidBytes("e20942bf-8789-e652-23fd-c86c3a105743"),
+      new TextEncoder().encode("owned-todo"),
+      Uint8Array.of(0),
+      presentBytes(Uint8Array.of(1, 0, 0, 0)),
+      presentBytes(uuidBytes("06839e1b-9b29-732c-1b39-8ee592bd2a68")),
+      concatBytes([Uint8Array.of(1, 0, 0, 0), new TextEncoder().encode("x")]),
+    ]);
+
+    expect(decodeNestedRowBytes(todoColumns, bytes, todoDescriptor, "full-record")).toMatchObject({
+      id: "e20942bf-8789-e652-23fd-c86c3a105743",
+      values: [
+        { type: "Text", value: "owned-todo" },
+        { type: "Boolean", value: false },
+        { type: "Integer", value: 1 },
+        { type: "Uuid", value: "06839e1b-9b29-732c-1b39-8ee592bd2a68" },
+        { type: "Array", value: [{ type: "Text", value: "x" }] },
+      ],
+    });
+  });
 });
 
 function decodeTestDeltas(
@@ -6231,6 +6268,40 @@ it("rejects malformed or misaligned subscription occurrence sidecars", () => {
     removedOccurrenceKeys: [Uint8Array.from([2, 0])],
   });
   expect(() => readNativeSubscriptionDelta(new PostcardReader(malformed))).toThrow(
+    "malformed v2 ResultKey",
+  );
+
+  const zeroArm = new Uint8Array(41);
+  zeroArm[0] = 2;
+  zeroArm.fill(1, 1, 17);
+  new DataView(zeroArm.buffer).setUint32(17, 1);
+  zeroArm.fill(2, 21, 37);
+  const aliasedV1 = encodeSubscriptionDelta({
+    added: [],
+    updated: [],
+    removed: [{ table: "todos", rowId: new Uint8Array(16) }],
+    removedOccurrenceKeys: [zeroArm],
+  });
+  expect(() => readNativeSubscriptionDelta(new PostcardReader(aliasedV1))).toThrow(
+    "malformed v2 ResultKey",
+  );
+
+  const invalidUtf8 = new Uint8Array(50);
+  invalidUtf8[0] = 2;
+  invalidUtf8.fill(1, 1, 17);
+  new DataView(invalidUtf8.buffer).setUint32(17, 1);
+  invalidUtf8.fill(2, 21, 37);
+  new DataView(invalidUtf8.buffer).setUint32(37, 1);
+  new DataView(invalidUtf8.buffer).setUint32(41, 0);
+  new DataView(invalidUtf8.buffer).setUint32(45, 1);
+  invalidUtf8[49] = 0xff;
+  const malformedLabel = encodeSubscriptionDelta({
+    added: [],
+    updated: [],
+    removed: [{ table: "todos", rowId: new Uint8Array(16) }],
+    removedOccurrenceKeys: [invalidUtf8],
+  });
+  expect(() => readNativeSubscriptionDelta(new PostcardReader(malformedLabel))).toThrow(
     "malformed v2 ResultKey",
   );
 });

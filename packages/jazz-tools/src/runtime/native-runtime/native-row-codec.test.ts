@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   createRecord,
+  decodeNativeTerminalRow,
   decodeNativeRowValues,
   decodeRecordValue,
   encodeNativeRowValues,
@@ -187,6 +188,65 @@ describe("native row codec", () => {
     expect(decodeNativeRowValues(columns, explicitNull)).toEqual([{ type: "Null" }]);
     expect(decodeNativeRowValues(columns, sparseAbsence)).toEqual([{ type: "Null" }]);
   });
+
+  it("decodes terminal arrays as physical nested records rather than packed row envelopes", () => {
+    const rootId = "00000000-0000-4000-8000-000000000001";
+    const firstChildId = "00000000-0000-4000-8000-000000000002";
+    const secondChildId = "00000000-0000-4000-8000-000000000003";
+    const children = [
+      { name: "children", column_type: { type: "Text" as const }, nullable: false },
+    ];
+    const columns = [
+      {
+        name: "children",
+        column_type: {
+          type: "Array" as const,
+          element: { type: "Row" as const, columns: children },
+        },
+        nullable: false,
+      },
+    ];
+    const childRecord = (id: string, name: string) =>
+      Uint8Array.from([...uuidBytes(id), ...new TextEncoder().encode(name)]);
+    const first = childRecord(firstChildId, "first");
+    const second = childRecord(secondChildId, "second");
+    const childArray = Uint8Array.from([
+      2,
+      0,
+      0,
+      0,
+      4 + 4 + first.length,
+      0,
+      0,
+      0,
+      ...first,
+      ...second,
+    ]);
+    const descriptor = [
+      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+      { name: "children", valueType: { tag: 13, inner: { tag: 15, record: [] } } },
+    ];
+    const raw = createRecord(descriptor, [uuidBytes(rootId), childArray]);
+
+    expect(decodeNativeTerminalRow(rootId, columns, raw)).toMatchObject({
+      id: rootId,
+      values: [
+        {
+          type: "Array",
+          value: [
+            {
+              type: "Row",
+              value: { id: firstChildId, values: [{ type: "Text", value: "first" }] },
+            },
+            {
+              type: "Row",
+              value: { id: secondChildId, values: [{ type: "Text", value: "second" }] },
+            },
+          ],
+        },
+      ],
+    });
+  });
 });
 
 function nativeRowCodecFixture(): NativeRowCodecFixture {
@@ -208,4 +268,13 @@ function hexToBytes(hex: string): Uint8Array {
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function uuidBytes(id: string): Uint8Array {
+  return Uint8Array.from(
+    id
+      .replaceAll("-", "")
+      .match(/../g)!
+      .map((hex) => Number.parseInt(hex, 16)),
+  );
 }

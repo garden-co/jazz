@@ -4853,7 +4853,7 @@ where
                         .reset_local_maintained_view_subscription_from_binding_view(
                             maintained,
                             binding_view,
-                        );
+                        )?;
                     snapshot = authoritative;
                     consumed_authoritative_resets.insert(binding_view);
                 }
@@ -5057,7 +5057,7 @@ where
                                             .reset_local_maintained_view_subscription_from_binding_view(
                                                 maintained,
                                                 authoritative_reset_binding_view,
-                                            );
+                                            )?;
                                         None
                                     }
                                     Err(error) => return Err(error.into()),

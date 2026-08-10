@@ -10545,6 +10545,14 @@ fn collect_by_projection_value_type(
     })
 }
 
+fn collect_by_output_value(output_type: &ValueType, value: Value) -> Value {
+    match (output_type, value) {
+        (ValueType::Nullable(_), value @ Value::Nullable(_)) => value,
+        (ValueType::Nullable(_), value) => Value::Nullable(Some(Box::new(value))),
+        (_, value) => value,
+    }
+}
+
 fn collect_by_projected_value(
     values: &[Value],
     field: &CollectByProjection,
@@ -10698,7 +10706,13 @@ fn update_unbounded_collect_by_terminal_state(
             .unwrap_or(collect_by.collection_field.as_str());
         let child_values = child_fields
             .iter()
-            .map(|field| collect_by_projected_value(&source_values, field))
+            .enumerate()
+            .map(|(index, field)| {
+                Ok::<Value, IvmRuntimeError>(collect_by_output_value(
+                    &child_descriptor.fields()[index].value_type,
+                    collect_by_projected_value(&source_values, field)?,
+                ))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let child_record: Vec<u8> = child_descriptor.create(&child_values)?;
         let child_key = encoded_record_key_part(child_descriptor, &child_record, &[0])?;
@@ -10875,11 +10889,7 @@ fn collect_by_root_from_records(
         .map(|(index, field)| {
             let value = collect_by_projected_value(&parent_values, field)?;
             let output_type = &output_desc.fields()[index].value_type;
-            Ok::<Value, IvmRuntimeError>(match (output_type, value) {
-                (ValueType::Nullable(_), value @ Value::Nullable(_)) => value,
-                (ValueType::Nullable(_), value) => Value::Nullable(Some(Box::new(value))),
-                (_, value) => value,
-            })
+            Ok::<Value, IvmRuntimeError>(collect_by_output_value(output_type, value))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let record = output_desc.create(&values).map_err(|error| {
@@ -10907,11 +10917,7 @@ fn collect_by_parent_from_records(
         .map(|(index, field)| {
             let value = collect_by_projected_value(&parent_values, field)?;
             let output_type = &output_desc.fields()[index].value_type;
-            Ok::<Value, IvmRuntimeError>(match (output_type, value) {
-                (ValueType::Nullable(_), value @ Value::Nullable(_)) => value,
-                (ValueType::Nullable(_), value) => Value::Nullable(Some(Box::new(value))),
-                (_, value) => value,
-            })
+            Ok::<Value, IvmRuntimeError>(collect_by_output_value(output_type, value))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let window = collect_by_window_from_records(input_desc, records, collect_by)?;
@@ -10923,7 +10929,13 @@ fn collect_by_parent_from_records(
         let child_values = collect_by
             .child_fields
             .iter()
-            .map(|field| collect_by_projected_value(&source_values, field))
+            .enumerate()
+            .map(|(index, field)| {
+                Ok::<Value, IvmRuntimeError>(collect_by_output_value(
+                    &collect_by.child_descriptor.fields()[index].value_type,
+                    collect_by_projected_value(&source_values, field)?,
+                ))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let child = OwnedRecord::new(
             collect_by.child_descriptor.create(&child_values)?,
@@ -10952,7 +10964,13 @@ fn collect_by_tree_parent_from_records(
     let mut values = collect_by
         .parent_fields
         .iter()
-        .map(|field| collect_by_projected_value(&parent_values, field))
+        .enumerate()
+        .map(|(index, field)| {
+            Ok::<Value, IvmRuntimeError>(collect_by_output_value(
+                &output_desc.fields()[index].value_type,
+                collect_by_projected_value(&parent_values, field)?,
+            ))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     values.extend(render_collect_by_slots(
         input_desc,
@@ -11029,7 +11047,13 @@ fn render_collect_by_slots(
                 let mut child_values = slot
                     .child_fields
                     .iter()
-                    .map(|field| collect_by_projected_value(&source_values, field))
+                    .enumerate()
+                    .map(|(index, field)| {
+                        Ok::<Value, IvmRuntimeError>(collect_by_output_value(
+                            &slot.child_descriptor.fields()[index].value_type,
+                            collect_by_projected_value(&source_values, field)?,
+                        ))
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 child_values.extend(render_collect_by_slots(
                     input_desc,
@@ -11472,6 +11496,33 @@ mod tests {
         ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey,
     };
     use crate::storage::{RecordStore, RocksDbStorage};
+
+    #[test]
+    fn collect_by_terminal_records_preserve_nullable_descriptor_wrappers() {
+        let uuid = uuid::Uuid::from_bytes([7; 16]);
+
+        assert_eq!(
+            collect_by_output_value(
+                &ValueType::Nullable(Box::new(ValueType::I32)),
+                Value::I32(3),
+            ),
+            Value::Nullable(Some(Box::new(Value::I32(3))))
+        );
+        assert_eq!(
+            collect_by_output_value(
+                &ValueType::Nullable(Box::new(ValueType::Uuid)),
+                Value::Uuid(uuid),
+            ),
+            Value::Nullable(Some(Box::new(Value::Uuid(uuid))))
+        );
+        assert_eq!(
+            collect_by_output_value(
+                &ValueType::Nullable(Box::new(ValueType::I32)),
+                Value::Nullable(None),
+            ),
+            Value::Nullable(None)
+        );
+    }
 
     #[test]
     fn root_ordering_rewrites_insert_indices_and_emits_moves_after_payload_edits() {

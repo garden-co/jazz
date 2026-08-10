@@ -789,6 +789,69 @@ describe("db.subscribeAll browser integration", () => {
     unsubscribe();
   });
 
+  it("decodes nullable child records delivered through an include terminal", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-subscribe-test",
+        driver: { type: "persistent", dbName: uniqueDbName("include-nullable-child") },
+      }),
+    );
+
+    const {
+      value: { id: userId },
+    } = db.insert(users, { name: "Owner", team_id: undefined });
+    const deltas: Array<SubscriptionDelta<User & { todosViaOwner?: Todo[] }>> = [];
+    const unsubscribe = trackUnsubscribe(
+      db.subscribeAll(
+        makeQuery<User & { todosViaOwner?: Todo[] }>("users", {
+          conditions: [{ column: "id", op: "eq", value: userId }],
+          includes: { todosViaOwner: true },
+        }),
+        (delta) => deltas.push(delta),
+      ),
+    );
+
+    const {
+      value: { id: todoId },
+    } = db.insert(todos, {
+      title: "nullable terminal child",
+      done: false,
+      priority: 3,
+      owner_id: userId,
+      tags: ["x"],
+      payload: Uint8Array.of(7, 0, 8),
+    });
+
+    await waitForCondition(
+      () => {
+        const child = deltas[deltas.length - 1]?.all[0]?.todosViaOwner?.find(
+          (todo) => todo.id === todoId,
+        );
+        return child?.id === todoId;
+      },
+      4000,
+      "expected nullable child record through include terminal",
+    );
+    const child = deltas[deltas.length - 1]?.all[0]?.todosViaOwner?.find(
+      (todo) => todo.id === todoId,
+    );
+    expect(child?.priority).toBe(3);
+    expect(child?.owner_id).toBe(userId);
+    expect(child?.payload).toEqual(Uint8Array.of(7, 0, 8));
+
+    await db.update(todos, todoId, { priority: 7 });
+    await waitForCondition(
+      () =>
+        deltas[deltas.length - 1]?.all[0]?.todosViaOwner?.some(
+          (todo) => todo.id === todoId && todo.priority === 7,
+        ) === true,
+      4000,
+      "expected nullable child terminal update to decode",
+    );
+
+    unsubscribe();
+  });
+
   it("supports hop queries", async () => {
     const db = track(
       await createDb({

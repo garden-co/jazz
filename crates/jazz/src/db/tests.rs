@@ -9272,6 +9272,126 @@ fn server_reset_subscription_materializes_without_local_snapshot_eval() {
 }
 
 #[test]
+fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+
+    let first = row(0x71);
+    let middle = row(0x72);
+    let last = row(0x73);
+    let first_write = client
+        .insert_with_id("todos", first, cells("alpha", false, client_author))
+        .unwrap();
+    let _middle_write = client
+        .insert_with_id("todos", middle, cells("middle", false, client_author))
+        .unwrap();
+    let last_write = client
+        .insert_with_id("todos", last, cells("omega", false, client_author))
+        .unwrap();
+    client.tick().unwrap();
+
+    let query = Query::from("todos").order_by("title", OrderDirection::Asc);
+    let prepared = prepared(&client, &query);
+    let opts = ReadOpts::default();
+    let mut subscription = block_on(client.subscribe(&prepared, opts.clone())).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_event()).unwrap()
+    else {
+        panic!("expected opening subscription delta");
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![first, middle, last]
+    );
+
+    let first_updated = client
+        .update(
+            "todos",
+            first,
+            BTreeMap::from([("title".to_owned(), Value::String("zulu".to_owned()))]),
+        )
+        .unwrap();
+    let binding_view_key = BindingViewKey::new(
+        prepared.shape().shape_id(),
+        prepared.binding().binding_id(),
+        RegisterShapeOptions {
+            tier: opts.tier,
+            read_view: opts.read_view,
+        }
+        .read_view_key(),
+    );
+    client
+        .node
+        .node
+        .borrow_mut()
+        .inject_pending_authoritative_reset_for_test(
+            binding_view_key,
+            [
+                ResultMemberEntry::row((
+                    "todos".to_owned().into(),
+                    first,
+                    first_updated.mergeable_tx_id(),
+                )),
+                ResultMemberEntry::row((
+                    "todos".to_owned().into(),
+                    last,
+                    last_write.mergeable_tx_id(),
+                )),
+            ],
+            GlobalSeq(42),
+        );
+
+    assert_eq!(client.refresh_subscriptions().unwrap(), 1);
+    let event = block_on(subscription.next_event()).unwrap();
+    let reset = if matches!(event, SubscriptionEvent::Delta { reset: true, .. }) {
+        event
+    } else {
+        block_on(subscription.next_event()).unwrap()
+    };
+    assert!(matches!(
+        reset,
+        SubscriptionEvent::Delta { reset: true, .. }
+    ));
+
+    let state = subscription._state.borrow();
+    let SubscriptionKind::Prepared {
+        maintained_subscription: Some(maintained),
+        ..
+    } = &state.kind
+    else {
+        panic!("expected maintained subscription state");
+    };
+    let paired = subscription_outputs_with_occurrence_sidecar(
+        &state.snapshot,
+        maintained.root_occurrence_ids(),
+    )
+    .expect("authoritative reset must atomically replace the root occurrence sidecar");
+    assert_eq!(
+        paired
+            .iter()
+            .map(|output| output.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![last, first],
+        "reset rows reordered after the title update and removed the middle row"
+    );
+    assert_eq!(
+        paired
+            .iter()
+            .map(|output| output.occurrence_id.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            OutputOccurrenceId::single_source(ObjectId::from_uuid(last.0)),
+            OutputOccurrenceId::single_source(ObjectId::from_uuid(first.0)),
+        ],
+        "each reset row remains paired with its current occurrence root"
+    );
+    assert_ne!(
+        first_write.mergeable_tx_id(),
+        first_updated.mergeable_tx_id()
+    );
+}
+
+#[test]
 fn authoritative_reset_with_missing_payload_falls_back_to_refresh() {
     let schema = schema();
     let client_author = AuthorId::from_bytes([0xc1; 16]);
