@@ -1905,11 +1905,11 @@ fn policy_graph_dropdown_entry_cells(dropdown: RowUuid, idx: usize) -> BTreeMap<
             nullable(Some(Value::Bool(false))),
         ),
         ("c729".to_owned(), Value::Bool(true)),
-        ("c488".to_owned(), nullable(Some(Value::U32(idx as u32)))),
+        ("c488".to_owned(), nullable(Some(Value::I32(idx as i32)))),
         ("c730".to_owned(), Value::Bool(idx.is_multiple_of(3))),
         ("c731".to_owned(), nullable(None)),
         ("c732".to_owned(), nullable(None)),
-        ("c733".to_owned(), nullable(Some(Value::U32(0)))),
+        ("c733".to_owned(), nullable(Some(Value::I32(0)))),
     ])
 }
 
@@ -1936,7 +1936,9 @@ fn policy_graph_version(
         cells,
         None,
     )
-    .unwrap()
+    .unwrap_or_else(|error| {
+        panic!("policy graph fixture row {table}/{row_uuid:?} is invalid: {error:?}")
+    })
 }
 
 fn seed_policy_graph_known_global(
@@ -1997,6 +1999,25 @@ fn open_policy_graph_native_btree_node(
     )
 }
 
+#[cfg(feature = "sqlite")]
+fn open_policy_graph_sqlite_node(
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+) -> (
+    tempfile::TempDir,
+    NodeState<groove::storage::SqliteStorage>,
+) {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage =
+        groove::storage::SqliteStorage::open(temp_dir.path().join("node.db"), &refs).unwrap();
+    (
+        temp_dir,
+        NodeState::new(node_uuid, schema, storage).unwrap(),
+    )
+}
+
 fn apply_policy_graph_reset_receipt<S>(
     storage_label: &str,
     reader: &mut NodeState<S>,
@@ -2031,10 +2052,21 @@ where
     apply_elapsed
 }
 
-#[ignore]
-#[test]
-fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
-    jazz_benchmark_guard::refuse_contaminated_measurement();
+struct PolicyGraphResetIngestFixture {
+    schema: JazzSchema,
+    shape: ValidatedQuery,
+    binding: Binding,
+    update: SyncMessage,
+    seed_elapsed: std::time::Duration,
+    serve_elapsed: std::time::Duration,
+    result_member_count: usize,
+    version_bundle_count: usize,
+}
+
+fn policy_graph_reset_ingest_fixture(
+    entry_count: usize,
+    dropdown_count: usize,
+) -> PolicyGraphResetIngestFixture {
     let schema = policy_graph_perf_schema_fixture();
     let (_core_dir, mut core) = open_node_with_schema(node(0x22), schema.clone());
 
@@ -2042,8 +2074,6 @@ fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
     let corp = policy_graph_row(0x32, 1);
     let member_team = RowUuid(member.0);
     let access_team = policy_graph_row(0x33, 1);
-    let dropdown_count = 30usize;
-    let entry_count = 19_894usize;
     let mut seed_rows = Vec::new();
     let seed_start = std::time::Instant::now();
     let member_claims = BTreeMap::from([
@@ -2051,7 +2081,7 @@ fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
         ("user_id".to_owned(), Value::Uuid(member.0)),
         ("isAdmin".to_owned(), Value::Bool(false)),
     ]);
-    core.set_session_claims(member, member_claims.clone());
+    core.set_session_claims(member, member_claims);
 
     seed_rows.push((
         "t1",
@@ -2068,7 +2098,7 @@ fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
         corp,
         BTreeMap::from([
             ("c457".to_owned(), Value::Uuid(member_team.0)),
-            ("c632".to_owned(), Value::U32(0)),
+            ("c632".to_owned(), Value::I32(0)),
         ]),
     ));
     seed_rows.push((
@@ -2150,6 +2180,51 @@ fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
     let version_bundle_count = version_bundles.len();
     assert!(result_member_count >= entry_count);
 
+    PolicyGraphResetIngestFixture {
+        schema,
+        shape,
+        binding,
+        update,
+        seed_elapsed,
+        serve_elapsed,
+        result_member_count,
+        version_bundle_count,
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_node_applies_policy_graph_reset_receipt() {
+    let fixture = policy_graph_reset_ingest_fixture(64, 4);
+    let (_dir, mut reader) = open_policy_graph_sqlite_node(node(0x27), fixture.schema);
+    apply_policy_graph_reset_receipt(
+        "sqlite",
+        &mut reader,
+        &fixture.shape,
+        &fixture.binding,
+        fixture.update,
+        64,
+    );
+}
+
+#[ignore]
+#[test]
+fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
+    let dropdown_count = 30usize;
+    let entry_count = 19_894usize;
+    let fixture = policy_graph_reset_ingest_fixture(entry_count, dropdown_count);
+    let PolicyGraphResetIngestFixture {
+        schema,
+        shape,
+        binding,
+        update,
+        seed_elapsed,
+        serve_elapsed,
+        result_member_count,
+        version_bundle_count,
+    } = fixture;
+
     let mut memory_reader = open_policy_graph_memory_node(node(0x23), schema.clone());
     let memory_elapsed = apply_policy_graph_reset_receipt(
         "memory",
@@ -2168,6 +2243,23 @@ fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
         update.clone(),
         entry_count,
     );
+    #[cfg(feature = "sqlite")]
+    {
+        let (_sqlite_dir, mut sqlite_reader) =
+            open_policy_graph_sqlite_node(node(0x26), schema.clone());
+        let sqlite_elapsed = apply_policy_graph_reset_receipt(
+            "sqlite",
+            &mut sqlite_reader,
+            &shape,
+            &binding,
+            update.clone(),
+            entry_count,
+        );
+        println!(
+            "policy_graph_perf_dropdown_entry_reset_ingest_timing sqlite_apply_ms={:.3}",
+            sqlite_elapsed.as_secs_f64() * 1000.0
+        );
+    }
     let (_btree_dir, mut btree_reader) = open_policy_graph_native_btree_node(node(0x25), schema.clone());
     let btree_elapsed = apply_policy_graph_reset_receipt(
         "native_btree_on_close",

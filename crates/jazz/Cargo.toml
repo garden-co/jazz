@@ -9,7 +9,7 @@ autotests = true
 [features]
 default = ["rocksdb", "server", "transport-compression-zstd"]
 rocksdb = ["groove/rocksdb", "dep:rocksdb"]
-sqlite = ["dep:rusqlite"]
+sqlite = ["groove/sqlite"]
 client = ["server"]
 server = [
   "dep:axum",
@@ -72,7 +72,6 @@ rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = fal
   "lz4",
   "zstd",
 ], optional = true }
-rusqlite = { version = "0.34", features = ["bundled"], optional = true }
 axum = { version = "0.8.9", default-features = false, features = [
   "http1",
   "json",
