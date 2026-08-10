@@ -7454,6 +7454,15 @@ where
             }
             rows
         };
+        // The graph used for synchronous materialization intentionally retains
+        // physical provenance fields so large values and policy witnesses can
+        // be resolved above.  Do not let that internal descriptor cross the
+        // public CurrentRow boundary: subscriptions use the public terminal
+        // shape, and native/WASM consumers must see the same layout from both
+        // read paths.
+        if shape.query().flat_join.is_none() {
+            normalize_public_current_rows(&table_schema, &mut rows)?;
+        }
         let query = shape.query();
         self.finish_engine_query_rows(query, &mut rows)?;
         if query.flat_join.is_none() && query.array_subqueries.is_empty() {
@@ -13032,6 +13041,25 @@ fn compare_optional_values(left: Option<Value>, right: Option<Value>) -> Orderin
 
 fn sort_query_default_rows(rows: &mut [CurrentRow]) {
     rows.sort_by(default_query_row_order);
+}
+
+/// Convert materializer-only rows back to the canonical application row
+/// descriptor before exposing them through a one-shot query.  The materializer
+/// may retain physical schema/provenance fields while resolving a row, whereas
+/// subscriptions are emitted from the public app-row terminal directly.
+fn normalize_public_current_rows(
+    table: &TableSchema,
+    rows: &mut [CurrentRow],
+) -> Result<(), Error> {
+    let columns = table
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    for row in rows {
+        *row = row.project(table, &columns)?;
+    }
+    Ok(())
 }
 
 fn default_query_row_order(left: &CurrentRow, right: &CurrentRow) -> Ordering {
