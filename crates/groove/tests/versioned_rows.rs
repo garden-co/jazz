@@ -92,10 +92,7 @@ fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
         vec![(vec![Value::U64(1), Value::String("first".into())], 1,)]
     );
 
-    database.register_table_variant(
-        "items",
-        TableVariant::new(2, ["id", "title", "completed"]),
-    )?;
+    database.register_table_variant("items", TableVariant::new(2, ["id", "title", "completed"]))?;
     database.register_variant_projection_case(
         "items",
         "reader-v1",
@@ -398,10 +395,7 @@ fn active_variant_index_accepts_a_live_schema_version_without_rebuilding()
     let subscription_id = subscription.id();
     assert!(subscription.recv()?.is_empty());
 
-    database.register_table_variant(
-        "items",
-        TableVariant::new(2, ["id", "email", "active"]),
-    )?;
+    database.register_table_variant("items", TableVariant::new(2, ["id", "email", "active"]))?;
     assert_eq!(subscription.id(), subscription_id);
 
     let descriptor = RecordDescriptor::new([

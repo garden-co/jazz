@@ -4373,7 +4373,9 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
             }
         }
         ColumnType::Union(_) => {
-            panic!("union column types are internal to Groove and have no Jazz query binding encoding")
+            panic!(
+                "union column types are internal to Groove and have no Jazz query binding encoding"
+            )
         }
     }
 }

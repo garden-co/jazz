@@ -2784,7 +2784,9 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             panic!("record-valued values have no v3 protocol encoding")
         }
         Value::Union(_) => {
-            panic!("union-valued values are an internal Groove representation, not a Jazz protocol value")
+            panic!(
+                "union-valued values are an internal Groove representation, not a Jazz protocol value"
+            )
         }
     }
 }

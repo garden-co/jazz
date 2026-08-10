@@ -713,10 +713,7 @@ impl VersionRow {
     }
 
     /// Bind a derived storage row to the same schema version as this version.
-    pub(super) fn bind_groove_record(
-        &self,
-        record: OwnedRecord,
-    ) -> groove::records::VariantRecord {
+    pub(super) fn bind_groove_record(&self, record: OwnedRecord) -> groove::records::VariantRecord {
         groove::records::VariantRecord::new(
             u32::try_from(self.schema_version_alias().0)
                 .expect("schema aliases are allocated in Groove's variant-tag space"),
