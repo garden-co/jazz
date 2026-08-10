@@ -249,6 +249,66 @@ pub enum PermissionAdviceAction {
     },
 }
 
+/// The policy operation proven by an authorization-scope receipt.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
+)]
+pub enum AuthorizationScopeOperation {
+    /// Read-policy evaluation.
+    Read,
+    /// Insert-check evaluation.
+    Insert,
+    /// Update-using and update-check evaluation.
+    Update,
+    /// Delete-using evaluation.
+    Delete,
+}
+
+/// Stable, action-specific identity for one authority-hydrated policy scope.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct AuthorizationSupportScopeKey {
+    /// Compiled policy support shape, including the selected operation clause.
+    pub support_shape_digest: [u8; 32],
+    /// Authenticated subject, never caller-supplied on a serving link.
+    pub subject: AuthorId,
+    /// Canonical digest of authenticated claims.
+    pub claims_digest: [u8; 32],
+    /// Compiled policy shape and selected policy epoch.
+    pub policy_digest: [u8; 32],
+}
+
+/// Ephemeral candidate-specific key used only for final evaluation.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct AuthorizationOperationKey {
+    /// Exact operation to evaluate.
+    pub operation: AuthorizationScopeOperation,
+    /// Protected table.
+    pub table: String,
+    /// Target row when applicable.
+    pub row: Option<RowUuid>,
+    /// Canonical candidate/patch digest when applicable.
+    pub candidate_digest: [u8; 32],
+}
+
+/// Authority-issued receipt proving one scope was hydrated through its stated cut.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct AuthorizationScopeReceipt {
+    /// Scope covered by this receipt.
+    pub key: AuthorizationSupportScopeKey,
+    /// Authenticated authority identity that issued this receipt.
+    pub authority: [u8; 16],
+    /// Authority-local connection/process epoch.
+    pub authority_epoch: u64,
+    /// Authenticated-claims revision paired with this proof.
+    pub claims_revision: u64,
+    /// Policy/schema epoch used to compile the scope.
+    pub policy_epoch: u64,
+    /// Complete authoritative history cut reflected by the support view.
+    pub settled_through: GlobalSeq,
+    /// Authority authorization generation paired with that cut.
+    pub authorization_progress: u64,
+}
+
 /// Advisory result of a permission preflight.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum PermissionAdvice {
