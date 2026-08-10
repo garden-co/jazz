@@ -376,6 +376,101 @@ describe("SubscriptionManager", () => {
     expect(manager.all()).toEqual([{ id, name: "typed", count: 8 }]);
   });
 
+  it("applies typed-v2 terminal update, removal, and reopen through its exact ordered key", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const id = "00000000-0000-4000-8000-000000000001";
+    const joinedId = "00000000-0000-4000-8000-000000000002";
+    const sidecar = Uint8Array.from([
+      2,
+      ...uuidBytes(id),
+      0,
+      0,
+      0,
+      1,
+      ...uuidBytes(joinedId),
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      3,
+      0x61,
+      0x72,
+      0x6d,
+    ]);
+    // Groove's ordered Record key: root UUID, union-arm String, joined UUID.
+    const key = [10, ...uuidBytes(id), 6, 0x61, 0x72, 0x6d, 0, 0, 10, ...uuidBytes(joinedId)];
+    const emptyNative = {
+      __jazzNativeRowDelta: true as const,
+      added: new Uint8Array(),
+      removed: new Uint8Array(),
+      updated: new Uint8Array(),
+      addedCount: 0,
+      removedCount: 0,
+      updatedCount: 0,
+    };
+
+    manager.handleDelta(
+      {
+        ...emptyNative,
+        added: nativeAddedRecord(id, 0, "opened", 1),
+        addedCount: 1,
+        addedOccurrenceKeys: [sidecar],
+      },
+      transform,
+      nativeColumns,
+    );
+    const updated = manager.handleDelta(
+      {
+        ...emptyNative,
+        terminalOperations: [
+          {
+            root_key: key,
+            path: [],
+            edit: { Update: { key, value: [...terminalRowData(id, "updated", 2)] } },
+          },
+        ],
+      },
+      transform,
+      nativeColumns,
+    );
+    expect(updated.all).toEqual([{ id, name: "updated", count: 2 }]);
+    expect(updated.delta[0]?.id).toMatch(/^result:02/);
+
+    const removed = manager.handleDelta(
+      {
+        ...emptyNative,
+        terminalOperations: [{ root_key: key, path: [], edit: { Remove: { key } } }],
+      },
+      transform,
+      nativeColumns,
+    );
+    expect(removed).toEqual({ delta: [{ kind: 1, id: updated.delta[0]?.id, index: 0 }], all: [] });
+
+    const reopened = manager.handleDelta(
+      {
+        ...emptyNative,
+        terminalOperations: [
+          {
+            root_key: key,
+            path: [],
+            edit: { Insert: { key, index: 0, value: [...terminalRowData(id, "reopened", 3)] } },
+          },
+        ],
+      },
+      transform,
+      nativeColumns,
+    );
+    expect(reopened.all).toEqual([{ id, name: "reopened", count: 3 }]);
+    expect(reopened.delta[0]?.id).toBe(updated.delta[0]?.id);
+  });
+
   it("bridges a unique legacy snapshot root to its composite terminal address", () => {
     const manager = new SubscriptionManager<TestItem>();
     const id = "00000000-0000-4000-8000-000000000001";

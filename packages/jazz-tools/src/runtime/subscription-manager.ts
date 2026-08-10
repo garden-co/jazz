@@ -54,6 +54,7 @@ export type SubscriptionDelta<T> =
 type SubscriptionManagerSnapshot<T> = {
   currentResults: Map<string, T>;
   terminalRows: Map<string, WasmRow>;
+  terminalOccurrenceAddresses: Map<string, string>;
   orderedIds: string[];
   orderedIdIndex: Map<string, number>;
 };
@@ -230,6 +231,8 @@ function resultIdentity(item: { id: string }): string {
 export class SubscriptionManager<T extends { id: string }> {
   private currentResults = new Map<string, T>();
   private terminalRows = new Map<string, WasmRow>();
+  /** Exact ordered Groove root key -> opaque v2 occurrence sidecar address. */
+  private terminalOccurrenceAddresses = new Map<string, string>();
   private orderedIds: string[] = [];
   private orderedIdIndex = new Map<string, number>();
 
@@ -275,6 +278,16 @@ export class SubscriptionManager<T extends { id: string }> {
         if (reset) {
           this.clear();
         }
+        for (const key of [
+          ...(delta.addedOccurrenceKeys ?? []),
+          ...(delta.updatedOccurrenceKeys ?? []),
+          ...(delta.removedOccurrenceKeys ?? []),
+        ]) {
+          const orderedKey = orderedTerminalKeyForTypedOccurrence(key);
+          if (orderedKey) {
+            this.terminalOccurrenceAddresses.set(bytesKey(orderedKey), publicResultKey(key));
+          }
+        }
         // Packed row deltas have already been normalized to the public logical
         // record layout. Only Groove terminal edit payloads retain the outer
         // sparse current-row carrier described by `sparse`.
@@ -317,6 +330,7 @@ export class SubscriptionManager<T extends { id: string }> {
       terminalRows: new Map(
         Array.from(this.terminalRows, ([id, row]) => [id, cloneTerminalRow(row, columns)]),
       ),
+      terminalOccurrenceAddresses: new Map(this.terminalOccurrenceAddresses),
       orderedIds: [...this.orderedIds],
       orderedIdIndex: new Map(this.orderedIdIndex),
     };
@@ -325,6 +339,7 @@ export class SubscriptionManager<T extends { id: string }> {
   private restore(snapshot: SubscriptionManagerSnapshot<T>): void {
     this.currentResults = snapshot.currentResults;
     this.terminalRows = snapshot.terminalRows;
+    this.terminalOccurrenceAddresses = snapshot.terminalOccurrenceAddresses;
     this.orderedIds = snapshot.orderedIds;
     this.orderedIdIndex = snapshot.orderedIdIndex;
   }
@@ -345,7 +360,7 @@ export class SubscriptionManager<T extends { id: string }> {
     // applying its index before an earlier root Remove makes the outcome depend
     // on operation-key ordering.
     for (const operation of rootInserts) {
-      const rootId = terminalKeyId(operation.root_key);
+      const rootId = this.terminalAddress(operation.root_key);
       const rootRowId = terminalPayloadRowId(operation.root_key);
       const edit = operation.edit;
       assertTerminalRootEditKey(operation.root_key, edit);
@@ -456,7 +471,7 @@ export class SubscriptionManager<T extends { id: string }> {
    * snapshot only when exactly one retained root has the addressed UUID.
    */
   private terminalRootId(encoded: readonly number[]): string {
-    const address = terminalKeyId(encoded);
+    const address = this.terminalAddress(encoded);
     if (this.terminalRows.has(address)) return address;
     // Only UUID-only legacy composite keys have a lossless correspondence to
     // an occurrence sidecar. Typed values and v2 identities must remain
@@ -467,6 +482,10 @@ export class SubscriptionManager<T extends { id: string }> {
       row.id === physicalId && !id.startsWith("result:") ? id : null,
     ).filter((id): id is string => id !== null);
     return matches.length === 1 ? matches[0]! : address;
+  }
+
+  private terminalAddress(encoded: readonly number[]): string {
+    return this.terminalOccurrenceAddresses.get(bytesKey(encoded)) ?? terminalKeyId(encoded);
   }
 
   seed(rows: T[]): SubscriptionDelta<T> {
@@ -624,6 +643,7 @@ export class SubscriptionManager<T extends { id: string }> {
   clear(): void {
     this.currentResults.clear();
     this.terminalRows.clear();
+    this.terminalOccurrenceAddresses.clear();
     this.orderedIds = [];
     this.orderedIdIndex.clear();
   }
@@ -644,6 +664,80 @@ export class SubscriptionManager<T extends { id: string }> {
 
 export function isNativeRowDelta(delta: SubscriptionWireDelta): delta is NativeRowDelta {
   return !Array.isArray(delta) && delta.__jazzNativeRowDelta === true;
+}
+
+/**
+ * Reconstruct the exact Groove ordered root key from a typed ResultKey v2.
+ * This is metadata-driven: a terminal key is accepted as typed only when it
+ * byte-for-byte matches the sidecar's root, joined UUIDs, and union-arm
+ * discriminators. It intentionally does not infer meaning from a string in an
+ * arbitrary ordered key.
+ */
+function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array | undefined {
+  if (sidecar[0] !== 2 || sidecar.byteLength < 25) return undefined;
+  let cursor = 1;
+  const root = sidecar.subarray(cursor, (cursor += 16));
+  const joinedCount = readU32Be(sidecar, cursor);
+  cursor += 4;
+  if (joinedCount > 256 || cursor + joinedCount * 16 + 4 > sidecar.byteLength) return undefined;
+  const joined = Array.from({ length: joinedCount }, () => {
+    const value = sidecar.subarray(cursor, (cursor += 16));
+    return value;
+  });
+  const discriminatorCount = readU32Be(sidecar, cursor);
+  cursor += 4;
+  if (discriminatorCount > joinedCount) return undefined;
+  const arms = new Map<number, Uint8Array>();
+  for (let index = 0; index < discriminatorCount; index += 1) {
+    if (cursor + 8 > sidecar.byteLength) return undefined;
+    const position = readU32Be(sidecar, cursor);
+    const length = readU32Be(sidecar, cursor + 4);
+    cursor += 8;
+    if (
+      position >= joinedCount ||
+      length === 0 ||
+      cursor + length > sidecar.byteLength ||
+      arms.has(position)
+    ) {
+      return undefined;
+    }
+    arms.set(position, sidecar.subarray(cursor, (cursor += length)));
+  }
+  if (cursor !== sidecar.byteLength) return undefined;
+
+  const ordered: number[] = [10, ...root];
+  for (const [index, uuid] of joined.entries()) {
+    const arm = arms.get(index);
+    if (arm) {
+      ordered.push(6, ...orderedBytes(arm));
+    }
+    ordered.push(10, ...uuid);
+  }
+  return Uint8Array.from(ordered);
+}
+
+function readU32Be(bytes: Uint8Array, offset: number): number {
+  return (
+    (((bytes[offset] ?? 0) << 24) |
+      ((bytes[offset + 1] ?? 0) << 16) |
+      ((bytes[offset + 2] ?? 0) << 8) |
+      (bytes[offset + 3] ?? 0)) >>>
+    0
+  );
+}
+
+function orderedBytes(value: Uint8Array): number[] {
+  const encoded: number[] = [];
+  for (const byte of value) {
+    if (byte === 0) encoded.push(0, 0xff);
+    else encoded.push(byte);
+  }
+  encoded.push(0, 0);
+  return encoded;
+}
+
+function bytesKey(bytes: ArrayLike<number>): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function terminalKeyId(encoded: readonly number[]): string {
