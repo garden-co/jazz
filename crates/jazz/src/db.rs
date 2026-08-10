@@ -72,11 +72,11 @@ use crate::tools::OpenBatchId;
 use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
 use crate::wire::{
-    FEATURE_MESSAGE_FRAGMENTATION, TransportError, WIRE_PROTOCOL_VERSION, WireEnvelope, WireError,
-    WireErrorCode, WireFeatures, WireFrame, WireMessageFragment, WireRetry, WireSession,
-    WireStreamDecoder, WireStreamEncoder, WireTransport, current_wire_features, decode_frame,
-    decode_sync_message_for_features, encode_frame, encode_sync_message,
-    encode_sync_message_for_features,
+    FEATURE_MESSAGE_FRAGMENTATION, TransportError, WIRE_PROTOCOL_VERSION, WireAuthorityEndpoint,
+    WireEnvelope, WireError, WireErrorCode, WireFeatures, WireFrame, WireMessageFragment,
+    WireRetry, WireSession, WireStreamDecoder, WireStreamEncoder, WireTransport,
+    current_wire_features, decode_frame, decode_sync_message_for_features, encode_frame,
+    encode_sync_message, encode_sync_message_for_features,
 };
 
 const WIRE_FRAGMENT_PAYLOAD_BYTES: usize = 512 * 1024;
@@ -4785,6 +4785,23 @@ where
         &self,
         transport: Box<dyn Transport>,
     ) -> Rc<RefCell<PeerConnection<S>>> {
+        let session_context = transport.connection_session_context();
+        let connection_epoch = session_context
+            .map(|context| context.local.epoch)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
+        let expected_scope_authority = session_context
+            .filter(|context| {
+                context.negotiated_features & crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS != 0
+            })
+            .map(|context| AuthorityContext {
+                authority: *context.remote.node.as_bytes(),
+                link: *context.link_identity.as_bytes(),
+                connection_epoch: context.remote.epoch,
+                claims_revision: 0,
+                policy_epoch: 0,
+                authorization_progress: 0,
+                settled_through: 0,
+            });
         // Carry queued and already-registered subscriptions upstream immediately.
         let mut pending = self
             .upstream_subscriptions
@@ -4844,7 +4861,7 @@ where
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(0),
             next_now_ms: Cell::new(1),
-            connection_epoch: uuid::Uuid::new_v4().as_u128() as u64,
+            connection_epoch,
             link: ConnectionLink::Upstream {
                 pending,
                 upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
@@ -4859,7 +4876,7 @@ where
                 branch_metadata_repair_cursor: None,
                 scope_view_cuts: BTreeMap::new(),
                 scope_receipts: BTreeMap::new(),
-                expected_scope_authority: None,
+                expected_scope_authority,
             },
             last_resume_bytes: None,
         }));
@@ -4992,6 +5009,10 @@ where
     ) -> Rc<RefCell<PeerConnection<S>>> {
         let peer = cursor.map(|cursor| cursor.peer).unwrap_or(peer);
         let session_claim_revision = self.node.borrow().session_claim_revision(identity);
+        let connection_epoch = transport
+            .connection_session_context()
+            .map(|context| context.local.epoch)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
         let connection = Rc::new(RefCell::new(PeerConnection {
             transport,
             node: Rc::clone(&self.node),
@@ -5004,7 +5025,7 @@ where
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(session_claim_revision),
             next_now_ms: Cell::new(1),
-            connection_epoch: uuid::Uuid::new_v4().as_u128() as u64,
+            connection_epoch,
             link: ConnectionLink::Subscriber {
                 peer,
                 ingest_context: CommitUnitIngestContext {
@@ -5906,6 +5927,25 @@ pub trait Transport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError>;
     /// Pull the next inbound message the binding has staged, if any.
     fn try_recv(&mut self) -> Option<SyncMessage>;
+
+    /// Immutable endpoint facts accepted by authenticated session admission.
+    /// Semantic messages never self-assert this context.
+    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+        None
+    }
+}
+
+/// Handshake/session facts for one accepted connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConnectionSessionContext {
+    /// This endpoint's authority identity and fresh epoch.
+    pub local: WireAuthorityEndpoint,
+    /// Authenticated remote authority identity and fresh epoch.
+    pub remote: WireAuthorityEndpoint,
+    /// Authenticated session identity terminated by this link.
+    pub link_identity: AuthorId,
+    /// Features accepted for this connection.
+    pub negotiated_features: WireFeatures,
 }
 
 /// Adapter from postcard wire frames to the internal sync-message transport.
@@ -6066,6 +6106,7 @@ pub struct WireTransportAdapter<T> {
     protocol_version: u16,
     features: WireFeatures,
     session: Option<WireSession>,
+    session_context: Option<ConnectionSessionContext>,
     outbound_stream: WireStreamEncoder,
     inbound_stream: WireStreamDecoder,
     reassembler: LogicalMessageReassembler,
@@ -6089,6 +6130,18 @@ where
         features: WireFeatures,
         session: Option<WireSession>,
     ) -> Self {
+        Self::new_with_session_context(inner, protocol_version, features, session, None)
+    }
+
+    /// Wrap a transport after authenticated hello/session admission supplied
+    /// immutable endpoint identities and epochs.
+    pub fn new_with_session_context(
+        inner: T,
+        protocol_version: u16,
+        features: WireFeatures,
+        session: Option<WireSession>,
+        session_context: Option<ConnectionSessionContext>,
+    ) -> Self {
         let outbound_stream = WireStreamEncoder::new(features)
             .expect("negotiated wire compression must be compiled into this binary");
         let inbound_stream = WireStreamDecoder::new(features)
@@ -6098,6 +6151,7 @@ where
             protocol_version,
             features,
             session,
+            session_context,
             outbound_stream,
             inbound_stream,
             reassembler: LogicalMessageReassembler::default(),
@@ -6407,6 +6461,10 @@ where
             }
         }
         None
+    }
+
+    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+        self.session_context
     }
 }
 

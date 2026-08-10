@@ -6142,6 +6142,31 @@ fn expect_auth_failed_frame(transport: &mut ByteDuplexTransport, retry: WireRetr
 }
 
 #[test]
+fn wire_transport_adapter_carries_only_admitted_session_context() {
+    let (left, _) = byte_duplex_raw();
+    let context = ConnectionSessionContext {
+        local: crate::wire::WireAuthorityEndpoint {
+            node: NodeUuid::from_bytes([0x81; 16]),
+            epoch: 17,
+        },
+        remote: crate::wire::WireAuthorityEndpoint {
+            node: NodeUuid::from_bytes([0x82; 16]),
+            epoch: 19,
+        },
+        link_identity: AuthorId::from_bytes([0x83; 16]),
+        negotiated_features: crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS,
+    };
+    let adapter = WireTransportAdapter::new_with_session_context(
+        left,
+        WIRE_PROTOCOL_VERSION,
+        context.negotiated_features,
+        None,
+        Some(context),
+    );
+    assert_eq!(adapter.connection_session_context(), Some(context));
+}
+
+#[test]
 fn wire_transport_adapter_reports_malformed_frames() {
     let (left, mut right) = byte_duplex_raw();
     left.inbound.borrow_mut().push_back(vec![0xff, 0x00, 0x01]);
