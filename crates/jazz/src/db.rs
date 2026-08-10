@@ -5248,6 +5248,7 @@ where
                             }
                         }
                     }
+                    self.schedule_tick(TickUrgency::Immediate);
                 } else {
                     // No successor yet: preserve bounded live downstream
                     // routes for a later admitted authority.  Clearing them
@@ -5256,6 +5257,7 @@ where
                         pending.retain(|route| route.queue.upgrade().is_some());
                         !pending.is_empty()
                     });
+                    self.schedule_tick(TickUrgency::Immediate);
                 }
             }
         }
