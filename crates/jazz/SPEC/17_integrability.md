@@ -184,8 +184,10 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
 
 **Implementation status.** The alpha conformance matrix covers in-memory
 (client main thread), OPFS (client worker relay), and RocksDB (edge and core).
-SQLite is conditionally last in scope with React Native, only if RocksDB is
-unsuitable there; this is a tooling decision rather than a semantic contract.
+The SQLite `OrderedKvStorage` backend is implemented behind Groove's `sqlite`
+feature. The RN owner's 2026-08-07 decision to go directly to SQLite supersedes
+the RocksDB-first ordering above for React Native; this remains a tooling choice
+behind the existing storage contract rather than a new semantic contract.
 
 ## Open Questions
 

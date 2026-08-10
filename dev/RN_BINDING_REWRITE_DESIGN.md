@@ -1,9 +1,8 @@
 # React Native binding rewrite — design
 
-Status: proposed (2026-08-07, amended same day after design review). Owner: RN
-surface owner. Scope: `crates/groove` SQLite storage backend, `crates/jazz-rn`
-rewrite, `packages/jazz-tools/src/react-native` wiring, revived Expo example
-E2E.
+Status: in progress (M1 landed 2026-08-10; M2–M5 pending). Owner: RN surface
+owner. Scope: `crates/groove` SQLite storage backend, `crates/jazz-rn` rewrite,
+`packages/jazz-tools/src/react-native` wiring, revived Expo example E2E.
 
 ## 1. Context
 
