@@ -27,7 +27,10 @@ use thiserror::Error;
 #[cfg(feature = "cold-settle-attribution")]
 use web_time::Instant;
 
-use crate::authorization_scope::AuthorityContext;
+use crate::authorization_scope::{
+    AuthorityContext, AuthorizationScopeLease, AuthorizationScopeOwnerToken,
+    AuthorizationScopeRegistry,
+};
 use crate::ids::{AuthorId, NodeUuid, RowUuid, SchemaVersionId};
 pub use crate::node::CommitUnitTrust;
 #[cfg(feature = "testing")]
@@ -438,6 +441,35 @@ struct ScopeAggregate {
     expected_support: BTreeSet<(ShapeId, BindingId)>,
     members: BTreeMap<SubscriptionKey, (ShapeId, BindingId)>,
     applied: BTreeMap<SubscriptionKey, (crate::time::GlobalSeq, u64)>,
+}
+
+/// One receipt-bound authorization operation owned by one admitted upstream.
+///
+/// This state deliberately lives on `ConnectionLink::Upstream`: a receipt is
+/// only meaningful for the authenticated authority epoch that delivered it.
+/// The manager additionally records every support subscription, since an
+/// aggregate receipt names only the final completing subscription.
+struct AuthorizationScopeLeaseRequest {
+    action: PermissionAdviceAction,
+    lease: AuthorizationScopeLease,
+    owner: Option<AuthorizationScopeOwnerToken>,
+    support_subscriptions: BTreeSet<SubscriptionKey>,
+    applied_support_cuts: BTreeMap<SubscriptionKey, crate::time::GlobalSeq>,
+}
+
+/// Per-upstream admission manager for scope receipts and their retained leases.
+struct AuthorizationScopeLeaseManager {
+    registry: AuthorizationScopeRegistry,
+    requests: BTreeMap<PermissionAdviceRequestId, AuthorizationScopeLeaseRequest>,
+}
+
+impl Default for AuthorizationScopeLeaseManager {
+    fn default() -> Self {
+        Self {
+            registry: AuthorizationScopeRegistry::default(),
+            requests: BTreeMap::new(),
+        }
+    }
 }
 
 /// Locally-authored transactions awaiting upload, oldest first. Shared with
@@ -4877,6 +4909,7 @@ where
                 scope_view_cuts: BTreeMap::new(),
                 scope_receipts: BTreeMap::new(),
                 expected_scope_authority,
+                scope_lease_manager: AuthorizationScopeLeaseManager::default(),
             },
             last_resume_bytes: None,
         }));
@@ -6548,6 +6581,9 @@ enum ConnectionLink {
         /// Authenticated remote authority identity established by the binding
         /// handshake. Receipts are rejected until this is present.
         expected_scope_authority: Option<AuthorityContext>,
+        /// Receipt-backed operations and their support cuts for this exact
+        /// authenticated upstream session.
+        scope_lease_manager: AuthorizationScopeLeaseManager,
     },
     /// Serving one subscriber: apply their subscribe requests, ship view
     /// updates under their identity.
@@ -6961,6 +6997,7 @@ where
                 scope_view_cuts,
                 scope_receipts,
                 expected_scope_authority,
+                scope_lease_manager: _,
             } => {
                 // Repair is deliberately retried on each non-blocked tick. The
                 // request set is bounded and deduplicated; a dropped request or
