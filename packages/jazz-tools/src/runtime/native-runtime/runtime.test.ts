@@ -1115,6 +1115,49 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(staged).toEqual(["todos"]);
   });
 
+  it("preserves logical user columns that share names with native storage metadata", () => {
+    const collisionSchema = {
+      records: {
+        columns: ["schema_version", "parents", "authored_columns"].map((name) => ({
+          name,
+          column_type: { type: "Text" } as const,
+          nullable: false,
+        })),
+      },
+    } satisfies WasmSchema;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => encodeRows([]),
+            insertWithIdEncoded: () => fakeWrite(),
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      collisionSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    const inserted = runtime.insert("records", {
+      schema_version: { type: "Text", value: "v1" },
+      parents: { type: "Text", value: "root" },
+      authored_columns: { type: "Text", value: "all" },
+    });
+
+    expect(inserted.values).toEqual([
+      { type: "Text", value: "v1" },
+      { type: "Text", value: "root" },
+      { type: "Text", value: "all" },
+    ]);
+  });
+
   it("uses identity-aware core txs only on an explicit trusted-serving host", () => {
     const alice = "00000000-0000-0000-0000-0000000000a1";
     const authors: string[] = [];

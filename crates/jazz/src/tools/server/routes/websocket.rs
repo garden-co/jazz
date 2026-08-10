@@ -1771,8 +1771,6 @@ mod tests {
             client_b.edge_todo_titles(&client_b_todos).await.is_empty(),
             "reader should settle the initial covered result as empty"
         );
-        client_b.detach_query(client_b_todos_attachment);
-
         let client_a = TestClient::new(schema, 0xa1, 0xa100).await;
         let mut ws_a = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
         let _inserted = client_a.insert_todo("after empty coverage");
@@ -1802,6 +1800,7 @@ mod tests {
             client_b.edge_todo_titles(&client_b_todos).await,
             vec!["after empty coverage".to_owned()]
         );
+        client_b.detach_query(client_b_todos_attachment);
     }
 
     #[tokio::test(flavor = "current_thread")]
