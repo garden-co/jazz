@@ -681,9 +681,11 @@ mod tests {
     use crate::ids::SchemaVersionId;
     use crate::ids::{NodeUuid, RowUuid};
     use crate::protocol::{
-        RegisterShapeOptions, ResultRowEntry, ShapeAst, Subscribe, SubscribeRejectReason,
-        SubscriptionKey, VersionBundle, VersionBundleRun, VersionBundleRunError, VersionCarrier,
-        VersionRecord, build_version_bundle_runs_from_singletons,
+        AuthorizationOperationKey, AuthorizationScopeOperation, AuthorizationScopePurpose,
+        AuthorizationSupportScopeKey, RegisterShapeOptions, ResultRowEntry, ShapeAst, Subscribe,
+        SubscribeRejectReason, SubscriptionKey, VersionBundle, VersionBundleRun,
+        VersionBundleRunError, VersionCarrier, VersionRecord,
+        build_version_bundle_runs_from_singletons,
     };
     use crate::protocol_limits::MAX_WIRE_FRAME_BYTES;
     use crate::query::{BindingId, Query, ShapeId};
@@ -1301,5 +1303,55 @@ mod tests {
 
         assert_eq!(err.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(err.retry, WireRetry::Never);
+    }
+
+    #[test]
+    fn authorization_scope_semantics_fail_closed_without_negotiated_feature() {
+        let subscription = SubscriptionKey {
+            shape_id: ShapeId(uuid::Uuid::from_bytes([1; 16])),
+            binding_id: BindingId(uuid::Uuid::from_bytes([2; 16])),
+            read_view: Default::default(),
+        };
+        let message = SyncMessage::AuthorizationScopeSubscribe {
+            subscribe: Subscribe {
+                shape_id: subscription.shape_id,
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+            },
+            purpose: AuthorizationScopePurpose {
+                key: AuthorizationSupportScopeKey {
+                    support_shape_digest: [3; 32],
+                    subject: crate::ids::AuthorId::from_bytes([4; 16]),
+                    claims_digest: [5; 32],
+                    policy_digest: [6; 32],
+                },
+                operation: AuthorizationOperationKey {
+                    operation: AuthorizationScopeOperation::Read,
+                    table: "todos".to_owned(),
+                    row: Some(RowUuid::from_bytes([7; 16])),
+                    candidate_digest: [8; 32],
+                },
+            },
+        };
+        let old_features = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
+        assert_eq!(
+            encode_sync_message_for_features(&message, old_features)
+                .unwrap_err()
+                .code,
+            WireErrorCode::UnsupportedFeature
+        );
+
+        let encoded = encode_sync_message_for_features(
+            &message,
+            old_features | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS,
+        )
+        .unwrap();
+        assert_eq!(
+            decode_sync_message_for_features(&encoded, old_features)
+                .unwrap_err()
+                .code,
+            WireErrorCode::UnsupportedFeature
+        );
     }
 }

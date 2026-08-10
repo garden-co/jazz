@@ -11,6 +11,7 @@ pub const MAX_AUTHORIZATION_SCOPES: usize = 256;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AuthorityContext {
     pub authority: [u8; 16],
+    pub link: [u8; 16],
     pub connection_epoch: u64,
     pub claims_revision: u64,
     pub policy_epoch: u64,
@@ -221,6 +222,7 @@ impl AuthorizationScopeRegistry {
         required_cut: u64,
     ) -> bool {
         receipt.authority == ctx.authority
+            && receipt.link == ctx.link
             && receipt.authority_epoch == ctx.connection_epoch
             && receipt.claims_revision == ctx.claims_revision
             && receipt.policy_epoch == ctx.policy_epoch
@@ -307,6 +309,7 @@ mod tests {
     fn c() -> AuthorityContext {
         AuthorityContext {
             authority: [4; 16],
+            link: [5; 16],
             connection_epoch: 1,
             claims_revision: 1,
             policy_epoch: 1,
@@ -318,6 +321,7 @@ mod tests {
         AuthorizationScopeReceipt {
             key,
             authority: [4; 16],
+            link: [5; 16],
             authority_epoch: 1,
             claims_revision: 1,
             policy_epoch: 1,
@@ -441,6 +445,10 @@ mod tests {
                 ..c()
             },
             AuthorityContext {
+                link: [9; 16],
+                ..c()
+            },
+            AuthorityContext {
                 connection_epoch: 2,
                 ..c()
             },
@@ -477,6 +485,7 @@ mod tests {
                     changed,
                     AuthorizationScopeReceipt {
                         authority: changed.authority,
+                        link: changed.link,
                         authority_epoch: changed.connection_epoch,
                         claims_revision: changed.claims_revision,
                         policy_epoch: changed.policy_epoch,

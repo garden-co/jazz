@@ -562,7 +562,9 @@ where
                 self.apply_content_extents(extents)
             }
             SyncMessage::PermissionAdviceRequest { .. }
-            | SyncMessage::PermissionAdviceResponse { .. } => Err(Error::UnsupportedSyncMessage(
+            | SyncMessage::PermissionAdviceResponse { .. }
+            | SyncMessage::AuthorizationScopeSubscribe { .. }
+            | SyncMessage::AuthorizationScopeReceipt { .. } => Err(Error::UnsupportedSyncMessage(
                 "permission advice requires authenticated link context",
             )),
         }

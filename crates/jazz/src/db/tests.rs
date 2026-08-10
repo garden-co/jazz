@@ -9,10 +9,11 @@ use groove::storage::{OrderedKvStorage, ReopenableStorage, RocksDbStorage};
 use super::*;
 use crate::ids::{AuthorId, BranchId, NodeUuid};
 use crate::protocol::{
-    BindingViewKey, BranchMetadata, CatalogueAck, KnownStateCompleteness, KnownStateDeclaration,
-    LensOp, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry,
-    RowVersionRef, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
-    TableLens,
+    AuthorizationOperationKey, AuthorizationScopeOperation, AuthorizationScopePurpose,
+    AuthorizationSupportScopeKey, BindingViewKey, BranchMetadata, CatalogueAck,
+    KnownStateCompleteness, KnownStateDeclaration, LensOp, ReadViewSourceSpec, ReadViewSpec,
+    RegisterShapeOptions, ResultMemberEntry, RowVersionRef, ShapeAst, Subscribe,
+    SubscribeRejectReason, SubscribeServerFailureCode, TableLens,
 };
 use crate::protocol_limits::{
     MAX_CONTENT_EXTENT_BYTES, MAX_FETCH_ROW_VERSIONS, MAX_KNOWN_STATE_EXACT_REFS,
@@ -13868,6 +13869,82 @@ fn db_query_builder_expresses_s1_shaped_filters_and_include_modes() {
         .offset(1)
         .limit(1);
     assert_eq!(row_ids(&prepared_read(&db, &paged)), vec![row(3)]);
+}
+
+#[test]
+fn authorization_scope_receipt_follows_its_support_view() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, identity);
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::AuthorizationScopeSubscribe {
+            subscribe: Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+            },
+            purpose: AuthorizationScopePurpose {
+                key: AuthorizationSupportScopeKey {
+                    support_shape_digest: [1; 32],
+                    subject: identity,
+                    claims_digest: [2; 32],
+                    policy_digest: [3; 32],
+                },
+                operation: AuthorizationOperationKey {
+                    operation: AuthorizationScopeOperation::Read,
+                    table: "todos".to_owned(),
+                    row: Some(row(1)),
+                    candidate_digest: [4; 32],
+                },
+            },
+        })
+        .unwrap();
+
+    subscriber.borrow_mut().tick().unwrap();
+    let mut received_view = false;
+    let mut received_receipt = false;
+    while let Some(message) = client_transport.try_recv() {
+        match message {
+            SyncMessage::CatalogueSnapshot(_) => {}
+            SyncMessage::ViewUpdate {
+                subscription: received,
+                ..
+            } => {
+                assert_eq!(received, subscription);
+                received_view = true;
+            }
+            SyncMessage::AuthorizationScopeReceipt {
+                subscription: received,
+                receipt,
+            } => {
+                assert!(received_view, "receipt must follow its support view");
+                assert_eq!(received, subscription);
+                assert_eq!(receipt.link, *identity.as_bytes());
+                assert_eq!(receipt.key.subject, identity);
+                received_receipt = true;
+            }
+            other => panic!("unexpected authorization-scope response: {other:?}"),
+        }
+    }
+    assert!(received_view);
+    assert!(received_receipt);
 }
 
 fn row_ids(rows: &[CurrentRow]) -> Vec<RowUuid> {

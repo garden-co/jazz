@@ -913,6 +913,11 @@ where
         self.clock.applied_global_watermark
     }
 
+    /// Stable identity of the authority issuing wire-level receipts.
+    pub(crate) fn node_uuid(&self) -> NodeUuid {
+        self.node_uuid
+    }
+
     /// Attach process-local auth claims to an accepted subscriber identity.
     pub(crate) fn set_session_claims(
         &mut self,

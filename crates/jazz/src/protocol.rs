@@ -205,6 +205,24 @@ pub enum SyncMessage {
         /// Final serving-authority result, or `Unknown` when unavailable.
         advice: PermissionAdvice,
     },
+    /// Register and hydrate a support view for one authorization scope.
+    ///
+    /// Appended to preserve every pre-existing postcard enum discriminant.
+    /// This wraps the existing subscription pipeline rather than creating a
+    /// second query transport, and is feature-gated for old peers.
+    AuthorizationScopeSubscribe {
+        /// Ordinary shape/binding subscription carrying the support view.
+        subscribe: Subscribe,
+        /// Scope and non-secret operation purpose of that support view.
+        purpose: AuthorizationScopePurpose,
+    },
+    /// Authority proof emitted after the matching support `ViewUpdate`.
+    AuthorizationScopeReceipt {
+        /// Support view that the receiver must apply before accepting proof.
+        subscription: SubscriptionKey,
+        /// Bound authority receipt.
+        receipt: AuthorizationScopeReceipt,
+    },
 }
 
 /// Opaque identity for one permission-advice exchange.
@@ -290,6 +308,17 @@ pub struct AuthorizationOperationKey {
     pub candidate_digest: [u8; 32],
 }
 
+/// Declares why a regular subscription is being opened as authorization
+/// support. The authority binds it to its authenticated link identity; the
+/// operation key contains only a digest of the candidate, never its cells.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct AuthorizationScopePurpose {
+    /// Reusable support identity compiled by the requester.
+    pub key: AuthorizationSupportScopeKey,
+    /// Candidate-specific operation evaluated after support hydration.
+    pub operation: AuthorizationOperationKey,
+}
+
 /// Authority-issued receipt proving one scope was hydrated through its stated cut.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct AuthorizationScopeReceipt {
@@ -297,6 +326,8 @@ pub struct AuthorizationScopeReceipt {
     pub key: AuthorizationSupportScopeKey,
     /// Authenticated authority identity that issued this receipt.
     pub authority: [u8; 16],
+    /// Authenticated subscriber link to which this proof is restricted.
+    pub link: [u8; 16],
     /// Authority-local connection/process epoch.
     pub authority_epoch: u64,
     /// Authenticated-claims revision paired with this proof.
@@ -353,7 +384,12 @@ impl SyncMessage {
     /// classification rather than accidentally sending a future enum variant
     /// to an older peer.
     pub fn required_wire_features(&self) -> crate::wire::WireFeatures {
-        crate::wire::FEATURE_NONE
+        match self {
+            Self::AuthorizationScopeSubscribe { .. } | Self::AuthorizationScopeReceipt { .. } => {
+                crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+            }
+            _ => crate::wire::FEATURE_NONE,
+        }
     }
 
     /// Validate any packed view-update carrier runs in this message.
