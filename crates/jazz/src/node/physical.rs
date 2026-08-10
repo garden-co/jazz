@@ -1669,7 +1669,7 @@ fn merge_physical_value_type(
     use records::ValueType;
     match (existing, incoming) {
         (ValueType::Enum(left), ValueType::Enum(right))
-            if left.registry_id == right.registry_id =>
+            if left.registry_id() == right.registry_id() =>
         {
             let (shorter, longer) = if left.variants.len() <= right.variants.len() {
                 (&left.variants, right)

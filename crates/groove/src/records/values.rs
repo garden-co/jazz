@@ -10,6 +10,10 @@
 use super::{Error, OwnedRecord, RecordDescriptor};
 use std::collections::BTreeMap;
 
+/// Reserved high bit marking an engine-owned registry shared at one explicit
+/// internal relational boundary.
+const SYSTEM_REGISTRY_MARKER: u64 = 1 << 63;
+
 /// Stable compact identity for a physical enum/union occurrence.
 pub fn variant_registry_id_for_path(path: &str) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;
@@ -17,6 +21,7 @@ pub fn variant_registry_id_for_path(path: &str) -> u64 {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
+    let hash = hash & !SYSTEM_REGISTRY_MARKER;
     if hash == 0 { 1 } else { hash }
 }
 
@@ -175,9 +180,22 @@ pub struct EnumSchema {
     /// Durable identity of this enum occurrence. The enclosing table stamps
     /// unstamped schemas from their physical field path before persistence.
     #[serde(default)]
-    pub registry_id: u64,
+    registry_id: u64,
     pub name: String,
     pub variants: Vec<String>,
+}
+
+/// Opaque token for an engine-owned enum registry shared at an explicitly
+/// defined relational boundary.
+#[derive(Clone, Copy, Debug)]
+pub struct SystemVariantRegistry(u64);
+
+impl SystemVariantRegistry {
+    /// The internal deletion-state register that joins content and deletion
+    /// facts in Jazz's query engine.
+    pub fn deletion_state() -> Self {
+        Self(variant_registry_id_for_path("jazz/internal/deletion") | SYSTEM_REGISTRY_MARKER)
+    }
 }
 
 /// Named union schema whose declaration-order cases have stable `u32` tags.
@@ -326,7 +344,18 @@ impl EnumSchema {
     }
 
     pub fn with_registry_id(mut self, registry_id: u64) -> Self {
-        self.registry_id = registry_id;
+        self.registry_id = registry_id & !SYSTEM_REGISTRY_MARKER;
+        self
+    }
+
+    pub fn registry_id(&self) -> u64 {
+        self.registry_id
+    }
+
+    /// Mark an engine-owned enum identity that is intentionally shared across
+    /// one explicit internal relational boundary.
+    pub fn with_system_registry(mut self, registry: SystemVariantRegistry) -> Self {
+        self.registry_id = registry.0;
         self
     }
 
@@ -504,7 +533,9 @@ impl ValueType {
     fn assign_variant_registries(&mut self, path: &str, replace: bool) {
         match self {
             Self::Enum(schema) => {
-                if replace || schema.registry_id == 0 {
+                if schema.registry_id & SYSTEM_REGISTRY_MARKER == 0
+                    && (replace || schema.registry_id == 0)
+                {
                     schema.registry_id = variant_registry_id_for_path(path);
                 }
             }

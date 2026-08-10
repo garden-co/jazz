@@ -73,7 +73,7 @@ impl PartialEq<String> for TableName {
 
 /// Column data type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum ColumnType {
     /// 4-byte signed integer (i32), like PostgreSQL INTEGER.
     Integer,

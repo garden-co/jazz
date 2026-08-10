@@ -484,12 +484,36 @@ fn enum_registry_identity_is_owned_by_each_physical_column_occurrence() {
         .columns
         .iter()
         .map(|column| match &column.column_type {
-            ColumnType::Enum(schema) => schema.registry_id,
+            ColumnType::Enum(schema) => schema.registry_id(),
             _ => unreachable!(),
         })
         .collect::<HashSet<_>>();
     assert_eq!(ids.len(), 2);
     assert!(!ids.contains(&7));
+}
+
+#[test]
+fn ordinary_enum_registry_ids_cannot_claim_the_reserved_system_marker() {
+    let supplied = EnumSchema::new("state", ["new", "done"])
+        .unwrap()
+        .with_registry_id(1 << 63);
+    let table = TableSchema::new(
+        "items",
+        [
+            ColumnSchema::new("a", ColumnType::Enum(supplied.clone())),
+            ColumnSchema::new("b", ColumnType::Enum(supplied)),
+        ],
+    );
+    let ids = table
+        .columns
+        .iter()
+        .map(|column| match &column.column_type {
+            ColumnType::Enum(schema) => schema.registry_id(),
+            _ => unreachable!(),
+        })
+        .collect::<HashSet<_>>();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.iter().all(|id| id & (1 << 63) == 0));
 }
 
 fn tuple_edges_schema() -> DatabaseSchema {
@@ -10064,7 +10088,7 @@ fn persist_maintains_schema_index_entries() {
     let prefix = b"albums\0albums_by_title\0";
     let entries = database.storage.prefix("indices", prefix).unwrap();
     assert_eq!(entries.len(), 1);
-    assert_eq!(persisted_index_value(&entries[0].1), []);
+    assert_eq!(persisted_index_value(&entries[0].1), Vec::<u8>::new());
 
     let mut batch = database.open_batch();
     batch.update(
@@ -10081,7 +10105,7 @@ fn persist_maintains_schema_index_entries() {
             .windows("Giant Steps".len())
             .any(|window| window == b"Giant Steps")
     );
-    assert_eq!(persisted_index_value(&entries[0].1), []);
+    assert_eq!(persisted_index_value(&entries[0].1), Vec::<u8>::new());
 
     let mut batch = database.open_batch();
     batch.delete("albums", PrimaryKeyValue::U64(7));

@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use groove::records::{EnumSchema, RecordDescriptor, Value, ValueType};
+use groove::records::{EnumSchema, RecordDescriptor, SystemVariantRegistry, Value, ValueType};
 use groove::schema::{
     ColumnType as GrooveColumnType, DatabaseSchema as GrooveDatabaseSchema,
     DirectRecordStoreSchema, IndexSchema as GrooveIndexSchema, IntegerKeyType, PrimaryKey,
@@ -1135,7 +1135,11 @@ fn fate_column() -> GrooveColumnType {
 }
 
 fn deletion_column() -> GrooveColumnType {
-    storage_enum("jazz_deletion", &["deleted", "restored"])
+    GrooveColumnType::Enum(
+        EnumSchema::new("jazz_deletion", ["deleted", "restored"])
+            .expect("valid deletion enum")
+            .with_system_registry(SystemVariantRegistry::deletion_state()),
+    )
 }
 
 fn rejection_reason_column() -> GrooveColumnType {
@@ -1711,6 +1715,43 @@ mod tests {
                 .map(|column| column.column.as_str())
                 .collect::<Vec<_>>(),
             vec!["row_uuid"]
+        );
+    }
+
+    #[test]
+    fn system_deletion_registry_survives_storage_rebinding_but_user_enums_do_not() {
+        let state = EnumSchema::new("state", ["open", "done"]).unwrap();
+        let left = TableSchema::new(
+            "left",
+            [ColumnSchema::new("state", ColumnType::Enum(state.clone()))],
+        );
+        let right = TableSchema::new(
+            "right",
+            [ColumnSchema::new("state", ColumnType::Enum(state))],
+        );
+        let registry = |table: GrooveTableSchema, name: &str| match &table
+            .columns
+            .iter()
+            .find(|column| column.name == name)
+            .unwrap()
+            .column_type
+        {
+            GrooveColumnType::Enum(schema) => schema.registry_id(),
+            GrooveColumnType::Nullable(inner) => match inner.as_ref() {
+                GrooveColumnType::Enum(schema) => schema.registry_id(),
+                other => panic!("expected enum field, got {other:?}"),
+            },
+            other => panic!("expected enum field, got {other:?}"),
+        };
+
+        assert_eq!(
+            registry(left.register_storage_table(), "_deletion"),
+            registry(right.register_storage_table(), "_deletion")
+        );
+        assert_ne!(
+            registry(left.history_storage_table(), "user_state"),
+            registry(right.history_storage_table(), "user_state"),
+            "structurally identical user enums must retain independent registries"
         );
     }
 }

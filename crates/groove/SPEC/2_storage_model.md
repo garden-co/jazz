@@ -37,6 +37,11 @@ Invariant digest:
 - `INV-STORAGE-26`: Record-store persistence is row-only: each logical stored record has its canonical row key/value entry, and no storage maintenance may replace a run of rows with a second logical representation.
 - `INV-STORAGE-27`: A record-valued `ValueType` MUST carry its descriptor inline and accept only canonical child bytes; it MUST NOT appear, directly or recursively, in a durable primary key.
 
+Engine-owned schema catalogues and operator-supplied native schema files are trusted
+durable formats: their serialized enum registry identities round-trip exactly. Public
+Jazz schema JSON is a separate, deliberately narrower model and cannot carry a Groove
+enum registry identity; public conversion creates fresh internal descriptors instead.
+
 ## Details
 
 Rust names in this chapter (`OrderedKvStorage`, `RecordStore`,

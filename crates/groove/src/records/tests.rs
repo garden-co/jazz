@@ -16,6 +16,18 @@ fn descriptor(value_types: impl IntoIterator<Item = ValueType>) -> RecordDescrip
     )
 }
 
+#[test]
+fn system_enum_registry_identity_survives_trusted_serde_round_trip() {
+    let schema = EnumSchema::new("jazz_deletion", ["deleted", "restored"])
+        .unwrap()
+        .with_system_registry(SystemVariantRegistry::deletion_state());
+    let encoded = serde_json::to_string(&schema).unwrap();
+    let restored: EnumSchema = serde_json::from_str(&encoded).unwrap();
+
+    assert_eq!(restored.registry_id(), schema.registry_id());
+    assert_ne!(restored.registry_id() & (1 << 63), 0);
+}
+
 crate::define_record! {
     struct TestStaticRow {
         0 => id: u64,
