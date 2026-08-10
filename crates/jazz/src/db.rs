@@ -238,7 +238,11 @@ type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
 type PermissionAdviceWaiters =
     Rc<RefCell<BTreeMap<PermissionAdviceRequestId, oneshot::Sender<PermissionAdvice>>>>;
 type PendingDownstreamFates = Rc<RefCell<Vec<SyncMessage>>>;
-type EdgeFateRoutes = Rc<RefCell<BTreeMap<TxId, Vec<Weak<RefCell<Vec<SyncMessage>>>>>>>;
+struct EdgeFateRoute {
+    authority: AuthorityContext,
+    queue: Weak<RefCell<Vec<SyncMessage>>>,
+}
+type EdgeFateRoutes = Rc<RefCell<BTreeMap<TxId, Vec<EdgeFateRoute>>>>;
 type ShapeRegistrationKey = (ShapeId, ReadViewKey);
 
 /// Per-subscriber state for a shape/read-view registration.
@@ -4601,7 +4605,7 @@ where
     write_state_waiters: WriteStateWaiters,
     permission_advice_waiters: PermissionAdviceWaiters,
     edge_fate_routes: EdgeFateRoutes,
-    has_upstream_authority: Rc<Cell<bool>>,
+    admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
     next_write_state_waiter_id: Cell<u64>,
     next_subscription_nonce: Cell<u64>,
     subscriber_dirty_epoch: Rc<Cell<u64>>,
@@ -4630,7 +4634,7 @@ where
             next_subscription_nonce: Cell::new(1),
             permission_advice_waiters: Rc::new(RefCell::new(BTreeMap::new())),
             edge_fate_routes: Rc::new(RefCell::new(BTreeMap::new())),
-            has_upstream_authority: Rc::new(Cell::new(false)),
+            admitted_upstream_authority: Rc::new(RefCell::new(None)),
             subscriber_dirty_epoch: Rc::new(Cell::new(0)),
             edge_cache_budget: Cell::new(None),
         }
@@ -4840,7 +4844,6 @@ where
         &self,
         transport: Box<dyn Transport>,
     ) -> Rc<RefCell<PeerConnection<S>>> {
-        self.has_upstream_authority.set(true);
         let session_context = transport.connection_session_context();
         let connection_epoch = session_context
             .map(|context| context.local.epoch)
@@ -4858,6 +4861,9 @@ where
                 authorization_progress: 0,
                 settled_through: 0,
             });
+        if let Some(context) = expected_scope_authority {
+            *self.admitted_upstream_authority.borrow_mut() = Some(context);
+        }
         // Carry queued and already-registered subscriptions upstream immediately.
         let mut pending = self
             .upstream_subscriptions
@@ -4914,7 +4920,7 @@ where
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
             edge_fate_routes: Rc::clone(&self.edge_fate_routes),
-            has_upstream_authority: Rc::clone(&self.has_upstream_authority),
+            admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
             downstream_fates: Rc::new(RefCell::new(Vec::new())),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
@@ -5082,7 +5088,7 @@ where
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
             edge_fate_routes: Rc::clone(&self.edge_fate_routes),
-            has_upstream_authority: Rc::clone(&self.has_upstream_authority),
+            admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
             downstream_fates: Rc::new(RefCell::new(Vec::new())),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
@@ -6564,7 +6570,7 @@ where
     write_state_waiters: WriteStateWaiters,
     permission_advice_waiters: PermissionAdviceWaiters,
     edge_fate_routes: EdgeFateRoutes,
-    has_upstream_authority: Rc<Cell<bool>>,
+    admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
     downstream_fates: PendingDownstreamFates,
     subscriber_dirty_epoch: Rc<Cell<u64>>,
     observed_subscriber_dirty_epoch: Cell<u64>,
@@ -7691,11 +7697,26 @@ where
                                 .borrow_mut()
                                 .apply_sync_message_with_ingest_context(message, None)?;
                             if let Some((tx_id, fate)) = routed_fate {
-                                let routes = self.edge_fate_routes.borrow_mut().remove(&tx_id);
-                                for route in routes.into_iter().flatten() {
-                                    if let Some(queue) = route.upgrade() {
-                                        queue.borrow_mut().push(fate.clone());
+                                let authority = *expected_scope_authority;
+                                let mut routes = self.edge_fate_routes.borrow_mut();
+                                let Some(pending) = routes.get_mut(&tx_id) else {
+                                    continue;
+                                };
+                                let mut remaining = Vec::new();
+                                for route in std::mem::take(pending) {
+                                    if Some(route.authority) == authority {
+                                        if let Some(queue) = route.queue.upgrade() {
+                                            queue.borrow_mut().push(fate.clone());
+                                        }
+                                    } else {
+                                        remaining.push(route);
                                     }
+                                }
+                                if remaining.is_empty() {
+                                    routes.remove(&tx_id);
+                                } else {
+                                    *routes.get_mut(&tx_id).expect("route remains present") =
+                                        remaining;
                                 }
                             }
                         }
@@ -8531,7 +8552,7 @@ where
                                         && matches!(peer.role(), PeerRole::ClientLink { .. }) =>
                                 {
                                     if tx.kind == TxKind::Mergeable {
-                                        if !self.has_upstream_authority.get() {
+                                        if self.admitted_upstream_authority.borrow().is_none() {
                                             // The terminal core is the sole
                                             // local authority.  Edges below
                                             // always take the relay path.
@@ -8552,11 +8573,18 @@ where
                                             self.node
                                                 .borrow_mut()
                                                 .ingest_relay_commit_unit(tx, versions)?;
+                                            let authority = (*self
+                                                .admitted_upstream_authority
+                                                .borrow())
+                                            .expect("edge relay branch requires admitted upstream authority");
                                             self.edge_fate_routes
                                                 .borrow_mut()
                                                 .entry(tx_id)
                                                 .or_default()
-                                                .push(Rc::downgrade(&self.downstream_fates));
+                                                .push(EdgeFateRoute {
+                                                    authority,
+                                                    queue: Rc::downgrade(&self.downstream_fates),
+                                                });
                                             // Edge persistence is observable,
                                             // but the final policy fate remains
                                             // parked for the upstream authority.
@@ -8745,7 +8773,7 @@ where
                         .map_err(transport_error)?;
                     }
                 }
-                if !self.has_upstream_authority.get() {
+                if self.admitted_upstream_authority.borrow().is_none() {
                     let fate_updates = {
                         let mut node = self.node.borrow_mut();
                         peer.drain_deferred_edge_fates(&mut node, tick_now_ms)?
