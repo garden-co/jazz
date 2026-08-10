@@ -5785,11 +5785,32 @@ fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
         "a concurrent admitted upstream must not steal existing route ownership"
     );
     assert_eq!(edge.server.admitted_upstream_authorities.borrow().len(), 2);
+    let tx_id = edge
+        .node()
+        .borrow_mut()
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0x91), 1).cells(cells("handoff", false, identity)),
+        )
+        .unwrap();
+    let queue = Rc::new(RefCell::new(Vec::new()));
+    edge.server.edge_fate_routes.borrow_mut().insert(
+        tx_id,
+        vec![EdgeFateRoute {
+            authority: first.unwrap(),
+            queue: Rc::downgrade(&queue),
+        }],
+    );
     assert!(edge.server.detach_connection(&a));
     assert_ne!(
         *edge.server.admitted_upstream_authority.borrow(),
         first,
         "detaching the selected owner must deterministically hand off future routes"
+    );
+    let handoff = edge.server.admitted_upstream_authority.borrow().unwrap();
+    assert_eq!(
+        edge.server.edge_fate_routes.borrow()[&tx_id][0].authority,
+        handoff,
+        "an Edge-Accepted caller route must follow the selected handoff rather than vanish"
     );
 }
 

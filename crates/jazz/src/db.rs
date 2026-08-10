@@ -5192,11 +5192,26 @@ where
             eligible.retain(|candidate| *candidate != authority);
             if *self.admitted_upstream_authority.borrow() == Some(authority) {
                 // Old routes cannot migrate to a replacement authority: they
-                // remain locally pending and a fresh upload creates a route
-                // for the deterministic handoff owner.
+                // must be rebound explicitly to the deterministic handoff
+                // owner. Both upstreams share the upload outbox, so B may
+                // already have the unit; clearing this route would strand an
+                // Edge-Accepted caller forever.
                 let handoff = eligible.first().copied();
                 *self.admitted_upstream_authority.borrow_mut() = handoff;
-                prune_edge_fate_routes(&mut self.edge_fate_routes.borrow_mut(), None);
+                let mut routes = self.edge_fate_routes.borrow_mut();
+                if let Some(handoff) = handoff {
+                    routes.retain(|_, pending| {
+                        pending.retain(|route| route.queue.upgrade().is_some());
+                        for route in pending.iter_mut() {
+                            if route.authority == authority {
+                                route.authority = handoff;
+                            }
+                        }
+                        !pending.is_empty()
+                    });
+                } else {
+                    prune_edge_fate_routes(&mut routes, None);
+                }
             }
         }
         detached
