@@ -46,10 +46,11 @@ use super::query_engine::{
     user_column_field,
 };
 use crate::protocol::{
-    BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry, ReadViewKey,
-    ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry,
-    ResultMemberPayloadEntry, RowVersionRef, ShapeAst, ShapeBody, Subscribe, SubscriptionKey,
-    SyntheticReplacementToken,
+    AuthorizationOperationKey, AuthorizationScopeOperation, AuthorizationSupportScopeKey,
+    BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, PermissionAdviceAction,
+    ProgramFactEntry, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
+    ResultMemberEntry, ResultMemberPayloadEntry, RowVersionRef, ShapeAst, ShapeBody, Subscribe,
+    SubscriptionKey, SyntheticReplacementToken,
 };
 use crate::protocol_limits::MAX_KNOWN_STATE_EXACT_REFS;
 use crate::query::{
@@ -57,11 +58,22 @@ use crate::query::{
     Include, JoinTarget, JoinVia, Operand, OrderDirection, Predicate, Query as JazzQuery,
     QueryError, ShapeId, ValidatedQuery, binding_id_for_values, relation_query_to_query,
 };
-use crate::schema::{ColumnSchema, branch_metadata_table_schema};
+use crate::schema::{ColumnSchema, JazzSchema, branch_metadata_table_schema};
 use crate::tools::{ObjectId, OutputOccurrenceId};
 
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
+
+/// Exact, action-specific policy support compiled for a hypothetical operation.
+///
+/// The support key deliberately excludes the row/candidate operation key: two
+/// operations reuse hydration only when their compiled support is identical.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct AuthorizationSupportScope {
+    pub(crate) key: AuthorizationSupportScopeKey,
+    pub(crate) operation: AuthorizationOperationKey,
+    pub(crate) subscriptions: Vec<(ValidatedQuery, Binding)>,
+}
 
 /// Aggregate terminal membership is structurally identified by the aggregate
 /// query plan and its synthetic group-key member. Its table label is not an
@@ -11163,6 +11175,434 @@ where
         let shape = query.validate(&self.catalogue.schema)?;
         let binding = shape.bind(binding_values)?;
         Ok(Some((shape, binding)))
+    }
+
+    /// Compile the exact policy clauses needed for one non-mutating operation.
+    /// This is intentionally separate from the legacy table-wide write scope:
+    /// callers are not switched until the receipt transport is negotiated.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn authorization_support_scope(
+        &self,
+        writer: AuthorId,
+        action: &PermissionAdviceAction,
+    ) -> Result<AuthorizationSupportScope, Error> {
+        let (operation, table_name) = authorization_scope_action(action);
+        let policies = authorization_policy_queries(self.table(table_name)?, operation);
+        let claims = self.session_claims.get(&writer);
+        let mut claim_values = default_permission_scope_claim_values(writer);
+        if let Some(claims) = claims {
+            claim_values.extend(claims.clone());
+        }
+        let subscriptions = policies
+            .iter()
+            .map(|policy| {
+                compile_permission_scope_policy(
+                    policy.clone(),
+                    claims,
+                    &claim_values,
+                    &self.catalogue.schema,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let policy_bytes = postcard::to_allocvec(&(operation, &policies))
+            .map_err(|_| Error::InvalidStoredValue("authorization policy serialization failed"))?;
+        let claim_bytes = postcard::to_allocvec(&claim_values)
+            .map_err(|_| Error::InvalidStoredValue("authorization claims serialization failed"))?;
+        let support_bytes = postcard::to_allocvec(&(
+            operation,
+            subscriptions
+                .iter()
+                .map(|(shape, binding)| (shape.shape_id(), binding.binding_id()))
+                .collect::<Vec<_>>(),
+        ))
+        .map_err(|_| Error::InvalidStoredValue("authorization scope serialization failed"))?;
+        let action_bytes = postcard::to_allocvec(action).map_err(|_| {
+            Error::InvalidStoredValue("authorization operation serialization failed")
+        })?;
+        let operation_key =
+            authorization_operation_key(operation, table_name, action, action_bytes);
+        Ok(AuthorizationSupportScope {
+            key: AuthorizationSupportScopeKey {
+                support_shape_digest: *blake3::hash(&support_bytes).as_bytes(),
+                subject: writer,
+                claims_digest: *blake3::hash(&claim_bytes).as_bytes(),
+                policy_digest: *blake3::hash(&policy_bytes).as_bytes(),
+            },
+            operation: operation_key,
+            subscriptions,
+        })
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn compile_permission_scope_policy(
+    mut query: JazzQuery,
+    claims: Option<&BTreeMap<String, Value>>,
+    claim_values: &BTreeMap<String, Value>,
+    schema: &JazzSchema,
+) -> Result<(ValidatedQuery, Binding), Error> {
+    query.filters = query
+        .filters
+        .into_iter()
+        .map(|p| rewrite_claim_predicate_for_binding(p, claims))
+        .collect();
+    query.joins = query
+        .joins
+        .into_iter()
+        .map(|j| rewrite_claim_join_for_binding(j, claims))
+        .collect();
+    query.reachable = query
+        .reachable
+        .into_iter()
+        .map(|mut reachable| {
+            reachable.access_filters = reachable
+                .access_filters
+                .into_iter()
+                .map(|p| rewrite_claim_predicate_for_binding(p, claims))
+                .collect();
+            reachable.edge_filters = reachable
+                .edge_filters
+                .into_iter()
+                .map(|p| rewrite_claim_predicate_for_binding(p, claims))
+                .collect();
+            if let Some(seed) = &mut reachable.seed {
+                seed.filters = std::mem::take(&mut seed.filters)
+                    .into_iter()
+                    .map(|p| rewrite_claim_predicate_for_binding(p, claims))
+                    .collect();
+            }
+            reachable
+        })
+        .collect();
+    let mut values = BTreeMap::new();
+    bind_scope_claim_operands(&mut query, claim_values, &mut values);
+    let shape = query.validate(schema)?;
+    let binding = shape.bind(values)?;
+    Ok((shape, binding))
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn authorization_scope_action(
+    action: &PermissionAdviceAction,
+) -> (AuthorizationScopeOperation, &str) {
+    match action {
+        PermissionAdviceAction::Read { table, .. } => (AuthorizationScopeOperation::Read, table),
+        PermissionAdviceAction::Insert { table, .. } => {
+            (AuthorizationScopeOperation::Insert, table)
+        }
+        PermissionAdviceAction::Update { table, .. } => {
+            (AuthorizationScopeOperation::Update, table)
+        }
+        PermissionAdviceAction::Delete { table, .. } => {
+            (AuthorizationScopeOperation::Delete, table)
+        }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn authorization_policy_queries(
+    table: &crate::schema::TableSchema,
+    operation: AuthorizationScopeOperation,
+) -> Vec<JazzQuery> {
+    match operation {
+        AuthorizationScopeOperation::Read
+            if table.read_policy.is_none() && access_edge_parent_reference(table).is_none() =>
+        {
+            Vec::new()
+        }
+        AuthorizationScopeOperation::Read => vec![authorization_query_from_read_policy(table)],
+        AuthorizationScopeOperation::Insert => table
+            .write_policies
+            .insert_check
+            .clone()
+            .into_iter()
+            .collect(),
+        AuthorizationScopeOperation::Update => [
+            table.write_policies.update_using.clone(),
+            table.write_policies.update_check.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+        AuthorizationScopeOperation::Delete => table
+            .write_policies
+            .delete_using
+            .clone()
+            .into_iter()
+            .collect(),
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn authorization_operation_key(
+    operation: AuthorizationScopeOperation,
+    table: &str,
+    action: &PermissionAdviceAction,
+    action_bytes: Vec<u8>,
+) -> AuthorizationOperationKey {
+    let row = match action {
+        PermissionAdviceAction::Read { row, .. }
+        | PermissionAdviceAction::Update { row, .. }
+        | PermissionAdviceAction::Delete { row, .. } => Some(*row),
+        PermissionAdviceAction::Insert { .. } => None,
+    };
+    AuthorizationOperationKey {
+        operation,
+        table: table.to_owned(),
+        row,
+        candidate_digest: *blake3::hash(&action_bytes).as_bytes(),
+    }
+}
+
+#[cfg(test)]
+mod authorization_scope_compiler_tests {
+    use super::*;
+    use crate::ids::NodeUuid;
+    use crate::node::NodeState;
+    use crate::schema::WritePolicies;
+    use groove::schema::ColumnType;
+    use groove::storage::{Durability, RocksDbStorage};
+
+    fn table() -> crate::schema::TableSchema {
+        crate::schema::TableSchema::new("protected", Vec::<ColumnSchema>::new())
+            .with_read_policy(JazzQuery::from("read_support"))
+            .with_write_policies(WritePolicies {
+                insert_check: Some(JazzQuery::from("insert_support")),
+                update_using: Some(JazzQuery::from("old_support")),
+                update_check: Some(JazzQuery::from("new_support")),
+                delete_using: Some(JazzQuery::from("delete_support")),
+            })
+    }
+
+    #[test]
+    fn action_selects_exact_policy_dependencies() {
+        let table = table();
+        assert_eq!(
+            authorization_policy_queries(&table, AuthorizationScopeOperation::Read),
+            vec![authorization_query_from_read_policy(&table)]
+        );
+        assert_eq!(
+            authorization_policy_queries(&table, AuthorizationScopeOperation::Insert),
+            vec![JazzQuery::from("insert_support")]
+        );
+        assert_eq!(
+            authorization_policy_queries(&table, AuthorizationScopeOperation::Update),
+            vec![
+                JazzQuery::from("old_support"),
+                JazzQuery::from("new_support")
+            ]
+        );
+        assert_eq!(
+            authorization_policy_queries(&table, AuthorizationScopeOperation::Delete),
+            vec![JazzQuery::from("delete_support")]
+        );
+    }
+
+    #[test]
+    fn operation_key_keeps_row_and_candidate_out_of_shareable_scope_identity() {
+        let first = PermissionAdviceAction::Update {
+            table: "protected".to_owned(),
+            row: RowUuid::from_bytes([1; 16]),
+            patch: BTreeMap::new(),
+        };
+        let second = PermissionAdviceAction::Update {
+            table: "protected".to_owned(),
+            row: RowUuid::from_bytes([2; 16]),
+            patch: BTreeMap::new(),
+        };
+        let (operation, table_name) = authorization_scope_action(&first);
+        let policy_bytes =
+            postcard::to_allocvec(&(operation, authorization_policy_queries(&table(), operation)))
+                .unwrap();
+        let first_key = authorization_operation_key(
+            operation,
+            table_name,
+            &first,
+            postcard::to_allocvec(&first).unwrap(),
+        );
+        let second_key = authorization_operation_key(
+            operation,
+            table_name,
+            &second,
+            postcard::to_allocvec(&second).unwrap(),
+        );
+        assert_ne!(first_key, second_key);
+        assert_eq!(
+            policy_bytes,
+            postcard::to_allocvec(&(operation, authorization_policy_queries(&table(), operation)))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn actual_compiler_uses_claims_and_access_edge_parent_inheritance() {
+        let schema = JazzSchema::new([
+            crate::schema::TableSchema::new(
+                "resources",
+                [ColumnSchema::new("owner", ColumnType::Uuid)],
+            )
+            .with_read_policy(JazzQuery::from("resources").filter(crate::query::eq(
+                crate::query::col("owner"),
+                crate::query::claim("sub"),
+            ))),
+            crate::schema::TableSchema::new(
+                "document_access_edges",
+                [ColumnSchema::new("resource_id", ColumnType::Uuid)],
+            )
+            .with_reference("resource_id", "resources")
+            .with_read_policy(JazzQuery::from("document_access_edges")),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let cfs = schema.column_families();
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage =
+            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let mut node = NodeState::new(NodeUuid::from_bytes([7; 16]), schema, storage).unwrap();
+        let identity = AuthorId::from_bytes([8; 16]);
+        node.set_session_claims(
+            identity,
+            BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
+        );
+        let first_action = PermissionAdviceAction::Read {
+            table: "document_access_edges".to_owned(),
+            row: RowUuid::from_bytes([1; 16]),
+        };
+        let first = node
+            .authorization_support_scope(identity, &first_action)
+            .unwrap();
+        assert_eq!(first.subscriptions.len(), 1);
+        let raw = node
+            .table("document_access_edges")
+            .unwrap()
+            .read_policy
+            .clone()
+            .unwrap();
+        let raw_compiled = compile_permission_scope_policy(
+            raw,
+            node.session_claims.get(&identity),
+            &default_permission_scope_claim_values(identity),
+            &node.catalogue.schema,
+        )
+        .unwrap();
+        assert_ne!(
+            first.subscriptions[0].0.shape_id(),
+            raw_compiled.0.shape_id(),
+            "canonical access-edge parent inheritance must alter the compiled support"
+        );
+        let second_action = PermissionAdviceAction::Read {
+            table: "document_access_edges".to_owned(),
+            row: RowUuid::from_bytes([2; 16]),
+        };
+        let second = node
+            .authorization_support_scope(identity, &second_action)
+            .unwrap();
+        assert_eq!(
+            first.key, second.key,
+            "same compiled support should coalesce across rows"
+        );
+        assert_ne!(
+            first.operation, second.operation,
+            "row remains an ephemeral evaluation key"
+        );
+        node.set_session_claims(
+            identity,
+            BTreeMap::from([("role".to_owned(), Value::String("viewer".to_owned()))]),
+        );
+        let changed_claims = node
+            .authorization_support_scope(identity, &first_action)
+            .unwrap();
+        assert_ne!(first.key.claims_digest, changed_claims.key.claims_digest);
+    }
+
+    #[test]
+    fn actual_compiler_selects_write_clauses_and_skips_public_read_support() {
+        let claim_policy = |column: &str| {
+            JazzQuery::from("protected").filter(crate::query::eq(
+                crate::query::col(column),
+                crate::query::claim("sub"),
+            ))
+        };
+        let schema = JazzSchema::new([
+            crate::schema::TableSchema::new("public", Vec::<ColumnSchema>::new()),
+            crate::schema::TableSchema::new(
+                "protected",
+                [
+                    ColumnSchema::new("value", ColumnType::String),
+                    ColumnSchema::new("insert_owner", ColumnType::Uuid),
+                    ColumnSchema::new("old_owner", ColumnType::Uuid),
+                    ColumnSchema::new("new_owner", ColumnType::Uuid),
+                    ColumnSchema::new("delete_owner", ColumnType::Uuid),
+                ],
+            )
+            .with_write_policies(WritePolicies {
+                insert_check: Some(claim_policy("insert_owner")),
+                update_using: Some(claim_policy("old_owner")),
+                update_check: Some(claim_policy("new_owner")),
+                delete_using: Some(claim_policy("delete_owner")),
+            }),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let cfs = schema.column_families();
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage =
+            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let mut node = NodeState::new(NodeUuid::from_bytes([9; 16]), schema, storage).unwrap();
+        let identity = AuthorId::from_bytes([3; 16]);
+        node.set_session_claims(
+            identity,
+            BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
+        );
+        let cells = BTreeMap::from([("value".to_owned(), Value::String("next".to_owned()))]);
+        let insert = node
+            .authorization_support_scope(
+                identity,
+                &PermissionAdviceAction::Insert {
+                    table: "protected".to_owned(),
+                    cells: cells.clone(),
+                },
+            )
+            .unwrap();
+        let update = node
+            .authorization_support_scope(
+                identity,
+                &PermissionAdviceAction::Update {
+                    table: "protected".to_owned(),
+                    row: RowUuid::from_bytes([1; 16]),
+                    patch: cells,
+                },
+            )
+            .unwrap();
+        let delete = node
+            .authorization_support_scope(
+                identity,
+                &PermissionAdviceAction::Delete {
+                    table: "protected".to_owned(),
+                    row: RowUuid::from_bytes([1; 16]),
+                },
+            )
+            .unwrap();
+        let public = node
+            .authorization_support_scope(
+                identity,
+                &PermissionAdviceAction::Read {
+                    table: "public".to_owned(),
+                    row: RowUuid::from_bytes([1; 16]),
+                },
+            )
+            .unwrap();
+        assert_eq!(insert.subscriptions.len(), 1);
+        assert_eq!(
+            update.subscriptions.len(),
+            2,
+            "update must hydrate both using and check support"
+        );
+        assert_eq!(delete.subscriptions.len(), 1);
+        assert!(
+            public.subscriptions.is_empty(),
+            "public read must not create a support subscription"
+        );
+        assert_ne!(insert.key, update.key);
+        assert_ne!(update.key, delete.key);
     }
 }
 
