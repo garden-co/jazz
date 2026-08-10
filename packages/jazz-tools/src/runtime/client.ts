@@ -57,15 +57,15 @@ export interface Runtime {
     write_context_json?: string | null,
   ): MutationResult;
   delete(table: string, object_id: string, write_context_json?: string | null): MutationResult;
-  canInsert?(table: string, values: InsertValues, session?: Session): boolean;
-  canRead?(table: string, objectId: string, session?: Session): boolean;
+  canInsert?(table: string, values: InsertValues, session?: Session): PermissionAdvice;
+  canRead?(table: string, objectId: string, session?: Session): PermissionAdvice;
   canUpdate?(
     table: string,
     objectId: string,
     values: Record<string, Value>,
     session?: Session,
-  ): boolean;
-  canDelete?(table: string, objectId: string, session?: Session): boolean;
+  ): PermissionAdvice;
+  canDelete?(table: string, objectId: string, session?: Session): PermissionAdvice;
   waitForTransaction(batchId: BatchId | Promise<BatchId>, tier: string): Promise<void>;
   query(
     query_json: string,
@@ -98,6 +98,13 @@ export interface Runtime {
   /** Register a callback invoked when the Rust transport rejects the JWT. */
   onAuthFailure(callback: (reason: string) => void): void;
 }
+
+/**
+ * Advisory result for a permission preflight. `allowed` and `denied` are
+ * final only when a trusted-serving authority evaluated the request;
+ * `unknown` means that a local replica or unavailable authority cannot decide.
+ */
+export type PermissionAdvice = "allowed" | "denied" | "unknown";
 
 export interface TransactionalRuntime extends Runtime {
   beginTransaction(
@@ -946,14 +953,14 @@ export class JazzClient {
     return new WriteHandle(committedBatchId(result), this);
   }
 
-  canInsert(table: string, values: InsertValues, session?: Session): boolean {
+  canInsert(table: string, values: InsertValues, session?: Session): PermissionAdvice {
     if (!this.runtime.canInsert) {
       throw new Error("Runtime does not support write-policy dry-run insert checks.");
     }
     return this.runtime.canInsert(table, values, session ?? this.resolvedSession ?? undefined);
   }
 
-  canRead(table: string, objectId: string, session?: Session): boolean {
+  canRead(table: string, objectId: string, session?: Session): PermissionAdvice {
     if (!this.runtime.canRead) {
       throw new Error("Runtime does not support read-policy dry-run checks.");
     }
@@ -965,7 +972,7 @@ export class JazzClient {
     objectId: string,
     values: Record<string, Value>,
     session?: Session,
-  ): boolean {
+  ): PermissionAdvice {
     if (!this.runtime.canUpdate) {
       throw new Error("Runtime does not support write-policy dry-run update checks.");
     }
@@ -977,7 +984,7 @@ export class JazzClient {
     );
   }
 
-  canDelete(table: string, objectId: string, session?: Session): boolean {
+  canDelete(table: string, objectId: string, session?: Session): PermissionAdvice {
     if (!this.runtime.canDelete) {
       throw new Error("Runtime does not support write-policy dry-run delete checks.");
     }

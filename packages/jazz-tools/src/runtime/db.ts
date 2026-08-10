@@ -39,6 +39,7 @@ import {
   type AuthConfig,
   type OpenBatchId,
   type BatchId,
+  type PermissionAdvice,
 } from "./client.js";
 import { type RuntimeSource, type RuntimeTokenOptions } from "./runtime-source.js";
 import { DefaultRuntimeSource } from "./default-runtime-source.js";
@@ -1377,7 +1378,7 @@ export class Db {
     return client.delete(table._table, id, options, context?.session, context?.attribution);
   }
 
-  canInsert<T, Init>(table: TableProxy<T, Init>, data: Init): boolean {
+  canInsert<T, Init>(table: TableProxy<T, Init>, data: Init): PermissionAdvice {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecordForOperation(
@@ -1390,13 +1391,17 @@ export class Db {
     return client.canInsert(table._table, values, context?.session);
   }
 
-  canRead<T, Init>(table: TableProxy<T, Init>, id: string): boolean {
+  canRead<T, Init>(table: TableProxy<T, Init>, id: string): PermissionAdvice {
     const client = this.getClient(table._schema);
     const context = this.getRuntimeOperationContext();
     return client.canRead(table._table, id, context?.readSession ?? context?.session);
   }
 
-  canUpdate<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): boolean {
+  canUpdate<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+  ): PermissionAdvice {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
     const updates = toWriteRecordForOperation(
@@ -1409,7 +1414,7 @@ export class Db {
     return client.canUpdate(table._table, id, updates, context?.session);
   }
 
-  canDelete<T, Init>(table: TableProxy<T, Init>, id: string): boolean {
+  canDelete<T, Init>(table: TableProxy<T, Init>, id: string): PermissionAdvice {
     const client = this.getClient(table._schema);
     const context = this.getRuntimeOperationContext();
     return client.canDelete(table._table, id, context?.session);

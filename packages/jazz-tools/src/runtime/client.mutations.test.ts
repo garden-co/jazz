@@ -82,19 +82,19 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
     },
     canInsert: (table, values, session) => {
       dryRunCalls.push(["canInsert", table, values, session]);
-      return true;
+      return "allowed";
     },
     canRead: (table, objectId, session) => {
       dryRunCalls.push(["canRead", table, objectId, session]);
-      return true;
+      return "allowed";
     },
     canUpdate: (table, objectId, values, session) => {
       dryRunCalls.push(["canUpdate", table, objectId, values, session]);
-      return true;
+      return "allowed";
     },
     canDelete: (table, objectId, session) => {
       dryRunCalls.push(["canDelete", table, objectId, session]);
-      return true;
+      return "allowed";
     },
     query: async () => [],
     waitForTransaction: async () => {},
@@ -148,10 +148,10 @@ describe("JazzClient write attribution", () => {
       authMode: "external",
     };
 
-    expect(client.canInsert("todos", insertValues, session)).toBe(true);
-    expect(client.canRead("todos", "row-1", session)).toBe(true);
-    expect(client.canUpdate("todos", "row-1", updates, session)).toBe(true);
-    expect(client.canDelete("todos", "row-1", session)).toBe(true);
+    expect(client.canInsert("todos", insertValues, session)).toBe("allowed");
+    expect(client.canRead("todos", "row-1", session)).toBe("allowed");
+    expect(client.canUpdate("todos", "row-1", updates, session)).toBe("allowed");
+    expect(client.canDelete("todos", "row-1", session)).toBe("allowed");
 
     expect(dryRunCalls).toEqual([
       ["canInsert", "todos", insertValues, session],

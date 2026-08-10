@@ -14,6 +14,7 @@ import type {
   InsertResult,
   MutationResult,
   OpenBatchId,
+  PermissionAdvice,
   Runtime,
   TransactionKind,
 } from "../client.js";
@@ -166,16 +167,6 @@ type NativeDb = {
     author: Uint8Array,
     updatedAtMs?: number | null,
   ): Write;
-  canInsertEncoded?(table: string, cells: Uint8Array): boolean;
-  canInsertEncodedForIdentity?(table: string, cells: Uint8Array, author: Uint8Array): boolean;
-  canReadForIdentity?(table: string, rowId: Uint8Array, author: Uint8Array): boolean;
-  canUpdateEncodedForIdentity?(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    author: Uint8Array,
-  ): boolean;
-  canDeleteForIdentity?(table: string, rowId: Uint8Array, author: Uint8Array): boolean;
   mergeableTx(openBatchId: OpenBatchId): Tx;
   mergeableTxForIdentity?(openBatchId: OpenBatchId, author: Uint8Array): Tx;
   exclusiveTx?(openBatchId: OpenBatchId): Tx;
@@ -660,30 +651,18 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.finishMutation(write);
   }
 
-  canInsert(table: string, values: InsertValues, session?: Session): boolean {
-    const cells = encodeCellsForRow(this.table(table), values, table);
-    const runtimeSession = runtimeSessionFromPublicSession(session);
-    this.applySessionClaims(runtimeSession);
-    const identity = runtimeSession?.identity ?? this.peerIdentity ?? parseUuid(SYSTEM_AUTHOR_ID);
-    if (this.db.canInsertEncodedForIdentity) {
-      return this.db.canInsertEncodedForIdentity(table, cells, identity);
-    }
-    if (!runtimeSession && this.db.canInsertEncoded) {
-      return this.db.canInsertEncoded(table, cells);
-    }
-    throw new Error("Runtime does not support write-policy dry-run insert checks.");
+  canInsert(table: string, values: InsertValues, session?: Session): PermissionAdvice {
+    void table;
+    void values;
+    void session;
+    return "unknown";
   }
 
-  canRead(table: string, objectId: string, session?: Session): boolean {
-    this.table(table);
-    const rowId = parseUuid(objectId);
-    const runtimeSession = runtimeSessionFromPublicSession(session);
-    this.applySessionClaims(runtimeSession);
-    const identity = runtimeSession?.identity ?? this.peerIdentity ?? parseUuid(SYSTEM_AUTHOR_ID);
-    if (!this.db.canReadForIdentity) {
-      throw new Error("Runtime does not support read-policy dry-run checks.");
-    }
-    return this.db.canReadForIdentity(table, rowId, identity);
+  canRead(table: string, objectId: string, session?: Session): PermissionAdvice {
+    void table;
+    void objectId;
+    void session;
+    return "unknown";
   }
 
   canUpdate(
@@ -691,28 +670,19 @@ export class NativeRuntimeAdapter implements Runtime {
     objectId: string,
     values: Record<string, Value>,
     session?: Session,
-  ): boolean {
-    const rowId = parseUuid(objectId);
-    const patch = encodeCellsForPatch(this.table(table), values);
-    const runtimeSession = runtimeSessionFromPublicSession(session);
-    this.applySessionClaims(runtimeSession);
-    const identity = runtimeSession?.identity ?? this.peerIdentity ?? parseUuid(SYSTEM_AUTHOR_ID);
-    if (!this.db.canUpdateEncodedForIdentity) {
-      throw new Error("Runtime does not support write-policy dry-run update checks.");
-    }
-    return this.db.canUpdateEncodedForIdentity(table, rowId, patch, identity);
+  ): PermissionAdvice {
+    void table;
+    void objectId;
+    void values;
+    void session;
+    return "unknown";
   }
 
-  canDelete(table: string, objectId: string, session?: Session): boolean {
-    this.table(table);
-    const rowId = parseUuid(objectId);
-    const runtimeSession = runtimeSessionFromPublicSession(session);
-    this.applySessionClaims(runtimeSession);
-    const identity = runtimeSession?.identity ?? this.peerIdentity ?? parseUuid(SYSTEM_AUTHOR_ID);
-    if (!this.db.canDeleteForIdentity) {
-      throw new Error("Runtime does not support write-policy dry-run delete checks.");
-    }
-    return this.db.canDeleteForIdentity(table, rowId, identity);
+  canDelete(table: string, objectId: string, session?: Session): PermissionAdvice {
+    void table;
+    void objectId;
+    void session;
+    return "unknown";
   }
 
   beginTransaction(

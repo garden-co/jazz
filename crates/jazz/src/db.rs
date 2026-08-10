@@ -196,6 +196,23 @@ where
     next_now_ms: Rc<Cell<u64>>,
 }
 
+/// Advisory result of a permission preflight.
+///
+/// `Allowed` and `Denied` are final only when returned by a trusted serving
+/// authority. A client-local replica must return `Unknown` whenever policy
+/// evidence may be incomplete; callers must never treat `Unknown` as an
+/// authorization grant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionAdvice {
+    /// A trusted serving authority determined that the operation is allowed.
+    Allowed,
+    /// A trusted serving authority determined that the operation is denied.
+    Denied,
+    /// The local runtime cannot make a sound final decision.
+    Unknown,
+}
+
 /// Process-local, content-addressed identity for an exact typed schema view.
 ///
 /// Unlike [`SchemaVersionId`], which identifies structural migration lineage,
@@ -2140,25 +2157,24 @@ where
         )
     }
 
-    /// Return whether an insert with these cells would pass write policy.
+    /// Advise whether an insert may be allowed.
     ///
-    /// This is a dry-run over the current local preview: it builds the
-    /// hypothetical version used by the write path, evaluates policy as this
-    /// Db's authenticated author, and does not store a version or advance time.
-    pub fn can_insert(&self, table: &str, cells: RowCells) -> Result<bool, Error> {
-        self.can_insert_for_identity(table, cells, self.identity.author)
+    /// A `Db` is ordinarily a client-local replica, whose policy evidence may
+    /// be incomplete. It therefore never turns a local policy evaluation into
+    /// an allow/deny result. Use an explicitly trusted serving authority for a
+    /// final decision.
+    pub fn can_insert(&self, _table: &str, _cells: RowCells) -> Result<PermissionAdvice, Error> {
+        Ok(PermissionAdvice::Unknown)
     }
 
-    /// Return whether an insert with these cells would pass write policy for `identity`.
-    ///
-    /// This trusted serving-node dry-run mirrors `insert_with_id_for_identity`
-    /// without storing a version or advancing time.
-    pub fn can_insert_for_identity(
+    /// Evaluate an insert for a test-only serving-path probe without writing.
+    #[cfg(test)]
+    pub(crate) fn authorize_insert_for_identity(
         &self,
         table: &str,
         cells: RowCells,
         identity: AuthorId,
-    ) -> Result<bool, Error> {
+    ) -> Result<PermissionAdvice, Error> {
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
             .node
@@ -2170,6 +2186,13 @@ where
                     .permission_subject(identity)
                     .cells(cells),
             )
+            .map(|allowed| {
+                if allowed {
+                    PermissionAdvice::Allowed
+                } else {
+                    PermissionAdvice::Denied
+                }
+            })
             .map_err(Into::into)
     }
 
@@ -2629,44 +2652,38 @@ where
         }
     }
 
-    /// Return whether this Db's author can read the current local row.
-    pub fn can_read(&self, table: &str, row: RowUuid) -> Result<bool, Error> {
-        self.can_read_for_identity(table, row, self.identity.author)
+    /// Advise whether a read may be allowed. Client-local replicas return
+    /// `Unknown` rather than using locally available rows as policy evidence.
+    pub fn can_read(&self, _table: &str, _row: RowUuid) -> Result<PermissionAdvice, Error> {
+        Ok(PermissionAdvice::Unknown)
     }
 
-    /// Return whether `author` can read the current local row.
-    pub fn can_read_for_identity(
+    /// Evaluate a read for the serving path without disclosing data.
+    pub(crate) fn authorize_read_for_identity(
         &self,
         table: &str,
         row: RowUuid,
         author: AuthorId,
-    ) -> Result<bool, Error> {
+    ) -> Result<PermissionAdvice, Error> {
         self.table_schema(table)?;
         self.node
             .node
             .borrow_mut()
             .dry_run_read_current_allows(table, row, author)
+            .map(|allowed| {
+                if allowed {
+                    PermissionAdvice::Allowed
+                } else {
+                    PermissionAdvice::Denied
+                }
+            })
             .map_err(Into::into)
     }
 
-    /// Return whether this Db's author can update the current local row.
-    pub fn can_update(&self, table: &str, row: RowUuid) -> Result<bool, Error> {
-        self.can_update_for_identity(table, row, self.identity.author)
-    }
-
-    /// Return whether `author` can update the current local row.
-    pub fn can_update_for_identity(
-        &self,
-        table: &str,
-        row: RowUuid,
-        author: AuthorId,
-    ) -> Result<bool, Error> {
-        self.table_schema(table)?;
-        self.node
-            .node
-            .borrow_mut()
-            .dry_run_write_current_allows(table, row, author)
-            .map_err(Into::into)
+    /// Advise whether an update may be allowed. Client-local replicas return
+    /// `Unknown` rather than using locally available rows as policy evidence.
+    pub fn can_update(&self, _table: &str, _row: RowUuid) -> Result<PermissionAdvice, Error> {
+        Ok(PermissionAdvice::Unknown)
     }
 
     /// Attach process-local auth claims for `identity`.
@@ -2682,23 +2699,32 @@ where
         }
     }
 
-    /// Return whether this Db's author can delete the current local row.
-    pub fn can_delete(&self, table: &str, row: RowUuid) -> Result<bool, Error> {
-        self.can_delete_for_identity(table, row, self.identity.author)
+    /// Advise whether a delete may be allowed. Client-local replicas return
+    /// `Unknown` rather than using locally available rows as policy evidence.
+    pub fn can_delete(&self, _table: &str, _row: RowUuid) -> Result<PermissionAdvice, Error> {
+        Ok(PermissionAdvice::Unknown)
     }
 
-    /// Return whether `author` can delete the current local row.
-    pub fn can_delete_for_identity(
+    /// Evaluate a delete for a test-only serving-path probe without writing.
+    #[cfg(test)]
+    pub(crate) fn authorize_delete_for_identity(
         &self,
         table: &str,
         row: RowUuid,
         author: AuthorId,
-    ) -> Result<bool, Error> {
+    ) -> Result<PermissionAdvice, Error> {
         self.table_schema(table)?;
         self.node
             .node
             .borrow_mut()
             .dry_run_delete_current_allows(table, row, author)
+            .map(|allowed| {
+                if allowed {
+                    PermissionAdvice::Allowed
+                } else {
+                    PermissionAdvice::Denied
+                }
+            })
             .map_err(Into::into)
     }
 
@@ -3971,7 +3997,7 @@ where
             let authored_columns = patch.keys().cloned().collect();
             return Ok((patch, parent, authored_columns));
         }
-        if !self.can_read_for_identity(table, row, identity)? {
+        if self.authorize_read_for_identity(table, row, identity)? != PermissionAdvice::Allowed {
             return Err(read_for_write_denied("partial UPDATE", table));
         }
         let mut cells = BTreeMap::new();

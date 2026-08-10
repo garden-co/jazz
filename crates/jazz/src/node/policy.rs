@@ -176,6 +176,7 @@ where
         self.write_policy_allows_version_record(&version, commit.effective_permission_subject())
     }
 
+    #[cfg(test)]
     pub(crate) fn dry_run_mergeable_write_allows_for_view(
         &mut self,
         exact_view: &JazzSchema,
@@ -212,6 +213,7 @@ where
             .map(|rows| !rows.is_empty())
     }
 
+    #[cfg(test)]
     pub(crate) fn dry_run_write_current_allows(
         &mut self,
         table_name: &str,
@@ -235,6 +237,7 @@ where
         self.write_policy_query_allows_current_row(&policy, row.row_uuid(), author)
     }
 
+    #[cfg(test)]
     pub(crate) fn dry_run_delete_current_allows(
         &mut self,
         table_name: &str,

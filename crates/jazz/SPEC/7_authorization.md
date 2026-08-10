@@ -11,7 +11,7 @@ authorization, read narrowing, and policy composition. It builds on queries
 
 Invariant digest:
 
-- `INV-API-28`: Db::caninsert, canread, canupdate, and candelete MUST evaluate permissions under the current DbIdentity.author without committing writes, changing local rows, or using...
+- `INV-API-28`: Db::caninsert, canread, canupdate, and candelete MUST return Unknown on a client-local replica; only a trusted serving authority may return final Allowed or Denied without...
 - `INV-API-29`: A Db is a client: facade writes MUST keep permissionsubject == madeby, and a Db MUST reject any attempt to attribute a write to another author. Cross-author attributio...
 - `INV-BRANCH-15`: Branch overlay data MUST NOT ship to a session that cannot read the branch metadata row; branch readability gates overlay visibility before ordinary per-row policy che...
 - `INV-RLS-1`: A non-system commit unit MUST be rejected with Fate::Rejected(RejectionReason::AuthorizationDenied) and MUST NOT ingest accepted version rows when any version in the u...
@@ -371,10 +371,11 @@ client-supplied values must not widen those facts.
   without creating accidental whole-table authority scans. Exposed by
   `world-tour`'s band-member policy.
 - ✅ **Permission introspection is a dry-run API, not magic columns.** `$can*`
-  columns cannot express _can-insert_ or richer probes; a dry-run is policy
-  evaluation _without ingest_ — the write-validation machinery applied
-  hypothetically, with local-preview semantics. The facade methods (`can_insert`,
-  `can_read`, `can_update`, `can_delete`, ch. 13) are implemented as dry-runs
+  columns cannot express _can-insert_ or richer probes. A client-local probe
+  returns `Unknown`: it must not turn its partial replica into either an
+  authorization grant or an oracle for hidden policy evidence. The facade
+  methods (`can_insert`, `can_read`, `can_update`, `can_delete`, ch. 13) return
+  final `Allowed`/`Denied` only from an explicitly trusted-serving authority
   (`INV-API-28`).
 - 🔶 **Principal authorship migration.** Decide the stable `AuthorId`/principal
   representation for commit authorship, how old self-authored commit encodings

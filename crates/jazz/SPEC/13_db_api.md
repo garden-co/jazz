@@ -43,7 +43,7 @@ Invariant digest:
 - `INV-API-25`: `TextEdit` operations MUST use byte offsets relative to the current local parent value for the column and MUST lower to `LargeValueEditOp::Insert`/`LargeValueEditOp::Delete`.
 - `INV-API-26`: `Db::mergeable_tx()` MUST group multiple facade writes under one mergeable `TxId`, and the produced commit unit MUST set `Transaction.n_total_writes` to the number of grouped versions.
 - `INV-API-27`: `Db::exclusive_tx()` MUST expose serializable exclusive transactions on the facade, preserving snapshot reads and returning `WriteRejected` when authority validation detects a conflict.
-- `INV-API-28`: `Db::can_insert`, `can_read`, `can_update`, and `can_delete` are advisory local probes under the current `DbIdentity.author`: they MAY evaluate incomplete or stale local policy/data, return `bool`, and MUST NOT commit writes, change local rows, or use caller-supplied identity. They are neither authoritative nor guaranteed conservative.
+- `INV-API-28`: `Db::can_insert`, `can_read`, `can_update`, and `can_delete` return `PermissionAdvice`: a client-local `Db` MUST return `Unknown` rather than evaluate possibly incomplete policy evidence. Only an explicitly trusted-serving authority may return final `Allowed` or `Denied`; probes MUST NOT commit writes, change local rows, or expose policy-supporting rows.
 - `INV-API-33`: Ordinary `Db` reads and subscriptions MUST use client-local lowering: policy is enforced by the trusted upstream before emission and is never re-applied to received rows. Local/None reads scan locally available data; Edge/Global settled reads consume the identity-scoped settled view received upstream.
 - `INV-API-29`: A `Db` is a client: facade writes MUST keep `permission_subject == made_by`, and a `Db` MUST reject any attempt to attribute a write to another author. Cross-author attribution is a node-level concern on the ingest side (a trusted serving `Node`, `INV-RLS-18`, ch. 9), never a `Db` capability.
 - `INV-API-30`: Reopening persistent storage with the same `DbIdentity` MUST schedule every locally originated transaction that reached `Local` durability and has not reached terminal settlement for upstream delivery. Locally originated means `TxId.node == DbIdentity.node` and `Transaction.made_by == DbIdentity.author`; delivery is at-least-once by `TxId` and relies on idempotent authority handling.
@@ -272,11 +272,11 @@ empty data and lowers to content + `DeletionEvent::Restored`. `INV-API-25` —
 `TextEdit` uses byte offsets relative to the current parent, lowering to
 `LargeValueEditOp` (ch. 12).
 
-Dry-run permission probes (`can_insert`, `can_read`, `can_update`,
-`can_delete`) are advisory local evaluations. They do not ingest versions or
-change local rows, but local data and policy dependencies can be stale or
-incomplete, so their booleans are neither authoritative nor conservative
-(`INV-API-28`, ch. 7).
+Permission probes (`can_insert`, `can_read`, `can_update`, `can_delete`) return
+`PermissionAdvice`. A client-local replica returns `Unknown` without evaluating
+possibly incomplete policy dependencies. An explicitly trusted-serving authority
+may return final `Allowed` or `Denied`. Probes never ingest versions, change
+local rows, or return supporting data (`INV-API-28`, ch. 7).
 
 ### 13.5 The sync/serve surface (binding-facing)
 

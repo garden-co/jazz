@@ -8,8 +8,8 @@ use base64::Engine;
 use futures_util::{Stream, StreamExt};
 use jazz::db::{
     block_on, Db, DbConfig, DbIdentity, ExclusiveTxOps, InitialSyncFlushCadence, LocalUpdates,
-    MergeableTxOps, PeerConnection, PreparedQuery, Propagation, QueryAttachment, ReadOpts,
-    RowCells, SeededRowIdSource, SubscriptionEvent, TickScheduler, TickUrgency,
+    MergeableTxOps, PeerConnection, PermissionAdvice, PreparedQuery, Propagation, QueryAttachment,
+    ReadOpts, RowCells, SeededRowIdSource, SubscriptionEvent, TickScheduler, TickUrgency,
     WireTransportAdapter, WriteHandle,
 };
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
@@ -100,6 +100,15 @@ fn decode_seed(seed_b64: &str) -> Result<[u8; 32], JsValue> {
     bytes
         .try_into()
         .map_err(|_| JsValue::from_str("seed must be exactly 32 bytes"))
+}
+
+fn advice_string(advice: PermissionAdvice) -> String {
+    match advice {
+        PermissionAdvice::Allowed => "allowed",
+        PermissionAdvice::Denied => "denied",
+        PermissionAdvice::Unknown => "unknown",
+    }
+    .to_owned()
 }
 
 /// Mint a local-first identity JWT from a base64url-encoded 32-byte seed.
@@ -1613,53 +1622,17 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = canInsertEncoded)]
-    pub fn can_insert_encoded(&self, table: String, cells: Vec<u8>) -> Result<bool, JsValue> {
+    pub fn can_insert_encoded(&self, table: String, cells: Vec<u8>) -> Result<String, JsValue> {
         let cells = decode_cells(&cells)?;
-        match &self.inner {
-            WasmDbInner::Memory(db) => db.can_insert(&table, cells).map_err(to_js_error),
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => db.can_insert(&table, cells).map_err(to_js_error),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
-        }
-    }
-
-    #[wasm_bindgen(js_name = canInsertEncodedForIdentity)]
-    pub fn can_insert_encoded_for_identity(
-        &self,
-        table: String,
-        cells: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<bool, JsValue> {
-        let cells = decode_cells(&cells)?;
-        let author = author_id_from_bytes(&author)?;
         match &self.inner {
             WasmDbInner::Memory(db) => db
-                .can_insert_for_identity(&table, cells, author)
+                .can_insert(&table, cells)
+                .map(advice_string)
                 .map_err(to_js_error),
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => db
-                .can_insert_for_identity(&table, cells, author)
-                .map_err(to_js_error),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
-        }
-    }
-
-    #[wasm_bindgen(js_name = canReadForIdentity)]
-    pub fn can_read_for_identity(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<bool, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let author = author_id_from_bytes(&author)?;
-        match &self.inner {
-            WasmDbInner::Memory(db) => db
-                .can_read_for_identity(&table, row_id, author)
-                .map_err(to_js_error),
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => db
-                .can_read_for_identity(&table, row_id, author)
+                .can_insert(&table, cells)
+                .map(advice_string)
                 .map_err(to_js_error),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
@@ -1741,49 +1714,6 @@ impl WasmDb {
             patch,
             updated_at_ms.map(|value| value as u64),
         )
-    }
-
-    #[wasm_bindgen(js_name = canUpdateEncodedForIdentity)]
-    pub fn can_update_encoded_for_identity(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        _patch: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<bool, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let author = author_id_from_bytes(&author)?;
-        match &self.inner {
-            WasmDbInner::Memory(db) => db
-                .can_update_for_identity(&table, row_id, author)
-                .map_err(to_js_error),
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => db
-                .can_update_for_identity(&table, row_id, author)
-                .map_err(to_js_error),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
-        }
-    }
-
-    #[wasm_bindgen(js_name = canDeleteForIdentity)]
-    pub fn can_delete_for_identity(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<bool, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let author = author_id_from_bytes(&author)?;
-        match &self.inner {
-            WasmDbInner::Memory(db) => db
-                .can_delete_for_identity(&table, row_id, author)
-                .map_err(to_js_error),
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => db
-                .can_delete_for_identity(&table, row_id, author)
-                .map_err(to_js_error),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
-        }
     }
 
     #[wasm_bindgen(js_name = upsertEncoded)]

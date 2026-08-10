@@ -101,9 +101,7 @@ declare module "jazz-wasm" {
     ): ReadableStream<unknown>;
 
     insertEncoded(table: string, cells: Uint8Array): WasmWrite;
-    canInsertEncoded(table: string, cells: Uint8Array): boolean;
-    canInsertEncodedForIdentity(table: string, cells: Uint8Array, author: Uint8Array): boolean;
-    canReadForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): boolean;
+    canInsertEncoded(table: string, cells: Uint8Array): "allowed" | "denied" | "unknown";
     insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
     insertWithIdEncodedForIdentity(
       table: string,
@@ -118,13 +116,6 @@ declare module "jazz-wasm" {
       patch: Uint8Array,
       author: Uint8Array,
     ): WasmWrite;
-    canUpdateEncodedForIdentity(
-      table: string,
-      rowId: Uint8Array,
-      patch: Uint8Array,
-      author: Uint8Array,
-    ): boolean;
-    canDeleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): boolean;
     upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
     upsertEncodedForIdentity(
       table: string,

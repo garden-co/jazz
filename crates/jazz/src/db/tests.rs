@@ -1310,29 +1310,43 @@ fn issue_cells(
 }
 
 #[test]
-fn can_insert_dry_run_uses_current_identity_without_writing() {
+fn client_insert_advice_is_unknown_without_writing() {
     let schema = owner_write_schema();
     let owner = AuthorId::from_bytes([0xa1; 16]);
     let other = AuthorId::from_bytes([0xb2; 16]);
     let owner_db = open_db(0xa1, owner, &schema);
     let other_db = open_db(0xb2, other, &schema);
 
-    assert!(
+    assert_eq!(
         owner_db
             .can_insert("todos", cells("owned", false, owner))
-            .unwrap()
+            .unwrap(),
+        PermissionAdvice::Unknown,
     );
-    assert!(
-        !other_db
+    assert_eq!(
+        other_db
             .can_insert("todos", cells("owned", false, owner))
-            .unwrap()
+            .unwrap(),
+        PermissionAdvice::Unknown,
+    );
+    assert_eq!(
+        owner_db
+            .authorize_insert_for_identity("todos", cells("owned", false, owner), owner)
+            .unwrap(),
+        PermissionAdvice::Allowed,
+    );
+    assert_eq!(
+        owner_db
+            .authorize_insert_for_identity("todos", cells("owned", false, owner), other)
+            .unwrap(),
+        PermissionAdvice::Denied,
     );
     assert_eq!(prepared_read(&owner_db, &owner_db.table("todos")).len(), 0);
     assert_eq!(prepared_read(&other_db, &other_db.table("todos")).len(), 0);
 }
 
 #[test]
-fn can_read_dry_run_uses_current_local_winner() {
+fn client_read_advice_is_unknown_even_when_a_local_winner_exists() {
     let schema = owner_read_schema();
     let owner = AuthorId::from_bytes([0xa1; 16]);
     let other = AuthorId::from_bytes([0xb2; 16]);
@@ -1367,12 +1381,30 @@ fn can_read_dry_run_uses_current_local_winner() {
         .apply_sync_message(SyncMessage::CommitUnit { tx, versions })
         .unwrap();
 
-    assert!(owner_db.can_read("todos", row).unwrap());
-    assert!(!other_db.can_read("todos", row).unwrap());
+    assert_eq!(
+        owner_db.can_read("todos", row).unwrap(),
+        PermissionAdvice::Unknown
+    );
+    assert_eq!(
+        other_db.can_read("todos", row).unwrap(),
+        PermissionAdvice::Unknown
+    );
+    assert_eq!(
+        owner_db
+            .authorize_read_for_identity("todos", row, owner)
+            .unwrap(),
+        PermissionAdvice::Allowed,
+    );
+    assert_eq!(
+        owner_db
+            .authorize_read_for_identity("todos", row, other)
+            .unwrap(),
+        PermissionAdvice::Denied,
+    );
 }
 
 #[test]
-fn can_delete_dry_run_is_gated_by_write_policy_without_mutating() {
+fn client_delete_advice_is_unknown_without_mutating() {
     let schema = owner_write_schema();
     let owner = AuthorId::from_bytes([0xa1; 16]);
     let other = AuthorId::from_bytes([0xb2; 16]);
@@ -1396,8 +1428,26 @@ fn can_delete_dry_run_is_gated_by_write_policy_without_mutating() {
         )
         .unwrap();
 
-    assert!(owner_db.can_delete("todos", row).unwrap());
-    assert!(!other_db.can_delete("todos", row).unwrap());
+    assert_eq!(
+        owner_db.can_delete("todos", row).unwrap(),
+        PermissionAdvice::Unknown
+    );
+    assert_eq!(
+        other_db.can_delete("todos", row).unwrap(),
+        PermissionAdvice::Unknown
+    );
+    assert_eq!(
+        owner_db
+            .authorize_delete_for_identity("todos", row, owner)
+            .unwrap(),
+        PermissionAdvice::Allowed,
+    );
+    assert_eq!(
+        owner_db
+            .authorize_delete_for_identity("todos", row, other)
+            .unwrap(),
+        PermissionAdvice::Denied,
+    );
     assert_eq!(prepared_read(&owner_db, &owner_db.table("todos")).len(), 1);
     assert_eq!(prepared_read(&other_db, &other_db.table("todos")).len(), 1);
 }

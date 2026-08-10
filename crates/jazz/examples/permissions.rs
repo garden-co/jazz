@@ -4,8 +4,8 @@ use std::rc::Rc;
 
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, Error, ErrorCode, Node, RowCells, RowIdSource, SeededRowIdSource,
-    Transport, WriteState,
+    Db, DbConfig, DbIdentity, Error, ErrorCode, Node, PermissionAdvice, RowCells, RowIdSource,
+    SeededRowIdSource, Transport, WriteState,
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
@@ -184,22 +184,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let owner_db = open_db(0xa1, owner, schema.clone(), storage.clone())?;
     let other_db = open_db(0xb2, other, schema.clone(), storage.clone())?;
 
-    assert!(owner_db.can_insert("todos", todo_cells("owned", false, owner))?);
-    assert!(!other_db.can_insert("todos", todo_cells("owned", false, owner))?);
+    assert_eq!(
+        owner_db.can_insert("todos", todo_cells("owned", false, owner))?,
+        PermissionAdvice::Unknown,
+    );
+    assert_eq!(
+        other_db.can_insert("todos", todo_cells("owned", false, owner))?,
+        PermissionAdvice::Unknown,
+    );
     let todos = owner_db.prepare_query(&owner_db.table("todos"))?;
     assert_eq!(owner_db.read(&todos)?.len(), 0);
 
     let row = RowUuid::from_bytes([0x33; 16]);
     owner_db.insert_with_id("todos", row, todo_cells("private", false, owner))?;
 
-    assert!(owner_db.can_read("todos", row)?);
-    assert!(owner_db.can_update("todos", row)?);
-    assert!(owner_db.can_delete("todos", row)?);
-    assert!(!other_db.can_read("todos", row)?);
-    assert!(!other_db.can_update("todos", row)?);
-    assert!(!other_db.can_delete("todos", row)?);
+    assert_eq!(owner_db.can_read("todos", row)?, PermissionAdvice::Unknown);
+    assert_eq!(
+        owner_db.can_update("todos", row)?,
+        PermissionAdvice::Unknown
+    );
+    assert_eq!(
+        owner_db.can_delete("todos", row)?,
+        PermissionAdvice::Unknown
+    );
+    assert_eq!(other_db.can_read("todos", row)?, PermissionAdvice::Unknown);
+    assert_eq!(
+        other_db.can_update("todos", row)?,
+        PermissionAdvice::Unknown
+    );
+    assert_eq!(
+        other_db.can_delete("todos", row)?,
+        PermissionAdvice::Unknown
+    );
     assert_eq!(owner_db.read(&todos)?.len(), 1);
-    println!("permission previews allow the owner and reject another user");
+    println!("client permission previews remain unknown until a serving authority evaluates them");
 
     let backend = author(0xbe);
     let attributed_user = author(0xc3);

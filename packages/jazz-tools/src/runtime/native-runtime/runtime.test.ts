@@ -1022,6 +1022,106 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(clientReads).toBe(1);
   });
 
+  it("returns unknown locally without consulting hidden policy evidence", () => {
+    let authoritativeChecks = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            authorizeReadForIdentity: () => {
+              authoritativeChecks += 1;
+              return "allowed" as const;
+            },
+            authorizeInsertEncodedForIdentity: () => {
+              authoritativeChecks += 1;
+              return "denied" as const;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const session = {
+      user_id: "00000000-0000-0000-0000-0000000000a1",
+      claims: {},
+      authMode: "external" as const,
+    };
+
+    expect(runtime.canRead("todos", "00000000-0000-0000-0000-000000000001", session)).toBe(
+      "unknown",
+    );
+    expect(
+      runtime.canInsert("todos", { title: { type: "Text", value: "candidate" } }, session),
+    ).toBe("unknown");
+    expect(authoritativeChecks).toBe(0);
+  });
+
+  it("returns unknown while offline", async () => {
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ tick: () => undefined }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    await runtime.disconnect();
+
+    expect(
+      runtime.canDelete("todos", "00000000-0000-0000-0000-000000000001", {
+        user_id: "00000000-0000-0000-0000-0000000000a1",
+        claims: {},
+        authMode: "external",
+      }),
+    ).toBe("unknown");
+  });
+
+  it("does not locally evaluate permission advice even on a serving-configured runtime", () => {
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            authorizeReadForIdentity: () => "allowed" as const,
+            authorizeInsertEncodedForIdentity: () => "denied" as const,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+      { readAuthorizationHost: "trusted-serving" },
+    );
+    const session = {
+      user_id: "00000000-0000-0000-0000-0000000000a1",
+      claims: {},
+      authMode: "external" as const,
+    };
+
+    expect(runtime.canRead("todos", "00000000-0000-0000-0000-000000000001", session)).toBe(
+      "unknown",
+    );
+    expect(
+      runtime.canInsert("todos", { title: { type: "Text", value: "candidate" } }, session),
+    ).toBe("unknown");
+  });
+
   it("uses trusted serving only when the host explicitly selects it", async () => {
     const authors: string[] = [];
     const runtime = new NativeRuntimeAdapter(
