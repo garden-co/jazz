@@ -15,7 +15,7 @@ use ruzstd::io::Read;
 use postcard::{from_bytes, to_allocvec};
 use serde::{Deserialize, Serialize};
 
-use crate::ids::AuthorId;
+use crate::ids::{AuthorId, NodeUuid};
 use crate::protocol::SyncMessage;
 use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_len};
 
@@ -107,6 +107,23 @@ pub struct WireHello {
     pub features: WireFeatures,
     /// Runtime/link role for topology and admission decisions.
     pub role: WirePeerRole,
+    /// Authority endpoint bound by the authenticated handshake when the
+    /// authorization-scope receipt feature is offered.  Semantic sync frames
+    /// never self-assert this identity.
+    #[serde(default)]
+    pub authority: Option<WireAuthorityEndpoint>,
+}
+
+/// Fresh, authenticated authority endpoint identity for one negotiated link.
+///
+/// The session/admission layer allocates this nonce before constructing the
+/// eventual sync connection; receipts use it to reject reconnect replay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireAuthorityEndpoint {
+    /// Stable authority node identity authenticated by the transport.
+    pub node: NodeUuid,
+    /// Fresh non-resumable epoch for this accepted connection.
+    pub epoch: u64,
 }
 
 impl WireHello {
@@ -117,7 +134,14 @@ impl WireHello {
             max_protocol_version: WIRE_PROTOCOL_VERSION,
             features,
             role,
+            authority: None,
         }
+    }
+
+    /// Attach the endpoint allocated by authenticated session admission.
+    pub fn with_authority(mut self, node: NodeUuid, epoch: u64) -> Self {
+        self.authority = Some(WireAuthorityEndpoint { node, epoch });
+        self
     }
 }
 
@@ -663,9 +687,16 @@ pub fn negotiate_wire(
             ),
         ));
     }
+    let mut features = remote.features & local_features;
+    // Receipt semantics need a handshake-bound issuer epoch.  A peer that
+    // merely advertises the bit but cannot provide that endpoint is treated as
+    // old for this feature, so semantic receipt variants stay fail-closed.
+    if features & FEATURE_AUTHORIZATION_SCOPE_RECEIPTS != 0 && remote.authority.is_none() {
+        features &= !FEATURE_AUTHORIZATION_SCOPE_RECEIPTS;
+    }
     Ok(WireNegotiated {
         protocol_version: max,
-        features: remote.features & local_features,
+        features,
     })
 }
 
@@ -1270,6 +1301,7 @@ mod tests {
             max_protocol_version: 3,
             features: FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_SESSION_FRAME,
             role: WirePeerRole::Relay,
+            authority: None,
         };
 
         let negotiated = negotiate_wire(
@@ -1296,12 +1328,40 @@ mod tests {
             max_protocol_version: 1,
             features: FEATURE_NONE,
             role: WirePeerRole::Core,
+            authority: None,
         };
 
         let err = negotiate_wire(&remote, 2, 2, FEATURE_NONE).unwrap_err();
 
         assert_eq!(err.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(err.retry, WireRetry::Never);
+    }
+
+    #[test]
+    fn receipt_feature_requires_handshake_bound_authority_endpoint() {
+        let feature = FEATURE_AUTHORIZATION_SCOPE_RECEIPTS;
+        let old = WireHello::current(WirePeerRole::Core, feature);
+        assert_eq!(
+            negotiate_wire(&old, WIRE_PROTOCOL_VERSION, WIRE_PROTOCOL_VERSION, feature)
+                .unwrap()
+                .features
+                & feature,
+            0
+        );
+        let accepted = WireHello::current(WirePeerRole::Core, feature)
+            .with_authority(NodeUuid::from_bytes([0x71; 16]), 9);
+        assert_ne!(
+            negotiate_wire(
+                &accepted,
+                WIRE_PROTOCOL_VERSION,
+                WIRE_PROTOCOL_VERSION,
+                feature,
+            )
+            .unwrap()
+            .features
+                & feature,
+            0
+        );
     }
 
     #[test]
