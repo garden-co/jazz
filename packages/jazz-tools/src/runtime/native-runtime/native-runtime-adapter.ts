@@ -61,6 +61,8 @@ export { encodeSchema } from "./schema-codec.js";
 
 const SERVER_PUMP_DEBOUNCE_MS = 16;
 
+type ReadAuthorizationHost = "client-local" | "trusted-serving";
+
 type NativeDbConstructor = {
   openMemory(schema: Uint8Array, config: Uint8Array): NativeDb;
   openPersistent?(dataPath: string, schema: Uint8Array, config: Uint8Array): NativeDb;
@@ -366,6 +368,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly completedTxs: Map<string, CompletedTx>;
   private readonly writes: Map<string, Write>;
   private readonly ownerRuntime: NativeRuntimeAdapter;
+  private readonly readAuthorizationHost: ReadAuthorizationHost;
   private readonly serverPumpObservedWrites = new WeakSet<Write>();
   private readonly subscriptions = new Map<number, SubscriptionState>();
   private authFailureCallback: ((reason: string) => void) | null = null;
@@ -414,10 +417,13 @@ export class NativeRuntimeAdapter implements Runtime {
       persistentPath?: string;
       db?: NativeDb;
       initialSyncFlushEvery?: number;
+      readAuthorizationHost?: ReadAuthorizationHost;
       owner?: NativeRuntimeAdapter;
     },
   ) {
     this.ownerRuntime = opts?.owner?.ownerRuntime ?? this;
+    this.readAuthorizationHost =
+      opts?.owner?.readAuthorizationHost ?? opts?.readAuthorizationHost ?? "client-local";
     this.transactionOwner = opts?.owner?.transactionOwner ?? {
       pendingTxs: new Map(),
       completedTxs: new Map(),
@@ -814,11 +820,15 @@ export class NativeRuntimeAdapter implements Runtime {
     const coreQueryJson = addNestedOuterColumns(queryJson);
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
     if (queryUsesNativeRelationApi(coreQueryJson)) {
-      if (session) {
+      if (this.readAuthorizationHost === "trusted-serving") {
         if (!this.db.allRelationQueryForIdentity) {
-          throw new Error("Native runtime does not support session-scoped relation queries");
+          throw new Error("Native runtime does not support trusted-serving relation queries");
         }
-        const payload = this.db.allRelationQueryForIdentity(coreQueryJson, session.identity, opts);
+        const payload = this.db.allRelationQueryForIdentity(
+          coreQueryJson,
+          session?.identity ?? this.peerIdentity,
+          opts,
+        );
         return rowsFromBatches(readRowBatches(payload), this.schema);
       }
       if (!this.db.allRelationQuery) {
@@ -832,11 +842,15 @@ export class NativeRuntimeAdapter implements Runtime {
     this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     try {
       if (queryHasArraySubqueries(coreQueryJson)) {
-        if (session) {
+        if (this.readAuthorizationHost === "trusted-serving") {
           if (!this.db.allRelationSnapshotForIdentity) {
-            throw new Error("Native runtime does not support session-scoped relation snapshots");
+            throw new Error("Native runtime does not support trusted-serving relation snapshots");
           }
-          const payload = this.db.allRelationSnapshotForIdentity(query, session.identity, opts);
+          const payload = this.db.allRelationSnapshotForIdentity(
+            query,
+            session?.identity ?? this.peerIdentity,
+            opts,
+          );
           return rowsFromRelationSnapshot(
             readRelationSnapshot(payload),
             this.schema,
@@ -885,16 +899,21 @@ export class NativeRuntimeAdapter implements Runtime {
       if (!this.db.subscribeRelationQuery) {
         throw new Error("Native runtime does not support relation query subscriptions");
       }
-      if (session && !this.db.subscribeRelationQueryForIdentity) {
-        throw new Error(
-          "Native runtime does not support session-scoped relation query subscriptions",
-        );
+      if (
+        this.readAuthorizationHost === "trusted-serving" &&
+        !this.db.subscribeRelationQueryForIdentity
+      ) {
+        throw new Error("Native runtime does not support trusted-serving relation subscriptions");
       }
     } else if (!this.db.subscribe) {
       throw new Error("Native runtime does not support subscriptions");
     }
-    if (!usesNativeRelationApi && session && !this.db.subscribeForIdentity) {
-      throw new Error("Native runtime does not support session-scoped subscriptions");
+    if (
+      this.readAuthorizationHost === "trusted-serving" &&
+      !usesNativeRelationApi &&
+      !this.db.subscribeForIdentity
+    ) {
+      throw new Error("Native runtime does not support trusted-serving subscriptions");
     }
     const handle = this.nextSubscriptionId++;
     const opts = readOptions(tier, false, optionsJson);
@@ -903,15 +922,21 @@ export class NativeRuntimeAdapter implements Runtime {
     let preparedQuery: PreparedQuery | null = null;
     try {
       if (usesNativeRelationApi) {
-        nativeSubscription = identity
-          ? this.db.subscribeRelationQueryForIdentity!(queryJson, identity, opts)
-          : this.db.subscribeRelationQuery!(queryJson, opts);
+        nativeSubscription =
+          this.readAuthorizationHost === "trusted-serving"
+            ? this.db.subscribeRelationQueryForIdentity!(
+                queryJson,
+                identity ?? this.peerIdentity,
+                opts,
+              )
+            : this.db.subscribeRelationQuery!(queryJson, opts);
       } else {
         const query = this.prepareQuery(queryJson);
         preparedQuery = query;
-        nativeSubscription = identity
-          ? this.db.subscribeForIdentity!(query, identity, opts)
-          : this.db.subscribe!(query, opts);
+        nativeSubscription =
+          this.readAuthorizationHost === "trusted-serving"
+            ? this.db.subscribeForIdentity!(query, identity ?? this.peerIdentity, opts)
+            : this.db.subscribe!(query, opts);
       }
     } catch (error) {
       const nativeStack = error instanceof Error ? error.stack : undefined;
@@ -1128,7 +1153,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readRow(table: string, rowId: Uint8Array, identity?: Uint8Array): RowState | undefined {
     if (!identity) return this.readRowForWriteMerge(table, rowId);
     const query = this.prepareQuery(JSON.stringify({ table }));
-    const rows = this.db.allForIdentity(query, identity, readOptions());
+    const rows = this.readRowsForHost(query, readOptions(), identity);
     return rowsFromBatches(readRowBatches(rows), this.schema).find(
       (row) => row.table === table && row.id === formatUuid(rowId),
     );
@@ -1200,19 +1225,15 @@ export class NativeRuntimeAdapter implements Runtime {
     session: RuntimeSession | undefined,
     pendingTx: PendingTx | undefined,
   ): Uint8Array {
-    if (!pendingTx) {
-      return session
-        ? this.db.allForIdentity(query, session.identity, opts)
-        : this.db.all(query, opts);
-    }
-    if (session) {
+    if (!pendingTx) return this.readRowsForHost(query, opts, session?.identity);
+    if (this.readAuthorizationHost === "trusted-serving") {
       if (!this.db.allInTransactionForIdentity) {
-        throw new Error("Native runtime does not support session-scoped transaction reads");
+        throw new Error("Native runtime does not support trusted-serving transaction reads");
       }
       return this.db.allInTransactionForIdentity(
         query,
         this.txForRead(pendingTx),
-        session.identity,
+        session?.identity ?? this.peerIdentity,
         opts,
       );
     }
@@ -1220,6 +1241,17 @@ export class NativeRuntimeAdapter implements Runtime {
       throw new Error("Native runtime does not support transaction reads");
     }
     return this.db.allInTransaction(query, this.txForRead(pendingTx), opts);
+  }
+
+  /**
+   * Client runtimes consume server-scoped settled data locally. Only an
+   * explicitly configured serving host may select the policy-enforcing entry
+   * point, with a request session supplying its subject when present.
+   */
+  private readRowsForHost(query: PreparedQuery, opts: unknown, identity?: Uint8Array): Uint8Array {
+    return this.readAuthorizationHost === "trusted-serving"
+      ? this.db.allForIdentity(query, identity ?? this.peerIdentity, opts)
+      : this.db.all(query, opts);
   }
 
   private stagedRowForWriteMerge(
@@ -1263,11 +1295,7 @@ export class NativeRuntimeAdapter implements Runtime {
       try {
         attachment = await this.attachQueryIfNeeded("edge", null, query, session);
         const opts = readOptions("edge", false, null);
-        if (session) {
-          this.db.allForIdentity(query, session.identity, opts);
-        } else {
-          this.db.all(query, opts);
-        }
+        this.readRowsForHost(query, opts, session?.identity);
       } finally {
         if (attachment !== undefined) this.db.detachQuery?.(attachment);
       }
@@ -1367,11 +1395,7 @@ export class NativeRuntimeAdapter implements Runtime {
         if (this.db.queryAttachmentIsCovered(attachment)) return;
       }
       try {
-        if (identity) {
-          this.db.allForIdentity(query, identity, opts);
-        } else {
-          this.db.all(query, opts);
-        }
+        this.readRowsForHost(query, opts, identity);
         if (!this.db.queryAttachmentIsCovered) return;
       } catch (error) {
         if (!isPendingCoverageError(error)) throw error;
