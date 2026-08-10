@@ -54,6 +54,19 @@ fn fast_current_membership_position(
     }
 }
 
+fn fast_authorization_progress(known_state: &Option<KnownStateDeclaration>) -> Option<u64> {
+    match known_state {
+        Some(KnownStateDeclaration::FastWithAuthorizationProgress {
+            completeness: KnownStateCompleteness::FastCurrentMembership,
+            authorization_progress,
+            ..
+        }) => Some(*authorization_progress),
+        Some(KnownStateDeclaration::Fast { .. })
+        | Some(KnownStateDeclaration::ExactVersionSet { .. })
+        | None => None,
+    }
+}
+
 fn member_settle_position(member: &ResultMemberEntry) -> Option<crate::time::GlobalSeq> {
     match member {
         ResultMemberEntry::Row(row) | ResultMemberEntry::TypedRow { row, .. } => {
@@ -143,6 +156,7 @@ struct PeerSubscriptionState {
     groove_runtime_token: Option<u64>,
     known_state: Option<KnownStateDeclaration>,
     authorization_progress: u64,
+    has_served_authorization_progress: bool,
 }
 
 impl PeerSubscriptionState {
@@ -281,6 +295,23 @@ fn edge_scope_ttl_ms() -> u64 {
 }
 
 impl PeerState {
+    fn fast_cursor_authorization_matches(
+        &self,
+        subscription: SubscriptionKey,
+        known_state: &Option<KnownStateDeclaration>,
+    ) -> bool {
+        match self.role {
+            PeerRole::Relay => true,
+            PeerRole::ClientLink { .. } => {
+                self.subscriptions.get(&subscription).is_some_and(|state| {
+                    state.has_served_authorization_progress
+                        && fast_authorization_progress(known_state)
+                            == Some(state.authorization_progress)
+                })
+            }
+        }
+    }
+
     pub(crate) fn needs_catalogue_snapshot(&self, fingerprint: [u8; 32]) -> bool {
         self.announced_catalogue_fingerprint != Some(fingerprint)
     }
@@ -1048,6 +1079,8 @@ impl PeerState {
             .get(&subscription)
             .and_then(|state| state.known_state.clone());
         let known_membership_position = fast_current_membership_position(&known_state);
+        let authorization_matches =
+            self.fast_cursor_authorization_matches(subscription, &known_state);
         let watermark = node.applied_global_watermark();
         let simple_membership_delta =
             transitions.program_fact_adds.is_empty() && transitions.program_fact_removes.is_empty();
@@ -1074,16 +1107,19 @@ impl PeerState {
         // removed prior member or newly visible pre-cursor member cannot be
         // reconstructed from that cursor, so it cannot safely suppress the
         // authoritative membership diff or the payload needed to apply it.
-        // Membership can change through policy rows without advancing the
-        // link-local authorization generation. Preserve the #1266 reset for
-        // pre-cursor grants/revokes; post-cursor additions remain incremental.
-        let cursor_membership_mismatch = known_membership_position.is_some_and(|position| {
-            fast_cursor_requires_authoritative_reset(
-                position,
-                previous_member_result_set,
-                &current_member_result_set,
-            )
-        });
+        // A relay has no per-client authorization boundary. A client may only
+        // reuse a pre-cursor membership diff when this peer retained the view
+        // and the receiver echoes its exact server-stamped authorization
+        // generation. Fresh, legacy, and tokenless client declarations keep
+        // the #1266 authoritative reset.
+        let cursor_membership_mismatch = !authorization_matches
+            && known_membership_position.is_some_and(|position| {
+                fast_cursor_requires_authoritative_reset(
+                    position,
+                    previous_member_result_set,
+                    &current_member_result_set,
+                )
+            });
         let (program_fact_adds, program_fact_removes, reset_result_set) = if reset_result_set
             && !cursor_membership_mismatch
             && let Some(position) = known_membership_position
@@ -1207,6 +1243,10 @@ impl PeerState {
         state.maintained_subscription_view = Some(maintained_subscription);
         state.groove_runtime_token = Some(node.groove_runtime_token());
         self.record_outgoing_view_update(&update);
+        self.subscriptions
+            .entry(subscription)
+            .or_default()
+            .has_served_authorization_progress = true;
         self.metrics.maintained_subscription_view.hits_out += 1;
         self.refresh_maintained_subscription_view_footprint(subscription);
         Ok(update)
@@ -1276,10 +1316,25 @@ impl PeerState {
             .get(&subscription)
             .map(PeerSubscriptionState::member_result_set)
             .unwrap_or_default();
+        let previous_program_fact_set = self
+            .subscriptions
+            .get(&subscription)
+            .map(PeerSubscriptionState::program_fact_set)
+            .unwrap_or_default();
+        let previous_member_index = self
+            .subscriptions
+            .get(&subscription)
+            .map(|state| state.member_index.clone())
+            .unwrap_or_default();
         let known_state = self
             .subscriptions
             .get(&subscription)
             .and_then(|state| state.known_state.clone());
+        let retained_authorization = self.subscriptions.get(&subscription).and_then(|state| {
+            state
+                .has_served_authorization_progress
+                .then_some(state.authorization_progress)
+        });
         self.forget_subscription_with_node(node, subscription);
         let plan = node.mark_peer_maintained_query_shape_cache(shape, binding, opts.tier);
         let cached = CachedPeerQueryPlan::with_plan(opts.tier, plan);
@@ -1287,6 +1342,13 @@ impl PeerState {
         state.prepared_query = Some(cached);
         state.groove_runtime_token = Some(node.groove_runtime_token());
         state.known_state = known_state;
+        state.result_member_set = previous_member_result_set.clone();
+        state.program_fact_set = previous_program_fact_set;
+        state.member_index = previous_member_index;
+        if let Some(authorization_progress) = retained_authorization {
+            state.authorization_progress = authorization_progress;
+            state.has_served_authorization_progress = true;
+        }
         self.rehydrate_query_maintained_subscription_view(
             node,
             MaintainedRehydrateRequest {
@@ -2468,6 +2530,147 @@ mod tests {
             &previous,
             &BTreeSet::new(),
         ));
+    }
+
+    #[test]
+    fn client_fast_cursor_requires_retained_matching_authorization_progress() {
+        let subscription = SubscriptionKey {
+            shape_id: crate::query::ShapeId(uuid::Uuid::from_u128(1)),
+            binding_id: crate::query::BindingId(uuid::Uuid::from_u128(2)),
+            read_view: Default::default(),
+        };
+        let cursor = GlobalSeq(10);
+        let known_state = Some(KnownStateDeclaration::FastWithAuthorizationProgress {
+            completeness: KnownStateCompleteness::FastCurrentMembership,
+            position: cursor,
+            authorization_progress: 0,
+        });
+        let previous = BTreeSet::from([settled_member(row(1), 7)]);
+        let revoked = BTreeSet::new();
+
+        let mut fresh_client = PeerState::client_link(AuthorId::from_bytes([0x11; 16]));
+        fresh_client.declare_known_state(subscription, known_state.clone());
+        assert!(!fresh_client.fast_cursor_authorization_matches(subscription, &known_state));
+        assert!(fast_cursor_requires_authoritative_reset(
+            cursor, &previous, &revoked,
+        ));
+
+        let state = fresh_client.subscriptions.get_mut(&subscription).unwrap();
+        state.authorization_progress = 0;
+        state.has_served_authorization_progress = true;
+        assert!(fresh_client.fast_cursor_authorization_matches(subscription, &known_state));
+
+        let legacy = Some(KnownStateDeclaration::Fast {
+            completeness: KnownStateCompleteness::FastCurrentMembership,
+            position: cursor,
+        });
+        assert!(!fresh_client.fast_cursor_authorization_matches(subscription, &legacy));
+        assert!(!fresh_client.fast_cursor_authorization_matches(subscription, &None));
+
+        let relay = PeerState::relay();
+        assert!(relay.fast_cursor_authorization_matches(subscription, &legacy));
+    }
+
+    #[test]
+    fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
+        let (_dir, mut core) = open_node_with_uuid(node(0x91));
+        let live = row(0x31);
+        let live_tx = core
+            .commit_mergeable(MergeableCommit::new("todos", live, 1_000).cells(title_cells("live")))
+            .unwrap();
+        accept_global(&mut core, live_tx, 1);
+        let shape = Query::from("todos").validate(&schema()).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let subscription = subscription_key(&shape, &binding);
+        let known = |position, authorization_progress| {
+            Some(KnownStateDeclaration::FastWithAuthorizationProgress {
+                completeness: KnownStateCompleteness::FastCurrentMembership,
+                position: GlobalSeq(position),
+                authorization_progress,
+            })
+        };
+
+        let identity = AuthorId::from_bytes([0x11; 16]);
+        let mut fresh = PeerState::client_link(identity);
+        fresh.declare_known_state(subscription, known(1, 0));
+        let fresh_update = fresh.rehydrate_query(&mut core, &shape, &binding).unwrap();
+        let SyncMessage::ViewUpdate {
+            reset_result_set,
+            result_member_adds,
+            ..
+        } = fresh_update
+        else {
+            panic!("expected view update");
+        };
+        assert!(
+            reset_result_set,
+            "fresh client token must not suppress reset"
+        );
+        assert_eq!(result_member_adds.len(), 1);
+
+        let retained_member = fresh.subscriptions[&subscription]
+            .result_member_set
+            .iter()
+            .next()
+            .unwrap()
+            .clone();
+        apply_contribution_add(
+            fresh.subscriptions.get_mut(&subscription).unwrap(),
+            std::iter::once(&retained_member),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            fresh.subscriptions[&subscription]
+                .member_index
+                .values()
+                .next()
+                .unwrap()
+                .refcount,
+            2
+        );
+
+        fresh.declare_known_state(subscription, known(1, 0));
+        let retained_update = fresh.rehydrate_query(&mut core, &shape, &binding).unwrap();
+        let SyncMessage::ViewUpdate {
+            reset_result_set,
+            result_member_adds,
+            ..
+        } = retained_update
+        else {
+            panic!("expected view update");
+        };
+        assert!(!reset_result_set, "retained matching token may resume");
+        assert!(result_member_adds.is_empty());
+        assert_eq!(
+            fresh.subscriptions[&subscription]
+                .member_index
+                .values()
+                .next()
+                .unwrap()
+                .refcount,
+            2,
+            "retained resume must preserve contribution refcounts"
+        );
+
+        let deleted_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", live, 2_000).deletion(DeletionEvent::Deleted),
+            )
+            .unwrap();
+        accept_global(&mut core, deleted_tx, 2);
+        fresh.declare_known_state(subscription, known(2, 1));
+        let revoke_update = fresh.rehydrate_query(&mut core, &shape, &binding).unwrap();
+        let SyncMessage::ViewUpdate {
+            reset_result_set, ..
+        } = revoke_update
+        else {
+            panic!("expected view update");
+        };
+        assert!(
+            reset_result_set,
+            "mismatched authorization token must reset a retained revoke"
+        );
     }
 
     fn output_member(root: RowUuid, joined: RowUuid, time: u64) -> ResultMemberEntry {
