@@ -11936,10 +11936,25 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(
+        subscription
+            .try_next_event()
+            .expect("identity-key grant must publish during the completed tick cycle"),
+    );
     assert_eq!(row_ids(&added), vec![resource]);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
+
+    let mut late_subscription =
+        prepared_subscribe(&client, &Query::from("resources"), ReadOpts::default()).unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(
+            late_subscription
+                .try_next_event()
+                .expect("late subscription must open synchronously"),
+        )),
+        vec![resource]
+    );
 
     server
         .update(
@@ -11951,7 +11966,25 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(
+        subscription
+            .try_next_event()
+            .expect("identity-key revoke must publish during the completed tick cycle"),
+    );
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed
+            .into_iter()
+            .map(|row| row.row_uuid)
+            .collect::<Vec<_>>(),
+        vec![resource]
+    );
+    let (added, updated, removed) = delta_rows(
+        late_subscription
+            .try_next_event()
+            .expect("late subscription must publish the identity-key revoke"),
+    );
     assert!(added.is_empty());
     assert!(updated.is_empty());
     assert_eq!(

@@ -1731,7 +1731,7 @@ where
                 node.unsubscribe_groove_subscription(subscription_id);
             }
         }));
-        let maintained_subscription = Some(subscription);
+        let mut maintained_subscription = Some(subscription);
         let terminal_rows = !local_shape.query().array_subqueries.is_empty();
         let mut state_shape = local_shape;
         let mut state_binding = local_binding;
@@ -1769,6 +1769,29 @@ where
             )?;
         }
         let settled_tier = remote_read_tier.unwrap_or(read_tier);
+        if authorization_mode == QueryAuthorizationMode::ClientLocal
+            && remote_read_tier.is_some()
+            && state_shape.query().aggregate.is_none()
+        {
+            let binding_view_key = BindingViewKey {
+                shape_id: state_shape.shape_id(),
+                binding_id: state_binding.binding_id(),
+                read_view: RegisterShapeOptions {
+                    tier: settled_tier,
+                    read_view: opts.read_view.clone(),
+                }
+                .read_view_key(),
+            };
+            if let Some(maintained) = maintained_subscription.as_mut() {
+                self.node
+                    .node
+                    .borrow()
+                    .seed_local_maintained_authoritative_result_membership(
+                        maintained,
+                        binding_view_key,
+                    );
+            }
+        }
         let settled = subscription_is_settled(
             &self.node.node.borrow(),
             &state_shape,
@@ -5070,6 +5093,23 @@ where
                 }
                 .read_view_key(),
             };
+            if authorization_mode == QueryAuthorizationMode::ClientLocal
+                && remote_read_tier.is_some()
+                && shape.query().aggregate.is_none()
+            {
+                let mut state_ref = state.borrow_mut();
+                let SubscriptionKind::Prepared {
+                    maintained_subscription,
+                    ..
+                } = &mut state_ref.kind;
+                if let Some(maintained) = maintained_subscription.as_mut() {
+                    node.borrow()
+                        .seed_local_maintained_authoritative_result_membership(
+                            maintained,
+                            settled_binding_view,
+                        );
+                }
+            }
             let pending_binding_view = pending_authoritative_resets
                 .contains(&delivered_binding_view)
                 .then_some(delivered_binding_view)
@@ -5298,9 +5338,9 @@ where
                         {
                             let mut node_ref = node.borrow_mut();
                             if authoritative_snapshot_available {
-                                match node_ref
-                                    .drain_local_maintained_view_subscription_state(maintained)
-                                {
+                                match node_ref.drain_local_maintained_view_subscription_state(
+                                    maintained, None,
+                                ) {
                                     Ok(_) => {
                                         node_ref
                                             .reset_local_maintained_view_subscription_from_binding_view(
@@ -5312,7 +5352,8 @@ where
                                     Err(error) => return Err(error.into()),
                                 }
                             } else {
-                                match node_ref.drain_local_maintained_view_subscription(maintained)
+                                match node_ref
+                                    .drain_local_maintained_view_subscription(maintained, None)
                                 {
                                     Ok(update) => update,
                                     Err(crate::node::Error::MissingTransaction(_)) => {
@@ -5393,7 +5434,9 @@ where
                                 // Groove mirror for future resets without
                                 // publishing its redundant reconstruction.
                                 node.borrow_mut()
-                                    .drain_local_maintained_view_subscription_state(maintained)?;
+                                    .drain_local_maintained_view_subscription_state(
+                                        maintained, None,
+                                    )?;
                             }
                             let settled = subscription_is_settled(
                                 &node.borrow(),
@@ -5423,7 +5466,15 @@ where
                             maintained_subscription.as_mut()
                         {
                             let mut node_ref = node.borrow_mut();
-                            match node_ref.drain_local_maintained_view_subscription(maintained) {
+                            let authoritative_binding_view = (authorization_mode
+                                == QueryAuthorizationMode::ClientLocal
+                                && remote_read_tier.is_some()
+                                && shape.query().aggregate.is_none())
+                            .then_some(settled_binding_view);
+                            match node_ref.drain_local_maintained_view_subscription(
+                                maintained,
+                                authoritative_binding_view,
+                            ) {
                                 Ok(update) => update,
                                 Err(crate::node::Error::MissingTransaction(_)) => {
                                     node_ref.record_authoritative_reset_missing_payload_fallback();
