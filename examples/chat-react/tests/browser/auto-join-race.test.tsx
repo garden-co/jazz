@@ -31,10 +31,6 @@ import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 // Helpers
 // ---------------------------------------------------------------------------
 
-function uniqueDbName(label: string): string {
-  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -135,8 +131,8 @@ describe("auto-join race on first message send", () => {
       // ── Alice: create a public chat ────────────────────────────────────────
       const aliceConfig = {
         appId: APP_ID,
-        dbName: uniqueDbName("autojoin-alice"),
-        driver: { type: "memory" },
+        dbName: crypto.randomUUID(),
+        driver: { type: "memory" as const },
         serverUrl,
         secret: await testSecret(`autojoin-alice-${runId}`),
       };
@@ -200,8 +196,8 @@ describe("auto-join race on first message send", () => {
 
       const bobConfig = {
         appId: APP_ID,
-        dbName: uniqueDbName("autojoin-bob"),
-        driver: { type: "memory" },
+        dbName: crypto.randomUUID(),
+        driver: { type: "memory" as const },
         serverUrl,
         secret: await testSecret(`autojoin-bob-${runId}`),
       };
