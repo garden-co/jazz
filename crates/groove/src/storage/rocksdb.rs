@@ -174,6 +174,8 @@ impl RocksDbStorage {
         let mut live_data = Vec::new();
         let mut memtables = Vec::new();
         let mut pending_compaction = Vec::new();
+        let mut flush_pending = Vec::new();
+        let mut compaction_pending = Vec::new();
         for name in &self.column_families {
             let Some(handle) = self.db.cf_handle(name) else {
                 continue;
@@ -184,6 +186,8 @@ impl RocksDbStorage {
             live_data.push(property(properties::ESTIMATE_LIVE_DATA_SIZE)?);
             memtables.push(property(properties::SIZE_ALL_MEM_TABLES)?);
             pending_compaction.push(property(properties::ESTIMATE_PENDING_COMPACTION_BYTES)?);
+            flush_pending.push(property(properties::MEM_TABLE_FLUSH_PENDING)?);
+            compaction_pending.push(property(properties::COMPACTION_PENDING)?);
         }
         let global = |property| self.db.property_int_value(property);
         Ok(RocksDbMetrics {
@@ -194,8 +198,8 @@ impl RocksDbStorage {
             pending_compaction_bytes: sum_available(&pending_compaction),
             running_flushes: global(properties::NUM_RUNNING_FLUSHES)?,
             running_compactions: global(properties::NUM_RUNNING_COMPACTIONS)?,
-            flush_pending: global(properties::MEM_TABLE_FLUSH_PENDING)?.map(|v| v != 0),
-            compaction_pending: global(properties::COMPACTION_PENDING)?.map(|v| v != 0),
+            flush_pending: any_available(&flush_pending),
+            compaction_pending: any_available(&compaction_pending),
         })
     }
 }
@@ -204,6 +208,12 @@ fn sum_available(values: &[Option<u64>]) -> Option<u64> {
     values.iter().try_fold(0u64, |sum, value| {
         value.map(|value| sum.saturating_add(value))
     })
+}
+
+fn any_available(values: &[Option<u64>]) -> Option<bool> {
+    values
+        .iter()
+        .try_fold(false, |any, value| value.map(|value| any || value != 0))
 }
 
 fn rocksdb_options(block_cache: &Cache, write_buffer_manager: &WriteBufferManager) -> Options {
@@ -604,7 +614,7 @@ mod tests {
     use super::{
         CLASS_AHEAD_CURRENT_CF, CLASS_CHANGES_CF, CLASS_CONTENT_CF, CLASS_GLOBAL_CURRENT_CF,
         CLASS_HISTORY_CF, CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, RocksDbClassProfile,
-        RocksDbStorage, rocksdb_class_profile, sum_available,
+        RocksDbStorage, any_available, rocksdb_class_profile, sum_available,
     };
 
     #[test]
@@ -675,6 +685,8 @@ mod tests {
     fn metrics_include_default_cf_and_keep_unavailable_aggregates_unknown() {
         assert_eq!(sum_available(&[Some(2), Some(3)]), Some(5));
         assert_eq!(sum_available(&[Some(2), None, Some(3)]), None);
+        assert_eq!(any_available(&[Some(0), Some(1)]), Some(true));
+        assert_eq!(any_available(&[Some(0), None]), None);
 
         let dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(dir.path(), &["left", "right"]).unwrap();
