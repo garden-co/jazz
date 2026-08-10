@@ -3647,7 +3647,7 @@ function nativeRowFieldPlans(
 
   for (let index = 0; index < batch.descriptor.length; index += 1) {
     const fieldName = batch.descriptor[index]?.name;
-    if (!fieldName || isInternalField(fieldName)) continue;
+    if (!fieldName || isInternalField(fieldName) || isCurrentRowPhysicalField(fieldName)) continue;
 
     const name = publicFieldName(fieldName);
     const type =
@@ -3665,6 +3665,15 @@ function nativeRowFieldPlans(
 
   if (!projectedColumns) cache.set(cacheKey, plans);
   return plans;
+}
+
+// These fields are provenance retained by settled/materializer read paths.
+// They are never Jazz application columns (user columns use the `user_`
+// descriptor namespace) and must not cross the public native row boundary.
+function isCurrentRowPhysicalField(fieldName: string): boolean {
+  return (
+    fieldName === "schema_version" || fieldName === "parents" || fieldName === "authored_columns"
+  );
 }
 
 function nativeRowFieldPlanCacheKey(batch: NativeRowBatch): string {
