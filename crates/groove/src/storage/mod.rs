@@ -37,7 +37,17 @@ pub use opfs::OpfsStorage;
 #[cfg(not(target_arch = "wasm32"))]
 pub use opfs::{BtreeSyncPolicy, NativeBtreeStorage};
 #[cfg(feature = "rocksdb")]
-pub use rocksdb_storage::{Durability, RocksDbStorage};
+pub use rocksdb_storage::RocksDbStorage;
+
+/// Local durability tier used for writes by file-backed storage backends.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Durability {
+    /// Sync every write batch through the OS for the strongest local durability.
+    #[default]
+    FullSync,
+    /// Keep WAL atomicity but do not fsync every commit, like SQLite WAL/NORMAL.
+    WalNoSync,
+}
 
 pub type ColumnFamilyName = str;
 pub type Key = [u8];

@@ -22,6 +22,8 @@ use super::{
     apply_storage_delta, compact_storage_delta_operand,
 };
 
+pub use super::Durability;
+
 const ROCKSDB_BLOCK_CACHE_BYTES: usize = 256 * 1024 * 1024;
 const ROCKSDB_WRITE_BUFFER_MANAGER_BYTES: usize = 256 * 1024 * 1024;
 const ROCKSDB_DEFAULT_BLOCK_BYTES: usize = 16 * 1024;
@@ -37,16 +39,6 @@ const CLASS_CHANGES_CF: &str = "__groove_class_changes";
 const CLASS_INDICES_CF: &str = "__groove_class_indices";
 const CLASS_CONTENT_CF: &str = "__groove_class_content";
 const CLASS_META_CF: &str = "__groove_class_meta";
-
-/// RocksDB durability tier used for writes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Durability {
-    /// Sync every write batch through the OS for the strongest local durability.
-    #[default]
-    FullSync,
-    /// Keep WAL atomicity but do not fsync every commit, like SQLite WAL/NORMAL.
-    WalNoSync,
-}
 
 /// RocksDB implementation of the ordered KV storage trait.
 pub struct RocksDbStorage {
