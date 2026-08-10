@@ -58,6 +58,28 @@ pub struct RocksDbStorage {
     write_flush_cadence: RefCell<Option<WriteFlushCadence>>,
 }
 
+/// A best-effort, allocation-free snapshot of the RocksDB counters that are
+/// useful when attributing a storage receipt.  These are backend counters, not
+/// process memory measurements: in particular `memtable_bytes` excludes the
+/// shared block cache and Rust allocations.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RocksDbMetrics {
+    /// Total bytes in all SST files, including files no longer live.
+    pub total_sst_bytes: u64,
+    /// Bytes in SST files reachable from the latest LSM version.
+    pub live_sst_bytes: u64,
+    /// Estimated bytes of live key/value data.
+    pub estimated_live_data_bytes: u64,
+    /// Bytes in mutable and immutable memtables; not the block cache.
+    pub memtable_bytes: u64,
+    /// Estimated bytes awaiting compaction (where supported by the profile).
+    pub pending_compaction_bytes: u64,
+    pub running_flushes: u64,
+    pub running_compactions: u64,
+    pub flush_pending: bool,
+    pub compaction_pending: bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct WriteFlushCadence {
     every: usize,
@@ -137,6 +159,47 @@ impl RocksDbStorage {
         self.db
             .cf_handle(cf)
             .ok_or_else(|| Error::ColumnFamilyNotFound(cf.to_owned()))
+    }
+
+    /// Snapshot RocksDB's per-column-family size and background-work
+    /// properties.  This intentionally does not enable RocksDB statistics:
+    /// enabling counters changes the workload being measured.  Receipts should
+    /// record these snapshots before and after a workload alongside recursive
+    /// on-disk directory bytes and machine metadata.
+    pub fn metrics(&self) -> Result<RocksDbMetrics, Error> {
+        let mut metrics = RocksDbMetrics::default();
+        for name in &self.column_families {
+            let Some(handle) = self.db.cf_handle(name) else {
+                continue;
+            };
+            let property = |property| self.db.property_int_value_cf(handle, property);
+            metrics.total_sst_bytes = metrics
+                .total_sst_bytes
+                .saturating_add(property(properties::TOTAL_SST_FILES_SIZE)?.unwrap_or(0));
+            metrics.live_sst_bytes = metrics
+                .live_sst_bytes
+                .saturating_add(property(properties::LIVE_SST_FILES_SIZE)?.unwrap_or(0));
+            metrics.estimated_live_data_bytes = metrics
+                .estimated_live_data_bytes
+                .saturating_add(property(properties::ESTIMATE_LIVE_DATA_SIZE)?.unwrap_or(0));
+            metrics.memtable_bytes = metrics
+                .memtable_bytes
+                .saturating_add(property(properties::SIZE_ALL_MEM_TABLES)?.unwrap_or(0));
+            metrics.pending_compaction_bytes = metrics.pending_compaction_bytes.saturating_add(
+                property(properties::ESTIMATE_PENDING_COMPACTION_BYTES)?.unwrap_or(0),
+            );
+            metrics.running_flushes = metrics
+                .running_flushes
+                .saturating_add(property(properties::NUM_RUNNING_FLUSHES)?.unwrap_or(0));
+            metrics.running_compactions = metrics
+                .running_compactions
+                .saturating_add(property(properties::NUM_RUNNING_COMPACTIONS)?.unwrap_or(0));
+            metrics.flush_pending |=
+                property(properties::MEM_TABLE_FLUSH_PENDING)?.unwrap_or(0) != 0;
+            metrics.compaction_pending |=
+                property(properties::COMPACTION_PENDING)?.unwrap_or(0) != 0;
+        }
+        Ok(metrics)
     }
 }
 
@@ -586,5 +649,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
         assert!(storage.write_flush_cadence.borrow().is_none());
+    }
+
+    #[test]
+    fn metrics_include_memtable_bytes_written_to_each_column_family() {
+        use crate::storage::OrderedKvStorage;
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["left", "right"]).unwrap();
+        let before = storage.metrics().unwrap();
+        storage.set("left", b"a", &vec![7; 32 * 1024]).unwrap();
+        storage.set("right", b"b", &vec![9; 32 * 1024]).unwrap();
+        let after = storage.metrics().unwrap();
+
+        assert!(
+            after.memtable_bytes > before.memtable_bytes,
+            "two writes must be visible to the per-CF metric aggregation: before={before:?}, after={after:?}"
+        );
     }
 }
