@@ -9503,7 +9503,7 @@ pub enum IvmRuntimeError {
     UnsupportedOperator,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "rocksdb"))]
 mod tests {
     use super::*;
     use crate::schema::{

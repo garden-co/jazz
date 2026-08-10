@@ -1,3 +1,5 @@
+#![cfg(feature = "rocksdb")]
+
 //! Anti-join same-tick cross-term regressions: when a left row and its
 //! matching right row arrive in the same commit, the left row arrives
 //! suppressed — nothing must be emitted, and especially not a retraction

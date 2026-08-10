@@ -1,3 +1,5 @@
+#![cfg(feature = "rocksdb")]
+
 //! Regression tests for initial subscription messages.
 
 use groove::db::{Database, GraphBuilder};

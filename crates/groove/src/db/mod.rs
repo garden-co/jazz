@@ -3771,5 +3771,5 @@ impl From<crate::storage::Error> for Error {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "rocksdb"))]
 mod tests;

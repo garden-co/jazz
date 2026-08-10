@@ -1,3 +1,5 @@
+#![cfg(feature = "rocksdb")]
+
 //! Prepared shapes must keep the binding relation, the
 //! shared arrangements, and the refcount map in lockstep:
 //! - a shape subscription cleaned up via the storage-less path (dropped

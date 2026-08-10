@@ -1,3 +1,5 @@
+#![cfg(feature = "rocksdb")]
+
 //! Regression tests for the shared-arrangement maintenance protocol.
 //!
 //! These guard against arrangements being updated once per consuming join

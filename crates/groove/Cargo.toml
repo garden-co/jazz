@@ -6,6 +6,7 @@ edition = "2024"
 [features]
 default = ["rocksdb"]
 rocksdb = ["dep:rocksdb"]
+sqlite = ["dep:rusqlite"]
 cold-settle-attribution = []
 
 [dependencies]
@@ -24,6 +25,7 @@ uuid = { version = "1.18.1", features = ["serde", "v5"] }
 web-time = "1.1.0"
 rustc-hash.workspace = true
 opfs-btree = { path = "../opfs-btree" }
+rusqlite = { version = "0.34", features = ["bundled"], optional = true }
 
 [dev-dependencies]
 jazz-benchmark-guard = { path = "../benchmark-guard" }

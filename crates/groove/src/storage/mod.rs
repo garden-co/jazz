@@ -19,6 +19,9 @@ mod opfs;
 #[cfg(feature = "rocksdb")]
 #[path = "rocksdb.rs"]
 pub mod rocksdb_storage;
+#[cfg(feature = "sqlite")]
+#[path = "sqlite.rs"]
+pub mod sqlite_storage;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -38,6 +41,8 @@ pub use opfs::OpfsStorage;
 pub use opfs::{BtreeSyncPolicy, NativeBtreeStorage};
 #[cfg(feature = "rocksdb")]
 pub use rocksdb_storage::RocksDbStorage;
+#[cfg(feature = "sqlite")]
+pub use sqlite_storage::SqliteStorage;
 
 /// Local durability tier used for writes by file-backed storage backends.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -172,6 +177,7 @@ impl StorageDelta {
     }
 }
 
+#[cfg(feature = "rocksdb")]
 pub(crate) fn compact_storage_delta_operand(
     template_operand: &[u8],
     merged_record: Vec<u8>,
@@ -2635,6 +2641,18 @@ pub enum Error {
     #[cfg(feature = "rocksdb")]
     #[error(transparent)]
     RocksDb(#[from] ::rocksdb::Error),
+    #[error("storage is closed")]
+    StorageClosed,
+    #[cfg(feature = "sqlite")]
+    #[error(transparent)]
+    Sqlite(#[from] ::rusqlite::Error),
+    #[cfg(feature = "sqlite")]
+    #[error("wal checkpoint incomplete (busy={busy}): {checkpointed}/{log} frames")]
+    SqliteCheckpointIncomplete {
+        busy: i64,
+        log: i64,
+        checkpointed: i64,
+    },
     #[error(transparent)]
     Opfs(#[from] opfs_btree::BTreeError),
 }
@@ -2642,6 +2660,34 @@ pub enum Error {
 #[cfg(test)]
 pub(crate) mod conformance {
     use super::*;
+
+    pub(crate) fn record(time: u64, node: u8, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend(time.to_le_bytes());
+        bytes.extend([node; 16]);
+        bytes.extend(payload);
+        bytes
+    }
+
+    pub(crate) fn delta(
+        time: u64,
+        node: u8,
+        parents: Vec<(u64, u8)>,
+        record: Vec<u8>,
+    ) -> StorageDelta {
+        StorageDelta::current_winner(CurrentWinnerDelta {
+            tx_time: time,
+            tx_node_uuid: [node; 16],
+            parents: parents
+                .into_iter()
+                .map(|(time, node)| (time, [node; 16]))
+                .collect(),
+            tx_time_offset: 0,
+            tx_node_uuid_offset: 8,
+            record,
+        })
+        .unwrap()
+    }
 
     pub(crate) fn persistence_order_and_batch_atomicity<S>(storage: S)
     where
@@ -2717,29 +2763,6 @@ pub(crate) mod conformance {
     where
         S: OrderedKvStorage,
     {
-        fn record(time: u64, node: u8, payload: &[u8]) -> Vec<u8> {
-            let mut bytes = Vec::new();
-            bytes.extend(time.to_le_bytes());
-            bytes.extend([node; 16]);
-            bytes.extend(payload);
-            bytes
-        }
-
-        fn delta(time: u64, node: u8, parents: Vec<(u64, u8)>, record: Vec<u8>) -> StorageDelta {
-            StorageDelta::current_winner(CurrentWinnerDelta {
-                tx_time: time,
-                tx_node_uuid: [node; 16],
-                parents: parents
-                    .into_iter()
-                    .map(|(time, node)| (time, [node; 16]))
-                    .collect(),
-                tx_time_offset: 0,
-                tx_node_uuid_offset: 8,
-                record,
-            })
-            .unwrap()
-        }
-
         let older = record(10, 1, b"older");
         let newer = record(20, 1, b"newer");
         let child = record(11, 2, b"child");
@@ -2779,6 +2802,126 @@ pub(crate) mod conformance {
                 &delta(9, 9, Vec::new(), loser),
             )])
             .unwrap();
+        assert_eq!(storage.get("records", b"row").unwrap(), Some(child));
+    }
+
+    /// Bytewise ordering and prefix scoping, including the all-0xFF prefix
+    /// that has no finite exclusive upper bound.
+    pub(crate) fn ordered_scans_scope_prefixes_including_all_ff<S>(storage: S)
+    where
+        S: OrderedKvStorage,
+    {
+        for (key, value) in [
+            (b"user:1".to_vec(), b"one".to_vec()),
+            (b"user:10".to_vec(), b"ten".to_vec()),
+            (b"user:2".to_vec(), b"two".to_vec()),
+            (vec![0xfe, 0x01], b"before".to_vec()),
+            (vec![0xff], b"exact".to_vec()),
+            (vec![0xff, 0x00], b"ff-zero".to_vec()),
+            (vec![0xff, 0xff, 0x07], b"ff-ff".to_vec()),
+        ] {
+            storage.set("records", &key, &value).unwrap();
+        }
+
+        assert_eq!(
+            storage.range("records", b"user:", b"user;").unwrap(),
+            vec![
+                (b"user:1".to_vec(), b"one".to_vec()),
+                (b"user:10".to_vec(), b"ten".to_vec()),
+                (b"user:2".to_vec(), b"two".to_vec()),
+            ]
+        );
+        assert_eq!(storage.prefix("records", b"user:").unwrap().len(), 3);
+        assert_eq!(storage.prefix("records", b"").unwrap().len(), 7);
+        assert_eq!(
+            storage.prefix("records", &[0xff]).unwrap(),
+            vec![
+                (vec![0xff], b"exact".to_vec()),
+                (vec![0xff, 0x00], b"ff-zero".to_vec()),
+                (vec![0xff, 0xff, 0x07], b"ff-ff".to_vec()),
+            ]
+        );
+        assert_eq!(
+            storage.prefix("records", &[0xff, 0xff]).unwrap(),
+            vec![(vec![0xff, 0xff, 0x07], b"ff-ff".to_vec())]
+        );
+    }
+
+    /// Reverse scans and last-lookups must agree with the reversed forward
+    /// scan for every prefix shape, including all-0xFF and bounded uppers.
+    pub(crate) fn reverse_and_last_lookups_match_forward_scans<S>(storage: S)
+    where
+        S: OrderedKvStorage,
+    {
+        for (key, value) in [
+            (b"idx:a".to_vec(), b"1".to_vec()),
+            (b"idx:b".to_vec(), b"2".to_vec()),
+            (b"idx:c".to_vec(), b"3".to_vec()),
+            (vec![0xff, 0x01], b"f1".to_vec()),
+            (vec![0xff, 0x02], b"f2".to_vec()),
+        ] {
+            storage.set("records", &key, &value).unwrap();
+        }
+
+        for prefix in [&b"idx:"[..], &b""[..], &[0xff][..]] {
+            let mut forward = Vec::new();
+            storage
+                .scan_prefix("records", prefix, &mut |key, value| {
+                    forward.push((key.to_vec(), value.to_vec()));
+                    Ok(())
+                })
+                .unwrap();
+            let mut reversed = Vec::new();
+            storage
+                .scan_prefix_reverse("records", prefix, &mut |key, value| {
+                    reversed.push((key.to_vec(), value.to_vec()));
+                    Ok(())
+                })
+                .unwrap();
+            let mut expected = forward.clone();
+            expected.reverse();
+            assert_eq!(reversed, expected, "reverse mismatch for prefix {prefix:?}");
+            assert_eq!(
+                storage.last_with_prefix("records", prefix).unwrap(),
+                forward.last().cloned(),
+                "last mismatch for prefix {prefix:?}"
+            );
+        }
+
+        assert_eq!(
+            storage
+                .last_with_prefix_before_or_at("records", b"idx:", b"idx:b")
+                .unwrap(),
+            Some((b"idx:b".to_vec(), b"2".to_vec()))
+        );
+        assert_eq!(
+            storage
+                .last_with_prefix_before_or_at("records", b"idx:", b"idx:aa")
+                .unwrap(),
+            Some((b"idx:a".to_vec(), b"1".to_vec()))
+        );
+    }
+
+    /// A Delta later in a batch must observe values staged earlier in the
+    /// same batch.
+    pub(crate) fn set_then_delta_in_one_batch_observes_staged_value<S>(storage: S)
+    where
+        S: OrderedKvStorage,
+    {
+        let base = record(10, 1, b"base");
+        let child = record(11, 2, b"child");
+
+        storage
+            .write_many(&[
+                WriteOperation::set("records", b"row", &base),
+                WriteOperation::delta(
+                    "records",
+                    b"row",
+                    &delta(11, 2, vec![(10, 1)], child.clone()),
+                ),
+            ])
+            .unwrap();
+
         assert_eq!(storage.get("records", b"row").unwrap(), Some(child));
     }
 }
@@ -3098,6 +3241,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn get_set_and_delete_values() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -3110,6 +3254,7 @@ mod tests {
         assert_eq!(storage.get("records", b"a").unwrap(), None);
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn wal_no_sync_durability_mode_keeps_wal_writes_enabled() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -3125,6 +3270,7 @@ mod tests {
         assert_eq!(storage.get("records", b"a").unwrap(), Some(b"one".to_vec()));
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn rocksdb_approximate_class_bytes_reports_populated_family() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -3140,6 +3286,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn range_returns_ordered_values_between_start_and_end() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -3158,6 +3305,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn prefix_returns_ordered_values_with_matching_prefix() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -3176,6 +3324,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn prefix_handles_prefixes_without_a_finite_upper_bound() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -3194,6 +3343,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn direct_operations_report_missing_column_families() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -3229,6 +3379,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn scans_visit_ordered_values_without_materializing_in_storage_api() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -3255,6 +3406,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn write_many_writes_all_operations_atomically() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -3367,6 +3519,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn write_many_fails_without_writing_when_column_family_is_missing() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -3383,6 +3536,7 @@ mod tests {
         assert_eq!(storage.get("records", b"1").unwrap(), None);
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn write_many_can_mix_sets_and_deletes_atomically() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -3775,6 +3929,22 @@ mod tests {
         conformance::delta_append_current_winner_observes_merged_state(storage);
     }
 
+    #[test]
+    fn memory_storage_passes_read_semantics_conformance() {
+        conformance::ordered_scans_scope_prefixes_including_all_ff(MemoryStorage::new(&[
+            "records",
+        ]));
+        conformance::reverse_and_last_lookups_match_forward_scans(MemoryStorage::new(&["records"]));
+    }
+
+    #[test]
+    fn memory_storage_observes_staged_values_for_same_batch_deltas() {
+        conformance::set_then_delta_in_one_batch_observes_staged_value(MemoryStorage::new(&[
+            "records",
+        ]));
+    }
+
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn record_store_writes_and_reads_typed_records() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -4357,6 +4527,7 @@ mod tests {
         (legacy_reads, indexed_reads)
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn windowed_record_store_survives_reopen_mid_consolidated_history() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -4446,6 +4617,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn rocksdb_storage_conforms_to_delta_append_contract() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -4453,6 +4625,7 @@ mod tests {
         conformance::delta_append_current_winner_observes_merged_state(storage);
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn rocksdb_delta_append_survives_reopen_with_pending_operands() {
         fn record(time: u64, node: u8, payload: &[u8]) -> Vec<u8> {

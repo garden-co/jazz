@@ -1,3 +1,5 @@
+#![cfg(feature = "rocksdb")]
+
 //! Cyclic graphs are valid inputs to monotone set recursion: transitive
 //! closure over a cycle is the canonical recursive query. The incremental
 //! path already converges via frontier dedup (`accept_positive`); the
