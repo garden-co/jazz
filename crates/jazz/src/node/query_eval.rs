@@ -11127,60 +11127,6 @@ where
         self.database.query_graph(graph).map_err(Error::Groove)
     }
 
-    pub(crate) fn permission_scope_shape_binding(
-        &self,
-        table: &str,
-        writer: AuthorId,
-    ) -> Result<Option<(ValidatedQuery, Binding)>, Error> {
-        let Some(policy) = self.table(table)?.write_policies.any() else {
-            return Ok(None);
-        };
-        let claims = self.session_claims.get(&writer);
-        let mut claim_values = default_permission_scope_claim_values(writer);
-        if let Some(claims) = claims {
-            claim_values.extend(claims.clone());
-        }
-        let mut binding_values = BTreeMap::new();
-        let mut query = policy;
-        query.filters = query
-            .filters
-            .into_iter()
-            .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
-            .collect();
-        query.joins = query
-            .joins
-            .into_iter()
-            .map(|join| rewrite_claim_join_for_binding(join, claims))
-            .collect();
-        query.reachable = query
-            .reachable
-            .into_iter()
-            .map(|mut reachable| {
-                reachable.access_filters = reachable
-                    .access_filters
-                    .into_iter()
-                    .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
-                    .collect();
-                reachable.edge_filters = reachable
-                    .edge_filters
-                    .into_iter()
-                    .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
-                    .collect();
-                if let Some(seed) = &mut reachable.seed {
-                    seed.filters = std::mem::take(&mut seed.filters)
-                        .into_iter()
-                        .map(|predicate| rewrite_claim_predicate_for_binding(predicate, claims))
-                        .collect();
-                }
-                reachable
-            })
-            .collect();
-        bind_scope_claim_operands(&mut query, &claim_values, &mut binding_values);
-        let shape = query.validate(&self.catalogue.schema)?;
-        let binding = shape.bind(binding_values)?;
-        Ok(Some((shape, binding)))
-    }
-
     /// Compile the exact policy clauses needed for one non-mutating operation.
     /// This is intentionally separate from the legacy table-wide write scope:
     /// callers are not switched until the receipt transport is negotiated.

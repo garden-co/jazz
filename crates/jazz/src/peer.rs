@@ -25,9 +25,9 @@ use crate::node::{Error, NodeState, PreparedQueryPlanHandle};
 use crate::protocol::ResultRowEntry;
 use crate::protocol::{
     ContentExtent, KnownStateCompleteness, KnownStateDeclaration, LargeValueOwnerRef,
-    ProgramFactEntry, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef,
-    ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier,
-    VersionRecord, expand_version_carriers,
+    PermissionAdviceAction, ProgramFactEntry, ReadViewSpec, RegisterShapeOptions,
+    ResultMemberEntry, RowVersionRef, ShapeAst, Subscribe, SubscriptionKey, SyncMessage,
+    VersionBundle, VersionCarrier, VersionRecord, expand_version_carriers,
 };
 use crate::protocol_limits::validate_fetch_row_versions;
 use crate::query::{Binding, ValidatedQuery};
@@ -1747,7 +1747,7 @@ impl PeerState {
             ));
         }
         let permission_identity = self.identity();
-        if let Some(scope_subscriptions) = self.unsettled_permission_scope_subscriptions(
+        if let Some(scope_subscriptions) = self.unsettled_authority_scope_subscriptions(
             node,
             permission_identity,
             &versions,
@@ -1798,7 +1798,7 @@ impl PeerState {
         let mut updates = Vec::new();
         for (tx_id, fate) in deferred {
             if self
-                .unsettled_permission_scope_subscriptions(
+                .unsettled_authority_scope_subscriptions(
                     node,
                     fate.permission_identity,
                     &fate.versions,
@@ -1863,7 +1863,11 @@ impl PeerState {
             .count() as u64;
     }
 
-    fn unsettled_permission_scope_subscriptions<S>(
+    /// Locally hydrate the same action-specific support clauses that an
+    /// admitted upstream authority would send in `AuthorizationScopeView`.
+    /// Terminal cores do not put those views on a wire, but they must never
+    /// fall back to the historical table-wide permission query.
+    fn unsettled_authority_scope_subscriptions<S>(
         &mut self,
         node: &mut NodeState<S>,
         writer: AuthorId,
@@ -1879,36 +1883,45 @@ impl PeerState {
             .map(|version| version.table().to_owned())
             .collect::<BTreeSet<_>>();
         for table in tables {
-            let Some((shape, binding)) = node.permission_scope_shape_binding(&table, writer)?
-            else {
-                continue;
+            // A transaction's encoded version set does not retain its
+            // high-level operation enum.  `Update` is the conservative common
+            // write action: it hydrates both old-row and candidate policy
+            // clauses, so a terminal core cannot bypass a stricter write
+            // predicate while exact operation carriage is being introduced.
+            let action = PermissionAdviceAction::Update {
+                table,
+                row: RowUuid::from_bytes([0; 16]),
+                patch: BTreeMap::new(),
             };
-            let subscription = SubscriptionKey {
-                shape_id: shape.shape_id(),
-                binding_id: binding.binding_id(),
-                read_view: Default::default(),
-            };
-            if retained_scope_is_unsettled
-                && self
-                    .edge_scope_subscription_refs
-                    .contains_key(&subscription)
-            {
+            let scope = node.authorization_support_scope(writer, &action)?;
+            for (shape, binding) in scope.subscriptions {
+                let subscription = SubscriptionKey {
+                    shape_id: shape.shape_id(),
+                    binding_id: binding.binding_id(),
+                    read_view: scope.options.read_view_key(),
+                };
+                if retained_scope_is_unsettled
+                    && self
+                        .edge_scope_subscription_refs
+                        .contains_key(&subscription)
+                {
+                    unsettled.push(subscription);
+                    continue;
+                }
+                if self
+                    .subscriptions
+                    .get(&subscription)
+                    .is_some_and(|state| state.maintained_subscription_view.is_some())
+                {
+                    continue;
+                }
+                let previous_role = self.role;
+                self.role = PeerRole::ClientLink { identity: writer };
+                let rehydrate = self.rehydrate_query(node, &shape, &binding);
+                self.role = previous_role;
+                let _ = rehydrate?;
                 unsettled.push(subscription);
-                continue;
             }
-            if self
-                .subscriptions
-                .get(&subscription)
-                .is_some_and(|state| state.maintained_subscription_view.is_some())
-            {
-                continue;
-            }
-            let previous_role = self.role;
-            self.role = PeerRole::ClientLink { identity: writer };
-            let rehydrate = self.rehydrate_query(node, &shape, &binding);
-            self.role = previous_role;
-            let _ = rehydrate?;
-            unsettled.push(subscription);
         }
         if unsettled.is_empty() {
             Ok(None)
