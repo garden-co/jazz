@@ -423,12 +423,14 @@ describe("Db mergeable transactions", () => {
   });
 
   it("keeps client permission advice unknown across uncommitted transaction rows", async () => {
-    expect(db.canInsert(app.todos, { title: "allowed", done: false })).toBe("unknown");
+    await expect(db.canInsert(app.todos, { title: "allowed", done: false })).resolves.toBe(
+      "unknown",
+    );
 
     const tx = db.beginTransaction();
     const staged = tx.insert(app.todos, { title: "staged dry-run", done: false });
 
-    expect(db.canUpdate(app.todos, staged.id, { done: true })).toBe("unknown");
+    await expect(db.canUpdate(app.todos, staged.id, { done: true })).resolves.toBe("unknown");
     expect(tx.kind).toBe("mergeable");
 
     await tx.rollback();

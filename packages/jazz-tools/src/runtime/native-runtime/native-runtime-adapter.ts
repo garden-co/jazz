@@ -667,21 +667,21 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.finishMutation(write);
   }
 
-  canInsert(table: string, values: InsertValues, session?: Session): PermissionAdvice {
+  canInsertLocally(table: string, values: InsertValues, session?: Session): PermissionAdvice {
     void table;
     void values;
     void session;
     return "unknown";
   }
 
-  canRead(table: string, objectId: string, session?: Session): PermissionAdvice {
+  canReadLocally(table: string, objectId: string, session?: Session): PermissionAdvice {
     void table;
     void objectId;
     void session;
     return "unknown";
   }
 
-  canUpdate(
+  canUpdateLocally(
     table: string,
     objectId: string,
     values: Record<string, Value>,
@@ -694,7 +694,7 @@ export class NativeRuntimeAdapter implements Runtime {
     return "unknown";
   }
 
-  canDelete(table: string, objectId: string, session?: Session): PermissionAdvice {
+  canDeleteLocally(table: string, objectId: string, session?: Session): PermissionAdvice {
     void table;
     void objectId;
     void session;

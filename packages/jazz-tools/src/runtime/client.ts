@@ -57,15 +57,15 @@ export interface Runtime {
     write_context_json?: string | null,
   ): MutationResult;
   delete(table: string, object_id: string, write_context_json?: string | null): MutationResult;
-  canInsert?(table: string, values: InsertValues, session?: Session): PermissionAdvice;
-  canRead?(table: string, objectId: string, session?: Session): PermissionAdvice;
-  canUpdate?(
+  canInsertLocally?(table: string, values: InsertValues, session?: Session): PermissionAdvice;
+  canReadLocally?(table: string, objectId: string, session?: Session): PermissionAdvice;
+  canUpdateLocally?(
     table: string,
     objectId: string,
     values: Record<string, Value>,
     session?: Session,
   ): PermissionAdvice;
-  canDelete?(table: string, objectId: string, session?: Session): PermissionAdvice;
+  canDeleteLocally?(table: string, objectId: string, session?: Session): PermissionAdvice;
   requestInsertPermissionAdvice?(
     table: string,
     values: InsertValues,
@@ -974,30 +974,38 @@ export class JazzClient {
     return new WriteHandle(committedBatchId(result), this);
   }
 
-  canInsert(table: string, values: InsertValues, session?: Session): PermissionAdvice {
-    if (!this.runtime.canInsert) {
+  canInsertLocally(table: string, values: InsertValues, session?: Session): PermissionAdvice {
+    if (!this.runtime.canInsertLocally) {
       throw new Error("Runtime does not support write-policy dry-run insert checks.");
     }
-    return this.runtime.canInsert(table, values, session ?? this.resolvedSession ?? undefined);
+    return this.runtime.canInsertLocally(
+      table,
+      values,
+      session ?? this.resolvedSession ?? undefined,
+    );
   }
 
-  canRead(table: string, objectId: string, session?: Session): PermissionAdvice {
-    if (!this.runtime.canRead) {
+  canReadLocally(table: string, objectId: string, session?: Session): PermissionAdvice {
+    if (!this.runtime.canReadLocally) {
       throw new Error("Runtime does not support read-policy dry-run checks.");
     }
-    return this.runtime.canRead(table, objectId, session ?? this.resolvedSession ?? undefined);
+    return this.runtime.canReadLocally(
+      table,
+      objectId,
+      session ?? this.resolvedSession ?? undefined,
+    );
   }
 
-  canUpdate(
+  canUpdateLocally(
     table: string,
     objectId: string,
     values: Record<string, Value>,
     session?: Session,
   ): PermissionAdvice {
-    if (!this.runtime.canUpdate) {
+    if (!this.runtime.canUpdateLocally) {
       throw new Error("Runtime does not support write-policy dry-run update checks.");
     }
-    return this.runtime.canUpdate(
+    return this.runtime.canUpdateLocally(
       table,
       objectId,
       values,
@@ -1005,11 +1013,15 @@ export class JazzClient {
     );
   }
 
-  canDelete(table: string, objectId: string, session?: Session): PermissionAdvice {
-    if (!this.runtime.canDelete) {
+  canDeleteLocally(table: string, objectId: string, session?: Session): PermissionAdvice {
+    if (!this.runtime.canDeleteLocally) {
       throw new Error("Runtime does not support write-policy dry-run delete checks.");
     }
-    return this.runtime.canDelete(table, objectId, session ?? this.resolvedSession ?? undefined);
+    return this.runtime.canDeleteLocally(
+      table,
+      objectId,
+      session ?? this.resolvedSession ?? undefined,
+    );
   }
 
   requestInsertPermissionAdvice(

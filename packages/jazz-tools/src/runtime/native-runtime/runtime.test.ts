@@ -1054,11 +1054,11 @@ describe("NativeRuntimeAdapter server transport", () => {
       authMode: "external" as const,
     };
 
-    expect(runtime.canRead("todos", "00000000-0000-0000-0000-000000000001", session)).toBe(
+    expect(runtime.canReadLocally("todos", "00000000-0000-0000-0000-000000000001", session)).toBe(
       "unknown",
     );
     expect(
-      runtime.canInsert("todos", { title: { type: "Text", value: "candidate" } }, session),
+      runtime.canInsertLocally("todos", { title: { type: "Text", value: "candidate" } }, session),
     ).toBe("unknown");
     expect(authoritativeChecks).toBe(0);
   });
@@ -1080,7 +1080,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.disconnect();
 
     expect(
-      runtime.canDelete("todos", "00000000-0000-0000-0000-000000000001", {
+      runtime.canDeleteLocally("todos", "00000000-0000-0000-0000-000000000001", {
         user_id: "00000000-0000-0000-0000-0000000000a1",
         claims: {},
         authMode: "external",
@@ -1155,11 +1155,11 @@ describe("NativeRuntimeAdapter server transport", () => {
       authMode: "external" as const,
     };
 
-    expect(runtime.canRead("todos", "00000000-0000-0000-0000-000000000001", session)).toBe(
+    expect(runtime.canReadLocally("todos", "00000000-0000-0000-0000-000000000001", session)).toBe(
       "unknown",
     );
     expect(
-      runtime.canInsert("todos", { title: { type: "Text", value: "candidate" } }, session),
+      runtime.canInsertLocally("todos", { title: { type: "Text", value: "candidate" } }, session),
     ).toBe("unknown");
   });
 

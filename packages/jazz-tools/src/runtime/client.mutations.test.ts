@@ -80,20 +80,20 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
       deleteCalls.push([table, objectId, writeContextJson ?? undefined]);
       return receipt(writeContextJson, "delete-transaction-id");
     },
-    canInsert: (table, values, session) => {
-      dryRunCalls.push(["canInsert", table, values, session]);
+    canInsertLocally: (table, values, session) => {
+      dryRunCalls.push(["canInsertLocally", table, values, session]);
       return "allowed";
     },
-    canRead: (table, objectId, session) => {
-      dryRunCalls.push(["canRead", table, objectId, session]);
+    canReadLocally: (table, objectId, session) => {
+      dryRunCalls.push(["canReadLocally", table, objectId, session]);
       return "allowed";
     },
-    canUpdate: (table, objectId, values, session) => {
-      dryRunCalls.push(["canUpdate", table, objectId, values, session]);
+    canUpdateLocally: (table, objectId, values, session) => {
+      dryRunCalls.push(["canUpdateLocally", table, objectId, values, session]);
       return "allowed";
     },
-    canDelete: (table, objectId, session) => {
-      dryRunCalls.push(["canDelete", table, objectId, session]);
+    canDeleteLocally: (table, objectId, session) => {
+      dryRunCalls.push(["canDeleteLocally", table, objectId, session]);
       return "allowed";
     },
     query: async () => [],
@@ -148,16 +148,16 @@ describe("JazzClient write attribution", () => {
       authMode: "external",
     };
 
-    expect(client.canInsert("todos", insertValues, session)).toBe("allowed");
-    expect(client.canRead("todos", "row-1", session)).toBe("allowed");
-    expect(client.canUpdate("todos", "row-1", updates, session)).toBe("allowed");
-    expect(client.canDelete("todos", "row-1", session)).toBe("allowed");
+    expect(client.canInsertLocally("todos", insertValues, session)).toBe("allowed");
+    expect(client.canReadLocally("todos", "row-1", session)).toBe("allowed");
+    expect(client.canUpdateLocally("todos", "row-1", updates, session)).toBe("allowed");
+    expect(client.canDeleteLocally("todos", "row-1", session)).toBe("allowed");
 
     expect(dryRunCalls).toEqual([
-      ["canInsert", "todos", insertValues, session],
-      ["canRead", "todos", "row-1", session],
-      ["canUpdate", "todos", "row-1", updates, session],
-      ["canDelete", "todos", "row-1", session],
+      ["canInsertLocally", "todos", insertValues, session],
+      ["canReadLocally", "todos", "row-1", session],
+      ["canUpdateLocally", "todos", "row-1", updates, session],
+      ["canDeleteLocally", "todos", "row-1", session],
     ]);
   });
 

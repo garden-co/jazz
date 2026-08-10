@@ -160,15 +160,19 @@ export async function readTodoTitlesWithSelectedProject(db: Db) {
 // #region dry-run-permissions-ts
 export async function readTodosWithDeletePermission(db: Db) {
   const todos = await db.all(app.todos.select("id", "title").orderBy("title", "asc"));
-  return todos.filter((todo) => db.canDelete(app.todos, todo.id));
+  const advice = await Promise.all(todos.map((todo) => db.canDelete(app.todos, todo.id)));
+  return todos.filter((_, index) => advice[index] === "allowed");
 }
 
 export async function readEditableTodos(db: Db) {
   const todos = await db.all(app.todos.select("id", "title").orderBy("title", "asc"));
-  return todos.filter((todo) => db.canUpdate(app.todos, todo.id, { title: todo.title }));
+  const advice = await Promise.all(
+    todos.map((todo) => db.canUpdate(app.todos, todo.id, { title: todo.title })),
+  );
+  return todos.filter((_, index) => advice[index] === "allowed");
 }
 
-export function canCreateTodo(db: Db, title: string) {
+export async function canCreateTodo(db: Db, title: string) {
   return db.canInsert(app.todos, { title, done: false });
 }
 // #endregion dry-run-permissions-ts

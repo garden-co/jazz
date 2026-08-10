@@ -304,35 +304,20 @@ function createMockDb(rows: TestRow[] = []) {
       wait: vi.fn(async () => undefined),
     })),
     canInsert: vi.fn(() =>
-      !runtimeContext?.session || runtimeContext.session.user_id === "user-1"
-        ? "allowed"
-        : "denied",
+      Promise.resolve(
+        !runtimeContext?.session || runtimeContext.session.user_id === "user-1"
+          ? ("allowed" as const)
+          : ("denied" as const),
+      ),
     ),
     canUpdate: vi.fn(() =>
-      !runtimeContext?.session || runtimeContext.session.user_id === "user-1"
-        ? "allowed"
-        : "denied",
+      Promise.resolve(
+        !runtimeContext?.session || runtimeContext.session.user_id === "user-1"
+          ? ("allowed" as const)
+          : ("denied" as const),
+      ),
     ),
     canDelete: vi.fn(() =>
-      !runtimeContext?.session || runtimeContext.session.user_id === "user-1"
-        ? "allowed"
-        : "denied",
-    ),
-    requestCanInsert: vi.fn(() =>
-      Promise.resolve(
-        !runtimeContext?.session || runtimeContext.session.user_id === "user-1"
-          ? ("allowed" as const)
-          : ("denied" as const),
-      ),
-    ),
-    requestCanUpdate: vi.fn(() =>
-      Promise.resolve(
-        !runtimeContext?.session || runtimeContext.session.user_id === "user-1"
-          ? ("allowed" as const)
-          : ("denied" as const),
-      ),
-    ),
-    requestCanDelete: vi.fn(() =>
       Promise.resolve(
         !runtimeContext?.session || runtimeContext.session.user_id === "user-1"
           ? ("allowed" as const)
@@ -605,9 +590,9 @@ describe("web/createJazzClient async subscription channel", () => {
     expect(db.insert).toHaveBeenCalledWith(table, { value: "worker-created" }, undefined);
     expect(db.update).toHaveBeenCalledWith(table, "row-1", { value: "worker-updated" }, undefined);
     expect(db.delete).toHaveBeenCalledWith(table, "row-1", undefined);
-    expect(db.requestCanInsert).toHaveBeenCalledWith(table, { value: "worker-created" });
-    expect(db.requestCanUpdate).toHaveBeenCalledWith(table, "row-1", { value: "worker-updated" });
-    expect(db.requestCanDelete).toHaveBeenCalledWith(table, "row-1");
+    expect(db.canInsert).toHaveBeenCalledWith(table, { value: "worker-created" });
+    expect(db.canUpdate).toHaveBeenCalledWith(table, "row-1", { value: "worker-updated" });
+    expect(db.canDelete).toHaveBeenCalledWith(table, "row-1");
 
     await expect(
       channel.insert(table, { value: "session-created" }, undefined, TEST_AUTH_STATE.session!),
