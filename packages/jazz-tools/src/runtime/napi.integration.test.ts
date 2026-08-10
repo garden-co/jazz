@@ -601,14 +601,16 @@ describe("NAPI integration", () => {
         { timeout: 20_000 },
       );
 
-      expect(() =>
-        aliceDb.insert(policyTodosTable, {
-          title: "session-policy-denied",
-          done: false,
-          description: "",
-          owner_id: "bob",
-        }),
-      ).toThrow('Insert failed: WriteError("policy denied INSERT on table todos")');
+      await expect(
+        aliceDb
+          .insert(policyTodosTable, {
+            title: "session-policy-denied",
+            done: false,
+            description: "",
+            owner_id: "bob",
+          })
+          .wait({ tier: "edge" }),
+      ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
 
       await withTimeout(
         aliceDb.update(policyTodosTable, createdTodo.id, { done: true }).wait({ tier: "edge" }),

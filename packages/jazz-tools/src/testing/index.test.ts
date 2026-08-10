@@ -377,8 +377,8 @@ describe("createPolicyTestApp", () => {
         });
       });
 
-      bob.expectDenied((db) => {
-        db.insert(testApp.todos, {
+      await bob.expectDenied((db) => {
+        return db.insert(testApp.todos, {
           title: "Bob cannot insert Alice's todo",
           done: false,
           ownerId: "alice",

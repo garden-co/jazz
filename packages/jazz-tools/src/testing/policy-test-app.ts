@@ -14,8 +14,14 @@ type ExpectLike = (value: unknown) => {
     toThrow(expected?: unknown): void;
   };
   toThrow(expected?: unknown): void;
+  rejects: {
+    toThrow(expected?: unknown): Promise<void>;
+  };
 };
 type TestDbMethodCallback = (db: Db) => unknown;
+type PendingWrite = {
+  wait(options: { tier: "edge" }): Promise<unknown>;
+};
 type SeedWrite<T> = {
   readonly value: T;
   wait(options: { tier: "local" }): Promise<T>;
@@ -28,21 +34,24 @@ export async function settlePolicySeed<T>(write: SeedWrite<T>): Promise<T> {
 
 /**
  * Db used for testing permissions.
- * Supports all {@link Db} operations plus the {@link TestDb.expectAllowed} and {@link TestDb.expectDenied}
- * helpers to test write operations without producing side effects on the test database.
+ * Supports all {@link Db} operations plus helpers for client-local write
+ * staging and serving-authority rejection. A rejected write briefly exists as
+ * an optimistic local batch, but is not persisted by the server.
  */
 export type TestDb = Db & {
   /**
-   * Assert that the callback does not throw a policy error.
+   * Assert that the callback does not throw while staging its write locally.
    * Write operations performed inside the callback are not persisted.
    */
   expectAllowed(callback: TestDbMethodCallback): void;
 
   /**
-   * Assert that the callback throws a policy error.
-   * Write operations performed inside the callback are not persisted.
+   * Assert that a write is rejected by the serving authority.
+   *
+   * Client writes are admitted optimistically, so this checks the write's edge
+   * receipt rather than expecting synchronous local permission enforcement.
    */
-  expectDenied(callback: TestDbMethodCallback): void;
+  expectDenied(callback: (db: Db) => PendingWrite): Promise<void>;
 };
 
 function asTestDb(db: Db, expect: ExpectLike): TestDb {
@@ -60,8 +69,11 @@ function asTestDb(db: Db, expect: ExpectLike): TestDb {
       },
     },
     expectDenied: {
-      value: (callback: TestDbMethodCallback) => {
-        expect(() => callback(db)).toThrow('WriteError("policy denied');
+      value: async (callback: (db: Db) => PendingWrite) => {
+        const write = callback(db);
+        await expect(write.wait({ tier: "edge" })).rejects.toThrow(
+          /AuthorizationDenied|Write rejected by server authorization/,
+        );
       },
     },
   });
