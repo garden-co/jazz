@@ -12427,6 +12427,9 @@ fn prepared_claim_value(path: &ClaimPath, policy: &PolicyContext) -> Result<Valu
 }
 
 fn coerce_prepared_binding_value(value: Value, column_type: &groove::schema::ColumnType) -> Value {
+    if let Some(value) = coerce_prepared_integer_value(&value, column_type) {
+        return value;
+    }
     match (value, column_type) {
         (Value::Uuid(value), groove::schema::ColumnType::String) => {
             Value::String(value.to_string())
@@ -12434,20 +12437,13 @@ fn coerce_prepared_binding_value(value: Value, column_type: &groove::schema::Col
         (Value::String(value), groove::schema::ColumnType::Uuid) => uuid::Uuid::parse_str(&value)
             .map(Value::Uuid)
             .unwrap_or(Value::String(value)),
-        (Value::I64(value), groove::schema::ColumnType::I32) => i32::try_from(value)
-            .map(Value::I32)
-            .unwrap_or(Value::I64(value)),
-        (Value::U32(value), groove::schema::ColumnType::I32) => i32::try_from(value)
-            .map(Value::I32)
-            .unwrap_or(Value::U32(value)),
-        (Value::I32(value), groove::schema::ColumnType::I64) => Value::I64(i64::from(value)),
-        (Value::U32(value), groove::schema::ColumnType::I64) => Value::I64(i64::from(value)),
-        (Value::U64(value), groove::schema::ColumnType::I64) => i64::try_from(value)
-            .map(Value::I64)
-            .unwrap_or(Value::U64(value)),
+        (Value::Nullable(value), groove::schema::ColumnType::Nullable(inner)) => Value::Nullable(
+            value.map(|value| Box::new(coerce_prepared_binding_value(*value, inner))),
+        ),
         (Value::Nullable(Some(value)), column_type) => Value::Nullable(Some(Box::new(
             coerce_prepared_binding_value(*value, column_type),
         ))),
+        (value @ Value::Nullable(None), _) => value,
         (Value::Array(values), groove::schema::ColumnType::Array(inner)) => Value::Array(
             values
                 .into_iter()
@@ -12471,6 +12467,33 @@ fn coerce_prepared_binding_value(value: Value, column_type: &groove::schema::Col
             Value::Nullable(Some(Box::new(coerce_prepared_binding_value(value, inner))))
         }
         (value, _) => value,
+    }
+}
+
+/// Normalizes prepared integer values. Failed conversions intentionally return
+/// `None`, so the original typed value stays in the binding and cannot wrap
+/// into an authorized value.
+fn coerce_prepared_integer_value(
+    value: &Value,
+    column_type: &groove::schema::ColumnType,
+) -> Option<Value> {
+    let value = match value {
+        Value::U8(value) => i128::from(*value),
+        Value::U16(value) => i128::from(*value),
+        Value::U32(value) => i128::from(*value),
+        Value::U64(value) => i128::from(*value),
+        Value::I32(value) => i128::from(*value),
+        Value::I64(value) => i128::from(*value),
+        _ => return None,
+    };
+    match column_type {
+        groove::schema::ColumnType::U8 => u8::try_from(value).ok().map(Value::U8),
+        groove::schema::ColumnType::U16 => u16::try_from(value).ok().map(Value::U16),
+        groove::schema::ColumnType::U32 => u32::try_from(value).ok().map(Value::U32),
+        groove::schema::ColumnType::U64 => u64::try_from(value).ok().map(Value::U64),
+        groove::schema::ColumnType::I32 => i32::try_from(value).ok().map(Value::I32),
+        groove::schema::ColumnType::I64 => i64::try_from(value).ok().map(Value::I64),
+        _ => None,
     }
 }
 
@@ -13506,6 +13529,127 @@ mod tests {
     use crate::schema::{JazzSchema, TableSchema};
 
     use super::*;
+
+    #[test]
+    fn prepared_integer_bindings_coerce_only_when_representable() {
+        let cases = [
+            (Value::I64(7), ColumnType::U8, Value::U8(7)),
+            (
+                Value::U32(u8::MAX as u32),
+                ColumnType::U8,
+                Value::U8(u8::MAX),
+            ),
+            (
+                Value::U32(u16::MAX as u32),
+                ColumnType::U16,
+                Value::U16(u16::MAX),
+            ),
+            (
+                Value::U64(u32::MAX as u64),
+                ColumnType::U32,
+                Value::U32(u32::MAX),
+            ),
+            (Value::I32(7), ColumnType::U64, Value::U64(7)),
+            (
+                Value::I64(i32::MIN as i64),
+                ColumnType::I32,
+                Value::I32(i32::MIN),
+            ),
+            (
+                Value::U64(i64::MAX as u64),
+                ColumnType::I64,
+                Value::I64(i64::MAX),
+            ),
+        ];
+
+        for (value, column_type, expected) in cases {
+            assert_eq!(coerce_prepared_binding_value(value, &column_type), expected);
+        }
+    }
+
+    #[test]
+    fn prepared_integer_bindings_do_not_wrap_out_of_range_values() {
+        let cases = [
+            (Value::I64(-1), ColumnType::U8),
+            (Value::U16(u8::MAX as u16 + 1), ColumnType::U8),
+            (Value::U32(u16::MAX as u32 + 1), ColumnType::U16),
+            (Value::U64(u32::MAX as u64 + 1), ColumnType::U32),
+            (Value::I64(-1), ColumnType::U64),
+            (Value::I64(i32::MIN as i64 - 1), ColumnType::I32),
+            (Value::U64(i64::MAX as u64 + 1), ColumnType::I64),
+        ];
+
+        for (value, column_type) in cases {
+            assert_eq!(
+                coerce_prepared_binding_value(value.clone(), &column_type),
+                value,
+                "unrepresentable values must fail closed rather than wrap"
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_nullable_integer_bindings_normalize_exactly_once() {
+        let nullable_u8 = ColumnType::Nullable(Box::new(ColumnType::U8));
+        let some_i64 = Value::Nullable(Some(Box::new(Value::I64(7))));
+        let none = Value::Nullable(None);
+
+        let cases = [
+            (
+                Value::I64(7),
+                ColumnType::U8,
+                Value::U8(7),
+                "nonnullable source to nonnullable target",
+            ),
+            (
+                Value::I64(7),
+                nullable_u8.clone(),
+                Value::Nullable(Some(Box::new(Value::U8(7)))),
+                "nonnullable source to nullable target",
+            ),
+            (
+                some_i64.clone(),
+                ColumnType::U8,
+                Value::Nullable(Some(Box::new(Value::U8(7)))),
+                "nullable source to nonnullable target",
+            ),
+            (
+                some_i64,
+                nullable_u8.clone(),
+                Value::Nullable(Some(Box::new(Value::U8(7)))),
+                "nullable source to nullable target must not double-wrap",
+            ),
+            (
+                none.clone(),
+                ColumnType::U8,
+                none.clone(),
+                "nullable None to nonnullable target",
+            ),
+            (
+                none.clone(),
+                nullable_u8.clone(),
+                none,
+                "nullable None to nullable target",
+            ),
+        ];
+
+        for (value, column_type, expected, case) in cases {
+            assert_eq!(
+                coerce_prepared_binding_value(value, &column_type),
+                expected,
+                "{case}"
+            );
+        }
+
+        let out_of_range = Value::Nullable(Some(Box::new(Value::I64(256))));
+        for column_type in [ColumnType::U8, nullable_u8] {
+            assert_eq!(
+                coerce_prepared_binding_value(out_of_range.clone(), &column_type),
+                out_of_range,
+                "out-of-range nullable integers must not wrap or narrow"
+            );
+        }
+    }
 
     #[test]
     fn maintained_root_order_keeps_occurrence_sidecar_aligned() {
