@@ -12437,9 +12437,13 @@ fn coerce_prepared_binding_value(value: Value, column_type: &groove::schema::Col
         (Value::String(value), groove::schema::ColumnType::Uuid) => uuid::Uuid::parse_str(&value)
             .map(Value::Uuid)
             .unwrap_or(Value::String(value)),
+        (Value::Nullable(value), groove::schema::ColumnType::Nullable(inner)) => Value::Nullable(
+            value.map(|value| Box::new(coerce_prepared_binding_value(*value, inner))),
+        ),
         (Value::Nullable(Some(value)), column_type) => Value::Nullable(Some(Box::new(
             coerce_prepared_binding_value(*value, column_type),
         ))),
+        (value @ Value::Nullable(None), _) => value,
         (Value::Array(values), groove::schema::ColumnType::Array(inner)) => Value::Array(
             values
                 .into_iter()
@@ -13580,6 +13584,69 @@ mod tests {
                 coerce_prepared_binding_value(value.clone(), &column_type),
                 value,
                 "unrepresentable values must fail closed rather than wrap"
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_nullable_integer_bindings_normalize_exactly_once() {
+        let nullable_u8 = ColumnType::Nullable(Box::new(ColumnType::U8));
+        let some_i64 = Value::Nullable(Some(Box::new(Value::I64(7))));
+        let none = Value::Nullable(None);
+
+        let cases = [
+            (
+                Value::I64(7),
+                ColumnType::U8,
+                Value::U8(7),
+                "nonnullable source to nonnullable target",
+            ),
+            (
+                Value::I64(7),
+                nullable_u8.clone(),
+                Value::Nullable(Some(Box::new(Value::U8(7)))),
+                "nonnullable source to nullable target",
+            ),
+            (
+                some_i64.clone(),
+                ColumnType::U8,
+                Value::Nullable(Some(Box::new(Value::U8(7)))),
+                "nullable source to nonnullable target",
+            ),
+            (
+                some_i64,
+                nullable_u8.clone(),
+                Value::Nullable(Some(Box::new(Value::U8(7)))),
+                "nullable source to nullable target must not double-wrap",
+            ),
+            (
+                none.clone(),
+                ColumnType::U8,
+                none.clone(),
+                "nullable None to nonnullable target",
+            ),
+            (
+                none.clone(),
+                nullable_u8.clone(),
+                none,
+                "nullable None to nullable target",
+            ),
+        ];
+
+        for (value, column_type, expected, case) in cases {
+            assert_eq!(
+                coerce_prepared_binding_value(value, &column_type),
+                expected,
+                "{case}"
+            );
+        }
+
+        let out_of_range = Value::Nullable(Some(Box::new(Value::I64(256))));
+        for column_type in [ColumnType::U8, nullable_u8] {
+            assert_eq!(
+                coerce_prepared_binding_value(out_of_range.clone(), &column_type),
+                out_of_range,
+                "out-of-range nullable integers must not wrap or narrow"
             );
         }
     }
