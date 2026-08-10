@@ -1,12 +1,103 @@
 //! Caller-free, deterministic authorization-support hydration state.
 #![allow(dead_code, missing_docs)]
 
-use crate::protocol::{AuthorizationScopeReceipt, AuthorizationSupportScopeKey};
+use crate::protocol::{AuthorizationScopeReceipt, AuthorizationSupportScopeKey, SubscriptionKey};
+use crate::query::{BindingId, ShapeId};
+use crate::time::GlobalSeq;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 pub const MAX_AUTHORIZATION_SCOPES: usize = 256;
+
+/// The authority-owned, all-clause proof lifecycle shared by locally terminal
+/// fate admission and wire-delivered authorization advice.  Membership is
+/// canonical (shape/binding); transport subscription keys are allocated by the
+/// authority and merely name one registered clause instance.
+#[derive(Clone, Debug)]
+pub(crate) struct AuthorityScopeAggregate {
+    pub(crate) expected_support: BTreeSet<(ShapeId, BindingId)>,
+    pub(crate) members: BTreeMap<SubscriptionKey, (ShapeId, BindingId)>,
+    pub(crate) applied: BTreeMap<SubscriptionKey, (GlobalSeq, u64)>,
+}
+
+impl AuthorityScopeAggregate {
+    pub(crate) fn new(expected_support: BTreeSet<(ShapeId, BindingId)>) -> Self {
+        Self {
+            expected_support,
+            members: BTreeMap::new(),
+            applied: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn expected_support(&self) -> &BTreeSet<(ShapeId, BindingId)> {
+        &self.expected_support
+    }
+
+    /// Register exactly one server-owned subscription for a canonical support
+    /// clause.  A duplicate or an out-of-scope clause invalidates completion.
+    pub(crate) fn register(
+        &mut self,
+        subscription: SubscriptionKey,
+        clause: (ShapeId, BindingId),
+    ) -> bool {
+        if !self.expected_support.contains(&clause)
+            || self.members.contains_key(&subscription)
+            || self.members.values().any(|member| *member == clause)
+        {
+            return false;
+        }
+        self.members.insert(subscription, clause);
+        true
+    }
+
+    pub(crate) fn forget(&mut self, subscription: SubscriptionKey) {
+        self.members.remove(&subscription);
+        self.applied.remove(&subscription);
+    }
+
+    pub(crate) fn has_no_members(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    /// Records a locally applied clause and returns the aggregate lower bounds
+    /// only when every canonical clause has an applied current view.
+    pub(crate) fn apply(
+        &mut self,
+        subscription: SubscriptionKey,
+        settled_through: GlobalSeq,
+        authorization_progress: u64,
+    ) -> Option<(GlobalSeq, u64)> {
+        if !self.members.contains_key(&subscription) {
+            return None;
+        }
+        self.applied
+            .insert(subscription, (settled_through, authorization_progress));
+        self.bounds()
+    }
+
+    pub(crate) fn bounds(&self) -> Option<(GlobalSeq, u64)> {
+        if self.members.len() != self.expected_support.len()
+            || self
+                .expected_support
+                .iter()
+                .any(|expected| !self.members.values().any(|member| member == expected))
+            || self
+                .members
+                .keys()
+                .any(|member| !self.applied.contains_key(member))
+        {
+            return None;
+        }
+        Some((
+            self.applied
+                .values()
+                .map(|(settled, _)| *settled)
+                .min_by_key(|settled| settled.0)?,
+            self.applied.values().map(|(_, progress)| *progress).min()?,
+        ))
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AuthorityContext {
@@ -288,6 +379,7 @@ impl Drop for AuthorizationScopeLease {
 mod tests {
     use super::*;
     use crate::ids::AuthorId;
+    use crate::query::{BindingId, ShapeId};
     use crate::time::GlobalSeq;
 
     fn k(n: u8) -> AuthorizationSupportScopeKey {
@@ -334,6 +426,31 @@ mod tests {
             AuthorizationScopeAcquisition::Owner(token) => token,
             _ => panic!("expected initial owner"),
         }
+    }
+
+    #[test]
+    fn aggregate_requires_every_registered_clause_even_when_views_arrive_in_reverse_order() {
+        let first = SubscriptionKey {
+            shape_id: ShapeId(uuid::Uuid::from_bytes([1; 16])),
+            binding_id: BindingId(uuid::Uuid::from_bytes([2; 16])),
+            read_view: Default::default(),
+        };
+        let second = SubscriptionKey {
+            shape_id: ShapeId(uuid::Uuid::from_bytes([3; 16])),
+            binding_id: BindingId(uuid::Uuid::from_bytes([4; 16])),
+            read_view: Default::default(),
+        };
+        let mut aggregate = AuthorityScopeAggregate::new(BTreeSet::from([
+            (first.shape_id, first.binding_id),
+            (second.shape_id, second.binding_id),
+        ]));
+        assert!(aggregate.register(first, (first.shape_id, first.binding_id)));
+        assert!(aggregate.register(second, (second.shape_id, second.binding_id)));
+        assert_eq!(aggregate.apply(second, GlobalSeq(9), 7), None);
+        assert_eq!(
+            aggregate.apply(first, GlobalSeq(12), 11),
+            Some((GlobalSeq(9), 7))
+        );
     }
 
     #[test]

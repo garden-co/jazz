@@ -28,9 +28,9 @@ use thiserror::Error;
 use web_time::Instant;
 
 use crate::authorization_scope::{
-    AuthorityContext, AuthorizationScopeAcquisition, AuthorizationScopeInstall,
-    AuthorizationScopeLease, AuthorizationScopeOwnerToken, AuthorizationScopeReadiness,
-    AuthorizationScopeRegistry,
+    AuthorityContext, AuthorityScopeAggregate, AuthorizationScopeAcquisition,
+    AuthorizationScopeInstall, AuthorizationScopeLease, AuthorizationScopeOwnerToken,
+    AuthorizationScopeReadiness, AuthorizationScopeRegistry,
 };
 use crate::ids::{AuthorId, NodeUuid, RowUuid, SchemaVersionId};
 pub use crate::node::CommitUnitTrust;
@@ -238,11 +238,29 @@ type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
 type PermissionAdviceWaiters =
     Rc<RefCell<BTreeMap<PermissionAdviceRequestId, oneshot::Sender<PermissionAdvice>>>>;
 type PendingDownstreamFates = Rc<RefCell<Vec<SyncMessage>>>;
+const MAX_EDGE_FATE_ROUTES: usize = 1024;
+const MAX_EDGE_FATE_ROUTES_PER_TX: usize = 8;
+
 struct EdgeFateRoute {
     authority: AuthorityContext,
     queue: Weak<RefCell<Vec<SyncMessage>>>,
 }
 type EdgeFateRoutes = Rc<RefCell<BTreeMap<TxId, Vec<EdgeFateRoute>>>>;
+
+/// A parked fate belongs to one admitted upstream epoch.  Drop routes for
+/// departed/replaced sessions (and dead subscriber queues) eagerly: retaining
+/// a weak queue alone would let arbitrary uploads grow this registry forever.
+fn prune_edge_fate_routes(
+    routes: &mut BTreeMap<TxId, Vec<EdgeFateRoute>>,
+    admitted: Option<AuthorityContext>,
+) {
+    routes.retain(|_, pending| {
+        pending.retain(|route| {
+            route.queue.upgrade().is_some() && admitted.is_some_and(|ctx| ctx == route.authority)
+        });
+        !pending.is_empty()
+    });
+}
 type ShapeRegistrationKey = (ShapeId, ReadViewKey);
 
 /// Per-subscriber state for a shape/read-view registration.
@@ -444,11 +462,10 @@ struct AuthorizedScopePurpose {
     expected_support: BTreeSet<(ShapeId, BindingId)>,
 }
 
-struct ScopeAggregate {
-    expected_support: BTreeSet<(ShapeId, BindingId)>,
-    members: BTreeMap<SubscriptionKey, (ShapeId, BindingId)>,
-    applied: BTreeMap<SubscriptionKey, (crate::time::GlobalSeq, u64)>,
-}
+// Compatibility spelling retained for module-local tests while the actual
+// implementation is the shared authority proof primitive.
+#[cfg(test)]
+type ScopeAggregate = AuthorityScopeAggregate;
 
 /// One receipt-bound authorization operation owned by one admitted upstream.
 ///
@@ -4861,9 +4878,15 @@ where
                 authorization_progress: 0,
                 settled_through: 0,
             });
-        if let Some(context) = expected_scope_authority {
-            *self.admitted_upstream_authority.borrow_mut() = Some(context);
-        }
+        // Replacing a scope-capable upstream epoch invalidates every parked
+        // downstream route bound to the old authority.  The write remains
+        // locally pending and may be relayed on this link, but only a fate
+        // authenticated for this exact new context can discharge a new route.
+        *self.admitted_upstream_authority.borrow_mut() = expected_scope_authority;
+        prune_edge_fate_routes(
+            &mut self.edge_fate_routes.borrow_mut(),
+            expected_scope_authority,
+        );
         // Carry queued and already-registered subscriptions upstream immediately.
         let mut pending = self
             .upstream_subscriptions
@@ -4925,7 +4948,6 @@ where
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(0),
-            next_now_ms: Cell::new(1),
             connection_epoch,
             link: ConnectionLink::Upstream {
                 pending,
@@ -5093,7 +5115,6 @@ where
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(session_claim_revision),
-            next_now_ms: Cell::new(1),
             connection_epoch,
             link: ConnectionLink::Subscriber {
                 peer,
@@ -5125,10 +5146,26 @@ where
 
     /// Detach a previously attached peer connection from this node.
     pub fn detach_connection(&self, connection: &Rc<RefCell<PeerConnection<S>>>) -> bool {
+        let authority = match &connection.borrow().link {
+            ConnectionLink::Upstream {
+                expected_scope_authority,
+                ..
+            } => *expected_scope_authority,
+            ConnectionLink::Subscriber { .. } => None,
+        };
         let mut connections = self.connections.borrow_mut();
         let before = connections.len();
         connections.retain(|candidate| !Rc::ptr_eq(candidate, connection));
-        connections.len() != before
+        let detached = connections.len() != before;
+        drop(connections);
+        if detached
+            && authority.is_some()
+            && *self.admitted_upstream_authority.borrow() == authority
+        {
+            *self.admitted_upstream_authority.borrow_mut() = None;
+            prune_edge_fate_routes(&mut self.edge_fate_routes.borrow_mut(), None);
+        }
+        detached
     }
 
     /// Service every accepted subscriber connection once.
@@ -6575,7 +6612,6 @@ where
     subscriber_dirty_epoch: Rc<Cell<u64>>,
     observed_subscriber_dirty_epoch: Cell<u64>,
     observed_session_claim_revision: Cell<u64>,
-    next_now_ms: Cell<u64>,
     /// Fresh non-resumable epoch binding authorization receipts to this link.
     connection_epoch: u64,
     link: ConnectionLink,
@@ -6655,7 +6691,8 @@ enum ConnectionLink {
         scope_purposes: BTreeMap<SubscriptionKey, AuthorizedScopePurpose>,
         /// Per-scope aggregation state. A full-scope receipt is withheld until
         /// every compiled support clause has a corresponding applied view.
-        scope_aggregates: BTreeMap<crate::protocol::AuthorizationSupportScopeKey, ScopeAggregate>,
+        scope_aggregates:
+            BTreeMap<crate::protocol::AuthorizationSupportScopeKey, AuthorityScopeAggregate>,
         /// True when this subscriber's maintained views may have queued deltas
         /// to serve. Idle transport ticks must not poll every view.
         serve_dirty: bool,
@@ -6995,7 +7032,6 @@ where
     /// flush pending outbound. Non-blocking; the binding calls it in its loop.
     pub fn tick(&mut self) -> Result<DbTickStats, Error> {
         let mut stats = DbTickStats::default();
-        let tick_now_ms = self.next_now_ms();
         let connection_epoch = self.connection_epoch;
         self.observe_shared_subscriber_dirty_epoch();
         self.rebind_subscriber_views_after_claim_change()?;
@@ -7414,22 +7450,51 @@ where
                                 drop_peer_request(&self.node);
                                 continue;
                             }
-                            let Some(request) = scope_lease_manager.requests.get_mut(&request_id)
-                            else {
+                            let Some(prior) = scope_lease_manager.requests.get(&request_id) else {
                                 // A cancelled intent cannot be revived by a
                                 // late/replayed authority view.
                                 continue;
                             };
-                            if request.key.as_ref().is_some_and(|known| known != &key)
-                                || request
+                            if prior.key.as_ref().is_some_and(|known| known != &key)
+                                || prior
                                     .clause_count
                                     .is_some_and(|known| known != clause_count)
                             {
                                 drop_peer_request(&self.node);
                                 continue;
                             }
+                            // The first authenticated view reveals the
+                            // server-selected scope key.  Acquire here, before
+                            // the aggregate receipt, so concurrent actions
+                            // that compile to this same support scope share
+                            // one registry lifecycle rather than racing after
+                            // hydration has already completed.
+                            let acquired = if prior.lease.is_none() {
+                                scope_lease_manager.registry.acquire(key.clone())
+                            } else {
+                                None
+                            };
+                            let Some(request) = scope_lease_manager.requests.get_mut(&request_id)
+                            else {
+                                continue;
+                            };
                             request.key = Some(key);
                             request.clause_count = Some(clause_count);
+                            if request.lease.is_none() {
+                                let Some((lease, acquisition)) = acquired else {
+                                    self.permission_advice_waiters
+                                        .borrow_mut()
+                                        .remove(&request_id);
+                                    scope_lease_manager.requests.remove(&request_id);
+                                    continue;
+                                };
+                                request.owner = match acquisition {
+                                    AuthorizationScopeAcquisition::Owner(owner) => Some(owner),
+                                    AuthorizationScopeAcquisition::Waiting
+                                    | AuthorizationScopeAcquisition::Proven => None,
+                                };
+                                request.lease = Some(lease);
+                            }
                             let duplicate = request
                                 .applied_clauses
                                 .get(&clause_index)
@@ -7517,33 +7582,44 @@ where
                                 .map(|(_, _, progress)| *progress)
                                 .min()
                                 .unwrap_or_default();
-                            if request.key.as_ref().is_some_and(|key| key != &receipt.key)
-                                || !all_current
-                                || !authorization_scope_receipt_matches_transport_context(
-                                    &receipt,
-                                    *expected,
-                                    applied_cut,
-                                )
-                            {
+                            let receipt_current =
+                                request.key.as_ref().is_some_and(|key| key == &receipt.key)
+                                    && all_current
+                                    && authorization_scope_receipt_matches_transport_context(
+                                        &receipt,
+                                        *expected,
+                                        applied_cut,
+                                    );
+                            if !receipt_current {
+                                // A claim/catalogue/progress transition can
+                                // race a just-completed hydration.  Retire its
+                                // lease and allocate a new opaque wire id so
+                                // old views/receipts cannot revive the
+                                // operation; retain the caller waiters and
+                                // reacquire under the observed context.
+                                let retry_id =
+                                    PermissionAdviceRequestId(*uuid::Uuid::new_v4().as_bytes());
+                                let action = request.action.clone();
+                                let waiters = request.waiters.clone();
+                                scope_lease_manager.requests.remove(&request_id);
+                                scope_lease_manager.requests.insert(
+                                    retry_id,
+                                    AuthorizationScopeLeaseRequest {
+                                        action: action.clone(),
+                                        waiters,
+                                        key: None,
+                                        lease: None,
+                                        owner: None,
+                                        clause_count: None,
+                                        applied_clauses: BTreeMap::new(),
+                                    },
+                                );
+                                pending.push(PendingUpstreamCommand::AuthorizationScopeIntent {
+                                    request_id: retry_id,
+                                    action,
+                                });
                                 drop_peer_request(&self.node);
                                 continue;
-                            }
-                            if request.lease.is_none() {
-                                let Some((lease, acquisition)) =
-                                    scope_lease_manager.registry.acquire(receipt.key.clone())
-                                else {
-                                    self.permission_advice_waiters
-                                        .borrow_mut()
-                                        .remove(&request_id);
-                                    scope_lease_manager.requests.remove(&request_id);
-                                    continue;
-                                };
-                                request.owner = match acquisition {
-                                    AuthorizationScopeAcquisition::Owner(owner) => Some(owner),
-                                    AuthorizationScopeAcquisition::Waiting
-                                    | AuthorizationScopeAcquisition::Proven => None,
-                                };
-                                request.lease = Some(lease);
                             }
                             let admitted = match (request.lease.as_ref(), request.owner.take()) {
                                 (Some(lease), Some(owner)) => matches!(
@@ -8281,18 +8357,20 @@ where
                             if let Some(purpose) = scope_purpose {
                                 let aggregate = scope_aggregates
                                     .entry(purpose.key.clone())
-                                    .or_insert_with(|| ScopeAggregate {
-                                        expected_support: purpose.expected_support.clone(),
-                                        members: BTreeMap::new(),
-                                        applied: BTreeMap::new(),
+                                    .or_insert_with(|| {
+                                        AuthorityScopeAggregate::new(
+                                            purpose.expected_support.clone(),
+                                        )
                                     });
-                                if aggregate.expected_support != purpose.expected_support {
+                                if aggregate.expected_support() != &purpose.expected_support
+                                    || !aggregate.register(
+                                        subscription,
+                                        (shape.shape_id(), binding.binding_id()),
+                                    )
+                                {
                                     drop_peer_request(&self.node);
                                     continue;
                                 }
-                                aggregate
-                                    .members
-                                    .insert(subscription, (shape.shape_id(), binding.binding_id()));
                                 scope_purposes.insert(subscription, purpose);
                             }
                             let group =
@@ -8552,49 +8630,53 @@ where
                                         && matches!(peer.role(), PeerRole::ClientLink { .. }) =>
                                 {
                                     if tx.kind == TxKind::Mergeable {
-                                        if self.admitted_upstream_authority.borrow().is_none() {
-                                            // The terminal core is the sole
-                                            // local authority.  Edges below
-                                            // always take the relay path.
-                                            peer.ingest_edge_mergeable_commit_unit(
-                                                &mut self.node.borrow_mut(),
-                                                tx,
-                                                versions,
-                                                tick_now_ms,
-                                            )?
-                                        } else {
-                                            // An edge never settles a write
-                                            // from its own locally-maintained
-                                            // policy scope. Relay it to the
-                                            // admitted upstream authority and
-                                            // retain the exact downstream route
-                                            // for its eventual fate.
-                                            let tx_id = tx.tx_id;
-                                            self.node
-                                                .borrow_mut()
-                                                .ingest_relay_commit_unit(tx, versions)?;
-                                            let authority = (*self
-                                                .admitted_upstream_authority
-                                                .borrow())
-                                            .expect("edge relay branch requires admitted upstream authority");
-                                            self.edge_fate_routes
-                                                .borrow_mut()
-                                                .entry(tx_id)
-                                                .or_default()
-                                                .push(EdgeFateRoute {
-                                                    authority,
-                                                    queue: Rc::downgrade(&self.downstream_fates),
-                                                });
-                                            // Edge persistence is observable,
-                                            // but the final policy fate remains
-                                            // parked for the upstream authority.
-                                            vec![SyncMessage::FateUpdate {
-                                                tx_id,
-                                                fate: Fate::Accepted,
-                                                global_seq: None,
-                                                durability: Some(DurabilityTier::Edge),
-                                            }]
+                                        // The serving layer enters this arm
+                                        // only for NodeRole::Edge.  An edge
+                                        // never becomes terminal merely
+                                        // because a connection disappeared.
+                                        let tx_id = tx.tx_id;
+                                        self.node
+                                            .borrow_mut()
+                                            .ingest_relay_commit_unit(tx, versions)?;
+                                        if let Some(authority) =
+                                            *self.admitted_upstream_authority.borrow()
+                                        {
+                                            let mut routes = self.edge_fate_routes.borrow_mut();
+                                            prune_edge_fate_routes(&mut routes, Some(authority));
+                                            let route_count =
+                                                routes.values().map(Vec::len).sum::<usize>();
+                                            if route_count < MAX_EDGE_FATE_ROUTES {
+                                                let pending = routes.entry(tx_id).or_default();
+                                                if pending.len() < MAX_EDGE_FATE_ROUTES_PER_TX
+                                                    && !pending.iter().any(|route| {
+                                                        route.authority == authority
+                                                            && route.queue.upgrade().is_some_and(
+                                                                |queue| {
+                                                                    Rc::ptr_eq(
+                                                                        &queue,
+                                                                        &self.downstream_fates,
+                                                                    )
+                                                                },
+                                                            )
+                                                    })
+                                                {
+                                                    pending.push(EdgeFateRoute {
+                                                        authority,
+                                                        queue: Rc::downgrade(
+                                                            &self.downstream_fates,
+                                                        ),
+                                                    });
+                                                }
+                                            }
                                         }
+                                        // Edge persistence is observable, but
+                                        // final policy fate stays parked.
+                                        vec![SyncMessage::FateUpdate {
+                                            tx_id,
+                                            fate: Fate::Accepted,
+                                            global_seq: None,
+                                            durability: Some(DurabilityTier::Edge),
+                                        }]
                                     } else {
                                         self.node
                                             .borrow_mut()
@@ -8773,20 +8855,6 @@ where
                         .map_err(transport_error)?;
                     }
                 }
-                if self.admitted_upstream_authority.borrow().is_none() {
-                    let fate_updates = {
-                        let mut node = self.node.borrow_mut();
-                        peer.drain_deferred_edge_fates(&mut node, tick_now_ms)?
-                    };
-                    for update in fate_updates {
-                        send_with_content_extents(
-                            &self.node,
-                            peer,
-                            self.transport.as_mut(),
-                            update,
-                        )?;
-                    }
-                }
             }
         }
         Ok(stats)
@@ -8817,12 +8885,6 @@ where
         if let ConnectionLink::Subscriber { serve_dirty, .. } = &mut self.link {
             *serve_dirty = true;
         }
-    }
-
-    fn next_now_ms(&self) -> u64 {
-        let next = self.next_now_ms.get();
-        self.next_now_ms.set(next + 1);
-        next
     }
 
     fn eviction_pins(&self) -> crate::peer::PeerEvictionPins {
@@ -8992,7 +9054,13 @@ where
             return Ok(());
         }
     };
-    let clause_count = u16::try_from(scope.subscriptions.len()).map_err(|_| {
+    let mut seen_support = BTreeSet::new();
+    let support_clauses = scope
+        .subscriptions
+        .iter()
+        .filter(|(shape, binding)| seen_support.insert((shape.shape_id(), binding.binding_id())))
+        .collect::<Vec<_>>();
+    let clause_count = u16::try_from(support_clauses.len()).map_err(|_| {
         Error::new(
             ErrorCode::Protocol,
             "authorization scope has too many clauses",
@@ -9006,10 +9074,14 @@ where
             .map_err(transport_error)?;
         return Ok(());
     }
-    let mut settled_through = None;
-    let mut authorization_progress = None;
+    let mut aggregate = AuthorityScopeAggregate::new(
+        support_clauses
+            .iter()
+            .map(|(shape, binding)| (shape.shape_id(), binding.binding_id()))
+            .collect(),
+    );
     let mut support_subscriptions = Vec::new();
-    for (index, (shape, binding)) in scope.subscriptions.iter().enumerate() {
+    for (index, (shape, binding)) in support_clauses.iter().enumerate() {
         let subscription = SubscriptionKey {
             shape_id: shape.shape_id(),
             // This usage-site key belongs to the authority, and cannot be
@@ -9017,6 +9089,12 @@ where
             binding_id: crate::query::BindingId(uuid::Uuid::new_v4()),
             read_view: scope.options.read_view_key(),
         };
+        if !aggregate.register(subscription, (shape.shape_id(), binding.binding_id())) {
+            transport
+                .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
+                .map_err(transport_error)?;
+            return Ok(());
+        }
         let supported = node
             .borrow_mut()
             .ensure_peer_maintained_subscription_view_supported(
@@ -9067,12 +9145,15 @@ where
                 "scope hydration was not a view update",
             ));
         };
-        settled_through =
-            Some(settled_through.map_or(*cut, |prior: crate::time::GlobalSeq| prior.min(*cut)));
-        authorization_progress = Some(authorization_progress.map_or(
-            peer.authorization_progress_for_subscription(subscription),
-            |prior: u64| prior.min(peer.authorization_progress_for_subscription(subscription)),
-        ));
+        let progress = peer.authorization_progress_for_subscription(subscription);
+        if aggregate.apply(subscription, *cut, progress).is_none()
+            && index + 1 == support_clauses.len()
+        {
+            transport
+                .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
+                .map_err(transport_error)?;
+            return Ok(());
+        }
         transport
             .send(SyncMessage::AuthorizationScopeView {
                 request_id,
@@ -9084,6 +9165,12 @@ where
             .map_err(transport_error)?;
         support_subscriptions.push(subscription);
     }
+    let Some((settled_through, authorization_progress)) = aggregate.bounds() else {
+        transport
+            .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
+            .map_err(transport_error)?;
+        return Ok(());
+    };
     transport
         .send(SyncMessage::AuthorizationScopeAggregateReceipt {
             request_id,
@@ -9094,8 +9181,8 @@ where
                 authority_epoch: connection_epoch,
                 claims_revision: node.borrow().session_claim_revision(identity),
                 policy_epoch: node.borrow().active_catalogue_seq(),
-                settled_through: settled_through.unwrap_or_default(),
-                authorization_progress: authorization_progress.unwrap_or_default(),
+                settled_through,
+                authorization_progress,
             },
         })
         .map_err(transport_error)?;
@@ -9146,7 +9233,10 @@ where
 }
 
 fn aggregate_authorization_scope_receipt_for_view<S>(
-    aggregates: &mut BTreeMap<crate::protocol::AuthorizationSupportScopeKey, ScopeAggregate>,
+    aggregates: &mut BTreeMap<
+        crate::protocol::AuthorizationSupportScopeKey,
+        AuthorityScopeAggregate,
+    >,
     node: &NodeState<S>,
     peer: &PeerState,
     link_identity: AuthorId,
@@ -9166,30 +9256,14 @@ where
         update,
     )?;
     let aggregate = aggregates.get_mut(&purpose.key)?;
-    if aggregate.expected_support != purpose.expected_support
-        || aggregate.members.get(&subscription)
-            != Some(&(subscription.shape_id, subscription.binding_id))
-    {
+    if aggregate.expected_support() != &purpose.expected_support {
         return None;
     }
-    aggregate.applied.insert(
+    let (settled_through, authorization_progress) = aggregate.apply(
         subscription,
-        (receipt.settled_through, receipt.authorization_progress),
-    );
-    if aggregate.members.len() != aggregate.expected_support.len()
-        || aggregate
-            .expected_support
-            .iter()
-            .any(|expected| !aggregate.members.values().any(|member| member == expected))
-        || aggregate
-            .members
-            .keys()
-            .any(|member| !aggregate.applied.contains_key(member))
-    {
-        return None;
-    }
-    let (settled_through, authorization_progress) =
-        aggregate_authorization_scope_bounds(&aggregate.applied)?;
+        receipt.settled_through,
+        receipt.authorization_progress,
+    )?;
     receipt.settled_through = settled_through;
     receipt.authorization_progress = authorization_progress;
     Some((subscription, receipt))
@@ -9198,6 +9272,7 @@ where
 /// Every support clause must be current in both dimensions.  They deliberately
 /// have independent lower bounds: cuts and authorization generations do not
 /// form a lexicographically ordered capability.
+#[cfg(test)]
 fn aggregate_authorization_scope_bounds(
     applied: &BTreeMap<SubscriptionKey, (crate::time::GlobalSeq, u64)>,
 ) -> Option<(crate::time::GlobalSeq, u64)> {
@@ -9240,7 +9315,10 @@ fn authorization_scope_support_options_match(
 }
 
 fn move_scope_aggregate_member(
-    aggregates: &mut BTreeMap<crate::protocol::AuthorizationSupportScopeKey, ScopeAggregate>,
+    aggregates: &mut BTreeMap<
+        crate::protocol::AuthorizationSupportScopeKey,
+        AuthorityScopeAggregate,
+    >,
     prior: Option<&AuthorizedScopePurpose>,
     refreshed: &AuthorizedScopePurpose,
     subscription: SubscriptionKey,
@@ -9249,26 +9327,20 @@ fn move_scope_aggregate_member(
         && prior.key != refreshed.key
         && let Some(previous) = aggregates.get_mut(&prior.key)
     {
-        previous.members.remove(&subscription);
-        previous.applied.remove(&subscription);
-        if previous.members.is_empty() {
+        previous.forget(subscription);
+        if previous.has_no_members() {
             aggregates.remove(&prior.key);
         }
     }
     let aggregate = aggregates
         .entry(refreshed.key.clone())
-        .or_insert_with(|| ScopeAggregate {
-            expected_support: refreshed.expected_support.clone(),
-            members: BTreeMap::new(),
-            applied: BTreeMap::new(),
-        });
-    if aggregate.expected_support == refreshed.expected_support {
-        aggregate.members.insert(
+        .or_insert_with(|| AuthorityScopeAggregate::new(refreshed.expected_support.clone()));
+    if aggregate.expected_support() == &refreshed.expected_support {
+        // A changed scope identity must never reuse the old support cut.
+        let _ = aggregate.register(
             subscription,
             (subscription.shape_id, subscription.binding_id),
         );
-        // A changed scope identity must never reuse the old support cut.
-        aggregate.applied.remove(&subscription);
     }
 }
 
@@ -9276,14 +9348,16 @@ fn move_scope_aggregate_member(
 /// exist.  In particular, do not retain an applied cut across a policy/claims
 /// transition that later returns to the same scope key.
 fn remove_scope_aggregate_member(
-    aggregates: &mut BTreeMap<crate::protocol::AuthorizationSupportScopeKey, ScopeAggregate>,
+    aggregates: &mut BTreeMap<
+        crate::protocol::AuthorizationSupportScopeKey,
+        AuthorityScopeAggregate,
+    >,
     key: &crate::protocol::AuthorizationSupportScopeKey,
     subscription: SubscriptionKey,
 ) {
     let empty = if let Some(aggregate) = aggregates.get_mut(key) {
-        aggregate.members.remove(&subscription);
-        aggregate.applied.remove(&subscription);
-        aggregate.members.is_empty()
+        aggregate.forget(subscription);
+        aggregate.has_no_members()
     } else {
         false
     };

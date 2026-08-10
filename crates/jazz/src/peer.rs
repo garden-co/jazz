@@ -13,6 +13,7 @@ use groove::ivm::MultisinkSubscription;
 use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use web_time::Instant;
 
+use crate::authorization_scope::AuthorityScopeAggregate;
 use crate::ids::{AuthorId, RowUuid};
 use crate::node::content_store::Extent;
 use crate::node::maintained_subscription_view::{
@@ -1894,12 +1895,31 @@ impl PeerState {
                 patch: BTreeMap::new(),
             };
             let scope = node.authorization_support_scope(writer, &action)?;
+            if scope.subscriptions.is_empty() {
+                // A policy with no support clauses is structurally complete;
+                // its terminal decision is evaluated by the same authority
+                // path without inventing an empty receipt.
+                continue;
+            }
+            let mut aggregate = AuthorityScopeAggregate::new(
+                scope
+                    .subscriptions
+                    .iter()
+                    .map(|(shape, binding)| (shape.shape_id(), binding.binding_id()))
+                    .collect(),
+            );
             for (shape, binding) in scope.subscriptions {
                 let subscription = SubscriptionKey {
                     shape_id: shape.shape_id(),
                     binding_id: binding.binding_id(),
                     read_view: scope.options.read_view_key(),
                 };
+                if !aggregate.register(subscription, (shape.shape_id(), binding.binding_id())) {
+                    // The compiler may reach the same canonical clause through
+                    // more than one policy edge.  It remains one support
+                    // proof clause, never a second maintained subscription.
+                    continue;
+                }
                 if retained_scope_is_unsettled
                     && self
                         .edge_scope_subscription_refs
@@ -1913,14 +1933,53 @@ impl PeerState {
                     .get(&subscription)
                     .is_some_and(|state| state.maintained_subscription_view.is_some())
                 {
+                    let _ = aggregate.apply(
+                        subscription,
+                        node.applied_global_watermark(),
+                        self.authorization_progress_for_subscription(subscription),
+                    );
                     continue;
                 }
                 let previous_role = self.role;
                 self.role = PeerRole::ClientLink { identity: writer };
                 let rehydrate = self.rehydrate_query(node, &shape, &binding);
                 self.role = previous_role;
-                let _ = rehydrate?;
+                let update = rehydrate?;
+                let SyncMessage::ViewUpdate {
+                    settled_through, ..
+                } = update
+                else {
+                    return Err(Error::UnsupportedSyncMessage(
+                        "authority support hydration did not return a view",
+                    ));
+                };
+                let _ = aggregate.apply(
+                    subscription,
+                    settled_through,
+                    self.authorization_progress_for_subscription(subscription),
+                );
+                // This legacy direct-PeerState entry point is retained only
+                // for compatibility tests.  Db edge admission uses the
+                // authority-owned upstream receipt path; a caller already
+                // parked here still waits for its next drain turn.
                 unsettled.push(subscription);
+            }
+            if aggregate.bounds().is_none() {
+                // Preserve the exact subscriptions that still need a newer
+                // clause view so an existing parked caller can retain them.
+                let missing = aggregate
+                    .expected_support()
+                    .iter()
+                    .filter_map(|(shape_id, binding_id)| {
+                        let subscription = SubscriptionKey {
+                            shape_id: *shape_id,
+                            binding_id: *binding_id,
+                            read_view: scope.options.read_view_key(),
+                        };
+                        (!unsettled.contains(&subscription)).then_some(subscription)
+                    })
+                    .collect::<Vec<_>>();
+                unsettled.extend(missing);
             }
         }
         if unsettled.is_empty() {
