@@ -467,6 +467,31 @@ fn enum_tasks_schema() -> DatabaseSchema {
     .with_index(IndexSchema::new("tasks_by_status", ["status"]))])
 }
 
+#[test]
+fn enum_registry_identity_is_owned_by_each_physical_column_occurrence() {
+    let supplied = EnumSchema::new("state", ["new", "done"])
+        .unwrap()
+        .with_registry_id(7);
+    let table = TableSchema::new(
+        "items",
+        [
+            ColumnSchema::new("a", ColumnType::Enum(supplied.clone())),
+            ColumnSchema::new("b", ColumnType::Enum(supplied)),
+        ],
+    );
+    assert_eq!(table.value_variant_registries.len(), 2);
+    let ids = table
+        .columns
+        .iter()
+        .map(|column| match &column.column_type {
+            ColumnType::Enum(schema) => schema.registry_id,
+            _ => unreachable!(),
+        })
+        .collect::<HashSet<_>>();
+    assert_eq!(ids.len(), 2);
+    assert!(!ids.contains(&7));
+}
+
 fn tuple_edges_schema() -> DatabaseSchema {
     let tx_ref = ColumnType::Tuple(vec![ColumnType::Uuid, ColumnType::U64]);
     DatabaseSchema::new([TableSchema::new(

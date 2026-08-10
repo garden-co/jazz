@@ -323,7 +323,10 @@ fn non_genesis_schema_activates_only_with_its_ordered_lineage_bundle() {
             publication: Box::new(publication),
         })
         .unwrap();
-    assert!(matches!(duplicate.as_slice(), [SyncMessage::CatalogueAck(_)]));
+    assert!(matches!(
+        duplicate.as_slice(),
+        [SyncMessage::CatalogueAck(_)]
+    ));
     drop(core);
 
     let reopened = reopen_node_at(&dir, node(0x2e), base);
@@ -649,14 +652,15 @@ fn malformed_unknown_source_bundle_is_quarantined_when_parent_arrives() {
     );
     let (dir, mut core) = open_node_with_schema(node(0x2d), v1.clone());
 
-    assert!(core
-        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+    assert!(
+        core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 2,
             publication: Box::new(malformed),
         })
         .unwrap()
-        .is_empty());
+        .is_empty()
+    );
     core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: 1,
@@ -864,7 +868,10 @@ fn active_history_projection_accepts_a_new_schema_variant_without_rebuild() {
     .unwrap();
 
     let deltas = subscription.recv().unwrap();
-    let rows = deltas.iter().filter(|(_, weight)| *weight > 0).collect::<Vec<_>>();
+    let rows = deltas
+        .iter()
+        .filter(|(_, weight)| *weight > 0)
+        .collect::<Vec<_>>();
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].0.descriptor(),
@@ -1011,7 +1018,10 @@ fn rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen() 
         u64::from(rows[0].variant_tag()),
         core.catalogue.schema_version_aliases[&renamed.id].0
     );
-    for logical_table in ["jazz_todos_rejected_versions", "jazz_tasks_rejected_versions"] {
+    for logical_table in [
+        "jazz_todos_rejected_versions",
+        "jazz_tasks_rejected_versions",
+    ] {
         assert!(matches!(
             core.database.table_schema(logical_table),
             Err(GrooveDbError::TableNotFound(_))
@@ -1035,11 +1045,13 @@ fn rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen() 
     );
 
     reopened.discard_rejection(rejected).unwrap();
-    assert!(reopened
-        .database
-        .primary_key_scan_raw(&storage_table, &[])
-        .unwrap()
-        .is_empty());
+    assert!(
+        reopened
+            .database
+            .primary_key_scan_raw(&storage_table, &[])
+            .unwrap()
+            .is_empty()
+    );
     drop(reopened);
     let reopened = reopen_node_at(&dir, node(0x34), schema());
     assert!(reopened.rejected_transaction(rejected).is_none());
@@ -1055,10 +1067,8 @@ fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
     let renamed = SchemaVersion::new(renamed_schema.clone());
     let (dir, mut core) = open_node_with_schema(node(0x2b), base.clone());
     let row_uuid = row(0x4b);
-    core.commit_mergeable(
-        MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("shared")),
-    )
-    .unwrap();
+    core.commit_mergeable(MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("shared")))
+        .unwrap();
     core.commit_mergeable(
         MergeableCommit::new("todos", row_uuid, 11).deletion(DeletionEvent::Deleted),
     )
@@ -1178,13 +1188,11 @@ fn changed_merge_semantics_start_a_new_physical_column_epoch() {
         "counts",
         [ColumnSchema::new("value", ColumnType::U64)],
     )]);
-    let evolved = SchemaVersion::new(JazzSchema::new([
-        TableSchema::new(
-            "counts",
-            [ColumnSchema::new("value", ColumnType::U64)],
-        )
-        .with_column_merge_strategy("value", MergeStrategy::Counter),
-    ]));
+    let evolved = SchemaVersion::new(JazzSchema::new([TableSchema::new(
+        "counts",
+        [ColumnSchema::new("value", ColumnType::U64)],
+    )
+    .with_column_merge_strategy("value", MergeStrategy::Counter)]));
     let (_dir, mut core) = open_node_with_schema(node(0x2c), base.clone());
     let source = core.catalogue.physical_mappings[&base.version_id()].tables["counts"].clone();
     publish_schema_lineage(
@@ -1376,13 +1384,14 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
         })
         .collect::<Vec<_>>();
 
-    assert!(core
-        .apply_sync_message(SyncMessage::CommitUnit {
+    assert!(
+        core.apply_sync_message(SyncMessage::CommitUnit {
             tx: tx.clone(),
             versions: rewritten,
         })
         .unwrap()
-        .is_empty());
+        .is_empty()
+    );
     assert_eq!(core.sync_metrics().parked_catalogue_orphans, 1);
     assert!(core.query_transaction(tx.tx_id).unwrap().is_none());
 
@@ -1427,10 +1436,12 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
     );
     drop(core);
     let mut reopened = reopen_node_at(&core_dir, node(0x37), base);
-    assert!(reopened
-        .query_transaction(tx.tx_id)
-        .unwrap()
-        .is_some_and(|stored| stored.fate == Fate::Accepted));
+    assert!(
+        reopened
+            .query_transaction(tx.tx_id)
+            .unwrap()
+            .is_some_and(|stored| stored.fate == Fate::Accepted)
+    );
     assert_eq!(
         reopened
             .query_rows(&shape, &binding, DurabilityTier::Global)
@@ -1450,8 +1461,7 @@ fn catalogue_arrival_drains_branch_relay_into_branch_partition() {
     let evolved_id = evolved.version_id();
     let (_writer_dir, mut writer) =
         open_history_complete_node_with_schema(node(0x38), base.clone());
-    let (relay_dir, mut relay) =
-        open_history_complete_node_with_schema(node(0x39), base.clone());
+    let (relay_dir, mut relay) = open_history_complete_node_with_schema(node(0x39), base.clone());
     let branch_id = branch(0x66);
     writer.create_root_branch(branch_id).unwrap();
     relay.create_root_branch(branch_id).unwrap();
@@ -1483,7 +1493,9 @@ fn catalogue_arrival_drains_branch_relay_into_branch_partition() {
         })
         .collect::<Vec<_>>();
 
-    relay.ingest_relay_commit_unit(tx.clone(), rewritten).unwrap();
+    relay
+        .ingest_relay_commit_unit(tx.clone(), rewritten)
+        .unwrap();
     assert!(relay.query_transaction(tx.tx_id).unwrap().is_none());
     assert!(
         !relay
@@ -1530,10 +1542,7 @@ fn catalogue_arrival_drains_branch_relay_into_branch_partition() {
         .collect::<BTreeMap<_, _>>();
     let evolved_cells = BTreeMap::from([
         ("body".to_owned(), Value::String(String::new())),
-        (
-            "title".to_owned(),
-            Value::String("relay parked".to_owned()),
-        ),
+        ("title".to_owned(), Value::String("relay parked".to_owned())),
     ]);
     assert_eq!(rows.get(&row(0x56)), Some(&evolved_cells));
     assert!(
@@ -1547,7 +1556,10 @@ fn catalogue_arrival_drains_branch_relay_into_branch_partition() {
     drop(relay);
     let mut reopened = reopen_node_at(&relay_dir, node(0x39), base);
     assert_eq!(
-        reopened.transaction_record(tx.tx_id).unwrap().target_lineage,
+        reopened
+            .transaction_record(tx.tx_id)
+            .unwrap()
+            .target_lineage,
         crate::tx::BranchLineage::Branch(branch_id)
     );
     let rows = reopened
@@ -1598,8 +1610,7 @@ fn parked_branch_ingress_role_keeps_authority_precedence_in_both_orders() {
 
     for (idx, relay_first) in [false, true].into_iter().enumerate() {
         let node_id = node(0x3b + idx as u8);
-        let (_dir, mut receiver) =
-            open_history_complete_node_with_schema(node_id, base.clone());
+        let (_dir, mut receiver) = open_history_complete_node_with_schema(node_id, base.clone());
         receiver.create_root_branch(branch_id).unwrap();
         let authority = || SyncMessage::CommitUnit {
             tx: tx.clone(),
@@ -1831,9 +1842,11 @@ fn shape_registration_parks_until_schema_version_catalogue_arrives() {
 
     drop(core);
     let reopened = reopen_node_at(&dir, node(0x3c), schema());
-    assert!(reopened
-        .catalogue_schemas()
-        .contains_key(&shape.schema_version()));
+    assert!(
+        reopened
+            .catalogue_schemas()
+            .contains_key(&shape.schema_version())
+    );
 }
 #[test]
 fn publishing_schema_registers_new_physical_tables_live() {
@@ -1860,8 +1873,7 @@ fn publishing_schema_registers_new_physical_tables_live() {
         Vec::<String>::new(),
     )
     .unwrap();
-    let table_id =
-        core.catalogue.physical_mappings[&evolved_payload.id].tables["todos"].table_id;
+    let table_id = core.catalogue.physical_mappings[&evolved_payload.id].tables["todos"].table_id;
     let history = physical_history_table_name(table_id);
     let register = physical_register_table_name(table_id);
     assert!(core.database.primary_key_scan_raw(&history, &[]).is_ok());
@@ -1917,21 +1929,19 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
 
     let note = row(0x3e);
     assert!(
-        core.advisory_mergeable_write_allows(
+        core.advisory_mergeable_write_allows(MergeableCommit::new("notes", note, 10).cells(
+            BTreeMap::from([("body".to_owned(), v("live add-table write"),)])
+        ))
+        .unwrap()
+    );
+    let tx_id = core
+        .commit_mergeable(
             MergeableCommit::new("notes", note, 10).cells(BTreeMap::from([(
                 "body".to_owned(),
                 v("live add-table write"),
-            )]))
+            )])),
         )
-        .unwrap()
-    );
-    let tx_id = core.commit_mergeable(
-        MergeableCommit::new("notes", note, 10).cells(BTreeMap::from([(
-            "body".to_owned(),
-            v("live add-table write"),
-        )])),
-    )
-    .unwrap();
+        .unwrap();
     assert_eq!(
         core.current_rows_for_schema("notes", evolved_payload.id, DurabilityTier::Local)
             .unwrap()
@@ -1956,7 +1966,10 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
         .collect::<BTreeMap<_, _>>();
     assert_eq!(
         rows,
-        BTreeMap::from([(note, BTreeMap::from([("body".to_owned(), v("live add-table write"))]))])
+        BTreeMap::from([(
+            note,
+            BTreeMap::from([("body".to_owned(), v("live add-table write"))])
+        )])
     );
 
     let mut peer = PeerState::new();
@@ -1971,8 +1984,7 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
     let update = peer.current_rows_update(&mut core, "notes").unwrap();
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
-        result_member_adds,
-        ..
+        result_member_adds, ..
     } = update
     else {
         panic!("current-row subscription should produce a view update");
@@ -2138,8 +2150,10 @@ fn shared_physical_reads_project_natural_lenses_after_schema_agnostic_winner() {
         ])
     );
 
-    core.commit_mergeable(MergeableCommit::new("todos", new_row, 12).deletion(DeletionEvent::Deleted))
-        .unwrap();
+    core.commit_mergeable(
+        MergeableCommit::new("todos", new_row, 12).deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
     let include_deleted_shape = Query::from("todos")
         .filter(eq(col("title"), param("wanted")))
         .validate(&base)
@@ -2875,6 +2889,176 @@ fn physical_schema_variants_survive_pointer_changes_and_reopen() {
     );
 }
 
+fn independent_enum_schema(a: &[&str], b: &[&str]) -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "items",
+        [
+            ColumnSchema::new(
+                "a",
+                ColumnType::Enum(groove::records::EnumSchema::new("a", a.iter().copied()).unwrap()),
+            ),
+            ColumnSchema::new(
+                "b",
+                ColumnType::Enum(groove::records::EnumSchema::new("b", b.iter().copied()).unwrap()),
+            ),
+        ],
+    )])
+}
+
+#[test]
+fn independent_column_enum_registries_evolve_additively_across_reopen() {
+    // Registry allocation is physical catalogue metadata, so this internal
+    // test asserts both user-visible decoding and the non-Cartesian boundary.
+    let base = independent_enum_schema(&["a0"], &["b0"]);
+    let a_evolved = SchemaVersion::new(independent_enum_schema(&["a0", "a1"], &["b0"]));
+    let b_evolved = SchemaVersion::new(independent_enum_schema(&["a0", "a1"], &["b0", "b1"]));
+    let (dir, mut core) = open_node_with_schema(node(0x72), base.clone());
+    core.commit_mergeable(
+        MergeableCommit::new("items", row(0x72), 1).cells(BTreeMap::from([
+            ("a".to_owned(), Value::Enum(0)),
+            ("b".to_owned(), Value::Enum(0)),
+        ])),
+    )
+    .unwrap();
+    let enum_lens = |source, target, column: &str| {
+        MigrationLens::new(
+            source,
+            target,
+            vec![TableLens {
+                source_table: "items".to_owned(),
+                target_table: "items".to_owned(),
+                ops: vec![LensOp::TransformColumn {
+                    column: column.to_owned(),
+                    transform: "jazz.identity".to_owned(),
+                }],
+            }],
+        )
+    };
+    publish_schema_lineage(
+        &mut core,
+        a_evolved.clone(),
+        enum_lens(base.version_id(), a_evolved.id, "a"),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: a_evolved.id,
+        },
+    })
+    .unwrap();
+    core.commit_mergeable(
+        MergeableCommit::new("items", row(0x73), 2).cells(BTreeMap::from([
+            ("a".to_owned(), Value::Enum(1)),
+            ("b".to_owned(), Value::Enum(0)),
+        ])),
+    )
+    .unwrap();
+    let table_id = core.catalogue.physical_mappings[&a_evolved.id].tables["items"].table_id;
+    let enum_registry_ids = core.catalogue.physical_mappings[&a_evolved.id].tables["items"]
+        .columns
+        .values()
+        .map(|column| {
+            groove::records::variant_registry_id_for_path(&format!(
+                "physical-column/{}/nullable",
+                column.0
+            ))
+        })
+        .collect::<BTreeSet<_>>();
+    let physical_name = physical_history_table_name(table_id);
+    let after_a = core.database.table_schema(&physical_name).unwrap();
+    let after_a_sizes = after_a
+        .value_variant_registries
+        .iter()
+        .filter(|(id, _)| enum_registry_ids.contains(id))
+        .map(|(_, registry)| match registry {
+            groove::records::VariantRegistry::Enum { variants } => variants.len(),
+            groove::records::VariantRegistry::Union { cases } => cases.len(),
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(after_a_sizes, BTreeSet::from([1, 2]));
+    publish_schema_lineage(
+        &mut core,
+        b_evolved.clone(),
+        enum_lens(a_evolved.id, b_evolved.id, "b"),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 2,
+            schema: b_evolved.id,
+        },
+    })
+    .unwrap();
+    core.commit_mergeable(
+        MergeableCommit::new("items", row(0x74), 3).cells(BTreeMap::from([
+            ("a".to_owned(), Value::Enum(1)),
+            ("b".to_owned(), Value::Enum(1)),
+        ])),
+    )
+    .unwrap();
+    assert_eq!(core.query_table_versions("items").unwrap().len(), 3);
+
+    let base_mapping = &core.catalogue.physical_mappings[&base.version_id()].tables["items"];
+    let a_mapping = &core.catalogue.physical_mappings[&a_evolved.id].tables["items"];
+    let b_mapping = &core.catalogue.physical_mappings[&b_evolved.id].tables["items"];
+    assert_eq!(base_mapping.columns, a_mapping.columns);
+    assert_eq!(a_mapping.columns, b_mapping.columns);
+    assert_eq!(base_mapping.table_id, b_mapping.table_id);
+
+    let table = core.database.table_schema(&physical_name).unwrap();
+    let user_registries = table
+        .value_variant_registries
+        .iter()
+        .filter(|(id, _)| enum_registry_ids.contains(id))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(user_registries.len(), 2);
+    assert_eq!(table.variants.len(), 3);
+    let stable_tags = table
+        .variants
+        .iter()
+        .map(|variant| variant.tag)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        user_registries
+            .values()
+            .map(|registry| match registry {
+                groove::records::VariantRegistry::Enum { variants } => variants.len(),
+                groove::records::VariantRegistry::Union { .. } => 0,
+            })
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([2])
+    );
+    drop(core);
+
+    let mut reopened = reopen_node_at(&dir, node(0x72), base);
+    let table = reopened.database.table_schema(&physical_name).unwrap();
+    assert_eq!(table.variants.len(), 3);
+    assert_eq!(
+        table
+            .variants
+            .iter()
+            .map(|variant| variant.tag)
+            .collect::<Vec<_>>(),
+        stable_tags
+    );
+    assert_eq!(
+        table
+            .value_variant_registries
+            .keys()
+            .filter(|id| enum_registry_ids.contains(id))
+            .count(),
+        2
+    );
+    assert_eq!(reopened.query_table_versions("items").unwrap().len(), 3);
+}
+
 #[test]
 fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
     let base = schema();
@@ -2898,17 +3082,12 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
         )]))
         .unwrap();
     let pre_lens_plan = core
-        .prepared_query_plan(
-            &shape,
-            &binding,
-            DurabilityTier::Local,
-            AuthorId::SYSTEM,
-        )
+        .prepared_query_plan(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
         .unwrap();
     publish_schema_lineage(
-    &mut core,
-    evolved_payload.clone(),
-    MigrationLens::new(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
             base.version_id(),
             evolved_payload.id,
             vec![TableLens {
@@ -2926,10 +3105,10 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
                 ],
             }],
         ),
-    Vec::<String>::new(),
-    Vec::<String>::new(),
-)
-.unwrap();
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
     core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
@@ -2950,7 +3129,12 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
         .query_rows(&shape, &binding, DurabilityTier::Local)
         .unwrap();
 
-    assert_eq!(rows.into_iter().map(current_row_pair).collect::<BTreeMap<_, _>>(), BTreeMap::from([(row(0x49), title_cells("projected"))]));
+    assert_eq!(
+        rows.into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(0x49), title_cells("projected"))])
+    );
     assert!(!core.uses_schema_projected_read(&shape));
     let rows = core
         .query_rows_local_preview(&shape, &binding, Some(&pre_lens_plan))
@@ -2996,9 +3180,10 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
         &mut join_core,
         join_evolved.clone(),
         MigrationLens::new(
-                join_base.version_id(),
-                join_evolved.id,
-                vec![TableLens {
+            join_base.version_id(),
+            join_evolved.id,
+            vec![
+                TableLens {
                     source_table: "todos".to_owned(),
                     target_table: "todos".to_owned(),
                     ops: vec![LensOp::AddColumn {
@@ -3010,8 +3195,9 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
                     source_table: "todo_members".to_owned(),
                     target_table: "todo_members".to_owned(),
                     ops: vec![],
-                }],
-            ),
+                },
+            ],
+        ),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -3034,19 +3220,15 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
         )
         .unwrap();
     join_core
-        .commit_mergeable(
-            MergeableCommit::new("todo_members", row(0x4e), 21).cells(BTreeMap::from([
+        .commit_mergeable(MergeableCommit::new("todo_members", row(0x4e), 21).cells(
+            BTreeMap::from([
                 ("todo".to_owned(), Value::Uuid(row(0x4d).0)),
                 ("member".to_owned(), Value::Uuid(row(0x4d).0)),
-            ])),
-        )
+            ]),
+        ))
         .unwrap();
     let projected_join = Query::from("todos")
-        .join_via(
-            "todo_members",
-            "todo",
-            [eq(col("member"), param("wanted"))],
-        )
+        .join_via("todo_members", "todo", [eq(col("member"), param("wanted"))])
         .validate(&join_base)
         .unwrap();
     let projected_join_binding = projected_join
@@ -3063,7 +3245,9 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
         )
         .unwrap();
     assert_eq!(
-        rows.into_iter().map(current_row_pair).collect::<BTreeMap<_, _>>(),
+        rows.into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
         BTreeMap::from([(row(0x4d), title_cells("joined"))])
     );
 }
@@ -3081,9 +3265,9 @@ fn schema_projected_reads_ignore_settled_result_set_materialization_cache() {
     let evolved_payload = SchemaVersion::new(evolved);
     let (_dir, mut core) = open_node_with_schema(node(0x4c), base.clone());
     publish_schema_lineage(
-    &mut core,
-    evolved_payload.clone(),
-    MigrationLens::new(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
             base.version_id(),
             evolved_payload.id,
             vec![TableLens {
@@ -3101,10 +3285,10 @@ fn schema_projected_reads_ignore_settled_result_set_materialization_cache() {
                 ],
             }],
         ),
-    Vec::<String>::new(),
-    Vec::<String>::new(),
-)
-.unwrap();
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
     core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
@@ -3144,8 +3328,8 @@ fn schema_projected_reads_ignore_settled_result_set_materialization_cache() {
         crate::protocol::BindingViewKey {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
-        read_view: Default::default(),
-},
+            read_view: Default::default(),
+        },
         BTreeSet::new(),
     );
 
@@ -3213,9 +3397,9 @@ fn schema_projected_current_reachable_filters_translate_old_names() {
     let evolved_payload = SchemaVersion::new(evolved);
     let (_dir, mut core) = open_node_with_schema(node(0x4f), base.clone());
     publish_schema_lineage(
-    &mut core,
-    evolved_payload.clone(),
-    MigrationLens::new(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
             base.version_id(),
             evolved_payload.id,
             vec![
@@ -3247,10 +3431,10 @@ fn schema_projected_current_reachable_filters_translate_old_names() {
                 },
             ],
         ),
-    Vec::<String>::new(),
-    Vec::<String>::new(),
-)
-.unwrap();
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
     core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
@@ -3264,19 +3448,14 @@ fn schema_projected_current_reachable_filters_translate_old_names() {
     let team2 = row(0x52);
     let team3 = row(0x53);
     for idx in [0x51, 0x52, 0x53] {
-        core.commit_mergeable(
-            MergeableCommit::new("teams", row(idx), idx as u64).cells(BTreeMap::from([(
-                "name".to_owned(),
-                v(format!("team-{idx}")),
-            )])),
-        )
+        core.commit_mergeable(MergeableCommit::new("teams", row(idx), idx as u64).cells(
+            BTreeMap::from([("name".to_owned(), v(format!("team-{idx}")))]),
+        ))
         .unwrap();
     }
     core.commit_mergeable(
-        MergeableCommit::new("docs", row(0xd1), 20).cells(BTreeMap::from([(
-            "title".to_owned(),
-            v("reachable"),
-        )])),
+        MergeableCommit::new("docs", row(0xd1), 20)
+            .cells(BTreeMap::from([("title".to_owned(), v("reachable"))])),
     )
     .unwrap();
     core.commit_mergeable(
@@ -3324,7 +3503,9 @@ fn schema_projected_current_reachable_filters_translate_old_names() {
         .unwrap();
 
     assert_eq!(
-        rows.into_iter().map(current_row_pair).collect::<BTreeMap<_, _>>(),
+        rows.into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
         BTreeMap::from([(row(0xd1), title_cells("reachable"))])
     );
 }
@@ -3341,9 +3522,9 @@ fn include_deleted_schema_projected_root_filters_translate_old_names() {
     )]));
     let (_dir, mut core) = open_node_with_schema(node(0x59), base.clone());
     publish_schema_lineage(
-    &mut core,
-    evolved.clone(),
-    MigrationLens::new(
+        &mut core,
+        evolved.clone(),
+        MigrationLens::new(
             base.version_id(),
             evolved.id,
             vec![TableLens {
@@ -3361,10 +3542,10 @@ fn include_deleted_schema_projected_root_filters_translate_old_names() {
                 ],
             }],
         ),
-    Vec::<String>::new(),
-    Vec::<String>::new(),
-)
-.unwrap();
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
     core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
@@ -3381,8 +3562,10 @@ fn include_deleted_schema_projected_root_filters_translate_old_names() {
         ])),
     )
     .unwrap();
-    core.commit_mergeable(MergeableCommit::new("todos", row(0x59), 11).deletion(DeletionEvent::Deleted))
-        .unwrap();
+    core.commit_mergeable(
+        MergeableCommit::new("todos", row(0x59), 11).deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
 
     let shape = Query::from("todos")
         .filter(eq(col("title"), param("wanted")))
@@ -3405,7 +3588,10 @@ fn include_deleted_schema_projected_root_filters_translate_old_names() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), row(0x59));
     assert!(rows[0].is_deleted());
-    assert_eq!(rows[0].cell(&base.tables[0], "title"), Some(v("deleted-root")));
+    assert_eq!(
+        rows[0].cell(&base.tables[0], "title"),
+        Some(v("deleted-root"))
+    );
 }
 
 #[test]
@@ -3434,9 +3620,9 @@ fn include_deleted_schema_projected_join_filters_translate_old_names() {
     ]));
     let (_dir, mut core) = open_node_with_schema(node(0x5a), base.clone());
     publish_schema_lineage(
-    &mut core,
-    evolved.clone(),
-    MigrationLens::new(
+        &mut core,
+        evolved.clone(),
+        MigrationLens::new(
             base.version_id(),
             evolved.id,
             vec![
@@ -3458,10 +3644,10 @@ fn include_deleted_schema_projected_join_filters_translate_old_names() {
                 },
             ],
         ),
-    Vec::<String>::new(),
-    Vec::<String>::new(),
-)
-.unwrap();
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
     core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
@@ -3477,8 +3663,10 @@ fn include_deleted_schema_projected_join_filters_translate_old_names() {
             .cells(BTreeMap::from([("name".to_owned(), v("joined"))])),
     )
     .unwrap();
-    core.commit_mergeable(MergeableCommit::new("issues", issue, 11).deletion(DeletionEvent::Deleted))
-        .unwrap();
+    core.commit_mergeable(
+        MergeableCommit::new("issues", issue, 11).deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
     core.commit_mergeable(
         MergeableCommit::new("issue_tags", row(0x5b), 12).cells(BTreeMap::from([
             ("issue".to_owned(), Value::Uuid(issue.0)),
@@ -3491,7 +3679,9 @@ fn include_deleted_schema_projected_join_filters_translate_old_names() {
         .join_via("issue_tags", "issue", [eq(col("tag_kind"), param("tag"))])
         .validate(&base)
         .unwrap();
-    let binding = shape.bind(BTreeMap::from([("tag".to_owned(), v("bug"))])).unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([("tag".to_owned(), v("bug"))]))
+        .unwrap();
     let rows = core
         .query_rows_including_deleted_in_authorization_mode(
             &shape,
@@ -3560,9 +3750,9 @@ fn include_deleted_schema_projected_reachable_filters_translate_old_names() {
     ]));
     let (_dir, mut core) = open_node_with_schema(node(0x5c), base.clone());
     publish_schema_lineage(
-    &mut core,
-    evolved.clone(),
-    MigrationLens::new(
+        &mut core,
+        evolved.clone(),
+        MigrationLens::new(
             base.version_id(),
             evolved.id,
             vec![
@@ -3597,10 +3787,10 @@ fn include_deleted_schema_projected_reachable_filters_translate_old_names() {
                 },
             ],
         ),
-    Vec::<String>::new(),
-    Vec::<String>::new(),
-)
-.unwrap();
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
     core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
@@ -3637,13 +3827,13 @@ fn include_deleted_schema_projected_reachable_filters_translate_old_names() {
         ])),
     )
     .unwrap();
-    core.commit_mergeable(
-        MergeableCommit::new("team_access", row(0x60), 15).cells(BTreeMap::from([
+    core.commit_mergeable(MergeableCommit::new("team_access", row(0x60), 15).cells(
+        BTreeMap::from([
             ("doc".to_owned(), Value::Uuid(doc.0)),
             ("team".to_owned(), Value::Uuid(team2.0)),
             ("access_label".to_owned(), v("allow")),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
 
     let shape = Query::from("docs")
@@ -3698,9 +3888,9 @@ fn historical_schema_projected_reads_use_projected_snapshot_source() {
     let evolved_payload = SchemaVersion::new(evolved);
     let (_dir, mut core) = open_node_with_schema(node(0x54), base.clone());
     publish_schema_lineage(
-    &mut core,
-    evolved_payload.clone(),
-    MigrationLens::new(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
             base.version_id(),
             evolved_payload.id,
             vec![TableLens {
@@ -3718,10 +3908,10 @@ fn historical_schema_projected_reads_use_projected_snapshot_source() {
                 ],
             }],
         ),
-    Vec::<String>::new(),
-    Vec::<String>::new(),
-)
-.unwrap();
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
     core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
@@ -3775,7 +3965,9 @@ fn historical_schema_projected_reads_use_projected_snapshot_source() {
     );
     let rows = core.query_rows_at(&shape, &binding, GlobalSeq(1)).unwrap();
     assert_eq!(
-        rows.into_iter().map(current_row_pair).collect::<BTreeMap<_, _>>(),
+        rows.into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
         BTreeMap::from([(row(0x54), title_cells("historical"))])
     );
 }
@@ -3818,9 +4010,9 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
     .unwrap();
 
     publish_schema_lineage(
-    &mut core,
-    renamed.clone(),
-    MigrationLens::new(
+        &mut core,
+        renamed.clone(),
+        MigrationLens::new(
             base.version_id(),
             renamed.id,
             vec![TableLens {
@@ -3838,10 +4030,10 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
                 ],
             }],
         ),
-    Vec::<String>::new(),
-    Vec::<String>::new(),
-)
-.unwrap();
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
     core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
@@ -3990,9 +4182,9 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
     let evolved_payload = SchemaVersion::new(evolved);
     let (_dir, mut core) = open_node_with_schema(node(0x55), base.clone());
     publish_schema_lineage(
-    &mut core,
-    evolved_payload.clone(),
-    MigrationLens::new(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
             base.version_id(),
             evolved_payload.id,
             vec![
@@ -4027,10 +4219,10 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
                 },
             ],
         ),
-    Vec::<String>::new(),
-    Vec::<String>::new(),
-)
-.unwrap();
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
     core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
@@ -4045,12 +4237,9 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
     let team3 = row(0x58);
     for idx in [0x56, 0x57, 0x58] {
         let tx_id = core
-            .commit_mergeable(
-                MergeableCommit::new("teams", row(idx), idx as u64).cells(BTreeMap::from([(
-                    "name".to_owned(),
-                    v(format!("team-{idx}")),
-                )])),
-            )
+            .commit_mergeable(MergeableCommit::new("teams", row(idx), idx as u64).cells(
+                BTreeMap::from([("name".to_owned(), v(format!("team-{idx}")))]),
+            ))
             .unwrap();
         core.apply_fate_update(
             tx_id,
@@ -4062,10 +4251,8 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
     }
     let doc_tx = core
         .commit_mergeable(
-            MergeableCommit::new("docs", row(0xd5), 90).cells(BTreeMap::from([(
-                "name".to_owned(),
-                v("reachable"),
-            )])),
+            MergeableCommit::new("docs", row(0xd5), 90)
+                .cells(BTreeMap::from([("name".to_owned(), v("reachable"))])),
         )
         .unwrap();
     core.apply_fate_update(
@@ -4140,13 +4327,18 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
             .is_empty(),
         "access and edge rows should not be visible before their historical positions"
     );
-    let rows = core.query_rows_at(&shape, &binding, GlobalSeq(230)).unwrap();
+    let rows = core
+        .query_rows_at(&shape, &binding, GlobalSeq(230))
+        .unwrap();
     assert_eq!(
-        rows.into_iter().map(current_row_pair).collect::<BTreeMap<_, _>>(),
+        rows.into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
         BTreeMap::from([(row(0xd5), title_cells("reachable"))])
     );
     assert!(
-        !core.query
+        !core
+            .query
             .query_shape_cache
             .keys()
             .any(|(shape_id, _, _)| *shape_id == shape.shape_id()),

@@ -4248,14 +4248,11 @@ where
                 &candidate_aliases,
                 schema_version,
                 &table.name,
-                [(
-                    None,
-                    table
-                        .columns
-                        .iter()
-                        .map(|column| column.name.clone())
-                        .collect(),
-                )],
+                table
+                    .columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect(),
             )?;
         }
         let mapping =

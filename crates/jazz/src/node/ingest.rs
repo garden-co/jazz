@@ -1156,6 +1156,26 @@ where
                     }
                     LensOp::TransformColumn { column, transform } => {
                         validate_transform_column(columns.get(column), transform)?;
+                        let source_column =
+                            columns.get(column).ok_or(Error::InvalidCatalogueUpdate(
+                                "transformed column is absent from source",
+                            ))?;
+                        let target_column = target_table
+                            .columns
+                            .iter()
+                            .find(|candidate| candidate.name == *column)
+                            .ok_or(Error::InvalidCatalogueUpdate(
+                                "transformed column is absent from target",
+                            ))?;
+                        if !physical_value_epoch_is_compatible(
+                            &source_column.column_type,
+                            &target_column.column_type,
+                        ) {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "column transform changes variant registry non-additively",
+                            ));
+                        }
+                        columns.insert(column.clone(), target_column.clone());
                     }
                     LensOp::RejectSourceDelta { .. } => {}
                 }

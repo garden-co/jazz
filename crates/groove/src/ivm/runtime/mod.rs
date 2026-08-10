@@ -29,8 +29,8 @@ use crate::ivm::{
     JoinOpKind, LiteralValue, MAX_COLLECT_BY_TREE_DEPTH, MapProjectOp, NodeDescriptor,
     NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField,
     ProjectionExpr, RecursiveOp, Retainer, StaticScanSpec, TableSourceOp, TopByDirection,
-    TopByLimit, TopByOp, TopByOrderField, VariantProjectOp, UnnestOp, UnwrapNullableOp,
-    ValueComparison, VariantProjectionTarget,
+    TopByLimit, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp, ValueComparison,
+    VariantProjectOp, VariantProjectionTarget,
 };
 use crate::records::{
     self, BorrowedRecord, OwnedRecord, RawProjectionField, RawProjectionScratch, RecordDescriptor,
@@ -258,10 +258,52 @@ impl IvmRuntime {
             table_schema.columns.push(column);
         }
         let version = variant_tag.tag;
+        for field in &variant_tag.payload_fields {
+            field
+                .value_type
+                .collect_variant_registries(&mut table_schema.value_variant_registries);
+        }
         table_schema.variants.push(variant_tag);
         let table_schema = table_schema.clone();
         for index in &table_schema.indices {
             self.register_schema_index_variant_case(&table_schema, index, version)?;
+        }
+        self.invalidate_table_inputs(table);
+        Ok(())
+    }
+
+    pub(crate) fn evolve_table_variant_registries(
+        &mut self,
+        table: &str,
+        columns: &[crate::schema::ColumnSchema],
+    ) -> Result<(), IvmRuntimeError> {
+        let table_schema = self
+            .schema
+            .tables
+            .iter_mut()
+            .find(|candidate| candidate.name == table)
+            .ok_or_else(|| IvmRuntimeError::TableNotFound(table.to_owned()))?;
+        for desired in columns {
+            let Some(existing) = table_schema
+                .columns
+                .iter_mut()
+                .find(|column| column.name == desired.name)
+            else {
+                continue;
+            };
+            if !existing
+                .column_type
+                .registry_compatible_with(&desired.column_type)
+            {
+                return Err(IvmRuntimeError::TableFieldAlreadyExists {
+                    table: table.to_owned(),
+                    field: desired.name.clone(),
+                });
+            }
+            existing.column_type = desired.column_type.clone();
+            desired
+                .column_type
+                .collect_variant_registries(&mut table_schema.value_variant_registries);
         }
         self.invalidate_table_inputs(table);
         Ok(())
@@ -336,7 +378,11 @@ impl IvmRuntime {
                     cases: HashMap::default(),
                 });
             }
-            std::collections::hash_map::Entry::Occupied(entry) if entry.get().output == output => {}
+            std::collections::hash_map::Entry::Occupied(mut entry)
+                if record_descriptors_registry_compatible(&entry.get().output, &output) =>
+            {
+                entry.get_mut().output = output;
+            }
             std::collections::hash_map::Entry::Occupied(_) => {
                 return Err(IvmRuntimeError::VariantProjectionOutputMismatch {
                     table: table.to_owned(),
@@ -511,15 +557,17 @@ impl IvmRuntime {
                 target: target.to_owned(),
             }
         })?;
-        let case = projection
-            .cases
-            .get(&record.variant_tag())
-            .ok_or_else(|| IvmRuntimeError::VariantProjectionCaseNotFound {
+        let case = projection.cases.get(&record.variant_tag()).ok_or_else(|| {
+            IvmRuntimeError::VariantProjectionCaseNotFound {
                 table: table.to_owned(),
                 target: target.to_owned(),
                 version: u64::from(record.variant_tag()),
-            })?;
-        if case.source() != *record.record().descriptor() {
+            }
+        })?;
+        if !case
+            .source()
+            .registry_compatible_with(record.record().descriptor())
+        {
             return Err(IvmRuntimeError::VariantProjectionSourceMismatch {
                 table: table.to_owned(),
                 target: target.to_owned(),
@@ -599,7 +647,7 @@ impl IvmRuntime {
         })?;
         let case = if let Some(fields) = fields {
             let projected = project_descriptor(&source, fields)?;
-            if projected != projection.output {
+            if !record_descriptors_registry_compatible(&projected, &projection.output) {
                 return Err(IvmRuntimeError::VariantProjectionOutputMismatch {
                     table: table.to_owned(),
                     target: variant_projection_target_name(&target).to_owned(),
@@ -678,12 +726,13 @@ impl IvmRuntime {
         index: &IndexSchema,
         variant_tag: u32,
     ) -> Result<(), IvmRuntimeError> {
-        let version = table.variant(variant_tag).ok_or_else(|| {
-            IvmRuntimeError::UnknownTableVariant {
-                table: table.name.clone(),
-                version: u64::from(variant_tag),
-            }
-        })?;
+        let version =
+            table
+                .variant(variant_tag)
+                .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
+                    table: table.name.clone(),
+                    version: u64::from(variant_tag),
+                })?;
         let fields = schema_index_input_fields(table, index)?
             .into_iter()
             .map(|shared| {
@@ -755,7 +804,7 @@ impl IvmRuntime {
         }
         self.prune_unreferenced_arrangements();
         let records = records?;
-        if records.descriptor != output {
+        if !records.descriptor.registry_compatible_with(&output) {
             return Err(IvmRuntimeError::GraphOutputMismatch);
         }
         Ok(records)
@@ -915,7 +964,9 @@ impl IvmRuntime {
             let mut terminal_sinks = BTreeMap::new();
             for (sink, output) in &subscription.outputs {
                 let records = evaluator.update_node(output.node)?;
-                if !records.deltas.is_empty() && records.descriptor != output.output {
+                if !records.deltas.is_empty()
+                    && !records.descriptor.registry_compatible_with(&output.output)
+                {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
                 let structured = evaluator.output_is_structured_collect_by(output.node)?;
@@ -1171,7 +1222,7 @@ impl IvmRuntime {
                 .map(|node| self.hydration_snapshot(node, storage))
                 .transpose()?;
             let mut records = self.hydration_snapshot(output.node, storage)?;
-            if records.descriptor != output.output {
+            if !records.descriptor.registry_compatible_with(&output.output) {
                 return Err(IvmRuntimeError::GraphOutputMismatch);
             }
             if let Some(ordering) = &ordering {
@@ -1246,7 +1297,7 @@ impl IvmRuntime {
                 .map(|node| self.subscription_hydration_snapshot(node, storage))
                 .transpose()?;
             let mut records = self.subscription_hydration_snapshot(output.node, storage)?;
-            if records.descriptor != output.output {
+            if !records.descriptor.registry_compatible_with(&output.output) {
                 return Err(IvmRuntimeError::GraphOutputMismatch);
             }
             if let Some(ordering) = &ordering {
@@ -2017,11 +2068,11 @@ impl IvmRuntime {
                 project_descriptor(&input, fields)
             }
             GraphBuilder::Union { inputs } => {
-                let mut output = None;
+                let mut output: Option<RecordDescriptor> = None;
                 for input in inputs {
                     let next = self.infer_builder_output_cached(input, output_memo)?;
                     if let Some(output) = output {
-                        if output != next {
+                        if !output.registry_compatible_with(&next) {
                             return Err(IvmRuntimeError::GraphOutputMismatch);
                         }
                     } else {
@@ -2044,7 +2095,7 @@ impl IvmRuntime {
             GraphBuilder::Recursive { seed, step, .. } => {
                 let seed = self.infer_builder_output_cached(seed, output_memo)?;
                 let step = self.infer_builder_output_cached(step, output_memo)?;
-                if seed != step {
+                if !seed.registry_compatible_with(&step) {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
                 Ok(seed)
@@ -2568,7 +2619,7 @@ impl IvmRuntime {
                 })
             }
             GraphBuilder::InlineRecords { output, records } => {
-                if inferred_output != *output {
+                if !inferred_output.registry_compatible_with(output) {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
                 let node = self.graph.dedup_node(
@@ -2660,8 +2711,12 @@ impl IvmRuntime {
                 }
                 let compiled_seed = self.add_dedup_graph_cached(seed, output_memo)?;
                 let compiled_step = self.add_dedup_graph_cached(step, output_memo)?;
-                if compiled_seed.output != compiled_step.output
-                    || compiled_seed.output != inferred_output
+                if !compiled_seed
+                    .output
+                    .registry_compatible_with(&compiled_step.output)
+                    || !compiled_seed
+                        .output
+                        .registry_compatible_with(&inferred_output)
                 {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
@@ -3153,7 +3208,7 @@ impl IvmRuntime {
                     }
                     let input_node = compiled_input.node;
                     let input_output = compiled_input.output;
-                    if inferred_output != input_output {
+                    if !inferred_output.registry_compatible_with(&input_output) {
                         return Err(IvmRuntimeError::GraphOutputMismatch);
                     }
                     input_nodes.push(input_node);
@@ -3745,6 +3800,13 @@ impl IvmRuntime {
             root_ordering_node: None,
         })
     }
+}
+
+fn record_descriptors_registry_compatible(
+    left: &RecordDescriptor,
+    right: &RecordDescriptor,
+) -> bool {
+    left.registry_compatible_with(right)
 }
 
 /// Point-in-time runtime counters for benchmark and diagnostics reporting.
@@ -4771,7 +4833,10 @@ fn validate_public_output_fields(
             .fields()
             .get(index)
             .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(index))?;
-        if source_field.value_type != field.value_type {
+        if !source_field
+            .value_type
+            .registry_compatible_with(&field.value_type)
+        {
             return Err(IvmRuntimeError::GraphOutputMismatch);
         }
     }
@@ -5849,7 +5914,7 @@ impl NodeState {
         {
             let projected;
             let source_deltas = if let Some(projection) = projection {
-                if projection.output != *output_desc {
+                if !projection.output.registry_compatible_with(output_desc) {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
                 let case = projection.cases.get(&delta.variant_tag).ok_or_else(|| {
@@ -5864,7 +5929,7 @@ impl NodeState {
                         version: u64::from(delta.variant_tag),
                     }
                 })?;
-                if case.source() != delta.descriptor {
+                if !case.source().registry_compatible_with(&delta.descriptor) {
                     return Err(IvmRuntimeError::VariantProjectionSourceMismatch {
                         table: input.table.clone(),
                         target: input
@@ -5916,7 +5981,7 @@ impl NodeState {
                     VariantProjectionCase::Ignore { .. } => continue,
                 }
             } else {
-                if delta.descriptor != *output_desc {
+                if !delta.descriptor.registry_compatible_with(output_desc) {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
                 &delta.deltas
@@ -6256,7 +6321,7 @@ impl NodeState {
             if input.deltas.is_empty() {
                 continue;
             }
-            if output_desc != input.descriptor {
+            if !output_desc.registry_compatible_with(&input.descriptor) {
                 return Err(IvmRuntimeError::GraphOutputMismatch);
             }
             deltas.extend(input.deltas.iter().cloned());
@@ -7262,7 +7327,7 @@ where
             .get(&frontier_source.binding)
             .cloned()
             .unwrap_or_else(|| RecordDeltas::empty(*output));
-        if deltas.descriptor != *output {
+        if !deltas.descriptor.registry_compatible_with(output) {
             return Err(IvmRuntimeError::GraphOutputMismatch);
         }
         Ok(deltas)

@@ -90,7 +90,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 pub use macros::{FieldKind, RecordField, assert_record_field_layout};
-pub use values::{EnumSchema, UnionCase, UnionSchema, UnionValue, Value, ValueType};
+pub use values::{
+    EnumSchema, UnionCase, UnionSchema, UnionValue, Value, ValueType, VariantRegistry,
+    variant_registry_id_for_path,
+};
 
 /// Maximum bytes in the canonical table-local variant-tag prefix.
 ///
@@ -132,6 +135,13 @@ impl RecordDescriptor {
 
     pub fn fields(&self) -> &[DescriptorField] {
         &self.fields
+    }
+
+    pub(crate) fn registry_compatible_with(&self, other: &Self) -> bool {
+        self.fields.len() == other.fields.len()
+            && self.fields.iter().zip(other.fields()).all(|(a, b)| {
+                a.name == b.name && a.value_type.registry_compatible_with(&b.value_type)
+            })
     }
 
     pub fn field_index(&self, field_name: &str) -> Option<usize> {
@@ -1606,7 +1616,10 @@ pub struct VariantRecord {
 
 impl VariantRecord {
     pub fn new(variant_tag: u32, record: OwnedRecord) -> Self {
-        Self { variant_tag, record }
+        Self {
+            variant_tag,
+            record,
+        }
     }
 
     pub fn variant_tag(&self) -> u32 {

@@ -7,7 +7,7 @@
 //! facade and IVM runtime consume this metadata to create storage keys and
 //! durable graph nodes.
 
-use crate::records::{RecordDescriptor, ValueType};
+use crate::records::{RecordDescriptor, ValueType, VariantRegistry, variant_registry_id_for_path};
 
 /// Schema-facing name for the one logical type space used by both columns and
 /// record values. This is an alias, not a conversion boundary.
@@ -208,6 +208,13 @@ fn descriptor_fields(descriptor: &RecordDescriptor) -> Vec<(String, ValueType)> 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct TableSchema {
     pub name: String,
+    /// Durable identity of the hidden whole-row variant registry.
+    #[serde(default)]
+    pub variant_registry_id: u64,
+    /// Independently persisted registries referenced by nested column and
+    /// payload descriptors. Keys are durable physical occurrence identities.
+    #[serde(default)]
+    pub value_variant_registries: std::collections::BTreeMap<u64, VariantRegistry>,
     /// Stable table-wide field catalogue. Schema versions select ordered row
     /// layouts from these fields without redefining their types.
     pub columns: Vec<ColumnSchema>,
@@ -226,9 +233,61 @@ pub struct TableSchema {
 
 impl TableSchema {
     pub fn new(name: impl Into<String>, columns: impl IntoIterator<Item = ColumnSchema>) -> Self {
+        Self::new_inner(name, columns, false)
+    }
+
+    /// Construct a physical table whose column types were already rebound to
+    /// durable registry identities by an owning catalogue.
+    #[doc(hidden)]
+    pub fn new_with_bound_registries(
+        name: impl Into<String>,
+        columns: impl IntoIterator<Item = ColumnSchema>,
+    ) -> Self {
+        Self::new_inner(name, columns, true)
+    }
+
+    fn new_inner(
+        name: impl Into<String>,
+        columns: impl IntoIterator<Item = ColumnSchema>,
+        preserve_bound_registries: bool,
+    ) -> Self {
+        let name = name.into();
+        let columns: Vec<ColumnSchema> = columns
+            .into_iter()
+            .map(|mut column| {
+                let path = format!("table/{name}/column/{}", column.name);
+                column.column_type = if preserve_bound_registries {
+                    column.column_type.stamp_variant_registries(&path)
+                } else {
+                    column.column_type.rebind_variant_registries(&path)
+                };
+                column
+            })
+            .collect();
+        let mut value_variant_registries = std::collections::BTreeMap::new();
+        for column in &columns {
+            let mut registries = std::collections::BTreeMap::new();
+            column
+                .column_type
+                .collect_variant_registries(&mut registries);
+            assert_eq!(
+                registries.len(),
+                column.column_type.variant_registry_occurrence_count(),
+                "variant registry identity collision within column {}",
+                column.name
+            );
+            for (id, registry) in registries {
+                assert!(
+                    value_variant_registries.insert(id, registry).is_none(),
+                    "variant registry identity collision across columns"
+                );
+            }
+        }
         Self {
-            name: name.into(),
-            columns: columns.into_iter().collect(),
+            variant_registry_id: variant_registry_id_for_path(&format!("table/{name}/row")),
+            value_variant_registries,
+            name,
+            columns,
             primary_key: None,
             indices: Vec::new(),
             foreign_keys: Vec::new(),
@@ -261,8 +320,7 @@ impl TableSchema {
         tag: u32,
         fields: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
-        self.variants
-            .push(TableVariant::new(tag, fields));
+        self.variants.push(TableVariant::new(tag, fields));
         self
     }
 
@@ -274,8 +332,37 @@ impl TableSchema {
         tag: u32,
         fields: impl IntoIterator<Item = TableVariantField>,
     ) -> Self {
-        self.variants
-            .push(TableVariant::with_payload(tag, fields));
+        let fields = fields.into_iter().map(|mut field| {
+            let path = format!(
+                "{}/case/{tag}/field/{}",
+                self.variant_registry_id, field.name
+            );
+            field.value_type = if field.shared_column.is_some() {
+                field.value_type.stamp_variant_registries(&path)
+            } else {
+                field.value_type.rebind_variant_registries(&path)
+            };
+            field
+        });
+        let fields = fields.collect::<Vec<_>>();
+        for field in &fields {
+            let mut registries = std::collections::BTreeMap::new();
+            field.value_type.collect_variant_registries(&mut registries);
+            assert_eq!(
+                registries.len(),
+                field.value_type.variant_registry_occurrence_count(),
+                "variant registry identity collision within payload field {}",
+                field.name
+            );
+            for (id, registry) in registries {
+                if let Some(existing) = self.value_variant_registries.get(&id) {
+                    assert_eq!(existing, &registry, "variant registry definition collision");
+                } else {
+                    self.value_variant_registries.insert(id, registry);
+                }
+            }
+        }
+        self.variants.push(TableVariant::with_payload(tag, fields));
         self
     }
 

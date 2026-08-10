@@ -22,8 +22,8 @@ use crate::ivm::{
 };
 use crate::queries::Query;
 use crate::records::{
-    self, BorrowedRecord, OwnedRecord, Record, RecordDescriptor, UnionSchema, Value,
-    VariantRecord, encode_variant_record, split_variant_record,
+    self, BorrowedRecord, OwnedRecord, Record, RecordDescriptor, UnionSchema, Value, VariantRecord,
+    encode_variant_record, split_variant_record,
 };
 use crate::schema::{
     ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType, PrimaryKey,
@@ -119,10 +119,12 @@ fn validate_table_schema_variants(table: &TableSchema) -> Result<(), Error> {
                 let Some(shared) = &field.shared_column else {
                     continue;
                 };
-                let valid = table
-                    .columns
-                    .iter()
-                    .any(|column| column.name == *shared && column.column_type == field.value_type);
+                let valid = table.columns.iter().any(|column| {
+                    column.name == *shared
+                        && column
+                            .column_type
+                            .registry_compatible_with(&field.value_type)
+                });
                 if !valid || !fields.insert(shared.as_str()) {
                     return Err(Error::InvalidTableVariantField {
                         table: table.name.clone(),
@@ -308,6 +310,35 @@ where
         validate_table_schema_variants(&updated)?;
         self.ivm_runtime
             .register_table_variant_with_columns(table, added_columns, variant)
+            .map_err(Error::IvmRuntime)
+    }
+
+    /// Append cases to nested enum/union registries without changing physical
+    /// column identity or rewriting existing row payload descriptors.
+    pub fn evolve_table_variant_registries(
+        &mut self,
+        table: &str,
+        columns: &[crate::schema::ColumnSchema],
+    ) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        let existing = self.table(table)?;
+        for desired in columns {
+            if let Some(current) = existing
+                .columns
+                .iter()
+                .find(|column| column.name == desired.name)
+                && !current
+                    .column_type
+                    .registry_compatible_with(&desired.column_type)
+            {
+                return Err(Error::TableFieldDefinitionMismatch {
+                    table: table.to_owned(),
+                    field: desired.name.clone(),
+                });
+            }
+        }
+        self.ivm_runtime
+            .evolve_table_variant_registries(table, columns)
             .map_err(Error::IvmRuntime)
     }
 
@@ -1982,8 +2013,7 @@ where
         match operation {
             BatchOperation::Insert { table, record } => {
                 let table_schema = self.table(table)?;
-                let (variant_tag, descriptor, record) =
-                    resolve_record_input(table_schema, record)?;
+                let (variant_tag, descriptor, record) = resolve_record_input(table_schema, record)?;
                 let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Insert,
@@ -2022,8 +2052,7 @@ where
             }
             BatchOperation::Update { table, record } => {
                 let table_schema = self.table(table)?;
-                let (variant_tag, descriptor, record) =
-                    resolve_record_input(table_schema, record)?;
+                let (variant_tag, descriptor, record) = resolve_record_input(table_schema, record)?;
                 let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Update,
@@ -3398,7 +3427,11 @@ fn resolve_variant_record(
             table: table.name.clone(),
             version: u64::from(variant_tag),
         })?;
-    if record.record().descriptor() != &descriptor {
+    if !record
+        .record()
+        .descriptor()
+        .registry_compatible_with(&descriptor)
+    {
         return Err(Error::SchemaVersionDescriptorMismatch {
             table: table.name.clone(),
             version: u64::from(variant_tag),

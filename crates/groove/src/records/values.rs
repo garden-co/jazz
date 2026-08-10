@@ -8,6 +8,17 @@
 //! value types but do not perform byte-level encoding themselves.
 
 use super::{Error, OwnedRecord, RecordDescriptor};
+use std::collections::BTreeMap;
+
+/// Stable compact identity for a physical enum/union occurrence.
+pub fn variant_registry_id_for_path(path: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in path.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    if hash == 0 { 1 } else { hash }
+}
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum Value {
@@ -161,6 +172,10 @@ impl From<Option<Value>> for Value {
 /// existing stored rows; reordering or removing variants changes meaning.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct EnumSchema {
+    /// Durable identity of this enum occurrence. The enclosing table stamps
+    /// unstamped schemas from their physical field path before persistence.
+    #[serde(default)]
+    pub registry_id: u64,
     pub name: String,
     pub variants: Vec<String>,
 }
@@ -172,6 +187,9 @@ pub struct EnumSchema {
 /// a case changes the meaning of stored values and is therefore incompatible.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct UnionSchema {
+    /// Durable identity of this union occurrence.
+    #[serde(default)]
+    pub registry_id: u64,
     pub name: String,
     pub cases: Vec<UnionCase>,
 }
@@ -181,6 +199,13 @@ pub struct UnionSchema {
 pub struct UnionCase {
     pub name: String,
     pub payload: RecordDescriptor,
+}
+
+/// Persisted append-only case registry for one nested value occurrence.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub enum VariantRegistry {
+    Enum { variants: Vec<String> },
+    Union { cases: Vec<String> },
 }
 
 impl UnionCase {
@@ -200,7 +225,16 @@ impl UnionSchema {
         let name = name.into();
         let cases = cases.into_iter().collect::<Vec<_>>();
         Self::validate_cases(&name, &cases)?;
-        Ok(Self { name, cases })
+        Ok(Self {
+            registry_id: 0,
+            name,
+            cases,
+        })
+    }
+
+    pub fn with_registry_id(mut self, registry_id: u64) -> Self {
+        self.registry_id = registry_id;
+        self
     }
 
     fn validate_cases(name: &str, cases: &[UnionCase]) -> Result<(), Error> {
@@ -249,6 +283,28 @@ impl UnionSchema {
     }
 }
 
+fn assign_record_variant_registries(
+    descriptor: &RecordDescriptor,
+    path: &str,
+    replace: bool,
+) -> RecordDescriptor {
+    RecordDescriptor::from_logical_fields(
+        descriptor
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(index, field)| super::DescriptorField {
+                name: field.name.clone(),
+                value_type: {
+                    let mut value_type = field.value_type.clone();
+                    value_type.assign_variant_registries(&format!("{path}/field/{index}"), replace);
+                    value_type
+                },
+            })
+            .collect(),
+    )
+}
+
 impl EnumSchema {
     pub fn new(
         name: impl Into<String>,
@@ -262,7 +318,16 @@ impl EnumSchema {
                 variants: variants.len(),
             });
         }
-        Ok(Self { name, variants })
+        Ok(Self {
+            registry_id: 0,
+            name,
+            variants,
+        })
+    }
+
+    pub fn with_registry_id(mut self, registry_id: u64) -> Self {
+        self.registry_id = registry_id;
+        self
     }
 
     pub fn discriminant(&self, variant: &str) -> Result<u8, Error> {
@@ -313,6 +378,170 @@ pub enum ValueType {
 }
 
 impl ValueType {
+    pub(crate) fn variant_registry_occurrence_count(&self) -> usize {
+        match self {
+            Self::Enum(_) => 1,
+            Self::Union(schema) => {
+                1 + schema
+                    .cases
+                    .iter()
+                    .flat_map(|case| case.payload.fields())
+                    .map(|field| field.value_type.variant_registry_occurrence_count())
+                    .sum::<usize>()
+            }
+            Self::Tuple(members) => members
+                .iter()
+                .map(Self::variant_registry_occurrence_count)
+                .sum(),
+            Self::Array(inner) | Self::Nullable(inner) => inner.variant_registry_occurrence_count(),
+            Self::Record(descriptor) => descriptor
+                .fields()
+                .iter()
+                .map(|field| field.value_type.variant_registry_occurrence_count())
+                .sum(),
+            _ => 0,
+        }
+    }
+
+    pub(crate) fn registry_compatible_with(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Enum(left), Self::Enum(right)) if left.registry_id == right.registry_id => {
+                left.variants.starts_with(&right.variants)
+                    || right.variants.starts_with(&left.variants)
+            }
+            (Self::Union(left), Self::Union(right)) if left.registry_id == right.registry_id => {
+                let shared = left.cases.len().min(right.cases.len());
+                left.cases[..shared]
+                    .iter()
+                    .zip(&right.cases[..shared])
+                    .all(|(a, b)| {
+                        a.name == b.name
+                            && a.payload.fields().len() == b.payload.fields().len()
+                            && a.payload
+                                .fields()
+                                .iter()
+                                .zip(b.payload.fields())
+                                .all(|(x, y)| {
+                                    x.name == y.name
+                                        && x.value_type.registry_compatible_with(&y.value_type)
+                                })
+                    })
+            }
+            (Self::Tuple(left), Self::Tuple(right)) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|(a, b)| a.registry_compatible_with(b))
+            }
+            (Self::Array(left), Self::Array(right))
+            | (Self::Nullable(left), Self::Nullable(right)) => left.registry_compatible_with(right),
+            (Self::Record(left), Self::Record(right)) => {
+                left.fields().len() == right.fields().len()
+                    && left.fields().iter().zip(right.fields()).all(|(a, b)| {
+                        a.name == b.name && a.value_type.registry_compatible_with(&b.value_type)
+                    })
+            }
+            _ => self == other,
+        }
+    }
+
+    pub(crate) fn collect_variant_registries(&self, output: &mut BTreeMap<u64, VariantRegistry>) {
+        match self {
+            Self::Enum(schema) => {
+                output.insert(
+                    schema.registry_id,
+                    VariantRegistry::Enum {
+                        variants: schema.variants.clone(),
+                    },
+                );
+            }
+            Self::Tuple(members) => {
+                for member in members {
+                    member.collect_variant_registries(output);
+                }
+            }
+            Self::Array(inner) | Self::Nullable(inner) => {
+                inner.collect_variant_registries(output);
+            }
+            Self::Record(descriptor) => {
+                for field in descriptor.fields() {
+                    field.value_type.collect_variant_registries(output);
+                }
+            }
+            Self::Union(schema) => {
+                output.insert(
+                    schema.registry_id,
+                    VariantRegistry::Union {
+                        cases: schema.cases.iter().map(|case| case.name.clone()).collect(),
+                    },
+                );
+                for case in &schema.cases {
+                    for field in case.payload.fields() {
+                        field.value_type.collect_variant_registries(output);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Stamp every nested enum/union occurrence with its durable physical path.
+    /// Existing explicit identities are retained so schema evolution can carry
+    /// them across renames and descriptor reconstruction.
+    pub(crate) fn stamp_variant_registries(mut self, path: &str) -> Self {
+        self.assign_variant_registries(path, false);
+        self
+    }
+
+    /// Bind the complete nested registry tree to a durable physical
+    /// occurrence. This is used by catalogue lowerers after logical renames.
+    pub fn rebind_variant_registries(mut self, path: &str) -> Self {
+        self.assign_variant_registries(path, true);
+        self
+    }
+
+    fn assign_variant_registries(&mut self, path: &str, replace: bool) {
+        match self {
+            Self::Enum(schema) => {
+                if replace || schema.registry_id == 0 {
+                    schema.registry_id = variant_registry_id_for_path(path);
+                }
+            }
+            Self::Tuple(members) => {
+                for (index, member) in members.iter_mut().enumerate() {
+                    member.assign_variant_registries(&format!("{path}/tuple/{index}"), replace);
+                }
+            }
+            Self::Array(inner) => {
+                inner.assign_variant_registries(&format!("{path}/array"), replace);
+            }
+            Self::Nullable(inner) => {
+                inner.assign_variant_registries(&format!("{path}/nullable"), replace);
+            }
+            Self::Record(descriptor) => {
+                **descriptor = assign_record_variant_registries(
+                    descriptor,
+                    &format!("{path}/record"),
+                    replace,
+                );
+            }
+            Self::Union(schema) => {
+                if replace || schema.registry_id == 0 {
+                    schema.registry_id = variant_registry_id_for_path(path);
+                }
+                for (index, case) in schema.cases.iter_mut().enumerate() {
+                    case.payload = assign_record_variant_registries(
+                        &case.payload,
+                        &format!("{path}/case/{index}"),
+                        replace,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Wrap this type in an explicit nullable representation.
     pub fn nullable(self) -> Self {
         Self::Nullable(Box::new(self))

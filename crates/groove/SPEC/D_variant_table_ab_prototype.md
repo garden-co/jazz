@@ -14,6 +14,20 @@ whole-row variant:
 - a nested `ValueType::Union` stores its case tag and case-local record payload
   using the same canonical bounded-varint tag codec.
 
+Every enum/union occurrence has a durable registry identity derived from its
+physical field path. `TableSchema::value_variant_registries` persists those
+registries independently of the descriptors that reference them. Descriptors
+carry a case snapshot for local byte decoding, but structural equality is not
+registry identity: live schema evolution reconciles snapshots by registry ID
+and accepts only append-only prefixes. The hidden whole-row registry has its
+own `TableSchema::variant_registry_id` and is never combined with nested
+registries.
+
+Consequently, adding a case to column A neither changes column B's registry nor
+multiplies whole-row cases. Jazz allocates exactly one hidden row case per
+physical schema layout; it has no `(layout × nested cases)` or public top-level
+enum lowering.
+
 The outer row tag is canonical u32 varint encoding. Tags 0 through 127 take
 one byte; overflow and noncanonical encodings are rejected. Case declaration
 is append-only: an existing tag, descriptor, and shared key identity are

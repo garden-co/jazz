@@ -1616,7 +1616,7 @@ fn expect_same_output(
     expected: &RecordDescriptor,
     actual: &RecordDescriptor,
 ) -> Result<(), GraphValidationError> {
-    if expected == actual {
+    if expected.registry_compatible_with(actual) {
         Ok(())
     } else {
         Err(GraphValidationError::OutputDescriptorMismatch)
