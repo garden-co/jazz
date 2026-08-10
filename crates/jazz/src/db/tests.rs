@@ -5449,6 +5449,7 @@ fn admitted_duplex_context_binds_peer_epochs_and_rejects_cross_wiring() {
     let expected = AuthorityContext {
         authority: *server_node.as_bytes(),
         link: *identity.as_bytes(),
+        connection_id: 41,
         connection_epoch: 97,
         claims_revision: 0,
         policy_epoch: 0,
@@ -5552,6 +5553,122 @@ fn permission_advice_uses_authenticated_link_identity_without_mutating() {
     assert_eq!(block_on(alice_advice), PermissionAdvice::Allowed);
     assert_eq!(block_on(mallory_advice), PermissionAdvice::Denied);
     assert_eq!(server.read(&Query::from("todos")).unwrap().len(), 1);
+}
+
+#[test]
+fn distinct_advice_actions_with_one_compiled_scope_hydrate_once() {
+    let schema = owner_read_schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let allowed = server
+        .insert("todos", cells("owned", false, alice))
+        .unwrap()
+        .row_uuid();
+    let denied = server
+        .insert(
+            "todos",
+            cells("other", false, AuthorId::from_bytes([0xb2; 16])),
+        )
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa1, alice, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = client.connect_upstream(client_transport);
+    let subscriber = server.accept_subscriber(server_transport, alice);
+
+    let first = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: allowed,
+    });
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(block_on(first), PermissionAdvice::Allowed);
+
+    let second = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: denied,
+    });
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(block_on(second), PermissionAdvice::Denied);
+
+    let hydration_count = match &subscriber.borrow().link {
+        ConnectionLink::Subscriber {
+            authority_scope_hydration_count,
+            ..
+        } => *authority_scope_hydration_count,
+        ConnectionLink::Upstream { .. } => unreachable!("server link is a subscriber"),
+    };
+    assert_eq!(
+        hydration_count, 1,
+        "candidate rows must share the compiled authority support hydration"
+    );
+}
+
+#[test]
+fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
+    let schema = owner_read_schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let target = server
+        .insert("todos", cells("owned", false, alice))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa1, alice, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = client.connect_upstream(client_transport);
+    let subscriber = server.accept_subscriber(server_transport, alice);
+
+    let first = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: target,
+    });
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(block_on(first), PermissionAdvice::Allowed);
+
+    server.node().borrow_mut().set_session_claims(
+        alice,
+        BTreeMap::from([("fresh".to_owned(), Value::Bool(true))]),
+    );
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    let refreshed = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: target,
+    });
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(block_on(refreshed), PermissionAdvice::Allowed);
+
+    let hydration_count = match &subscriber.borrow().link {
+        ConnectionLink::Subscriber {
+            authority_scope_hydration_count,
+            ..
+        } => *authority_scope_hydration_count,
+        ConnectionLink::Upstream { .. } => unreachable!("server link is a subscriber"),
+    };
+    assert_eq!(
+        hydration_count, 2,
+        "new claims must not reuse stale evidence"
+    );
 }
 
 #[test]
@@ -14466,6 +14583,7 @@ fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
     let context = AuthorityContext {
         authority: [0x8a; 16],
         link,
+        connection_id: 1,
         connection_epoch: 7,
         claims_revision: 3,
         policy_epoch: 11,

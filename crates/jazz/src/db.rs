@@ -30,7 +30,7 @@ use web_time::Instant;
 use crate::authorization_scope::{
     AuthorityContext, AuthorityScopeAggregate, AuthorizationScopeAcquisition,
     AuthorizationScopeInstall, AuthorizationScopeLease, AuthorizationScopeOwnerToken,
-    AuthorizationScopeReadiness, AuthorizationScopeRegistry,
+    AuthorizationScopeReadiness, AuthorizationScopeRegistry, MAX_AUTHORIZATION_SCOPES,
 };
 use crate::ids::{AuthorId, NodeUuid, RowUuid, SchemaVersionId};
 pub use crate::node::CommitUnitTrust;
@@ -490,6 +490,24 @@ struct AuthorizationScopeLeaseRequest {
 struct AuthorizationScopeLeaseManager {
     registry: AuthorizationScopeRegistry,
     requests: BTreeMap<PermissionAdviceRequestId, AuthorizationScopeLeaseRequest>,
+}
+
+/// One authority-compiled support hydration retained only while every
+/// authority revision and global cut it represents remains current.  It is
+/// keyed by the support scope rather than the candidate operation, so distinct
+/// rows/patches can reuse hydration but still evaluate their own action.
+#[derive(Clone)]
+struct ServedAuthorizationScopeHydration {
+    clauses: Vec<ServedAuthorizationScopeClause>,
+    receipt: AuthorizationScopeReceipt,
+}
+
+#[derive(Clone)]
+struct ServedAuthorizationScopeClause {
+    subscription: SubscriptionKey,
+    register: SyncMessage,
+    subscribe: SyncMessage,
+    view: SyncMessage,
 }
 
 /// Locally-authored transactions awaiting upload, oldest first. Shared with
@@ -4872,6 +4890,7 @@ where
             .map(|context| AuthorityContext {
                 authority: *context.remote.node.as_bytes(),
                 link: *context.link_identity.as_bytes(),
+                connection_id: connection_epoch,
                 connection_epoch: context.remote.epoch,
                 claims_revision: 0,
                 policy_epoch: 0,
@@ -5135,6 +5154,8 @@ where
                 branch_metadata_repair_cursor: None,
                 scope_purposes: BTreeMap::new(),
                 scope_aggregates: BTreeMap::new(),
+                authority_scope_hydrations: BTreeMap::new(),
+                authority_scope_hydration_count: 0,
                 serve_dirty: true,
             },
             last_resume_bytes: None,
@@ -6693,6 +6714,14 @@ enum ConnectionLink {
         /// every compiled support clause has a corresponding applied view.
         scope_aggregates:
             BTreeMap<crate::protocol::AuthorizationSupportScopeKey, AuthorityScopeAggregate>,
+        /// Bounded authority-owned hydration cache. Entries are reused only at
+        /// the exact claims/policy/global cut that produced them.
+        authority_scope_hydrations: BTreeMap<
+            crate::protocol::AuthorizationSupportScopeKey,
+            ServedAuthorizationScopeHydration,
+        >,
+        /// Number of cache-miss support hydratations on this authority link.
+        authority_scope_hydration_count: u64,
         /// True when this subscriber's maintained views may have queued deltas
         /// to serve. Idle transport ticks must not poll every view.
         serve_dirty: bool,
@@ -7831,6 +7860,8 @@ where
                 branch_metadata_repair_cursor,
                 scope_purposes,
                 scope_aggregates,
+                authority_scope_hydrations,
+                authority_scope_hydration_count,
                 serve_dirty,
             } => {
                 let repairs = next_branch_metadata_repairs(
@@ -7917,6 +7948,8 @@ where
                                 request_id,
                                 action,
                                 ingest_context.trust,
+                                authority_scope_hydrations,
+                                authority_scope_hydration_count,
                             )?;
                             continue;
                         }
@@ -9033,6 +9066,11 @@ fn serve_authorization_scope_intent<S>(
     request_id: PermissionAdviceRequestId,
     action: PermissionAdviceAction,
     trust: CommitUnitTrust,
+    hydrations: &mut BTreeMap<
+        crate::protocol::AuthorizationSupportScopeKey,
+        ServedAuthorizationScopeHydration,
+    >,
+    hydration_count: &mut u64,
 ) -> Result<(), Error>
 where
     S: OrderedKvStorage,
@@ -9074,6 +9112,50 @@ where
             .map_err(transport_error)?;
         return Ok(());
     }
+    let current_claims_revision = node.borrow().session_claim_revision(identity);
+    let current_policy_epoch = node.borrow().active_catalogue_seq();
+    let current_cut = node.borrow().applied_global_watermark();
+    // A cache entry is evidence, not a generic response cache.  Prune every
+    // revision/cut mismatch before looking up this compiled support key.
+    hydrations.retain(|_, hydration| {
+        hydration.receipt.claims_revision == current_claims_revision
+            && hydration.receipt.policy_epoch == current_policy_epoch
+            && hydration.receipt.settled_through == current_cut
+    });
+    if let Some(hydration) = hydrations.get(&scope.key) {
+        for (index, clause) in hydration.clauses.iter().enumerate() {
+            transport
+                .send(clause.register.clone())
+                .map_err(transport_error)?;
+            transport
+                .send(clause.subscribe.clone())
+                .map_err(transport_error)?;
+            transport
+                .send(SyncMessage::AuthorizationScopeView {
+                    request_id,
+                    key: scope.key.clone(),
+                    clause_index: index as u16,
+                    clause_count,
+                    view: Box::new(clause.view.clone()),
+                })
+                .map_err(transport_error)?;
+        }
+        transport
+            .send(SyncMessage::AuthorizationScopeAggregateReceipt {
+                request_id,
+                receipt: hydration.receipt.clone(),
+            })
+            .map_err(transport_error)?;
+        for clause in &hydration.clauses {
+            transport
+                .send(SyncMessage::Unsubscribe {
+                    subscription: clause.subscription,
+                })
+                .map_err(transport_error)?;
+        }
+        return Ok(());
+    }
+    *hydration_count = hydration_count.saturating_add(1);
     let mut aggregate = AuthorityScopeAggregate::new(
         support_clauses
             .iter()
@@ -9081,6 +9163,7 @@ where
             .collect(),
     );
     let mut support_subscriptions = Vec::new();
+    let mut served_clauses = Vec::new();
     for (index, (shape, binding)) in support_clauses.iter().enumerate() {
         let subscription = SubscriptionKey {
             shape_id: shape.shape_id(),
@@ -9112,21 +9195,19 @@ where
             return Ok(());
         }
         let values = binding_values_in_param_order(shape, binding);
-        transport
-            .send(SyncMessage::RegisterShape {
-                shape_id: shape.shape_id(),
-                ast: ShapeAst::from_validated(shape),
-                opts: scope.options.clone(),
-            })
-            .map_err(transport_error)?;
-        transport
-            .send(SyncMessage::Subscribe(Subscribe {
-                shape_id: shape.shape_id(),
-                subscription,
-                values,
-                known_state: None,
-            }))
-            .map_err(transport_error)?;
+        let register = SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(shape),
+            opts: scope.options.clone(),
+        };
+        transport.send(register.clone()).map_err(transport_error)?;
+        let subscribe = SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values,
+            known_state: None,
+        });
+        transport.send(subscribe.clone()).map_err(transport_error)?;
         peer.declare_known_state(subscription, None);
         let update = peer.rehydrate_query_for_subscription_with_opts(
             &mut node.borrow_mut(),
@@ -9160,10 +9241,16 @@ where
                 key: scope.key.clone(),
                 clause_index: index as u16,
                 clause_count,
-                view: Box::new(update),
+                view: Box::new(update.clone()),
             })
             .map_err(transport_error)?;
         support_subscriptions.push(subscription);
+        served_clauses.push(ServedAuthorizationScopeClause {
+            subscription,
+            register,
+            subscribe,
+            view: update,
+        });
     }
     let Some((settled_through, authorization_progress)) = aggregate.bounds() else {
         transport
@@ -9171,21 +9258,31 @@ where
             .map_err(transport_error)?;
         return Ok(());
     };
+    let receipt = AuthorizationScopeReceipt {
+        key: scope.key.clone(),
+        authority: *node.borrow().node_uuid().as_bytes(),
+        link: *identity.as_bytes(),
+        authority_epoch: connection_epoch,
+        claims_revision: current_claims_revision,
+        policy_epoch: current_policy_epoch,
+        settled_through,
+        authorization_progress,
+    };
     transport
         .send(SyncMessage::AuthorizationScopeAggregateReceipt {
             request_id,
-            receipt: AuthorizationScopeReceipt {
-                key: scope.key,
-                authority: *node.borrow().node_uuid().as_bytes(),
-                link: *identity.as_bytes(),
-                authority_epoch: connection_epoch,
-                claims_revision: node.borrow().session_claim_revision(identity),
-                policy_epoch: node.borrow().active_catalogue_seq(),
-                settled_through,
-                authorization_progress,
-            },
+            receipt: receipt.clone(),
         })
         .map_err(transport_error)?;
+    if hydrations.len() < MAX_AUTHORIZATION_SCOPES {
+        hydrations.insert(
+            scope.key,
+            ServedAuthorizationScopeHydration {
+                clauses: served_clauses,
+                receipt,
+            },
+        );
+    }
     // Scope views are proof material, not application subscriptions.  Their
     // lifetime ends after the receipt; FIFO keeps the receiver's local
     // evaluation ahead of this cleanup.

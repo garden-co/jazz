@@ -103,6 +103,10 @@ impl AuthorityScopeAggregate {
 pub struct AuthorityContext {
     pub authority: [u8; 16],
     pub link: [u8; 16],
+    /// Locally generated identity for one physical admitted upstream link.
+    /// It never crosses the wire; it prevents a parallel connection to the
+    /// same remote authority epoch from discharging another link's routes.
+    pub connection_id: u64,
     pub connection_epoch: u64,
     pub claims_revision: u64,
     pub policy_epoch: u64,
@@ -402,6 +406,7 @@ mod tests {
         AuthorityContext {
             authority: [4; 16],
             link: [5; 16],
+            connection_id: 1,
             connection_epoch: 1,
             claims_revision: 1,
             policy_epoch: 1,
