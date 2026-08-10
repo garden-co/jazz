@@ -238,6 +238,7 @@ type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
 type PermissionAdviceWaiters =
     Rc<RefCell<BTreeMap<PermissionAdviceRequestId, oneshot::Sender<PermissionAdvice>>>>;
 type PendingDownstreamFates = Rc<RefCell<Vec<SyncMessage>>>;
+type AdmittedUpstreamAuthorities = Rc<RefCell<Vec<AuthorityContext>>>;
 const MAX_EDGE_FATE_ROUTES: usize = 1024;
 const MAX_EDGE_FATE_ROUTES_PER_TX: usize = 8;
 
@@ -4640,6 +4641,7 @@ where
     write_state_waiters: WriteStateWaiters,
     permission_advice_waiters: PermissionAdviceWaiters,
     edge_fate_routes: EdgeFateRoutes,
+    admitted_upstream_authorities: AdmittedUpstreamAuthorities,
     admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
     next_write_state_waiter_id: Cell<u64>,
     next_subscription_nonce: Cell<u64>,
@@ -4669,6 +4671,7 @@ where
             next_subscription_nonce: Cell::new(1),
             permission_advice_waiters: Rc::new(RefCell::new(BTreeMap::new())),
             edge_fate_routes: Rc::new(RefCell::new(BTreeMap::new())),
+            admitted_upstream_authorities: Rc::new(RefCell::new(Vec::new())),
             admitted_upstream_authority: Rc::new(RefCell::new(None)),
             subscriber_dirty_epoch: Rc::new(Cell::new(0)),
             edge_cache_budget: Cell::new(None),
@@ -4897,15 +4900,18 @@ where
                 authorization_progress: 0,
                 settled_through: 0,
             });
-        // Replacing a scope-capable upstream epoch invalidates every parked
-        // downstream route bound to the old authority.  The write remains
-        // locally pending and may be relayed on this link, but only a fate
-        // authenticated for this exact new context can discharge a new route.
-        *self.admitted_upstream_authority.borrow_mut() = expected_scope_authority;
-        prune_edge_fate_routes(
-            &mut self.edge_fate_routes.borrow_mut(),
-            expected_scope_authority,
-        );
+        // Keep every admitted link eligible, but bind each downstream route
+        // to one stable selected owner. A newly connected parallel upstream
+        // must not silently replace the owner (or settle its parked writes).
+        if let Some(context) = expected_scope_authority {
+            let mut eligible = self.admitted_upstream_authorities.borrow_mut();
+            if !eligible.contains(&context) {
+                eligible.push(context);
+            }
+            if self.admitted_upstream_authority.borrow().is_none() {
+                *self.admitted_upstream_authority.borrow_mut() = Some(context);
+            }
+        }
         // Carry queued and already-registered subscriptions upstream immediately.
         let mut pending = self
             .upstream_subscriptions
@@ -4962,6 +4968,7 @@ where
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
             edge_fate_routes: Rc::clone(&self.edge_fate_routes),
+            admitted_upstream_authorities: Rc::clone(&self.admitted_upstream_authorities),
             admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
             downstream_fates: Rc::new(RefCell::new(Vec::new())),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
@@ -5129,6 +5136,7 @@ where
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
             edge_fate_routes: Rc::clone(&self.edge_fate_routes),
+            admitted_upstream_authorities: Rc::clone(&self.admitted_upstream_authorities),
             admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
             downstream_fates: Rc::new(RefCell::new(Vec::new())),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
@@ -5179,12 +5187,17 @@ where
         connections.retain(|candidate| !Rc::ptr_eq(candidate, connection));
         let detached = connections.len() != before;
         drop(connections);
-        if detached
-            && authority.is_some()
-            && *self.admitted_upstream_authority.borrow() == authority
-        {
-            *self.admitted_upstream_authority.borrow_mut() = None;
-            prune_edge_fate_routes(&mut self.edge_fate_routes.borrow_mut(), None);
+        if detached && let Some(authority) = authority {
+            let mut eligible = self.admitted_upstream_authorities.borrow_mut();
+            eligible.retain(|candidate| *candidate != authority);
+            if *self.admitted_upstream_authority.borrow() == Some(authority) {
+                // Old routes cannot migrate to a replacement authority: they
+                // remain locally pending and a fresh upload creates a route
+                // for the deterministic handoff owner.
+                let handoff = eligible.first().copied();
+                *self.admitted_upstream_authority.borrow_mut() = handoff;
+                prune_edge_fate_routes(&mut self.edge_fate_routes.borrow_mut(), None);
+            }
         }
         detached
     }
@@ -6628,6 +6641,7 @@ where
     write_state_waiters: WriteStateWaiters,
     permission_advice_waiters: PermissionAdviceWaiters,
     edge_fate_routes: EdgeFateRoutes,
+    admitted_upstream_authorities: AdmittedUpstreamAuthorities,
     admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
     downstream_fates: PendingDownstreamFates,
     subscriber_dirty_epoch: Rc<Cell<u64>>,
@@ -7780,14 +7794,19 @@ where
                             }
                         }
                         message => {
-                            if matches!(message, SyncMessage::FateUpdate { .. }) {
+                            if let SyncMessage::FateUpdate { tx_id, .. } = &message {
                                 let admitted = *self.admitted_upstream_authority.borrow();
                                 // Gate fate before any NodeState mutation. A
                                 // parallel, stale, or featureless upstream is
                                 // not merely forbidden from forwarding an
-                                // edge route; it must not settle local state.
-                                if expected_scope_authority.is_none()
-                                    || admitted != *expected_scope_authority
+                                // edge route; it must not settle the routed
+                                // transaction's local state. Ordinary Core
+                                // client links have no edge route and retain
+                                // their normal fate transport.
+                                let routed = self.edge_fate_routes.borrow().contains_key(tx_id);
+                                if routed
+                                    && (expected_scope_authority.is_none()
+                                        || admitted != *expected_scope_authority)
                                 {
                                     drop_peer_request(&self.node);
                                     continue;
@@ -8689,48 +8708,81 @@ where
                                         // never becomes terminal merely
                                         // because a connection disappeared.
                                         let tx_id = tx.tx_id;
-                                        self.node
-                                            .borrow_mut()
-                                            .ingest_relay_commit_unit(tx, versions)?;
-                                        if let Some(authority) =
+                                        let route_registered = if let Some(authority) =
                                             *self.admitted_upstream_authority.borrow()
                                         {
                                             let mut routes = self.edge_fate_routes.borrow_mut();
                                             prune_edge_fate_routes(&mut routes, Some(authority));
                                             let route_count =
                                                 routes.values().map(Vec::len).sum::<usize>();
-                                            if route_count < MAX_EDGE_FATE_ROUTES {
+                                            let pending = routes.get(&tx_id);
+                                            let already_routed = pending.is_some_and(|pending| {
+                                                pending.iter().any(|route| {
+                                                    route.authority == authority
+                                                        && route.queue.upgrade().is_some_and(
+                                                            |queue| {
+                                                                Rc::ptr_eq(
+                                                                    &queue,
+                                                                    &self.downstream_fates,
+                                                                )
+                                                            },
+                                                        )
+                                                })
+                                            });
+                                            if already_routed {
+                                                true
+                                            } else if route_count < MAX_EDGE_FATE_ROUTES {
                                                 let pending = routes.entry(tx_id).or_default();
-                                                if pending.len() < MAX_EDGE_FATE_ROUTES_PER_TX
-                                                    && !pending.iter().any(|route| {
-                                                        route.authority == authority
-                                                            && route.queue.upgrade().is_some_and(
-                                                                |queue| {
-                                                                    Rc::ptr_eq(
-                                                                        &queue,
-                                                                        &self.downstream_fates,
-                                                                    )
-                                                                },
-                                                            )
-                                                    })
-                                                {
+                                                if pending.len() < MAX_EDGE_FATE_ROUTES_PER_TX {
                                                     pending.push(EdgeFateRoute {
                                                         authority,
                                                         queue: Rc::downgrade(
                                                             &self.downstream_fates,
                                                         ),
                                                     });
+                                                    true
+                                                } else {
+                                                    false
                                                 }
+                                            } else {
+                                                false
                                             }
+                                        } else {
+                                            false
+                                        };
+                                        let legacy_park = !route_registered
+                                            && self
+                                                .admitted_upstream_authorities
+                                                .borrow()
+                                                .is_empty();
+                                        if !route_registered && !legacy_park {
+                                            // Do not claim Edge durability for
+                                            // a write that lacks exactly one
+                                            // authority route; otherwise its
+                                            // caller could wait forever.
+                                            vec![SyncMessage::FateUpdate {
+                                                tx_id,
+                                                fate: Fate::Rejected(
+                                                    RejectionReason::MalformedCommit(
+                                                        "no admitted authority route".to_owned(),
+                                                    ),
+                                                ),
+                                                global_seq: None,
+                                                durability: None,
+                                            }]
+                                        } else {
+                                            self.node
+                                                .borrow_mut()
+                                                .ingest_relay_commit_unit(tx, versions)?;
+                                            // Edge persistence is observable, but
+                                            // final policy fate stays parked.
+                                            vec![SyncMessage::FateUpdate {
+                                                tx_id,
+                                                fate: Fate::Accepted,
+                                                global_seq: None,
+                                                durability: Some(DurabilityTier::Edge),
+                                            }]
                                         }
-                                        // Edge persistence is observable, but
-                                        // final policy fate stays parked.
-                                        vec![SyncMessage::FateUpdate {
-                                            tx_id,
-                                            fate: Fate::Accepted,
-                                            global_seq: None,
-                                            durability: Some(DurabilityTier::Edge),
-                                        }]
                                     } else {
                                         self.node
                                             .borrow_mut()
