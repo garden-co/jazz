@@ -5976,7 +5976,7 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
         2,
     );
     let _client_upstream = client.connect_upstream(client_transport);
-    let _edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
+    let edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
         edge_transport,
         identity,
         BTreeMap::new(),
@@ -6037,7 +6037,23 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
     authority_b.server.set_permissions_ready(true).unwrap();
     edge.tick().unwrap();
     authority_b.tick().unwrap();
-    edge.tick().unwrap();
+    // Step B's actual upstream connection separately so the downstream fate
+    // queue is observable before the edge-client connection flushes it.
+    edge_b.borrow_mut().tick().unwrap();
+    assert_eq!(
+        edge_client.borrow().downstream_fates.borrow().len(),
+        1,
+        "B's terminal fate must enqueue exactly one downstream notification"
+    );
+    assert!(
+        !edge
+            .server
+            .edge_fate_routes
+            .borrow()
+            .contains_key(&write.mergeable_tx_id()),
+        "forwarding the terminal fate must retire its route"
+    );
+    edge_client.borrow_mut().tick().unwrap();
     client.tick().unwrap();
     assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
     assert_eq!(
@@ -6057,7 +6073,20 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
         })
         .unwrap();
     edge.tick().unwrap();
+    edge_client.borrow_mut().tick().unwrap();
     client.tick().unwrap();
+    assert!(
+        edge_client.borrow().downstream_fates.borrow().is_empty(),
+        "late A must not enqueue a second downstream fate"
+    );
+    assert!(
+        !edge
+            .server
+            .edge_fate_routes
+            .borrow()
+            .contains_key(&write.mergeable_tx_id()),
+        "late A must not recreate the retired route"
+    );
     assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
     assert_eq!(
         write.write_state().unwrap().durability,
