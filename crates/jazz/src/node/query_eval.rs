@@ -7737,14 +7737,29 @@ where
         let Some(row_result_set) = self.query.settled_result_sets.get(&binding_view) else {
             return Ok(Vec::new());
         };
-        let row_entries = row_result_set
+        let mut row_entries = row_result_set
             .iter()
             .filter_map(ResultMemberEntry::as_row)
             .filter(|(entry_table, _, _)| entry_table.as_str() == table)
-            .collect::<Vec<_>>();
+            .map(|(_, row_uuid, tx_id)| (row_uuid, tx_id))
+            .collect::<BTreeSet<_>>();
+        if let Some(program_facts) = self.query.settled_program_facts.get(&binding_view) {
+            row_entries.extend(program_facts.iter().filter_map(|fact| {
+                let ProgramFactEntry::RelationEdge(edge) = fact else {
+                    return None;
+                };
+                (edge.target_table.as_str() == table)
+                    .then(|| {
+                        edge.target_version
+                            .as_ref()
+                            .map(|version| (edge.target_row, version.tx))
+                    })
+                    .flatten()
+            }));
+        }
         let table_schema = self.table(table)?.clone();
         let mut rows = Vec::with_capacity(row_entries.len());
-        for (_, row_uuid, tx_id) in row_entries {
+        for (row_uuid, tx_id) in row_entries {
             let tx_node_alias = self
                 .node_aliases
                 .get(&tx_id.node)
