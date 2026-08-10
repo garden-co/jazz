@@ -27,6 +27,7 @@ use thiserror::Error;
 #[cfg(feature = "cold-settle-attribution")]
 use web_time::Instant;
 
+use crate::authorization_scope::AuthorityContext;
 use crate::ids::{AuthorId, NodeUuid, RowUuid, SchemaVersionId};
 pub use crate::node::CommitUnitTrust;
 #[cfg(feature = "testing")]
@@ -43,12 +44,11 @@ pub use crate::protocol::PermissionAdvice;
 #[cfg(feature = "sync-autopsy")]
 use crate::protocol::expand_version_carriers;
 use crate::protocol::{
-    AuthorizationScopePurpose, AuthorizationScopeReceipt, BindingViewKey, ContentExtent,
-    CoverageKey, CurrentWriteSchema, LargeValueOwnerRef, LensOp, MigrationLens,
-    PermissionAdviceAction, PermissionAdviceRequestId, ReadViewKey, ReadViewSourceSpec,
-    ReadViewSpec, RegisterShapeOptions, SchemaLineagePublication, SchemaVersion, ShapeAst,
-    Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey, SyncMessage,
-    TableLens,
+    AuthorizationScopeReceipt, BindingViewKey, ContentExtent, CoverageKey, CurrentWriteSchema,
+    LargeValueOwnerRef, LensOp, MigrationLens, PermissionAdviceAction, PermissionAdviceRequestId,
+    ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, SchemaLineagePublication,
+    SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
+    SubscriptionKey, SyncMessage, TableLens,
 };
 use crate::protocol_limits::{
     MAX_FETCH_BRANCH_METADATA, MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES, MAX_INFLIGHT_LOGICAL_MESSAGES,
@@ -422,6 +422,15 @@ struct CoverageGroup {
     shape: ValidatedQuery,
     binding: Binding,
     subscribers: BTreeSet<SubscriptionKey>,
+}
+
+/// Authority-derived scope identity retained for a support subscription.
+/// Never constructed from the caller's wire payload.
+#[derive(Clone, Debug, PartialEq)]
+struct AuthorizedScopePurpose {
+    key: crate::protocol::AuthorizationSupportScopeKey,
+    operation: crate::protocol::AuthorizationOperationKey,
+    action: PermissionAdviceAction,
 }
 
 /// Locally-authored transactions awaiting upload, oldest first. Shared with
@@ -4843,6 +4852,7 @@ where
                 branch_metadata_repair_cursor: None,
                 scope_view_cuts: BTreeMap::new(),
                 scope_receipts: BTreeMap::new(),
+                expected_scope_authority: None,
             },
             last_resume_bytes: None,
         }));
@@ -6469,6 +6479,9 @@ enum ConnectionLink {
         /// Proofs tied to support views applied on this connection. They are
         /// connection-local, so reconnects invalidate them by construction.
         scope_receipts: BTreeMap<SubscriptionKey, AuthorizationScopeReceipt>,
+        /// Authenticated remote authority identity established by the binding
+        /// handshake. Receipts are rejected until this is present.
+        expected_scope_authority: Option<AuthorityContext>,
     },
     /// Serving one subscriber: apply their subscribe requests, ship view
     /// updates under their identity.
@@ -6502,7 +6515,7 @@ enum ConnectionLink {
         /// link receive the identical payload-free answer.
         permission_advice_responses: BTreeMap<PermissionAdviceRequestId, PermissionAdvice>,
         /// Authorization-support purposes keyed by their ordinary support view.
-        scope_purposes: BTreeMap<SubscriptionKey, AuthorizationScopePurpose>,
+        scope_purposes: BTreeMap<SubscriptionKey, AuthorizedScopePurpose>,
         /// True when this subscriber's maintained views may have queued deltas
         /// to serve. Idle transport ticks must not poll every view.
         serve_dirty: bool,
@@ -6555,6 +6568,7 @@ where
     /// changed. Policy claim values are bound when a maintained view opens, so
     /// retaining the old view after a claim change would retain its authority.
     fn rebind_subscriber_views_after_claim_change(&mut self) -> Result<bool, Error> {
+        let connection_epoch = self.connection_epoch;
         let identity = match &self.link {
             ConnectionLink::Subscriber { ingest_context, .. } => ingest_context.identity,
             ConnectionLink::Upstream { .. } => return Ok(false),
@@ -6568,6 +6582,7 @@ where
             peer,
             coverage_groups,
             served_current_rows,
+            scope_purposes,
             ..
         } = &mut self.link
         else {
@@ -6623,12 +6638,45 @@ where
                     .map_err(transport_error)?;
             }
             for subscription in subscribers {
-                send_with_content_extents(
-                    &self.node,
-                    peer,
-                    self.transport.as_mut(),
-                    retarget_view_update(update.clone(), subscription),
-                )?;
+                let update = retarget_view_update(update.clone(), subscription);
+                let refreshed_scope =
+                    scope_purposes
+                        .get(&subscription)
+                        .cloned()
+                        .and_then(|prior| {
+                            refresh_authorized_scope_purpose(
+                                &self.node.borrow(),
+                                identity,
+                                subscription,
+                                &shape,
+                                &binding,
+                                &prior,
+                            )
+                        });
+                if let Some(refreshed) = &refreshed_scope {
+                    scope_purposes.insert(subscription, refreshed.clone());
+                } else {
+                    scope_purposes.remove(&subscription);
+                }
+                let receipt = refreshed_scope.as_ref().and_then(|purpose| {
+                    authorization_scope_receipt_for_view(
+                        &self.node.borrow(),
+                        peer,
+                        identity,
+                        connection_epoch,
+                        purpose,
+                        &update,
+                    )
+                });
+                send_with_content_extents(&self.node, peer, self.transport.as_mut(), update)?;
+                if let Some((subscription, receipt)) = receipt {
+                    self.transport
+                        .send(SyncMessage::AuthorizationScopeReceipt {
+                            subscription,
+                            receipt,
+                        })
+                        .map_err(transport_error)?;
+                }
             }
         }
         for table in served_current_rows.values() {
@@ -6677,6 +6725,23 @@ where
         self.last_resume_bytes
     }
 
+    /// Bind scope receipts to the authority context authenticated by the
+    /// transport handshake. Changing it clears every locally cached proof.
+    pub fn set_expected_authorization_scope_authority(&mut self, context: AuthorityContext) {
+        let ConnectionLink::Upstream {
+            expected_scope_authority,
+            scope_receipts,
+            scope_view_cuts,
+            ..
+        } = &mut self.link
+        else {
+            return;
+        };
+        *expected_scope_authority = Some(context);
+        scope_receipts.clear();
+        scope_view_cuts.clear();
+    }
+
     /// Return a receipt only after this connection applied its matching
     /// authorization-support view. A reconnect creates a new connection and
     /// therefore has no receipt to reuse.
@@ -6706,9 +6771,12 @@ where
     /// tighter one: the client keeps the same subscription, but its visible
     /// membership must be recalculated immediately.
     fn rehydrate_subscriber_views(&mut self) -> Result<(), Error> {
+        let connection_epoch = self.connection_epoch;
         let ConnectionLink::Subscriber {
             peer,
             coverage_groups,
+            ingest_context,
+            scope_purposes,
             serve_dirty,
             ..
         } = &mut self.link
@@ -6746,7 +6814,44 @@ where
             for subscription in subscribers {
                 let update = retarget_view_update(update.clone(), subscription);
                 self.last_resume_bytes = Some(serialized_sync_message_len(&update));
+                let refreshed_scope =
+                    scope_purposes
+                        .get(&subscription)
+                        .cloned()
+                        .and_then(|prior| {
+                            refresh_authorized_scope_purpose(
+                                &self.node.borrow(),
+                                ingest_context.identity,
+                                subscription,
+                                &shape,
+                                &binding,
+                                &prior,
+                            )
+                        });
+                if let Some(refreshed) = &refreshed_scope {
+                    scope_purposes.insert(subscription, refreshed.clone());
+                } else {
+                    scope_purposes.remove(&subscription);
+                }
+                let receipt = refreshed_scope.as_ref().and_then(|purpose| {
+                    authorization_scope_receipt_for_view(
+                        &self.node.borrow(),
+                        peer,
+                        ingest_context.identity,
+                        connection_epoch,
+                        purpose,
+                        &update,
+                    )
+                });
                 send_with_content_extents(&self.node, peer, self.transport.as_mut(), update)?;
+                if let Some((subscription, receipt)) = receipt {
+                    self.transport
+                        .send(SyncMessage::AuthorizationScopeReceipt {
+                            subscription,
+                            receipt,
+                        })
+                        .map_err(transport_error)?;
+                }
             }
         }
         *serve_dirty = true;
@@ -6776,6 +6881,7 @@ where
                 branch_metadata_repair_cursor,
                 scope_view_cuts,
                 scope_receipts,
+                expected_scope_authority,
             } => {
                 // Repair is deliberately retried on each non-blocked tick. The
                 // request set is bounded and deduplicated; a dropped request or
@@ -7118,7 +7224,17 @@ where
                             subscription,
                             receipt,
                         } => {
+                            let Some(expected) = expected_scope_authority else {
+                                drop_peer_request(&self.node);
+                                continue;
+                            };
                             if receipt.link != *receipt.key.subject.as_bytes()
+                                || receipt.authority != expected.authority
+                                || receipt.authority_epoch != expected.connection_epoch
+                                || receipt.claims_revision != expected.claims_revision
+                                || receipt.policy_epoch != expected.policy_epoch
+                                || receipt.authorization_progress < expected.authorization_progress
+                                || receipt.settled_through.0 < expected.settled_through
                                 || scope_view_cuts.get(&subscription)
                                     != Some(&receipt.settled_through)
                             {
@@ -7265,10 +7381,6 @@ where
                 while let Some(message) = self.transport.try_recv() {
                     let (message, scope_purpose) = match message {
                         SyncMessage::AuthorizationScopeSubscribe { subscribe, purpose } => {
-                            if purpose.key.subject != ingest_context.identity {
-                                drop_peer_request(&self.node);
-                                continue;
-                            }
                             (SyncMessage::Subscribe(subscribe), Some(purpose))
                         }
                         message => (message, None),
@@ -7504,13 +7616,6 @@ where
                             }
                             let shape_id = subscribe.shape_id;
                             let subscription = subscribe.subscription;
-                            if let Some(purpose) = &scope_purpose
-                                && let Some(existing) = scope_purposes.get(&subscription)
-                                && existing != purpose
-                            {
-                                drop_peer_request(&self.node);
-                                continue;
-                            }
                             let values = subscribe.values.clone();
                             let known_state = subscribe.known_state.clone();
                             let registration_key = (shape_id, subscription.read_view);
@@ -7572,6 +7677,47 @@ where
                                 }
                             };
                             if ensure_supported_register_shape_options(&opts).is_err() {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
+                            let scope_purpose = if let Some(purpose) = scope_purpose {
+                                let expected_result =
+                                    self.node.borrow().authorization_support_scope(
+                                        ingest_context.identity,
+                                        &purpose.action,
+                                    );
+                                let expected = match expected_result {
+                                    Ok(expected) => expected,
+                                    Err(_) => {
+                                        drop_peer_request(&self.node);
+                                        continue;
+                                    }
+                                };
+                                let exact_support = subscription.shape_id == shape.shape_id()
+                                    && subscription.binding_id == binding.binding_id()
+                                    && expected.subscriptions.iter().any(
+                                        |(expected_shape, expected_binding)| {
+                                            expected_shape.shape_id() == shape.shape_id()
+                                                && expected_binding.binding_id()
+                                                    == binding.binding_id()
+                                        },
+                                    );
+                                if !exact_support {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                }
+                                Some(AuthorizedScopePurpose {
+                                    key: expected.key,
+                                    operation: expected.operation,
+                                    action: purpose.action,
+                                })
+                            } else {
+                                None
+                            };
+                            if let Some(purpose) = &scope_purpose
+                                && let Some(existing) = scope_purposes.get(&subscription)
+                                && existing != purpose
+                            {
                                 drop_peer_request(&self.node);
                                 continue;
                             }
@@ -8309,7 +8455,7 @@ fn authorization_scope_receipt_for_view<S>(
     peer: &PeerState,
     link_identity: AuthorId,
     connection_epoch: u64,
-    purpose: &AuthorizationScopePurpose,
+    purpose: &AuthorizedScopePurpose,
     update: &SyncMessage,
 ) -> Option<(SubscriptionKey, AuthorizationScopeReceipt)>
 where
@@ -8336,6 +8482,36 @@ where
             authorization_progress: peer.authorization_progress_for_subscription(*subscription),
         },
     ))
+}
+
+fn refresh_authorized_scope_purpose<S>(
+    node: &NodeState<S>,
+    link_identity: AuthorId,
+    subscription: SubscriptionKey,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    prior: &AuthorizedScopePurpose,
+) -> Option<AuthorizedScopePurpose>
+where
+    S: OrderedKvStorage,
+{
+    let expected = node
+        .authorization_support_scope(link_identity, &prior.action)
+        .ok()?;
+    let exact_support = subscription.shape_id == shape.shape_id()
+        && subscription.binding_id == binding.binding_id()
+        && expected
+            .subscriptions
+            .iter()
+            .any(|(expected_shape, expected_binding)| {
+                expected_shape.shape_id() == shape.shape_id()
+                    && expected_binding.binding_id() == binding.binding_id()
+            });
+    exact_support.then_some(AuthorizedScopePurpose {
+        key: expected.key,
+        operation: expected.operation,
+        action: prior.action.clone(),
+    })
 }
 
 fn query_root_filters_reference_id(query: &Query) -> bool {

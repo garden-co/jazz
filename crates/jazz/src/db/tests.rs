@@ -9,11 +9,10 @@ use groove::storage::{OrderedKvStorage, ReopenableStorage, RocksDbStorage};
 use super::*;
 use crate::ids::{AuthorId, BranchId, NodeUuid};
 use crate::protocol::{
-    AuthorizationOperationKey, AuthorizationScopeOperation, AuthorizationScopePurpose,
-    AuthorizationSupportScopeKey, BindingViewKey, BranchMetadata, CatalogueAck,
-    KnownStateCompleteness, KnownStateDeclaration, LensOp, ReadViewSourceSpec, ReadViewSpec,
-    RegisterShapeOptions, ResultMemberEntry, RowVersionRef, ShapeAst, Subscribe,
-    SubscribeRejectReason, SubscribeServerFailureCode, TableLens,
+    AuthorizationScopePurpose, BindingViewKey, BranchMetadata, CatalogueAck,
+    KnownStateCompleteness, KnownStateDeclaration, LensOp, PermissionAdviceAction,
+    ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef,
+    ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, TableLens,
 };
 use crate::protocol_limits::{
     MAX_CONTENT_EXTENT_BYTES, MAX_FETCH_ROW_VERSIONS, MAX_KNOWN_STATE_EXACT_REFS,
@@ -13873,7 +13872,8 @@ fn db_query_builder_expresses_s1_shaped_filters_and_include_modes() {
 
 #[test]
 fn authorization_scope_receipt_follows_its_support_view() {
-    let schema = schema();
+    let mut schema = schema();
+    schema.tables[0].read_policy = Some(Query::from("todos"));
     let identity = AuthorId::from_bytes([0xc1; 16]);
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let shape = Query::from("todos").validate(&schema).unwrap();
@@ -13901,17 +13901,9 @@ fn authorization_scope_receipt_follows_its_support_view() {
                 known_state: None,
             },
             purpose: AuthorizationScopePurpose {
-                key: AuthorizationSupportScopeKey {
-                    support_shape_digest: [1; 32],
-                    subject: identity,
-                    claims_digest: [2; 32],
-                    policy_digest: [3; 32],
-                },
-                operation: AuthorizationOperationKey {
-                    operation: AuthorizationScopeOperation::Read,
+                action: PermissionAdviceAction::Read {
                     table: "todos".to_owned(),
-                    row: Some(row(1)),
-                    candidate_digest: [4; 32],
+                    row: row(1),
                 },
             },
         })
@@ -13945,6 +13937,75 @@ fn authorization_scope_receipt_follows_its_support_view() {
     }
     assert!(received_view);
     assert!(received_receipt);
+
+    server.node().borrow_mut().set_session_claims(
+        identity,
+        BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
+    );
+    subscriber.borrow_mut().tick().unwrap();
+    let mut refreshed_view = false;
+    let mut refreshed_receipt = None;
+    while let Some(message) = client_transport.try_recv() {
+        match message {
+            SyncMessage::ViewUpdate { .. } => refreshed_view = true,
+            SyncMessage::AuthorizationScopeReceipt { receipt, .. } => {
+                assert!(
+                    refreshed_view,
+                    "replacement receipt follows replacement view"
+                );
+                refreshed_receipt = Some(receipt);
+            }
+            other => panic!("unexpected claims-refresh response: {other:?}"),
+        }
+    }
+    let refreshed_receipt = refreshed_receipt.expect("claims change must reissue receipt");
+    assert_eq!(refreshed_receipt.claims_revision, 1);
+}
+
+#[test]
+fn authorization_scope_rejects_unrelated_caller_intent() {
+    let mut schema = schema();
+    schema.tables[0].read_policy = Some(Query::from("todos"));
+    let identity = AuthorId::from_bytes([0xc2; 16]);
+    let server = open_core(0x5f, AuthorId::SYSTEM, &schema);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, identity);
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::AuthorizationScopeSubscribe {
+            subscribe: Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+            },
+            purpose: AuthorizationScopePurpose {
+                action: PermissionAdviceAction::Read {
+                    table: "not_todos".to_owned(),
+                    row: row(1),
+                },
+            },
+        })
+        .unwrap();
+
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(
+        client_transport.try_recv().is_none(),
+        "an unrelated action must not produce a support view or receipt"
+    );
 }
 
 fn row_ids(rows: &[CurrentRow]) -> Vec<RowUuid> {

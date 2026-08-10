@@ -681,10 +681,9 @@ mod tests {
     use crate::ids::SchemaVersionId;
     use crate::ids::{NodeUuid, RowUuid};
     use crate::protocol::{
-        AuthorizationOperationKey, AuthorizationScopeOperation, AuthorizationScopePurpose,
-        AuthorizationSupportScopeKey, RegisterShapeOptions, ResultRowEntry, ShapeAst, Subscribe,
-        SubscribeRejectReason, SubscriptionKey, VersionBundle, VersionBundleRun,
-        VersionBundleRunError, VersionCarrier, VersionRecord,
+        AuthorizationScopePurpose, PermissionAdviceAction, RegisterShapeOptions, ResultRowEntry,
+        ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, VersionBundle,
+        VersionBundleRun, VersionBundleRunError, VersionCarrier, VersionRecord,
         build_version_bundle_runs_from_singletons,
     };
     use crate::protocol_limits::MAX_WIRE_FRAME_BYTES;
@@ -1320,17 +1319,9 @@ mod tests {
                 known_state: None,
             },
             purpose: AuthorizationScopePurpose {
-                key: AuthorizationSupportScopeKey {
-                    support_shape_digest: [3; 32],
-                    subject: crate::ids::AuthorId::from_bytes([4; 16]),
-                    claims_digest: [5; 32],
-                    policy_digest: [6; 32],
-                },
-                operation: AuthorizationOperationKey {
-                    operation: AuthorizationScopeOperation::Read,
+                action: PermissionAdviceAction::Read {
                     table: "todos".to_owned(),
-                    row: Some(RowUuid::from_bytes([7; 16])),
-                    candidate_digest: [8; 32],
+                    row: RowUuid::from_bytes([7; 16]),
                 },
             },
         };

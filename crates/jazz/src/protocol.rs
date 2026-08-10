@@ -308,15 +308,13 @@ pub struct AuthorizationOperationKey {
     pub candidate_digest: [u8; 32],
 }
 
-/// Declares why a regular subscription is being opened as authorization
-/// support. The authority binds it to its authenticated link identity; the
-/// operation key contains only a digest of the candidate, never its cells.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+/// Minimal caller intent for a regular subscription opened as authorization
+/// support. The authority derives the scope key and operation itself from this
+/// intent, its authenticated link identity, and the registered shape/binding.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct AuthorizationScopePurpose {
-    /// Reusable support identity compiled by the requester.
-    pub key: AuthorizationSupportScopeKey,
-    /// Candidate-specific operation evaluated after support hydration.
-    pub operation: AuthorizationOperationKey,
+    /// Candidate operation whose policy support is being hydrated.
+    pub action: PermissionAdviceAction,
 }
 
 /// Authority-issued receipt proving one scope was hydrated through its stated cut.
