@@ -182,11 +182,19 @@ Mapping (`journal_mode=WAL` always):
   boundary is on disk — and does not depend on checkpointing. It resets the
   `set_write_flush_cadence` pending counter, mirroring RocksDB's
   `flush_wal(true)` path.
-- Checkpoints are a compaction concern, not the durability mechanism:
-  `wal_checkpoint(TRUNCATE)` runs at `close()` under a `busy_timeout`, and
-  its result is checked — `SQLITE_BUSY`/partial checkpoint at close is an
-  error surfaced to the caller, not silently ignored. No checkpoint is
-  attempted on the hot path.
+- Checkpoints are WAL-size management, not the durability mechanism.
+  SQLite's default PASSIVE auto-checkpoint (~1000 WAL pages) **stays
+  enabled** — it is what bounds WAL growth in a long-lived mobile app, it
+  never blocks readers, and disabling it would require inventing a
+  background checkpoint policy for no gain. `wal_checkpoint(TRUNCATE)` runs
+  at `close()` under a `busy_timeout`, and its result is checked — `busy`
+  or a partial checkpoint at close is a distinct error surfaced to the
+  caller, not silently ignored.
+- Apple targets: `fullfsync=ON` and `checkpoint_fullfsync=ON` are set at
+  open (no-ops elsewhere). Ordinary `fsync` on Apple hardware may leave
+  data in drive caches; `F_FULLFSYNC` is what backs the power-loss claim
+  there. Elsewhere the claim is qualified by the platform's fsync
+  semantics.
 
 ### Error mapping
 
@@ -200,17 +208,30 @@ feature:
 Sqlite(#[from] rusqlite::Error),
 ```
 
-plus uses `InvalidStorageLayout` for open-time format/shape mismatches (see
-above). Corruption (`SQLITE_CORRUPT`, `SQLITE_NOTADB`) surfaces through the
-`Sqlite` variant with the SQLite result code preserved; the conformance suite
-asserts that a truncated/garbage file produces it at open or first read
-rather than a panic or silent empty database.
+plus a backend-neutral `Error::StorageClosed` (use-after-close is a runtime
+state, not a layout problem) and a feature-gated
+`Error::SqliteCheckpointIncomplete { busy, log, checkpointed }` for blocked
+or partial close-time checkpoints. `InvalidStorageLayout` is reserved for
+open-time format/shape validation only. Corruption (`SQLITE_CORRUPT`,
+`SQLITE_NOTADB`) surfaces through the `Sqlite` variant with the SQLite
+result code preserved; the conformance suite asserts that a
+truncated/garbage file produces it at open or first read rather than a
+panic or silent empty database. Open-time validation enumerates the entire
+`sqlite_master` (excluding SQLite-internal objects) and rejects any
+unexpected table, index, view, or trigger — a trigger on `kv` would alter
+semantics while a tables-only check passed.
 
 ### Threading note
 
 `OrderedKvStorage` is used thread-affinely by `Db`; the backend keeps its
 single connection in the `RefCell<Option<Connection>>` and is `!Sync` like
 its siblings. No connection pool, no async.
+
+**Single-owner assumption (recorded).** Exactly one owning `SqliteStorage`
+opens a given file at a time — the same assumption the sibling backends
+make. The boundary-counter bump nevertheless runs inside an `IMMEDIATE`
+transaction so the read-increment-write cannot interleave even if the
+assumption is ever violated by a second connection.
 
 ## 4. `crates/jazz-rn` (Rust)
 
@@ -499,21 +520,28 @@ test): black-box integration tests through public APIs, no JSON-literal
 schema/query construction — schemas and queries built with the public
 builders, then encoded with the same helpers the bindings use.
 
-1. **Groove conformance** (`crates/groove`): backend-parametrized suite
-   running the ordered-KV contract over `SqliteStorage` and asserting
-   behavioral equality with `MemoryStorage` — point ops, range/prefix/reverse
-   scans, `last_with_prefix*`, all-`0xFF` prefixes, empty keys, multi-MB
-   values, atomic `write_many` covering `Set`/`Delete`/`Delta` (including
-   delta-after-set-in-same-batch read-your-own-writes and a mid-batch invalid
-   delta leaving no partial state), reopen with added CFs, format/shape
-   rejection of alien files, corruption surfacing from truncated/garbage
-   files, and close → reopen durability at both `Durability` levels.
-2. **Abrupt-termination durability** (`crates/groove`): subprocess writer is
-   `SIGKILL`ed at controlled points (after commit under `FullSync`; after
-   `flush_write_boundary` under `WalNoSync`; mid-batch); the parent reopens
-   and asserts WAL recovery yields exactly the durable prefix — boundary
-   guarantees for `WalNoSync`, per-commit guarantees for `FullSync`, never a
-   torn batch. Clean close → reopen tests cannot stand in for jetsam.
+1. **Groove conformance** (`crates/groove`): shared, backend-parametrized
+   conformance functions run over both `MemoryStorage` (oracle) and
+   `SqliteStorage` — point ops, range/prefix scoping incl. all-`0xFF`
+   prefixes, reverse scans and `last_with_prefix*` parity against forward
+   scans, empty keys, same-batch delta visibility, reopen with added CFs —
+   plus sqlite-local tests for multi-MB values, format/shape rejection of
+   alien files (incl. unexpected triggers/views/indexes), corruption
+   surfacing, and mid-batch invalid-delta rollback. The rollback guarantee
+   is documented as **stronger than MemoryStorage's current behavior**
+   (memory applies ops in place and is not atomic under delta-application
+   failure) — that divergence is flagged for an owner decision, not patched
+   unilaterally.
+2. **Abrupt-termination recovery** (`crates/groove`): subprocess writer is
+   `SIGKILL`ed at controlled points (mid-initialization; after commit under
+   `FullSync`; after `flush_write_boundary` under `WalNoSync`; mid-batch);
+   the parent reopens and asserts WAL recovery yields whole committed state
+   only — never a torn batch, never a bricked store. Scope honestly stated:
+   SIGKILL exercises app-crash recovery; WAL survives app crashes regardless
+   of `synchronous`, so **power-loss durability is derived from SQLite's
+   documented `synchronous`/`fullfsync` semantics and guarded by
+   pragma-state assertions**, not simulated by these tests. Clean
+   close → reopen tests cannot stand in for jetsam.
 3. **Node harness over SQLite** (`crates/jazz`): run the existing node
    test-harness storage matrix (the slot `NativeBtreeStorage` occupies) with
    `SqliteStorage` under `--features sqlite,test`.

@@ -2,31 +2,33 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A production `SqliteStorage` backend in `crates/groove` implementing the ordered-KV contract over bundled rusqlite, conformance-equal to `MemoryStorage`, with verified durability boundaries — plus the `jazz` `sqlite` feature re-pointed onto it.
+**Goal:** A production `SqliteStorage` backend in `crates/groove` implementing the ordered-KV contract over bundled rusqlite, conformance-equal to `MemoryStorage` on read semantics, with recovery-tested boundaries — plus the `jazz` `sqlite` feature re-pointed onto it.
 
-**Architecture:** One SQLite file per store (`journal_mode=WAL`), a single `kv (cf INTEGER, k BLOB, v BLOB, PRIMARY KEY(cf,k)) WITHOUT ROWID` table with interned column-family ids, a `meta` table carrying format identity and the durable-boundary counter. Thread-affine (`RefCell`), single connection, no async. `Durability` is lifted out of the RocksDB-gated module first so the backend can share it.
+**Architecture:** One SQLite file per store (`journal_mode=WAL`, default auto-checkpoint kept), a single `kv (cf INTEGER, k BLOB, v BLOB, PRIMARY KEY(cf,k)) WITHOUT ROWID` table with interned column-family ids, a `meta` table carrying format identity and the durable-boundary counter. Thread-affine (`RefCell`), single connection, single owning store per file. `Durability` is lifted out of the RocksDB-gated module first so the backend can share it.
 
 **Tech Stack:** Rust 2024, rusqlite 0.34 (`bundled`), thiserror 2, existing groove storage traits (`OrderedKvStorage`, `ReopenableStorage`), `apply_storage_delta` for `WriteOperation::Delta`.
 
 **Spec:** `dev/RN_BINDING_REWRITE_DESIGN.md` §3, §8.1–8.3. This plan is M1 only; jazz-rn (M2) is a separate plan.
 
-**Revision note (2026-08-08):** amended after plan review — init atomicity, exact schema validation, u64 boundary counter, checkpoint busy handling, deterministic torn-batch failpoint, same-batch delta coverage, Tasks 2–4 as one commit, sqlite-only gate, AGENTS.md/symlink and jazz-server gate corrections, SPEC updates pulled into M1.
+**Revision note (2026-08-10, v3):** after second plan review — mandatory transactional init + init-kill test, non-ignored jazz-level gate test (the perf matrix test is `#[ignore]`), honest durability wording + pragma-state guards + Apple `fullfsync`, auto-checkpoint decision recorded (keep SQLite default), shared conformance fns over Memory+SQLite (incl. reverse/last parity; memory's delta-failure non-atomicity flagged, not patched), SQL-native reverse/last (they sit on real pk read paths), full `sqlite_master` object validation + trigger test, `StorageClosed`/`SqliteCheckpointIncomplete` error variants, boundary bump in an `IMMEDIATE` transaction + recorded single-owner assumption.
 
 ## Global Constraints
 
 - Feature name is `sqlite` in both `groove` and `jazz`; `jazz`'s becomes `sqlite = ["groove/sqlite"]`.
 - rusqlite pin: `0.34` with `features = ["bundled"]` (already the dev-dependency pin; keep both entries).
 - `SqliteStorage::open` defaults to `Durability::WalNoSync`, mirroring `RocksDbStorage::open`'s documented default; `open_with_durability` opts into `FullSync`.
-- Format identity: `meta` rows `format = 'jazz-groove-kv'`, `format_version = 1`, `boundary_seq` = 8-byte big-endian `u64`. Store initialization is **atomic** (one transaction); fresh-vs-existing is decided by `sqlite_master` emptiness, never by file existence.
-- Any existing non-empty file that does not validate **exactly** (stored `CREATE` SQL text per table, meta rows present, `boundary_seq` exactly 8 bytes) ⇒ `Error::InvalidStorageLayout`. Never adopt an alien file.
-- Corruption (`SQLITE_CORRUPT`/`SQLITE_NOTADB`) surfaces through a new transparent `Error::Sqlite(#[from] rusqlite::Error)` variant, feature-gated.
-- All-`0xFF` prefixes have no finite upper bound: prefix scans must terminate by `starts_with`, never rely on an incremented bound alone.
+- Format identity: `meta` rows `format = 'jazz-groove-kv'`, `format_version = 1`, `boundary_seq` = 8-byte big-endian `u64`. Store initialization is **one `rusqlite::Transaction`** (schema + meta rows together — no optional variants); fresh-vs-existing is decided by `sqlite_master` emptiness, never by file existence.
+- Validation of an existing non-empty file enumerates **all** non-internal `sqlite_master` objects: exactly the three expected tables (stored `CREATE` SQL equal to our constants — we bundle one SQLite version, so our own DDL text is stable), no extra tables/indexes/views/triggers, meta rows present, `boundary_seq` exactly 8 bytes. Any deviation ⇒ `Error::InvalidStorageLayout`. `InvalidStorageLayout` is **open-time validation only** — runtime states get their own variants: `Error::StorageClosed` (backend-neutral) and `Error::SqliteCheckpointIncomplete { busy, log, checkpointed }` (feature-gated).
+- Durability wording is honest: SIGKILL tests verify app-crash recovery, batch atomicity, and boundary persistence; power-loss durability **derives from SQLite `synchronous`/`fullfsync` semantics** and is guarded by pragma-state assertions (a removed pragma fails a test), not simulated. Apple targets set `fullfsync=ON` and `checkpoint_fullfsync=ON` (set unconditionally; no-ops off Apple).
+- SQLite's default PASSIVE auto-checkpoint stays enabled (recorded decision: it bounds WAL growth on long-lived mobile apps and never blocks readers); `TRUNCATE` checkpoint at `close()` with `busy` + frame-count verification.
+- Single-owner assumption (recorded in the design): one owning `SqliteStorage` per file; the boundary bump still runs in an `IMMEDIATE` transaction so read-increment-write cannot interleave.
+- All-`0xFF` prefixes have no finite upper bound: prefix scans (forward and reverse) must scope by `starts_with`, never rely on an incremented bound alone.
 - Storage-level tests are internal (`#[cfg(test)]` in `sqlite.rs`), matching `memory.rs`/`opfs.rs`; per `crates/jazz/TESTING_GUIDELINES.md` internal tests must say why — backend contract behavior is not observable through public jazz APIs.
-- Node-level tests (Task 7) use public builders; no JSON-literal schemas/queries.
+- Node-level tests (Task 7) use public builders; no JSON-literal schemas/queries. The jazz-level gate test must be **non-ignored** (the perf receipt test is `#[ignore]` and never runs in gates).
 - Per-task iteration gate: `cargo test -p groove --no-default-features --features sqlite` — the sqlite-only configuration jazz-rn will actually build (and it skips the RocksDB compile). Combined-features runs (`cargo test -p groove --features sqlite`) happen at Task 5 and landing.
 - Landing tier (Task 8): `cargo test -p jazz`, `cargo test -p groove`, `cargo test -p groove --features sqlite`, `cargo test -p groove --no-default-features --features sqlite`, `cargo test -p jazz --no-default-features --features test`, `cargo test -p jazz --bin jazz-server`, `cargo check -p jazz-sim --benches`, ts-wire-codec gate, oracle + canary, `dev/benchmarks/smoke.sh` (storage touched), and the jazz-private sensitive-data guard — the guard's absence **blocks push** (clone `jazz-private` or obtain an explicit owner exception first).
 - `.claude/CLAUDE.md` is a symlink to `AGENTS.md` — documentation edits go to `AGENTS.md` and stage `AGENTS.md`.
-- Tasks 2–4 form **one commit** (Task 4's final step): no intermediate commit may ship a public `OrderedKvStorage` impl with an `unimplemented!()` method or dead fields.
+- Tasks 2–4 form **one commit** (Task 4's final step): no intermediate commit may ship a public `OrderedKvStorage` impl with a stub method or dead fields.
 - Commit messages follow repo style (`feat(groove): …`, `test(groove): …`, `chore(jazz): …`); no AI attribution anywhere.
 
 ---
@@ -95,12 +97,12 @@ git commit -m "refactor(groove): lift Durability out of the rocksdb-gated module
 
 ---
 
-### Task 2: `sqlite` feature, error variant, and atomic validated open
+### Task 2: `sqlite` feature, error variants, and atomic validated open
 
 **Files:**
 
 - Modify: `crates/groove/Cargo.toml` (feature + optional dependency)
-- Modify: `crates/groove/src/storage/mod.rs` (module wiring + `Error::Sqlite`)
+- Modify: `crates/groove/src/storage/mod.rs` (module wiring + error variants)
 - Create: `crates/groove/src/storage/sqlite.rs`
 
 **Interfaces:**
@@ -110,10 +112,12 @@ git commit -m "refactor(groove): lift Durability out of the rocksdb-gated module
   - `pub fn open(path: impl AsRef<Path>, column_families: &[&str]) -> Result<Self, Error>` (WalNoSync)
   - `pub fn open_with_durability(path: impl AsRef<Path>, column_families: &[&str], durability: Durability) -> Result<Self, Error>`
   - `groove::storage::Error::Sqlite(rusqlite::Error)` (feature-gated, `#[from]`, transparent)
+  - `groove::storage::Error::StorageClosed` (backend-neutral: use-after-close is a runtime state, not a layout mismatch)
+  - `groove::storage::Error::SqliteCheckpointIncomplete { busy: i64, log: i64, checkpointed: i64 }` (feature-gated; Task 4 uses it)
 
 **No commit in this task** — Tasks 2–4 land as one commit at Task 4's final step (a partial trait surface must never be committed).
 
-- [ ] **Step 1: Feature and dependency wiring**
+- [ ] **Step 1: Feature, dependency, and error wiring**
 
 In `crates/groove/Cargo.toml`, `[features]` section, add:
 
@@ -145,9 +149,14 @@ pub use sqlite_storage::SqliteStorage;
 In the `pub enum Error` block (`mod.rs`, after the `RocksDb` variant):
 
 ```rust
+#[error("storage is closed")]
+StorageClosed,
 #[cfg(feature = "sqlite")]
 #[error(transparent)]
 Sqlite(#[from] ::rusqlite::Error),
+#[cfg(feature = "sqlite")]
+#[error("wal checkpoint incomplete (busy={busy}): {checkpointed}/{log} frames")]
+SqliteCheckpointIncomplete { busy: i64, log: i64, checkpointed: i64 },
 ```
 
 - [ ] **Step 2: Write the failing open/validation tests**
@@ -157,11 +166,11 @@ Create `crates/groove/src/storage/sqlite.rs` containing only the test module for
 ```rust
 //! SQLite implementation of the ordered KV storage trait.
 //!
-//! One database file per store. A single `kv` table keyed on
-//! `(interned column family id, key blob)` provides the ordered contract via
-//! the composite primary key; `meta` carries format identity and the durable
-//! boundary counter. Thread-affine like its siblings: one connection behind a
-//! `RefCell`, no pool, no async.
+//! One database file per store, one owning `SqliteStorage` per file. A single
+//! `kv` table keyed on `(interned column family id, key blob)` provides the
+//! ordered contract via the composite primary key; `meta` carries format
+//! identity and the durable boundary counter. Thread-affine like its
+//! siblings: one connection behind a `RefCell`, no pool, no async.
 
 #[cfg(test)]
 mod tests {
@@ -222,7 +231,7 @@ mod tests {
 
         let error = SqliteStorage::open(&path, &["records"]).unwrap_err();
         assert!(
-            matches!(&error, Error::InvalidStorageLayout(message) if message.contains("meta")),
+            matches!(&error, Error::InvalidStorageLayout(message) if message.contains("not_ours") || message.contains("meta")),
             "alien sqlite file must be rejected as a layout error, got: {error:?}"
         );
     }
@@ -245,6 +254,28 @@ mod tests {
         assert!(
             matches!(&error, Error::InvalidStorageLayout(message) if message.contains("kv")),
             "shape-diverged kv table must be rejected, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn open_rejects_unexpected_schema_objects() {
+        // A trigger on kv could alter semantics while a tables-only check
+        // passes; validation must enumerate ALL non-internal schema objects.
+        let dir = tempfile::tempdir().unwrap();
+        let path = db_path(&dir);
+        let storage = SqliteStorage::open(&path, &["records"]).unwrap();
+        drop(storage);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER sneaky AFTER INSERT ON kv BEGIN DELETE FROM kv; END;",
+        )
+        .unwrap();
+        drop(conn);
+
+        let error = SqliteStorage::open(&path, &["records"]).unwrap_err();
+        assert!(
+            matches!(&error, Error::InvalidStorageLayout(message) if message.contains("sneaky")),
+            "unexpected trigger must be rejected, got: {error:?}"
         );
     }
 
@@ -309,19 +340,21 @@ Expected: FAIL to compile — `SqliteStorage` not defined.
 Add above the test module in `sqlite.rs`. Initialization rules:
 
 - Fresh-vs-existing is decided by `SELECT COUNT(*) FROM sqlite_master` — **not** file existence — so a crash that left a zero-byte or headers-only file recovers as fresh.
-- Creation is one transaction (`execute_batch` wrapped in `BEGIN`/`COMMIT`): after a mid-initialization kill the schema either fully exists or not at all; no third state can brick the store.
-- The exact `CREATE` statements are constants, reused verbatim by validation against `sqlite_master.sql` — types, `NOT NULL`, primary keys, `UNIQUE`, and `WITHOUT ROWID` are all validated because the full SQL text is compared, satisfying the design's "exact expected shape" contract.
+- Creation is **one `rusqlite::Transaction`** covering DDL _and_ the meta rows (parameterized inserts, no hex-literal batch). There is no state in which tables exist without meta rows; a kill anywhere during initialization leaves an object-free file that reopens as fresh. This form is mandatory, not preferred.
+- The exact `CREATE` statements are constants, reused verbatim by validation against `sqlite_master.sql`. Validation additionally enumerates all non-internal `sqlite_master` objects and rejects extras (tables, indexes, views, triggers).
 - `journal_mode=WAL` is set via `pragma_update_and_check` and the returned mode is asserted to be `wal` — `pragma_update` alone would error on the returned row, and silently-not-WAL would void the durability model.
+- `fullfsync=ON` and `checkpoint_fullfsync=ON` are set unconditionally (they only take effect on Apple platforms, where ordinary fsync may leave data in drive caches; no-ops elsewhere).
+- SQLite's default auto-checkpoint is deliberately left enabled (recorded decision — bounds WAL growth; PASSIVE never blocks readers). No `wal_autocheckpoint` pragma is issued.
 
 ```rust
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 use super::{
-    ColumnFamilyName, Durability, Error, Key, ScanVisitor, Value, WriteOperation,
+    ColumnFamilyName, Durability, Error, Key, KeyValue, ScanVisitor, Value, WriteOperation,
     apply_storage_delta,
 };
 
@@ -341,6 +374,11 @@ struct WriteFlushCadence {
 }
 
 /// SQLite implementation of [`super::OrderedKvStorage`].
+///
+/// Exactly one owning `SqliteStorage` opens a given file at a time (the same
+/// assumption the sibling backends make); the boundary counter nevertheless
+/// updates inside an IMMEDIATE transaction so a violated assumption cannot
+/// silently lose increments.
 #[derive(Debug)]
 pub struct SqliteStorage {
     path: PathBuf,
@@ -378,7 +416,7 @@ impl SqliteStorage {
                 })?;
             }
         }
-        let connection = Connection::open(&path)?;
+        let mut connection = Connection::open(&path)?;
         let mode: String =
             connection.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
         if !mode.eq_ignore_ascii_case("wal") {
@@ -394,15 +432,19 @@ impl SqliteStorage {
                 Durability::WalNoSync => "NORMAL",
             },
         )?;
+        // Apple platforms: ordinary fsync can leave data in drive caches;
+        // F_FULLFSYNC backs the power-loss claim there. No-ops elsewhere.
+        connection.pragma_update(None, "fullfsync", "ON")?;
+        connection.pragma_update(None, "checkpoint_fullfsync", "ON")?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
 
         // Fresh means "no schema objects at all" — a zero-byte or headers-only
-        // file left by a crash before the (single-transaction) initialization
-        // committed recovers as fresh here.
+        // file left by a crash before the single create transaction committed
+        // recovers as fresh here.
         let object_count: i64 =
             connection.query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row.get(0))?;
         if object_count == 0 {
-            Self::create_schema(&connection)?;
+            Self::create_schema(&mut connection)?;
         } else {
             Self::validate_schema(&connection)?;
         }
@@ -418,51 +460,67 @@ impl SqliteStorage {
         Ok(storage)
     }
 
-    fn create_schema(connection: &Connection) -> Result<(), Error> {
-        // One transaction: initialization is atomic. execute_batch runs each
-        // statement in autocommit otherwise, and a kill between them would
-        // otherwise leave a half-initialized store.
-        connection.execute_batch(&format!(
-            "BEGIN;\n{CREATE_META};\n{CREATE_COLUMN_FAMILIES};\n{CREATE_KV};\nCOMMIT;"
+    fn create_schema(connection: &mut Connection) -> Result<(), Error> {
+        // ONE transaction for DDL + meta rows: initialization is atomic. A
+        // kill at any point leaves either a schema-free file (reopens fresh)
+        // or a complete store — never a half-initialized reject.
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(&format!(
+            "{CREATE_META};\n{CREATE_COLUMN_FAMILIES};\n{CREATE_KV};"
         ))?;
-        connection.execute(
+        transaction.execute(
             "INSERT INTO meta (key, value) VALUES ('format', ?1), ('format_version', ?2), ('boundary_seq', ?3)",
             rusqlite::params![FORMAT, FORMAT_VERSION, 0u64.to_be_bytes()],
         )?;
+        #[cfg(test)]
+        tests::kill_test_init_barrier();
+        transaction.commit()?;
         Ok(())
     }
 
     fn validate_schema(connection: &Connection) -> Result<(), Error> {
-        // Exact-shape validation: compare the stored CREATE statements against
-        // the constants used to create them. SQLite preserves the original SQL
-        // text verbatim in sqlite_master, so this checks names, types,
-        // NOT NULL, primary keys, UNIQUE, and WITHOUT ROWID in one comparison.
-        for (table, expected) in [
-            ("meta", CREATE_META),
-            ("column_families", CREATE_COLUMN_FAMILIES),
-            ("kv", CREATE_KV),
-        ] {
-            let stored: Option<String> = connection
-                .query_row(
-                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
-                    [table],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            match stored {
-                None => {
+        // Enumerate ALL non-internal schema objects: the store must contain
+        // exactly our three tables (verbatim CREATE text — we create them
+        // ourselves with one bundled SQLite version, so the stored text is
+        // stable) and nothing else — no extra tables, indexes, views, or
+        // triggers. A trigger on kv could alter semantics while a
+        // tables-only check passed.
+        let mut statement = connection.prepare(
+            "SELECT type, name, sql FROM sqlite_master \
+             WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name",
+        )?;
+        let objects: Vec<(String, String, Option<String>)> = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<_, _>>()?;
+
+        let mut expected: std::collections::BTreeMap<&str, &str> =
+            std::collections::BTreeMap::new();
+        expected.insert("meta", CREATE_META);
+        expected.insert("column_families", CREATE_COLUMN_FAMILIES);
+        expected.insert("kv", CREATE_KV);
+
+        for (object_type, name, sql) in &objects {
+            match expected.remove(name.as_str()) {
+                Some(expected_sql) if object_type == "table" => {
+                    if sql.as_deref() != Some(expected_sql) {
+                        return Err(Error::InvalidStorageLayout(format!(
+                            "table {name} shape diverges from the expected layout: {sql:?}"
+                        )));
+                    }
+                }
+                _ => {
                     return Err(Error::InvalidStorageLayout(format!(
-                        "table {table} is missing; refusing to adopt this file"
+                        "unexpected schema object {object_type} {name}; refusing to adopt this file"
                     )));
                 }
-                Some(sql) if sql != expected => {
-                    return Err(Error::InvalidStorageLayout(format!(
-                        "table {table} shape diverges from the expected layout: {sql:?}"
-                    )));
-                }
-                Some(_) => {}
             }
         }
+        if let Some((missing, _)) = expected.into_iter().next() {
+            return Err(Error::InvalidStorageLayout(format!(
+                "table {missing} is missing; refusing to adopt this file"
+            )));
+        }
+
         let format: Vec<u8> = connection
             .query_row("SELECT value FROM meta WHERE key = 'format'", [], |row| row.get(0))
             .optional()?
@@ -537,38 +595,24 @@ impl SqliteStorage {
         operate: impl FnOnce(&Connection) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let connection = self.connection.borrow();
-        let connection = connection
-            .as_ref()
-            .ok_or_else(|| Error::InvalidStorageLayout("sqlite storage is closed".into()))?;
+        let connection = connection.as_ref().ok_or(Error::StorageClosed)?;
         operate(connection)
     }
 }
 ```
 
-Note: `meta` insertion runs right after the schema transaction. If the process dies between the two, the file has tables but no meta rows — `validate_schema` rejects it with "meta.format row is missing". To keep even that window closed, the meta `INSERT` may be folded into the same `execute_batch` transaction with inline blob literals (`X'...'`); implementer's choice, but the batch + params split shown above MUST then be replaced by literals since `execute_batch` takes no params:
+The `kill_test_init_barrier` referenced from `create_schema` is a `#[cfg(test)]` no-op stub for now (Task 6 gives it its env-triggered body) — add inside `mod tests`:
 
 ```rust
-connection.execute_batch(&format!(
-    "BEGIN;\n{CREATE_META};\n{CREATE_COLUMN_FAMILIES};\n{CREATE_KV};\n\
-     INSERT INTO meta (key, value) VALUES\
-     ('format', X'{}'), ('format_version', X'{}'), ('boundary_seq', X'0000000000000000');\nCOMMIT;",
-    hex_upper(FORMAT),
-    hex_upper(FORMAT_VERSION),
-))?;
-```
-
-with this local helper. Prefer this fully-atomic form.
-
-```rust
-fn hex_upper(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02X}")).collect()
-}
+    /// Test-only failpoint for the init-kill test (Task 6). Inert unless the
+    /// kill-test env vars are set.
+    pub(super) fn kill_test_init_barrier() {}
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test -p groove --no-default-features --features sqlite sqlite_storage -j 8`
-Expected: 7 tests PASS.
+Expected: 8 tests PASS.
 
 - [ ] **Step 6: Verify feature independence**
 
@@ -579,25 +623,141 @@ Do NOT commit yet (see task header).
 
 ---
 
-### Task 3: Point operations and ordered scans
+### Task 3: Point operations, ordered scans, and SQL-native reverse/last
 
 **Files:**
 
 - Modify: `crates/groove/src/storage/sqlite.rs`
+- Modify: `crates/groove/src/storage/mod.rs` (two shared read-semantics conformance fns)
 
 **Interfaces:**
 
-- Produces: `impl OrderedKvStorage for SqliteStorage` — `get`, `set`, `delete`, `scan_range`, `scan_prefix`, `column_family_names`, `approximate_class_bytes` (returns `Ok(None)`). Defaults supply `scan_prefix_reverse` / `last_with_prefix` / `last_with_prefix_before_or_at` over `scan_prefix` — correct by construction; SQL-native reverse is a recorded perf follow-up, not part of M1. `write_many` remains a `todo!("Task 4")` stub — which is exactly why this task has no commit.
+- Produces: `impl OrderedKvStorage for SqliteStorage` — `get`, `set`, `delete`, `scan_range`, `scan_prefix`, **`scan_prefix_reverse`, `last_with_prefix`, `last_with_prefix_before_or_at`** (SQL-native: these sit on real primary-key read paths — `db/mod.rs:1087`, `:1224`, `:1479`, `:2414-2442` — and the trait defaults materialize the whole prefix, O(n) per lookup), `column_family_names`, `approximate_class_bytes` (`Ok(None)`); `write_many` remains a `todo!` stub (why this task has no commit). Also two shared conformance fns in `mod.rs`:
+  - `pub(crate) fn ordered_scans_scope_prefixes_including_all_ff<S: OrderedKvStorage>(storage: S)`
+  - `pub(crate) fn reverse_and_last_lookups_match_forward_scans<S: OrderedKvStorage>(storage: S)`
 
-- [ ] **Step 1: Extend the test module imports and write the failing tests**
+- [ ] **Step 1: Add the shared read-semantics conformance fns**
 
-First extend the test-module `use` block (the trait must be in scope for method calls):
+In `mod.rs`'s `pub(crate) mod conformance`, add (these encode the contract once; Memory runs them as the oracle, SQLite must match):
+
+```rust
+    /// Bytewise ordering and prefix scoping, including the all-0xFF prefix
+    /// that has no finite exclusive upper bound.
+    pub(crate) fn ordered_scans_scope_prefixes_including_all_ff<S>(storage: S)
+    where
+        S: OrderedKvStorage,
+    {
+        for (key, value) in [
+            (b"user:1".to_vec(), b"one".to_vec()),
+            (b"user:10".to_vec(), b"ten".to_vec()),
+            (b"user:2".to_vec(), b"two".to_vec()),
+            (vec![0xfe, 0x01], b"before".to_vec()),
+            (vec![0xff], b"exact".to_vec()),
+            (vec![0xff, 0x00], b"ff-zero".to_vec()),
+            (vec![0xff, 0xff, 0x07], b"ff-ff".to_vec()),
+        ] {
+            storage.set("records", &key, &value).unwrap();
+        }
+
+        assert_eq!(
+            storage.range("records", b"user:", b"user;").unwrap(),
+            vec![
+                (b"user:1".to_vec(), b"one".to_vec()),
+                (b"user:10".to_vec(), b"ten".to_vec()),
+                (b"user:2".to_vec(), b"two".to_vec()),
+            ]
+        );
+        assert_eq!(storage.prefix("records", b"user:").unwrap().len(), 3);
+        assert_eq!(storage.prefix("records", b"").unwrap().len(), 7);
+        assert_eq!(
+            storage.prefix("records", &[0xff]).unwrap(),
+            vec![
+                (vec![0xff], b"exact".to_vec()),
+                (vec![0xff, 0x00], b"ff-zero".to_vec()),
+                (vec![0xff, 0xff, 0x07], b"ff-ff".to_vec()),
+            ]
+        );
+        assert_eq!(
+            storage.prefix("records", &[0xff, 0xff]).unwrap(),
+            vec![(vec![0xff, 0xff, 0x07], b"ff-ff".to_vec())]
+        );
+    }
+
+    /// Reverse scans and last-lookups must agree with the reversed forward
+    /// scan for every prefix shape, including all-0xFF and bounded uppers.
+    pub(crate) fn reverse_and_last_lookups_match_forward_scans<S>(storage: S)
+    where
+        S: OrderedKvStorage,
+    {
+        for (key, value) in [
+            (b"idx:a".to_vec(), b"1".to_vec()),
+            (b"idx:b".to_vec(), b"2".to_vec()),
+            (b"idx:c".to_vec(), b"3".to_vec()),
+            (vec![0xff, 0x01], b"f1".to_vec()),
+            (vec![0xff, 0x02], b"f2".to_vec()),
+        ] {
+            storage.set("records", &key, &value).unwrap();
+        }
+
+        for prefix in [&b"idx:"[..], &b""[..], &[0xff][..]] {
+            let mut forward = Vec::new();
+            storage
+                .scan_prefix("records", prefix, &mut |key, value| {
+                    forward.push((key.to_vec(), value.to_vec()));
+                    Ok(())
+                })
+                .unwrap();
+            let mut reversed = Vec::new();
+            storage
+                .scan_prefix_reverse("records", prefix, &mut |key, value| {
+                    reversed.push((key.to_vec(), value.to_vec()));
+                    Ok(())
+                })
+                .unwrap();
+            let mut expected = forward.clone();
+            expected.reverse();
+            assert_eq!(reversed, expected, "reverse mismatch for prefix {prefix:?}");
+            assert_eq!(
+                storage.last_with_prefix("records", prefix).unwrap(),
+                forward.last().cloned(),
+                "last mismatch for prefix {prefix:?}"
+            );
+        }
+
+        assert_eq!(
+            storage
+                .last_with_prefix_before_or_at("records", b"idx:", b"idx:b")
+                .unwrap(),
+            Some((b"idx:b".to_vec(), b"2".to_vec()))
+        );
+        assert_eq!(
+            storage
+                .last_with_prefix_before_or_at("records", b"idx:", b"idx:aa")
+                .unwrap(),
+            Some((b"idx:a".to_vec(), b"1".to_vec()))
+        );
+    }
+```
+
+And in `mod.rs`'s `#[cfg(test)] mod tests`, run both over the oracle:
+
+```rust
+    #[test]
+    fn memory_storage_passes_read_semantics_conformance() {
+        conformance::ordered_scans_scope_prefixes_including_all_ff(MemoryStorage::new(&["records"]));
+        conformance::reverse_and_last_lookups_match_forward_scans(MemoryStorage::new(&["records"]));
+    }
+```
+
+- [ ] **Step 2: Extend the sqlite test module and write the failing tests**
+
+Extend the test-module `use` block (the trait must be in scope for method calls):
 
 ```rust
     use super::super::{Durability, Error, OrderedKvStorage};
 ```
 
-Then append inside `mod tests`:
+Append inside `mod tests`:
 
 ```rust
     fn open_records(dir: &tempfile::TempDir) -> SqliteStorage {
@@ -631,67 +791,14 @@ Then append inside `mod tests`:
     }
 
     #[test]
-    fn scans_are_bytewise_ordered_and_prefix_scoped() {
+    fn sqlite_storage_passes_read_semantics_conformance() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = open_records(&dir);
-        for (key, value) in [
-            (b"user:1".as_slice(), b"one".as_slice()),
-            (b"user:10", b"ten"),
-            (b"user:2", b"two"),
-            (b"visit:1", b"v"),
-        ] {
-            storage.set("records", key, value).unwrap();
-        }
-
-        let mut seen = Vec::new();
-        storage
-            .scan_range("records", b"user:", b"user;", &mut |key, value| {
-                seen.push((key.to_vec(), value.to_vec()));
-                Ok(())
-            })
-            .unwrap();
-        assert_eq!(
-            seen,
-            vec![
-                (b"user:1".to_vec(), b"one".to_vec()),
-                (b"user:10".to_vec(), b"ten".to_vec()),
-                (b"user:2".to_vec(), b"two".to_vec()),
-            ]
+        super::super::conformance::ordered_scans_scope_prefixes_including_all_ff(
+            open_records(&dir),
         );
-
-        assert_eq!(
-            storage.prefix("records", b"user:").unwrap().len(),
-            3,
-            "prefix scan must exclude non-matching tails"
-        );
-        assert_eq!(storage.prefix("records", b"").unwrap().len(), 4);
-    }
-
-    #[test]
-    fn all_ff_prefix_scans_terminate_and_scope_correctly() {
-        let dir = tempfile::tempdir().unwrap();
-        let storage = open_records(&dir);
-        storage.set("records", &[0xfe, 0x01], b"before").unwrap();
-        storage.set("records", &[0xff], b"exact").unwrap();
-        storage.set("records", &[0xff, 0x00], b"ff-zero").unwrap();
-        storage.set("records", &[0xff, 0xff, 0x07], b"ff-ff").unwrap();
-
-        assert_eq!(
-            storage.prefix("records", &[0xff]).unwrap(),
-            vec![
-                (vec![0xff], b"exact".to_vec()),
-                (vec![0xff, 0x00], b"ff-zero".to_vec()),
-                (vec![0xff, 0xff, 0x07], b"ff-ff".to_vec()),
-            ]
-        );
-        assert_eq!(
-            storage.prefix("records", &[0xff, 0xff]).unwrap(),
-            vec![(vec![0xff, 0xff, 0x07], b"ff-ff".to_vec())]
-        );
-        // Reverse + last derive from scan_prefix defaults; exercise them here too.
-        assert_eq!(
-            storage.last_with_prefix("records", &[0xff]).unwrap(),
-            Some((vec![0xff, 0xff, 0x07], b"ff-ff".to_vec()))
+        let dir2 = tempfile::tempdir().unwrap();
+        super::super::conformance::reverse_and_last_lookups_match_forward_scans(
+            open_records(&dir2),
         );
     }
 
@@ -712,14 +819,14 @@ Then append inside `mod tests`:
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] **Step 3: Run tests to verify they fail**
 
 Run: `cargo test -p groove --no-default-features --features sqlite sqlite_storage -j 8`
 Expected: FAIL to compile — `SqliteStorage` does not implement `OrderedKvStorage`.
 
-- [ ] **Step 3: Implement the trait (reads/scans)**
+- [ ] **Step 4: Implement the trait (reads/scans, forward and reverse)**
 
-Add to `sqlite.rs`. Prefix upper bound: increment the rightmost non-`0xFF` byte when one exists (index-range optimization); an all-`0xFF` (or empty) prefix runs upper-unbounded. Both paths keep the `starts_with` guard and stop past the prefix, so correctness never depends on the bound.
+Add to `sqlite.rs`. Prefix upper bound: increment the rightmost non-`0xFF` byte when one exists (index-range optimization); an all-`0xFF` (or empty) prefix runs unbounded on that side. Both directions keep the `starts_with` guard: forward breaks once past the prefix; reverse skips the greater-than-prefix tail first, then breaks below the prefix.
 
 ```rust
 fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
@@ -734,32 +841,64 @@ fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+enum ScanDirection {
+    Forward,
+    Reverse,
+}
+
 impl SqliteStorage {
-    fn scan_where(
+    fn scan_prefix_directed(
         &self,
         cf: &ColumnFamilyName,
-        clause: &str,
-        parameters: &[&dyn rusqlite::ToSql],
-        prefix_guard: Option<&[u8]>,
+        prefix: &Key,
+        direction: ScanDirection,
+        limit_one: bool,
+        upper_inclusive: Option<&Key>,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error> {
         let cf_id = self.cf_id(cf)?;
+        let upper = prefix_upper_bound(prefix);
+        let order = match direction {
+            ScanDirection::Forward => "ORDER BY k",
+            ScanDirection::Reverse => "ORDER BY k DESC",
+        };
         self.with_connection(|connection| {
-            let mut statement = connection.prepare_cached(&format!(
-                "SELECT k, v FROM kv WHERE cf = ?1 {clause} ORDER BY k"
-            ))?;
-            let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&cf_id];
-            bound.extend_from_slice(parameters);
-            let mut rows = statement.query(&bound[..])?;
+            let mut clause = String::from("AND k >= ?2");
+            let mut parameters: Vec<&dyn rusqlite::ToSql> = vec![&cf_id, &prefix];
+            if let Some(upper) = upper.as_ref() {
+                clause.push_str(" AND k < ?3");
+                parameters.push(upper);
+            }
+            let query = format!("SELECT k, v FROM kv WHERE cf = ?1 {clause} {order}");
+            let mut statement = connection.prepare_cached(&query)?;
+            let mut rows = statement.query(&parameters[..])?;
             while let Some(row) = rows.next()? {
                 let key = row.get_ref(0)?.as_blob()?;
-                if let Some(prefix) = prefix_guard {
-                    if !key.starts_with(prefix) {
-                        break; // ordered scan has left the prefix range
+                if !key.starts_with(prefix) {
+                    match direction {
+                        // Forward: ordered ascent has left the prefix range.
+                        ScanDirection::Forward => break,
+                        // Reverse without a finite upper bound starts in the
+                        // greater-than-prefix tail: skip until inside, break
+                        // once below.
+                        ScanDirection::Reverse => {
+                            if key < prefix {
+                                break;
+                            }
+                            continue;
+                        }
+                    }
+                }
+                if let Some(upper_inclusive) = upper_inclusive {
+                    if key > upper_inclusive {
+                        continue; // reverse descent has not reached the cap yet
                     }
                 }
                 let value = row.get_ref(1)?.as_blob()?;
                 visit(key, value)?;
+                if limit_one {
+                    break;
+                }
             }
             Ok(())
         })
@@ -809,7 +948,19 @@ impl super::OrderedKvStorage for SqliteStorage {
         end: &Key,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error> {
-        self.scan_where(cf, "AND k >= ?2 AND k < ?3", &[&start, &end], None, visit)
+        let cf_id = self.cf_id(cf)?;
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare_cached(
+                "SELECT k, v FROM kv WHERE cf = ?1 AND k >= ?2 AND k < ?3 ORDER BY k",
+            )?;
+            let mut rows = statement.query(rusqlite::params![cf_id, start, end])?;
+            while let Some(row) = rows.next()? {
+                let key = row.get_ref(0)?.as_blob()?;
+                let value = row.get_ref(1)?.as_blob()?;
+                visit(key, value)?;
+            }
+            Ok(())
+        })
     }
 
     fn scan_prefix(
@@ -818,16 +969,57 @@ impl super::OrderedKvStorage for SqliteStorage {
         prefix: &Key,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error> {
-        match prefix_upper_bound(prefix) {
-            Some(upper) => self.scan_where(
-                cf,
-                "AND k >= ?2 AND k < ?3",
-                &[&prefix, &upper],
-                Some(prefix),
-                visit,
-            ),
-            None => self.scan_where(cf, "AND k >= ?2", &[&prefix], Some(prefix), visit),
-        }
+        self.scan_prefix_directed(cf, prefix, ScanDirection::Forward, false, None, visit)
+    }
+
+    fn scan_prefix_reverse(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), Error> {
+        self.scan_prefix_directed(cf, prefix, ScanDirection::Reverse, false, None, visit)
+    }
+
+    fn last_with_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+    ) -> Result<Option<KeyValue>, Error> {
+        let mut last = None;
+        self.scan_prefix_directed(
+            cf,
+            prefix,
+            ScanDirection::Reverse,
+            true,
+            None,
+            &mut |key, value| {
+                last = Some((key.to_vec(), value.to_vec()));
+                Ok(())
+            },
+        )?;
+        Ok(last)
+    }
+
+    fn last_with_prefix_before_or_at(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        upper: &Key,
+    ) -> Result<Option<KeyValue>, Error> {
+        let mut last = None;
+        self.scan_prefix_directed(
+            cf,
+            prefix,
+            ScanDirection::Reverse,
+            true,
+            Some(upper),
+            &mut |key, value| {
+                last = Some((key.to_vec(), value.to_vec()));
+                Ok(())
+            },
+        )?;
+        Ok(last)
     }
 
     fn write_many(&self, _operations: &[WriteOperation<'_>]) -> Result<(), Error> {
@@ -840,10 +1032,10 @@ impl super::OrderedKvStorage for SqliteStorage {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cargo test -p groove --no-default-features --features sqlite sqlite_storage -j 8`
-Expected: all Task 2 + Task 3 tests PASS (`write_many` is not exercised yet).
+Run: `cargo test -p groove --no-default-features --features sqlite -j 8 && cargo test -p groove memory_storage_passes_read_semantics -j 8`
+Expected: sqlite tests PASS (`write_many` not exercised yet); the memory oracle passes the same conformance fns.
 
 Do NOT commit yet (see Task 2 header).
 
@@ -858,8 +1050,8 @@ Do NOT commit yet (see Task 2 header).
 
 **Interfaces:**
 
-- Consumes: `apply_storage_delta(current: Option<&[u8]>, encoded: &[u8]) -> Result<Vec<u8>, Error>`; `StorageDelta`/`StorageDeltaKind` (`pub` fields); the conformance module's `record`/`delta` builders (hoisted in Step 1).
-- Produces: full `OrderedKvStorage` (`write_many` with `Set`/`Delete`/`Delta`, `set_write_flush_cadence`, `flush_write_boundary`, `close`), `impl ReopenableStorage`, and a new shared conformance fn `set_then_delta_in_one_batch_observes_staged_value`. Behavior contracts: batches are all-or-nothing; a `Delta` in a batch observes earlier operations of the same batch; `flush_write_boundary` reads-increments-writes `meta.boundary_seq` as a big-endian `u64` (exactly one row updated) with WAL sync forced; post-close calls error; close checkpoints (`TRUNCATE`) and errors on `busy` or partial checkpoint.
+- Consumes: `apply_storage_delta`; `StorageDelta`/`StorageDeltaKind` (`pub` fields); the conformance module's `record`/`delta` builders (hoisted in Step 1).
+- Produces: full `OrderedKvStorage` (`write_many` with `Set`/`Delete`/`Delta`, `set_write_flush_cadence`, `flush_write_boundary`, `close`), `impl ReopenableStorage`, and a shared conformance fn `set_then_delta_in_one_batch_observes_staged_value`. Behavior contracts: batches are all-or-nothing; a `Delta` in a batch observes earlier operations of the same batch; `flush_write_boundary` runs an **`IMMEDIATE` transaction** that reads-increments-writes `meta.boundary_seq` as a big-endian `u64` (exactly one row updated) with WAL sync forced for that commit; post-close calls return `Error::StorageClosed`; close checkpoints (`TRUNCATE`) and returns `Error::SqliteCheckpointIncomplete` on `busy` or partial checkpoint.
 
 - [ ] **Step 1: Hoist the conformance delta builders and add the same-batch conformance fn**
 
@@ -894,7 +1086,7 @@ In `crates/groove/src/storage/mod.rs`, inside `pub(crate) mod conformance`: the 
     }
 ```
 
-Also add a `MemoryStorage` call in the existing `mod tests` of `mod.rs` (memory is the semantic oracle and must pass the new fn too):
+Also add a `MemoryStorage` call in the existing `mod tests` of `mod.rs` (memory is the semantic oracle for delta _visibility_):
 
 ```rust
     #[test]
@@ -903,6 +1095,8 @@ Also add a `MemoryStorage` call in the existing `mod tests` of `mod.rs` (memory 
         conformance::set_then_delta_in_one_batch_observes_staged_value(storage);
     }
 ```
+
+**Owner flag (record in the PR description, do not patch):** mid-batch _rollback_ on a failing delta is deliberately NOT a shared conformance fn — `MemoryStorage::write_many` applies operations in place (`memory.rs:202-243`) and is not atomic when `apply_storage_delta` fails mid-batch. The SQLite backend's rollback test below asserts a **stronger** guarantee than memory currently provides; whether memory should be fixed to match is an owner decision.
 
 - [ ] **Step 2: Write the failing sqlite tests**
 
@@ -939,9 +1133,10 @@ Append inside `mod tests`:
         super::super::conformance::set_then_delta_in_one_batch_observes_staged_value(storage2);
 
         // Invalid delta payload ⇒ whole batch rolls back, including the Set
-        // before it. StorageDelta's fields are public: a syntactically valid
-        // envelope with a garbage CurrentWinner payload encodes fine and
-        // fails only at application time.
+        // before it. (Stronger than MemoryStorage's current in-place behavior
+        // — see the owner flag in the PR description.) StorageDelta's fields
+        // are public: a syntactically valid envelope with a garbage
+        // CurrentWinner payload encodes fine and fails only at application.
         let bogus = StorageDelta {
             kind: StorageDeltaKind::CurrentWinnerV1,
             payload: b"not a valid current-winner delta".to_vec(),
@@ -989,14 +1184,52 @@ Append inside `mod tests`:
     }
 
     #[test]
+    fn synchronous_pragma_matches_durability_mode_and_survives_boundary() {
+        // The SIGKILL suite cannot distinguish FULL from NORMAL (WAL survives
+        // app crashes regardless); this guards the pragma state so an
+        // accidentally removed FULL switch or boundary restore fails loudly.
+        fn synchronous_level(storage: &SqliteStorage) -> i64 {
+            storage
+                .with_connection(|connection| {
+                    Ok(connection.pragma_query_value(None, "synchronous", |row| row.get(0))?)
+                })
+                .unwrap()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let full = SqliteStorage::open_with_durability(
+            db_path(&dir),
+            &["records"],
+            Durability::FullSync,
+        )
+        .unwrap();
+        assert_eq!(synchronous_level(&full), 2, "FullSync must run synchronous=FULL");
+        full.flush_write_boundary().unwrap();
+        assert_eq!(synchronous_level(&full), 2, "boundary must restore FULL");
+        full.close().unwrap();
+
+        let dir2 = tempfile::tempdir().unwrap();
+        let normal = SqliteStorage::open(db_path(&dir2), &["records"]).unwrap();
+        assert_eq!(synchronous_level(&normal), 1, "WalNoSync must run synchronous=NORMAL");
+        normal.flush_write_boundary().unwrap();
+        assert_eq!(synchronous_level(&normal), 1, "boundary must restore NORMAL");
+    }
+
+    #[test]
     fn close_then_reopen_preserves_data_and_post_close_calls_error() {
         let dir = tempfile::tempdir().unwrap();
         let storage = open_records(&dir);
         storage.set("records", b"a", b"one").unwrap();
         storage.close().unwrap();
 
-        assert!(storage.get("records", b"a").is_err(), "post-close reads must error");
-        assert!(storage.set("records", b"a", b"x").is_err(), "post-close writes must error");
+        assert!(
+            matches!(storage.get("records", b"a").unwrap_err(), Error::StorageClosed),
+            "post-close reads must report StorageClosed"
+        );
+        assert!(
+            matches!(storage.set("records", b"a", b"x").unwrap_err(), Error::StorageClosed),
+            "post-close writes must report StorageClosed"
+        );
 
         let storage = SqliteStorage::open(db_path(&dir), &["records"]).unwrap();
         assert_eq!(storage.get("records", b"a").unwrap(), Some(b"one".to_vec()));
@@ -1015,6 +1248,8 @@ Append inside `mod tests`:
 
         // A second connection holding an open read transaction blocks a
         // TRUNCATE checkpoint; close must surface that, not silently succeed.
+        // (This violates the recorded single-owner assumption on purpose to
+        // exercise the failure path.)
         let reader = rusqlite::Connection::open(db_path(&dir)).unwrap();
         let tx = reader.unchecked_transaction().unwrap();
         let _: i64 = tx
@@ -1023,18 +1258,20 @@ Append inside `mod tests`:
 
         let error = storage.close().unwrap_err();
         assert!(
-            matches!(&error, Error::InvalidStorageLayout(message) if message.contains("checkpoint")),
-            "blocked checkpoint must error, got: {error:?}"
+            matches!(error, Error::SqliteCheckpointIncomplete { .. }),
+            "blocked checkpoint must report SqliteCheckpointIncomplete, got: {error:?}"
         );
         drop(tx);
         drop(reader);
     }
 ```
 
+(`StorageDelta { kind, payload }` fields are `pub` in `storage/mod.rs:124-127`; `StorageDeltaKind::CurrentWinnerV1` is its only variant. No test-only constructor is needed and none may be added.)
+
 - [ ] **Step 3: Run tests to verify they fail**
 
 Run: `cargo test -p groove --no-default-features --features sqlite -j 8`
-Expected: FAIL — `write_many` panics `todo!`, `reopen`/`close` override missing; the new conformance fn compiles (memory test passes).
+Expected: FAIL — `write_many` panics `todo!`, `reopen`/`close`/cadence overrides missing.
 
 - [ ] **Step 4: Implement**
 
@@ -1055,9 +1292,7 @@ Replace the `write_many` stub and add the lifecycle methods:
 
         {
             let mut connection = self.connection.borrow_mut();
-            let connection = connection
-                .as_mut()
-                .ok_or_else(|| Error::InvalidStorageLayout("sqlite storage is closed".into()))?;
+            let connection = connection.as_mut().ok_or(Error::StorageClosed)?;
             let transaction = connection.transaction()?;
             for (index, operation) in operations.iter().enumerate() {
                 #[cfg(test)]
@@ -1129,45 +1364,52 @@ Replace the `write_many` stub and add the lifecycle methods:
         // A durable boundary is a meta.boundary_seq bump committed with WAL
         // sync forced for this commit, independent of checkpointing and of the
         // store's durability mode. The counter is a fixed-width big-endian u64
-        // decoded and incremented in Rust — SQL blob/int casts do not produce
-        // fixed-width bytes.
-        self.with_connection(|connection| {
-            let bytes: Vec<u8> = connection
-                .query_row(
-                    "SELECT value FROM meta WHERE key = 'boundary_seq'",
-                    [],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .ok_or_else(|| {
-                    Error::InvalidStorageLayout("meta.boundary_seq row is missing".into())
-                })?;
-            let bytes: [u8; 8] = bytes.try_into().map_err(|found: Vec<u8>| {
-                Error::InvalidStorageLayout(format!(
-                    "meta.boundary_seq must be exactly 8 bytes, found {}",
-                    found.len()
-                ))
-            })?;
-            let next = u64::from_be_bytes(bytes).wrapping_add(1).to_be_bytes();
-
+        // decoded and incremented in Rust inside an IMMEDIATE transaction —
+        // read-increment-write cannot interleave even if the single-owner
+        // assumption is ever violated.
+        {
+            let mut connection = self.connection.borrow_mut();
+            let connection = connection.as_mut().ok_or(Error::StorageClosed)?;
             connection.pragma_update(None, "synchronous", "FULL")?;
-            let update = connection.execute(
-                "UPDATE meta SET value = ?1 WHERE key = 'boundary_seq'",
-                [&next[..]],
-            );
+            let result = (|| -> Result<(), Error> {
+                let transaction =
+                    connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let bytes: Vec<u8> = transaction
+                    .query_row(
+                        "SELECT value FROM meta WHERE key = 'boundary_seq'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .ok_or_else(|| {
+                        Error::InvalidStorageLayout("meta.boundary_seq row is missing".into())
+                    })?;
+                let bytes: [u8; 8] = bytes.try_into().map_err(|found: Vec<u8>| {
+                    Error::InvalidStorageLayout(format!(
+                        "meta.boundary_seq must be exactly 8 bytes, found {}",
+                        found.len()
+                    ))
+                })?;
+                let next = u64::from_be_bytes(bytes).wrapping_add(1).to_be_bytes();
+                let changed = transaction.execute(
+                    "UPDATE meta SET value = ?1 WHERE key = 'boundary_seq'",
+                    [&next[..]],
+                )?;
+                if changed != 1 {
+                    return Err(Error::InvalidStorageLayout(format!(
+                        "boundary_seq update touched {changed} rows, expected 1"
+                    )));
+                }
+                transaction.commit()?;
+                Ok(())
+            })();
             let restore = match self.durability {
                 Durability::FullSync => "FULL",
                 Durability::WalNoSync => "NORMAL",
             };
             connection.pragma_update(None, "synchronous", restore)?;
-            let changed = update?;
-            if changed != 1 {
-                return Err(Error::InvalidStorageLayout(format!(
-                    "boundary_seq update touched {changed} rows, expected 1"
-                )));
-            }
-            Ok(())
-        })?;
+            result?;
+        }
         if let Some(cadence) = self.write_flush_cadence.borrow_mut().as_mut() {
             cadence.pending = 0;
         }
@@ -1183,22 +1425,20 @@ Replace the `write_many` stub and add the lifecycle methods:
         // the connection still drops (resources released) and the error is
         // reported — the WAL is replayed on the next open.
         connection.busy_timeout(std::time::Duration::from_millis(250))?;
-        let (busy, log_frames, checkpointed): (i64, i64, i64) = connection.query_row(
+        let (busy, log, checkpointed): (i64, i64, i64) = connection.query_row(
             "PRAGMA wal_checkpoint(TRUNCATE)",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
-        if busy != 0 || log_frames != checkpointed {
-            return Err(Error::InvalidStorageLayout(format!(
-                "close checkpoint incomplete (busy={busy}): {checkpointed}/{log_frames} WAL frames"
-            )));
+        if busy != 0 || log != checkpointed {
+            return Err(Error::SqliteCheckpointIncomplete { busy, log, checkpointed });
         }
         connection.close().map_err(|(_, error)| Error::Sqlite(error))?;
         Ok(())
     }
 ```
 
-(SQLite's `wal_checkpoint` pragma returns `(busy, log, checkpointed)`; `busy = 1` means the checkpoint could not run to completion because of a competing reader/writer — for `TRUNCATE` that is a failure even when the two frame counts happen to match. On an empty WAL the counts are `0`/`-1` and equal — complete.)
+(SQLite's `wal_checkpoint` pragma returns `(busy, log, checkpointed)`; `busy = 1` means the checkpoint could not run to completion — for `TRUNCATE` that is a failure even when the two frame counts happen to match. On an empty WAL the counts are `0`/`-1` and equal — complete.)
 
 And the reopen implementation after the trait impl:
 
@@ -1213,7 +1453,7 @@ impl super::ReopenableStorage for SqliteStorage {
 }
 ```
 
-Add the (for now inert) barrier hook at the top of `mod tests` — Task 6 gives it its real body; a stub keeps this task compiling:
+Add the (for now inert) batch barrier hook next to `kill_test_init_barrier` in `mod tests` — Task 6 gives both their real bodies:
 
 ```rust
     /// Test-only failpoint used by the SIGKILL suite (Task 6). Inert unless
@@ -1224,7 +1464,7 @@ Add the (for now inert) barrier hook at the top of `mod tests` — Task 6 gives 
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test -p groove --no-default-features --features sqlite -j 8`
-Expected: all sqlite tests + the memory same-batch conformance test PASS. (The reader-blocked-checkpoint test takes ~250ms by design.)
+Expected: all sqlite tests + the memory conformance tests PASS. (The reader-blocked-checkpoint test takes ~250ms by design.)
 
 - [ ] **Step 6: Commit Tasks 2–4 as one change**
 
@@ -1243,7 +1483,7 @@ git commit -m "feat(groove): sqlite ordered-kv storage backend"
 
 **Interfaces:**
 
-- Consumes: `super::super::conformance::{persistence_order_and_batch_atomicity, reopen_preserves_data_and_adds_families, delta_append_current_winner_observes_merged_state, set_then_delta_in_one_batch_observes_staged_value}` — the same parametrized functions `opfs.rs:373-475` runs for `NativeBtreeStorage`.
+- Consumes: `super::super::conformance::{persistence_order_and_batch_atomicity, reopen_preserves_data_and_adds_families, delta_append_current_winner_observes_merged_state}` — the same parametrized functions `opfs.rs:373-475` runs for `NativeBtreeStorage`. (The read-semantics and same-batch fns are already wired in Tasks 3–4.)
 
 - [ ] **Step 1: Write the conformance + large-value tests**
 
@@ -1287,7 +1527,7 @@ Append inside `mod tests`:
     }
 ```
 
-Fixture note: all three shared conformance functions seed the `"records"` family only; `reopen_preserves_data_and_adds_families` itself reopens with `["records", "indices"]` — so opening with `&["records"]` is exactly right, matching the `opfs.rs:373-480` call sites. (The same-batch fn is already exercised in Task 4's test.)
+Fixture note: all three shared conformance functions seed the `"records"` family only; `reopen_preserves_data_and_adds_families` itself reopens with `["records", "indices"]` — so opening with `&["records"]` is exactly right, matching the `opfs.rs:373-480` call sites.
 
 - [ ] **Step 2: Run to verify current state**
 
@@ -1308,29 +1548,43 @@ git commit -m "test(groove): run shared storage conformance over sqlite backend"
 
 ---
 
-### Task 6: Abrupt-termination durability tests
+### Task 6: Abrupt-termination recovery tests
 
 **Files:**
 
-- Modify: `crates/groove/src/storage/sqlite.rs` (barrier body + tests, `#[cfg(unix)]` for the kill tests)
+- Modify: `crates/groove/src/storage/sqlite.rs` (barrier bodies + tests, `#[cfg(unix)]` for the kill tests)
 
 **Interfaces:**
 
-- Consumes: the self-exec pattern — the test spawns `std::env::current_exe()` (the unit-test binary; the library is compiled with `cfg(test)` there, so the barrier is live in the child) filtered by unique substring, then SIGKILLs it at a controlled point.
-- Produces: a real body for `kill_test_barrier` (env-triggered, inert in production and in unrelated tests).
+- Consumes: the self-exec pattern — the test spawns `std::env::current_exe()` (the unit-test binary; the library is compiled with `cfg(test)` there, so both barriers are live in the child) filtered by unique substring, then SIGKILLs it at a controlled point.
+- Produces: real bodies for `kill_test_barrier` and `kill_test_init_barrier` (env-triggered, inert otherwise).
+- **Scope, stated honestly:** these tests verify app-crash WAL recovery, initialization atomicity, batch atomicity, and boundary persistence. They cannot distinguish `synchronous` levels (WAL survives app crashes regardless); power-loss durability derives from SQLite semantics and is guarded by the Task 4 pragma-state test.
 
-- [ ] **Step 1: Give the barrier its real body**
+- [ ] **Step 1: Give the barriers their real bodies**
 
-Replace the Task 4 stub in `mod tests`:
+Replace the Task 2/4 stubs in `mod tests`:
 
 ```rust
-    /// Test-only failpoint for the SIGKILL suite. When the env vars are set,
-    /// the Nth write_many call parks forever INSIDE its open transaction after
-    /// staging `barrier_after` operations — the parent then kills the process
-    /// mid-transaction, deterministically.
-    ///
-    /// Inert unless SQLITE_KILL_TEST_BARRIER_CALL is set, so every other test
-    /// (and production code — this module is cfg(test)) is unaffected.
+    /// Test-only failpoint for the init-kill test: parks inside the
+    /// initialization transaction (after DDL + meta staging, before commit)
+    /// so the parent can SIGKILL mid-initialization deterministically.
+    /// Inert unless SQLITE_KILL_TEST_INIT is set.
+    pub(super) fn kill_test_init_barrier() {
+        if std::env::var("SQLITE_KILL_TEST_INIT").is_err() {
+            return;
+        }
+        let ready = std::env::var("SQLITE_KILL_TEST_READY").unwrap();
+        std::fs::write(&ready, b"parked-in-init").unwrap();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// Test-only failpoint for the torn-batch test. When the env vars are
+    /// set, the Nth write_many call parks forever INSIDE its open transaction
+    /// after staging `barrier_after` operations — the parent then kills the
+    /// process mid-transaction, deterministically. Inert unless
+    /// SQLITE_KILL_TEST_BARRIER_CALL is set.
     pub(super) fn kill_test_barrier(op_index: usize) {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static WRITE_MANY_CALL: AtomicUsize = AtomicUsize::new(0);
@@ -1361,10 +1615,10 @@ Replace the Task 4 stub in `mod tests`:
 Append inside `mod tests`:
 
 ```rust
-    // ---- abrupt-termination durability ------------------------------------
+    // ---- abrupt-termination recovery --------------------------------------
     // A clean close cannot stand in for jetsam: these tests SIGKILL a child
     // process at controlled points and assert exactly which writes survive
-    // WAL recovery on reopen.
+    // WAL recovery on reopen. (App-crash recovery only — see Task 6 scope.)
 
     /// Child entry point. Runs only when the env marker is set; otherwise it
     /// is a no-op test. The child never closes the storage — the kill is the
@@ -1374,6 +1628,14 @@ Append inside `mod tests`:
         let Ok(role) = std::env::var("SQLITE_KILL_TEST_ROLE") else { return };
         let path = std::env::var("SQLITE_KILL_TEST_DB").unwrap();
         let ready = std::env::var("SQLITE_KILL_TEST_READY").unwrap();
+
+        if role == "init" {
+            // The init barrier (armed via SQLITE_KILL_TEST_INIT) parks inside
+            // create_schema's transaction; open never returns.
+            let _ = SqliteStorage::open(&path, &["records"]);
+            unreachable!("init barrier must park inside create_schema");
+        }
+
         let durability = match role.as_str() {
             "full_sync" => Durability::FullSync,
             "wal_no_sync" | "torn_batch" => Durability::WalNoSync,
@@ -1405,9 +1667,9 @@ Append inside `mod tests`:
         if role == "wal_no_sync" {
             storage.flush_write_boundary().unwrap();
         }
-        // Signal the parent that the guaranteed-durable point is on disk.
+        // Signal the parent that the guaranteed-recoverable point is on disk.
         std::fs::write(&ready, b"ready").unwrap();
-        // Keep writing past the durable point, then spin until killed.
+        // Keep writing past that point, then spin until killed.
         storage.set("records", b"after-boundary", b"2").unwrap();
         loop {
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1415,7 +1677,11 @@ Append inside `mod tests`:
     }
 
     #[cfg(unix)]
-    fn run_kill_test(role: &str, barrier: Option<(usize, usize)>) -> (tempfile::TempDir, SqliteStorage) {
+    fn run_kill_test(
+        role: &str,
+        init_barrier: bool,
+        batch_barrier: Option<(usize, usize)>,
+    ) -> (tempfile::TempDir, SqliteStorage) {
         let dir = tempfile::tempdir().unwrap();
         let db = db_path(&dir).to_string_lossy().into_owned();
         let ready = dir.path().join("ready").to_string_lossy().into_owned();
@@ -1428,7 +1694,10 @@ Append inside `mod tests`:
             .env("SQLITE_KILL_TEST_ROLE", role)
             .env("SQLITE_KILL_TEST_DB", &db)
             .env("SQLITE_KILL_TEST_READY", &ready);
-        if let Some((call, after)) = barrier {
+        if init_barrier {
+            command.env("SQLITE_KILL_TEST_INIT", "1");
+        }
+        if let Some((call, after)) = batch_barrier {
             command
                 .env("SQLITE_KILL_TEST_BARRIER_CALL", call.to_string())
                 .env("SQLITE_KILL_TEST_BARRIER_AFTER", after.to_string());
@@ -1447,8 +1716,21 @@ Append inside `mod tests`:
 
     #[cfg(unix)]
     #[test]
+    fn sigkill_during_initialization_recovers_as_fresh() {
+        // The child parks inside create_schema's single transaction and is
+        // killed there; the file must reopen as a working fresh store.
+        let (_dir, storage) = run_kill_test("init", true, None);
+        storage.set("records", b"post-recovery", b"ok").unwrap();
+        assert_eq!(
+            storage.get("records", b"post-recovery").unwrap(),
+            Some(b"ok".to_vec())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn sigkill_after_full_sync_commit_preserves_every_commit() {
-        let (_dir, storage) = run_kill_test("full_sync", None);
+        let (_dir, storage) = run_kill_test("full_sync", false, None);
         assert_eq!(
             storage.get("records", b"before-boundary").unwrap(),
             Some(b"1".to_vec()),
@@ -1461,7 +1743,7 @@ Append inside `mod tests`:
     #[cfg(unix)]
     #[test]
     fn sigkill_after_boundary_preserves_the_boundary_prefix() {
-        let (_dir, storage) = run_kill_test("wal_no_sync", None);
+        let (_dir, storage) = run_kill_test("wal_no_sync", false, None);
         assert_eq!(
             storage.get("records", b"before-boundary").unwrap(),
             Some(b"1".to_vec()),
@@ -1474,7 +1756,7 @@ Append inside `mod tests`:
     fn sigkill_mid_batch_preserves_whole_generations_only() {
         // Barrier parks the 2nd write_many call (generation 1) after staging
         // 4 of its 8 ops; the kill lands inside that open transaction.
-        let (_dir, storage) = run_kill_test("torn_batch", Some((2, 4)));
+        let (_dir, storage) = run_kill_test("torn_batch", false, Some((2, 4)));
         let mut generation_counts = std::collections::BTreeMap::<u8, u32>::new();
         storage
             .scan_prefix("records", b"gen", &mut |key, _value| {
@@ -1502,28 +1784,28 @@ Append inside `mod tests`:
 - [ ] **Step 3: Run the kill tests**
 
 Run: `cargo test -p groove --no-default-features --features sqlite sigkill -j 8 -- --test-threads=1`
-Expected: 3 tests PASS (`full_sync`, `wal_no_sync` boundary, deterministic `torn_batch`). Also run the child no-op path: `cargo test -p groove --no-default-features --features sqlite sqlite_kill_test_child_writer -j 8` — PASS immediately (env unset ⇒ no-op), and the full sqlite suite once more to prove the barrier is inert: `cargo test -p groove --no-default-features --features sqlite -j 8`.
+Expected: 4 tests PASS (`init`, `full_sync`, `wal_no_sync` boundary, deterministic `torn_batch`). Also run the child no-op path: `cargo test -p groove --no-default-features --features sqlite sqlite_kill_test_child_writer -j 8` — PASS immediately (env unset ⇒ no-op), and the full sqlite suite once more to prove the barriers are inert: `cargo test -p groove --no-default-features --features sqlite -j 8`.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add crates/groove/src/storage/sqlite.rs
-git commit -m "test(groove): sigkill durability coverage for sqlite backend"
+git commit -m "test(groove): sigkill recovery coverage for sqlite backend"
 ```
 
 ---
 
-### Task 7: Re-point jazz's `sqlite` feature and add the node-harness slot
+### Task 7: Re-point jazz's `sqlite` feature and add a non-ignored node gate test
 
 **Files:**
 
 - Modify: `crates/jazz/Cargo.toml:12` (feature) and `crates/jazz/Cargo.toml:75` (drop rusqlite dependency)
-- Modify: `crates/jazz/src/node/tests/sync.rs` (sqlite sibling of the btree node constructor + matrix leg)
+- Modify: `crates/jazz/src/node/tests/sync.rs` (sqlite node constructor + non-ignored gate test + matrix leg)
 
 **Interfaces:**
 
-- Consumes: `groove::storage::SqliteStorage` (Tasks 2–4); the existing backend matrix in the test that prints `policy_graph_perf_dropdown_entry_reset_ingest_timing` (`sync.rs:2153-2186`), which runs `apply_policy_graph_reset_receipt` over memory / rocksdb / native-btree; the `open_policy_graph_native_btree_node` constructor at `sync.rs:1981-1997`.
-- Produces: `jazz` feature `sqlite = ["groove/sqlite"]`; a fourth, `#[cfg(feature = "sqlite")]` leg in that matrix exercising `NodeState<SqliteStorage>`.
+- Consumes: `groove::storage::SqliteStorage` (Tasks 2–4); the `open_policy_graph_native_btree_node` constructor at `sync.rs:1981-1997`; the seeding/serve helpers of the **`#[ignore]`** perf receipt test `policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt` (`sync.rs:2034+`) — `policy_graph_perf_schema_fixture`, `seed_policy_graph_known_global`, `PeerState::rehydrate_query`, `apply_policy_graph_reset_receipt` (which itself asserts `rows.len() == entry_count`, `sync.rs:2026`).
+- Produces: `jazz` feature `sqlite = ["groove/sqlite"]`; a **non-ignored** `#[cfg(feature = "sqlite")]` semantic node test that runs in the canonical gate (the ignored receipt test never runs in gates — adding a leg there alone would be a vacuous gate); plus the sqlite leg in the ignored receipt matrix for perf parity when run explicitly.
 
 - [ ] **Step 1: Re-point the feature**
 
@@ -1547,9 +1829,9 @@ rusqlite = { version = "0.34", features = ["bundled"], optional = true }
 
 Run: `grep -rn "rusqlite" crates/jazz/src crates/jazz/tests` — Expected: no hits (verified during design; if one appears, stop and reassess rather than force the removal).
 
-- [ ] **Step 2: Add the sqlite leg to the backend matrix**
+- [ ] **Step 2: Add the sqlite node constructor**
 
-In `crates/jazz/src/node/tests/sync.rs`, directly below `open_policy_graph_native_btree_node` (`sync.rs:1981-1997`), add the sqlite sibling, mirroring its body exactly (same `column_families()` refs derivation, same `NodeState::new` call):
+In `crates/jazz/src/node/tests/sync.rs`, directly below `open_policy_graph_native_btree_node` (`sync.rs:1981-1997`), mirroring its body exactly:
 
 ```rust
 #[cfg(feature = "sqlite")]
@@ -1569,7 +1851,40 @@ fn open_policy_graph_sqlite_node(
 }
 ```
 
-Then, in the matrix test (`sync.rs:2153-2186`), insert a fourth leg **before** the native-btree leg (which consumes `update` by move — the new leg clones like the earlier legs do):
+- [ ] **Step 3: Extract the scenario fixture and add the non-ignored gate test**
+
+The receipt test's seeding + serve section (schema fixture → seed rows → `Query::from(...).validate(...)` → `bind` → `PeerState::rehydrate_query` producing the `SyncMessage` view update) currently lives inline in the `#[ignore]` test with a large `entry_count`. Extract it mechanically into a helper parametrized by counts — same statements, no behavior change; the receipt test calls the helper with its original counts and keeps its `#[ignore]` + `refuse_contaminated_measurement` guard:
+
+```rust
+fn policy_graph_reset_ingest_fixture(
+    entry_count: usize,
+    dropdown_count: usize,
+) -> (JazzSchema, ValidatedQuery, Binding, SyncMessage) {
+    // Body: moved verbatim from policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt
+    // (schema fixture, core node, seed_rows construction, seed_policy_graph_known_global,
+    // shape validate + bind, PeerState::rehydrate_query), returning the pieces
+    // the backend legs consume. Keep the timing printlns in the receipt test,
+    // not here.
+}
+```
+
+Then add the gate test — small counts, **not ignored**, asserting through the same receipt-application helper (which checks `rows.len() == entry_count`):
+
+```rust
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_node_applies_policy_graph_reset_receipt() {
+    let (schema, shape, binding, update) = policy_graph_reset_ingest_fixture(64, 4);
+    let (_dir, mut reader) = open_policy_graph_sqlite_node(node(0x27), schema);
+    apply_policy_graph_reset_receipt("sqlite", &mut reader, &shape, &binding, update, 64);
+}
+```
+
+(Adjust the helper's exact return types to what the extracted code produces — the four values above are what the existing legs consume at `sync.rs:2153-2186`. If the fixture body resists a clean four-value return, returning a small struct is fine; the gate test's shape stays the same.)
+
+- [ ] **Step 4: Add the sqlite leg to the ignored receipt matrix**
+
+In the receipt test (`sync.rs:2153-2186`), insert before the native-btree leg (which consumes `update` by move — the new leg clones like the earlier legs do):
 
 ```rust
     #[cfg(feature = "sqlite")]
@@ -1591,19 +1906,18 @@ Then, in the matrix test (`sync.rs:2153-2186`), insert a fourth leg **before** t
     }
 ```
 
-Do not invent a new scenario: the value is backend parity inside this existing, known-good matrix (same receipt, same assertions inside `apply_policy_graph_reset_receipt`).
+- [ ] **Step 5: Run the gate test and the canonical gate**
 
-- [ ] **Step 3: Run the matrix test with sqlite enabled**
+Run: `cargo test -p jazz --no-default-features --features test sqlite_node_applies_policy_graph_reset_receipt -j 8`
+Expected: PASS — and it runs (1 test executed, not `0 filtered`); this is the non-vacuous jazz-level gate.
 
-Run: `cargo test -p jazz --no-default-features --features test policy_graph_perf_dropdown_entry_reset_ingest_timing -j 8`
-Expected: PASS with the sqlite leg's timing line in the output (`--nocapture` to see it). A failure here is a real backend divergence surfaced by the node semantics — investigate in `sqlite.rs`, do not touch the test.
-
-- [ ] **Step 4: Run the canonical jazz gate**
+Run the receipt matrix once explicitly (ignored tests need the flag): `cargo test -p jazz --no-default-features --features test policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt -j 8 -- --ignored --nocapture`
+Expected: PASS with the sqlite timing line in the output.
 
 Run: `cargo test -p jazz --no-default-features --features test -j 8`
-Expected: PASS (the `test-utils` feature already includes `sqlite`, so this gate now builds and exercises the backend).
+Expected: PASS (the `test-utils` feature already includes `sqlite`, so the canonical gate now builds the backend and executes the new gate test).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add crates/jazz/Cargo.toml crates/jazz/src/node/tests/sync.rs
@@ -1690,7 +2004,8 @@ git commit -m "chore: add sqlite backend gate and record M1"
 
 ## Not in this plan (deliberately)
 
-- SQL-native `scan_prefix_reverse` / `last_with_prefix*` (defaults are correct; optimize only when a profile demands it — record in the M2 plan if it comes up).
+- Fixing `MemoryStorage`'s non-atomic behavior on mid-batch delta failure — flagged for an owner decision (Task 4 Step 1); the sqlite backend's rollback guarantee is documented as stronger.
+- A test VFS asserting `xSync` calls — power-loss semantics are derived from SQLite documentation and guarded by pragma-state assertions instead; a VFS harness is recorded as a possible follow-up if the guarantee ever needs machine proof.
 - `approximate_class_bytes` heuristics (contract answer `Ok(None)`).
 - Any `crates/jazz-rn` change (M2 plan), TS change (M3 plan), or mobile build (M4 plan).
-- Wiring the new conformance additions (`0xFF`, kill tests) over NativeBtree/RocksDB — the same-batch delta conformance fn IS wired to Memory (oracle); broader rollout is its own investigation if a latent failure appears, not an M1 blocker.
+- Wiring the new conformance fns over NativeBtree/RocksDB — Memory (oracle) and SQLite run them; broader rollout is its own investigation if a latent failure appears, not an M1 blocker.
