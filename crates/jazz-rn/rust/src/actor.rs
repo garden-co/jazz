@@ -1008,6 +1008,17 @@ impl CoreState {
                 schema,
                 config,
             } => {
+                if let Some(parent) = path
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                {
+                    std::fs::create_dir_all(parent).map_err(|error| JazzRnError::Runtime {
+                        message: format!(
+                            "failed to create SQLite storage directory {}: {error}",
+                            parent.display()
+                        ),
+                    })?;
+                }
                 let (schema, config) = binding::decode_open_args(&schema, &config)?;
                 let column_families = schema.column_families();
                 let refs = column_families

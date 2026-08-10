@@ -116,7 +116,11 @@
       "<rootDir>/example/node_modules",
       "<rootDir>/lib/"
     ],
-    "preset": "react-native"
+    "preset": "react-native",
+    "transformIgnorePatterns": [
+      "node_modules/(?!\\.pnpm|((jest-)?react-native|@react-native(-community)?)/)"
+    ],
+    "watchman": false
   },
   "packageManager": "pnpm@10.16.1",
   "codegenConfig": {

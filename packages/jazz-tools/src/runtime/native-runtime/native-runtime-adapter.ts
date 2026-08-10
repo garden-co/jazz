@@ -55,12 +55,12 @@ export { encodeSchema } from "./schema-codec.js";
 
 const SERVER_PUMP_DEBOUNCE_MS = 16;
 
-type NativeDbConstructor = {
+export type NativeDbConstructor = {
   openMemory(schema: Uint8Array, config: Uint8Array): NativeDb;
   openPersistent?(dataPath: string, schema: Uint8Array, config: Uint8Array): NativeDb;
 };
 
-type NativeDb = {
+export type NativeDb = {
   all(query: PreparedQuery, opts: unknown): Uint8Array;
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
   allRelationQuery?(queryJson: string, opts: unknown): Uint8Array;
@@ -183,15 +183,15 @@ type NativeDb = {
   free?(): void;
 };
 
-type PreparedQuery = object;
+export type PreparedQuery = object;
 
-type Subscription = {
+export type Subscription = {
   readAll(): unknown[];
   drain?(): unknown[];
   close?(): boolean;
 };
 
-type Write = {
+export type Write = {
   payload: Uint8Array;
   wait(tier: string): void;
   writeState(): unknown;
@@ -199,7 +199,7 @@ type Write = {
   close?(): boolean;
 };
 
-type Tx = {
+export type Tx = {
   commit(): Write;
   rollback(): void;
   insertWithIdEncoded(

@@ -15,3 +15,11 @@ declare module "expo-secure-store" {
   export function setItemAsync(key: string, value: string): Promise<void>;
   export function deleteItemAsync(key: string): Promise<void>;
 }
+
+declare module "expo-file-system" {
+  export const Paths: {
+    readonly document: {
+      readonly uri: string;
+    };
+  };
+}

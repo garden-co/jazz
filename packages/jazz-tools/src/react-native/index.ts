@@ -15,12 +15,5 @@ export {
   type LocalFirstAuth,
   type UseLocalFirstAuthOptions,
 } from "./use-local-first-auth.js";
-export {
-  REACT_NATIVE_SQLITE_STORAGE_UNIMPLEMENTED_ERROR,
-  UnimplementedSqliteStorageDriver,
-  type ReactNativeSqliteConnection,
-  type ReactNativeSqliteStorageDriver,
-  type ReactNativeSqliteTransaction,
-} from "./storage.js";
 export type { QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
 export { schema } from "../index.js";

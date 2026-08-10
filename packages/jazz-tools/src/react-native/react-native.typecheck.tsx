@@ -3,7 +3,6 @@ import type { ReactNode } from "react";
 import {
   Db,
   JazzProvider,
-  UnimplementedSqliteStorageDriver,
   createDb,
   createJazzClient,
   schema,
@@ -15,8 +14,6 @@ import {
   useSession,
   type DbConfig,
   type JazzClient,
-  type ReactNativeSqliteConnection,
-  type ReactNativeSqliteStorageDriver,
 } from "./index.js";
 
 const app = schema.defineApp({
@@ -26,12 +23,10 @@ const app = schema.defineApp({
   }),
 });
 
-const sqliteStorage: ReactNativeSqliteStorageDriver = new UnimplementedSqliteStorageDriver();
-
 const config: DbConfig = {
   appId: "rn-typecheck",
   serverUrl: "https://sync.example.test",
-  sqliteStorage,
+  dataDirectory: "/var/mobile/Containers/Data/Application/jazz/Documents",
 };
 
 async function clientFactory(): Promise<JazzClient> {
@@ -72,14 +67,5 @@ function Hooks({ children }: { children: ReactNode }) {
   );
 }
 
-async function storageDriverShape(connection: ReactNativeSqliteConnection) {
-  await connection.execute("create table if not exists jazz_kv (key text primary key, value blob)");
-  const rows = await connection.query<{ key: string }>("select key from jazz_kv");
-  await connection.transaction((tx) => tx.execute("delete from jazz_kv where key = ?", ["k"]));
-  await connection.close();
-  rows satisfies readonly { key: string }[];
-}
-
 void clientFactory;
 void Hooks;
-void storageDriverShape;

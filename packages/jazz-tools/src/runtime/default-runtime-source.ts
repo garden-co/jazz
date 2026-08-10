@@ -14,69 +14,12 @@ import {
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import { PersistentBrowserOpfsRuntime } from "./native-runtime/persistent-browser-runtime.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
-import { parseJwtPayload } from "./client-session.js";
+import { resolveInitialSyncFlushEvery, resolveRuntimeIdentity } from "./runtime-identity.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
 function setGlobalWasmLogLevel(level?: DbConfig["logLevel"]): void {
   (globalThis as any).__JAZZ_WASM_LOG_LEVEL = level ?? DEFAULT_WASM_LOG_LEVEL;
-}
-
-function deterministicBytes(seed: string): Uint8Array {
-  let hash = 0x811c9dc5;
-  const bytes = new Uint8Array(16);
-  for (let round = 0; round < 4; round += 1) {
-    for (let i = 0; i < seed.length; i += 1) {
-      hash ^= seed.charCodeAt(i) + round;
-      hash = Math.imul(hash, 0x01000193);
-    }
-    const view = new DataView(bytes.buffer);
-    view.setUint32(round * 4, hash >>> 0, true);
-  }
-  return bytes;
-}
-
-function randomBytes(): Uint8Array {
-  const bytes = new Uint8Array(16);
-  if (globalThis.crypto?.getRandomValues) {
-    globalThis.crypto.getRandomValues(bytes);
-    return bytes;
-  }
-  return deterministicBytes(`${Date.now()}:${Math.random()}`);
-}
-
-function uuidBytes(value: string): Uint8Array | null {
-  const hex = value.replaceAll("-", "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) {
-    return null;
-  }
-  const bytes = new Uint8Array(16);
-  for (let index = 0; index < 16; index += 1) {
-    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
-  }
-  return bytes;
-}
-
-function subjectFromConfig(config: DbConfig): string | null {
-  if (config.cookieSession?.user_id) return config.cookieSession.user_id;
-  const payload = parseJwtPayload(config.jwtToken ?? "");
-  return typeof payload?.sub === "string" && payload.sub.trim() ? payload.sub.trim() : null;
-}
-
-function persistentIdentitySeed(config: DbConfig, subject: string | null): string {
-  return `${config.appId}:${config.env ?? "dev"}:${config.userBranch ?? "main"}:${subject ?? "anonymous"}`;
-}
-
-function authorBytesForSubject(subject: string, fallbackSeed: string): Uint8Array {
-  return uuidBytes(subject) ?? deterministicBytes(`${fallbackSeed}:author`);
-}
-
-function initialSyncFlushEvery(config: DbConfig): number {
-  const value = config.initialSyncFlushEvery ?? 512;
-  if (!Number.isSafeInteger(value) || value < 1) {
-    throw new Error("initialSyncFlushEvery must be a positive integer");
-  }
-  return value;
 }
 
 export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
@@ -104,19 +47,12 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       onAuthFailure,
     };
 
-    const subject = subjectFromConfig(config);
     const persistentBrowserDbName =
       isBrowserRuntime() && (config.driver?.type ?? "persistent") === "persistent"
         ? resolveDefaultPersistentDbName(config)
         : undefined;
-    const identitySeed = persistentIdentitySeed(config, subject);
-    const node = persistentBrowserDbName
-      ? deterministicBytes(`${identitySeed}:${persistentBrowserDbName}:node`)
-      : randomBytes();
-    const author = subject
-      ? authorBytesForSubject(subject, identitySeed)
-      : deterministicBytes(`${identitySeed}:author`);
-    const flushEvery = initialSyncFlushEvery(config);
+    const { node, author } = resolveRuntimeIdentity(config, persistentBrowserDbName);
+    const flushEvery = resolveInitialSyncFlushEvery(config);
     const mainThreadPeerRuntime = persistentBrowserDbName
       ? new PersistentBrowserOpfsRuntime(
           config.runtimeSources,

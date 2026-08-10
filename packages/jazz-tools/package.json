@@ -185,6 +185,7 @@
     "better-auth": "^1.5.5",
     "expo": ">=54",
     "expo-crypto": ">=14.0.0",
+    "expo-file-system": ">=18.0.0",
     "expo-secure-store": ">=14.0.0",
     "jazz-rn": "workspace:*",
     "react": ">=19",
@@ -201,6 +202,9 @@
       "optional": true
     },
     "expo-crypto": {
+      "optional": true
+    },
+    "expo-file-system": {
       "optional": true
     },
     "expo-secure-store": {

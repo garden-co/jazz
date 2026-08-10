@@ -1,8 +1,10 @@
 // Typecheck-only port of the deleted origin/main Expo auth tests to the v2 API.
 import {
   ExpoAuthSecretStore,
+  expoDataDirectory,
   expoAuthSecretStore,
   useLocalFirstAuth,
+  withExpoDataDirectory,
   type ExpoAuthSecretStoreOptions,
   type ExpoSecureStoreLike,
   type UseLocalFirstAuthOptions,
@@ -33,6 +35,12 @@ const hookOptions: UseLocalFirstAuthOptions = {
 
 const store = new ExpoAuthSecretStore(options);
 store satisfies typeof expoAuthSecretStore;
+const dataDirectory = expoDataDirectory("file:///var/mobile/Documents/");
+const nativeConfig = withExpoDataDirectory({
+  appId: "expo-native",
+  dataDirectory,
+});
+nativeConfig.dataDirectory satisfies string;
 
 function HookConsumer() {
   const auth = useLocalFirstAuth(hookOptions);

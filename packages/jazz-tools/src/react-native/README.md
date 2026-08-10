@@ -1,31 +1,53 @@
 # React Native bindings
 
-This directory restores the React Native binding shape against the v2 runtime.
-It is compile-level scaffolding only: the React hooks, provider, client factory,
-typed schema exports, and auth helper all typecheck, but persistent storage does
-not run yet.
+`jazz-tools/react-native` runs the Jazz Rust core through the `jazz-rn`
+Turbo Module. It does not load WASM and does not use a JavaScript SQLite
+driver. One Rust actor thread owns the database; the TypeScript runtime keeps
+WebSockets, subscriptions, and the public Jazz API on the JavaScript side.
 
-The current `createDb()` path installs `ReactNativeRuntimeSource`. When the
-config uses persistent storage, it opens `UnimplementedSqliteStorageDriver`,
-whose methods throw:
+Install `jazz-rn` directly in every React Native application because it is an
+optional peer of `jazz-tools`. Rebuild the native app after installing or
+upgrading it; Expo Go cannot load this custom native module.
 
-`React Native SQLite storage driver is not yet implemented — see src/react-native/README.md`
+Persistent storage uses the Rust Groove SQLite backend. Supply an absolute
+filesystem `dataDirectory`; `dbName` remains a logical name and is sanitized
+before the final path is formed as `<dataDirectory>/<dbName>.db`.
 
-Open decisions for the RN owner:
+```tsx
+import "jazz-tools/expo/polyfills";
 
-- SQLite driver route: `op-sqlite`, `expo-sqlite`, or the surviving
-  `crates/jazz-rn` native-module route with JSI.
-- Runtime route: keep loading the WASM-backed v2 runtime in RN, or move the
-  runtime boundary into `crates/jazz-rn` as a native module.
-- Storage ABI: map the future RN SQLite driver onto the portable ordered-KV
-  contract, including migration reporting, corruption behavior, teardown, and
-  durability tests.
+import { expoDataDirectory } from "jazz-tools/expo";
+import { JazzProvider } from "jazz-tools/react-native";
 
-Useful pointers:
+export function App() {
+  return (
+    <JazzProvider
+      config={{
+        appId: "todo-mobile",
+        dataDirectory: expoDataDirectory(),
+      }}
+      fallback={null}
+    >
+      {/* application */}
+    </JazzProvider>
+  );
+}
+```
 
-- Native module scaffold: `crates/jazz-rn/` (`android/`, `ios/`,
-  `JazzRn.podspec`, generated RN bridge files).
-- Port ledger rows: `dev/MAIN_INTEGRATION_LEDGER.md` rows for
-  `f072cb04e`, `42e77fd38`, `52ec1e1b8`, `64b033b19`, and `6e65acff3`.
-- Owning spec: `crates/jazz/SPEC/13_db_api.md`, open questions for binding
-  storage and React Native runtime reuse.
+`withExpoDataDirectory(config)` is also available when constructing config
+outside JSX. A memory driver does not require `dataDirectory` (the general
+Jazz configuration currently requires a `serverUrl` for memory mode).
+
+Persistent node and author identities are derived deterministically from the
+application, environment, user branch, authenticated subject, and logical
+database name. Reopening the same database therefore resumes pending local
+writes instead of orphaning its outbox.
+
+Native writes are durable by default. `Db.shutdown()` closes transports,
+cancels pending native waiters, checkpoints SQLite, and joins the actor thread.
+After a terminal native panic or close, construct a new client rather than
+reusing the old instance.
+
+For native development, bindings are generated from
+`crates/jazz-rn/rust/src/lib.rs` with `ubrn`; iOS and Android builds package the
+same Rust core, bundled SQLite, and zstd transport support.

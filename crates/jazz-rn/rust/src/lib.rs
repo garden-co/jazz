@@ -1256,3 +1256,134 @@ fn mint_token(
     )
     .map_err(|message| JazzRnError::Internal { message })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use jazz::binding_support::{OpenDbConfig, OpenDbIdentity};
+    use jazz::groove::records::{RecordDescriptor, Value, ValueType};
+    use jazz::groove::schema::{ColumnSchema, ColumnType};
+    use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+    use jazz::protocol::SyncMessage;
+    use jazz::schema::{JazzSchema, TableSchema};
+    use jazz::tx::TxId;
+    use jazz::wire::{
+        WireFrame, WireStreamDecoder, current_wire_features, decode_frame, decode_sync_message,
+    };
+
+    use super::RnDb;
+
+    fn encoded_schema() -> Vec<u8> {
+        let schema = JazzSchema::new([TableSchema::new(
+            "todos",
+            [ColumnSchema::new("title", ColumnType::String)],
+        )]);
+        postcard::to_allocvec(&schema).expect("encode test schema")
+    }
+
+    fn encoded_config(node: [u8; 16], author: [u8; 16]) -> Vec<u8> {
+        postcard::to_allocvec(&OpenDbConfig {
+            identity: OpenDbIdentity {
+                node: NodeUuid::from_bytes(node),
+                author: AuthorId::from_bytes(author),
+            },
+            row_id_seed: Some(1),
+            history_complete: false,
+            initial_sync_flush_every: None,
+        })
+        .expect("encode test config")
+    }
+
+    fn encoded_cells() -> Vec<u8> {
+        let descriptor = RecordDescriptor::new([("title", ValueType::String)]);
+        let record = descriptor
+            .create(&[Value::String("survives restart".to_owned())])
+            .expect("encode test row");
+        postcard::to_allocvec(&(descriptor, record)).expect("encode test cells")
+    }
+
+    fn outbound_messages(db: &Arc<RnDb>) -> Vec<SyncMessage> {
+        let transport = db.connect_upstream().expect("attach upstream transport");
+        let mut frames = Vec::new();
+        for _ in 0..4 {
+            db.tick().expect("tick reopened database");
+            transport.tick().expect("tick reopened transport");
+            frames.extend(
+                transport
+                    .recv_wire_frames()
+                    .expect("drain reopened transport"),
+            );
+        }
+
+        let mut decoder = WireStreamDecoder::new(current_wire_features())
+            .expect("construct outbound stream decoder");
+        frames
+            .into_iter()
+            .filter_map(
+                |frame| match decode_frame(&frame).expect("decode outbound frame") {
+                    WireFrame::Message(envelope) => {
+                        let payload = decoder
+                            .decode_message(&envelope.payload, envelope.features)
+                            .expect("decode outbound stream payload");
+                        Some(decode_sync_message(&payload).expect("decode outbound sync message"))
+                    }
+                    WireFrame::Hello(_) | WireFrame::Error(_) => None,
+                },
+            )
+            .collect()
+    }
+
+    #[test]
+    fn persistent_reopen_with_same_identity_reschedules_pending_write() {
+        // Pending-upload restoration is observable only through the binding's
+        // raw transport contract, so this black-boxes RnDb and decodes the
+        // emitted public wire message rather than inspecting actor state.
+        let directory = tempfile::tempdir().expect("create test directory");
+        let path = directory.path().join("nested").join("jazz.db");
+        let schema = encoded_schema();
+        let config = encoded_config([0x11; 16], [0x22; 16]);
+        let db = RnDb::open_persistent(
+            path.to_string_lossy().into_owned(),
+            schema.clone(),
+            config.clone(),
+        )
+        .expect("open persistent binding");
+        let write = db
+            .insert_with_id_encoded(
+                "todos".to_owned(),
+                vec![0x33; 16],
+                encoded_cells(),
+                Some(1_000.0),
+            )
+            .expect("insert offline row");
+        write
+            .wait("local".to_owned())
+            .expect("write reaches local durability");
+        let (_, expected_tx): (RowUuid, TxId) =
+            postcard::from_bytes(&write.payload().expect("read write payload"))
+                .expect("decode write payload");
+        write.close().expect("close write handle");
+        db.close().expect("close first persistent binding");
+
+        let wrong_identity = RnDb::open_persistent(
+            path.to_string_lossy().into_owned(),
+            schema.clone(),
+            encoded_config([0x44; 16], [0x22; 16]),
+        )
+        .expect("reopen with a different node identity");
+        assert!(outbound_messages(&wrong_identity).into_iter().all(|message| {
+            !matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == expected_tx)
+        }));
+        wrong_identity
+            .close()
+            .expect("close wrong-identity binding");
+
+        let reopened = RnDb::open_persistent(path.to_string_lossy().into_owned(), schema, config)
+            .expect("reopen with the original identity");
+        assert!(outbound_messages(&reopened).into_iter().any(|message| {
+            matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == expected_tx)
+        }));
+        reopened.close().expect("close reopened binding");
+    }
+}

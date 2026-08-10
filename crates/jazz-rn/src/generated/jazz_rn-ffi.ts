@@ -27,169 +27,467 @@ interface NativeModuleInterface {
     buffer: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): string;
-  ubrn_uniffi_jazz_rn_fn_clone_rnruntime(
+  ubrn_uniffi_jazz_rn_fn_clone_rndb(
     handle: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): bigint;
-  ubrn_uniffi_jazz_rn_fn_free_rnruntime(
+  ubrn_uniffi_jazz_rn_fn_free_rndb(
     handle: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
-  ubrn_uniffi_jazz_rn_fn_constructor_rnruntime_new(
-    schemaJson: Uint8Array,
-    appId: Uint8Array,
-    jazzEnv: Uint8Array,
-    userBranch: Uint8Array,
-    tier: Uint8Array,
+  ubrn_uniffi_jazz_rn_fn_constructor_rndb_open_memory(
+    schema: Uint8Array,
+    config: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_constructor_rndb_open_persistent(
     dataPath: Uint8Array,
+    schema: Uint8Array,
+    config: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): bigint;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_batched_tick(
+  ubrn_uniffi_jazz_rn_fn_method_rndb_all(
     ptr: bigint,
-    uniffi_out_err: UniffiRustCallStatus
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_begin_transaction(
-    ptr: bigint,
-    transactionKind: Uint8Array,
+    query: bigint,
+    optsJson: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_close(
+  ubrn_uniffi_jazz_rn_fn_method_rndb_all_for_identity(
     ptr: bigint,
+    query: bigint,
+    author: Uint8Array,
+    optsJson: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_commit_transaction(
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_all_in_transaction(
     ptr: bigint,
-    transactionId: Uint8Array,
+    query: bigint,
+    transaction: bigint,
+    optsJson: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_connect(
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_all_in_transaction_for_identity(
     ptr: bigint,
-    url: Uint8Array,
-    authJson: Uint8Array,
+    query: bigint,
+    transaction: bigint,
+    author: Uint8Array,
+    optsJson: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_create_subscription(
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_all_relation_query(
     ptr: bigint,
     queryJson: Uint8Array,
-    sessionJson: Uint8Array,
-    tier: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus
-  ): bigint;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_delete(
-    ptr: bigint,
-    objectId: Uint8Array,
-    writeContextJson: Uint8Array,
+    optsJson: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_disconnect(
-    ptr: bigint,
-    uniffi_out_err: UniffiRustCallStatus
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_execute_subscription(
-    ptr: bigint,
-    handle: bigint,
-    callback: bigint,
-    uniffi_out_err: UniffiRustCallStatus
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_get_schema_hash(
-    ptr: bigint,
-    uniffi_out_err: UniffiRustCallStatus
-  ): Uint8Array;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_insert(
-    ptr: bigint,
-    table: Uint8Array,
-    valuesJson: Uint8Array,
-    writeContextJson: Uint8Array,
-    objectId: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus
-  ): Uint8Array;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_auth_failure(
-    ptr: bigint,
-    callback: bigint,
-    uniffi_out_err: UniffiRustCallStatus
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_batched_tick_needed(
-    ptr: bigint,
-    callback: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_mutation_error(
-    ptr: bigint,
-    callback: bigint,
-    uniffi_out_err: UniffiRustCallStatus
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_query(
+  ubrn_uniffi_jazz_rn_fn_method_rndb_all_relation_query_for_identity(
     ptr: bigint,
     queryJson: Uint8Array,
-    sessionJson: Uint8Array,
-    tier: Uint8Array,
-    optionsJson: Uint8Array
-  ): bigint;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_restore(
-    ptr: bigint,
-    table: Uint8Array,
-    objectId: Uint8Array,
-    valuesJson: Uint8Array,
-    writeContextJson: Uint8Array,
+    author: Uint8Array,
+    optsJson: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_rollback_transaction(
+  ubrn_uniffi_jazz_rn_fn_method_rndb_all_relation_snapshot(
     ptr: bigint,
-    transactionId: Uint8Array,
+    query: bigint,
+    optsJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_all_relation_snapshot_for_identity(
+    ptr: bigint,
+    query: bigint,
+    author: Uint8Array,
+    optsJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_attach_query(
+    ptr: bigint,
+    query: bigint,
+    optsJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_attach_query_for_identity(
+    ptr: bigint,
+    query: bigint,
+    author: Uint8Array,
+    optsJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_can_delete_for_identity(
+    ptr: bigint,
+    table: Uint8Array,
+    rowId: Uint8Array,
+    author: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): number;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_unsubscribe(
+  ubrn_uniffi_jazz_rn_fn_method_rndb_can_insert_encoded(
     ptr: bigint,
+    table: Uint8Array,
+    cells: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): number;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_can_insert_encoded_for_identity(
+    ptr: bigint,
+    table: Uint8Array,
+    cells: Uint8Array,
+    author: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): number;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_can_read_for_identity(
+    ptr: bigint,
+    table: Uint8Array,
+    rowId: Uint8Array,
+    author: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): number;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_can_update_encoded_for_identity(
+    ptr: bigint,
+    table: Uint8Array,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    author: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): number;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_close(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_connect_upstream(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_delete(
+    ptr: bigint,
+    table: Uint8Array,
+    rowId: Uint8Array,
+    updatedAtMsValue: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_delete_for_identity(
+    ptr: bigint,
+    table: Uint8Array,
+    rowId: Uint8Array,
+    author: Uint8Array,
+    updatedAtMsValue: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_detach_query(
+    ptr: bigint,
+    attachment: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_exclusive_tx(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_insert_with_id_encoded(
+    ptr: bigint,
+    table: Uint8Array,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    updatedAtMsValue: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_insert_with_id_encoded_for_identity(
+    ptr: bigint,
+    table: Uint8Array,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    author: Uint8Array,
+    updatedAtMsValue: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_local_current_row(
+    ptr: bigint,
+    table: Uint8Array,
+    rowId: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_mergeable_tx(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_mergeable_tx_for_identity(
+    ptr: bigint,
+    author: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_prepare_query(
+    ptr: bigint,
+    query: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_query_attachment_is_covered(
+    ptr: bigint,
+    attachment: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): number;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_restore_encoded(
+    ptr: bigint,
+    table: Uint8Array,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    updatedAtMsValue: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_restore_encoded_for_identity(
+    ptr: bigint,
+    table: Uint8Array,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    author: Uint8Array,
+    updatedAtMsValue: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_set_identity_claims(
+    ptr: bigint,
+    author: Uint8Array,
+    claimsJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_set_tick_scheduler(
+    ptr: bigint,
+    callback: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_subscribe(
+    ptr: bigint,
+    query: bigint,
+    optsJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_subscribe_for_identity(
+    ptr: bigint,
+    query: bigint,
+    author: Uint8Array,
+    optsJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_subscribe_relation_query(
+    ptr: bigint,
+    queryJson: Uint8Array,
+    optsJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_subscribe_relation_query_for_identity(
+    ptr: bigint,
+    queryJson: Uint8Array,
+    author: Uint8Array,
+    optsJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_tick(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_update_encoded(
+    ptr: bigint,
+    table: Uint8Array,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    updatedAtMsValue: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_update_encoded_for_identity(
+    ptr: bigint,
+    table: Uint8Array,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    author: Uint8Array,
+    updatedAtMsValue: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_upsert_encoded(
+    ptr: bigint,
+    table: Uint8Array,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    updatedAtMsValue: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_upsert_encoded_for_identity(
+    ptr: bigint,
+    table: Uint8Array,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    author: Uint8Array,
+    updatedAtMsValue: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_clone_rnpreparedquery(
+    handle: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_free_rnpreparedquery(
     handle: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_update(
-    ptr: bigint,
-    objectId: Uint8Array,
-    valuesJson: Uint8Array,
-    writeContextJson: Uint8Array,
+  ubrn_uniffi_jazz_rn_fn_clone_rnqueryattachment(
+    handle: bigint,
     uniffi_out_err: UniffiRustCallStatus
-  ): Uint8Array;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_update_auth(
-    ptr: bigint,
-    authJson: Uint8Array,
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_free_rnqueryattachment(
+    handle: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_upsert(
+  ubrn_uniffi_jazz_rn_fn_clone_rnsubscription(
+    handle: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_free_rnsubscription(
+    handle: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnsubscription_close(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): number;
+  ubrn_uniffi_jazz_rn_fn_method_rnsubscription_drain(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rnsubscription_read_all(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_clone_rntransport(
+    handle: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_free_rntransport(
+    handle: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rntransport_close(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): number;
+  ubrn_uniffi_jazz_rn_fn_method_rntransport_recv_wire_frames(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rntransport_send_wire_frame(
+    ptr: bigint,
+    frame: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rntransport_send_wire_frames(
+    ptr: bigint,
+    frames: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rntransport_tick(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): number;
+  ubrn_uniffi_jazz_rn_fn_clone_rntx(
+    handle: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_free_rntx(
+    handle: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rntx_commit(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rntx_delete(
     ptr: bigint,
     table: Uint8Array,
-    objectId: Uint8Array,
-    valuesJson: Uint8Array,
-    writeContextJson: Uint8Array,
+    rowId: Uint8Array,
+    updatedAtMsValue: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rntx_insert_with_id_encoded(
+    ptr: bigint,
+    table: Uint8Array,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    updatedAtMsValue: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rntx_restore_encoded(
+    ptr: bigint,
+    table: Uint8Array,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    updatedAtMsValue: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rntx_rollback(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rntx_update_encoded(
+    ptr: bigint,
+    table: Uint8Array,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    updatedAtMsValue: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rntx_upsert_encoded(
+    ptr: bigint,
+    table: Uint8Array,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    updatedAtMsValue: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_clone_rnwrite(
+    handle: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_free_rnwrite(
+    handle: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnwrite_close(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): number;
+  ubrn_uniffi_jazz_rn_fn_method_rnwrite_payload(
+    ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_wait_for_transaction(
+  ubrn_uniffi_jazz_rn_fn_method_rnwrite_register_write_state_waiter(
     ptr: bigint,
-    transactionId: Uint8Array,
-    tier: Uint8Array
+    uniffi_out_err: UniffiRustCallStatus
   ): bigint;
-  ubrn_uniffi_jazz_rn_fn_init_callback_vtable_authfailurecallback(
-    vtable: UniffiVTableCallbackInterfaceAuthFailureCallback
+  ubrn_uniffi_jazz_rn_fn_method_rnwrite_wait(
+    ptr: bigint,
+    tier: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
   ): void;
-  ubrn_uniffi_jazz_rn_fn_init_callback_vtable_batchedtickcallback(
-    vtable: UniffiVTableCallbackInterfaceBatchedTickCallback
+  ubrn_uniffi_jazz_rn_fn_method_rnwrite_write_state(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_clone_rnwritestatewaiter(
+    handle: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_free_rnwritestatewaiter(
+    handle: bigint,
+    uniffi_out_err: UniffiRustCallStatus
   ): void;
-  ubrn_uniffi_jazz_rn_fn_init_callback_vtable_mutationerrorcallback(
-    vtable: UniffiVTableCallbackInterfaceMutationErrorCallback
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_init_callback_vtable_subscriptioncallback(
-    vtable: UniffiVTableCallbackInterfaceSubscriptionCallback
+  ubrn_uniffi_jazz_rn_fn_method_rnwritestatewaiter_wait(ptr: bigint): bigint;
+  ubrn_uniffi_jazz_rn_fn_init_callback_vtable_tickschedulercallback(
+    vtable: UniffiVTableCallbackInterfaceTickSchedulerCallback
   ): void;
   ubrn_uniffi_jazz_rn_fn_func_mint_anonymous_token(
     seedB64: Uint8Array,
     audience: Uint8Array,
-    ttlSeconds: bigint,
+    ttlSeconds: number,
+    nowSeconds: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_func_mint_local_first_token(
     seedB64: Uint8Array,
     audience: Uint8Array,
-    ttlSeconds: bigint,
+    ttlSeconds: number,
+    nowSeconds: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
   ubrn_ffi_jazz_rn_rust_future_poll_u8(
@@ -326,35 +624,101 @@ interface NativeModuleInterface {
   ): void;
   ubrn_uniffi_jazz_rn_checksum_func_mint_anonymous_token(): number;
   ubrn_uniffi_jazz_rn_checksum_func_mint_local_first_token(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_batched_tick(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_begin_transaction(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_close(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_commit_transaction(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_connect(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_create_subscription(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_delete(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_disconnect(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_execute_subscription(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_get_schema_hash(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_auth_failure(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_batched_tick_needed(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_mutation_error(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_query(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_restore(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_rollback_transaction(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_unsubscribe(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update_auth(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_upsert(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_wait_for_transaction(): number;
-  ubrn_uniffi_jazz_rn_checksum_constructor_rnruntime_new(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_authfailurecallback_on_failure(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_batchedtickcallback_request_batched_tick(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_mutationerrorcallback_on_error(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_subscriptioncallback_on_update(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_all(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_all_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_all_in_transaction(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_all_in_transaction_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_all_relation_query(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_all_relation_query_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_all_relation_snapshot(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_all_relation_snapshot_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_attach_query(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_attach_query_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_can_delete_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_can_insert_encoded(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_can_insert_encoded_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_can_read_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_can_update_encoded_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_close(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_connect_upstream(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_delete(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_delete_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_detach_query(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_exclusive_tx(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_insert_with_id_encoded(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_insert_with_id_encoded_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_local_current_row(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_mergeable_tx(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_mergeable_tx_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_prepare_query(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_query_attachment_is_covered(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_restore_encoded(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_restore_encoded_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_set_identity_claims(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_set_tick_scheduler(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_subscribe(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_subscribe_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_subscribe_relation_query(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_subscribe_relation_query_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_tick(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_update_encoded(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_update_encoded_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_upsert_encoded(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_upsert_encoded_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnsubscription_close(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnsubscription_drain(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnsubscription_read_all(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rntransport_close(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rntransport_recv_wire_frames(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rntransport_send_wire_frame(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rntransport_send_wire_frames(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rntransport_tick(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rntx_commit(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rntx_delete(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rntx_insert_with_id_encoded(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rntx_restore_encoded(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rntx_rollback(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rntx_update_encoded(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rntx_upsert_encoded(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnwrite_close(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnwrite_payload(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnwrite_register_write_state_waiter(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnwrite_wait(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnwrite_write_state(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnwritestatewaiter_wait(): number;
+  ubrn_uniffi_jazz_rn_checksum_constructor_rndb_open_memory(): number;
+  ubrn_uniffi_jazz_rn_checksum_constructor_rndb_open_persistent(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_tickschedulercallback_on_tick_needed(): number;
   ubrn_ffi_jazz_rn_uniffi_contract_version(): number;
-  ubrn_uniffi_internal_fn_method_rnruntime_ffi__bless_pointer(
+  ubrn_uniffi_internal_fn_method_rndb_ffi__bless_pointer(
+    pointer: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): UniffiGcObject;
+  ubrn_uniffi_internal_fn_method_rnpreparedquery_ffi__bless_pointer(
+    pointer: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): UniffiGcObject;
+  ubrn_uniffi_internal_fn_method_rnqueryattachment_ffi__bless_pointer(
+    pointer: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): UniffiGcObject;
+  ubrn_uniffi_internal_fn_method_rnsubscription_ffi__bless_pointer(
+    pointer: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): UniffiGcObject;
+  ubrn_uniffi_internal_fn_method_rntransport_ffi__bless_pointer(
+    pointer: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): UniffiGcObject;
+  ubrn_uniffi_internal_fn_method_rntx_ffi__bless_pointer(
+    pointer: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): UniffiGcObject;
+  ubrn_uniffi_internal_fn_method_rnwrite_ffi__bless_pointer(
+    pointer: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): UniffiGcObject;
+  ubrn_uniffi_internal_fn_method_rnwritestatewaiter_ffi__bless_pointer(
     pointer: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): UniffiGcObject;
@@ -476,40 +840,14 @@ export type UniffiForeignFutureCompleteVoid = (
   callbackData: bigint,
   result: UniffiForeignFutureResultVoid
 ) => void;
-type UniffiCallbackInterfaceAuthFailureCallbackMethod0 = (
+type UniffiCallbackInterfaceTickSchedulerCallbackMethod0 = (
   uniffiHandle: bigint,
-  reason: Uint8Array
+  urgency: Uint8Array
 ) => UniffiResult<void>;
-type UniffiCallbackInterfaceBatchedTickCallbackMethod0 = (
-  uniffiHandle: bigint
-) => UniffiResult<void>;
-type UniffiCallbackInterfaceMutationErrorCallbackMethod0 = (
-  uniffiHandle: bigint,
-  eventJson: Uint8Array
-) => UniffiResult<void>;
-type UniffiCallbackInterfaceSubscriptionCallbackMethod0 = (
-  uniffiHandle: bigint,
-  deltaJson: Uint8Array
-) => UniffiResult<void>;
-export type UniffiVTableCallbackInterfaceAuthFailureCallback = {
+export type UniffiVTableCallbackInterfaceTickSchedulerCallback = {
   uniffiFree: UniffiCallbackInterfaceFree;
   uniffiClone: UniffiCallbackInterfaceClone;
-  onFailure: UniffiCallbackInterfaceAuthFailureCallbackMethod0;
-};
-export type UniffiVTableCallbackInterfaceBatchedTickCallback = {
-  uniffiFree: UniffiCallbackInterfaceFree;
-  uniffiClone: UniffiCallbackInterfaceClone;
-  requestBatchedTick: UniffiCallbackInterfaceBatchedTickCallbackMethod0;
-};
-export type UniffiVTableCallbackInterfaceMutationErrorCallback = {
-  uniffiFree: UniffiCallbackInterfaceFree;
-  uniffiClone: UniffiCallbackInterfaceClone;
-  onError: UniffiCallbackInterfaceMutationErrorCallbackMethod0;
-};
-export type UniffiVTableCallbackInterfaceSubscriptionCallback = {
-  uniffiFree: UniffiCallbackInterfaceFree;
-  uniffiClone: UniffiCallbackInterfaceClone;
-  onUpdate: UniffiCallbackInterfaceSubscriptionCallbackMethod0;
+  onTickNeeded: UniffiCallbackInterfaceTickSchedulerCallbackMethod0;
 };
 
 // UniffiRustFutureContinuationCallback is generated as part of the component interface's
