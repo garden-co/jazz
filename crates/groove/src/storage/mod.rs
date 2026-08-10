@@ -33,7 +33,7 @@ pub use opfs::OpfsStorage;
 #[cfg(not(target_arch = "wasm32"))]
 pub use opfs::{BtreeSyncPolicy, NativeBtreeStorage};
 #[cfg(feature = "rocksdb")]
-pub use rocksdb_storage::{Durability, RocksDbStorage};
+pub use rocksdb_storage::{Durability, RocksDbMetrics, RocksDbStorage};
 
 pub type ColumnFamilyName = str;
 pub type Key = [u8];
