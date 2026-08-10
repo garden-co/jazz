@@ -12,7 +12,7 @@ use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::protocol::{
     CurrentWriteSchema, LensOp, MigrationLens, SchemaLineagePublication, SchemaVersion, TableLens,
 };
-use jazz::query::{OrderDirection, Query, claim, col, eq, lit, param};
+use jazz::query::{OrderDirection, PolicyBranch, Query, claim, col, eq, lit, param};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
 
@@ -457,6 +457,105 @@ fn prepared_policy_claims_route_per_identity_and_application_binding() {
 // REMOVED for the tests-only PR: prepared_policy_claim_predicate_routing_rejects_unsupported_shapes
 // asserted ErrorCode::PreparedClaimPredicateRoutingUnsupported, a fail-closed rejection that is
 // part of the unlanded fix rather than of INV-RLS-21 itself. It returns with the implementation.
+#[test]
+fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
+    let policy = Query::from(DOCUMENTS)
+        .filter(eq(col("visibility"), lit("public")))
+        .policy_branch(PolicyBranch::single_alternative_from_query(
+            Query::from(DOCUMENTS).filter(eq(col("owner"), claim("sub"))),
+        ))
+        .policy_branch(PolicyBranch::single_alternative_from_query(
+            Query::from(DOCUMENTS).filter(eq(col("region"), claim("region"))),
+        ));
+    let schema = JazzSchema::new([TableSchema::new(
+        DOCUMENTS,
+        [
+            ColumnSchema::new("visibility", ColumnType::String),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+            ColumnSchema::new("region", ColumnType::String),
+        ],
+    )
+    .with_read_policy(policy)
+    .with_write_policy(Policy::public())]);
+    let db = open_db_with_schema(schema);
+    let public = row(0x51);
+    let private = row(0x52);
+    let regional = row(0x53);
+    db.set_identity_claims(
+        USER_A,
+        BTreeMap::from([("region".to_owned(), Value::String("region-a".to_owned()))]),
+    );
+    db.set_identity_claims(
+        USER_B,
+        BTreeMap::from([("region".to_owned(), Value::String("region-b".to_owned()))]),
+    );
+    db.insert_with_id(
+        DOCUMENTS,
+        public,
+        BTreeMap::from([
+            ("visibility".to_owned(), Value::String("public".to_owned())),
+            ("owner".to_owned(), Value::Uuid(WRITER.0)),
+            ("region".to_owned(), Value::String("other".to_owned())),
+        ]),
+    )
+    .expect("seed public document");
+    db.insert_with_id(
+        DOCUMENTS,
+        private,
+        BTreeMap::from([
+            ("visibility".to_owned(), Value::String("private".to_owned())),
+            ("owner".to_owned(), Value::Uuid(USER_A.0)),
+            ("region".to_owned(), Value::String("other".to_owned())),
+        ]),
+    )
+    .expect("seed private document");
+    db.insert_with_id(
+        DOCUMENTS,
+        regional,
+        BTreeMap::from([
+            ("visibility".to_owned(), Value::String("private".to_owned())),
+            ("owner".to_owned(), Value::Uuid(WRITER.0)),
+            ("region".to_owned(), Value::String("region-a".to_owned())),
+        ]),
+    )
+    .expect("seed regional document");
+
+    let prepared = db
+        .prepare_query(&Query::from(DOCUMENTS).order_by("visibility", OrderDirection::Asc))
+        .expect("prepare mixed claim and claimless policy");
+    let mut rows = block_on(db.all_for_identity(&prepared, opts(), USER_A))
+        .expect("read mixed claim and claimless policy")
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<Vec<_>>();
+    rows.sort_unstable();
+    let mut expected = vec![public, private, regional];
+    expected.sort_unstable();
+    assert_eq!(rows, expected);
+
+    let rows = block_on(db.all_for_identity(&prepared, opts(), USER_B))
+        .expect("read claimless policy branch")
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<Vec<_>>();
+    assert_eq!(rows, vec![public]);
+
+    let windowed = db
+        .prepare_query(
+            &Query::from(DOCUMENTS)
+                .order_by("visibility", OrderDirection::Desc)
+                .limit(1),
+        )
+        .expect("prepare finite mixed-policy window");
+    for identity in [USER_A, USER_B] {
+        let rows = block_on(db.all_for_identity(&windowed, opts(), identity))
+            .expect("read finite claimless policy branch")
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![public]);
+    }
+}
 
 fn assert_retained_subscription_regions(region_a: &str, region_b: &str) {
     let db = open_db();
