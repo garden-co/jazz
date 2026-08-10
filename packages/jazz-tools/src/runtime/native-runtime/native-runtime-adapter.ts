@@ -327,8 +327,10 @@ type SubscriptionState = {
   visibleOpened: boolean;
   deferredVisiblePublication: boolean;
   deferredVisibleReset: boolean;
-  deferredTerminalOperations: NativeTerminalOperation[];
-  deferredTerminalCurrentRowCarrier: boolean;
+  deferredTerminalOperations: Array<{
+    operation: NativeTerminalOperation;
+    currentRowCarrier: boolean;
+  }>;
   callback?: Function;
   cancelled: boolean;
 };
@@ -1025,7 +1027,6 @@ export class NativeRuntimeAdapter implements Runtime {
       deferredVisiblePublication: false,
       deferredVisibleReset: false,
       deferredTerminalOperations: [],
-      deferredTerminalCurrentRowCarrier: false,
       cancelled: false,
     });
     return handle;
@@ -1766,7 +1767,11 @@ export class NativeRuntimeAdapter implements Runtime {
         subscription.rowIndexByKey = applied.rowIndexByKey;
         subscription.opened = true;
         applied.wireDelta.terminalOperations = chunk.terminalOperations;
-        applied.wireDelta.terminalCurrentRowCarrier = chunk.terminalCurrentRowCarrier;
+        applied.wireDelta.terminalCurrentRowOperationIndexes = chunk.terminalCurrentRowCarrier
+          ? chunk.terminalOperations?.flatMap((operation, index) =>
+              operation.path.length === 0 ? [index] : [],
+            )
+          : undefined;
         this.publishSubscriptionRows(
           subscription,
           applied.wireDelta,
@@ -1786,9 +1791,12 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.subscriptionCallbacksAreSettledGated(subscription) && settled === false) {
       subscription.deferredVisiblePublication = true;
       subscription.deferredVisibleReset ||= reset;
-      subscription.deferredTerminalOperations.push(...(wireDelta.terminalOperations ?? []));
-      subscription.deferredTerminalCurrentRowCarrier ||=
-        wireDelta.terminalCurrentRowCarrier === true;
+      subscription.deferredTerminalOperations.push(
+        ...(wireDelta.terminalOperations ?? []).map((operation, index) => ({
+          operation,
+          currentRowCarrier: wireDelta.terminalCurrentRowOperationIndexes?.includes(index) ?? false,
+        })),
+      );
       return;
     }
 
@@ -1819,11 +1827,16 @@ export class NativeRuntimeAdapter implements Runtime {
 
     const terminalOperations = [
       ...subscription.deferredTerminalOperations,
-      ...(wireDelta.terminalOperations ?? []),
+      ...(wireDelta.terminalOperations ?? []).map((operation, index) => ({
+        operation,
+        currentRowCarrier: wireDelta.terminalCurrentRowOperationIndexes?.includes(index) ?? false,
+      })),
     ];
-    if (terminalOperations.length > 0) visibleDelta.terminalOperations = terminalOperations;
-    if (subscription.deferredTerminalCurrentRowCarrier || wireDelta.terminalCurrentRowCarrier) {
-      visibleDelta.terminalCurrentRowCarrier = true;
+    if (terminalOperations.length > 0) {
+      visibleDelta.terminalOperations = terminalOperations.map(({ operation }) => operation);
+      visibleDelta.terminalCurrentRowOperationIndexes = terminalOperations.flatMap(
+        ({ currentRowCarrier }, index) => (currentRowCarrier ? [index] : []),
+      );
     }
 
     subscription.callback?.(visibleDelta);
@@ -1838,7 +1851,6 @@ export class NativeRuntimeAdapter implements Runtime {
     subscription.deferredVisiblePublication = false;
     subscription.deferredVisibleReset = false;
     subscription.deferredTerminalOperations = [];
-    subscription.deferredTerminalCurrentRowCarrier = false;
   }
 
   private subscriptionCallbacksAreSettledGated(subscription: SubscriptionState): boolean {
