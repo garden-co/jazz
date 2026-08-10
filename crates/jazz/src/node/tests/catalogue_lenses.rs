@@ -1008,7 +1008,7 @@ fn rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen() 
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
-        rows[0].schema_version(),
+        u64::from(rows[0].variant_tag()),
         core.catalogue.schema_version_aliases[&renamed.id].0
     );
     for logical_table in ["jazz_todos_rejected_versions", "jazz_tasks_rejected_versions"] {

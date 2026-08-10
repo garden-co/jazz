@@ -2554,6 +2554,9 @@ mod tests {
                     **descriptor,
                 ))
             }
+            crate::groove::records::ValueType::Union(_) => {
+                panic!("Jazz public schema conversion must not receive whole-row Groove unions")
+            }
         }
     }
 

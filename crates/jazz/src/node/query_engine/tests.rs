@@ -61,6 +61,7 @@ fn collect_binding_source_fingerprint(graph: &GraphBuilder, sources: &mut BTreeS
         }
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::UnionMatch { input, .. }
         | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
@@ -110,6 +111,7 @@ fn graph_any(graph: &GraphBuilder, predicate: &impl Fn(&GraphBuilder) -> bool) -
         }
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::UnionMatch { input, .. }
         | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }

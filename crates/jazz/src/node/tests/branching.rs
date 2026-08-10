@@ -729,7 +729,7 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
     assert_eq!(
         stored
             .iter()
-            .map(|raw| raw.schema_version())
+            .map(|raw| raw.variant_tag())
             .collect::<BTreeSet<_>>()
             .len(),
         2,

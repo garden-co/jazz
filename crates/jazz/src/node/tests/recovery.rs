@@ -136,7 +136,7 @@ fn opening_defers_malformed_current_row_to_read() {
             .primary_key_get_raw(&table, &[Value::Uuid(row(0xff).0)])
             .unwrap()
             .unwrap();
-        let schema_version = raw.schema_version();
+        let variant_tag = raw.variant_tag();
         let (key, raw) = raw.into_parts();
         node.database.close().unwrap();
         drop(node);
@@ -150,7 +150,7 @@ fn opening_defers_malformed_current_row_to_read() {
             .set(
                 &table,
                 &key,
-                &groove::records::encode_variant_record(schema_version, &raw[..1]),
+                &groove::records::encode_variant_record(variant_tag, &raw[..1]),
             )
             .unwrap();
         storage.close().unwrap();

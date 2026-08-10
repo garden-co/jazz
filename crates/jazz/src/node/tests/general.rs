@@ -94,6 +94,9 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
                     **descriptor,
                 ))
             }
+            groove::schema::ColumnType::Union(_) => {
+                panic!("Jazz public schemas do not expose whole-row Groove unions")
+            }
         }
     }
 
