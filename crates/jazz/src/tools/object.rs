@@ -531,6 +531,14 @@ mod tests {
             "typed discriminator records must use strictly ascending positions"
         );
 
+        let mut invalid_utf8 = vec![TYPED_RESULT_KEY_WIRE_VERSION];
+        invalid_utf8.extend_from_slice(&valid.typed_canonical_bytes());
+        *invalid_utf8.last_mut().expect("typed key has arm label") = 0xff;
+        assert!(
+            serde_json::from_value::<ResultKey>(serde_json::json!(invalid_utf8)).is_err(),
+            "typed discriminator labels must be valid UTF-8"
+        );
+
         let typed = ResultKey(valid);
         let mut oversized: Vec<u8> =
             serde_json::from_slice(&serde_json::to_vec(&typed).expect("encode typed key fixture"))

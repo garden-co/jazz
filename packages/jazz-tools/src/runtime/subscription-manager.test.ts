@@ -452,6 +452,9 @@ describe("SubscriptionManager", () => {
         ],
       ),
     );
+    const invalidUtf8 = typedResultKey(root, [joined], [[0, "valid"]]);
+    invalidUtf8[invalidUtf8.length - 1] = 0xff;
+    rejectSidecar(invalidUtf8);
 
     const manager = new SubscriptionManager<TestItem>();
     const registry = manager as unknown as {

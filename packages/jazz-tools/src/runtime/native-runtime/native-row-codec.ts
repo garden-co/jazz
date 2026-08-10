@@ -2,6 +2,7 @@ import type { ColumnDescriptor, ColumnType, Value, WasmRow } from "../../drivers
 import { isProvenanceMagicTimestampColumn } from "../../magic-columns.js";
 
 const textDecoder = new TextDecoder();
+const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 export type ValueType = {
   tag: number;
@@ -121,7 +122,8 @@ function validTypedResultKey(bytes: Uint8Array): boolean {
       position <= previousPosition ||
       length === 0 ||
       length > 4096 ||
-      cursor + length > bytes.length
+      cursor + length > bytes.length ||
+      !isValidUtf8(bytes.subarray(cursor, cursor + length))
     ) {
       return false;
     }
@@ -129,6 +131,15 @@ function validTypedResultKey(bytes: Uint8Array): boolean {
     cursor += length;
   }
   return cursor === bytes.length;
+}
+
+function isValidUtf8(bytes: Uint8Array): boolean {
+  try {
+    fatalUtf8Decoder.decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function readNativeRelationSubscriptionSnapshot(

@@ -21,6 +21,8 @@ import {
   logicalStorageColumns,
 } from "./native-runtime/native-row-codec.js";
 
+const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
+
 export const RowChangeKind = {
   Added: 0 as const,
   Removed: 1 as const,
@@ -716,6 +718,7 @@ function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array |
       length === 0 ||
       length > 4096 ||
       cursor + length > sidecar.byteLength ||
+      !isValidUtf8(sidecar.subarray(cursor, cursor + length)) ||
       arms.has(position)
     ) {
       return undefined;
@@ -754,6 +757,15 @@ function orderedBytes(value: Uint8Array): number[] {
   }
   encoded.push(0, 0);
   return encoded;
+}
+
+function isValidUtf8(bytes: Uint8Array): boolean {
+  try {
+    fatalUtf8Decoder.decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function bytesKey(bytes: ArrayLike<number>): string {
