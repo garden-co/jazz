@@ -7712,8 +7712,11 @@ where
                                 };
                                 let exact_support = subscription.shape_id == shape.shape_id()
                                     && subscription.binding_id == binding.binding_id()
-                                    && opts == expected.options
-                                    && subscription.read_view == expected.options.read_view_key()
+                                    && authorization_scope_support_options_match(
+                                        &expected.options,
+                                        &opts,
+                                        subscription,
+                                    )
                                     && expected.subscriptions.iter().any(
                                         |(expected_shape, expected_binding)| {
                                             expected_shape.shape_id() == shape.shape_id()
@@ -8613,6 +8616,17 @@ fn authorization_scope_receipt_matches_transport_context(
         && receipt.authorization_progress >= expected.authorization_progress
         && receipt.settled_through.0 >= expected.settled_through
         && applied_cut.is_some_and(|cut| cut >= receipt.settled_through)
+}
+
+/// Scope support is authority-current.  Keep this separate from generic shape
+/// admission so a matching query identity cannot silently substitute a branch,
+/// snapshot, or local-tier view for the support proof it is meant to hydrate.
+fn authorization_scope_support_options_match(
+    expected: &RegisterShapeOptions,
+    actual: &RegisterShapeOptions,
+    subscription: SubscriptionKey,
+) -> bool {
+    actual == expected && subscription.read_view == expected.read_view_key()
 }
 
 fn move_scope_aggregate_member(

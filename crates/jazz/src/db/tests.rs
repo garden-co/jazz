@@ -14257,6 +14257,60 @@ fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
 }
 
 #[test]
+fn authorization_scope_requires_canonical_current_global_support_options() {
+    let expected = RegisterShapeOptions::default();
+    let subscription_for = |opts: &RegisterShapeOptions| SubscriptionKey {
+        shape_id: ShapeId(uuid::Uuid::from_bytes([0x51; 16])),
+        binding_id: BindingId(uuid::Uuid::from_bytes([0x52; 16])),
+        read_view: opts.read_view_key(),
+    };
+    assert!(authorization_scope_support_options_match(
+        &expected,
+        &expected,
+        subscription_for(&expected),
+    ));
+    let variants = [
+        RegisterShapeOptions {
+            tier: DurabilityTier::Global,
+            read_view: ReadViewSpec {
+                source: ReadViewSourceSpec::Branch {
+                    branch: uuid::Uuid::from_bytes([0x53; 16]),
+                },
+                ..ReadViewSpec::default()
+            },
+        },
+        RegisterShapeOptions {
+            tier: DurabilityTier::Global,
+            read_view: ReadViewSpec {
+                source: ReadViewSourceSpec::Snapshot {
+                    snapshot: SnapshotRef {
+                        owner: NodeUuid::from_bytes([0x54; 16]),
+                        global_base: GlobalSeq(0),
+                        local_base: TxTime(0),
+                        dots: Vec::new(),
+                    },
+                },
+                ..ReadViewSpec::default()
+            },
+        },
+        RegisterShapeOptions {
+            tier: DurabilityTier::Local,
+            read_view: ReadViewSpec::default(),
+        },
+    ];
+    for actual in variants {
+        assert!(
+            !authorization_scope_support_options_match(
+                &expected,
+                &actual,
+                subscription_for(&actual),
+            ),
+            "noncanonical scope support must not satisfy the pure admission fence"
+        );
+    }
+}
+
+#[test]
 fn authorization_scope_rejects_noncanonical_support_read_views() {
     let mut schema = schema();
     schema.tables[0].read_policy = Some(Query::from("todos"));
