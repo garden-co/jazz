@@ -150,7 +150,7 @@ fn opening_defers_malformed_current_row_to_read() {
             .set(
                 &table,
                 &key,
-                &groove::records::encode_versioned_record(schema_version, &raw[..1]),
+                &groove::records::encode_variant_record(schema_version, &raw[..1]),
             )
             .unwrap();
         storage.close().unwrap();

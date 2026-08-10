@@ -708,7 +708,7 @@ impl VersionRow {
 
     /// Bind this row's encoded payload to the schema version already stored in
     /// its Jazz metadata before handing it to Groove.
-    pub(super) fn groove_record(&self) -> groove::records::VersionedRecord {
+    pub(super) fn groove_record(&self) -> groove::records::VariantRecord {
         self.bind_groove_record(self.record.clone())
     }
 
@@ -716,8 +716,12 @@ impl VersionRow {
     pub(super) fn bind_groove_record(
         &self,
         record: OwnedRecord,
-    ) -> groove::records::VersionedRecord {
-        groove::records::VersionedRecord::new(self.schema_version_alias().0, record)
+    ) -> groove::records::VariantRecord {
+        groove::records::VariantRecord::new(
+            u32::try_from(self.schema_version_alias().0)
+                .expect("schema aliases are allocated in Groove's variant-tag space"),
+            record,
+        )
     }
 
     pub(super) fn deletion(&self) -> Option<DeletionEvent> {

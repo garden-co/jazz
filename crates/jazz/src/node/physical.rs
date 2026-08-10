@@ -958,10 +958,10 @@ where
                 .cloned()
                 .collect::<Vec<_>>();
             for schema_version in desired.variants {
-                if existing.schema_version(schema_version.tag).is_some() {
+                if existing.variant(schema_version.tag).is_some() {
                     continue;
                 }
-                self.database.register_table_schema_version_with_columns(
+                self.database.register_table_variant_with_columns(
                     &desired.name,
                     added_columns.clone(),
                     schema_version,
@@ -1393,7 +1393,7 @@ where
     pub(super) fn version_storage_write_binding(
         &mut self,
         version: &VersionRow,
-    ) -> Result<(groove::Intern<String>, groove::records::VersionedRecord), Error> {
+    ) -> Result<(groove::Intern<String>, groove::records::VariantRecord), Error> {
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue(
@@ -1414,7 +1414,10 @@ where
         let record = OwnedRecord::new(version.record.raw().to_vec(), binding.descriptor);
         Ok((
             groove::Intern::new(binding.storage_table),
-            groove::records::VersionedRecord::new(version.schema_version_alias().0, record),
+            groove::records::VariantRecord::new(
+                groove_variant_tag(version.schema_version_alias())?,
+                record,
+            ),
         ))
     }
 
@@ -1422,7 +1425,7 @@ where
         &self,
         version: &VersionRow,
         logical_record: &OwnedRecord,
-    ) -> Result<(groove::Intern<String>, groove::records::VersionedRecord), Error> {
+    ) -> Result<(groove::Intern<String>, groove::records::VariantRecord), Error> {
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue(
@@ -1437,7 +1440,10 @@ where
         let record = OwnedRecord::new(logical_record.raw().to_vec(), binding.descriptor);
         Ok((
             groove::Intern::new(binding.storage_table),
-            groove::records::VersionedRecord::new(version.schema_version_alias().0, record),
+            groove::records::VariantRecord::new(
+                groove_variant_tag(version.schema_version_alias())?,
+                record,
+            ),
         ))
     }
 
@@ -1445,7 +1451,7 @@ where
         &mut self,
         version: &VersionRow,
         branch_id: BranchId,
-    ) -> Result<(groove::Intern<String>, groove::records::VersionedRecord), Error> {
+    ) -> Result<(groove::Intern<String>, groove::records::VariantRecord), Error> {
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue(

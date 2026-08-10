@@ -1647,7 +1647,7 @@ where
             .database
             .primary_key_scan_raw(&storage_table, &[Value::Uuid(row_uuid.0)])?
             .into_iter()
-            .map(|raw| (SchemaVersionAlias(raw.schema_version()), raw.raw().to_vec()))
+            .map(|raw| (SchemaVersionAlias(u64::from(raw.variant_tag())), raw.raw().to_vec()))
             .collect::<Vec<_>>();
         let mut versions = Vec::with_capacity(raws.len());
         for (schema_alias, raw) in raws {

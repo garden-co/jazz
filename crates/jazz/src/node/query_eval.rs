@@ -5879,8 +5879,8 @@ where
         )?;
         let mut records = Vec::with_capacity(indexed.len());
         for raw in indexed {
-            let schema_version = raw.schema_version();
-            let record = groove::records::VersionedRecord::new(schema_version, raw.owned_record());
+            let variant_tag = raw.variant_tag();
+            let record = groove::records::VariantRecord::new(variant_tag, raw.owned_record());
             if let Some(projected) =
                 self.database
                     .project_variant_record(&storage_table, &target, &record)?
