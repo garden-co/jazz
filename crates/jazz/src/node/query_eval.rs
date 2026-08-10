@@ -134,6 +134,7 @@ pub(crate) struct LocalMaintainedViewSubscription {
     result_select: Option<Vec<String>>,
     result_set: BTreeSet<ResultMemberEntry>,
     authoritative_result_set: BTreeSet<ResultMemberEntry>,
+    authoritative_result_generation: u64,
     result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     program_facts: BTreeSet<ProgramFactEntry>,
     root_occurrence_ids: Vec<OutputOccurrenceId>,
@@ -8127,6 +8128,7 @@ where
             result_select: shape.query().select.clone(),
             result_set: BTreeSet::new(),
             authoritative_result_set: BTreeSet::new(),
+            authoritative_result_generation: 0,
             result_payloads: BTreeMap::new(),
             program_facts: BTreeSet::new(),
             root_occurrence_ids: Vec::new(),
@@ -8183,6 +8185,8 @@ where
             .cloned()
             .unwrap_or_default();
         local.authoritative_result_set = local.result_set.clone();
+        local.authoritative_result_generation =
+            self.applied_view_update_generation(binding_view_key);
         local.program_facts = self
             .query
             .settled_program_facts
@@ -8232,6 +8236,8 @@ where
             .get(&binding_view_key)
             .cloned()
             .unwrap_or_default();
+        local.authoritative_result_generation =
+            self.applied_view_update_generation(binding_view_key);
     }
 
     fn drain_local_maintained_view_subscription_transitions(
@@ -8325,18 +8331,36 @@ where
         let mut structured_app_row_changes = BTreeSet::new();
         let mut terminal_operations = Vec::new();
         if let Some(binding_view) = authoritative_binding_view {
-            let remote_members = self
-                .query
-                .settled_result_sets
-                .get(&binding_view)
-                .cloned()
-                .unwrap_or_default();
-            for entry in local.authoritative_result_set.difference(&remote_members) {
-                if local.result_set.contains(entry) {
-                    states.insert(entry.clone(), (true, false));
+            let authoritative_generation = self.applied_view_update_generation(binding_view);
+            // Local optimistic changes can advance the maintained graph
+            // without any newer serving-peer membership decision. Keep them
+            // visible until an authoritative generation advances.
+            if authoritative_generation != local.authoritative_result_generation {
+                let remote_members = self
+                    .query
+                    .settled_result_sets
+                    .get(&binding_view)
+                    .cloned()
+                    .unwrap_or_default();
+                let remote_occurrences = remote_members
+                    .iter()
+                    .filter_map(ResultMemberEntry::output_occurrence_id)
+                    .collect::<BTreeSet<_>>();
+                for entry in local.authoritative_result_set.difference(&remote_members) {
+                    // A content-version replacement is still the same
+                    // authorized output occurrence. Membership reconciliation
+                    // must not retract the locally maintained row while its
+                    // newer payload is being applied.
+                    let remains_authoritative = entry
+                        .output_occurrence_id()
+                        .is_some_and(|occurrence| remote_occurrences.contains(&occurrence));
+                    if !remains_authoritative && local.result_set.contains(entry) {
+                        states.insert(entry.clone(), (true, false));
+                    }
                 }
+                local.authoritative_result_set = remote_members;
+                local.authoritative_result_generation = authoritative_generation;
             }
-            local.authoritative_result_set = remote_members;
         }
         loop {
             match local.subscription.try_recv() {
