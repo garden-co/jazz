@@ -2299,7 +2299,6 @@ mod tests {
         PredicateExpr as RelPredicateExpr, RecursionBound as RelRecursionBound,
         RelExpr as PublicRelExpr, RowIdRef as RelRowIdRef, ValueRef as RelValueRef,
     };
-
     #[test]
     fn rejects_user_columns_in_the_compiler_aggregate_namespace() {
         let schema = SchemaBuilder::new()
@@ -2316,6 +2315,8 @@ mod tests {
                 .contains("reserved aggregate-output namespace")
         );
     }
+
+    use crate::tools::public_api::types::EnumCaseDescriptor;
     use crate::tools::public_api::types::TableSchemaBuilder;
     use crate::tools::public_schema::{
         ColumnDescriptor, ColumnType, LargeValueKind, PolicyExpr, RowDescriptor, Schema,
@@ -2549,6 +2550,57 @@ mod tests {
                 .unwrap()
                 .default,
             Some(GrooveValue::String("x".to_owned()))
+        );
+    }
+
+    #[test]
+    fn converts_payload_enum_default_to_tagged_record() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("events").column_with_default(
+                "event",
+                ColumnType::EnumPayload {
+                    cases: vec![
+                        EnumCaseDescriptor {
+                            name: "message".to_owned(),
+                            fields: vec![
+                                ColumnDescriptor::new("text", ColumnType::Text),
+                                ColumnDescriptor::new("level", ColumnType::Integer).nullable(),
+                            ],
+                        },
+                        EnumCaseDescriptor {
+                            name: "closed".to_owned(),
+                            fields: vec![ColumnDescriptor::new("code", ColumnType::Integer)],
+                        },
+                    ],
+                },
+                Value::Enum {
+                    case: "message".to_owned(),
+                    values: vec![Value::Text("hello".to_owned()), Value::Null],
+                },
+            ))
+            .build();
+        let table = convert_public_schema(&schema)
+            .unwrap()
+            .tables
+            .into_iter()
+            .find(|table| table.name == "events")
+            .unwrap();
+        let default = table
+            .columns
+            .iter()
+            .find(|column| column.name == "event")
+            .and_then(|column| column.default.as_ref())
+            .unwrap();
+        let GrooveValue::Enum(value) = default else {
+            panic!("expected a payload enum default");
+        };
+        assert_eq!(value.tag(), 0);
+        assert_eq!(
+            value.record().to_values().unwrap(),
+            vec![
+                GrooveValue::String("hello".to_owned()),
+                GrooveValue::Nullable(None),
+            ]
         );
     }
 
