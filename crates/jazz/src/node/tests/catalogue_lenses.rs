@@ -2934,6 +2934,154 @@ fn enum_projection_schema(statuses: &[&str]) -> JazzSchema {
     )])
 }
 
+fn enum_identity_lens(source: SchemaVersionId, target: SchemaVersionId) -> MigrationLens {
+    MigrationLens::new(
+        source,
+        target,
+        vec![TableLens {
+            source_table: "items".to_owned(),
+            target_table: "items".to_owned(),
+            ops: vec![LensOp::TransformColumn {
+                column: "status".to_owned(),
+                transform: "jazz.identity".to_owned(),
+            }],
+        }],
+    )
+}
+
+/// Earlier catalogue introductions retain their physical scalar-enum tags
+/// when a later sibling introduces a shallower authored ordinal.
+///
+/// alice publishes `base -> A -> A2`; bob later publishes `base -> B`.
+///
+/// ```text
+/// base ──► A (+ a) ──► A2 (+ a2)
+///   └────────────────► B (+ b)
+/// ```
+///
+/// The node must append `b` after `a2`, activate the registry, and recover
+/// the same mapping after reopen. (Sorting observes the local read schema;
+/// the shared physical ordering is asserted below.)
+#[test]
+fn scalar_enum_later_sibling_appends_without_retagging_deeper_cases() {
+    let base = enum_projection_schema(&["base"]);
+    let a = SchemaVersion::new(enum_projection_schema(&["base", "a"]));
+    let a2 = SchemaVersion::new(enum_projection_schema(&["base", "a", "a2"]));
+    let b = SchemaVersion::new(enum_projection_schema(&["base", "b"]));
+    let (dir, mut core) = open_node_with_schema(node(0x78), base.clone());
+
+    publish_schema_lineage(
+        &mut core,
+        a.clone(),
+        enum_identity_lens(base.version_id(), a.id),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    publish_schema_lineage(
+        &mut core,
+        a2.clone(),
+        enum_identity_lens(a.id, a2.id),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: a2.id,
+        },
+    })
+    .unwrap();
+
+    let base_row = row(0x78);
+    let a_row = row(0x79);
+    let a2_row = row(0x7a);
+    for (row_uuid, title, status, tx_time) in [
+        (a2_row, "a2", 2, 1),
+        (base_row, "base", 0, 2),
+        (a_row, "a", 1, 3),
+    ] {
+        core.commit_mergeable(
+            MergeableCommit::new("items", row_uuid, tx_time).cells(BTreeMap::from([
+                ("title".to_owned(), v(title)),
+                ("status".to_owned(), Value::EnumTag(status)),
+            ])),
+        )
+        .unwrap();
+    }
+    // `b` has local ordinal 1, but it is catalogue-later than A2's ordinal
+    // 2. Ordinal-first physical ordering would attempt to insert it before
+    // A2, which Groove correctly rejects as a retagging evolution.
+    publish_schema_lineage(
+        &mut core,
+        b.clone(),
+        enum_identity_lens(base.version_id(), b.id),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    let b_mapping = &core.catalogue.physical_mappings[&b.id].tables["items"];
+    let physical_cases = core
+        .physical_scalar_enum_cases(b_mapping.table_id, b_mapping.columns["status"])
+        .unwrap();
+    assert_eq!(
+        physical_cases,
+        vec![
+            GlobalScalarEnumCaseId {
+                introducing_schema: base.version_id(),
+                introducing_ordinal: 0,
+            },
+            GlobalScalarEnumCaseId {
+                introducing_schema: a.id,
+                introducing_ordinal: 1,
+            },
+            GlobalScalarEnumCaseId {
+                introducing_schema: a2.id,
+                introducing_ordinal: 2,
+            },
+            GlobalScalarEnumCaseId {
+                introducing_schema: b.id,
+                introducing_ordinal: 1,
+            },
+        ],
+    );
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 2,
+            schema: b.id,
+        },
+    })
+    .unwrap();
+    let b_row = row(0x7b);
+    core.commit_mergeable(
+        MergeableCommit::new("items", b_row, 4).cells(BTreeMap::from([
+            ("title".to_owned(), v("b")),
+            ("status".to_owned(), Value::EnumTag(1)),
+        ])),
+    )
+    .unwrap();
+    drop(core);
+
+    let mut reopened = reopen_node_at(&dir, node(0x78), base.clone());
+    let titles = Query::from("items").select(["title"]).validate(&base).unwrap();
+    assert_eq!(
+        reopened
+            .query_rows(
+                &titles,
+                &titles.bind(BTreeMap::new()).unwrap(),
+                DurabilityTier::Local,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([base_row, a_row, a2_row, b_row]),
+    );
+}
+
 fn payload_enum_projection_schema(cases: &[&str]) -> JazzSchema {
     JazzSchema::new([TableSchema::new(
         "items",

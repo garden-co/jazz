@@ -82,18 +82,17 @@ fn compare_scalar_enum_cases(
     left: &GlobalScalarEnumCaseId,
     right: &GlobalScalarEnumCaseId,
 ) -> std::cmp::Ordering {
-    // Every descendant repeats its inherited cases at their original authored
-    // ordinal. That ordinal therefore preserves the existing physical prefix;
-    // authoritative catalogue aliases linearize only genuinely concurrent
-    // introductions at the same next ordinal. UUID is solely a deterministic
-    // tie-breaker for corrupt/incomplete catalogues.
-    left.introducing_ordinal
-        .cmp(&right.introducing_ordinal)
-        .then_with(|| {
-            aliases
-                .get(&left.introducing_schema)
-                .cmp(&aliases.get(&right.introducing_schema))
-        })
+    // A case's *introducing* schema alias is its authoritative, durable
+    // introduction position.  Descendants retain the original identity, so
+    // ordering by alias preserves the inherited physical prefix and appends a
+    // later sibling even when that sibling's authored ordinal is shallower
+    // than a case introduced earlier on another branch.  Ordinal only orders
+    // multiple cases introduced by the same schema. UUID is solely a
+    // deterministic tie-breaker for corrupt/incomplete catalogues.
+    aliases
+        .get(&left.introducing_schema)
+        .cmp(&aliases.get(&right.introducing_schema))
+        .then_with(|| left.introducing_ordinal.cmp(&right.introducing_ordinal))
         .then_with(|| left.introducing_schema.cmp(&right.introducing_schema))
 }
 
@@ -703,7 +702,7 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    fn physical_scalar_enum_cases(
+    pub(super) fn physical_scalar_enum_cases(
         &self,
         table_id: PhysicalTableId,
         column_id: PhysicalColumnId,
@@ -3688,6 +3687,13 @@ mod variant_case_tests {
         SchemaVersionId(uuid::Uuid::from_bytes([byte; 16]))
     }
 
+    fn case(schema: SchemaVersionId, ordinal: u8) -> GlobalScalarEnumCaseId {
+        GlobalScalarEnumCaseId {
+            introducing_schema: schema,
+            introducing_ordinal: ordinal,
+        }
+    }
+
     fn mapping(table_id: u64, columns: &[(&str, u64)]) -> SchemaPhysicalMapping {
         SchemaPhysicalMapping {
             tables: BTreeMap::from([(
@@ -3791,6 +3797,54 @@ mod variant_case_tests {
             &old,
             &value_type(&["new"]),
         ));
+    }
+
+    #[test]
+    fn later_sibling_with_a_shallower_ordinal_appends_after_deeper_introduction() {
+        // This is an internal lowering invariant. The same ordering primitive
+        // builds scalar, direct-payload, and nested-enum physical registries;
+        // their compact tags are not publicly observable on their own.
+        //
+        // base ──► A (+ ordinal 1) ──► A2 (+ ordinal 2)
+        //   └────────────────────────► B (+ ordinal 1)
+        //
+        // B is published later in the dense catalogue, so it must append
+        // after A2 rather than retag A2 merely because B's local ordinal is
+        // shallower. The test is sensitive to restoring ordinal-first order.
+        let base = schema(1);
+        let a = schema(2);
+        let a2 = schema(3);
+        let b = schema(4);
+        let aliases = BTreeMap::from([
+            (base, SchemaVersionAlias(1)),
+            (a, SchemaVersionAlias(2)),
+            (a2, SchemaVersionAlias(3)),
+            (b, SchemaVersionAlias(4)),
+        ]);
+        let base_case = case(base, 0);
+        let a_case = case(a, 1);
+        let a2_case = case(a2, 2);
+        let b_case = case(b, 1);
+
+        for registry_kind in ["scalar", "direct payload", "nested"] {
+            let mut registry = vec![
+                base_case.clone(),
+                a_case.clone(),
+                a2_case.clone(),
+                b_case.clone(),
+            ];
+            registry.sort_by(|left, right| compare_scalar_enum_cases(&aliases, left, right));
+            assert_eq!(
+                registry,
+                vec![
+                    base_case.clone(),
+                    a_case.clone(),
+                    a2_case.clone(),
+                    b_case.clone()
+                ],
+                "{registry_kind} registry"
+            );
+        }
     }
 
     #[test]
