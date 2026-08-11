@@ -5,6 +5,7 @@ pub mod fixture;
 pub mod mem;
 pub mod policy_graph_fixture;
 pub mod profiling;
+pub mod view_accounting;
 
 use hdrhistogram::Histogram;
 use jazz::protocol::SyncMessage;

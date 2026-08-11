@@ -1,0 +1,208 @@
+//! Shared simulation accounting for sync-message row delivery payloads.
+
+use jazz::protocol::{ResultMemberEntry, SyncMessage, VersionBundle, VersionRecord};
+use jazz::tx::Transaction;
+
+/// Estimate row-delivery bytes carried by a sync message.
+pub fn view_update_bytes(update: &SyncMessage) -> u64 {
+    match update {
+        SyncMessage::ViewUpdate {
+            version_bundles,
+            peer_payload_inventory,
+            result_member_adds,
+            result_member_removes,
+            ..
+        } => {
+            version_bundles
+                .iter()
+                .map(version_bundle_bytes)
+                .sum::<u64>()
+                + (peer_payload_inventory.complete_tx_payloads.len() as u64 * tx_id_wire_bytes())
+                + result_rows_bytes(result_member_adds)
+                + result_rows_bytes(result_member_removes)
+        }
+        SyncMessage::CommitUnit { tx, versions } => {
+            transaction_wire_bytes(tx) + versions.iter().map(version_record_bytes).sum::<u64>()
+        }
+        SyncMessage::FateUpdate { .. } => tx_id_wire_bytes() + 16,
+        SyncMessage::ContentExtents { extents } => {
+            extents.iter().map(|extent| extent.bytes.len() as u64).sum()
+        }
+        // An authority scope view carries an ordinary settlement-bearing view
+        // update. Its row payload is part of the simulated delivery cost.
+        SyncMessage::AuthorizationScopeView { view, .. } => view_update_bytes(view),
+        SyncMessage::BranchMetadata(_)
+        | SyncMessage::FetchBranchMetadata { .. }
+        | SyncMessage::RegisterShape { .. }
+        | SyncMessage::Subscribe(_)
+        | SyncMessage::PublishSchema { .. }
+        | SyncMessage::PublishSchemaWithLens { .. }
+        | SyncMessage::PublishLens { .. }
+        | SyncMessage::SetCurrentWriteSchema { .. }
+        | SyncMessage::CatalogueAck(_)
+        | SyncMessage::FetchContentExtent { .. }
+        | SyncMessage::SessionClaims { .. }
+        | SyncMessage::SubscribeRejected { .. }
+        | SyncMessage::Unsubscribe { .. }
+        | SyncMessage::FetchRowVersions { .. }
+        | SyncMessage::RowVersionPayloads { .. }
+        | SyncMessage::CatalogueSnapshot(_)
+        | SyncMessage::PermissionAdviceRequest { .. }
+        | SyncMessage::PermissionAdviceResponse { .. }
+        | SyncMessage::AuthorizationScopeSubscribe { .. }
+        | SyncMessage::AuthorizationScopeReceipt { .. }
+        | SyncMessage::AuthorizationScopeIntent { .. }
+        | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
+        | SyncMessage::AuthorizationScopeUnavailable { .. }
+        | SyncMessage::AuthorizationScopeDecision { .. } => 0,
+    }
+}
+
+/// Estimate the irreducible row-version payload bytes carried by a sync message.
+pub fn bytes_floor(update: &SyncMessage) -> u64 {
+    match update {
+        SyncMessage::ViewUpdate {
+            version_bundles, ..
+        } => version_bundles
+            .iter()
+            .flat_map(|bundle| &bundle.versions)
+            .map(version_record_bytes)
+            .sum(),
+        SyncMessage::AuthorizationScopeView { view, .. } => bytes_floor(view),
+        _ => 0,
+    }
+}
+
+fn version_bundle_bytes(bundle: &VersionBundle) -> u64 {
+    transaction_wire_bytes(&bundle.tx)
+        + bundle
+            .versions
+            .iter()
+            .map(version_record_bytes)
+            .sum::<u64>()
+        + 16
+}
+
+fn version_record_bytes(version: &VersionRecord) -> u64 {
+    version.table().len() as u64 + version.record().raw().len() as u64
+}
+
+fn transaction_wire_bytes(tx: &Transaction) -> u64 {
+    tx_id_wire_bytes()
+        + 4
+        + 16
+        + tx.user_metadata_json
+            .as_ref()
+            .map_or(0, |metadata| metadata.len() as u64)
+}
+
+fn result_rows_bytes(rows: &[ResultMemberEntry]) -> u64 {
+    rows.iter()
+        .filter_map(|entry| entry.as_row())
+        .map(|(table, _, _)| table.len() as u64 + 16 + tx_id_wire_bytes())
+        .sum()
+}
+
+fn tx_id_wire_bytes() -> u64 {
+    8 + 16
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use jazz::groove::records::Value;
+    use jazz::groove::schema::ColumnType;
+    use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+    use jazz::protocol::{
+        AuthorizationSupportScopeKey, PeerPayloadInventory, PermissionAdviceRequestId, ReadViewKey,
+        SubscriptionKey,
+    };
+    use jazz::query::{BindingId, ShapeId};
+    use jazz::schema::{ColumnSchema, JazzSchema, TableSchema};
+    use jazz::time::{GlobalSeq, TxTime};
+    use jazz::tx::{BranchLineage, DurabilityTier, Fate, Transaction, TxId, TxKind};
+
+    use super::*;
+
+    // This is necessarily internal: accounting helpers measure simulation
+    // instrumentation, not public database behavior.
+    #[test]
+    fn authorization_scope_view_accounts_for_nested_payload_and_floor() {
+        let tx_id = TxId::new(TxTime::new(1, 0), NodeUuid(uuid::Uuid::nil()));
+        let schema = JazzSchema::new([TableSchema::new(
+            "items",
+            [ColumnSchema::new("name", ColumnType::String)],
+        )]);
+        let version = VersionRecord::from_cells(
+            &schema.tables[0],
+            schema.version_id(),
+            RowUuid(uuid::Uuid::nil()),
+            Vec::new(),
+            AuthorId(uuid::Uuid::nil()),
+            tx_id.time,
+            AuthorId(uuid::Uuid::nil()),
+            tx_id.time,
+            &BTreeMap::<String, Value>::from([("name".to_owned(), Value::String("value".into()))]),
+            None,
+        )
+        .expect("valid test wire record");
+        let nested = SyncMessage::ViewUpdate {
+            subscription: SubscriptionKey {
+                shape_id: ShapeId(uuid::Uuid::nil()),
+                binding_id: BindingId(uuid::Uuid::nil()),
+                read_view: ReadViewKey::default(),
+            },
+            settled_through: GlobalSeq::default(),
+            reset_result_set: false,
+            version_carriers: Vec::new(),
+            version_bundles: vec![VersionBundle {
+                tx: Transaction {
+                    tx_id,
+                    kind: TxKind::Mergeable,
+                    n_total_writes: 1,
+                    made_by: AuthorId(uuid::Uuid::nil()),
+                    permission_subject: None,
+                    base_snapshot: None,
+                    row_read_set: None,
+                    absent_read_set: None,
+                    predicate_read_set: None,
+                    user_metadata_json: None,
+                    target_lineage: BranchLineage::Root,
+                    branch_merge: None,
+                    merge_strategy: None,
+                },
+                versions: vec![version],
+                fate: Fate::Accepted,
+                global_seq: Some(GlobalSeq(1)),
+                durability: DurabilityTier::Global,
+            }],
+            peer_payload_inventory: PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        };
+        let nested_bytes = view_update_bytes(&nested);
+        let nested_floor = bytes_floor(&nested);
+        assert!(nested_bytes > 0);
+        assert!(nested_floor > 0);
+
+        let wrapped = SyncMessage::AuthorizationScopeView {
+            request_id: PermissionAdviceRequestId([0; 16]),
+            key: AuthorizationSupportScopeKey {
+                support_shape_digest: [0; 32],
+                subject: AuthorId(uuid::Uuid::nil()),
+                claims_digest: [0; 32],
+                policy_digest: [0; 32],
+            },
+            clause_index: 0,
+            clause_count: 1,
+            view: Box::new(nested),
+        };
+
+        assert_eq!(view_update_bytes(&wrapped), nested_bytes);
+        assert_eq!(bytes_floor(&wrapped), nested_floor);
+    }
+}
