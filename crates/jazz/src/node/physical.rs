@@ -32,6 +32,11 @@ pub(super) struct TablePhysicalMapping {
     /// from receipt order.
     #[serde(default)]
     pub(super) scalar_enum_cases: BTreeMap<PhysicalColumnId, Vec<GlobalScalarEnumCaseId>>,
+    /// The same durable identities for direct payload enums.  Payload layouts
+    /// are resolved from the introducing schema; the opaque physical case tag
+    /// never uses an authored ordinal or display name as identity.
+    #[serde(default)]
+    pub(super) payload_enum_cases: BTreeMap<PhysicalColumnId, Vec<GlobalScalarEnumCaseId>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
@@ -219,6 +224,7 @@ pub(super) fn allocate_provisional_physical_mapping(
                 columns,
                 variant_cases: Vec::new(),
                 scalar_enum_cases: BTreeMap::new(),
+                payload_enum_cases: BTreeMap::new(),
             },
         );
     }
@@ -463,6 +469,35 @@ where
         if cases.is_empty() {
             return Err(Error::InvalidStoredValue(
                 "physical scalar enum registry identity mapping missing",
+            ));
+        }
+        let mut cases = cases.into_iter().collect::<Vec<_>>();
+        cases.sort_by(|left, right| {
+            compare_scalar_enum_cases(&self.catalogue.schema_version_aliases, left, right)
+        });
+        Ok(cases)
+    }
+
+    fn physical_payload_enum_cases(
+        &self,
+        table_id: PhysicalTableId,
+        column_id: PhysicalColumnId,
+    ) -> Result<Vec<GlobalScalarEnumCaseId>, Error> {
+        let mut cases = BTreeSet::new();
+        for mapping in self.catalogue.physical_mappings.values() {
+            for table in mapping
+                .tables
+                .values()
+                .filter(|table| table.table_id == table_id)
+            {
+                if let Some(column_cases) = table.payload_enum_cases.get(&column_id) {
+                    cases.extend(column_cases.iter().cloned());
+                }
+            }
+        }
+        if cases.is_empty() {
+            return Err(Error::InvalidStoredValue(
+                "physical payload enum registry identity mapping missing",
             ));
         }
         let mut cases = cases.into_iter().collect::<Vec<_>>();
@@ -957,12 +992,6 @@ where
 
         let source_table = self.table_in_schema(source_table_name, source_schema)?;
         let target_table = self.table_in_schema(target_table_name, target_schema)?;
-        let source_physical_table = match shape {
-            ContentProjectionShape::History => physical_history_table_name(source_mapping.table_id),
-            ContentProjectionShape::Current => {
-                physical_global_current_table_name(source_mapping.table_id)
-            }
-        };
         let mut cells = source_table
             .columns
             .iter()
@@ -1090,37 +1119,34 @@ where
                             })
                             .collect::<Result<Vec<_>, Error>>()?;
                         fields.push(ProjectField::enum_tag_remap(source, output, tags));
-                    } else if let records::ValueType::Enum(target_enum_schema) = &column.column_type
-                    {
-                        let column_id = self
+                    } else if matches!(column.column_type, records::ValueType::Enum(_)) {
+                        let target_mapping = self
                             .catalogue
                             .physical_mappings
                             .get(&target_schema)
                             .and_then(|mapping| mapping.tables.get(target_table_name))
-                            .and_then(|mapping| mapping.columns.get(&column.name))
-                            .copied()
                             .ok_or(Error::InvalidStoredValue(
+                                "target payload enum physical mapping missing",
+                            ))?;
+                        let column_id = target_mapping.columns.get(&column.name).copied().ok_or(
+                            Error::InvalidStoredValue(
                                 "target payload enum physical column mapping missing",
-                            ))?;
-                        let physical_column = self
-                            .database
-                            .table_schema(&source_physical_table)?
-                            .columns
-                            .iter()
-                            .find(|physical| physical.name == physical_user_column_field(column_id))
+                            ),
+                        )?;
+                        let target_cases = target_mapping
+                            .payload_enum_cases
+                            .get(&column_id)
                             .ok_or(Error::InvalidStoredValue(
-                                "physical payload enum projection column missing",
+                                "target payload enum identity mapping missing",
                             ))?;
-                        let physical_schema =
-                            physical_payload_enum_schema(&physical_column.column_type)?;
-                        let tags = physical_schema
-                            .cases
+                        let physical_cases =
+                            self.physical_payload_enum_cases(target_mapping.table_id, column_id)?;
+                        let tags = physical_cases
                             .iter()
-                            .map(|physical_case| {
-                                target_enum_schema
-                                    .cases
+                            .map(|identity| {
+                                target_cases
                                     .iter()
-                                    .position(|target_case| target_case.name == physical_case.name)
+                                    .position(|target_case| target_case == identity)
                                     .map(|tag| {
                                         u32::try_from(tag).map_err(|_| {
                                             Error::InvalidStoredValue(
@@ -1238,21 +1264,6 @@ where
         // concurrent siblings which both authored ordinal 2.
         let mut values = version.record.to_values()?;
         for (column_index, column) in source_table.columns.iter().enumerate() {
-            let physical_column = physical_table
-                .columns
-                .iter()
-                .find(|candidate| {
-                    candidate.name
-                        == physical_user_column_field(
-                            *source_mapping
-                                .columns
-                                .get(&column.name)
-                                .expect("physical mapping was validated below"),
-                        )
-                })
-                .ok_or(Error::InvalidStoredValue(
-                    "physical enum write column missing",
-                ))?;
             let column_id = source_mapping.columns.get(&column.name).copied().ok_or(
                 Error::InvalidStoredValue("physical scalar enum write column mapping missing"),
             )?;
@@ -1276,12 +1287,16 @@ where
                     )?;
                 }
                 records::ValueType::Enum(authored_schema) => {
-                    let physical_schema =
-                        physical_payload_enum_schema(&physical_column.column_type)?;
+                    let authored_cases = source_mapping.payload_enum_cases.get(&column_id).ok_or(
+                        Error::InvalidStoredValue("authored payload enum identity mapping missing"),
+                    )?;
+                    let physical_cases =
+                        self.physical_payload_enum_cases(source_mapping.table_id, column_id)?;
                     *value = remap_authored_payload_enum_value(
                         value.clone(),
                         authored_schema,
-                        physical_schema,
+                        authored_cases,
+                        &physical_cases,
                     )?;
                 }
                 _ => continue,
@@ -1448,32 +1463,27 @@ fn remap_authored_scalar_enum_value(
     }
 }
 
-fn physical_payload_enum_schema(
-    value_type: &records::ValueType,
-) -> Result<&records::EnumSchema, Error> {
-    match value_type {
-        records::ValueType::Enum(schema) => Ok(schema),
-        records::ValueType::Nullable(inner) => physical_payload_enum_schema(inner),
-        _ => Err(Error::InvalidStoredValue(
-            "physical payload enum descriptor missing",
-        )),
-    }
-}
-
 fn remap_authored_payload_enum_value(
     value: Value,
     authored_schema: &records::EnumSchema,
-    physical_schema: &records::EnumSchema,
+    authored_cases: &[GlobalScalarEnumCaseId],
+    physical_cases: &[GlobalScalarEnumCaseId],
 ) -> Result<Value, Error> {
     match value {
         Value::Enum(value) => {
-            let authored_case = authored_schema.case(value.tag())?;
-            let physical_tag = physical_schema
-                .cases
-                .iter()
-                .position(|case| case.name == authored_case.name)
+            authored_schema.case(value.tag())?;
+            let identity = authored_cases
+                .get(usize::try_from(value.tag()).map_err(|_| {
+                    Error::InvalidStoredValue("authored payload enum tag exhausted")
+                })?)
                 .ok_or(Error::InvalidStoredValue(
-                    "authored payload enum case absent from physical registry",
+                    "authored payload enum tag outside identity mapping",
+                ))?;
+            let physical_tag = physical_cases
+                .iter()
+                .position(|case| case == identity)
+                .ok_or(Error::InvalidStoredValue(
+                    "authored payload enum identity absent from physical registry",
                 ))?;
             // Payload descriptors are checked again by the physical record
             // encoder.  A same-name sibling with a different layout therefore
@@ -1487,7 +1497,12 @@ fn remap_authored_payload_enum_value(
         }
         Value::Nullable(None) => Ok(Value::Nullable(None)),
         Value::Nullable(Some(value)) => Ok(Value::Nullable(Some(Box::new(
-            remap_authored_payload_enum_value(*value, authored_schema, physical_schema)?,
+            remap_authored_payload_enum_value(
+                *value,
+                authored_schema,
+                authored_cases,
+                physical_cases,
+            )?,
         )))),
         _ => Err(Error::InvalidStoredValue(
             "authored payload enum value has non-enum representation",
@@ -1624,6 +1639,68 @@ pub(super) fn physical_version_storage_tables(
             })
             .collect::<Result<BTreeMap<_, _>, Error>>()?;
 
+        let mut payload_enum_registries =
+            BTreeMap::<PhysicalColumnId, BTreeSet<GlobalScalarEnumCaseId>>::new();
+        let mut payload_enum_layouts =
+            BTreeMap::<(PhysicalColumnId, GlobalScalarEnumCaseId), records::RecordDescriptor>::new(
+            );
+        for (_, logical_table, mapping) in &variants {
+            for column in &logical_table.columns {
+                let records::ValueType::Enum(enum_schema) = &column.column_type else {
+                    continue;
+                };
+                let column_id =
+                    mapping
+                        .columns
+                        .get(&column.name)
+                        .copied()
+                        .ok_or(Error::InvalidStoredValue(
+                            "physical payload enum column mapping missing",
+                        ))?;
+                let identities =
+                    mapping
+                        .payload_enum_cases
+                        .get(&column_id)
+                        .ok_or(Error::InvalidStoredValue(
+                            "physical payload enum identity mapping missing",
+                        ))?;
+                if identities.len() != enum_schema.cases.len() {
+                    return Err(Error::InvalidStoredValue(
+                        "payload enum identity mapping width mismatch",
+                    ));
+                }
+                for (identity, case) in identities.iter().zip(&enum_schema.cases) {
+                    let key = (column_id, identity.clone());
+                    match payload_enum_layouts.entry(key) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(case.payload.clone());
+                        }
+                        std::collections::btree_map::Entry::Occupied(entry)
+                            if entry.get() == &case.payload => {}
+                        std::collections::btree_map::Entry::Occupied(_) => {
+                            return Err(Error::InvalidStoredValue(
+                                "same payload enum identity has incompatible layout",
+                            ));
+                        }
+                    }
+                }
+                payload_enum_registries
+                    .entry(column_id)
+                    .or_default()
+                    .extend(identities.iter().cloned());
+            }
+        }
+        let payload_enum_registries = payload_enum_registries
+            .into_iter()
+            .map(|(column_id, cases)| {
+                let mut cases = cases.into_iter().collect::<Vec<_>>();
+                cases.sort_by(|left, right| {
+                    compare_scalar_enum_cases(schema_version_aliases, left, right)
+                });
+                Ok((column_id, cases))
+            })
+            .collect::<Result<BTreeMap<_, _>, Error>>()?;
+
         let mut physical_columns = BTreeMap::new();
         for (_, logical_table, mapping) in &variants {
             for column in &logical_table.columns {
@@ -1643,6 +1720,42 @@ pub(super) fn physical_version_storage_tables(
                                 Error::InvalidStoredValue("physical scalar enum registry missing"),
                             )?,
                         )?)
+                        .nullable()
+                    }
+                    records::ValueType::Enum(_) => {
+                        let cases = payload_enum_registries.get(&column_id).ok_or(
+                            Error::InvalidStoredValue("physical payload enum registry missing"),
+                        )?;
+                        let cases = cases
+                            .iter()
+                            .map(|identity| {
+                                let payload = payload_enum_layouts
+                                    .get(&(column_id, identity.clone()))
+                                    .ok_or(Error::InvalidStoredValue(
+                                        "physical payload enum layout missing",
+                                    ))?
+                                    .clone();
+                                Ok(records::EnumCase::new(
+                                    physical_scalar_enum_case_name(identity),
+                                    payload,
+                                ))
+                            })
+                            .collect::<Result<Vec<_>, Error>>()?;
+                        records::ValueType::Enum(Box::new(
+                            records::EnumSchema::new(
+                                format!("physical-column-{}", column_id.0),
+                                cases,
+                            )
+                            .map_err(|_| {
+                                Error::InvalidStoredValue("invalid physical payload enum registry")
+                            })?
+                            .with_registry_id(
+                                records::variant_registry_id_for_path(&format!(
+                                    "physical-column/{}",
+                                    column_id.0
+                                )),
+                            ),
+                        ))
                         .nullable()
                     }
                     _ => column
@@ -2284,6 +2397,7 @@ mod variant_case_tests {
                         .collect(),
                     variant_cases: Vec::new(),
                     scalar_enum_cases: BTreeMap::new(),
+                    payload_enum_cases: BTreeMap::new(),
                 },
             )]),
         }
@@ -2526,23 +2640,55 @@ mod variant_case_tests {
         };
         let archived = authored("archived");
         let snoozed = authored("snoozed");
-        let physical = match merge_physical_value_type(
-            &records::ValueType::Enum(Box::new(archived.clone().with_registry_id(94))),
-            &records::ValueType::Enum(Box::new(snoozed.clone().with_registry_id(94))),
-        )
-        .unwrap()
-        {
-            records::ValueType::Enum(schema) => *schema,
-            _ => unreachable!(),
-        };
+        let base = schema(1);
+        let archived_schema = schema(2);
+        let snoozed_schema = schema(3);
+        let archived_cases = vec![
+            GlobalScalarEnumCaseId {
+                introducing_schema: base,
+                introducing_ordinal: 0,
+            },
+            GlobalScalarEnumCaseId {
+                introducing_schema: base,
+                introducing_ordinal: 1,
+            },
+            GlobalScalarEnumCaseId {
+                introducing_schema: archived_schema,
+                introducing_ordinal: 2,
+            },
+        ];
+        let snoozed_cases = vec![
+            archived_cases[0].clone(),
+            archived_cases[1].clone(),
+            GlobalScalarEnumCaseId {
+                introducing_schema: snoozed_schema,
+                introducing_ordinal: 2,
+            },
+        ];
+        let physical_cases = archived_cases
+            .iter()
+            .cloned()
+            .chain(snoozed_cases.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         let payload =
             records::EnumValue::create(2, descriptor.clone(), &[Value::String("x".to_owned())])
                 .unwrap();
-        let archived_value =
-            remap_authored_payload_enum_value(Value::Enum(payload.clone()), &archived, &physical)
-                .unwrap();
-        let snoozed_value =
-            remap_authored_payload_enum_value(Value::Enum(payload), &snoozed, &physical).unwrap();
+        let archived_value = remap_authored_payload_enum_value(
+            Value::Enum(payload.clone()),
+            &archived,
+            &archived_cases,
+            &physical_cases,
+        )
+        .unwrap();
+        let snoozed_value = remap_authored_payload_enum_value(
+            Value::Enum(payload),
+            &snoozed,
+            &snoozed_cases,
+            &physical_cases,
+        )
+        .unwrap();
         assert_ne!(archived_value, snoozed_value);
     }
 }
