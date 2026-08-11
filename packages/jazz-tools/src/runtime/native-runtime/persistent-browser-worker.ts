@@ -249,10 +249,10 @@ async function openRuntime(message: OpenMessage): Promise<void> {
   const db = await wasmModule.WasmDb.openBrowser(
     dbName,
     encodeSchema(schema as never),
-    openConfig(node, author, 1, true, initialSyncFlushEvery),
+    openConfig(node, author, 1, false, initialSyncFlushEvery),
   );
 
-  runtime = NativeRuntimeAdapter.fromDb(db as never, schema as never, node, author, 1, true);
+  runtime = NativeRuntimeAdapter.fromDb(db as never, schema as never, node, author, 1, false);
   runtimeViews.clear();
   nextRuntimeViewId = 1;
   runtime.onAuthFailure((reason: string) => {
