@@ -255,6 +255,15 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
                 hash_value(hasher, inner);
             }
         }
+        Value::Enum { case, values } => {
+            hasher.update(&[14]);
+            hasher.update(case.as_bytes());
+            hasher.update(&[0]);
+            hasher.update(&(values.len() as u64).to_le_bytes());
+            for inner in values {
+                hash_value(hasher, inner);
+            }
+        }
         Value::Null => {
             hasher.update(&[9]);
         }
@@ -289,6 +298,21 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
             for variant in normalized {
                 hasher.update(variant.as_bytes());
                 hasher.update(&[0]);
+            }
+        }
+        ColumnType::EnumPayload { cases } => {
+            hasher.update(&[13]);
+            hasher.update(&(cases.len() as u64).to_le_bytes());
+            for case in cases {
+                hasher.update(case.name.as_bytes());
+                hasher.update(&[0]);
+                hasher.update(&(case.fields.len() as u64).to_le_bytes());
+                for field in &case.fields {
+                    hasher.update(field.name.as_str().as_bytes());
+                    hasher.update(&[0]);
+                    hash_column_type(hasher, &field.column_type);
+                    hasher.update(&[u8::from(field.nullable)]);
+                }
             }
         }
         ColumnType::Timestamp => {

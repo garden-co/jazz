@@ -8,6 +8,7 @@ import type {
   Schema,
   Table,
   SqlType,
+  EnumCaseSqlType,
   EnumSqlType,
   JsonSqlType,
   JsonSchema,
@@ -233,6 +234,12 @@ export type EnumColumn<
   HasDefault,
   Value
 >;
+export type EnumCasesColumn<
+  Cases extends readonly EnumCaseSqlType[] = readonly EnumCaseSqlType[],
+  Optional extends boolean = false,
+  HasDefault extends boolean = false,
+  Value = TSTypeFromSqlType<{ kind: "ENUM"; cases: Cases }>,
+> = TypedColumnBuilder<{ kind: "ENUM"; cases: Cases }, Optional, undefined, HasDefault, Value>;
 export type RefColumn<
   TargetTable extends string,
   Optional extends boolean = false,
@@ -404,8 +411,39 @@ class EnumBuilder implements ColumnBuilder {
   public _sqlType: EnumSqlType;
   _transform?: ColumnTransform<unknown, unknown>;
 
-  constructor(...variants: string[]) {
-    this._sqlType = { kind: "ENUM", variants: normalizeEnumVariants(variants) };
+  constructor(variantsOrCases: string[] | Record<string, ColumnBuilder>) {
+    if (Array.isArray(variantsOrCases)) {
+      this._sqlType = { kind: "ENUM", variants: normalizeEnumVariants(variantsOrCases) };
+      return;
+    }
+    const cases: EnumCaseSqlType[] = [];
+    for (const [caseName, payload] of Object.entries(variantsOrCases)) {
+      if (!caseName) throw new Error("Enum case names cannot be empty strings.");
+      const fields: Column[] = [];
+      for (const [fieldName, builder] of Object.entries(
+        payload as unknown as Record<string, ColumnBuilder>,
+      )) {
+        if (fieldName === "type") {
+          throw new Error('Enum payload field name "type" is reserved for the discriminant.');
+        }
+        if (builder._references !== undefined) {
+          throw new Error("Enum payload fields cannot use references; use a UUID value instead.");
+        }
+        const field = builder._build(fieldName);
+        if (containsReference(field.sqlType)) {
+          throw new Error(
+            "Enum payload fields cannot contain references; use UUID values instead.",
+          );
+        }
+        fields.push(field);
+      }
+      cases.push({ name: caseName, fields });
+    }
+    if (cases.length === 0) throw new Error("Payload enums must declare at least one case.");
+    if (new Set(cases.map((entry) => entry.name)).size !== cases.length) {
+      throw new Error("Enum case names must be unique.");
+    }
+    this._sqlType = { kind: "ENUM", cases };
   }
 
   optional(): this {
@@ -444,6 +482,12 @@ class EnumBuilder implements ColumnBuilder {
   get _references(): string | undefined {
     return undefined;
   }
+}
+
+function containsReference(sqlType: SqlType): boolean {
+  return (
+    typeof sqlType === "object" && sqlType.kind === "ARRAY" && containsReference(sqlType.element)
+  );
 }
 
 class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
@@ -840,8 +884,31 @@ export const col = {
     ): JsonColumn<StandardJSONSchemaV1.InferOutput<Schema>>;
     (schema: JsonSchema): JsonColumn;
   },
-  enum: <const Variants extends readonly [string, ...string[]]>(...variants: Variants) =>
-    new EnumBuilder(...variants) as unknown as EnumColumn<Variants>,
+  enum: ((...input: unknown[]) => {
+    if (input.length === 1 && typeof input[0] === "object" && input[0] !== null) {
+      return new EnumBuilder(input[0] as Record<string, ColumnBuilder>);
+    }
+    return new EnumBuilder(input as string[]);
+  }) as unknown as {
+    <const Variants extends readonly [string, ...string[]]>(
+      ...variants: Variants
+    ): EnumColumn<Variants>;
+    <const Cases extends Record<string, Record<string, AnyTypedColumnBuilder>>>(
+      cases: Cases,
+    ): EnumCasesColumn<
+      {
+        [Name in keyof Cases & string]: {
+          name: Name;
+          fields: {
+            [Field in keyof Cases[Name] & string]: Column & {
+              name: Field;
+              sqlType: ColumnBuilderSqlType<Cases[Name][Field]>;
+            };
+          }[keyof Cases[Name] & string][];
+        };
+      }[keyof Cases & string][]
+    >;
+  },
   ref: <const TargetTable extends string>(targetTable: TargetTable) =>
     new RefBuilder(targetTable) as unknown as RefColumn<TargetTable>,
   array: <Builder extends AnyTypedColumnBuilder>(element: Builder) =>

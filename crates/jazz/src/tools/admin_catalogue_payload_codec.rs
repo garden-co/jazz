@@ -10,8 +10,9 @@ use std::collections::HashMap;
 use crate::tools::object::ObjectId;
 use crate::tools::public_api::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
 use crate::tools::public_api::types::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, LargeValueKind, RowDescriptor,
-    Schema, SchemaHash, TableName, TablePolicies, TableSchema, Value,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, EnumCaseDescriptor,
+    LargeValueKind, RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, TableSchema,
+    Value,
 };
 
 use crate::tools::schema_lens::{LensOp, LensTransform};
@@ -334,6 +335,7 @@ const TYPE_DOUBLE: u8 = 10;
 const TYPE_BYTEA: u8 = 11;
 const TYPE_JSON: u8 = 12;
 const TYPE_BATCH_ID: u8 = 13;
+const TYPE_ENUM_PAYLOAD: u8 = 14;
 
 fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
     match col_type {
@@ -366,6 +368,14 @@ fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
             write_u32(buf, variants.len() as u32);
             for variant in variants {
                 write_string(buf, variant);
+            }
+        }
+        ColumnType::EnumPayload { cases } => {
+            buf.push(TYPE_ENUM_PAYLOAD);
+            write_u32(buf, cases.len() as u32);
+            for case in cases {
+                write_string(buf, &case.name);
+                encode_row_descriptor(buf, &RowDescriptor::new(case.fields.clone()));
             }
         }
         ColumnType::Array { element: elem } => {
@@ -419,6 +429,16 @@ fn decode_column_type(
                 variants.push(read_string(data, offset, "enum_variant")?);
             }
             Ok(ColumnType::Enum { variants })
+        }
+        TYPE_ENUM_PAYLOAD => {
+            let count = read_u32(data, offset)? as usize;
+            let mut cases = Vec::with_capacity(count);
+            for _ in 0..count {
+                let name = read_string(data, offset, "enum_case")?;
+                let fields = decode_row_descriptor(data, offset, schema_version)?.columns;
+                cases.push(EnumCaseDescriptor { name, fields });
+            }
+            Ok(ColumnType::EnumPayload { cases })
         }
         TYPE_ARRAY => {
             let elem = decode_column_type(data, offset, schema_version)?;
@@ -1398,6 +1418,7 @@ const VALUE_ROW: u8 = 8;
 const VALUE_DOUBLE: u8 = 10;
 const VALUE_BYTEA: u8 = 11;
 const VALUE_BATCH_ID: u8 = 12;
+const VALUE_ENUM: u8 = 13;
 
 fn encode_value(buf: &mut Vec<u8>, value: &Value) {
     match value {
@@ -1454,6 +1475,14 @@ fn encode_value(buf: &mut Vec<u8>, value: &Value) {
             write_u32(buf, values.len() as u32);
             for v in values {
                 encode_value(buf, v);
+            }
+        }
+        Value::Enum { case, values } => {
+            buf.push(VALUE_ENUM);
+            write_string(buf, case);
+            write_u32(buf, values.len() as u32);
+            for value in values {
+                encode_value(buf, value);
             }
         }
     }
@@ -1523,6 +1552,15 @@ fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, CatalogueEncod
                 values.push(decode_value(data, offset)?);
             }
             Ok(Value::Row { id: None, values })
+        }
+        VALUE_ENUM => {
+            let case = read_string(data, offset, "enum_value_case")?;
+            let count = read_u32(data, offset)?;
+            let mut values = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                values.push(decode_value(data, offset)?);
+            }
+            Ok(Value::Enum { case, values })
         }
         _ => Err(CatalogueEncodingError::InvalidTypeTag {
             tag,

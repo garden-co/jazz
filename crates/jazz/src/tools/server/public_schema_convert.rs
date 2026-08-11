@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::groove::records::{ScalarEnumSchema, Value as GrooveValue};
+use crate::groove::records::{
+    EnumCase, EnumSchema, RecordDescriptor, ScalarEnumSchema, Value as GrooveValue,
+};
 use crate::groove::schema::ColumnType as GrooveColumnType;
 use crate::query::{
     InheritsOperation, JoinCorrelation, JoinSourceLookup, JoinTarget, JoinVia, Operand,
@@ -608,6 +610,44 @@ fn convert_column_type(
         ColumnType::Uuid => Ok(GrooveColumnType::Uuid),
         ColumnType::Bytea => Ok(GrooveColumnType::Bytes),
         ColumnType::Enum { .. } => Ok(GrooveColumnType::String),
+        ColumnType::EnumPayload { cases } => {
+            let mut converted_cases = Vec::with_capacity(cases.len());
+            for case in cases {
+                if case.name.is_empty() {
+                    return Err(err(
+                        format!("$.{}.{}", table.as_str(), column),
+                        "enum case names cannot be empty",
+                    ));
+                }
+                let mut fields = Vec::with_capacity(case.fields.len());
+                for field in &case.fields {
+                    if field.references.is_some() {
+                        return Err(err(
+                            format!("$.{}.{}.{}", table.as_str(), column, field.name.as_str()),
+                            "enum payload fields cannot use references; use UUID values instead",
+                        ));
+                    }
+                    let mut value_type =
+                        convert_column_type(table, field.name.as_str(), &field.column_type)?;
+                    if field.nullable {
+                        value_type = value_type.nullable();
+                    }
+                    fields.push((field.name.as_str().to_owned(), value_type));
+                }
+                converted_cases.push(EnumCase::new(
+                    case.name.clone(),
+                    RecordDescriptor::new(fields),
+                ));
+            }
+            EnumSchema::new(format!("{}_{}", table.as_str(), column), converted_cases)
+                .map(|schema| GrooveColumnType::Enum(Box::new(schema)))
+                .map_err(|error| {
+                    err(
+                        format!("$.{}.{}", table.as_str(), column),
+                        error.to_string(),
+                    )
+                })
+        }
         ColumnType::Array { element } => {
             Ok(convert_column_type(table, column, element.as_ref())?.array_of())
         }

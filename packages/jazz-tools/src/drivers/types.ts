@@ -116,6 +116,7 @@ export type ColumnType =
   | { type: "Text" }
   | { type: "Json"; schema?: Record<string, unknown> }
   | { type: "Enum"; variants: string[] }
+  | { type: "EnumPayload"; cases: Array<{ name: string; fields: ColumnDescriptor[] }> }
   | { type: "Timestamp" }
   | { type: "Uuid" }
   | { type: "Bytea" }

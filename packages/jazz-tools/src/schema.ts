@@ -19,7 +19,14 @@ export type JsonSchemaToTs<Schema extends JsonSchema> = FromSchema<Schema>;
 
 export interface EnumSqlType {
   kind: "ENUM";
-  variants: string[];
+  /** The established zero-payload scalar enum form. */
+  variants?: readonly string[];
+  /** Payload-bearing cases. This form is deliberately distinct from variants. */
+  cases?: readonly EnumCaseSqlType[];
+}
+export interface EnumCaseSqlType {
+  name: string;
+  fields: Column[];
 }
 export interface ArraySqlType {
   kind: "ARRAY";
@@ -43,8 +50,11 @@ export function sqlTypeToString(sqlType: SqlType): string {
     return sqlType;
   }
   if (sqlType.kind === "ENUM") {
-    const variants = sqlType.variants.map((variant) => `'${variant.replace(/'/g, "''")}'`);
-    return `ENUM(${variants.join(",")})`;
+    if (sqlType.variants) {
+      const variants = sqlType.variants.map((variant) => `'${variant.replace(/'/g, "''")}'`);
+      return `ENUM(${variants.join(",")})`;
+    }
+    return `ENUM(${(sqlType.cases ?? []).map((entry) => entry.name).join(",")})`;
   }
   if (sqlType.kind === "JSON") {
     if (!sqlType.schema) {
@@ -78,7 +88,11 @@ export type TSTypeFromSqlType<T extends SqlType> = T extends ScalarSqlType
   : T extends ArraySqlType
     ? TSTypeFromSqlType<T["element"]>[]
     : T extends EnumSqlType
-      ? T["variants"][number]
+      ? T["variants"] extends readonly string[]
+        ? T["variants"][number]
+        : T["cases"] extends readonly EnumCaseSqlType[]
+          ? EnumValueFromCases<T["cases"]>
+          : never
       : T extends JsonSqlType<infer Output>
         ? Output
         : never;
@@ -92,6 +106,12 @@ export interface Column {
   mergeStrategy?: ColumnMergeStrategy;
   largeValue?: "blob" | "text";
 }
+
+export type EnumValueFromCases<Cases extends readonly EnumCaseSqlType[]> = {
+  [Case in Cases[number] as Case["name"]]: { type: Case["name"] } & {
+    [Field in Case["fields"][number] as Field["name"]]: TSTypeFromSqlType<Field["sqlType"]>;
+  };
+}[Cases[number]["name"]];
 
 export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";
 export type PolicyCmpOp = "Eq" | "Ne" | "Lt" | "Le" | "Gt" | "Ge";
