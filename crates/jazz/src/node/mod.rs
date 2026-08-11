@@ -4277,6 +4277,7 @@ where
                             variant_cases: Vec::new(),
                             scalar_enum_cases: BTreeMap::new(),
                             payload_enum_cases: BTreeMap::new(),
+                            nested_scalar_enum_cases: BTreeMap::new(),
                         },
                     );
                 }
@@ -4592,6 +4593,7 @@ where
                     variant_cases: Vec::new(),
                     scalar_enum_cases,
                     payload_enum_cases,
+                    nested_scalar_enum_cases: source_table.nested_scalar_enum_cases.clone(),
                 },
             );
         }

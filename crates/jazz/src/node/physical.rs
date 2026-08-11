@@ -37,6 +37,13 @@ pub(super) struct TablePhysicalMapping {
     /// never uses an authored ordinal or display name as identity.
     #[serde(default)]
     pub(super) payload_enum_cases: BTreeMap<PhysicalColumnId, Vec<GlobalScalarEnumCaseId>>,
+    /// Recursive scalar enum occurrences below a direct user column.  The
+    /// structural key is stable across array/nullable/tuple/record lowering;
+    /// payload children are rooted under their parent case identity by the
+    /// catalogue reconciler.
+    #[serde(default)]
+    pub(super) nested_scalar_enum_cases:
+        BTreeMap<PhysicalColumnId, BTreeMap<String, Vec<GlobalScalarEnumCaseId>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
@@ -237,6 +244,7 @@ pub(super) fn allocate_provisional_physical_mapping(
                 variant_cases: Vec::new(),
                 scalar_enum_cases: BTreeMap::new(),
                 payload_enum_cases: BTreeMap::new(),
+                nested_scalar_enum_cases: BTreeMap::new(),
             },
         );
     }
@@ -2559,6 +2567,7 @@ mod variant_case_tests {
                     variant_cases: Vec::new(),
                     scalar_enum_cases: BTreeMap::new(),
                     payload_enum_cases: BTreeMap::new(),
+                    nested_scalar_enum_cases: BTreeMap::new(),
                 },
             )]),
         }
