@@ -33,7 +33,11 @@ describe("native row codec", () => {
     ];
     const columns: ColumnDescriptor[] = [
       { name: "active", column_type: { type: "Boolean" }, nullable: false },
-      { name: "choice", column_type: { type: "Enum" }, nullable: false },
+      {
+        name: "choice",
+        column_type: { type: "Enum", variants: ["draft", "published"] },
+        nullable: false,
+      },
       {
         name: "labels",
         column_type: { type: "Array", element: { type: "Text" } },
@@ -116,7 +120,11 @@ describe("native row codec", () => {
                 nullable: false,
               }
             : _kind === "enum"
-              ? { name: "value", column_type: { type: "Enum" }, nullable: false }
+              ? {
+                  name: "value",
+                  column_type: { type: "Enum", variants: ["draft", "published"] },
+                  nullable: false,
+                }
               : { name: "value", column_type: { type: "Boolean" }, nullable: false };
 
     expect(() =>
