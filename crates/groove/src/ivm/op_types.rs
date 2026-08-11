@@ -8,6 +8,8 @@
 //! first, then stateless operators, then stateful join/recursive operators,
 //! then aggregate descriptors.
 
+use std::collections::BTreeMap;
+
 use crate::ivm::graph::DurableStorage;
 use crate::records::{RecordDescriptor, Value, ValueType};
 use crate::schema::IndexSchema;
@@ -134,6 +136,20 @@ pub struct MapProjectOp {
     pub expressions: Vec<ProjectionExpr>,
     /// `(input_descriptor_idx, input_field_idx)` pairs for fast record copying.
     pub mapping: Vec<(usize, usize)>,
+}
+
+/// Per-occurrence enum tag translation at a descriptor boundary.
+///
+/// The paths name an enum occurrence relative to one projected field: `root`,
+/// `root/nullable`, `root/array`, `root/tuple/<n>`, `root/record/<field>`,
+/// and payload children below `root/case/<tag>/<field>`.  The vectors map the
+/// compact source tag to a target tag; `None` deliberately makes that mapping
+/// non-total.  This keeps a node-local physical enum registry an optimization,
+/// rather than allowing its raw tags to escape as user semantics.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct RecursiveEnumRemaps {
+    pub scalar: BTreeMap<String, Vec<Option<u8>>>,
+    pub payload: BTreeMap<String, Vec<Option<u32>>>,
 }
 
 /// One projected expression and optional output name.
@@ -419,6 +435,10 @@ pub enum PlanExpr {
     EnumRemap {
         field: String,
         tags: Vec<Option<u32>>,
+    },
+    RecursiveEnumRemap {
+        field: String,
+        remaps: RecursiveEnumRemaps,
     },
 }
 

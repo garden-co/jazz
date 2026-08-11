@@ -926,13 +926,33 @@ impl ProjectField {
         }
     }
 
+    /// Recursively re-encode enum tags at every mapped nested occurrence.
+    /// This is descriptor-aware and therefore deliberately cannot take the
+    /// raw-copy projection fast path.
+    pub fn recursive_enum_remap(
+        source_name: impl Into<String>,
+        output_name: impl Into<String>,
+        target: ValueType,
+        remaps: RecursiveEnumRemaps,
+    ) -> Self {
+        Self {
+            expression: ProjectExpr::RecursiveEnumRemap {
+                source: FieldRef::name(source_name),
+                target,
+                remaps,
+            },
+            output_name: output_name.into(),
+        }
+    }
+
     pub fn source(&self) -> Option<&FieldRef> {
         match &self.expression {
             ProjectExpr::Field(source)
             | ProjectExpr::Nullable(source)
             | ProjectExpr::NullableFlat(source)
             | ProjectExpr::EnumTagRemap { source, .. }
-            | ProjectExpr::EnumRemap { source, .. } => Some(source),
+            | ProjectExpr::EnumRemap { source, .. }
+            | ProjectExpr::RecursiveEnumRemap { source, .. } => Some(source),
             ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => {
                 None
             }
@@ -958,6 +978,11 @@ pub enum ProjectExpr {
     EnumRemap {
         source: FieldRef,
         tags: Vec<Option<u32>>,
+    },
+    RecursiveEnumRemap {
+        source: FieldRef,
+        target: ValueType,
+        remaps: RecursiveEnumRemaps,
     },
 }
 

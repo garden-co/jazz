@@ -28,9 +28,9 @@ use crate::ivm::{
     FrontierSourceOp, GraphBuilder, IndexByOp, IndexSourceOp, InlineRecordsOp, IvmGraph, JoinOp,
     JoinOpKind, LiteralValue, MAX_COLLECT_BY_TREE_DEPTH, MapProjectOp, NodeDescriptor,
     NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField,
-    ProjectionExpr, RecursiveOp, Retainer, StaticScanSpec, TableSourceOp, TopByDirection,
-    TopByLimit, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp, ValueComparison,
-    VariantProjectOp, VariantProjectionTarget,
+    ProjectionExpr, RecursiveEnumRemaps, RecursiveOp, Retainer, StaticScanSpec, TableSourceOp,
+    TopByDirection, TopByLimit, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp,
+    ValueComparison, VariantProjectOp, VariantProjectionTarget,
 };
 use crate::records::{
     self, BorrowedRecord, EnumSchema, EnumValue, OwnedRecord, RawProjectionField,
@@ -647,7 +647,17 @@ impl IvmRuntime {
         })?;
         let case = if let Some(fields) = fields {
             let projected = project_descriptor(&source, fields)?;
-            if !record_descriptors_registry_compatible(&projected, &projection.output) {
+            // A recursive enum projector is an explicit descriptor boundary:
+            // its source and output may intentionally name different enum
+            // registries. The operation validates and re-encodes the values
+            // against the fixed output descriptor at execution time, so the
+            // usual raw-descriptor compatibility shortcut is inapplicable.
+            let recursive_enum_boundary = fields
+                .iter()
+                .any(|field| matches!(field.expression, ProjectExpr::RecursiveEnumRemap { .. }));
+            if !recursive_enum_boundary
+                && !record_descriptors_registry_compatible(&projected, &projection.output)
+            {
                 return Err(IvmRuntimeError::VariantProjectionOutputMismatch {
                     table: table.to_owned(),
                     target: variant_projection_target_name(&target).to_owned(),
@@ -5140,6 +5150,20 @@ fn lift_literal_filter(
                                 tags.clone(),
                             ))
                         }
+                        ProjectExpr::RecursiveEnumRemap {
+                            source,
+                            target,
+                            remaps,
+                        } => {
+                            let source =
+                                project_source_from_joined_filter_input(&input_output, source)?;
+                            Ok(ProjectField::recursive_enum_remap(
+                                source,
+                                field.output_name.clone(),
+                                target.clone(),
+                                remaps.clone(),
+                            ))
+                        }
                     })
                     .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
                 fields.push(ProjectField::renamed(
@@ -5442,6 +5466,22 @@ fn project_fields_against_rewritten_input(
                         source,
                         field.output_name.clone(),
                         tags.clone(),
+                    ));
+                }
+                ProjectExpr::RecursiveEnumRemap {
+                    source,
+                    target,
+                    remaps,
+                } => {
+                    let source = field_ref_name(&original_output, source)?;
+                    if rewritten_output.field_index(&source).is_none() {
+                        return Err(IvmRuntimeError::GraphFieldNotFound(source));
+                    }
+                    return Ok(ProjectField::recursive_enum_remap(
+                        source,
+                        field.output_name.clone(),
+                        target.clone(),
+                        remaps.clone(),
                     ));
                 }
                 ProjectExpr::Literal(_)
@@ -6395,7 +6435,8 @@ fn plan_expr_names(expressions: &[PlanExpr]) -> Vec<String> {
             | PlanExpr::Nullable(name)
             | PlanExpr::NullableFlat(name)
             | PlanExpr::EnumTagRemap { field: name, .. }
-            | PlanExpr::EnumRemap { field: name, .. } => Some(name.clone()),
+            | PlanExpr::EnumRemap { field: name, .. }
+            | PlanExpr::RecursiveEnumRemap { field: name, .. } => Some(name.clone()),
             PlanExpr::Literal(_) | PlanExpr::Null(_) => None,
         })
         .collect()
@@ -8575,6 +8616,7 @@ fn project_descriptor(
                         .value_type
                         .clone()
                 }
+                ProjectExpr::RecursiveEnumRemap { target, .. } => target.clone(),
             };
             Ok((project_field.output_name.clone(), value_type))
         })
@@ -9066,6 +9108,12 @@ fn project_field_expr(
             field: field_ref_name(input, source)?,
             tags: tags.clone(),
         }),
+        ProjectExpr::RecursiveEnumRemap { source, remaps, .. } => {
+            Ok(PlanExpr::RecursiveEnumRemap {
+                field: field_ref_name(input, source)?,
+                remaps: remaps.clone(),
+            })
+        }
     }
 }
 
@@ -9104,6 +9152,23 @@ fn project_record(
                 remap_enum_tag(input.get(field)?.clone(), tags)?
             }
             PlanExpr::EnumRemap { field, tags } => remap_enum(input.get(field)?.clone(), tags)?,
+            PlanExpr::RecursiveEnumRemap { field, remaps } => {
+                let source_idx = input_desc
+                    .field_index(field)
+                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
+                let output_idx = output_desc
+                    .field_index(expr.output_name.as_deref().ok_or_else(|| {
+                        IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned())
+                    })?)
+                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
+                remap_recursive_enum_value(
+                    input.get(field)?.clone(),
+                    &input_desc.fields()[source_idx].value_type,
+                    &output_desc.fields()[output_idx].value_type,
+                    remaps,
+                    "root",
+                )?
+            }
         });
     }
     Ok(output_desc.create(&values)?)
@@ -9145,6 +9210,154 @@ fn remap_enum(value: Value, tags: &[Option<u32>]) -> Result<Value, IvmRuntimeErr
             Ok(Value::Nullable(Some(Box::new(remap_enum(*value, tags)?))))
         }
         _ => Err(IvmRuntimeError::EnumProjectionNonEnum),
+    }
+}
+
+/// Re-encode an arbitrary user value across two descriptors whose enum
+/// registries use different compact tags.  This is intentionally a value
+/// operation rather than a byte splice: descriptor equality does not imply
+/// that a physical enum tag has the same meaning in the authored descriptor.
+fn remap_recursive_enum_value(
+    value: Value,
+    source: &ValueType,
+    target: &ValueType,
+    remaps: &RecursiveEnumRemaps,
+    path: &str,
+) -> Result<Value, IvmRuntimeError> {
+    match (value, source, target) {
+        (Value::EnumTag(tag), ValueType::EnumTag(_), ValueType::EnumTag(_)) => remaps
+            .scalar
+            .get(path)
+            .and_then(|tags| tags.get(usize::from(tag)))
+            .and_then(|tag| *tag)
+            .map(Value::EnumTag)
+            .ok_or(IvmRuntimeError::EnumTagProjectionAbsent { tag }),
+        (Value::Nullable(None), ValueType::Nullable(_), ValueType::Nullable(_)) => {
+            Ok(Value::Nullable(None))
+        }
+        (
+            Value::Nullable(Some(value)),
+            ValueType::Nullable(source),
+            ValueType::Nullable(target),
+        ) => Ok(Value::Nullable(Some(Box::new(remap_recursive_enum_value(
+            *value,
+            source,
+            target,
+            remaps,
+            &format!("{path}/nullable"),
+        )?)))),
+        (Value::Array(values), ValueType::Array(source), ValueType::Array(target)) => {
+            Ok(Value::Array(
+                values
+                    .into_iter()
+                    .map(|value| {
+                        remap_recursive_enum_value(
+                            value,
+                            source,
+                            target,
+                            remaps,
+                            &format!("{path}/array"),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))
+        }
+        (Value::Tuple(values), ValueType::Tuple(source), ValueType::Tuple(target))
+            if values.len() == source.len() && source.len() == target.len() =>
+        {
+            Ok(Value::Tuple(
+                values
+                    .into_iter()
+                    .zip(source.iter().zip(target))
+                    .enumerate()
+                    .map(|(index, (value, (source, target)))| {
+                        remap_recursive_enum_value(
+                            value,
+                            source,
+                            target,
+                            remaps,
+                            &format!("{path}/tuple/{index}"),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))
+        }
+        (Value::Record(record), ValueType::Record(source), ValueType::Record(target))
+            if source.fields().len() == target.fields().len() =>
+        {
+            let values = record.to_values()?;
+            let values = values
+                .into_iter()
+                .zip(source.fields().iter().zip(target.fields()))
+                .map(|(value, (source, target))| {
+                    let name = source.name.as_deref().ok_or_else(|| {
+                        IvmRuntimeError::RecursiveEnumProjectionDescriptorMismatch {
+                            path: path.to_owned(),
+                        }
+                    })?;
+                    remap_recursive_enum_value(
+                        value,
+                        &source.value_type,
+                        &target.value_type,
+                        remaps,
+                        &format!("{path}/record/{name}"),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::Record(OwnedRecord::new(
+                target.create(&values)?,
+                **target,
+            )))
+        }
+        (Value::Enum(value), ValueType::Enum(source), ValueType::Enum(target)) => {
+            let source_tag = value.tag();
+            let target_tag = remaps
+                .payload
+                .get(path)
+                .and_then(|tags| tags.get(usize::try_from(source_tag).ok()?))
+                .and_then(|tag| *tag)
+                .ok_or(IvmRuntimeError::EnumProjectionAbsent { tag: source_tag })?;
+            let source_case = source.case(source_tag)?;
+            let target_case = target.case(target_tag)?;
+            if source_case.payload.fields().len() != target_case.payload.fields().len() {
+                return Err(IvmRuntimeError::RecursiveEnumProjectionDescriptorMismatch {
+                    path: path.to_owned(),
+                });
+            }
+            let values = value.record().to_values()?;
+            let values = values
+                .into_iter()
+                .zip(
+                    source_case
+                        .payload
+                        .fields()
+                        .iter()
+                        .zip(target_case.payload.fields()),
+                )
+                .map(|(value, (source, target))| {
+                    let name = source.name.as_deref().ok_or_else(|| {
+                        IvmRuntimeError::RecursiveEnumProjectionDescriptorMismatch {
+                            path: path.to_owned(),
+                        }
+                    })?;
+                    remap_recursive_enum_value(
+                        value,
+                        &source.value_type,
+                        &target.value_type,
+                        remaps,
+                        &format!("{path}/case/{source_tag}/{name}"),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::Enum(EnumValue::new(
+                target_tag,
+                OwnedRecord::new(target_case.payload.create(&values)?, target_case.payload),
+            )))
+        }
+        (value, source, target) if source == target => Ok(value),
+        _ => Err(IvmRuntimeError::RecursiveEnumProjectionDescriptorMismatch {
+            path: path.to_owned(),
+        }),
     }
 }
 
@@ -9202,7 +9415,9 @@ fn raw_projection_fields(
                 )
                 .ok()?,
             }),
-            PlanExpr::EnumTagRemap { .. } | PlanExpr::EnumRemap { .. } => None,
+            PlanExpr::EnumTagRemap { .. }
+            | PlanExpr::EnumRemap { .. }
+            | PlanExpr::RecursiveEnumRemap { .. } => None,
         })
         .collect::<Option<Vec<_>>>();
     Ok(fields)
@@ -9396,7 +9611,8 @@ fn aggregate_expr_value_type(
         | PlanExpr::Nullable(field)
         | PlanExpr::NullableFlat(field)
         | PlanExpr::EnumTagRemap { field, .. }
-        | PlanExpr::EnumRemap { field, .. } => {
+        | PlanExpr::EnumRemap { field, .. }
+        | PlanExpr::RecursiveEnumRemap { field, .. } => {
             let field_idx = input
                 .field_index(field)
                 .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
@@ -10424,6 +10640,12 @@ fn resolve_aggregate_expr(
             field: resolve_field_name(input, field)?,
             tags: tags.clone(),
         }),
+        Some(PlanExpr::RecursiveEnumRemap { field, remaps }) => {
+            Some(PlanExpr::RecursiveEnumRemap {
+                field: resolve_field_name(input, field)?,
+                remaps: remaps.clone(),
+            })
+        }
         Some(PlanExpr::Literal(_)) | Some(PlanExpr::Null(_)) | None => aggregate.expression.clone(),
     };
     Ok(AggregateExpr {
@@ -10743,6 +10965,9 @@ fn evaluate_aggregate_expr(
         }
         PlanExpr::EnumTagRemap { field, tags } => remap_enum_tag(record.get(field)?, tags),
         PlanExpr::EnumRemap { field, tags } => remap_enum(record.get(field)?, tags),
+        // Aggregates do not carry an output descriptor, so there is no
+        // well-defined target boundary for a recursive re-encoding.
+        PlanExpr::RecursiveEnumRemap { .. } => Err(IvmRuntimeError::UnsupportedOperator),
         PlanExpr::Literal(literal) => Ok(literal.to_value()),
         PlanExpr::Null(value_type) => Ok(Value::Nullable(match value_type {
             ValueType::Nullable(_) => None,
@@ -11930,6 +12155,8 @@ pub enum IvmRuntimeError {
         target: String,
         case: String,
     },
+    #[error("recursive enum projection descriptor mismatch at {path}")]
+    RecursiveEnumProjectionDescriptorMismatch { path: String },
     #[error("enum match field is not an enum: {field}")]
     VariantProjectFieldTypeMismatch { field: String },
     #[error("enum match payload descriptor does not match its declared case: {field}")]
@@ -11977,6 +12204,159 @@ mod tests {
             remapped.record().to_values().unwrap(),
             vec![Value::String("later".to_owned())]
         );
+    }
+
+    #[test]
+    fn recursive_enum_projection_reencodes_nullable_array_tuple_and_record_occurrences() {
+        let physical = ValueType::EnumTag(
+            records::ScalarEnumSchema::new("physical", ["draft", "snoozed", "archived"]).unwrap(),
+        );
+        let authored = ValueType::EnumTag(
+            records::ScalarEnumSchema::new("authored", ["draft", "archived"]).unwrap(),
+        );
+        let source = ValueType::Tuple(vec![
+            ValueType::Nullable(Box::new(ValueType::Array(Box::new(physical.clone())))),
+            ValueType::Record(Box::new(RecordDescriptor::new([("state", physical)]))),
+        ]);
+        let target = ValueType::Tuple(vec![
+            ValueType::Nullable(Box::new(ValueType::Array(Box::new(authored.clone())))),
+            ValueType::Record(Box::new(RecordDescriptor::new([("state", authored)]))),
+        ]);
+        let remaps = RecursiveEnumRemaps {
+            scalar: BTreeMap::from([
+                (
+                    "root/tuple/0/nullable/array".to_owned(),
+                    vec![Some(0), None, Some(1)],
+                ),
+                (
+                    "root/tuple/1/record/state".to_owned(),
+                    vec![Some(0), None, Some(1)],
+                ),
+            ]),
+            payload: BTreeMap::new(),
+        };
+        let record = RecordDescriptor::new([(
+            "state",
+            ValueType::EnumTag(
+                records::ScalarEnumSchema::new("physical", ["draft", "snoozed", "archived"])
+                    .unwrap(),
+            ),
+        )]);
+        let value = Value::Tuple(vec![
+            Value::Nullable(Some(Box::new(Value::Array(vec![Value::EnumTag(2)])))),
+            Value::Record(OwnedRecord::new(
+                record.create(&[Value::EnumTag(2)]).unwrap(),
+                record,
+            )),
+        ]);
+        let projected =
+            remap_recursive_enum_value(value, &source, &target, &remaps, "root").unwrap();
+        let Value::Tuple(values) = projected else {
+            panic!("tuple expected")
+        };
+        assert_eq!(
+            values[0],
+            Value::Nullable(Some(Box::new(Value::Array(vec![Value::EnumTag(1)]))))
+        );
+        let Value::Record(record) = &values[1] else {
+            panic!("record expected")
+        };
+        assert_eq!(record.to_values().unwrap(), vec![Value::EnumTag(1)]);
+    }
+
+    #[test]
+    fn recursive_enum_projection_remaps_payload_cases_and_nested_payload_enums() {
+        let physical_scalar = ValueType::EnumTag(
+            records::ScalarEnumSchema::new("physical", ["draft", "snoozed", "archived"]).unwrap(),
+        );
+        let authored_scalar = ValueType::EnumTag(
+            records::ScalarEnumSchema::new("authored", ["draft", "archived"]).unwrap(),
+        );
+        let physical_payload = ValueType::Enum(Box::new(
+            EnumSchema::new(
+                "physical-payload",
+                [
+                    records::EnumCase::new(
+                        "case-a",
+                        RecordDescriptor::new([("state", physical_scalar.clone())]),
+                    ),
+                    records::EnumCase::new(
+                        "case-b",
+                        RecordDescriptor::new(Vec::<(String, ValueType)>::new()),
+                    ),
+                ],
+            )
+            .unwrap(),
+        ));
+        let authored_payload = ValueType::Enum(Box::new(
+            EnumSchema::new(
+                "authored-payload",
+                [records::EnumCase::new(
+                    "case-a",
+                    RecordDescriptor::new([("state", authored_scalar)]),
+                )],
+            )
+            .unwrap(),
+        ));
+        let source = ValueType::Record(Box::new(RecordDescriptor::new([(
+            "nested",
+            physical_payload.clone(),
+        )])));
+        let target = ValueType::Record(Box::new(RecordDescriptor::new([(
+            "nested",
+            authored_payload.clone(),
+        )])));
+        let remaps = RecursiveEnumRemaps {
+            scalar: BTreeMap::from([(
+                "root/record/nested/case/0/state".to_owned(),
+                vec![Some(0), None, Some(1)],
+            )]),
+            payload: BTreeMap::from([("root/record/nested".to_owned(), vec![Some(0), None])]),
+        };
+        let ValueType::Enum(payload_schema) = physical_payload else {
+            panic!("payload expected")
+        };
+        let payload = payload_schema.case(0).unwrap().payload.clone();
+        let nested = Value::Enum(EnumValue::create(0, payload, &[Value::EnumTag(2)]).unwrap());
+        let ValueType::Record(source_record) = &source else {
+            panic!("record expected")
+        };
+        let value = Value::Record(OwnedRecord::new(
+            source_record.create(&[nested]).unwrap(),
+            (**source_record).clone(),
+        ));
+        let projected =
+            remap_recursive_enum_value(value, &source, &target, &remaps, "root").unwrap();
+        let Value::Record(record) = projected else {
+            panic!("record expected")
+        };
+        let Value::Enum(nested) = record.to_values().unwrap().pop().unwrap() else {
+            panic!("enum expected")
+        };
+        assert_eq!(nested.tag(), 0);
+        assert_eq!(
+            nested.record().to_values().unwrap(),
+            vec![Value::EnumTag(1)]
+        );
+
+        // A physical case which the target schema cannot name must fail rather
+        // than becoming a default case or silently removing the row.
+        let unknown = Value::Enum(
+            EnumValue::create(
+                1,
+                RecordDescriptor::new(Vec::<(String, ValueType)>::new()),
+                &[],
+            )
+            .unwrap(),
+        );
+        let value = Value::Record(OwnedRecord::new(
+            source_record.create(&[unknown]).unwrap(),
+            (**source_record).clone(),
+        ));
+        assert!(matches!(
+            remap_recursive_enum_value(value, &source, &target, &remaps, "root"),
+            Err(IvmRuntimeError::EnumProjectionAbsent { tag: 1 })
+        ));
     }
 
     #[test]

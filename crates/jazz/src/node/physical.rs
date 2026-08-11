@@ -57,11 +57,7 @@ pub(super) struct GlobalScalarEnumCaseId {
 /// `tuple/<n>`, `record/<field>`) and payload children extend the selected
 /// parent case identity. Keeping this separate from the compact local tag is
 /// what lets recursive values cross the authored/physical boundary safely.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct EnumOccurrenceRemaps {
-    scalar: BTreeMap<String, Vec<Option<u8>>>,
-    payload: BTreeMap<String, Vec<Option<u32>>>,
-}
+type EnumOccurrenceRemaps = groove::ivm::RecursiveEnumRemaps;
 
 /// A scalar enum discriminant in a physical table is an interned spelling of
 /// this identity, never an authored declaration ordinal.  The textual enum
@@ -614,11 +610,103 @@ where
                 }
             }
         }
+        if cases.is_empty() {
+            return Err(Error::InvalidStoredValue(
+                "physical nested scalar enum registry identity mapping missing",
+            ));
+        }
         let mut cases = cases.into_iter().collect::<Vec<_>>();
         cases.sort_by(|left, right| {
             compare_scalar_enum_cases(&self.catalogue.schema_version_aliases, left, right)
         });
         Ok(cases)
+    }
+
+    /// Construct the physical-to-authored side of the enum interning boundary
+    /// for one user cell.  Every entry is keyed by a structural occurrence;
+    /// absent target cases deliberately stay `None` so projection fails rather
+    /// than fabricating an older client's value.
+    fn physical_to_authored_enum_remaps(
+        &self,
+        target_mapping: &TablePhysicalMapping,
+        column_id: PhysicalColumnId,
+    ) -> Result<EnumOccurrenceRemaps, Error> {
+        let mut remaps = EnumOccurrenceRemaps::default();
+        if let Some(target_cases) = target_mapping.scalar_enum_cases.get(&column_id) {
+            // Bootstrap defines the physical table before its freshly
+            // hydrated catalogue mapping is durable.  In that one state the
+            // target's own registry is necessarily the complete physical
+            // registry; later states must use the lineage union below.
+            let physical_cases = self
+                .physical_scalar_enum_cases(target_mapping.table_id, column_id)
+                .unwrap_or_else(|_| target_cases.clone());
+            remaps.scalar.insert(
+                "root".to_owned(),
+                physical_cases
+                    .iter()
+                    .map(|identity| {
+                        target_cases
+                            .iter()
+                            .position(|candidate| candidate == identity)
+                            .map(|tag| {
+                                u8::try_from(tag).map_err(|_| {
+                                    Error::InvalidStoredValue("target scalar enum tag exhausted")
+                                })
+                            })
+                            .transpose()
+                    })
+                    .collect::<Result<_, _>>()?,
+            );
+        }
+        if let Some(target_cases) = target_mapping.payload_enum_cases.get(&column_id) {
+            let physical_cases = self
+                .physical_payload_enum_cases(target_mapping.table_id, column_id)
+                .unwrap_or_else(|_| target_cases.clone());
+            remaps.payload.insert(
+                "root".to_owned(),
+                physical_cases
+                    .iter()
+                    .map(|identity| {
+                        target_cases
+                            .iter()
+                            .position(|candidate| candidate == identity)
+                            .map(|tag| {
+                                u32::try_from(tag).map_err(|_| {
+                                    Error::InvalidStoredValue("target payload enum tag exhausted")
+                                })
+                            })
+                            .transpose()
+                    })
+                    .collect::<Result<_, _>>()?,
+            );
+        }
+        if let Some(paths) = target_mapping.nested_scalar_enum_cases.get(&column_id) {
+            for (path, target_cases) in paths {
+                let physical_cases = self
+                    .physical_nested_scalar_enum_cases(target_mapping.table_id, column_id, path)
+                    .unwrap_or_else(|_| target_cases.clone());
+                remaps.scalar.insert(
+                    path.clone(),
+                    physical_cases
+                        .iter()
+                        .map(|identity| {
+                            target_cases
+                                .iter()
+                                .position(|candidate| candidate == identity)
+                                .map(|tag| {
+                                    u8::try_from(tag).map_err(|_| {
+                                        Error::InvalidStoredValue(
+                                            "target nested scalar enum tag exhausted",
+                                        )
+                                    })
+                                })
+                                .transpose()
+                        })
+                        .collect::<Result<_, _>>()?,
+                );
+            }
+        }
+        Ok(remaps)
     }
 
     pub(super) fn physical_table_id_for_schema(
@@ -1172,6 +1260,33 @@ where
             ContentProjectionShape::History => HistoryRowRecord::USER_CELLS,
             ContentProjectionShape::Current => GlobalCurrentRowRecord::USER_CELLS,
         };
+        let target_mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&target_schema)
+            .and_then(|mapping| mapping.tables.get(target_table_name))
+            .ok_or(Error::InvalidStoredValue(
+                "target enum physical mapping missing",
+            ))?;
+        let physical_names = match shape {
+            ContentProjectionShape::History => {
+                physical_history_field_names(&target_table, target_mapping)?
+            }
+            ContentProjectionShape::Current => {
+                physical_current_field_names(&target_table, target_mapping)?
+            }
+        };
+        let physical_storage = match shape {
+            ContentProjectionShape::History => physical_history_table_name(target_mapping.table_id),
+            ContentProjectionShape::Current => {
+                physical_global_current_table_name(target_mapping.table_id)
+            }
+        };
+        let projection_output = widened_projection_descriptor(
+            &target_storage.record_schema(),
+            &physical_names,
+            self.database.table_schema(&physical_storage)?,
+        )?;
         let mut fields = target_storage
             .record_schema()
             .fields()
@@ -1195,83 +1310,64 @@ where
             };
             match projection {
                 CellProjection::Field(source) => {
-                    if matches!(column.column_type, records::ValueType::EnumTag(_)) {
-                        let target_mapping = self
-                            .catalogue
-                            .physical_mappings
-                            .get(&target_schema)
-                            .and_then(|mapping| mapping.tables.get(target_table_name))
-                            .ok_or(Error::InvalidStoredValue(
-                                "target scalar enum physical mapping missing",
-                            ))?;
-                        let column_id = target_mapping.columns.get(&column.name).copied().ok_or(
-                            Error::InvalidStoredValue(
-                                "target scalar enum physical column mapping missing",
-                            ),
-                        )?;
-                        let target_cases = target_mapping.scalar_enum_cases.get(&column_id).ok_or(
-                            Error::InvalidStoredValue(
-                                "target scalar enum identity mapping missing",
-                            ),
-                        )?;
-                        let physical_cases =
-                            self.physical_scalar_enum_cases(target_mapping.table_id, column_id)?;
-                        let tags = physical_cases
-                            .iter()
-                            .map(|identity| {
-                                target_cases
-                                    .iter()
-                                    .position(|candidate| candidate == identity)
-                                    .map(|tag| {
-                                        u8::try_from(tag).map_err(|_| {
-                                            Error::InvalidStoredValue(
-                                                "target scalar enum tag exhausted",
-                                            )
-                                        })
-                                    })
-                                    .transpose()
-                            })
-                            .collect::<Result<Vec<_>, Error>>()?;
-                        fields.push(ProjectField::enum_tag_remap(source, output, tags));
-                    } else if matches!(column.column_type, records::ValueType::Enum(_)) {
-                        let target_mapping = self
-                            .catalogue
-                            .physical_mappings
-                            .get(&target_schema)
-                            .and_then(|mapping| mapping.tables.get(target_table_name))
-                            .ok_or(Error::InvalidStoredValue(
-                                "target payload enum physical mapping missing",
-                            ))?;
-                        let column_id = target_mapping.columns.get(&column.name).copied().ok_or(
-                            Error::InvalidStoredValue(
-                                "target payload enum physical column mapping missing",
-                            ),
-                        )?;
-                        let target_cases = target_mapping
-                            .payload_enum_cases
-                            .get(&column_id)
-                            .ok_or(Error::InvalidStoredValue(
-                                "target payload enum identity mapping missing",
-                            ))?;
-                        let physical_cases =
-                            self.physical_payload_enum_cases(target_mapping.table_id, column_id)?;
-                        let tags = physical_cases
-                            .iter()
-                            .map(|identity| {
-                                target_cases
-                                    .iter()
-                                    .position(|target_case| target_case == identity)
-                                    .map(|tag| {
-                                        u32::try_from(tag).map_err(|_| {
-                                            Error::InvalidStoredValue(
-                                                "target payload enum tag exhausted",
-                                            )
-                                        })
-                                    })
-                                    .transpose()
-                            })
-                            .collect::<Result<Vec<_>, Error>>()?;
-                        fields.push(ProjectField::enum_remap(source, output, tags));
+                    let column_id = target_mapping.columns.get(&column.name).copied().ok_or(
+                        Error::InvalidStoredValue("target enum physical column mapping missing"),
+                    )?;
+                    let has_enum_boundary =
+                        target_mapping.scalar_enum_cases.contains_key(&column_id)
+                            || target_mapping.payload_enum_cases.contains_key(&column_id)
+                            || target_mapping
+                                .nested_scalar_enum_cases
+                                .contains_key(&column_id);
+                    let direct_enum = matches!(
+                        column.column_type,
+                        records::ValueType::EnumTag(_) | records::ValueType::Enum(_)
+                    );
+                    if has_enum_boundary || direct_enum {
+                        let remaps = if has_enum_boundary {
+                            self.physical_to_authored_enum_remaps(target_mapping, column_id)?
+                        } else {
+                            // Initial table construction precedes durable
+                            // registry hydration. At that bootstrap boundary
+                            // the sole physical descriptor uses exactly this
+                            // authored tag order, so an explicit identity map
+                            // both disables raw copying and records the same
+                            // descriptor-aware operation used after hydration.
+                            match &column.column_type {
+                                records::ValueType::EnumTag(schema) => EnumOccurrenceRemaps {
+                                    scalar: BTreeMap::from([(
+                                        "root".to_owned(),
+                                        (0..schema.variants.len())
+                                            .map(|tag| u8::try_from(tag).ok())
+                                            .collect(),
+                                    )]),
+                                    payload: BTreeMap::new(),
+                                },
+                                records::ValueType::Enum(schema) => EnumOccurrenceRemaps {
+                                    scalar: BTreeMap::new(),
+                                    payload: BTreeMap::from([(
+                                        "root".to_owned(),
+                                        (0..schema.cases.len())
+                                            .map(|tag| u32::try_from(tag).ok())
+                                            .collect(),
+                                    )]),
+                                },
+                                _ => unreachable!("direct enum checked above"),
+                            }
+                        };
+                        fields.push(ProjectField::recursive_enum_remap(
+                            source,
+                            output,
+                            projection_output
+                                .field_index(&user_column_field(&column.name))
+                                .and_then(|index| projection_output.fields().get(index))
+                                .ok_or(Error::InvalidStoredValue(
+                                    "target enum projection output field missing",
+                                ))?
+                                .value_type
+                                .clone(),
+                            remaps,
+                        ));
                     } else {
                         fields.push(ProjectField::renamed(source, output));
                     }
@@ -1917,11 +2013,11 @@ pub(super) fn physical_version_storage_tables(
         // before any descriptor assigns compact local tags.
         let mut scalar_enum_registries =
             BTreeMap::<PhysicalColumnId, BTreeSet<GlobalScalarEnumCaseId>>::new();
-        for (_, logical_table, mapping) in &variants {
+        for (schema_version, logical_table, mapping) in &variants {
             for column in &logical_table.columns {
-                if !matches!(column.column_type, records::ValueType::EnumTag(_)) {
+                let records::ValueType::EnumTag(enum_schema) = &column.column_type else {
                     continue;
-                }
+                };
                 let column_id =
                     mapping
                         .columns
@@ -1930,17 +2026,29 @@ pub(super) fn physical_version_storage_tables(
                         .ok_or(Error::InvalidStoredValue(
                             "physical scalar enum column mapping missing",
                         ))?;
-                let cases =
-                    mapping
-                        .scalar_enum_cases
-                        .get(&column_id)
-                        .ok_or(Error::InvalidStoredValue(
-                            "physical scalar enum identity mapping missing",
-                        ))?;
+                let cases = mapping
+                    .scalar_enum_cases
+                    .get(&column_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        // Provisional bootstrap schemas acquire their durable
+                        // mapping immediately after table construction.  Until
+                        // then this deterministic spelling is the same mapping
+                        // hydration will persist; it is not receipt-order state.
+                        enum_schema
+                            .variants
+                            .iter()
+                            .enumerate()
+                            .map(|(ordinal, _)| GlobalScalarEnumCaseId {
+                                introducing_schema: *schema_version,
+                                introducing_ordinal: ordinal as u8,
+                            })
+                            .collect()
+                    });
                 scalar_enum_registries
                     .entry(column_id)
                     .or_default()
-                    .extend(cases.iter().cloned());
+                    .extend(cases);
             }
         }
         let scalar_enum_registries = scalar_enum_registries
@@ -1982,7 +2090,7 @@ pub(super) fn physical_version_storage_tables(
         let mut payload_enum_layouts =
             BTreeMap::<(PhysicalColumnId, GlobalScalarEnumCaseId), records::RecordDescriptor>::new(
             );
-        for (_, logical_table, mapping) in &variants {
+        for (schema_version, logical_table, mapping) in &variants {
             for column in &logical_table.columns {
                 let records::ValueType::Enum(enum_schema) = &column.column_type else {
                     continue;
@@ -1995,13 +2103,21 @@ pub(super) fn physical_version_storage_tables(
                         .ok_or(Error::InvalidStoredValue(
                             "physical payload enum column mapping missing",
                         ))?;
-                let identities =
-                    mapping
-                        .payload_enum_cases
-                        .get(&column_id)
-                        .ok_or(Error::InvalidStoredValue(
-                            "physical payload enum identity mapping missing",
-                        ))?;
+                let identities = mapping
+                    .payload_enum_cases
+                    .get(&column_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        enum_schema
+                            .cases
+                            .iter()
+                            .enumerate()
+                            .map(|(ordinal, _)| GlobalScalarEnumCaseId {
+                                introducing_schema: *schema_version,
+                                introducing_ordinal: ordinal as u8,
+                            })
+                            .collect()
+                    });
                 if identities.len() != enum_schema.cases.len() {
                     return Err(Error::InvalidStoredValue(
                         "payload enum identity mapping width mismatch",
