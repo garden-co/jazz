@@ -3034,6 +3034,31 @@ fn direct_payload_enum_append_activates_and_recovers() {
 }
 
 #[test]
+fn payload_enum_unknown_case_is_ignored_only_when_unselected() {
+    let schema = |extra| {
+        let record = groove::records::RecordDescriptor::new([("x", groove::records::ValueType::String)]);
+        let mut cases = vec![groove::records::EnumCase::new("open", record.clone())];
+        if extra { cases.push(groove::records::EnumCase::new("closed", record)); }
+        JazzSchema::new([TableSchema::new("items", [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("status", ColumnType::Enum(Box::new(groove::records::EnumSchema::new("status", cases).unwrap()))),
+        ])])
+    };
+    let base = schema(false); let evolved = SchemaVersion::new(schema(true));
+    let (_dir, mut core) = open_node_with_schema(node(0x76), base.clone());
+    publish_schema_lineage(&mut core, evolved.clone(), MigrationLens::new(base.version_id(), evolved.id, vec![TableLens { source_table: "items".into(), target_table: "items".into(), ops: vec![LensOp::TransformColumn { column: "status".into(), transform: "jazz.identity".into() }] }]), Vec::<String>::new(), Vec::<String>::new()).unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema { author: AuthorId::SYSTEM, pointer: CurrentWriteSchema { revision: 1, schema: evolved.id } }).unwrap();
+    let payload = groove::records::RecordDescriptor::new([("x", groove::records::ValueType::String)]);
+    core.commit_mergeable(MergeableCommit::new("items", row(0x76), 1).cells(BTreeMap::from([
+        ("title".into(), v("ok")), ("status".into(), Value::Enum(groove::records::EnumValue::create(1, payload, &[v("closed")]).unwrap()))
+    ]))).unwrap();
+    let title = Query::from("items").select(["title"]).validate(&base).unwrap();
+    assert!(core.query_rows(&title, &title.bind(BTreeMap::new()).unwrap(), DurabilityTier::Local).is_ok());
+    let all = Query::from("items").validate(&base).unwrap();
+    assert!(core.query_rows(&all, &all.bind(BTreeMap::new()).unwrap(), DurabilityTier::Local).is_err());
+}
+
+#[test]
 fn old_enum_schema_only_decodes_cases_required_by_the_query() {
     // This is an internal current-source boundary test.  The public query API
     // supplies the requirement closure; the old read schema must not decode a
