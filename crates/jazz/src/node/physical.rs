@@ -76,15 +76,19 @@ fn compare_scalar_enum_cases(
     left: &GlobalScalarEnumCaseId,
     right: &GlobalScalarEnumCaseId,
 ) -> std::cmp::Ordering {
-    // Schema aliases are allocated by authoritative catalogue publication.
-    // They are therefore the only ordering that is both shared by partial
-    // catalogue replicas and meaningful for an enum's default order. UUID is
-    // solely a deterministic tie-breaker for corrupt/incomplete catalogues.
-    aliases
-        .get(&left.introducing_schema)
-        .cmp(&aliases.get(&right.introducing_schema))
+    // Every descendant repeats its inherited cases at their original authored
+    // ordinal. That ordinal therefore preserves the existing physical prefix;
+    // authoritative catalogue aliases linearize only genuinely concurrent
+    // introductions at the same next ordinal. UUID is solely a deterministic
+    // tie-breaker for corrupt/incomplete catalogues.
+    left.introducing_ordinal
+        .cmp(&right.introducing_ordinal)
+        .then_with(|| {
+            aliases
+                .get(&left.introducing_schema)
+                .cmp(&aliases.get(&right.introducing_schema))
+        })
         .then_with(|| left.introducing_schema.cmp(&right.introducing_schema))
-        .then(left.introducing_ordinal.cmp(&right.introducing_ordinal))
 }
 
 fn physical_scalar_enum_schema(
@@ -1684,10 +1688,12 @@ fn physical_write_descriptor(
                     .iter()
                     .find(|column| column.name == *name)
                     .ok_or(Error::InvalidStoredValue("physical write column missing"))?;
-                Ok((
-                    name.clone(),
-                    widen_projection_value_type(&logical.value_type, &physical.column_type),
-                ))
+                // Writes target the physical table itself. Unlike read-side
+                // widening, its descriptor must retain the physical enum
+                // registry identities so Groove accepts the variant record;
+                // values are explicitly re-encoded before this point.
+                let _ = logical;
+                Ok((name.clone(), physical.column_type.clone()))
             })
             .collect::<Result<Vec<_>, Error>>()?,
     ))
@@ -2556,16 +2562,7 @@ fn physical_history_descriptor(
             "physical history descriptor width mismatch",
         ));
     }
-    Ok(rebind_physical_user_registries(
-        records::RecordDescriptor::new(
-            physical_names.into_iter().zip(
-                logical_descriptor
-                    .fields()
-                    .iter()
-                    .map(|field| field.value_type.clone()),
-            ),
-        ),
-    ))
+    physical_descriptor_with_enum_registries(logical_descriptor, physical_names, mapping)
 }
 
 fn physical_current_descriptor(
@@ -2579,16 +2576,7 @@ fn physical_current_descriptor(
             "physical current descriptor width mismatch",
         ));
     }
-    Ok(rebind_physical_user_registries(
-        records::RecordDescriptor::new(
-            physical_names.into_iter().zip(
-                logical_descriptor
-                    .fields()
-                    .iter()
-                    .map(|field| field.value_type.clone()),
-            ),
-        ),
-    ))
+    physical_descriptor_with_enum_registries(logical_descriptor, physical_names, mapping)
 }
 
 fn physical_rejected_version_descriptor(
@@ -2602,35 +2590,50 @@ fn physical_rejected_version_descriptor(
             "physical rejected-version descriptor width mismatch",
         ));
     }
-    Ok(rebind_physical_user_registries(
-        records::RecordDescriptor::new(
-            physical_names.into_iter().zip(
-                logical_descriptor
-                    .fields()
-                    .iter()
-                    .map(|field| field.value_type.clone()),
-            ),
-        ),
-    ))
+    physical_descriptor_with_enum_registries(logical_descriptor, physical_names, mapping)
 }
 
-fn rebind_physical_user_registries(
-    descriptor: records::RecordDescriptor,
-) -> records::RecordDescriptor {
-    records::RecordDescriptor::new(descriptor.fields().iter().map(|field| {
-        let name = field.name.clone().expect("physical descriptors are named");
-        let value_type = name
-            .strip_prefix("user_")
-            .and_then(|id| id.parse::<u64>().ok())
-            .map(|id| {
-                field
-                    .value_type
-                    .clone()
-                    .rebind_variant_registries(&format!("physical-column/{id}"))
+fn physical_descriptor_with_enum_registries(
+    logical: records::RecordDescriptor,
+    physical_names: Vec<String>,
+    mapping: &TablePhysicalMapping,
+) -> Result<records::RecordDescriptor, Error> {
+    Ok(records::RecordDescriptor::new(
+        physical_names
+            .into_iter()
+            .zip(logical.fields())
+            .map(|(name, field)| {
+                let value_type = if let Some(id) = name
+                    .strip_prefix("user_")
+                    .and_then(|id| id.parse::<u64>().ok())
+                {
+                    let id = PhysicalColumnId(id);
+                    if let Some(cases) = mapping.scalar_enum_cases.get(&id) {
+                        physical_scalar_enum_schema(id, cases)
+                            .map(|schema| records::ValueType::EnumTag(schema).nullable())?
+                    } else {
+                        match &field.value_type {
+                            // Physical user cells are nullable for absence, but their
+                            // direct enum registry belongs to the column occurrence—not
+                            // to the nullable wrapper. Match the storage descriptor's
+                            // `physical_scalar_enum_schema(column_id, ...)` identity.
+                            records::ValueType::Nullable(inner) => records::ValueType::Nullable(
+                                Box::new(inner.as_ref().clone().rebind_variant_registries(
+                                    &format!("physical-column/{}", id.0),
+                                )),
+                            ),
+                            value_type => value_type
+                                .clone()
+                                .rebind_variant_registries(&format!("physical-column/{}", id.0)),
+                        }
+                    }
+                } else {
+                    field.value_type.clone()
+                };
+                Ok((name, value_type))
             })
-            .unwrap_or_else(|| field.value_type.clone());
-        (name, value_type)
-    }))
+            .collect::<Result<Vec<_>, Error>>()?,
+    ))
 }
 
 fn physical_history_field_names(
