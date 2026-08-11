@@ -893,11 +893,29 @@ impl ProjectField {
         }
     }
 
+    /// Remap a scalar enum's compact source discriminant into another
+    /// descriptor's discriminant. `None` is a deliberate non-total projection
+    /// and fails execution rather than fabricating a case.
+    pub fn enum_tag_remap(
+        source_name: impl Into<String>,
+        output_name: impl Into<String>,
+        tags: Vec<Option<u8>>,
+    ) -> Self {
+        Self {
+            expression: ProjectExpr::EnumTagRemap {
+                source: FieldRef::name(source_name),
+                tags,
+            },
+            output_name: output_name.into(),
+        }
+    }
+
     pub fn source(&self) -> Option<&FieldRef> {
         match &self.expression {
             ProjectExpr::Field(source)
             | ProjectExpr::Nullable(source)
-            | ProjectExpr::NullableFlat(source) => Some(source),
+            | ProjectExpr::NullableFlat(source)
+            | ProjectExpr::EnumTagRemap { source, .. } => Some(source),
             ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => {
                 None
             }
@@ -916,6 +934,10 @@ pub enum ProjectExpr {
     Null(ValueType),
     Nullable(FieldRef),
     NullableFlat(FieldRef),
+    EnumTagRemap {
+        source: FieldRef,
+        tags: Vec<Option<u8>>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
