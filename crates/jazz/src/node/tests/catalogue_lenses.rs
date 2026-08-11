@@ -3249,6 +3249,41 @@ fn enum_projection_requirement_closure_includes_hidden_policy_fields() {
 }
 
 #[test]
+fn enum_projection_requirement_none_allows_unused_relation_enum() {
+    let schema = |states: &[&str]| JazzSchema::new([
+        TableSchema::new("items", [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("state", ColumnType::Uuid),
+        ]).with_reference("state", "states"),
+        TableSchema::new("states", [ColumnSchema::new("status", ColumnType::EnumTag(
+            groove::records::ScalarEnumSchema::new("status", states.iter().copied()).unwrap(),
+        ))]),
+    ]);
+    let base = schema(&["open"]);
+    let evolved = SchemaVersion::new(schema(&["open", "closed"]));
+    let (_dir, mut core) = open_node_with_schema(node(0x78), base.clone());
+    publish_schema_lineage(&mut core, evolved.clone(), MigrationLens::new(
+        base.version_id(), evolved.id, vec![
+            TableLens { source_table: "items".into(), target_table: "items".into(), ops: vec![] },
+            TableLens { source_table: "states".into(), target_table: "states".into(), ops: vec![LensOp::TransformColumn { column: "status".into(), transform: "jazz.identity".into() }] },
+        ],
+    ), Vec::<String>::new(), Vec::<String>::new()).unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema { author: AuthorId::SYSTEM, pointer: CurrentWriteSchema { revision: 1, schema: evolved.id } }).unwrap();
+    let state = row(0x79);
+    core.commit_mergeable(MergeableCommit::new("states", state, 1).cells(BTreeMap::from([("status".into(), Value::EnumTag(1))]))).unwrap();
+    core.commit_mergeable(MergeableCommit::new("items", row(0x7a), 2).cells(BTreeMap::from([
+        ("title".into(), v("root remains readable")), ("state".into(), Value::Uuid(state.0)),
+    ]))).unwrap();
+
+    let root_only = Query::from("items").select(["title"]).validate(&base).unwrap();
+    assert!(core.query_rows(&root_only, &root_only.bind(BTreeMap::new()).unwrap(), DurabilityTier::Local).is_ok());
+    // Includes are hydrated by a separate path; this compilation path still
+    // proves the implicit relation source has no accidental enum dependency.
+    let included = Query::from("items").select(["title"]).include("state").validate(&base).unwrap();
+    assert!(core.query_rows(&included, &included.bind(BTreeMap::new()).unwrap(), DurabilityTier::Local).is_ok());
+}
+
+#[test]
 fn independent_column_enum_registries_evolve_additively_across_reopen() {
     // Registry allocation is physical catalogue metadata, so this internal
     // test asserts both user-visible decoding and the non-Cartesian boundary.
