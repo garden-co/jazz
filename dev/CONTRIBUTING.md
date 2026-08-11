@@ -33,6 +33,28 @@ pnpm test          # everything (via turbo)
 cargo test -p jazz --no-default-features --features test   # rust core only
 ```
 
+### Bounded Rust runs and receipts
+
+Use the repository launcher when a test could hang or when comparing local and
+CI run time. It writes a machine-readable JSON receipt containing the exact
+command, exact dirty-tree fingerprint (without source contents), toolchain,
+cache configuration, shard, timing, and direct exit status.
+
+```sh
+# Recommended: per-test slow timeout, named hung-test output, deterministic shard.
+cargo install cargo-nextest --locked
+node dev/gates/run-rust-tests.mjs --shard-index 1 --shard-count 2 -- \
+  --workspace --lib --bins --tests --features test
+
+# No Devbox or Nextest required: preserves Cargo selection and adds an overall
+# timeout, but cannot attribute a hang to an individual test.
+node dev/gates/run-rust-tests.mjs --timeout-seconds 900 -- -p jazz
+```
+
+The Nextest `jazz` profile reports a test slow after 60 seconds and terminates
+it one minute later. Hash partitions are deterministic and do not overlap for a
+fixed test inventory; keep the shard count identical across all CI shards.
+
 ### Snapshot testing with insta in rust
 
 Sync integration tests use [insta](https://insta.rs) for inline snapshot assertions. Snapshots live directly in the test source as `@"..."` strings — no separate `.snap` files.
