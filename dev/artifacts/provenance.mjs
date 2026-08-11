@@ -7,7 +7,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -26,13 +26,14 @@ function toolVersion(root, name, args = ["--version"]) {
   const commandArgs = name === "napi" ? ["--dir", "crates/jazz-napi", "exec", "napi", ...args] : args;
   const result = spawnSync(command, commandArgs, { cwd: root, encoding: "utf8", shell: process.platform === "win32" });
   if (result.status === 0) return result.stdout.trim() || result.stderr.trim();
-  return `unavailable: install ${name} or run pnpm ensure:rust-toolchain`;
+  if (name === "wasm-pack") return "unavailable: install wasm-pack (run pnpm ensure:rust-toolchain), then rebuild via pnpm --filter jazz-wasm build";
+  return `unavailable: ${name} is not on PATH`;
 }
 
 function wasmPackToolVersion(root, name) {
   const direct = toolVersion(root, name);
   if (!direct.startsWith("unavailable:")) return direct;
-  if (process.env.JAZZ_ARTIFACT_DISABLE_WASM_PACK_CACHE === "1") return direct;
+  if (process.env.JAZZ_ARTIFACT_DISABLE_WASM_PACK_CACHE === "1") return `unavailable: ${name} is supplied by wasm-pack; rebuild via pnpm --filter jazz-wasm build`;
   const caches = [process.env.XDG_CACHE_HOME, join(homedir(), ".cache"), join(homedir(), "Library", "Caches")].filter(Boolean);
   const candidates = [];
   for (const cache of caches) {
@@ -45,7 +46,7 @@ function wasmPackToolVersion(root, name) {
     }
   }
   candidates.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
-  if (!candidates.length) return direct;
+  if (!candidates.length) return `unavailable: ${name} is supplied by wasm-pack; rebuild via pnpm --filter jazz-wasm build`;
   return toolVersion(root, candidates[0]);
 }
 
@@ -72,6 +73,15 @@ const inputsFor = {
   wasm: ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/config", ".cargo/config.toml", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "turbo.json", "dev/artifacts", "crates/jazz-wasm", "crates/jazz", "crates/groove", "crates/opfs-btree", "crates/wasm-tracing"],
   napi: ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/config", ".cargo/config.toml", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "turbo.json", "dev/artifacts", "crates/jazz-napi", "crates/jazz", "crates/groove", "crates/opfs-btree"],
 };
+
+function artifactHashes(root, kind) {
+  const paths = kind === "wasm"
+    ? [join(root, "crates/jazz-wasm/pkg/jazz_wasm_bg.wasm")]
+    : readdirSync(join(root, "crates/jazz-napi"), { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".node"))
+      .map((entry) => join(root, "crates/jazz-napi", entry.name));
+  return paths.filter(existsSync).sort().map((path) => ({ file: basename(path), sha256: sha256(readFileSync(path)) }));
+}
 
 export function expectedManifest(root, kind, profile, targetOverride) {
   if (!(kind in inputsFor)) throw new Error(`unknown artifact kind: ${kind}`);
@@ -108,6 +118,7 @@ export function expectedManifest(root, kind, profile, targetOverride) {
     target: targetOverride ?? (kind === "wasm" ? "wasm32-unknown-unknown" : toolVersion(root, "rustc", ["-vV"]).match(/^host: (.+)$/m)?.[1] ?? "unknown"),
     features: "default",
     packageInputs: inputHash.digest("hex"),
+    artifacts: artifactHashes(root, kind),
   };
 }
 
@@ -124,14 +135,21 @@ export function verifyManifest(root, kind, profile, targetOverride) {
   let actual;
   try { actual = JSON.parse(readFileSync(path, "utf8")); } catch { return `manifest is invalid (${path})`; }
   const expected = expectedManifest(root, kind, profile, targetOverride);
-  for (const key of ["schema", "kind", "profile", "cargoLock", "rustToolchain", "toolchainInputs", "target", "features", "packageInputs"]) {
-    if (actual[key] !== expected[key]) return `${key} differs (built ${JSON.stringify(actual[key])}, expected ${JSON.stringify(expected[key])})`;
+  for (const key of ["schema", "kind", "profile", "cargoLock", "rustToolchain", "toolchainInputs", "target", "features", "packageInputs", "artifacts"]) {
+    if (JSON.stringify(actual[key]) !== JSON.stringify(expected[key])) return `${key} differs (built ${JSON.stringify(actual[key])}, expected ${JSON.stringify(expected[key])})`;
   }
   for (const key of ["rustc", "wasmPack", "wasmBindgen", "wasmOpt", "napi"]) {
     if (actual.tools?.[key] !== expected.tools[key]) return `tools.${key} differs (built ${JSON.stringify(actual.tools?.[key])}, expected ${JSON.stringify(expected.tools[key])})`;
   }
   for (const key of ["head", "tree", "dirtyDiff"]) if (actual.git?.[key] !== expected.git[key]) return `git.${key} differs`;
   return null;
+}
+
+export function verifyPublishedNapiManifest(manifest, target, nodePath) {
+  if (manifest.kind !== "napi" || manifest.profile !== "release" || manifest.target !== target) return `manifest is for ${manifest.kind}/${manifest.profile}/${manifest.target}, expected napi/release/${target}`;
+  if (!existsSync(nodePath)) return `native binding is missing (${nodePath})`;
+  const expected = { file: basename(nodePath), sha256: sha256(readFileSync(nodePath)) };
+  return manifest.artifacts?.some((artifact) => artifact.file === expected.file && artifact.sha256 === expected.sha256) ? null : `manifest does not match ${expected.file}`;
 }
 
 function main(args) {

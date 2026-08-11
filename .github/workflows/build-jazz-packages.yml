@@ -186,11 +186,14 @@ jobs:
         run: |
           node dev/artifacts/build.mjs napi release --target ${{ matrix.target }}
           node dev/artifacts/provenance.mjs verify napi release --target ${{ matrix.target }}
+          cp crates/jazz-napi/.jazz-artifact-manifest.json crates/jazz-napi/jazz-napi.${{ matrix.platform }}.manifest.json
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-napi-binding-${{ matrix.platform }}
-          path: crates/jazz-napi/jazz-napi.${{ matrix.platform }}.node
+          path: |
+            crates/jazz-napi/jazz-napi.${{ matrix.platform }}.node
+            crates/jazz-napi/jazz-napi.${{ matrix.platform }}.manifest.json
           if-no-files-found: error
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -261,6 +264,9 @@ jobs:
           pnpm exec napi version --npm-dir npm
           node -e 'const fs=require("fs");const rootPath="package.json";const pkg=JSON.parse(fs.readFileSync(rootPath,"utf8"));const deps=[];for(const entry of fs.readdirSync("npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const child=JSON.parse(fs.readFileSync(`npm/${entry.name}/package.json`,"utf8"));deps.push([child.name,pkg.version]);}deps.sort((a,b)=>a[0].localeCompare(b[0]));pkg.optionalDependencies=Object.fromEntries(deps);fs.writeFileSync(rootPath,`${JSON.stringify(pkg,null,2)}\n`);'
 
+      - name: Stage and verify jazz-napi provenance manifests
+        run: node dev/artifacts/stage-napi-manifests.mjs
+
       - name: Build jazz-tools TypeScript package
         run: pnpm --filter jazz-tools build
 
@@ -320,6 +326,7 @@ jobs:
             !crates/jazz-napi/node_modules
             !crates/jazz-napi/target
             !crates/jazz-napi/artifacts
+            !crates/jazz-napi/*.manifest.json
           include-hidden-files: true
           if-no-files-found: error
 

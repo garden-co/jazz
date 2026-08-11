@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expectedManifest, manifestPath, verifyManifest, writeManifest } from "./provenance.mjs";
+import { expectedManifest, manifestPath, verifyManifest, verifyPublishedNapiManifest, writeManifest } from "./provenance.mjs";
+import { stageNapiManifests } from "./stage-napi-manifests.mjs";
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "jazz-artifact-provenance-"));
@@ -82,7 +83,7 @@ test("missing optional tools have an explicit remediation value", () => {
   const root = fixture();
   delete process.env.JAZZ_ARTIFACT_TOOL_WASM_OPT;
   process.env.JAZZ_ARTIFACT_DISABLE_WASM_PACK_CACHE = "1";
-  assert.match(expectedManifest(root, "wasm", "fast").tools.wasmOpt, /unavailable: install wasm-opt or run pnpm ensure:rust-toolchain/);
+  assert.match(expectedManifest(root, "wasm", "fast").tools.wasmOpt, /unavailable: wasm-opt is supplied by wasm-pack; rebuild via pnpm --filter jazz-wasm build/);
   process.env.JAZZ_ARTIFACT_TOOL_WASM_OPT = "wasm-opt test";
   delete process.env.JAZZ_ARTIFACT_DISABLE_WASM_PACK_CACHE;
 });
@@ -91,4 +92,38 @@ test("release NAPI CI builds use the manifest-producing wrapper", () => {
   const workflow = readFileSync(new URL("../../.github/workflows/build-jazz-packages.yml", import.meta.url), "utf8");
   assert.match(workflow, /node dev\/artifacts\/build\.mjs napi release --target \$\{\{ matrix\.target \}\}/);
   assert.match(workflow, /node dev\/artifacts\/provenance\.mjs verify napi release --target \$\{\{ matrix\.target \}\}/);
+});
+
+test("assembled NAPI packages carry only matching manifests and reject stale or missing inputs", () => {
+  const root = fixture();
+  const platforms = {
+    "linux-x64-gnu": "x86_64-unknown-linux-gnu",
+    "darwin-x64": "x86_64-apple-darwin",
+    "darwin-arm64": "aarch64-apple-darwin",
+    "win32-x64-msvc": "x86_64-pc-windows-msvc",
+  };
+  for (const platform of Object.keys(platforms)) {
+    const dir = join(root, "crates/jazz-napi/npm", platform);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "package.json"), '{"files":["*.node"]}\n');
+    writeFileSync(join(root, "crates/jazz-napi", `jazz-napi.${platform}.node`), platform);
+    writeFileSync(join(dir, `jazz-napi.${platform}.node`), platform);
+  }
+  writeFileSync(join(root, "crates/jazz-napi/package.json"), '{"files":["index.js"]}\n');
+  mkdirSync(join(root, "crates/jazz-napi/artifacts"), { recursive: true });
+  for (const [platform, target] of Object.entries(platforms)) {
+    const manifest = expectedManifest(root, "napi", "release", target);
+    writeFileSync(join(root, "crates/jazz-napi/artifacts", `jazz-napi.${platform}.manifest.json`), JSON.stringify(manifest));
+  }
+  stageNapiManifests(root);
+  const node = join(root, "crates/jazz-napi/npm/linux-x64-gnu/jazz-napi.linux-x64-gnu.node");
+  const manifest = JSON.parse(readFileSync(join(root, "crates/jazz-napi/npm/linux-x64-gnu/jazz-napi.linux-x64-gnu.manifest.json"), "utf8"));
+  assert.equal(verifyPublishedNapiManifest(manifest, platforms["linux-x64-gnu"], node), null);
+  assert.match(readFileSync(join(root, "crates/jazz-napi/package.json"), "utf8"), /provenance\/\*\.manifest\.json/);
+
+  writeFileSync(node, "stale");
+  assert.match(verifyPublishedNapiManifest(manifest, platforms["linux-x64-gnu"], node), /does not match/);
+  writeFileSync(node, "linux-x64-gnu");
+  rmSync(join(root, "crates/jazz-napi/artifacts/jazz-napi.darwin-x64.manifest.json"), { force: true });
+  assert.throws(() => stageNapiManifests(root), /missing provenance manifest/);
 });
