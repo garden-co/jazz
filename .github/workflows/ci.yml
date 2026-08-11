@@ -80,7 +80,17 @@ jobs:
       - name: Install Rust prerequisites
         run: pnpm run ensure:rust-toolchain
 
-      - run: cargo test --workspace --lib --bins --tests --features test
+      - name: Install bounded Rust test runner
+        run: cargo install cargo-nextest --locked
+      - name: Workspace Rust tests (bounded, sharded, receipted)
+        run: node dev/gates/run-rust-tests.mjs --timeout-seconds 780 -- --workspace --lib --bins --tests --features test
+      - name: Upload Rust test receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-test-receipt
+          path: target/test-receipts/*.json
+          if-no-files-found: error
       # The correctness story of the engine-swap PR, first-class in CI
       # (Anselm-approved 2026-07-19): mechanism canaries, differential
       # harnesses, and the maintained-vs-one-shot oracle at a CI-sized seed
