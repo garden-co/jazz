@@ -1945,4 +1945,36 @@ mod variant_case_tests {
             &value_type(&["new"]),
         ));
     }
+
+    #[test]
+    fn concurrent_scalar_enum_additions_preserve_schema_qualified_case_identity() {
+        // This is deliberately an internal lowering test: the failure happens
+        // before a public row can be decoded. Two concurrent authored schemas
+        // both use ordinal 2, so accepting the raw tags as one physical tag
+        // would alias `archived` and `snoozed`.
+        let schema = |variants: &[&str]| {
+            records::ValueType::EnumTag(
+                records::ScalarEnumSchema::new("status", variants.iter().copied())
+                    .unwrap()
+                    .with_registry_id(91),
+            )
+        };
+        let archived = schema(&["draft", "published", "archived"]);
+        let snoozed = schema(&["draft", "published", "snoozed"]);
+
+        let merged_ab = merge_physical_value_type(&archived, &snoozed)
+            .expect("concurrent enum cases must coexist in one physical registry");
+        let merged_ba = merge_physical_value_type(&snoozed, &archived)
+            .expect("local arrival order must not choose semantic enum order");
+        assert_eq!(merged_ab, merged_ba);
+
+        // The implementation must additionally translate authored ordinal 2
+        // through a schema-qualified identity at both storage boundaries. This
+        // assertion only establishes the prerequisite: the physical registry
+        // has distinct slots for the sibling introductions.
+        let records::ValueType::EnumTag(registry) = merged_ab else {
+            panic!("expected scalar enum registry");
+        };
+        assert_eq!(registry.variants.len(), 4);
+    }
 }
