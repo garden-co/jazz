@@ -287,13 +287,22 @@ where
             ));
         }
         let mut added_columns = Vec::new();
+        let mut evolved_columns = Vec::new();
         for column in columns {
             match updated
                 .columns
-                .iter()
+                .iter_mut()
                 .find(|existing| existing.name == column.name)
             {
                 Some(existing) if existing == &column => {}
+                Some(existing)
+                    if existing
+                        .column_type
+                        .can_evolve_registry_to(&column.column_type) =>
+                {
+                    *existing = column.clone();
+                    evolved_columns.push(column);
+                }
                 Some(_) => {
                     return Err(Error::TableFieldDefinitionMismatch {
                         table: table.to_owned(),
@@ -308,6 +317,11 @@ where
         }
         updated.variants.push(variant.clone());
         validate_table_schema_variants(&updated)?;
+        if !evolved_columns.is_empty() {
+            self.ivm_runtime
+                .evolve_table_variant_registries(table, &evolved_columns)
+                .map_err(Error::IvmRuntime)?;
+        }
         self.ivm_runtime
             .register_table_variant_with_columns(table, added_columns, variant)
             .map_err(Error::IvmRuntime)
@@ -329,7 +343,7 @@ where
                 .find(|column| column.name == desired.name)
                 && !current
                     .column_type
-                    .registry_compatible_with(&desired.column_type)
+                    .can_evolve_registry_to(&desired.column_type)
             {
                 return Err(Error::TableFieldDefinitionMismatch {
                     table: table.to_owned(),

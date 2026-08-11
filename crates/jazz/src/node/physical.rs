@@ -3330,27 +3330,25 @@ fn merge_physical_value_type(
         (ValueType::Enum(left), ValueType::Enum(right))
             if left.registry_id == right.registry_id =>
         {
-            // As with scalar cases, ordinal is local to the authored schema.
-            // This fallback cannot carry the catalogue's schema-qualified case
-            // identities (the physical table path does), but it can still
-            // combine independent payload layouts deterministically and reject
-            // same-name payload incompatibilities rather than aliasing tags.
-            let mut by_name = BTreeMap::<String, records::RecordDescriptor>::new();
-            for case in left.cases.iter().chain(&right.cases) {
-                match by_name.entry(case.name.clone()) {
-                    std::collections::btree_map::Entry::Vacant(entry) => {
-                        entry.insert(case.payload.clone());
-                    }
-                    std::collections::btree_map::Entry::Occupied(mut entry) => {
-                        let payload = merge_physical_record_descriptor(entry.get(), &case.payload)?;
-                        entry.insert(payload);
-                    }
+            // Preserve the established physical tag prefix. These names are
+            // opaque spellings of catalogue identities; sorting them would
+            // silently retag stored values merely because two schema IDs sort
+            // differently. New identities append in the incoming descriptor's
+            // already-canonical catalogue order.
+            let mut cases = left.cases.clone();
+            for incoming_case in &right.cases {
+                if let Some(existing_case) = cases
+                    .iter_mut()
+                    .find(|existing| existing.name == incoming_case.name)
+                {
+                    existing_case.payload = merge_physical_record_descriptor(
+                        &existing_case.payload,
+                        &incoming_case.payload,
+                    )?;
+                } else {
+                    cases.push(incoming_case.clone());
                 }
             }
-            let cases = by_name
-                .into_iter()
-                .map(|(name, payload)| records::EnumCase::new(name, payload))
-                .collect::<Vec<_>>();
             Ok(ValueType::Enum(Box::new(
                 records::EnumSchema::new(right.name.clone(), cases)
                     .map_err(|_| Error::InvalidStoredValue("invalid physical enum registry"))?

@@ -2934,6 +2934,105 @@ fn enum_projection_schema(statuses: &[&str]) -> JazzSchema {
     )])
 }
 
+fn payload_enum_projection_schema(cases: &[&str]) -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "items",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new(
+                "status",
+                ColumnType::Enum(Box::new(
+                    groove::records::EnumSchema::new(
+                        "status",
+                        cases.iter().map(|case| {
+                            groove::records::EnumCase::new(
+                                *case,
+                                groove::records::RecordDescriptor::new([(
+                                    "note",
+                                    groove::records::ValueType::String,
+                                )]),
+                            )
+                        }),
+                    )
+                    .unwrap(),
+                )),
+            ),
+        ],
+    )])
+}
+
+/// This is an internal physical-activation regression: public clients cannot
+/// directly observe Groove's live descriptors, but a payload-enum append must
+/// activate and survive recovery before a newer client can write its new case.
+#[test]
+fn direct_payload_enum_append_activates_and_recovers() {
+    let base = payload_enum_projection_schema(&["draft"]);
+    let evolved_schema = payload_enum_projection_schema(&["draft", "published"]);
+    let evolved = SchemaVersion::new(evolved_schema.clone());
+    let (dir, mut core) = open_node_with_schema(node(0x76), base.clone());
+    publish_schema_lineage(
+        &mut core,
+        evolved.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "items".to_owned(),
+                target_table: "items".to_owned(),
+                ops: vec![LensOp::TransformColumn {
+                    column: "status".to_owned(),
+                    transform: "jazz.identity".to_owned(),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
+        },
+    })
+    .unwrap();
+    let published_payload = groove::records::RecordDescriptor::new([(
+        "note",
+        groove::records::ValueType::String,
+    )]);
+    core.commit_mergeable(
+        MergeableCommit::new("items", row(0x76), 1).cells(BTreeMap::from([
+            ("title".to_owned(), v("new-case")),
+            (
+                "status".to_owned(),
+                Value::Enum(groove::records::EnumValue::create(
+                    1,
+                    published_payload,
+                    &[v("written after activation")],
+                )
+                .unwrap()),
+            ),
+        ])),
+    )
+    .unwrap();
+    let table_id = core.catalogue.physical_mappings[&evolved.id].tables["items"].table_id;
+    let physical_history = physical_history_table_name(table_id);
+    assert_eq!(core.query_table_versions("items").unwrap().len(), 1);
+    drop(core);
+
+    let mut reopened = reopen_node_at(&dir, node(0x76), base);
+    assert_eq!(reopened.query_table_versions("items").unwrap().len(), 1);
+    let table = reopened.database.table_schema(&physical_history).unwrap();
+    assert!(table.value_variant_registries.values().any(|registry| {
+        matches!(
+            registry,
+            groove::records::VariantRegistry::Enum { cases }
+                if cases.len() == 2
+        )
+    }));
+}
+
 #[test]
 fn old_enum_schema_only_decodes_cases_required_by_the_query() {
     // This is an internal current-source boundary test.  The public query API
