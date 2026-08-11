@@ -16,8 +16,9 @@ use crate::protocol::{
     SubscribeServerFailureCode, TableLens,
 };
 use crate::protocol_limits::{
-    MAX_CONTENT_EXTENT_BYTES, MAX_FETCH_ROW_VERSIONS, MAX_KNOWN_STATE_EXACT_REFS,
-    MAX_LOGICAL_MESSAGE_BYTES, MAX_SHAPE_AST_BYTES, MAX_WIRE_FRAME_BYTES,
+    MAX_CONTENT_EXTENT_BYTES, MAX_FETCH_ROW_VERSIONS, MAX_INFLIGHT_LOGICAL_MESSAGES,
+    MAX_KNOWN_STATE_EXACT_REFS, MAX_LOGICAL_MESSAGE_BYTES, MAX_SHAPE_AST_BYTES,
+    MAX_WIRE_FRAME_BYTES,
 };
 use crate::query::{
     ArraySubquery, BindingId, Include, JoinMode, OrderDirection, PolicyBranch, Predicate,
@@ -27,10 +28,11 @@ use crate::query::{
 use crate::schema::{Policy, TableSchema, WritePolicies};
 use crate::time::{GlobalSeq, TxTime};
 use crate::tx::TxId;
-use crate::wire::decode_sync_message;
 use crate::wire::{
     FEATURE_MESSAGE_FRAGMENTATION, FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD,
-    WireStreamDecoder, current_wire_features,
+    WIRE_PROTOCOL_VERSION, WireEnvelope, WireError, WireErrorCode, WireFrame, WireMessageFragment,
+    WireRetry, WireSession, WireStreamDecoder, WireTransport, current_wire_features, decode_frame,
+    decode_sync_message, encode_frame,
 };
 
 fn block_on<F: Future>(future: F) -> F::Output {
