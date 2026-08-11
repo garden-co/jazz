@@ -3067,6 +3067,15 @@ fn old_enum_schema_only_decodes_cases_required_by_the_query() {
     let evolved_schema = enum_projection_schema(&["open", "closed"]);
     let evolved = SchemaVersion::new(evolved_schema.clone());
     let (_dir, mut core) = open_node_with_schema(node(0x75), base.clone());
+    // Requirement-none auxiliary sources still need a physical row shape for
+    // relation closure, but their unrequested enum cell must be typed-null.
+    assert!(core
+        .ensure_physical_current_projection_for_enum_columns(
+            base.version_id(),
+            "items",
+            &BTreeSet::new(),
+        )
+        .is_ok());
     let enum_lens = MigrationLens::new(
         base.version_id(),
         evolved.id,

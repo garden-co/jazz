@@ -677,10 +677,17 @@ impl IvmRuntime {
                 target: variant_projection_target_name(&target).to_owned(),
             }
         })?;
+        // An explicitly typed literal is also a descriptor boundary: it does
+        // not copy the source cell at all, so a physical enum registry in the
+        // input cannot leak through it.  Jazz uses this for requirement-none
+        // auxiliary sources, whose enum cells are deliberately typed-null.
         let allow_recursive_replacement = fields.is_some_and(|fields| {
-            fields
-                .iter()
-                .any(|field| matches!(field.expression, ProjectExpr::RecursiveEnumRemap { .. }))
+            fields.iter().any(|field| {
+                matches!(
+                    field.expression,
+                    ProjectExpr::RecursiveEnumRemap { .. } | ProjectExpr::TypedLiteral { .. }
+                )
+            })
         });
         let case = if let Some(fields) = fields {
             let projected = project_descriptor(&source, fields)?;
