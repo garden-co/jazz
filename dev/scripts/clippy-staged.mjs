@@ -8,16 +8,24 @@ import { execFileSync, spawnSync } from "node:child_process";
 import path from "node:path";
 
 const workspaceRoot = process.cwd();
-const dryRun = process.argv[2] === "--dry-run";
+const dryRun = process.argv.includes("--dry-run");
+const stagedFilesIndex = process.argv.indexOf("--staged-files");
 
-const stagedFiles = dryRun
-  ? process.argv.slice(3)
-  : execFileSync("git", ["diff", "--cached", "--name-only", "--diff-filter=ACMRD", "-z"], {
-      encoding: "buffer",
-    })
-      .toString("utf8")
-      .split("\0")
-      .filter(Boolean);
+// Lefthook supplies the staged paths to the hook.  This avoids starting a
+// second process from Node just to ask Git for information Lefthook already
+// collected (and works in restricted shells where child_process.spawnSync
+// cannot execute git).  Keep the Git fallback for direct local invocation.
+const stagedFiles =
+  stagedFilesIndex >= 0
+    ? process.argv.slice(stagedFilesIndex + 1).filter(Boolean)
+    : dryRun
+      ? process.argv.slice(2).filter((arg) => arg !== "--dry-run")
+      : execFileSync("git", ["diff", "--cached", "--name-only", "--diff-filter=ACMRD", "-z"], {
+          encoding: "buffer",
+        })
+          .toString("utf8")
+          .split("\0")
+          .filter(Boolean);
 
 const clippyInputs = stagedFiles.filter(
   (file) => file.endsWith(".rs") || path.basename(file) === "Cargo.toml",

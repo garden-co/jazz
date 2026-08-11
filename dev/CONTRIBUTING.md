@@ -26,6 +26,20 @@ This requires a working C/C++ toolchain and `libclang` for `bindgen`:
 
 ## Testing
 
+### Pre-commit hooks in restricted shells
+
+The staged Rust hook receives its file list directly from Lefthook and invokes
+Cargo through `dev/scripts/clippy-staged.sh`. It asks Cargo for authoritative
+workspace metadata once, then invokes Cargo directly; this avoids Node
+child-process invocations of `git` and `cargo`, which can be denied by
+sandboxed shells while ordinary Git commands still work. Run
+`pnpm test:tooling` to exercise workspace-member, standalone, excluded, and
+failure paths. Nonmember/auxiliary crates deliberately fall back to the root
+workspace guard; maintained standalone crates should have their
+own explicit gates. Run `pnpm test:tooling:real` for the slower real-Cargo
+probe of that fallback. Direct invocations of
+`node dev/scripts/clippy-staged.mjs` remain available for local debugging.
+
 ### Running tests
 
 ```sh
