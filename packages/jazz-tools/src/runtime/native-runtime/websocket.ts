@@ -15,7 +15,7 @@ export type WireError = {
 export type WebSocketNegotiation = {
   protocolVersion: number;
   features: number;
-  authority?: { node: Uint8Array; epoch: number };
+  authority?: { node: Uint8Array; epoch: bigint };
 };
 
 export type WebSocketCarrierOptions = {
@@ -146,10 +146,13 @@ export class WebSocketCarrier {
       this.resolveNegotiation = resolve;
       this.rejectNegotiation = reject;
     });
-    void waitForOpen(this.socket).then(() => {
-      this.socket.send(encodeWebSocketPrelude(options.authJson ?? "{}", options.peerIdentity));
-      this.socket.send(encodeWebSocketFrameBatch([encodeWireClientHello()]));
-    }, (error) => this.rejectNegotiation(error));
+    void waitForOpen(this.socket).then(
+      () => {
+        this.socket.send(encodeWebSocketPrelude(options.authJson ?? "{}", options.peerIdentity));
+        this.socket.send(encodeWebSocketFrameBatch([encodeWireClientHello()]));
+      },
+      (error) => this.rejectNegotiation(error),
+    );
     this.socket.addEventListener("message", (event) => {
       void this.handleMessage(event.data).catch((error) => {
         this.rejectNegotiation(error);
@@ -250,7 +253,10 @@ function decodeServerHello(frame: Uint8Array): WebSocketNegotiation {
     throw new Error(`server accepted unsupported wire features 0x${features.toString(16)}`);
   }
   if (reader.u64() !== 1) throw new Error("expected WirePeerRole::Core server hello");
-  const authority = reader.option((value) => ({ node: value.bytes(false), epoch: value.u64() }));
+  const authority = reader.option((value) => ({
+    node: value.bytes(false),
+    epoch: value.u64BigInt(),
+  }));
   return { protocolVersion: WIRE_PROTOCOL_VERSION, features, authority };
 }
 

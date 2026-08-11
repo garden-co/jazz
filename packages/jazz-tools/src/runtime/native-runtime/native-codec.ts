@@ -541,7 +541,17 @@ export class PostcardWriter {
     return Uint8Array.from(this.chunks);
   }
 
-  u64(value: number): void {
+  u64(value: number | bigint): void {
+    if (typeof value === "bigint") {
+      if (value < 0n || value > 0xffff_ffff_ffff_ffffn) {
+        throw new Error(`u64 out of range: ${value}`);
+      }
+      this.u64Big(value);
+      return;
+    }
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`u64 must be a non-negative safe integer, got ${value}`);
+    }
     let remaining = value;
     do {
       let byte = remaining & 0x7f;
@@ -639,6 +649,19 @@ export class PostcardReader {
       result += (byte & 0x7f) * 2 ** shift;
       if ((byte & 0x80) === 0) return result;
       shift += 7;
+    }
+  }
+
+  u64BigInt(): bigint {
+    let result = 0n;
+    let shift = 0n;
+    while (true) {
+      const byte = this.readByte();
+      result += BigInt(byte & 0x7f) << shift;
+      if (result > 0xffff_ffff_ffff_ffffn) throw new Error("postcard u64 overflow");
+      if ((byte & 0x80) === 0) return result;
+      shift += 7n;
+      if (shift >= 64n) throw new Error("postcard u64 overflow");
     }
   }
 

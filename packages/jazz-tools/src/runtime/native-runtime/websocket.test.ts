@@ -154,10 +154,43 @@ describe("websocket frame carrier", () => {
     expect(hello(sockets[1]!)).toBeUndefined();
     const firstNegotiation = await first.ready();
     const secondNegotiation = await second.ready();
-    expect(firstNegotiation.authority?.node).toEqual(
-      Uint8Array.from({ length: 16 }, () => 0x5e),
+    expect(firstNegotiation.authority?.node).toEqual(Uint8Array.from({ length: 16 }, () => 0x5e));
+    expect(secondNegotiation.authority?.epoch).toBeGreaterThan(
+      firstNegotiation.authority?.epoch ?? 0n,
     );
-    expect(secondNegotiation.authority?.epoch).toBeGreaterThan(firstNegotiation.authority?.epoch ?? 0);
+  });
+
+  it("preserves full u64 server authority epochs across stale/current hellos", async () => {
+    const staleEpoch = 9_007_199_254_740_991n;
+    const currentEpoch = staleEpoch + 1n;
+    const sockets: MessageWebSocket[] = [];
+    const WebSocket = class extends MessageWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    };
+    const stale = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: () => {},
+      WebSocket,
+    });
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(staleEpoch)]));
+    const current = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: () => {},
+      WebSocket,
+    });
+    sockets[1]!.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(currentEpoch)]));
+
+    const staleNegotiation = await stale.ready();
+    const currentNegotiation = await current.ready();
+
+    expect(staleNegotiation.authority?.epoch).toBe(staleEpoch);
+    expect(currentNegotiation.authority?.epoch).toBe(currentEpoch);
+    expect(currentNegotiation.authority!.epoch > staleNegotiation.authority!.epoch).toBe(true);
   });
 
   it("does not send or deliver semantic frames before the server hello", async () => {
@@ -208,10 +241,7 @@ describe("websocket frame carrier", () => {
     });
 
     socket!.emitMessage(
-      encodeWebSocketFrameBatch([
-        encodeServerHello(1),
-        encodeWireError(3, 1, "expired"),
-      ]),
+      encodeWebSocketFrameBatch([encodeServerHello(1n), encodeWireError(3, 1, "expired")]),
     );
     await Promise.resolve();
 
@@ -281,7 +311,7 @@ function encodeWireError(code: number, retry: number, message: string): Uint8Arr
   return writer.finish();
 }
 
-function encodeServerHello(epoch: number): Uint8Array {
+function encodeServerHello(epoch: bigint): Uint8Array {
   const writer = new PostcardWriter();
   writer.u64(0); // WireFrame::Hello
   writer.u64(WIRE_PROTOCOL_VERSION);
@@ -289,7 +319,10 @@ function encodeServerHello(epoch: number): Uint8Array {
   writer.u64(CLIENT_WIRE_FEATURES);
   writer.u64(1); // WirePeerRole::Core
   writer.some((authority) => {
-    authority.bytes(Uint8Array.from({ length: 16 }, () => 0x5e), false);
+    authority.bytes(
+      Uint8Array.from({ length: 16 }, () => 0x5e),
+      false,
+    );
     authority.u64(epoch);
   });
   return writer.finish();
@@ -343,5 +376,5 @@ class RecordingWebSocket extends MessageWebSocket {
     }
   }
 
-  private static epoch = 1;
+  private static epoch = 1n;
 }

@@ -198,9 +198,9 @@ type NativeDb = {
     protocolVersion: number,
     features: number,
     remoteNode: Uint8Array,
-    remoteEpoch: number,
+    remoteEpoch: bigint,
     localNode: Uint8Array,
-    localEpoch: number,
+    localEpoch: bigint,
   ): Transport;
   tick(): void;
   close?(): void;
@@ -399,7 +399,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverTransportErrorWaiters: ServerTransportErrorWaiter[] = [];
   private serverTransportWorkEpoch = 0;
   private serverTransportWorkWaiters: ServerTransportWorkWaiter[] = [];
-  private nextServerConnectionEpoch = 1;
+  private nextServerConnectionEpoch = 1n;
   private serverEndpointUrl: string | null = null;
   private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly pendingInboundServerFrames: Uint8Array[] = [];

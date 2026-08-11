@@ -1971,9 +1971,9 @@ impl WasmDb {
         protocol_version: u16,
         features: u32,
         remote_node: Vec<u8>,
-        remote_epoch: u32,
+        remote_epoch: u64,
         local_node: Vec<u8>,
-        local_epoch: u32,
+        local_epoch: u64,
     ) -> Result<WasmTransport, JsValue> {
         let remote_node: [u8; 16] = remote_node
             .try_into()
@@ -1985,11 +1985,11 @@ impl WasmDb {
         let session_context = ConnectionSessionContext {
             local: WireAuthorityEndpoint {
                 node: NodeUuid::from_bytes(local_node),
-                epoch: local_epoch as u64,
+                epoch: local_epoch,
             },
             remote: WireAuthorityEndpoint {
                 node: NodeUuid::from_bytes(remote_node),
-                epoch: remote_epoch as u64,
+                epoch: remote_epoch,
             },
             link_identity: AuthorId::from_bytes(local_node),
             negotiated_features: features as u64,

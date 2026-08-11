@@ -160,9 +160,9 @@ declare module "jazz-wasm" {
       protocolVersion: number,
       features: number,
       remoteNode: Uint8Array,
-      remoteEpoch: number,
+      remoteEpoch: bigint,
       localNode: Uint8Array,
-      localEpoch: number,
+      localEpoch: bigint,
     ): WasmTransport;
     acceptSubscriber(identity: Uint8Array): WasmTransport;
     mergeableTx(openBatchId: string): WasmTx;

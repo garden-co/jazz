@@ -11,10 +11,12 @@ import {
   writeDescriptor,
 } from "./native-codec.js";
 import {
+  CLIENT_WIRE_FEATURES,
   decodeWebSocketFrameBatch,
   encodeWebSocketPrelude,
   encodeWebSocketFrameBatch,
   isWireHello,
+  WIRE_PROTOCOL_VERSION,
 } from "./websocket.js";
 import {
   decodeNestedRowBytes,
@@ -143,6 +145,10 @@ async function waitForServerPumpTimer(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 
+async function waitForFakeWebSocketNegotiation(): Promise<void> {
+  for (let turn = 0; turn < 6; turn += 1) await Promise.resolve();
+}
+
 describe("NativeRuntimeAdapter server transport", () => {
   afterEach(() => {
     globalThis.WebSocket = previousWebSocket;
@@ -176,8 +182,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await Promise.resolve();
-    await Promise.resolve();
+    await waitForFakeWebSocketNegotiation();
     await waitForServerPumpTimer();
 
     expect(sockets).toHaveLength(1);
@@ -262,9 +267,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeWireServerHello()]));
-    await Promise.resolve();
-    await Promise.resolve();
+    await waitForFakeWebSocketNegotiation();
     await Promise.resolve();
     transportTicks = 0;
 
@@ -322,8 +325,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(schedulerCallback).toBeTypeOf("function");
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await Promise.resolve();
-    await Promise.resolve();
+    await waitForFakeWebSocketNegotiation();
     await waitForServerPumpTimer();
 
     expect(transport.tickCount).toBeGreaterThan(0);
@@ -364,8 +366,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await Promise.resolve();
-    await Promise.resolve();
+    await waitForFakeWebSocketNegotiation();
     transport.tickCount = 0;
 
     const frames = [Uint8Array.from([1]), Uint8Array.from([1, 42]), Uint8Array.from([1, 43])];
@@ -406,8 +407,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await Promise.resolve();
-    await Promise.resolve();
+    await waitForFakeWebSocketNegotiation();
     transport.tickCount = 0;
 
     const first = Uint8Array.from([1, 10]);
@@ -511,8 +511,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await Promise.resolve();
-    await Promise.resolve();
+    await waitForFakeWebSocketNegotiation();
     await waitForServerPumpTimer();
 
     expect(transport.tickCount).toBeGreaterThan(0);
@@ -549,11 +548,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await Promise.resolve();
-    await Promise.resolve();
+    await waitForFakeWebSocketNegotiation();
     await runtime.updateAuth(JSON.stringify({ jwt_token: "fresh.jwt" }));
-    await Promise.resolve();
-    await Promise.resolve();
+    await waitForFakeWebSocketNegotiation();
 
     expect(sockets).toHaveLength(2);
     expect(decodeWebSocketFrameBatch(sockets[1]!.sent[2]! as Uint8Array)).toEqual([
@@ -613,7 +610,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.onAuthFailure((reason) => authFailures.push(reason));
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await Promise.resolve();
+    await waitForFakeWebSocketNegotiation();
 
     sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(3, 1, "token expired")]));
     await Promise.resolve();
@@ -652,7 +649,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.onAuthFailure((reason) => authFailures.push(reason));
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await Promise.resolve();
+    await waitForFakeWebSocketNegotiation();
 
     sockets[0]!.emitMessage(
       encodeWebSocketFrameBatch([encodeWireError(5, 3, "conflicting commit unit")]),
@@ -701,6 +698,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await waitForFakeWebSocketNegotiation();
     const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "edge");
     const updates = vi.fn();
     runtime.executeSubscription(handle, updates);
@@ -2753,6 +2751,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
     await runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await waitForFakeWebSocketNegotiation();
 
     await Promise.all([
       runtime.query(
@@ -2877,6 +2876,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         true,
       );
       await runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await waitForFakeWebSocketNegotiation();
 
       const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
       await vi.advanceTimersByTimeAsync(40);
@@ -2929,6 +2929,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
     await runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await waitForFakeWebSocketNegotiation();
 
     const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
     await Promise.resolve();
@@ -6458,7 +6459,11 @@ class FakeWebSocket {
   private readonly messageListeners: Array<(event: { data: unknown }) => void> = [];
   closed = false;
 
-  constructor(readonly url: string) {}
+  constructor(readonly url: string) {
+    queueMicrotask(() => {
+      if (!this.closed) this.emitMessage(encodeWebSocketFrameBatch([encodeWireServerHello()]));
+    });
+  }
 
   send(data: Uint8Array | string): void {
     this.sent.push(data);
@@ -6486,14 +6491,20 @@ function encodeWireError(code: number, retry: number, message: string): Uint8Arr
   return writer.finish();
 }
 
-function encodeWireServerHello(): Uint8Array {
+function encodeWireServerHello(epoch: bigint = 1n): Uint8Array {
   const writer = new PostcardWriter();
   writer.u64(0); // WireFrame::Hello
-  writer.u64(6); // min_protocol_version
-  writer.u64(6); // max_protocol_version
-  writer.u64(0); // accepted features
+  writer.u64(WIRE_PROTOCOL_VERSION);
+  writer.u64(WIRE_PROTOCOL_VERSION);
+  writer.u64(CLIENT_WIRE_FEATURES);
   writer.u64(1); // WirePeerRole::Core
-  writer.none(); // WireHello::authority
+  writer.some((authority) => {
+    authority.bytes(
+      Uint8Array.from({ length: 16 }, () => 0x5e),
+      false,
+    );
+    authority.u64(epoch);
+  });
   return writer.finish();
 }
 
