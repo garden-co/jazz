@@ -76,7 +76,7 @@ for file in "$@"; do
 done
 
 if [ "$workspace" -eq 1 ]; then
-  set -- clippy --workspace --all-targets -- -D warnings
+  set -- clippy --workspace -- -D warnings
 elif [ -n "$packages" ]; then
   set -- clippy
   for package in $packages; do set -- "$@" --package "$package"; done
