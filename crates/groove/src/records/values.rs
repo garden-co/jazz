@@ -477,6 +477,117 @@ impl ValueType {
         }
     }
 
+    /// True when two descriptors have exactly the same byte layout and differ
+    /// only in the durable identities assigned to their enum registries.
+    ///
+    /// Unlike [`Self::registry_compatible_with`], this deliberately does not
+    /// admit append-only growth: a raw record projector copies enum bytes, so
+    /// the target must be able to decode every tag without a semantic remap.
+    pub(crate) fn registry_rebound_layout_compatible_with(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::EnumTag(left), Self::EnumTag(right)) => left.variants == right.variants,
+            (Self::Enum(left), Self::Enum(right)) => {
+                left.cases.len() == right.cases.len()
+                    && left.cases.iter().zip(&right.cases).all(|(a, b)| {
+                        a.name == b.name
+                            && a.payload.fields().len() == b.payload.fields().len()
+                            && a.payload
+                                .fields()
+                                .iter()
+                                .zip(b.payload.fields())
+                                .all(|(x, y)| {
+                                    x.name == y.name
+                                        && x.value_type
+                                            .registry_rebound_layout_compatible_with(&y.value_type)
+                                })
+                    })
+            }
+            (Self::Tuple(left), Self::Tuple(right)) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|(a, b)| a.registry_rebound_layout_compatible_with(b))
+            }
+            (Self::Array(left), Self::Array(right))
+            | (Self::Nullable(left), Self::Nullable(right)) => {
+                left.registry_rebound_layout_compatible_with(right)
+            }
+            (Self::Record(left), Self::Record(right)) => {
+                left.fields().len() == right.fields().len()
+                    && left.fields().iter().zip(right.fields()).all(|(a, b)| {
+                        a.name == b.name
+                            && a.value_type
+                                .registry_rebound_layout_compatible_with(&b.value_type)
+                    })
+            }
+            _ => self == other,
+        }
+    }
+
+    /// Whether this durable value occurrence may advance to `next` without
+    /// changing the interpretation of any value already stored under `self`.
+    ///
+    /// `registry_compatible_with` is deliberately symmetric: it is useful at
+    /// read/projection boundaries where either descriptor may describe an
+    /// existing value.  Live table evolution is stricter.  It is directional:
+    /// only `next` may append cases, while names, payload layouts, nesting and
+    /// registry identities remain fixed.
+    pub(crate) fn can_evolve_registry_to(&self, next: &Self) -> bool {
+        match (self, next) {
+            (Self::EnumTag(current), Self::EnumTag(next))
+                if current.registry_id == next.registry_id =>
+            {
+                next.variants.starts_with(&current.variants)
+            }
+            (Self::Enum(current), Self::Enum(next)) if current.registry_id == next.registry_id => {
+                next.cases.len() >= current.cases.len()
+                    && current
+                        .cases
+                        .iter()
+                        .zip(&next.cases)
+                        .all(|(current, next)| {
+                            current.name == next.name
+                                && current.payload.fields().len() == next.payload.fields().len()
+                                && current
+                                    .payload
+                                    .fields()
+                                    .iter()
+                                    .zip(next.payload.fields())
+                                    .all(|(current, next)| {
+                                        current.name == next.name
+                                            && current
+                                                .value_type
+                                                .can_evolve_registry_to(&next.value_type)
+                                    })
+                        })
+            }
+            (Self::Tuple(current), Self::Tuple(next)) => {
+                current.len() == next.len()
+                    && current
+                        .iter()
+                        .zip(next)
+                        .all(|(current, next)| current.can_evolve_registry_to(next))
+            }
+            (Self::Array(current), Self::Array(next))
+            | (Self::Nullable(current), Self::Nullable(next)) => {
+                current.can_evolve_registry_to(next)
+            }
+            (Self::Record(current), Self::Record(next)) => {
+                current.fields().len() == next.fields().len()
+                    && current
+                        .fields()
+                        .iter()
+                        .zip(next.fields())
+                        .all(|(current, next)| {
+                            current.name == next.name
+                                && current.value_type.can_evolve_registry_to(&next.value_type)
+                        })
+            }
+            _ => self == next,
+        }
+    }
+
     pub(crate) fn collect_variant_registries(&self, output: &mut BTreeMap<u64, VariantRegistry>) {
         match self {
             Self::EnumTag(schema) => {

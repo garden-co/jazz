@@ -22,7 +22,7 @@ Invariant digest:
 - `INV-STORAGE-10`: Fixed-width nullable nulls MUST encode as flag `0` plus zero-filled reserved payload width; variable-width nullable nulls MUST encode as only flag `0`.
 - `INV-STORAGE-11`: Fixed-width arrays MUST encode as concatenated element encodings without an element count; variable-width arrays MUST encode `count: u32`, offsets for all but the final element, then payloads.
 - `INV-STORAGE-12`: `F64` record and ordered-key values MUST NOT be NaN.
-- `INV-STORAGE-13`: `ScalarEnumSchema` values MUST persist and compare by declaration-order `u8` discriminant; appending variants is compatible, but reordering/removing variants changes stored meaning.
+- `INV-STORAGE-13`: A standalone `ScalarEnumSchema` value MUST persist and compare by its declaration-order `u8` discriminant. A distributed embedding such as Jazz MUST qualify that compact discriminant with the authored schema that declares it before treating it as a semantic value; a node-local physical discriminant is only an interned shorthand for that qualified identity.
 - `INV-STORAGE-14`: Primary-key bytes MUST be order-preserving tagged encodings: integer payloads big-endian, `Bool` as `0|1`, `Uuid` raw bytes, and `String`/`Bytes` escaped with embedded NUL `00 ff` plus terminator `00 00`.
 - `INV-STORAGE-15`: Table writes MUST reject rows whose primary-key values do not match the declared `PrimaryKeyColumn.key_type`, and MUST reject table writes for tables with no primary key.
 - `INV-STORAGE-16`: Inserts MUST reject an existing primary key, including keys introduced by earlier operations in the same `DatabaseBatch`.
@@ -50,6 +50,17 @@ canonical bounded `u32` case tag and that case's record payload. Tags are dense 
 declaration order; appending a case is compatible, while changing an existing case,
 its tag, or payload descriptor is not. Scalar enum columns use the same declaration
 and registry rules with zero-payload cases, encoded as their compact discriminant.
+
+Groove's standalone registry model deliberately has no distributed-schema
+semantics: its discriminant is meaningful only together with the descriptor that
+owns it. A host with concurrent schema versions MUST add that qualification at its
+boundary. In particular, a naked `u8` is never a globally meaningful user enum
+value merely because two schemas both happen to use it. The host may intern a
+resolved semantic case into a local dense tag, but equality, hashing, grouping,
+ordering, indexing, and projection must preserve the semantic case identity rather
+than depend on a local allocation order. This requirement applies to scalar enum
+columns now; payload enums need the same identity model before they are exposed
+through concurrent Jazz schema versions.
 
 Every enum occurrence owns a persistent registry identity derived from its physical
 path. Registries evolve independently: adding a case to one user column cannot alter

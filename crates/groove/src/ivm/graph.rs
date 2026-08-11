@@ -893,11 +893,66 @@ impl ProjectField {
         }
     }
 
+    /// Remap a scalar enum's compact source discriminant into another
+    /// descriptor's discriminant. `None` is a deliberate non-total projection
+    /// and fails execution rather than fabricating a case.
+    pub fn enum_tag_remap(
+        source_name: impl Into<String>,
+        output_name: impl Into<String>,
+        tags: Vec<Option<u8>>,
+    ) -> Self {
+        Self {
+            expression: ProjectExpr::EnumTagRemap {
+                source: FieldRef::name(source_name),
+                tags,
+            },
+            output_name: output_name.into(),
+        }
+    }
+
+    /// Remap a payload enum's case tag while retaining its selected payload.
+    /// As for scalar enums, `None` is a deliberate non-total projection.
+    pub fn enum_remap(
+        source_name: impl Into<String>,
+        output_name: impl Into<String>,
+        tags: Vec<Option<u32>>,
+    ) -> Self {
+        Self {
+            expression: ProjectExpr::EnumRemap {
+                source: FieldRef::name(source_name),
+                tags,
+            },
+            output_name: output_name.into(),
+        }
+    }
+
+    /// Recursively re-encode enum tags at every mapped nested occurrence.
+    /// This is descriptor-aware and therefore deliberately cannot take the
+    /// raw-copy projection fast path.
+    pub fn recursive_enum_remap(
+        source_name: impl Into<String>,
+        output_name: impl Into<String>,
+        target: ValueType,
+        remaps: RecursiveEnumRemaps,
+    ) -> Self {
+        Self {
+            expression: ProjectExpr::RecursiveEnumRemap {
+                source: FieldRef::name(source_name),
+                target,
+                remaps,
+            },
+            output_name: output_name.into(),
+        }
+    }
+
     pub fn source(&self) -> Option<&FieldRef> {
         match &self.expression {
             ProjectExpr::Field(source)
             | ProjectExpr::Nullable(source)
-            | ProjectExpr::NullableFlat(source) => Some(source),
+            | ProjectExpr::NullableFlat(source)
+            | ProjectExpr::EnumTagRemap { source, .. }
+            | ProjectExpr::EnumRemap { source, .. }
+            | ProjectExpr::RecursiveEnumRemap { source, .. } => Some(source),
             ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => {
                 None
             }
@@ -916,6 +971,19 @@ pub enum ProjectExpr {
     Null(ValueType),
     Nullable(FieldRef),
     NullableFlat(FieldRef),
+    EnumTagRemap {
+        source: FieldRef,
+        tags: Vec<Option<u8>>,
+    },
+    EnumRemap {
+        source: FieldRef,
+        tags: Vec<Option<u32>>,
+    },
+    RecursiveEnumRemap {
+        source: FieldRef,
+        target: ValueType,
+        remaps: RecursiveEnumRemaps,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

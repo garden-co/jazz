@@ -26,15 +26,15 @@ use super::query_engine::{
     AppProjectionTree, AppRowOutputRequest, AppRowSchema, CapabilityReport, ClaimPath, ClosurePath,
     ClosurePathSegment, ClosureRootGate, ComparisonOp as NormalizedComparisonOp,
     ContentVersionSource, CorrelationRequirement, DataSource, DeletionRegisterSource,
-    FieldProjection, FrontierId, JoinContribution, JoinMode as NormalizedJoinMode, LensSelection,
-    NormalizedRowSetShape, NormalizedShapeIdentity, NormalizedValueRef,
-    OrderKey as NormalizedOrderKey, OutputTerminalSchema, OverlayRef, OverlayStack,
-    PathCardinality, PathHolePolicy, PayloadProjection, PolicyContext, PolicyDecisionRole,
-    PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr, ProgramBinding,
-    ProgramClaimParam, ProgramFactKey, ProgramOutputSchemas, ProgramPathId, ProvenanceField,
-    QueryAuthorizationMode, QueryProgram, QueryProgramRequest, QueryReadSet, ReachableContribution,
-    ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource, ResultId,
-    ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
+    FieldProjection, FieldRequirement, FrontierId, JoinContribution,
+    JoinMode as NormalizedJoinMode, LensSelection, NormalizedRowSetShape, NormalizedShapeIdentity,
+    NormalizedValueRef, OrderKey as NormalizedOrderKey, OutputTerminalSchema, OverlayRef,
+    OverlayStack, PathCardinality, PathHolePolicy, PayloadProjection, PolicyContext,
+    PolicyDecisionRole, PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr,
+    ProgramBinding, ProgramClaimParam, ProgramFactKey, ProgramOutputSchemas, ProgramPathId,
+    ProvenanceField, QueryAuthorizationMode, QueryProgram, QueryProgramRequest, QueryReadSet,
+    ReachableContribution, ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource,
+    ResultId, ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
     RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
     RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
     SortDirection as NormalizedSortDirection, SourceAuthorizationRequest, SourceExpr, SourceGap,
@@ -702,6 +702,10 @@ struct CurrentQuerySourceResolver<'a, S> {
     read_view: &'a ReadView<RequestedSourceStage>,
     inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
     access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+    /// Query-local enum boundary targets, keyed by logical source.  Defining
+    /// a variant target invalidates table inputs, so reuse it across the main
+    /// source, access path, and metadata sidecars of one compiled program.
+    current_projection_targets: BTreeMap<SourceId, String>,
 }
 
 struct CurrentSourceGraph {
@@ -1327,6 +1331,44 @@ impl<S> CurrentQuerySourceResolver<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn current_projection_target(
+        &mut self,
+        request: &SourceRequest,
+        table: &TableSchema,
+    ) -> Result<String, SourceResolutionError> {
+        if let Some(target) = self.current_projection_targets.get(&request.source) {
+            return Ok(target.clone());
+        }
+        let required_fields = match &request.requirements.app_fields {
+            FieldRequirement::All => {
+                return Ok(physical_current_projection_target(
+                    self.node
+                        .catalogue
+                        .schema_version_aliases
+                        .get(&self.read_view.read_schema)
+                        .copied()
+                        .ok_or_else(|| {
+                            source_resolution_error(request, SourceGap::SchemaProjection)
+                        })?,
+                    &table.name,
+                ));
+            }
+            FieldRequirement::None => BTreeSet::new(),
+            FieldRequirement::Fields(fields) => fields.clone(),
+        };
+        let target = self
+            .node
+            .ensure_physical_current_projection_for_enum_columns(
+                self.read_view.read_schema,
+                &table.name,
+                &required_fields,
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        self.current_projection_targets
+            .insert(request.source.clone(), target.clone());
+        Ok(target)
+    }
+
     fn selected_global_current_source_graph(
         &mut self,
         request: &SourceRequest,
@@ -1347,6 +1389,7 @@ where
                 if tier != DurabilityTier::Global {
                     return Ok(None);
                 }
+                let projection_target = self.current_projection_target(request, table)?;
                 let rows = self
                     .node
                     .physical_global_current_source_for_index_scan(
@@ -1354,6 +1397,7 @@ where
                         self.read_view.read_schema,
                         &column,
                         &prefix,
+                        &projection_target,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 self.node.query_engine_read_metrics.source_index_probes += 1;
@@ -1488,44 +1532,15 @@ where
         table: &TableSchema,
         tier: DurabilityTier,
     ) -> Result<CurrentSourceGraph, SourceResolutionError> {
-        // Keep the schema-aware projected payload as the row source. Version
-        // witnesses are joined alongside it solely to provide authoritative
-        // provenance/version metadata; using the physical witness graph as
-        // the payload source would bypass lenses and large-value projection.
+        // The schema-aware projection already retains the complete current
+        // version witness tuple.  Joining it to the generic physical witness
+        // graph would independently decode every enum cell, defeating a
+        // title-only old-schema subscription before its narrowed source has a
+        // chance to replace unused enum values with typed nulls.
         let projected =
             self.projected_content_current_source_graph(request, table, tier, true, true)?;
-        let witnesses = self
-            .node
-            .maintained_view_content_current_with_version_in_schema(
-                table,
-                tier,
-                self.read_view.read_schema,
-            )
-            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-        let mut fields = vec![ProjectField::renamed(left_field("row_uuid"), "row_uuid")];
-        fields.extend(table.columns.iter().map(|column| {
-            let field = user_column_field(&column.name);
-            ProjectField::renamed(left_field(&field), field)
-        }));
-        fields.extend(
-            [
-                "schema_version",
-                "parents",
-                "authored_columns",
-                "created_by",
-                "created_at",
-                "updated_by",
-                "updated_at",
-                "tx_time",
-                "tx_node_id",
-                "global_seq",
-            ]
-            .into_iter()
-            .map(|field| ProjectField::renamed(right_field(field), field)),
-        );
         Ok(CurrentSourceGraph {
-            graph: GraphBuilder::join(projected, witnesses, ["row_uuid"], ["row_uuid"])
-                .project_fields(fields),
+            graph: projected,
             descriptor: current_row_descriptor(table),
             metadata: BTreeMap::new(),
         })
@@ -1540,15 +1555,17 @@ where
         exclude_deleted: bool,
     ) -> Result<GraphBuilder, SourceResolutionError> {
         let fields = global_current_storage_fields(read_table, true, include_global_seq);
+        let projection_target = self.current_projection_target(request, read_table)?;
         let access_path = self.access_paths.get(&request.source).cloned();
         let global = match &access_path {
             Some(CurrentAccessPath::PrimaryKey(prefix)) => {
                 self.node.query_engine_read_metrics.source_primary_key_scans += 1;
                 self.node
-                    .physical_current_source_scan_graph(
+                    .physical_current_source_scan_graph_with_projection_target(
                         self.read_view.read_schema,
                         &request.source.table,
                         PhysicalCurrentClass::Global,
+                        projection_target.clone(),
                         static_scan_for_prefix(prefix.clone(), 1),
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
@@ -1561,16 +1578,18 @@ where
                         self.read_view.read_schema,
                         column,
                         prefix,
+                        &projection_target,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
             }
             _ => {
                 self.node.query_engine_read_metrics.source_full_scans += 1;
                 self.node
-                    .physical_current_source_graph(
+                    .physical_current_source_graph_with_projection_target(
                         self.read_view.read_schema,
                         &request.source.table,
                         PhysicalCurrentClass::Global,
+                        projection_target.clone(),
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
             }
@@ -1580,19 +1599,23 @@ where
         } else {
             let global = global.project(fields.clone());
             let ahead = match &access_path {
-                Some(CurrentAccessPath::PrimaryKey(prefix)) => {
-                    self.node.physical_current_source_scan_graph(
+                Some(CurrentAccessPath::PrimaryKey(prefix)) => self
+                    .node
+                    .physical_current_source_scan_graph_with_projection_target(
                         self.read_view.read_schema,
                         &request.source.table,
                         PhysicalCurrentClass::Ahead,
+                        projection_target.clone(),
                         static_scan_for_prefix(prefix.clone(), 3),
-                    )
-                }
-                _ => self.node.physical_current_source_graph(
-                    self.read_view.read_schema,
-                    &request.source.table,
-                    PhysicalCurrentClass::Ahead,
-                ),
+                    ),
+                _ => self
+                    .node
+                    .physical_current_source_graph_with_projection_target(
+                        self.read_view.read_schema,
+                        &request.source.table,
+                        PhysicalCurrentClass::Ahead,
+                        projection_target,
+                    ),
             }
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
             let ahead = if tier == DurabilityTier::Edge {
@@ -5846,6 +5869,7 @@ where
         schema_version: SchemaVersionId,
         column: &str,
         prefix: &[Value],
+        projection_target: &str,
     ) -> Result<GraphBuilder, Error> {
         let mapping = self
             .catalogue
@@ -5863,15 +5887,6 @@ where
                 "physical current index column mapping missing",
             ))?;
         let storage_table = physical_global_current_table_name(mapping.table_id);
-        let alias = self
-            .catalogue
-            .schema_version_aliases
-            .get(&schema_version)
-            .copied()
-            .ok_or(Error::InvalidStoredValue(
-                "physical current index schema alias missing",
-            ))?;
-        let target = physical_current_projection_target(alias, &table.name);
         let indexed = self.database.index_scan_raw(
             &storage_table,
             &physical_current_index_name(column_id),
@@ -5883,7 +5898,7 @@ where
             let record = groove::records::VariantRecord::new(variant_tag, raw.owned_record());
             if let Some(projected) =
                 self.database
-                    .project_variant_record(&storage_table, &target, &record)?
+                    .project_variant_record(&storage_table, projection_target, &record)?
             {
                 records.push(projected.raw().to_vec());
             }
@@ -6163,6 +6178,7 @@ where
             read_view: &read_view,
             inline_sources,
             access_paths,
+            current_projection_targets: BTreeMap::new(),
         };
         let node_uuid = resolver.node.node_uuid;
         let node_alias = resolver.node.self_node_alias;
@@ -14379,6 +14395,7 @@ mod tests {
             read_view: &read_view,
             inline_sources: BTreeMap::new(),
             access_paths: BTreeMap::new(),
+            current_projection_targets: BTreeMap::new(),
         };
 
         assert!(resolver.needs_projected_current_source("users"));
