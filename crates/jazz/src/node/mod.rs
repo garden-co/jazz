@@ -4170,6 +4170,51 @@ where
         Ok(())
     }
 
+    fn hydrate_scalar_enum_case_mapping(
+        &mut self,
+        schema_version: SchemaVersionId,
+    ) -> Result<(), Error> {
+        let schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&schema_version)
+            .ok_or(Error::InvalidStoredValue(
+                "physical mapping schema payload missing",
+            ))?
+            .schema
+            .clone();
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get_mut(&schema_version)
+            .ok_or(Error::InvalidStoredValue("physical mapping missing"))?;
+        for table in &schema.tables {
+            let Some(physical) = mapping.tables.get_mut(&table.name) else {
+                continue;
+            };
+            for column in &table.columns {
+                let records::ValueType::EnumTag(enum_schema) = &column.column_type else {
+                    continue;
+                };
+                let Some(id) = physical.columns.get(&column.name).copied() else {
+                    continue;
+                };
+                physical.scalar_enum_cases.entry(id).or_insert_with(|| {
+                    enum_schema
+                        .variants
+                        .iter()
+                        .enumerate()
+                        .map(|(ordinal, _)| GlobalScalarEnumCaseId {
+                            introducing_schema: schema_version,
+                            introducing_ordinal: ordinal as u8,
+                        })
+                        .collect()
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn ensure_provisional_physical_mapping(
         &mut self,
         schema_version: SchemaVersionId,
@@ -4183,6 +4228,7 @@ where
                 .schema_version_aliases
                 .contains_key(&schema_version)
         {
+            self.hydrate_scalar_enum_case_mapping(schema_version)?;
             return Ok(());
         }
         let mapping = match self.catalogue.physical_mappings.get(&schema_version) {
