@@ -9,9 +9,31 @@ set -eu
 # callers invoking it elsewhere can set JAZZ_REPO_ROOT explicitly.
 root=${JAZZ_REPO_ROOT:-.}
 cd "$root"
+root=$(pwd)
 packages=""
+standalone_manifests=""
 workspace=0
 seen=' '
+newline='
+'
+
+root_members=$(sed -n '/^members[[:space:]]*=[[:space:]]*\[/,/^]/p' Cargo.toml |
+  sed -n 's/^[[:space:]]*"\([^"]*\)".*/\1/p')
+
+is_root_member_manifest() {
+  manifest=$1
+  case "$manifest" in
+    /*) manifest_abs=$manifest ;;
+    *) manifest_abs=$root/$manifest ;;
+  esac
+  while IFS= read -r member; do
+    [ -n "$member" ] || continue
+    [ "$manifest_abs" = "$root/$member/Cargo.toml" ] && return 0
+  done <<EOF
+$root_members
+EOF
+  return 1
+}
 
 for file in "$@"; do
   case "$file" in
@@ -28,9 +50,15 @@ for file in "$@"; do
       package=$(sed -n 's/^name[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' "$manifest" | head -n 1)
       if [ -z "$package" ]; then
         workspace=1
-      elif case "$seen" in *" $package "*) false ;; *) true ;; esac; then
+      elif is_root_member_manifest "$manifest"; then
+        case "$seen" in *" $package "*) : ;; *)
         packages="$packages $package"
         seen="$seen$package "
+        esac
+      else
+        case "$newline$standalone_manifests" in *"$newline$manifest$newline"*) : ;; *)
+          standalone_manifests="$standalone_manifests$manifest$newline"
+        esac
       fi
       break
     fi
@@ -43,12 +71,26 @@ done
 
 if [ "$workspace" -eq 1 ]; then
   set -- clippy --workspace -- -D warnings
-else
-  [ -n "$packages" ] || { echo "Clippy: no staged Rust or Cargo.toml changes"; exit 0; }
+elif [ -n "$packages" ]; then
   set -- clippy
   for package in $packages; do set -- "$@" --package "$package"; done
   set -- "$@" -- -D warnings
+else
+  set --
 fi
 
-echo "Clippy: cargo $*"
-exec cargo "$@"
+if [ "$#" -gt 0 ]; then
+  echo "Clippy: cargo $*"
+  cargo "$@"
+fi
+
+while IFS= read -r manifest; do
+  [ -n "$manifest" ] || continue
+  echo "Clippy: cargo clippy --manifest-path $manifest -- -D warnings"
+  cargo clippy --manifest-path "$manifest" -- -D warnings
+done <<EOF
+$standalone_manifests
+EOF
+
+[ "$workspace" -eq 1 ] || [ -n "$packages" ] || [ -n "$standalone_manifests" ] ||
+  echo "Clippy: no staged Rust or Cargo.toml changes"
