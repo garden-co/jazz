@@ -4741,6 +4741,28 @@ impl PredicateExpr {
             }
             Self::IsNull { field } => Ok(is_sql_null_value(&record.get(field)?)),
             Self::IsNotNull { field } => Ok(!is_sql_null_value(&record.get(field)?)),
+            Self::EnumMatch {
+                field,
+                case_tag,
+                payload,
+            } => {
+                let value = record.get(field)?;
+                let value = match value {
+                    Value::Nullable(Some(value)) => *value,
+                    value => value,
+                };
+                match value {
+                    Value::Enum(value) if value.tag() == *case_tag => {
+                        payload.matches(value.record().borrowed(), comparison)
+                    }
+                    // Wrong arms and NULL never match. This is intentionally
+                    // fail-closed so cross-case updates produce ordinary
+                    // removal/insertion deltas through the existing filter
+                    // operator.
+                    Value::Enum(_) | Value::Nullable(None) => Ok(false),
+                    _ => Ok(false),
+                }
+            }
             Self::And(predicates) => predicates
                 .iter()
                 .map(|predicate| predicate.matches(record, comparison))

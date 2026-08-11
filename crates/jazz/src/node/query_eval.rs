@@ -3019,6 +3019,7 @@ fn collect_root_literal_equalities(
         | Predicate::Lt(_, _)
         | Predicate::Lte(_, _)
         | Predicate::Contains(_, _)
+        | Predicate::EnumMatch { .. }
         | Predicate::IsNull(_) => {}
     }
     Ok(())
@@ -3136,6 +3137,33 @@ fn normalize_predicate(
         },
         Predicate::IsNull(value) => {
             NormalizedPredicateExpr::IsNull(normalize_operand(source, value)?)
+        }
+        Predicate::EnumMatch {
+            column,
+            case,
+            payload,
+        } => {
+            let column_type =
+                operand_column_type(schema, source, &Operand::Column(column.clone()))?.ok_or_else(
+                    || Error::QueryLowering("enum match column has no type".to_owned()),
+                )?;
+            let column_type = match column_type {
+                ColumnType::Nullable(inner) => *inner,
+                other => other,
+            };
+            let ColumnType::Enum(enum_schema) = column_type else {
+                return Err(Error::QueryLowering(
+                    "enum match requires a payload enum column".to_owned(),
+                ));
+            };
+            let case_tag = enum_schema
+                .tag(case)
+                .map_err(|_| Error::QueryLowering(format!("unknown payload enum case {case}")))?;
+            NormalizedPredicateExpr::EnumMatch {
+                value: normalize_operand(source, &Operand::Column(column.clone()))?,
+                case_tag,
+                payload: Box::new(normalize_predicate(schema, source, payload)?),
+            }
         }
     })
 }
@@ -12274,6 +12302,15 @@ fn rewrite_claim_predicate_for_binding(
             false_predicate()
         }
         Predicate::Contains(left, right) => Predicate::Contains(left, right),
+        Predicate::EnumMatch {
+            column,
+            case,
+            payload,
+        } => Predicate::EnumMatch {
+            column,
+            case,
+            payload: Box::new(rewrite_claim_predicate_for_binding(*payload, claims)),
+        },
         Predicate::IsNull(_) => false_predicate(),
     }
 }
@@ -12397,6 +12434,9 @@ fn bind_scope_claim_predicate(
         }
         Predicate::IsNull(operand) => {
             bind_scope_claim_operand(operand, claim_values, binding_values);
+        }
+        Predicate::EnumMatch { payload, .. } => {
+            bind_scope_claim_predicate(payload, claim_values, binding_values);
         }
     }
 }
@@ -12552,6 +12592,7 @@ fn rename_predicate_params(predicate: &mut Predicate, aliases: &BTreeMap<String,
             }
         }
         Predicate::IsNull(operand) => rename_operand_param(operand, aliases),
+        Predicate::EnumMatch { payload, .. } => rename_predicate_params(payload, aliases),
     }
 }
 
@@ -12594,6 +12635,7 @@ fn predicate_contains_unbound_claim(
                     .any(|operand| operand_contains_unbound_claim(operand, claims))
         }
         Predicate::IsNull(operand) => operand_contains_unbound_claim(operand, claims),
+        Predicate::EnumMatch { payload, .. } => predicate_contains_unbound_claim(payload, claims),
     }
 }
 
@@ -12999,6 +13041,13 @@ fn collect_claim_field_params_from_predicate(
         NormalizedPredicateExpr::Not(child) => {
             collect_claim_field_params_from_predicate(child, param_types, params);
         }
+        // Payload fields belong to the enum value rather than the containing
+        // record. They can still contain claim parameters, so walk the nested
+        // predicate while only collecting the enclosing record value here.
+        NormalizedPredicateExpr::EnumMatch { value, payload, .. } => {
+            collect_claim_field_param(value, ColumnType::Uuid, params);
+            collect_claim_field_params_from_predicate(payload, params);
+        }
     }
 }
 
@@ -13128,6 +13177,15 @@ fn bind_query_predicate(
         Predicate::IsNull(operand) => {
             Predicate::IsNull(bind_query_operand(operand, binding, mode)?)
         }
+        Predicate::EnumMatch {
+            column,
+            case,
+            payload,
+        } => Predicate::EnumMatch {
+            column,
+            case,
+            payload,
+        },
     })
 }
 
@@ -13779,6 +13837,9 @@ fn predicate_params(predicates: &[Predicate]) -> BTreeSet<String> {
                 }
             }
             Predicate::IsNull(operand) => collect_operand_param(operand, &mut params),
+            Predicate::EnumMatch { payload, .. } => {
+                params.extend(predicate_params(std::slice::from_ref(payload)));
+            }
         }
     }
     params

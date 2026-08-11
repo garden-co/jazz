@@ -27,6 +27,7 @@ export type RelPredicateExpr =
   | { IsNotNull: { column: RelColumnRef } }
   | { In: { left: RelColumnRef; values: RelValueRef[] } }
   | { Contains: { left: RelColumnRef; right: RelValueRef } }
+  | { EnumMatch: { column: RelColumnRef; case: string; payload: RelPredicateExpr } }
   | { And: RelPredicateExpr[] }
   | { Or: RelPredicateExpr[] }
   | { Not: RelPredicateExpr }

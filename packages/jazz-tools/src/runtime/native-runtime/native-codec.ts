@@ -191,6 +191,12 @@ export type QueryPredicate =
     }
   | {
       column: string;
+      op: "EnumMatch";
+      case: string;
+      payload: QueryPredicate;
+    }
+  | {
+      column: string;
       op: "IsNull";
     }
   | {
@@ -377,11 +383,18 @@ function writePredicate(writer: PostcardWriter, predicate: QueryPredicate): void
     writeLiteralOperand(writer, predicate.value);
     return;
   }
+  if (predicate.op === "EnumMatch") {
+    writer.u64(11); // Predicate::EnumMatch
+    writeColumnOperand(writer, predicate.column);
+    writer.string(predicate.case);
+    writePredicate(writer, predicate.payload);
+    return;
+  }
   if (predicate.op === "IsNull" || predicate.op === "IsNotNull") {
     if (predicate.op === "IsNotNull") {
       writer.u64(2); // Predicate::Not
     }
-    writer.u64(11); // Predicate::IsNull
+    writer.u64(12); // Predicate::IsNull
     writeColumnOperand(writer, predicate.column);
     return;
   }

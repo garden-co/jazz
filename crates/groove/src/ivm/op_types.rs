@@ -449,18 +449,60 @@ pub enum PlanExpr {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PredicateExpr {
-    Eq { field: String, value: LiteralValue },
-    Neq { field: String, value: LiteralValue },
-    Contains { field: String, value: LiteralValue },
-    EqField { field: String, value_field: String },
-    ContainsField { field: String, needle_field: String },
-    NeqField { field: String, value_field: String },
-    Gt { field: String, value: LiteralValue },
-    GtEq { field: String, value: LiteralValue },
-    Lt { field: String, value: LiteralValue },
-    LtEq { field: String, value: LiteralValue },
-    IsNull { field: String },
-    IsNotNull { field: String },
+    Eq {
+        field: String,
+        value: LiteralValue,
+    },
+    Neq {
+        field: String,
+        value: LiteralValue,
+    },
+    Contains {
+        field: String,
+        value: LiteralValue,
+    },
+    EqField {
+        field: String,
+        value_field: String,
+    },
+    ContainsField {
+        field: String,
+        needle_field: String,
+    },
+    NeqField {
+        field: String,
+        value_field: String,
+    },
+    Gt {
+        field: String,
+        value: LiteralValue,
+    },
+    GtEq {
+        field: String,
+        value: LiteralValue,
+    },
+    Lt {
+        field: String,
+        value: LiteralValue,
+    },
+    LtEq {
+        field: String,
+        value: LiteralValue,
+    },
+    IsNull {
+        field: String,
+    },
+    IsNotNull {
+        field: String,
+    },
+    /// Match one tagged enum case and evaluate a predicate against that
+    /// case's payload record. The payload predicate field names are relative
+    /// to the selected case descriptor.
+    EnumMatch {
+        field: String,
+        case_tag: u32,
+        payload: Box<PredicateExpr>,
+    },
     And(Vec<PredicateExpr>),
     Or(Vec<PredicateExpr>),
 }

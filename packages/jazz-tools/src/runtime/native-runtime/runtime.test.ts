@@ -2271,6 +2271,94 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
+  it("lowers a payload enum match relation filter into the native prepared query", () => {
+    let preparedBytes: Uint8Array | undefined;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: (query: Uint8Array) => {
+              preparedBytes = query;
+              return {};
+            },
+            subscribe: () => new ReadableStream(),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      {
+        events: {
+          columns: [
+            {
+              name: "event",
+              column_type: {
+                type: "EnumPayload",
+                cases: [
+                  {
+                    name: "message",
+                    fields: [{ name: "level", column_type: { type: "Integer" }, nullable: false }],
+                  },
+                ],
+              },
+              nullable: false,
+            },
+          ],
+        },
+      },
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    const handle = runtime.createSubscription(
+      JSON.stringify({
+        table: "events",
+        relation_ir: {
+          Project: {
+            input: {
+              Filter: {
+                input: { TableScan: { table: "events" } },
+                predicate: {
+                  EnumMatch: {
+                    column: { column: "event", scope: "events" },
+                    case: "message",
+                    payload: {
+                      Cmp: {
+                        left: { column: "level" },
+                        op: "Eq",
+                        right: { Literal: { type: "Integer", value: 2 } },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            columns: [{ alias: "event", expr: { Column: { column: "event", scope: "events" } } }],
+          },
+        },
+      }),
+    );
+
+    expect(handle).toBe(1);
+    expect(preparedBytes).toEqual(
+      queryWithPredicates(
+        "events",
+        [
+          {
+            column: "event",
+            op: "EnumMatch",
+            case: "message",
+            payload: { column: "level", op: "Eq", value: { type: "Integer", value: 2 } },
+          },
+        ],
+        { select: ["event"] },
+      ),
+    );
+  });
+
   it("trusts native subscription snapshots for simple equality relation filters", async () => {
     let controller: ReadableStreamDefaultController<unknown> | undefined;
     let preparedBytes: Uint8Array | undefined;

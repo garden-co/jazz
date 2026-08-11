@@ -247,6 +247,9 @@ fn coerce_predicate_typed_literals(
             }
         }
         Predicate::IsNull(_) => {}
+        Predicate::EnumMatch { payload, .. } => {
+            coerce_predicate_typed_literals(table, payload, column_types);
+        }
     }
 }
 
@@ -1802,6 +1805,24 @@ fn rel_predicate_to_policy(
             Ok(vec![LoweredRelPredicate {
                 predicate: Predicate::Contains(Operand::Column(left.column.clone()), operand),
                 column: Some(left.column.clone()),
+                value: None,
+            }])
+        }
+        RelPredicateExpr::EnumMatch {
+            column,
+            case,
+            payload,
+        } => {
+            let payload = rel_predicate_to_policy(table, path, payload)?;
+            Ok(vec![LoweredRelPredicate {
+                predicate: Predicate::EnumMatch {
+                    column: column.column.clone(),
+                    case: case.clone(),
+                    payload: Box::new(Predicate::All(
+                        payload.into_iter().map(|part| part.predicate).collect(),
+                    )),
+                },
+                column: Some(column.column.clone()),
                 value: None,
             }])
         }

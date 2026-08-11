@@ -11,6 +11,12 @@ const app = s.defineApp({
     done: s.boolean(),
     ownerId: s.ref("users").optional(),
   }),
+  events: s.table({
+    event: s.enum({
+      message: { text: s.string(), level: s.int() },
+      closed: { code: s.int() },
+    }),
+  }),
 });
 
 describe("translateQuery", () => {
@@ -49,6 +55,49 @@ describe("translateQuery", () => {
 
     expect(translated.relation_ir).toBeDefined();
     expect(translated.conditions).toBeUndefined();
+  });
+
+  it("lowers a payload enum match to the first-class relation predicate", () => {
+    const translated = JSON.parse(
+      translateQuery(
+        app.events.where({ event: { match: { type: "message", where: { level: 2 } } } })._build(),
+        app.wasmSchema,
+      ),
+    );
+
+    expect(translated.relation_ir).toEqual({
+      Project: {
+        input: {
+          Filter: {
+            input: { TableScan: { table: "events" } },
+            predicate: {
+              EnumMatch: {
+                column: { column: "event", scope: "events" },
+                case: "message",
+                payload: {
+                  Cmp: {
+                    left: { column: "level" },
+                    op: "Eq",
+                    right: { Literal: { type: "Integer", value: 2 } },
+                  },
+                },
+              },
+            },
+          },
+        },
+        columns: [{ alias: "event", expr: { Column: { column: "event", scope: "events" } } }],
+      },
+    });
+  });
+
+  it("rejects a payload enum match against an absent case field", () => {
+    const built = JSON.parse(app.events._build());
+    built.conditions = [
+      { column: "event", op: "match", value: { type: "closed", where: { level: 2 } } },
+    ];
+    expect(() => translateQuery(JSON.stringify(built), app.wasmSchema)).toThrow(
+      'unknown payload enum field "level" for case "closed"',
+    );
   });
 
   it("treats an omitted include limit as unbounded", () => {

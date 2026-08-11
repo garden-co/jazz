@@ -9466,6 +9466,9 @@ fn predicate_references_id(predicate: &Predicate) -> bool {
             operand_is_id(operand) || values.iter().any(operand_is_id)
         }
         Predicate::IsNull(operand) => operand_is_id(operand),
+        Predicate::EnumMatch {
+            column, payload, ..
+        } => column == "id" || predicate_references_id(payload),
     }
 }
 
