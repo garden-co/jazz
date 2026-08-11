@@ -2904,4 +2904,35 @@ mod variant_case_tests {
             ])
         );
     }
+
+    #[test]
+    fn nested_scalar_registry_reconciliation_preserves_inherited_cases() {
+        let base = schema(1);
+        let child = schema(2);
+        let nested = |variants: &[&str]| {
+            records::ValueType::Array(Box::new(records::ValueType::Nullable(Box::new(
+                records::ValueType::EnumTag(
+                    records::ScalarEnumSchema::new("state", variants.iter().copied()).unwrap(),
+                ),
+            ))))
+        };
+        let mut cases = BTreeMap::new();
+        hydrate_nested_scalar_enum_cases(
+            &nested(&["draft", "published"]),
+            base,
+            "root",
+            &mut cases,
+        )
+        .unwrap();
+        reconcile_nested_scalar_enum_cases(
+            &nested(&["draft", "published", "archived"]),
+            child,
+            "root",
+            &mut cases,
+        )
+        .unwrap();
+        assert_eq!(cases["root/array/nullable"].len(), 3);
+        assert_eq!(cases["root/array/nullable"][0].introducing_schema, base);
+        assert_eq!(cases["root/array/nullable"][2].introducing_schema, child);
+    }
 }
