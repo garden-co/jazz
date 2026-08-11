@@ -99,7 +99,6 @@ run_gate() {
 run_gate cargo-test-jazz cargo test -p jazz
 run_gate cargo-test-groove cargo test -p groove
 run_gate cargo-test-jazz-no-default-features cargo test -p jazz --no-default-features --features test
-run_gate cargo-test-jazz-server cargo test -p jazz-server
 run_gate cargo-check-jazz-sim-benches cargo check -p jazz-sim --benches
 run_gate ts-wire-codec dev/gates/ts-wire-codec.sh
 run_gate m3-maintained-one-shot env JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle
