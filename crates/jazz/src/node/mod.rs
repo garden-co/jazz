@@ -4210,6 +4210,7 @@ where
                             table_id,
                             columns,
                             variant_cases: Vec::new(),
+                            scalar_enum_cases: BTreeMap::new(),
                         },
                     );
                 }
@@ -4471,6 +4472,7 @@ where
                     table_id: source_table.table_id,
                     columns,
                     variant_cases: Vec::new(),
+                    scalar_enum_cases: BTreeMap::new(),
                 },
             );
         }

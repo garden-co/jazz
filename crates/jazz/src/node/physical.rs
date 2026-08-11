@@ -27,6 +27,17 @@ pub(super) struct TablePhysicalMapping {
     /// The one durable hidden Groove row case for this Jazz layout.
     #[serde(default)]
     pub(super) variant_cases: Vec<PhysicalVariantCase>,
+    /// Per-physical-column semantic identities for compact scalar enum tags.
+    /// This is durable catalogue state: local registry order is never inferred
+    /// from receipt order.
+    #[serde(default)]
+    pub(super) scalar_enum_cases: BTreeMap<PhysicalColumnId, Vec<GlobalScalarEnumCaseId>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub(super) struct GlobalScalarEnumCaseId {
+    pub(super) introducing_schema: SchemaVersionId,
+    pub(super) introducing_ordinal: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -162,6 +173,7 @@ pub(super) fn allocate_provisional_physical_mapping(
                 table_id,
                 columns,
                 variant_cases: Vec::new(),
+                scalar_enum_cases: BTreeMap::new(),
             },
         );
     }
@@ -1905,6 +1917,7 @@ mod variant_case_tests {
                         .map(|(name, id)| (name.to_string(), PhysicalColumnId(*id)))
                         .collect(),
                     variant_cases: Vec::new(),
+                    scalar_enum_cases: BTreeMap::new(),
                 },
             )]),
         }
