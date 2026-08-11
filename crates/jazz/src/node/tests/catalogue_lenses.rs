@@ -3152,6 +3152,10 @@ fn old_enum_schema_only_decodes_cases_required_by_the_query() {
             )
             .is_err());
     }
+    let grouped = Query::from("items").count().group_by("status").validate(&base).unwrap();
+    assert!(core
+        .query_rows(&grouped, &grouped.bind(BTreeMap::new()).unwrap(), DurabilityTier::Local)
+        .is_err());
 }
 
 #[test]
