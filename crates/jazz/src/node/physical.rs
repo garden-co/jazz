@@ -45,6 +45,18 @@ pub(super) struct GlobalScalarEnumCaseId {
     pub(super) introducing_ordinal: u8,
 }
 
+/// Explicit authored-to-physical tags for every enum occurrence beneath one
+/// user column. Paths are structural (`root`, `nullable`, `array`,
+/// `tuple/<n>`, `record/<field>`) and payload children extend the selected
+/// parent case identity. Keeping this separate from the compact local tag is
+/// what lets recursive values cross the authored/physical boundary safely.
+#[cfg(test)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct EnumOccurrenceRemaps {
+    scalar: BTreeMap<String, Vec<Option<u8>>>,
+    payload: BTreeMap<String, Vec<Option<u32>>>,
+}
+
 /// A scalar enum discriminant in a physical table is an interned spelling of
 /// this identity, never an authored declaration ordinal.  The textual enum
 /// names used in the physical descriptor are intentionally opaque: tags are
@@ -1510,6 +1522,155 @@ fn remap_authored_payload_enum_value(
     }
 }
 
+#[cfg(test)]
+fn remap_nested_enum_value(
+    value: Value,
+    authored: &records::ValueType,
+    physical: &records::ValueType,
+    remaps: &EnumOccurrenceRemaps,
+    path: &str,
+) -> Result<Value, Error> {
+    use records::ValueType;
+    match (value, authored, physical) {
+        (Value::EnumTag(tag), ValueType::EnumTag(_), ValueType::EnumTag(_)) => remaps
+            .scalar
+            .get(path)
+            .and_then(|tags| tags.get(usize::from(tag)))
+            .and_then(|tag| *tag)
+            .map(Value::EnumTag)
+            .ok_or(Error::InvalidStoredValue(
+                "nested scalar enum tag absent from physical mapping",
+            )),
+        (Value::Nullable(None), ValueType::Nullable(_), ValueType::Nullable(_)) => {
+            Ok(Value::Nullable(None))
+        }
+        (
+            Value::Nullable(Some(value)),
+            ValueType::Nullable(authored),
+            ValueType::Nullable(physical),
+        ) => Ok(Value::Nullable(Some(Box::new(remap_nested_enum_value(
+            *value,
+            authored,
+            physical,
+            remaps,
+            &format!("{path}/nullable"),
+        )?)))),
+        (Value::Array(values), ValueType::Array(authored), ValueType::Array(physical)) => {
+            Ok(Value::Array(
+                values
+                    .into_iter()
+                    .map(|value| {
+                        remap_nested_enum_value(
+                            value,
+                            authored,
+                            physical,
+                            remaps,
+                            &format!("{path}/array"),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))
+        }
+        (Value::Tuple(values), ValueType::Tuple(authored), ValueType::Tuple(physical))
+            if authored.len() == physical.len() && values.len() == authored.len() =>
+        {
+            Ok(Value::Tuple(
+                values
+                    .into_iter()
+                    .zip(authored.iter().zip(physical))
+                    .enumerate()
+                    .map(|(index, (value, (authored, physical)))| {
+                        remap_nested_enum_value(
+                            value,
+                            authored,
+                            physical,
+                            remaps,
+                            &format!("{path}/tuple/{index}"),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))
+        }
+        (Value::Record(record), ValueType::Record(authored), ValueType::Record(physical))
+            if authored.fields().len() == physical.fields().len() =>
+        {
+            let values = record.to_values()?;
+            let values = values
+                .into_iter()
+                .zip(authored.fields().iter().zip(physical.fields()))
+                .map(|(value, (authored, physical))| {
+                    let name = authored.name.as_deref().ok_or(Error::InvalidStoredValue(
+                        "nested record enum field unnamed",
+                    ))?;
+                    remap_nested_enum_value(
+                        value,
+                        &authored.value_type,
+                        &physical.value_type,
+                        remaps,
+                        &format!("{path}/record/{name}"),
+                    )
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            Ok(Value::Record(OwnedRecord::new(
+                physical.create(&values)?,
+                (**physical).clone(),
+            )))
+        }
+        (Value::Enum(value), ValueType::Enum(authored), ValueType::Enum(physical)) => {
+            let authored_tag = value.tag();
+            let physical_tag = remaps
+                .payload
+                .get(path)
+                .and_then(|tags| tags.get(usize::try_from(authored_tag).ok()?))
+                .and_then(|tag| *tag)
+                .ok_or(Error::InvalidStoredValue(
+                    "nested payload enum tag absent from physical mapping",
+                ))?;
+            let authored_case = authored.case(authored_tag)?;
+            let physical_case = physical.case(physical_tag)?;
+            if authored_case.payload.fields().len() != physical_case.payload.fields().len() {
+                return Err(Error::InvalidStoredValue(
+                    "nested payload enum payload width changed",
+                ));
+            }
+            let values = value.record().to_values()?;
+            let values = values
+                .into_iter()
+                .zip(
+                    authored_case
+                        .payload
+                        .fields()
+                        .iter()
+                        .zip(physical_case.payload.fields()),
+                )
+                .map(|(value, (authored, physical))| {
+                    let name = authored.name.as_deref().ok_or(Error::InvalidStoredValue(
+                        "nested payload enum field unnamed",
+                    ))?;
+                    remap_nested_enum_value(
+                        value,
+                        &authored.value_type,
+                        &physical.value_type,
+                        remaps,
+                        &format!("{path}/case/{authored_tag}/{name}"),
+                    )
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            Ok(Value::Enum(records::EnumValue::new(
+                physical_tag,
+                OwnedRecord::new(
+                    physical_case.payload.create(&values)?,
+                    physical_case.payload.clone(),
+                ),
+            )))
+        }
+        (value, authored, physical) if authored == physical => Ok(value),
+        _ => Err(Error::InvalidStoredValue(
+            "nested enum remap descriptor mismatch",
+        )),
+    }
+}
+
 fn widen_projection_value_type(
     logical: &records::ValueType,
     physical: &records::ValueType,
@@ -2690,5 +2851,48 @@ mod variant_case_tests {
         )
         .unwrap();
         assert_ne!(archived_value, snoozed_value);
+    }
+
+    #[test]
+    fn nested_scalar_enum_remap_rewrites_array_and_nullable_tags() {
+        let authored_enum = records::ValueType::EnumTag(
+            records::ScalarEnumSchema::new("state", ["draft", "archived"]).unwrap(),
+        );
+        let physical_enum = records::ValueType::EnumTag(
+            records::ScalarEnumSchema::new("physical", ["draft", "snoozed", "archived"]).unwrap(),
+        );
+        let authored = records::ValueType::Tuple(vec![
+            records::ValueType::Array(Box::new(authored_enum.clone())),
+            records::ValueType::Nullable(Box::new(authored_enum)),
+        ]);
+        let physical = records::ValueType::Tuple(vec![
+            records::ValueType::Array(Box::new(physical_enum.clone())),
+            records::ValueType::Nullable(Box::new(physical_enum)),
+        ]);
+        let remaps = EnumOccurrenceRemaps {
+            scalar: BTreeMap::from([
+                ("root/tuple/0/array".to_owned(), vec![Some(0), Some(2)]),
+                ("root/tuple/1/nullable".to_owned(), vec![Some(0), Some(2)]),
+            ]),
+            payload: BTreeMap::new(),
+        };
+        let remapped = remap_nested_enum_value(
+            Value::Tuple(vec![
+                Value::Array(vec![Value::EnumTag(1)]),
+                Value::Nullable(Some(Box::new(Value::EnumTag(1)))),
+            ]),
+            &authored,
+            &physical,
+            &remaps,
+            "root",
+        )
+        .unwrap();
+        assert_eq!(
+            remapped,
+            Value::Tuple(vec![
+                Value::Array(vec![Value::EnumTag(2)]),
+                Value::Nullable(Some(Box::new(Value::EnumTag(2)))),
+            ])
+        );
     }
 }
