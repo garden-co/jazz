@@ -1784,25 +1784,27 @@ fn merge_physical_value_type(
         (ValueType::Enum(left), ValueType::Enum(right))
             if left.registry_id == right.registry_id =>
         {
-            let max_len = left.cases.len().max(right.cases.len());
-            let mut cases = Vec::with_capacity(max_len);
-            for index in 0..max_len {
-                match (left.cases.get(index), right.cases.get(index)) {
-                    (Some(a), Some(b)) => {
-                        if a.name != b.name {
-                            return Err(Error::InvalidStoredValue(
-                                "physical enum registry changed non-additively",
-                            ));
-                        }
-                        cases.push(records::EnumCase::new(
-                            a.name.clone(),
-                            merge_physical_record_descriptor(&a.payload, &b.payload)?,
-                        ));
+            // As with scalar cases, ordinal is local to the authored schema.
+            // This fallback cannot carry the catalogue's schema-qualified case
+            // identities (the physical table path does), but it can still
+            // combine independent payload layouts deterministically and reject
+            // same-name payload incompatibilities rather than aliasing tags.
+            let mut by_name = BTreeMap::<String, records::RecordDescriptor>::new();
+            for case in left.cases.iter().chain(&right.cases) {
+                match by_name.entry(case.name.clone()) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(case.payload.clone());
                     }
-                    (Some(case), None) | (None, Some(case)) => cases.push(case.clone()),
-                    (None, None) => unreachable!(),
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        let payload = merge_physical_record_descriptor(entry.get(), &case.payload)?;
+                        entry.insert(payload);
+                    }
                 }
             }
+            let cases = by_name
+                .into_iter()
+                .map(|(name, payload)| records::EnumCase::new(name, payload))
+                .collect::<Vec<_>>();
             Ok(ValueType::Enum(Box::new(
                 records::EnumSchema::new(right.name.clone(), cases)
                     .map_err(|_| Error::InvalidStoredValue("invalid physical enum registry"))?
@@ -2331,5 +2333,55 @@ mod variant_case_tests {
         )
         .unwrap();
         assert_ne!(archived_tag, snoozed_tag);
+    }
+
+    #[test]
+    fn concurrent_payload_enum_additions_preserve_distinct_case_layouts() {
+        let schema = |cases: Vec<records::EnumCase>| {
+            records::ValueType::Enum(Box::new(
+                records::EnumSchema::new("status", cases)
+                    .unwrap()
+                    .with_registry_id(92),
+            ))
+        };
+        let payload = |name| records::RecordDescriptor::new([(name, records::ValueType::String)]);
+        let archived = schema(vec![
+            records::EnumCase::new("draft", payload("label")),
+            records::EnumCase::new("published", payload("label")),
+            records::EnumCase::new("archived", payload("reason")),
+        ]);
+        let snoozed = schema(vec![
+            records::EnumCase::new("draft", payload("label")),
+            records::EnumCase::new("published", payload("label")),
+            records::EnumCase::new("snoozed", payload("until")),
+        ]);
+        let merged = merge_physical_value_type(&archived, &snoozed)
+            .expect("concurrent payload cases must coexist");
+        let records::ValueType::Enum(registry) = merged else {
+            panic!("expected payload enum registry");
+        };
+        assert_eq!(registry.cases.len(), 4);
+        assert!(registry.cases.iter().any(|case| case.name == "archived"));
+        assert!(registry.cases.iter().any(|case| case.name == "snoozed"));
+    }
+
+    #[test]
+    fn concurrent_same_named_payload_case_must_not_merge_incompatibly() {
+        let schema = |payload| {
+            records::ValueType::Enum(Box::new(
+                records::EnumSchema::new("status", [records::EnumCase::new("draft", payload)])
+                    .unwrap()
+                    .with_registry_id(93),
+            ))
+        };
+        let left = schema(records::RecordDescriptor::new([(
+            "label",
+            records::ValueType::String,
+        )]));
+        let right = schema(records::RecordDescriptor::new([(
+            "label",
+            records::ValueType::U64,
+        )]));
+        assert!(merge_physical_value_type(&left, &right).is_err());
     }
 }
