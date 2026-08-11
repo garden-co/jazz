@@ -82,18 +82,17 @@ fn compare_scalar_enum_cases(
     left: &GlobalScalarEnumCaseId,
     right: &GlobalScalarEnumCaseId,
 ) -> std::cmp::Ordering {
-    // Every descendant repeats its inherited cases at their original authored
-    // ordinal. That ordinal therefore preserves the existing physical prefix;
-    // authoritative catalogue aliases linearize only genuinely concurrent
-    // introductions at the same next ordinal. UUID is solely a deterministic
-    // tie-breaker for corrupt/incomplete catalogues.
-    left.introducing_ordinal
-        .cmp(&right.introducing_ordinal)
-        .then_with(|| {
-            aliases
-                .get(&left.introducing_schema)
-                .cmp(&aliases.get(&right.introducing_schema))
-        })
+    // A case's *introducing* schema alias is its authoritative, durable
+    // introduction position.  Descendants retain the original identity, so
+    // ordering by alias preserves the inherited physical prefix and appends a
+    // later sibling even when that sibling's authored ordinal is shallower
+    // than a case introduced earlier on another branch.  Ordinal only orders
+    // multiple cases introduced by the same schema. UUID is solely a
+    // deterministic tie-breaker for corrupt/incomplete catalogues.
+    aliases
+        .get(&left.introducing_schema)
+        .cmp(&aliases.get(&right.introducing_schema))
+        .then_with(|| left.introducing_ordinal.cmp(&right.introducing_ordinal))
         .then_with(|| left.introducing_schema.cmp(&right.introducing_schema))
 }
 
@@ -703,7 +702,7 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    fn physical_scalar_enum_cases(
+    pub(super) fn physical_scalar_enum_cases(
         &self,
         table_id: PhysicalTableId,
         column_id: PhysicalColumnId,
@@ -3688,6 +3687,13 @@ mod variant_case_tests {
         SchemaVersionId(uuid::Uuid::from_bytes([byte; 16]))
     }
 
+    fn case(schema: SchemaVersionId, ordinal: u8) -> GlobalScalarEnumCaseId {
+        GlobalScalarEnumCaseId {
+            introducing_schema: schema,
+            introducing_ordinal: ordinal,
+        }
+    }
+
     fn mapping(table_id: u64, columns: &[(&str, u64)]) -> SchemaPhysicalMapping {
         SchemaPhysicalMapping {
             tables: BTreeMap::from([(
@@ -3794,7 +3800,55 @@ mod variant_case_tests {
     }
 
     #[test]
-    fn concurrent_scalar_enum_additions_preserve_schema_qualified_case_identity() {
+    fn later_sibling_with_a_shallower_ordinal_appends_after_deeper_introduction() {
+        // This is an internal lowering invariant. The same ordering primitive
+        // builds scalar, direct-payload, and nested-enum physical registries;
+        // their compact tags are not publicly observable on their own.
+        //
+        // base ──► A (+ ordinal 1) ──► A2 (+ ordinal 2)
+        //   └────────────────────────► B (+ ordinal 1)
+        //
+        // B is published later in the dense catalogue, so it must append
+        // after A2 rather than retag A2 merely because B's local ordinal is
+        // shallower. The test is sensitive to restoring ordinal-first order.
+        let base = schema(1);
+        let a = schema(2);
+        let a2 = schema(3);
+        let b = schema(4);
+        let aliases = BTreeMap::from([
+            (base, SchemaVersionAlias(1)),
+            (a, SchemaVersionAlias(2)),
+            (a2, SchemaVersionAlias(3)),
+            (b, SchemaVersionAlias(4)),
+        ]);
+        let base_case = case(base, 0);
+        let a_case = case(a, 1);
+        let a2_case = case(a2, 2);
+        let b_case = case(b, 1);
+
+        for registry_kind in ["scalar", "direct payload", "nested"] {
+            let mut registry = vec![
+                base_case.clone(),
+                a_case.clone(),
+                a2_case.clone(),
+                b_case.clone(),
+            ];
+            registry.sort_by(|left, right| compare_scalar_enum_cases(&aliases, left, right));
+            assert_eq!(
+                registry,
+                vec![
+                    base_case.clone(),
+                    a_case.clone(),
+                    a2_case.clone(),
+                    b_case.clone()
+                ],
+                "{registry_kind} registry"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_scalar_enum_merge_preserves_established_prefix_and_distinct_cases() {
         // This is deliberately an internal lowering test: the failure happens
         // before a public row can be decoded. Two concurrent authored schemas
         // both use ordinal 2, so accepting the raw tags as one physical tag
@@ -3812,17 +3866,32 @@ mod variant_case_tests {
         let merged_ab = merge_physical_value_type(&archived, &snoozed)
             .expect("concurrent enum cases must coexist in one physical registry");
         let merged_ba = merge_physical_value_type(&snoozed, &archived)
-            .expect("local arrival order must not choose semantic enum order");
-        assert_eq!(merged_ab, merged_ba);
+            .expect("the opposite established prefix also accepts its sibling");
 
-        // The implementation must additionally translate authored ordinal 2
-        // through a schema-qualified identity at both storage boundaries. This
-        // assertion only establishes the prerequisite: the physical registry
-        // has distinct slots for the sibling introductions.
-        let records::ValueType::EnumTag(registry) = merged_ab else {
+        // This compatibility helper operates on an already-established local
+        // physical descriptor. It is intentionally directional: canonical
+        // catalogue ordering has already happened before this point, so
+        // sorting or rebuilding this descriptor would retag stored values.
+        // The schema-qualified physical lowering path supplies that canonical
+        // order; this helper must only append a distinct sibling case.
+        let records::ValueType::EnumTag(merged_ab) = merged_ab else {
             panic!("expected scalar enum registry");
         };
-        assert_eq!(registry.variants.len(), 4);
+        let records::ValueType::EnumTag(merged_ba) = merged_ba else {
+            panic!("expected scalar enum registry");
+        };
+        assert_eq!(
+            merged_ab.variants,
+            vec!["draft", "published", "archived", "snoozed"],
+            "left registry stays an exact physical prefix"
+        );
+        assert_eq!(
+            merged_ba.variants,
+            vec!["draft", "published", "snoozed", "archived"],
+            "the reverse call preserves its own established prefix"
+        );
+        assert_eq!(merged_ab.variants.len(), 4);
+        assert_eq!(merged_ba.variants.len(), 4);
     }
 
     #[test]
