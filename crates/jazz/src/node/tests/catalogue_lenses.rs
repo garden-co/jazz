@@ -3159,6 +3159,87 @@ fn old_enum_schema_only_decodes_cases_required_by_the_query() {
 }
 
 #[test]
+fn enum_projection_requirement_closure_includes_hidden_policy_fields() {
+    // A policy field is not part of the public output, but it still decides
+    // whether the row exists.  It must therefore force a non-total enum
+    // projection instead of being treated like an unused cell.
+    let base = JazzSchema::new([TableSchema::new(
+        "items",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new(
+                "status",
+                ColumnType::EnumTag(
+                    groove::records::ScalarEnumSchema::new("status", ["open"]).unwrap(),
+                ),
+            ),
+        ],
+    )
+    .with_read_policy(Policy::shape(
+        Query::from("items").filter(eq(col("status"), lit(Value::EnumTag(0)))),
+    ))]);
+    let evolved_schema = JazzSchema::new([TableSchema::new(
+        "items",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new(
+                "status",
+                ColumnType::EnumTag(
+                    groove::records::ScalarEnumSchema::new("status", ["open", "closed"])
+                        .unwrap(),
+                ),
+            ),
+        ],
+    )
+    .with_read_policy(Policy::shape(
+        Query::from("items").filter(eq(col("status"), lit(Value::EnumTag(0)))),
+    ))]);
+    let evolved = SchemaVersion::new(evolved_schema);
+    let (_dir, mut core) = open_node_with_schema(node(0x77), base.clone());
+    publish_schema_lineage(
+        &mut core,
+        evolved.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "items".to_owned(),
+                target_table: "items".to_owned(),
+                ops: vec![LensOp::TransformColumn {
+                    column: "status".to_owned(),
+                    transform: "jazz.identity".to_owned(),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
+    })
+    .unwrap();
+    core.commit_mergeable(
+        MergeableCommit::new("items", row(0x77), 1).cells(BTreeMap::from([
+            ("title".to_owned(), v("hidden-policy-dependency")),
+            ("status".to_owned(), Value::EnumTag(1)),
+        ])),
+    )
+    .unwrap();
+
+    let title_only = Query::from("items").select(["title"]).validate(&base).unwrap();
+    let binding = title_only.bind(BTreeMap::new()).unwrap();
+    let result = core.query_rows_for_link(
+        &title_only,
+        &binding,
+        DurabilityTier::Local,
+        user(0x77),
+    );
+    assert!(result.is_err(), "policy result: {result:#?}");
+}
+
+#[test]
 fn independent_column_enum_registries_evolve_additively_across_reopen() {
     // Registry allocation is physical catalogue metadata, so this internal
     // test asserts both user-visible decoding and the non-Cartesian boundary.
