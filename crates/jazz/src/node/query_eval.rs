@@ -1532,44 +1532,15 @@ where
         table: &TableSchema,
         tier: DurabilityTier,
     ) -> Result<CurrentSourceGraph, SourceResolutionError> {
-        // Keep the schema-aware projected payload as the row source. Version
-        // witnesses are joined alongside it solely to provide authoritative
-        // provenance/version metadata; using the physical witness graph as
-        // the payload source would bypass lenses and large-value projection.
+        // The schema-aware projection already retains the complete current
+        // version witness tuple.  Joining it to the generic physical witness
+        // graph would independently decode every enum cell, defeating a
+        // title-only old-schema subscription before its narrowed source has a
+        // chance to replace unused enum values with typed nulls.
         let projected =
             self.projected_content_current_source_graph(request, table, tier, true, true)?;
-        let witnesses = self
-            .node
-            .maintained_view_content_current_with_version_in_schema(
-                table,
-                tier,
-                self.read_view.read_schema,
-            )
-            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-        let mut fields = vec![ProjectField::renamed(left_field("row_uuid"), "row_uuid")];
-        fields.extend(table.columns.iter().map(|column| {
-            let field = user_column_field(&column.name);
-            ProjectField::renamed(left_field(&field), field)
-        }));
-        fields.extend(
-            [
-                "schema_version",
-                "parents",
-                "authored_columns",
-                "created_by",
-                "created_at",
-                "updated_by",
-                "updated_at",
-                "tx_time",
-                "tx_node_id",
-                "global_seq",
-            ]
-            .into_iter()
-            .map(|field| ProjectField::renamed(right_field(field), field)),
-        );
         Ok(CurrentSourceGraph {
-            graph: GraphBuilder::join(projected, witnesses, ["row_uuid"], ["row_uuid"])
-                .project_fields(fields),
+            graph: projected,
             descriptor: current_row_descriptor(table),
             metadata: BTreeMap::new(),
         })

@@ -1212,9 +1212,13 @@ fn build_content_witness_projector(
         field_idx_in_descriptor(terminal_descriptor, &schema.authored_columns_field)?,
         9 + table.columns.len(),
     ));
-    RecordProjector::new(terminal_descriptor, storage_descriptor, mapping).map_err(|_| {
-        super::Error::InvalidStoredValue("content witness projector construction failed")
-    })
+    // Current-source tables bind enum registries to physical occurrences,
+    // while version carriers bind the same authored layout to history-table
+    // occurrences. The projector copies the encoded value only after the
+    // narrow rebound-layout check has proved every tag/payload layout equal.
+    RecordProjector::new_registry_rebound(terminal_descriptor, storage_descriptor, mapping).map_err(
+        |_| super::Error::InvalidStoredValue("content witness projector construction failed"),
+    )
 }
 
 fn tagged_deletion(value: Value) -> Result<Option<crate::tx::DeletionEvent>, super::Error> {

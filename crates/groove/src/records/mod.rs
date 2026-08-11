@@ -622,6 +622,31 @@ impl RecordProjector {
         target: RecordDescriptor,
         mapping: impl IntoIterator<Item = (usize, usize)>,
     ) -> Result<Self, Error> {
+        Self::new_inner(source, target, mapping, false)
+    }
+
+    /// Construct a byte-copy projector across descriptors that have identical
+    /// encoded layouts but were rebound to different enum registry IDs.
+    ///
+    /// This is intentionally narrower than general enum compatibility: every
+    /// case and nested payload layout must match exactly, so no tag can be
+    /// silently reinterpreted. Callers that cross evolved enum schemas must
+    /// use an explicit enum remap instead.
+    #[doc(hidden)]
+    pub fn new_registry_rebound(
+        source: RecordDescriptor,
+        target: RecordDescriptor,
+        mapping: impl IntoIterator<Item = (usize, usize)>,
+    ) -> Result<Self, Error> {
+        Self::new_inner(source, target, mapping, true)
+    }
+
+    fn new_inner(
+        source: RecordDescriptor,
+        target: RecordDescriptor,
+        mapping: impl IntoIterator<Item = (usize, usize)>,
+        allow_registry_rebinding: bool,
+    ) -> Result<Self, Error> {
         let mut target_to_source = vec![None; target.fields.len()];
         for (source_idx, target_idx) in mapping {
             let source_field =
@@ -643,7 +668,12 @@ impl RecordProjector {
             if target_to_source[target_idx].is_some() {
                 return Err(Error::ProjectDuplicateTarget { target_idx });
             }
-            if source_field.value_type != target_field.value_type {
+            if source_field.value_type != target_field.value_type
+                && !(allow_registry_rebinding
+                    && source_field
+                        .value_type
+                        .registry_rebound_layout_compatible_with(&target_field.value_type))
+            {
                 return Err(Error::ProjectTypeMismatch {
                     source_idx,
                     target_idx,

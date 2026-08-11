@@ -3059,6 +3059,166 @@ fn payload_enum_unknown_case_is_ignored_only_when_unselected() {
 }
 
 #[test]
+fn maintained_old_enum_subscriptions_only_fail_when_their_requirement_uses_new_cases() {
+    // This is an internal subscription-boundary regression. PeerState is the
+    // server-side maintained subscription driver; public clients receive its
+    // ViewUpdates, but cannot themselves install a catalogue lineage.
+    let base = enum_projection_schema(&["open"]);
+    let evolved = SchemaVersion::new(enum_projection_schema(&["open", "closed"]));
+    let (_dir, mut core) = open_node_with_schema(node(0x7b), base.clone());
+    publish_schema_lineage(
+        &mut core,
+        evolved.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "items".to_owned(),
+                target_table: "items".to_owned(),
+                ops: vec![LensOp::TransformColumn {
+                    column: "status".to_owned(),
+                    transform: "jazz.identity".to_owned(),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
+    })
+    .unwrap();
+
+    let known = row(0x7b);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("items", known, 1).cells(BTreeMap::from([
+            ("title".to_owned(), v("known case")),
+            ("status".to_owned(), Value::EnumTag(0)),
+        ])),
+    );
+
+    let title_only = Query::from("items").select(["title"]).validate(&base).unwrap();
+    let title_binding = title_only.bind(BTreeMap::new()).unwrap();
+    let mut title_peer = PeerState::new();
+    let initial = title_peer
+        .rehydrate_query(&mut core, &title_only, &title_binding)
+        .expect("old-schema title subscription opens over known case");
+    let SyncMessage::ViewUpdate { reset_result_set, result_member_adds, .. } = initial else {
+        panic!("expected initial maintained view update");
+    };
+    assert!(reset_result_set);
+    assert_eq!(result_member_adds.len(), 1);
+
+    // Recompiling exactly the same target must leave the maintained graph in
+    // place: target registration is idempotent, not a hidden reset mechanism.
+    let unchanged = title_peer
+        .query_update(&mut core, &title_only, &title_binding)
+        .expect("identical projection target remains registered");
+    let SyncMessage::ViewUpdate {
+        reset_result_set,
+        result_member_adds,
+        result_member_removes,
+        terminal_operations,
+        ..
+    } = unchanged else {
+        panic!("expected maintained view update");
+    };
+    assert!(!reset_result_set, "idempotent target registration must not reset");
+    assert!(result_member_adds.is_empty());
+    assert!(result_member_removes.is_empty());
+    assert!(terminal_operations.is_empty());
+
+    let unknown = row(0x7c);
+    let unknown_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("items", unknown, 2).cells(BTreeMap::from([
+            ("title".to_owned(), v("new case is harmless when unselected")),
+            ("status".to_owned(), Value::EnumTag(1)),
+        ])),
+    );
+    let update = title_peer
+        .query_update(&mut core, &title_only, &title_binding)
+        .expect("unused unknown enum must not break maintained title output");
+    let SyncMessage::ViewUpdate { reset_result_set, result_member_adds, .. } = update else {
+        panic!("expected maintained view update");
+    };
+    assert!(!reset_result_set);
+    assert!(result_member_adds.iter().any(|member| {
+        member.as_row().is_some_and(|(_, row_uuid, tx_id)| row_uuid == unknown && tx_id == unknown_tx)
+    }));
+
+    // A separate old-schema subscription that semantically consumes status
+    // must reject the same physical row. In particular, it may not reinterpret
+    // the new tag as `open` or suppress the row as an ordinary filter miss.
+    let status_required = Query::from("items").validate(&base).unwrap();
+    let status_binding = status_required.bind(BTreeMap::new()).unwrap();
+    let mut status_peer = PeerState::new();
+    assert!(status_peer
+        .rehydrate_query(&mut core, &status_required, &status_binding)
+        .is_err(), "required unknown enum case must fail explicitly");
+}
+
+#[test]
+fn maintained_old_payload_enum_subscription_rejects_new_case_without_aliasing() {
+    let base = payload_enum_projection_schema(&["draft"]);
+    let evolved = SchemaVersion::new(payload_enum_projection_schema(&["draft", "published"]));
+    let (_dir, mut core) = open_node_with_schema(node(0x7d), base.clone());
+    publish_schema_lineage(
+        &mut core,
+        evolved.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "items".to_owned(),
+                target_table: "items".to_owned(),
+                ops: vec![LensOp::TransformColumn {
+                    column: "status".to_owned(),
+                    transform: "jazz.identity".to_owned(),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
+    })
+    .unwrap();
+    let payload = groove::records::RecordDescriptor::new([(
+        "note",
+        groove::records::ValueType::String,
+    )]);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("items", row(0x7d), 1).cells(BTreeMap::from([
+            ("title".to_owned(), v("new payload case")),
+            (
+                "status".to_owned(),
+                Value::Enum(
+                    groove::records::EnumValue::create(1, payload, &[v("published")]).unwrap(),
+                ),
+            ),
+        ])),
+    );
+
+    let title_only = Query::from("items").select(["title"]).validate(&base).unwrap();
+    let binding = title_only.bind(BTreeMap::new()).unwrap();
+    let mut title_peer = PeerState::new();
+    assert!(title_peer.rehydrate_query(&mut core, &title_only, &binding).is_ok());
+
+    let required = Query::from("items").validate(&base).unwrap();
+    let binding = required.bind(BTreeMap::new()).unwrap();
+    let mut required_peer = PeerState::new();
+    assert!(required_peer.rehydrate_query(&mut core, &required, &binding).is_err());
+}
+
+#[test]
 fn old_enum_schema_only_decodes_cases_required_by_the_query() {
     // This is an internal current-source boundary test.  The public query API
     // supplies the requirement closure; the old read schema must not decode a
