@@ -1753,6 +1753,7 @@ export class NativeRuntimeAdapter implements Runtime {
         subscription.packedResetBatches = chunk.delta.added;
         subscription.packedResetRows = packedResetRows;
         subscription.opened = true;
+        packedResetRows.terminalOperations = chunk.terminalOperations;
         this.publishSubscriptionRows(subscription, packedResetRows, chunk.settled, true);
       } else {
         materializePackedResetRows(subscription, this.schema);

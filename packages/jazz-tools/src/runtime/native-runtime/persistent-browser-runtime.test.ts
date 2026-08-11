@@ -60,7 +60,7 @@ class FakeWorker {
   emitSubscription(subscription: number, delta: NativeRowDelta): void {
     queueMicrotask(() => {
       this.onmessage?.({
-        data: {
+        data: structuredClone({
           subscription,
           frame: {
             kind: "native-row-delta",
@@ -80,8 +80,9 @@ class FakeWorker {
             addedCount: delta.addedCount,
             removedCount: delta.removedCount,
             updatedCount: delta.updatedCount,
+            terminalOperations: delta.terminalOperations,
           },
-        },
+        }),
       } as MessageEvent);
     });
   }
@@ -982,6 +983,70 @@ describe("PersistentBrowserOpfsRuntime", () => {
     });
     expect([...updates[0]!.added]).toEqual([...added]);
 
+    await runtime.close();
+  });
+
+  it("round-trips canonical terminal operations through the worker subscription frame", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-terminal-operations-frame-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+    const subscriptionHandle = runtime.createSubscription(
+      JSON.stringify({ table: "todos" }),
+      null,
+      "local",
+      null,
+    );
+    const updates: NativeRowDelta[] = [];
+    runtime.executeSubscription(subscriptionHandle, (delta: NativeRowDelta) => updates.push(delta));
+
+    await vi.waitFor(() => {
+      expect(
+        worker.messages.some((message) => message.method === "createExecutedSubscription"),
+      ).toBe(true);
+    });
+    worker.respond(
+      worker.messages.find((message) => message.method === "createExecutedSubscription")!.id,
+      7,
+    );
+
+    const rootId = "00000000-0000-0000-0000-000000000123";
+    const childId = "00000000-0000-0000-0000-000000000124";
+    const rootKey = [10, ...uuidBytes(rootId)];
+    const childKey = [10, ...uuidBytes(childId)];
+    // CurrentRow root: key followed by the nullable-carried Text field.
+    const rootPayload = [...uuidBytes(rootId), 1, ...new TextEncoder().encode("root")];
+    const terminalOperations = [
+      {
+        root_key: rootKey,
+        path: [],
+        edit: { Insert: { index: 0, key: rootKey, value: rootPayload } },
+      },
+      {
+        root_key: rootKey,
+        path: [{ Collection: "children" }],
+        edit: { Insert: { index: 0, key: childKey, value: [...uuidBytes(childId), 99] } },
+      },
+    ];
+    worker.emitSubscription(subscriptionHandle, {
+      __jazzNativeRowDelta: true,
+      added: new Uint8Array(),
+      removed: new Uint8Array(),
+      updated: new Uint8Array(),
+      addedCount: 0,
+      removedCount: 0,
+      updatedCount: 0,
+      terminalOperations,
+    });
+
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    expect(updates[0]!.terminalOperations).toEqual(terminalOperations);
     await runtime.close();
   });
 
