@@ -6,6 +6,7 @@
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -16,6 +17,37 @@ const run = (root, command, args) => {
   const result = spawnSync(command, args, { cwd: root, encoding: "utf8" });
   return result.status === 0 ? result.stdout.trim() : "unavailable";
 };
+
+const toolEnvName = (name) => `JAZZ_ARTIFACT_TOOL_${name.toUpperCase().replaceAll("-", "_")}`;
+function toolVersion(root, name, args = ["--version"]) {
+  const injected = process.env[toolEnvName(name)];
+  if (injected) return injected;
+  const command = name === "napi" ? "pnpm" : name;
+  const commandArgs = name === "napi" ? ["--dir", "crates/jazz-napi", "exec", "napi", ...args] : args;
+  const result = spawnSync(command, commandArgs, { cwd: root, encoding: "utf8", shell: process.platform === "win32" });
+  if (result.status === 0) return result.stdout.trim() || result.stderr.trim();
+  return `unavailable: install ${name} or run pnpm ensure:rust-toolchain`;
+}
+
+function wasmPackToolVersion(root, name) {
+  const direct = toolVersion(root, name);
+  if (!direct.startsWith("unavailable:")) return direct;
+  if (process.env.JAZZ_ARTIFACT_DISABLE_WASM_PACK_CACHE === "1") return direct;
+  const caches = [process.env.XDG_CACHE_HOME, join(homedir(), ".cache"), join(homedir(), "Library", "Caches")].filter(Boolean);
+  const candidates = [];
+  for (const cache of caches) {
+    const wasmPackCache = join(cache, ".wasm-pack");
+    if (!existsSync(wasmPackCache)) continue;
+    for (const entry of readdirSync(wasmPackCache)) {
+      if (!entry.startsWith(`${name}-`)) continue;
+      const executable = name === "wasm-opt" ? join(wasmPackCache, entry, "bin", name) : join(wasmPackCache, entry, name);
+      if (existsSync(executable)) candidates.push(executable);
+    }
+  }
+  candidates.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+  if (!candidates.length) return direct;
+  return toolVersion(root, candidates[0]);
+}
 
 function files(root, paths) {
   const found = [];
@@ -37,11 +69,11 @@ function files(root, paths) {
 }
 
 const inputsFor = {
-  wasm: ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "dev/artifacts", "crates/jazz-wasm", "crates/jazz", "crates/groove", "crates/opfs-btree", "crates/wasm-tracing"],
-  napi: ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "dev/artifacts", "crates/jazz-napi", "crates/jazz", "crates/groove", "crates/opfs-btree"],
+  wasm: ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/config", ".cargo/config.toml", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "turbo.json", "dev/artifacts", "crates/jazz-wasm", "crates/jazz", "crates/groove", "crates/opfs-btree", "crates/wasm-tracing"],
+  napi: ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/config", ".cargo/config.toml", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "turbo.json", "dev/artifacts", "crates/jazz-napi", "crates/jazz", "crates/groove", "crates/opfs-btree"],
 };
 
-export function expectedManifest(root, kind, profile) {
+export function expectedManifest(root, kind, profile, targetOverride) {
   if (!(kind in inputsFor)) throw new Error(`unknown artifact kind: ${kind}`);
   const trackedInputs = files(root, inputsFor[kind]);
   const inputHash = createHash("sha256");
@@ -51,6 +83,13 @@ export function expectedManifest(root, kind, profile) {
   const cargoLock = join(root, "Cargo.lock");
   const toolchain = join(root, "rust-toolchain.toml");
   const injectedGit = process.env.JAZZ_ARTIFACT_GIT_HEAD && process.env.JAZZ_ARTIFACT_GIT_TREE && process.env.JAZZ_ARTIFACT_GIT_DIRTY_DIFF;
+  const tools = {
+    rustc: toolVersion(root, "rustc", ["-Vv"]),
+    wasmPack: kind === "wasm" ? toolVersion(root, "wasm-pack") : "not-applicable",
+    wasmBindgen: kind === "wasm" ? wasmPackToolVersion(root, "wasm-bindgen") : "not-applicable",
+    wasmOpt: kind === "wasm" ? wasmPackToolVersion(root, "wasm-opt") : "not-applicable",
+    napi: kind === "napi" ? toolVersion(root, "napi") : "not-applicable",
+  };
   return {
     schema: 1,
     kind,
@@ -64,8 +103,9 @@ export function expectedManifest(root, kind, profile) {
     },
     cargoLock: existsSync(cargoLock) ? sha256(readFileSync(cargoLock)) : "missing",
     rustToolchain: existsSync(toolchain) ? sha256(readFileSync(toolchain)) : "missing",
-    rustc: run(root, "rustc", ["-Vv"]),
-    target: kind === "wasm" ? "wasm32-unknown-unknown" : run(root, "rustc", ["-vV"]).match(/^host: (.+)$/m)?.[1] ?? "unknown",
+    tools,
+    toolchainInputs: sha256(JSON.stringify(tools)),
+    target: targetOverride ?? (kind === "wasm" ? "wasm32-unknown-unknown" : toolVersion(root, "rustc", ["-vV"]).match(/^host: (.+)$/m)?.[1] ?? "unknown"),
     features: "default",
     packageInputs: inputHash.digest("hex"),
   };
@@ -73,19 +113,22 @@ export function expectedManifest(root, kind, profile) {
 
 export const manifestPath = (root, kind) => join(root, kind === "wasm" ? "crates/jazz-wasm/pkg/.jazz-artifact-manifest.json" : "crates/jazz-napi/.jazz-artifact-manifest.json");
 
-export function writeManifest(root, kind, profile) {
+export function writeManifest(root, kind, profile, targetOverride) {
   const path = manifestPath(root, kind);
-  writeFileSync(path, `${JSON.stringify(expectedManifest(root, kind, profile), null, 2)}\n`);
+  writeFileSync(path, `${JSON.stringify(expectedManifest(root, kind, profile, targetOverride), null, 2)}\n`);
 }
 
-export function verifyManifest(root, kind, profile) {
+export function verifyManifest(root, kind, profile, targetOverride) {
   const path = manifestPath(root, kind);
   if (!existsSync(path)) return `manifest is missing (${path})`;
   let actual;
   try { actual = JSON.parse(readFileSync(path, "utf8")); } catch { return `manifest is invalid (${path})`; }
-  const expected = expectedManifest(root, kind, profile);
-  for (const key of ["schema", "kind", "profile", "cargoLock", "rustToolchain", "rustc", "target", "features", "packageInputs"]) {
+  const expected = expectedManifest(root, kind, profile, targetOverride);
+  for (const key of ["schema", "kind", "profile", "cargoLock", "rustToolchain", "toolchainInputs", "target", "features", "packageInputs"]) {
     if (actual[key] !== expected[key]) return `${key} differs (built ${JSON.stringify(actual[key])}, expected ${JSON.stringify(expected[key])})`;
+  }
+  for (const key of ["rustc", "wasmPack", "wasmBindgen", "wasmOpt", "napi"]) {
+    if (actual.tools?.[key] !== expected.tools[key]) return `tools.${key} differs (built ${JSON.stringify(actual.tools?.[key])}, expected ${JSON.stringify(expected.tools[key])})`;
   }
   for (const key of ["head", "tree", "dirtyDiff"]) if (actual.git?.[key] !== expected.git[key]) return `git.${key} differs`;
   return null;
@@ -95,10 +138,12 @@ function main(args) {
   const [command, kind, profile] = args;
   const rootFlag = args.indexOf("--root");
   const root = rootFlag === -1 ? here : resolve(args[rootFlag + 1]);
+  const targetFlag = args.indexOf("--target");
+  const target = targetFlag === -1 ? undefined : args[targetFlag + 1];
   if (!command || !kind || !profile || !["wasm", "napi"].includes(kind)) throw new Error("usage: provenance.mjs <write|verify> <wasm|napi> <profile> [--root path]");
-  if (command === "write") { writeManifest(root, kind, profile); return; }
+  if (command === "write") { writeManifest(root, kind, profile, target); return; }
   if (command === "verify") {
-    const problem = verifyManifest(root, kind, profile);
+    const problem = verifyManifest(root, kind, profile, target);
     if (problem) { console.error(`STALE ${kind} ${profile}: ${problem}`); process.exitCode = 1; }
     else console.log(`FRESH ${kind} ${profile}`);
     return;

@@ -183,7 +183,9 @@ jobs:
           sccache-key: release-napi-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-${{ matrix.platform }}-v1
 
       - name: Build jazz-napi binding
-        run: pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
+        run: |
+          node dev/artifacts/build.mjs napi release --target ${{ matrix.target }}
+          node dev/artifacts/provenance.mjs verify napi release --target ${{ matrix.target }}
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
