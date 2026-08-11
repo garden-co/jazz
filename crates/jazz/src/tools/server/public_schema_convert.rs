@@ -688,12 +688,7 @@ fn convert_column_type(
                 }
                 let mut fields = Vec::with_capacity(case.fields.len());
                 for field in &case.fields {
-                    if field.references.is_some() {
-                        return Err(err(
-                            format!("$.{}.{}.{}", table.as_str(), column, field.name.as_str()),
-                            "enum payload fields cannot use references; use UUID values instead",
-                        ));
-                    }
+                    validate_payload_enum_field(table, column, &case.name, field)?;
                     let mut value_type =
                         convert_column_type(table, field.name.as_str(), &field.column_type)?;
                     if field.nullable {
@@ -732,6 +727,60 @@ fn convert_column_type(
             "nested Row columns are not supported by core schema conversion yet",
         )),
     }
+}
+
+/// Enforce the same v1 payload-enum boundary for raw public-schema ingress as
+/// the TypeScript DSL. Schema JSON can bypass the DSL, so this must reject
+/// unsupported layouts before recursive column conversion admits them.
+fn validate_payload_enum_field(
+    table: &TableName,
+    column: &str,
+    case: &str,
+    field: &ColumnDescriptor,
+) -> Result<(), SchemaConversionError> {
+    let path = format!(
+        "$.{}.{}.{}.{}",
+        table.as_str(),
+        column,
+        case,
+        field.name.as_str()
+    );
+    if field.name.as_str() == "type" {
+        return Err(err(
+            path,
+            "enum payload field name \"type\" is reserved for the discriminant",
+        ));
+    }
+    if field.name.as_str().starts_with('$') {
+        return Err(err(
+            path,
+            "enum payload field names starting with \"$\" are reserved for magic columns",
+        ));
+    }
+    if field.references.is_some() {
+        return Err(err(
+            path,
+            "enum payload fields cannot use references; use UUID values instead",
+        ));
+    }
+    if !matches!(
+        field.column_type,
+        ColumnType::Boolean
+            | ColumnType::Text
+            | ColumnType::Timestamp
+            | ColumnType::Double
+            | ColumnType::Uuid
+            | ColumnType::Bytea
+            | ColumnType::Json { .. }
+            | ColumnType::Integer
+            | ColumnType::BigInt
+    ) {
+        return Err(err(
+            path,
+            "payload enum v1 fields must be scalar columns; arrays, rows, and nested enums are not supported",
+        ));
+    }
+    Ok(())
 }
 
 fn convert_merge_strategy(
@@ -2623,6 +2672,91 @@ mod tests {
                 GrooveValue::Nullable(None),
             ]
         );
+    }
+
+    #[test]
+    fn raw_payload_enum_ingress_rejects_non_scalar_and_reserved_fields() {
+        let nested_row = ColumnType::Row {
+            columns: Box::new(RowDescriptor::new(vec![ColumnDescriptor::new(
+                "nested",
+                ColumnType::Text,
+            )])),
+        };
+        let nested_payload_enum = ColumnType::EnumPayload {
+            cases: vec![EnumCaseDescriptor {
+                name: "nested".to_owned(),
+                fields: vec![ColumnDescriptor::new("value", ColumnType::Text)],
+            }],
+        };
+        let cases = [
+            (
+                ColumnDescriptor::new("type", ColumnType::Text),
+                "reserved for the discriminant",
+            ),
+            (
+                ColumnDescriptor::new("$createdAt", ColumnType::Timestamp),
+                "reserved for magic columns",
+            ),
+            (
+                ColumnDescriptor::new("owner", ColumnType::Uuid).references("users"),
+                "cannot use references",
+            ),
+            (
+                ColumnDescriptor::new(
+                    "owners",
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Uuid),
+                    },
+                ),
+                "must be scalar columns",
+            ),
+            (
+                ColumnDescriptor::new(
+                    "owner_refs",
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Uuid),
+                    },
+                )
+                .references("users"),
+                "cannot use references",
+            ),
+            (
+                ColumnDescriptor::new("row", nested_row),
+                "must be scalar columns",
+            ),
+            (
+                ColumnDescriptor::new(
+                    "tag",
+                    ColumnType::Enum {
+                        variants: vec!["a".to_owned()],
+                    },
+                ),
+                "must be scalar columns",
+            ),
+            (
+                ColumnDescriptor::new("nested", nested_payload_enum),
+                "must be scalar columns",
+            ),
+        ];
+
+        for (field, message) in cases {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("events").column(
+                    "event",
+                    ColumnType::EnumPayload {
+                        cases: vec![EnumCaseDescriptor {
+                            name: "message".to_owned(),
+                            fields: vec![field],
+                        }],
+                    },
+                ))
+                .build();
+            let error = convert_public_schema(&schema).expect_err("raw payload field is rejected");
+            assert!(
+                error.to_string().contains(message),
+                "expected {message:?}, got {error}"
+            );
+        }
     }
 
     #[test]

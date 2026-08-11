@@ -3159,12 +3159,216 @@ fn normalize_predicate(
             let case_tag = enum_schema
                 .tag(case)
                 .map_err(|_| Error::QueryLowering(format!("unknown payload enum case {case}")))?;
+            let enum_case = enum_schema
+                .case(case_tag)
+                .map_err(|_| Error::QueryLowering(format!("unknown payload enum case {case}")))?;
             NormalizedPredicateExpr::EnumMatch {
                 value: normalize_operand(source, &Operand::Column(column.clone()))?,
                 case_tag,
-                payload: Box::new(normalize_predicate(schema, source, payload)?),
+                payload: Box::new(normalize_enum_payload_predicate(
+                    &enum_case.payload,
+                    source,
+                    payload,
+                )?),
             }
         }
+    })
+}
+
+/// Normalize a predicate evaluated inside one selected payload-enum case.
+///
+/// Payload fields are case-local. They must never be resolved against the
+/// outer table, even when that table happens to have the same field name.
+fn normalize_enum_payload_predicate(
+    descriptor: &crate::groove::records::RecordDescriptor,
+    source: &SourceId,
+    predicate: &Predicate,
+) -> Result<NormalizedPredicateExpr, Error> {
+    Ok(match predicate {
+        Predicate::All(predicates) => NormalizedPredicateExpr::And(
+            predicates
+                .iter()
+                .map(|predicate| normalize_enum_payload_predicate(descriptor, source, predicate))
+                .collect::<Result<Vec<_>, Error>>()?,
+        ),
+        Predicate::Any(predicates) => NormalizedPredicateExpr::Or(
+            predicates
+                .iter()
+                .map(|predicate| normalize_enum_payload_predicate(descriptor, source, predicate))
+                .collect::<Result<Vec<_>, Error>>()?,
+        ),
+        Predicate::Not(predicate) => NormalizedPredicateExpr::Not(Box::new(
+            normalize_enum_payload_predicate(descriptor, source, predicate)?,
+        )),
+        Predicate::Eq(left, right) => normalize_enum_payload_compare(
+            descriptor,
+            source,
+            left,
+            NormalizedComparisonOp::Eq,
+            right,
+        )?,
+        Predicate::Ne(left, right) => normalize_enum_payload_compare(
+            descriptor,
+            source,
+            left,
+            NormalizedComparisonOp::Ne,
+            right,
+        )?,
+        Predicate::Gt(left, right) => normalize_enum_payload_compare(
+            descriptor,
+            source,
+            left,
+            NormalizedComparisonOp::Gt,
+            right,
+        )?,
+        Predicate::Gte(left, right) => normalize_enum_payload_compare(
+            descriptor,
+            source,
+            left,
+            NormalizedComparisonOp::Gte,
+            right,
+        )?,
+        Predicate::Lt(left, right) => normalize_enum_payload_compare(
+            descriptor,
+            source,
+            left,
+            NormalizedComparisonOp::Lt,
+            right,
+        )?,
+        Predicate::Lte(left, right) => normalize_enum_payload_compare(
+            descriptor,
+            source,
+            left,
+            NormalizedComparisonOp::Lte,
+            right,
+        )?,
+        Predicate::In(value, options) => {
+            let target_type = enum_payload_operand_type(descriptor, value)?;
+            NormalizedPredicateExpr::In {
+                value: normalize_enum_payload_operand(descriptor, source, value, None)?,
+                options: options
+                    .iter()
+                    .map(|operand| {
+                        normalize_enum_payload_operand(
+                            descriptor,
+                            source,
+                            operand,
+                            target_type.as_ref(),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?,
+            }
+        }
+        Predicate::Contains(value, needle) => {
+            let needle_type = enum_payload_contains_needle_type(descriptor, value)?;
+            NormalizedPredicateExpr::ArrayContains {
+                value: normalize_enum_payload_operand(descriptor, source, value, None)?,
+                needle: normalize_enum_payload_operand(
+                    descriptor,
+                    source,
+                    needle,
+                    needle_type.as_ref(),
+                )?,
+            }
+        }
+        Predicate::IsNull(value) => NormalizedPredicateExpr::IsNull(
+            normalize_enum_payload_operand(descriptor, source, value, None)?,
+        ),
+        Predicate::EnumMatch { .. } => {
+            return Err(Error::QueryLowering(
+                "nested payload enum matches are not supported".to_owned(),
+            ));
+        }
+    })
+}
+
+fn normalize_enum_payload_compare(
+    descriptor: &crate::groove::records::RecordDescriptor,
+    source: &SourceId,
+    left: &Operand,
+    op: NormalizedComparisonOp,
+    right: &Operand,
+) -> Result<NormalizedPredicateExpr, Error> {
+    let left_type = enum_payload_operand_type(descriptor, left)?;
+    let right_type = enum_payload_operand_type(descriptor, right)?;
+    Ok(NormalizedPredicateExpr::Compare {
+        left: normalize_enum_payload_operand(descriptor, source, left, right_type.as_ref())?,
+        op,
+        right: normalize_enum_payload_operand(descriptor, source, right, left_type.as_ref())?,
+    })
+}
+
+fn normalize_enum_payload_operand(
+    descriptor: &crate::groove::records::RecordDescriptor,
+    source: &SourceId,
+    operand: &Operand,
+    target_type: Option<&ColumnType>,
+) -> Result<NormalizedValueRef, Error> {
+    match operand {
+        Operand::Column(column) => {
+            if enum_payload_field_type(descriptor, column).is_none() {
+                return Err(Error::QueryLowering(format!(
+                    "unknown payload enum field {column}"
+                )));
+            }
+            Ok(NormalizedValueRef::SourceField {
+                source: source.clone(),
+                field: column.clone(),
+            })
+        }
+        Operand::Param(param) => Ok(NormalizedValueRef::Param(param.clone())),
+        Operand::Claim(claim) => Ok(NormalizedValueRef::Claim(ClaimPath(
+            claim.split('.').map(str::to_owned).collect(),
+        ))),
+        Operand::Literal(value) => {
+            let value = target_type
+                .map(|target_type| coerce_literal_for_column_type(value.clone(), target_type))
+                .unwrap_or_else(|| value.clone());
+            Ok(NormalizedValueRef::Literal(
+                postcard::to_allocvec(&value).map_err(|err| {
+                    Error::QueryLowering(format!("literal encoding failed: {err}"))
+                })?,
+            ))
+        }
+    }
+}
+
+fn enum_payload_operand_type(
+    descriptor: &crate::groove::records::RecordDescriptor,
+    operand: &Operand,
+) -> Result<Option<ColumnType>, Error> {
+    match operand {
+        Operand::Column(column) => enum_payload_field_type(descriptor, column)
+            .map(Some)
+            .ok_or_else(|| Error::QueryLowering(format!("unknown payload enum field {column}"))),
+        Operand::Literal(_) | Operand::Param(_) | Operand::Claim(_) => Ok(None),
+    }
+}
+
+fn enum_payload_field_type(
+    descriptor: &crate::groove::records::RecordDescriptor,
+    field: &str,
+) -> Option<ColumnType> {
+    descriptor
+        .fields()
+        .iter()
+        .find(|candidate| candidate.name.as_deref() == Some(field))
+        .map(|candidate| candidate.value_type.clone())
+}
+
+fn enum_payload_contains_needle_type(
+    descriptor: &crate::groove::records::RecordDescriptor,
+    value: &Operand,
+) -> Result<Option<ColumnType>, Error> {
+    Ok(match enum_payload_operand_type(descriptor, value)? {
+        Some(ColumnType::Array(member)) => Some(*member),
+        Some(ColumnType::Nullable(inner)) => match *inner {
+            ColumnType::Array(member) => Some(*member),
+            ColumnType::String => Some(ColumnType::String),
+            _ => None,
+        },
+        Some(ColumnType::String) => Some(ColumnType::String),
+        _ => None,
     })
 }
 
@@ -14670,6 +14874,42 @@ mod tests {
         for (value, column_type, expected) in cases {
             assert_eq!(coerce_prepared_binding_value(value, &column_type), expected);
         }
+    }
+
+    // This lowerer-level assertion protects the case-local descriptor lookup;
+    // public one-shot and maintained behavior is exercised by the enum query
+    // integration coverage.
+    #[test]
+    fn payload_enum_normalization_uses_case_local_field_types() {
+        let descriptor = RecordDescriptor::new([
+            ("shared", ValueType::Uuid),
+            ("case_only", ValueType::String),
+        ]);
+        let source = root_source_id("events");
+        let uuid = uuid::Uuid::from_u128(7);
+        let predicate = Predicate::Eq(
+            Operand::Column("shared".to_owned()),
+            Operand::Literal(Value::String(uuid.to_string())),
+        );
+
+        let normalized = normalize_enum_payload_predicate(&descriptor, &source, &predicate)
+            .expect("case-local field normalizes");
+        let NormalizedPredicateExpr::Compare { right, .. } = normalized else {
+            panic!("expected comparison");
+        };
+        let NormalizedValueRef::Literal(bytes) = right else {
+            panic!("expected literal");
+        };
+        assert_eq!(
+            postcard::from_bytes::<Value>(&bytes).unwrap(),
+            Value::Uuid(uuid)
+        );
+
+        let outer_only = Predicate::Eq(
+            Operand::Column("outer_only".to_owned()),
+            Operand::Literal(Value::String("not a payload field".to_owned())),
+        );
+        assert!(normalize_enum_payload_predicate(&descriptor, &source, &outer_only).is_err());
     }
 
     #[test]

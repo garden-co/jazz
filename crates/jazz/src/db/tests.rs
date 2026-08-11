@@ -3,6 +3,7 @@ use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
+use groove::records::{EnumCase, EnumSchema, EnumValue, RecordDescriptor, ValueType};
 use groove::schema::{ColumnSchema, ColumnType};
 use groove::storage::{OrderedKvStorage, ReopenableStorage, RocksDbStorage};
 
@@ -461,6 +462,49 @@ fn schema() -> JazzSchema {
     .with_write_policy(Policy::public())])
 }
 
+fn payload_enum_query_schema() -> JazzSchema {
+    let event = ColumnType::Enum(Box::new(
+        EnumSchema::new(
+            "event",
+            [
+                EnumCase::new(
+                    "message",
+                    RecordDescriptor::new([("level", ValueType::I32)]),
+                ),
+                EnumCase::new("closed", RecordDescriptor::new([("code", ValueType::I32)])),
+            ],
+        )
+        .unwrap(),
+    ));
+    JazzSchema::new([
+        TableSchema::new("events", [ColumnSchema::new("event", event)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+    ])
+}
+
+fn payload_message(level: i32) -> Value {
+    Value::Enum(
+        EnumValue::create(
+            0,
+            RecordDescriptor::new([("level", ValueType::I32)]),
+            &[Value::I32(level)],
+        )
+        .unwrap(),
+    )
+}
+
+fn payload_closed(code: i32) -> Value {
+    Value::Enum(
+        EnumValue::create(
+            1,
+            RecordDescriptor::new([("code", ValueType::I32)]),
+            &[Value::I32(code)],
+        )
+        .unwrap(),
+    )
+}
+
 fn owner_read_schema() -> JazzSchema {
     JazzSchema::new([TableSchema::new(
         "todos",
@@ -490,6 +534,74 @@ fn created_by_read_schema_for_claim(claim_name: &str) -> JazzSchema {
         Query::from("todos").filter(eq(col("$createdBy"), claim(claim_name))),
     ))
     .with_write_policy(Policy::public())])
+}
+
+#[test]
+fn payload_enum_match_filters_one_shot_and_maintained_case_transitions() {
+    let schema = payload_enum_query_schema();
+    let db = open_db(0xe7, AuthorId::from_bytes([0xe7; 16]), &schema);
+    let matching = row(0xe1);
+    let other_case = row(0xe2);
+    db.insert_with_id(
+        "events",
+        matching,
+        BTreeMap::from([("event".to_owned(), payload_message(2))]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "events",
+        other_case,
+        BTreeMap::from([("event".to_owned(), payload_closed(2))]),
+    )
+    .unwrap();
+
+    let query = Query::from("events").filter(Predicate::EnumMatch {
+        column: "event".to_owned(),
+        case: "message".to_owned(),
+        payload: Box::new(Predicate::Eq(
+            Operand::Column("level".to_owned()),
+            Operand::Literal(Value::I32(2)),
+        )),
+    });
+    assert_eq!(row_ids(&prepared_read(&db, &query)), vec![matching]);
+
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert_eq!(row_ids(&initial.rows), vec![matching]);
+
+    db.update(
+        "events",
+        matching,
+        BTreeMap::from([("event".to_owned(), payload_closed(2))]),
+    )
+    .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed
+            .into_iter()
+            .map(|row| row.row_uuid)
+            .collect::<Vec<_>>(),
+        vec![matching]
+    );
+    assert!(db.read(&prepared_query).unwrap().is_empty());
+
+    db.update(
+        "events",
+        other_case,
+        BTreeMap::from([("event".to_owned(), payload_message(2))]),
+    )
+    .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert_eq!(row_ids(&added), vec![other_case]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    assert_eq!(
+        row_ids(&db.read(&prepared_query).unwrap()),
+        vec![other_case]
+    );
 }
 
 fn owner_write_schema() -> JazzSchema {

@@ -4733,6 +4733,58 @@ mod tests {
     }
 
     #[test]
+    fn enum_match_validation_uses_selected_case_fields_not_outer_table_fields() {
+        let payload =
+            RecordDescriptor::new([("case_only", ValueType::String), ("shared", ValueType::I32)]);
+        let schema = JazzSchema::new([TableSchema::new(
+            "events",
+            [
+                ColumnSchema::new("shared", ColumnType::String),
+                ColumnSchema::new("outer_only", ColumnType::String),
+                ColumnSchema::new(
+                    "event",
+                    ColumnType::Enum(Box::new(
+                        EnumSchema::new("event", [EnumCase::new("message", payload)]).unwrap(),
+                    )),
+                ),
+            ],
+        )]);
+        let matched = |payload| Predicate::EnumMatch {
+            column: "event".to_owned(),
+            case: "message".to_owned(),
+            payload: Box::new(payload),
+        };
+
+        assert!(
+            Query::from("events")
+                .filter(matched(Predicate::Eq(
+                    Operand::Column("case_only".to_owned()),
+                    Operand::Literal(Value::String("present only in the case".to_owned())),
+                )))
+                .validate(&schema)
+                .is_ok()
+        );
+        assert!(
+            Query::from("events")
+                .filter(matched(Predicate::Eq(
+                    Operand::Column("outer_only".to_owned()),
+                    Operand::Literal(Value::String("outer".to_owned())),
+                )))
+                .validate(&schema)
+                .is_err()
+        );
+        assert!(
+            Query::from("events")
+                .filter(matched(Predicate::Eq(
+                    Operand::Column("shared".to_owned()),
+                    Operand::Literal(Value::String("outer type".to_owned())),
+                )))
+                .validate(&schema)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn contains_param_array_against_column_infers_array_type() {
         let validated = Query::from("issues")
             .filter(contains(param("teams"), col("assignee")))
