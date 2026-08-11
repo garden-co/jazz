@@ -133,6 +133,87 @@ fn hydrate_nested_scalar_enum_cases(
     Ok(())
 }
 
+fn global_case_path(path: &str, case: &GlobalScalarEnumCaseId) -> String {
+    format!(
+        "{path}/case/{}/{}",
+        case.introducing_schema.0.simple(),
+        case.introducing_ordinal
+    )
+}
+
+/// Register every nested payload enum by its schema-qualified case identity.
+/// Scalar descendants are handled by the existing scalar registry walker;
+/// this map owns only the payload tag boundary itself.
+fn hydrate_nested_payload_enum_cases(
+    value_type: &records::ValueType,
+    introducing_schema: SchemaVersionId,
+    path: &str,
+    output: &mut BTreeMap<String, Vec<GlobalScalarEnumCaseId>>,
+) -> Result<(), Error> {
+    use records::ValueType;
+    match value_type {
+        ValueType::Nullable(inner) => hydrate_nested_payload_enum_cases(
+            inner,
+            introducing_schema,
+            &format!("{path}/nullable"),
+            output,
+        )?,
+        ValueType::Array(inner) => hydrate_nested_payload_enum_cases(
+            inner,
+            introducing_schema,
+            &format!("{path}/array"),
+            output,
+        )?,
+        ValueType::Tuple(values) => {
+            for (index, value) in values.iter().enumerate() {
+                hydrate_nested_payload_enum_cases(
+                    value,
+                    introducing_schema,
+                    &format!("{path}/tuple/{index}"),
+                    output,
+                )?;
+            }
+        }
+        ValueType::Record(record) => {
+            for field in record.fields() {
+                let name = field.name.as_deref().ok_or(Error::InvalidStoredValue(
+                    "nested enum record field unnamed",
+                ))?;
+                hydrate_nested_payload_enum_cases(
+                    &field.value_type,
+                    introducing_schema,
+                    &format!("{path}/record/{name}"),
+                    output,
+                )?;
+            }
+        }
+        ValueType::Enum(schema) => {
+            let cases = output.entry(path.to_owned()).or_insert_with(|| {
+                schema
+                    .cases
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, _)| GlobalScalarEnumCaseId {
+                        introducing_schema,
+                        introducing_ordinal: ordinal as u8,
+                    })
+                    .collect()
+            });
+            let cases = cases.clone();
+            for (case, layout) in cases.iter().zip(&schema.cases) {
+                hydrate_nested_payload_enum_cases(
+                    &records::ValueType::Record(Box::new(layout.payload.clone())),
+                    introducing_schema,
+                    &global_case_path(path, case),
+                    output,
+                )?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn reconcile_nested_scalar_enum_cases(
     value_type: &records::ValueType,
     introducing_schema: SchemaVersionId,
@@ -4381,6 +4462,13 @@ where
                     "root",
                     nested,
                 )?;
+                let nested_payload = physical.nested_payload_enum_cases.entry(id).or_default();
+                hydrate_nested_payload_enum_cases(
+                    &column.column_type,
+                    schema_version,
+                    "root",
+                    nested_payload,
+                )?;
             }
             for column in &table.columns {
                 if matches!(column.column_type, records::ValueType::Enum(_)) {
@@ -4395,6 +4483,13 @@ where
                     schema_version,
                     "root",
                     nested,
+                )?;
+                let nested_payload = physical.nested_payload_enum_cases.entry(id).or_default();
+                hydrate_nested_payload_enum_cases(
+                    &column.column_type,
+                    schema_version,
+                    "root",
+                    nested_payload,
                 )?;
             }
         }
@@ -4445,6 +4540,7 @@ where
                             scalar_enum_cases: BTreeMap::new(),
                             payload_enum_cases: BTreeMap::new(),
                             nested_scalar_enum_cases: BTreeMap::new(),
+                            nested_payload_enum_cases: BTreeMap::new(),
                         },
                     );
                 }
@@ -4774,6 +4870,7 @@ where
                     scalar_enum_cases,
                     payload_enum_cases,
                     nested_scalar_enum_cases,
+                    nested_payload_enum_cases: source_table.nested_payload_enum_cases.clone(),
                 },
             );
         }
