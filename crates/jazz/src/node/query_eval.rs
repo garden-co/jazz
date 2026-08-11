@@ -8309,11 +8309,26 @@ where
         local: &mut LocalMaintainedViewSubscription,
         binding_view_key: BindingViewKey,
     ) -> Result<(), Error> {
+        // Settled result sets can include support members used to maintain relations or
+        // policies. The occurrence sidecar describes only public query roots, matching
+        // the authoritative snapshot's `root_count`, so exclude those support members.
         local.result_set = self
             .query
             .settled_result_sets
             .get(&binding_view_key)
-            .cloned()
+            .map(|members| {
+                members
+                    .iter()
+                    .filter(|member| {
+                        is_public_result_member(
+                            member,
+                            local.result_table.as_str(),
+                            local.result_query.aggregate.is_some(),
+                        )
+                    })
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default();
         local.authoritative_result_set = local.result_set.clone();
         local.authoritative_result_generation =

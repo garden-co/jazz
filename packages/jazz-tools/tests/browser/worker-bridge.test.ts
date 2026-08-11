@@ -9,7 +9,7 @@
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
-import type { Schema, WasmSchema } from "../../src/drivers/types.js";
+import type { Schema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {
   TestCleanup,
@@ -122,10 +122,6 @@ function getBrowserConnection(db: Db): any {
   return (db as any).connection;
 }
 
-function getPrivateClient(db: Db): unknown {
-  return getBrowserConnection(db)?.client ?? null;
-}
-
 function getActiveRoleBridge(db: Db): any {
   return getBrowserConnection(db)?.activeRoleBridge ?? null;
 }
@@ -136,10 +132,6 @@ function getPersistentBrowserRuntime(db: Db): any {
 
 function getPrivateWorker(db: Db): Worker | null {
   return getPersistentBrowserRuntime(db)?.worker ?? getActiveRoleBridge(db)?.worker ?? null;
-}
-
-function getPrivateWorkerBridge(db: Db): any {
-  return getActiveRoleBridge(db)?.workerBridge ?? null;
 }
 
 function getFollowerPortBridge(db: Db): any {
@@ -940,7 +932,7 @@ describe("Worker Bridge with OPFS", () => {
     unsub();
   });
 
-  it.fails("tiered subscriptions gate the first callback until the worker's settled snapshot content is local", async () => {
+  it("tiered subscriptions gate the first callback until the worker's settled snapshot content is local", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("subscribe-global-gated");
     const sharedLocalAuthToken = generateAuthSecret();
     const seeder = track(
@@ -979,19 +971,6 @@ describe("Worker Bridge with OPFS", () => {
         serverUrl: syncServer.serverUrl,
         secret: sharedLocalAuthToken,
       }),
-    );
-    (fresh as unknown as { getClient(schema: WasmSchema): unknown }).getClient(app.wasmSchema);
-    await waitForCondition(
-      async () => Boolean(getPrivateWorker(fresh)?.onmessage),
-      5000,
-      `fresh worker bridge should install its onmessage handler; diagnostics=${JSON.stringify({
-        tabRole: getTabRole(fresh),
-        workerExists: Boolean(getPrivateWorker(fresh)),
-        workerOnMessage: Boolean(getPrivateWorker(fresh)?.onmessage),
-        bridge: Boolean(getPrivateWorkerBridge(fresh)),
-        clientType: typeof getPrivateClient(fresh),
-        hasClient: Boolean(getPrivateClient(fresh)),
-      })}`,
     );
     const snapshots: Todo[][] = [];
     const unsubscribe = trackSubscription(
