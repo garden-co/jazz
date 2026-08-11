@@ -1340,19 +1340,15 @@ where
             return Ok(target.clone());
         }
         let required_fields = match &request.requirements.app_fields {
-            FieldRequirement::All => {
-                return Ok(physical_current_projection_target(
-                    self.node
-                        .catalogue
-                        .schema_version_aliases
-                        .get(&self.read_view.read_schema)
-                        .copied()
-                        .ok_or_else(|| {
-                            source_resolution_error(request, SourceGap::SchemaProjection)
-                        })?,
-                    &table.name,
-                ));
-            }
+            // `All` still goes through the query-local boundary. The durable
+            // all-fields projection predates compatibility-sensitive reads and
+            // reports a non-total enum remap as an execution error; a read
+            // must instead omit precisely that row before its query graph.
+            FieldRequirement::All => table
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
             FieldRequirement::None => BTreeSet::new(),
             FieldRequirement::Fields(fields) => fields.clone(),
         };

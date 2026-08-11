@@ -2003,6 +2003,7 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
         panic!("current-row subscription should produce a view update");
     };
     assert_eq!(result_member_adds.len(), 1);
+
     assert_eq!(version_bundles.len(), 1);
 }
 
@@ -3109,6 +3110,49 @@ fn payload_enum_projection_schema(cases: &[&str]) -> JazzSchema {
     )])
 }
 
+fn nested_scalar_enum_projection_schema(statuses: &[&str]) -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "items",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new(
+                "statuses",
+                ColumnType::Array(Box::new(ColumnType::EnumTag(
+                    groove::records::ScalarEnumSchema::new("status", statuses.iter().copied())
+                        .unwrap(),
+                ))),
+            ),
+        ],
+    )])
+}
+
+fn nested_payload_enum_projection_schema(cases: &[&str]) -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "items",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new(
+                "statuses",
+                ColumnType::Array(Box::new(ColumnType::Enum(Box::new(
+                    groove::records::EnumSchema::new(
+                        "status",
+                        cases.iter().map(|case| {
+                            groove::records::EnumCase::new(
+                                *case,
+                                groove::records::RecordDescriptor::new([(
+                                    "note",
+                                    groove::records::ValueType::String,
+                                )]),
+                            )
+                        }),
+                    )
+                    .unwrap(),
+                )))),
+            ),
+        ],
+    )])
+}
+
 /// This is an internal physical-activation regression: public clients cannot
 /// directly observe Groove's live descriptors, but a payload-enum append must
 /// activate and survive recovery before a newer client can write its new case.
@@ -3197,17 +3241,191 @@ fn payload_enum_unknown_case_is_ignored_only_when_unselected() {
     publish_schema_lineage(&mut core, evolved.clone(), MigrationLens::new(base.version_id(), evolved.id, vec![TableLens { source_table: "items".into(), target_table: "items".into(), ops: vec![LensOp::TransformColumn { column: "status".into(), transform: "jazz.identity".into() }] }]), Vec::<String>::new(), Vec::<String>::new()).unwrap();
     core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema { author: AuthorId::SYSTEM, pointer: CurrentWriteSchema { revision: 1, schema: evolved.id } }).unwrap();
     let payload = groove::records::RecordDescriptor::new([("x", groove::records::ValueType::String)]);
-    core.commit_mergeable(MergeableCommit::new("items", row(0x76), 1).cells(BTreeMap::from([
+    let unknown = row(0x76);
+    core.commit_mergeable(MergeableCommit::new("items", unknown, 1).cells(BTreeMap::from([
         ("title".into(), v("ok")), ("status".into(), Value::Enum(groove::records::EnumValue::create(1, payload, &[v("closed")]).unwrap()))
+    ]))).unwrap();
+    let known = row(0x77);
+    let known_payload = groove::records::RecordDescriptor::new([("x", groove::records::ValueType::String)]);
+    core.commit_mergeable(MergeableCommit::new("items", known, 2).cells(BTreeMap::from([
+        ("title".into(), v("known")), ("status".into(), Value::Enum(groove::records::EnumValue::create(0, known_payload, &[v("open")]).unwrap()))
     ]))).unwrap();
     let title = Query::from("items").select(["title"]).validate(&base).unwrap();
     assert!(core.query_rows(&title, &title.bind(BTreeMap::new()).unwrap(), DurabilityTier::Local).is_ok());
     let all = Query::from("items").validate(&base).unwrap();
-    assert!(core.query_rows(&all, &all.bind(BTreeMap::new()).unwrap(), DurabilityTier::Local).is_err());
+    assert_eq!(
+        core.query_rows(&all, &all.bind(BTreeMap::new()).unwrap(), DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([known]),
+    );
+}
+
+/// Old-schema reads omit only rows whose nested enum occurrence has an
+/// unrepresentable case; Alice's compatible row remains visible beside Bob's
+/// later case.
+///
+/// ```text
+/// alice ──writes open──► old reader ──► visible
+/// bob   ──writes closed► old reader ──► omitted
+/// ```
+#[test]
+fn nested_scalar_enum_unknown_case_omits_only_that_row() {
+    let base = nested_scalar_enum_projection_schema(&["open"]);
+    let evolved = SchemaVersion::new(nested_scalar_enum_projection_schema(&["open", "closed"]));
+    let (_dir, mut core) = open_node_with_schema(node(0x78), base.clone());
+    publish_schema_lineage(
+        &mut core,
+        evolved.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "items".to_owned(),
+                target_table: "items".to_owned(),
+                ops: vec![LensOp::TransformColumn {
+                    column: "statuses".to_owned(),
+                    transform: "jazz.identity".to_owned(),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
+        },
+    })
+    .unwrap();
+    let unknown = row(0x78);
+    let known = row(0x79);
+    for (row_uuid, title, status, tx_time) in [
+        (unknown, "new nested case", 1, 1),
+        (known, "known nested case", 0, 2),
+    ] {
+        core.commit_mergeable(
+            MergeableCommit::new("items", row_uuid, tx_time).cells(BTreeMap::from([
+                ("title".to_owned(), v(title)),
+                (
+                    "statuses".to_owned(),
+                    Value::Array(vec![Value::EnumTag(status)]),
+                ),
+            ])),
+        )
+        .unwrap();
+    }
+
+    let title_only = Query::from("items").select(["title"]).validate(&base).unwrap();
+    assert_eq!(
+        core.query_rows(
+            &title_only,
+            &title_only.bind(BTreeMap::new()).unwrap(),
+            DurabilityTier::Local,
+        )
+        .unwrap()
+        .len(),
+        2,
+    );
+    let all = Query::from("items").validate(&base).unwrap();
+    assert_eq!(
+        core.query_rows(&all, &all.bind(BTreeMap::new()).unwrap(), DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([known]),
+    );
+}
+
+/// A nested payload enum follows the same source-local compatibility rule as
+/// a scalar enum: Bob's later case is omitted while Alice's older case stays
+/// visible to an old-schema whole-row read.
+#[test]
+fn nested_payload_enum_unknown_case_omits_only_that_row() {
+    let base = nested_payload_enum_projection_schema(&["open"]);
+    let evolved = SchemaVersion::new(nested_payload_enum_projection_schema(&["open", "closed"]));
+    let (_dir, mut core) = open_node_with_schema(node(0x7a), base.clone());
+    publish_schema_lineage(
+        &mut core,
+        evolved.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "items".to_owned(),
+                target_table: "items".to_owned(),
+                ops: vec![LensOp::TransformColumn {
+                    column: "statuses".to_owned(),
+                    transform: "jazz.identity".to_owned(),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
+        },
+    })
+    .unwrap();
+    let payload = groove::records::RecordDescriptor::new([(
+        "note",
+        groove::records::ValueType::String,
+    )]);
+    let unknown = row(0x7a);
+    let known = row(0x7b);
+    for (row_uuid, title, status, note, tx_time) in [
+        (unknown, "new nested case", 1, "closed", 1),
+        (known, "known nested case", 0, "open", 2),
+    ] {
+        core.commit_mergeable(
+            MergeableCommit::new("items", row_uuid, tx_time).cells(BTreeMap::from([
+                ("title".to_owned(), v(title)),
+                (
+                    "statuses".to_owned(),
+                    Value::Array(vec![Value::Enum(
+                        groove::records::EnumValue::create(status, payload, &[v(note)]).unwrap(),
+                    )]),
+                ),
+            ])),
+        )
+        .unwrap();
+    }
+
+    let title_only = Query::from("items").select(["title"]).validate(&base).unwrap();
+    assert_eq!(
+        core.query_rows(
+            &title_only,
+            &title_only.bind(BTreeMap::new()).unwrap(),
+            DurabilityTier::Local,
+        )
+        .unwrap()
+        .len(),
+        2,
+    );
+    let all = Query::from("items").validate(&base).unwrap();
+    assert_eq!(
+        core.query_rows(&all, &all.bind(BTreeMap::new()).unwrap(), DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([known]),
+    );
 }
 
 #[test]
-fn maintained_old_enum_subscriptions_only_fail_when_their_requirement_uses_new_cases() {
+fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     // This is an internal subscription-boundary regression. PeerState is the
     // server-side maintained subscription driver; public clients receive its
     // ViewUpdates, but cannot themselves install a catalogue lineage.
@@ -3299,18 +3517,70 @@ fn maintained_old_enum_subscriptions_only_fail_when_their_requirement_uses_new_c
     }));
 
     // A separate old-schema subscription that semantically consumes status
-    // must reject the same physical row. In particular, it may not reinterpret
-    // the new tag as `open` or suppress the row as an ordinary filter miss.
+    // must omit the same physical row. In particular, it may not reinterpret
+    // the new tag as `open`, and must never error just because a newer client
+    // introduced an additive case.
     let status_required = Query::from("items").validate(&base).unwrap();
     let status_binding = status_required.bind(BTreeMap::new()).unwrap();
+    let whole_rows = core.query_rows(&status_required, &status_binding, DurabilityTier::Local)
+        .expect("one-shot whole-row read omits only the unknown row");
+    assert_eq!(
+        whole_rows.into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([known]),
+    );
     let mut status_peer = PeerState::new();
-    assert!(status_peer
+    let update = status_peer
         .rehydrate_query(&mut core, &status_required, &status_binding)
-        .is_err(), "required unknown enum case must fail explicitly");
+        .expect("required unknown enum case is a row exclusion");
+    let SyncMessage::ViewUpdate { result_member_adds, .. } = update else {
+        panic!("expected initial maintained view update");
+    };
+    assert_eq!(result_member_adds.len(), 1);
+    assert!(result_member_adds.iter().all(|member| {
+        member.as_row().is_some_and(|(_, row_uuid, _)| row_uuid == known)
+    }));
+
+    // Maintained membership follows the same compatibility boundary on every
+    // delta: moving a visible old row into an unknown case removes it, and
+    // moving it back to a known case re-adds it without a subscription error.
+    accept_global(
+        &mut core,
+        MergeableCommit::new("items", known, 3).cells(BTreeMap::from([
+            ("title".to_owned(), v("now incompatible")),
+            ("status".to_owned(), Value::EnumTag(1)),
+        ])),
+    );
+    let update = status_peer
+        .query_update(&mut core, &status_required, &status_binding)
+        .expect("newly incompatible delta removes the row");
+    let SyncMessage::ViewUpdate { result_member_removes, .. } = update else {
+        panic!("expected maintained view update");
+    };
+    assert!(result_member_removes.iter().any(|member| {
+        member.as_row().is_some_and(|(_, row_uuid, _)| row_uuid == known)
+    }));
+    accept_global(
+        &mut core,
+        MergeableCommit::new("items", known, 4).cells(BTreeMap::from([
+            ("title".to_owned(), v("compatible again")),
+            ("status".to_owned(), Value::EnumTag(0)),
+        ])),
+    );
+    let update = status_peer
+        .query_update(&mut core, &status_required, &status_binding)
+        .expect("newly compatible delta re-adds the row");
+    let SyncMessage::ViewUpdate { result_member_adds, .. } = update else {
+        panic!("expected maintained view update");
+    };
+    assert!(result_member_adds.iter().any(|member| {
+        member.as_row().is_some_and(|(_, row_uuid, _)| row_uuid == known)
+    }));
 }
 
 #[test]
-fn maintained_old_payload_enum_subscription_rejects_new_case_without_aliasing() {
+fn maintained_old_payload_enum_subscription_omits_new_case_without_aliasing() {
     let base = payload_enum_projection_schema(&["draft"]);
     let evolved = SchemaVersion::new(payload_enum_projection_schema(&["draft", "published"]));
     let (_dir, mut core) = open_node_with_schema(node(0x7d), base.clone());
@@ -3363,7 +3633,13 @@ fn maintained_old_payload_enum_subscription_rejects_new_case_without_aliasing() 
     let required = Query::from("items").validate(&base).unwrap();
     let binding = required.bind(BTreeMap::new()).unwrap();
     let mut required_peer = PeerState::new();
-    assert!(required_peer.rehydrate_query(&mut core, &required, &binding).is_err());
+    let update = required_peer
+        .rehydrate_query(&mut core, &required, &binding)
+        .expect("unknown payload case is a row exclusion");
+    let SyncMessage::ViewUpdate { result_member_adds, .. } = update else {
+        panic!("expected initial maintained view update");
+    };
+    assert!(result_member_adds.is_empty());
 }
 
 #[test]
@@ -3420,6 +3696,14 @@ fn old_enum_schema_only_decodes_cases_required_by_the_query() {
         ])),
     )
     .unwrap();
+    let open = row(0x76);
+    core.commit_mergeable(
+        MergeableCommit::new("items", open, 1).cells(BTreeMap::from([
+            ("title".to_owned(), v("still-compatible")),
+            ("status".to_owned(), Value::EnumTag(0)),
+        ])),
+    )
+    .unwrap();
 
     let title_only = Query::from("items").select(["title"]).validate(&base).unwrap();
     assert_eq!(
@@ -3432,23 +3716,31 @@ fn old_enum_schema_only_decodes_cases_required_by_the_query() {
         .into_iter()
         .map(current_row_pair)
         .collect::<BTreeMap<_, _>>(),
-        BTreeMap::from([(closed, BTreeMap::from([("title".to_owned(), v("still-readable"))]))])
+        BTreeMap::from([
+            (closed, BTreeMap::from([("title".to_owned(), v("still-readable"))])),
+            (open, BTreeMap::from([("title".to_owned(), v("still-compatible"))])),
+        ])
     );
 
-    // Whole-row output semantically consumes `status`, so the non-total
-    // projection must report the incompatible case rather than silently
-    // inventing an old value or suppressing the row.
+    // Whole-row output semantically consumes `status`, so its source boundary
+    // omits this incompatible row rather than inventing an old value or
+    // turning an additive schema change into an old-client query failure.
     let whole_row = Query::from("items").validate(&base).unwrap();
-    assert!(core
+    assert_eq!(core
         .query_rows(
             &whole_row,
             &whole_row.bind(BTreeMap::new()).unwrap(),
             DurabilityTier::Local,
         )
-        .is_err());
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>(),
+        BTreeSet::from([open]));
 
     // The closure is semantic rather than merely output-shaped: a hidden
-    // predicate or order key must force the same explicit incompatibility.
+    // predicate or order key must force the same source-local exclusion before
+    // those operators, including their pagination/aggregation consumers.
     for query in [
         Query::from("items")
             .select(["title"])
@@ -3461,25 +3753,32 @@ fn old_enum_schema_only_decodes_cases_required_by_the_query() {
             .validate(&base)
             .unwrap(),
     ] {
-        assert!(core
+        assert_eq!(core
             .query_rows(
                 &query,
                 &query.bind(BTreeMap::new()).unwrap(),
                 DurabilityTier::Local,
             )
-            .is_err());
+            .unwrap()
+            .len(),
+            1,
+            "known row survives a semantic enum boundary",
+        );
     }
     let grouped = Query::from("items").count().group_by("status").validate(&base).unwrap();
-    assert!(core
+    assert_eq!(core
         .query_rows(&grouped, &grouped.bind(BTreeMap::new()).unwrap(), DurabilityTier::Local)
-        .is_err());
+        .unwrap()
+        .len(),
+        1,
+    );
 }
 
 #[test]
 fn enum_projection_requirement_closure_includes_hidden_policy_fields() {
     // A policy field is not part of the public output, but it still decides
-    // whether the row exists.  It must therefore force a non-total enum
-    // projection instead of being treated like an unused cell.
+    // whether the row exists. It therefore excludes an incompatible row
+    // fail-closed rather than being treated like an unused cell.
     let base = JazzSchema::new([TableSchema::new(
         "items",
         [
@@ -3553,7 +3852,7 @@ fn enum_projection_requirement_closure_includes_hidden_policy_fields() {
         DurabilityTier::Local,
         user(0x77),
     );
-    assert!(result.is_err(), "policy result: {result:#?}");
+    assert!(result.unwrap().is_empty(), "policy must hide incompatible row");
 }
 
 #[test]

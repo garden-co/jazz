@@ -47,6 +47,7 @@ Invariant digest:
 - `INV-LOWER-25`: A lens-projected maintained source MUST emit the same net weighted current-row and witness deltas as applying the selected natural lens path to the authoritative source.
 - `INV-LOWER-26`: A structured query MUST expose one authoritative terminal output relation. Groove MUST assemble nested paths into that terminal; a child change semantically replaces or patches its owning root output, and public carriers MUST NOT require a second relation-edge delta stream.
 - `INV-LOWER-27`: An enum case's authored discriminant is scoped to its row `SchemaVersionId`; lowering MUST translate it through the persistent case identity of its physical occurrence before using a local storage tag, predicate, grouping key, or ordering key.
+- `INV-LOWER-28`: An additive enum case MUST be a row-level incompatibility for an older read schema, never a query or subscription error. Sources remove an unrepresentable row before any semantic consumer (filter, ordering, grouping, aggregation, policy, relation requirement, pagination, or maintained delta) observes it; unused enum occurrences remain undecoded and do not affect row visibility.
 
 ## Details
 
@@ -130,16 +131,25 @@ incompatible payload layouts reject rather than merge. The same translation
 recurs at nested enum occurrences.
 
 Projection from a physical case back into an authored schema is non-total. If a
-query does not read, filter, join, order, group, or authorize through that column,
-the row remains usable without decoding it. If a query semantically requires a
-case absent from its target schema, it MUST fail explicitly unless an authored
-down-grade lens supplies a default or nullable mapping. It MUST NOT silently hide
-the row or substitute an old case. Equality predicates for a known case may treat
-an absent newer case as non-matching.
+query does not read, filter, join, order, group, authorize, or otherwise require
+that occurrence, the row remains usable without decoding it. If a query
+semantically requires a case absent from its target schema, the physical source
+MUST deterministically omit that row before pagination, aggregation, or any
+maintained-view delta processing. It MUST NOT surface an old-client query or
+subscription error, substitute an old case, or invent a default. A policy
+dependency is fail-closed and therefore also omits the row. An optional relation
+or include may omit only its incompatible child while retaining its readable
+parent; a required relation follows its explicit requirement semantics. Equality
+against a known case consequently treats an absent newer case as non-matching.
 
 _Further invariant._ `INV-LOWER-27` — local enum tags are only interned
 representations of schema-qualified case identities; simultaneous sibling ordinal
 allocations cannot alias one another.
+
+_Further invariant._ `INV-LOWER-28` — enum compatibility is evaluated at the
+source boundary, so one-shot and maintained reads have the same row-membership
+semantics and no downstream operator can turn an unrepresentable value into a
+runtime failure.
 
 _Further invariants._ `INV-LOWER-2`, `INV-LOWER-4` — content and deletion lower
 to distinct tables belonging to the resolved `PhysicalTableId`, each with PK

@@ -75,6 +75,10 @@ enum VariantProjectionCase {
         source: RecordDescriptor,
         project: MapProjectOp,
         raw_projection: Option<Arc<[RawProjectionField]>>,
+        /// A Jazz schema-read boundary may exclude rows containing a case the
+        /// target schema cannot represent. This is deliberately narrower than
+        /// a general projection error: malformed values still fail loudly.
+        omit_unrepresentable_enum_rows: bool,
     },
     Ignore {
         source: RecordDescriptor,
@@ -437,6 +441,26 @@ impl IvmRuntime {
             VariantProjectionTarget::Named(target.to_owned()),
             variant_tag,
             Some(fields),
+            false,
+        )
+    }
+
+    /// Register a schema-read case whose unrepresentable enum values are
+    /// source-local row exclusions. This keeps old-client compatibility at
+    /// the source boundary rather than swallowing errors downstream.
+    pub(crate) fn register_variant_projection_case_omitting_unrepresentable_enums(
+        &mut self,
+        table: &str,
+        target: &str,
+        variant_tag: u32,
+        fields: &[ProjectField],
+    ) -> Result<(), IvmRuntimeError> {
+        self.register_variant_projection_target_case(
+            table,
+            VariantProjectionTarget::Named(target.to_owned()),
+            variant_tag,
+            Some(fields),
+            true,
         )
     }
 
@@ -570,6 +594,7 @@ impl IvmRuntime {
             VariantProjectionTarget::Named(target.to_owned()),
             variant_tag,
             None,
+            false,
         )
     }
 
@@ -617,12 +642,14 @@ impl IvmRuntime {
             VariantProjectionCase::Project {
                 project,
                 raw_projection,
+                omit_unrepresentable_enum_rows,
                 ..
             } => NodeState::update_map_project(
                 project,
                 projection.output,
                 &input,
                 raw_projection.as_deref(),
+                *omit_unrepresentable_enum_rows,
             )?,
             VariantProjectionCase::Enum {
                 tag,
@@ -640,11 +667,9 @@ impl IvmRuntime {
             )?,
             VariantProjectionCase::Ignore { .. } => return Ok(None),
         };
-        let record = projected
-            .deltas
-            .into_iter()
-            .next()
-            .ok_or(IvmRuntimeError::GraphOutputMismatch)?;
+        let Some(record) = projected.deltas.into_iter().next() else {
+            return Ok(None);
+        };
         Ok(Some(OwnedRecord::new(
             record.record.to_vec(),
             projection.output,
@@ -657,6 +682,7 @@ impl IvmRuntime {
         target: VariantProjectionTarget,
         variant_tag: u32,
         fields: Option<&[ProjectField]>,
+        omit_unrepresentable_enum_rows: bool,
     ) -> Result<(), IvmRuntimeError> {
         let source = self
             .schema
@@ -730,6 +756,7 @@ impl IvmRuntime {
                 source,
                 project,
                 raw_projection,
+                omit_unrepresentable_enum_rows,
             }
         } else {
             VariantProjectionCase::Ignore { source }
@@ -808,6 +835,7 @@ impl IvmRuntime {
             VariantProjectionTarget::SchemaIndex(index.name.clone()),
             variant_tag,
             fields.as_deref(),
+            false,
         )
     }
 
@@ -6017,6 +6045,7 @@ impl NodeState {
                     VariantProjectionCase::Project {
                         project,
                         raw_projection,
+                        omit_unrepresentable_enum_rows,
                         ..
                     } => {
                         projected = Self::update_map_project(
@@ -6027,6 +6056,7 @@ impl NodeState {
                                 deltas: delta.deltas.clone(),
                             },
                             raw_projection.as_deref(),
+                            *omit_unrepresentable_enum_rows,
                         )?;
                         &projected.deltas
                     }
@@ -6202,6 +6232,7 @@ impl NodeState {
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
         raw_projection: Option<&[RawProjectionField]>,
+        omit_unrepresentable_enum_rows: bool,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let estimated_output_bytes = input
             .deltas
@@ -6224,20 +6255,27 @@ impl NodeState {
                     .map_err(IvmRuntimeError::RecordEncoding)?
             } else {
                 let start = output.len();
-                let record = project_record(
+                let record = match project_record(
                     &project.expressions,
                     &project.mapping,
                     output_desc,
                     &input.descriptor,
                     delta.raw(),
-                )?;
+                ) {
+                    Ok(record) => record,
+                    Err(
+                        IvmRuntimeError::EnumTagProjectionAbsent { .. }
+                        | IvmRuntimeError::EnumProjectionAbsent { .. },
+                    ) if omit_unrepresentable_enum_rows => continue,
+                    Err(error) => return Err(error),
+                };
                 output.extend_from_slice(&record);
                 start..output.len()
             };
             spans.push((span, delta.weight));
         }
         let output = output.freeze();
-        let deltas = spans
+        let deltas: Vec<_> = spans
             .into_iter()
             .map(|(span, weight)| RecordDelta {
                 record: output.slice(span),
@@ -6258,7 +6296,8 @@ impl NodeState {
         input: &RecordDeltas,
         raw_projection: Option<&[RawProjectionField]>,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        let payloads = Self::update_map_project(project, payload_desc, input, raw_projection)?;
+        let payloads =
+            Self::update_map_project(project, payload_desc, input, raw_projection, false)?;
         let mut deltas = Vec::with_capacity(payloads.deltas.len());
         for payload in payloads.deltas {
             let value = Value::Enum(EnumValue::new(
@@ -7040,6 +7079,7 @@ where
                     output_desc,
                     &input,
                     raw_projection.as_deref(),
+                    false,
                 );
                 #[cfg(feature = "cold-settle-attribution")]
                 if let Ok(output) = &result {
@@ -9291,13 +9331,22 @@ fn remap_recursive_enum_value(
             Value::Nullable(Some(value)),
             ValueType::Nullable(source),
             ValueType::Nullable(target),
-        ) => Ok(Value::Nullable(Some(Box::new(remap_recursive_enum_value(
-            *value,
-            source,
-            target,
-            remaps,
-            &format!("{path}/nullable"),
-        )?)))),
+        ) => {
+            // Jazz storage adds one nullable carrier around every user cell.
+            // That carrier is not an authored enum occurrence, so a direct
+            // enum stored in a nullable cell remains rooted at `path`. An
+            // authored nullable enum *does* have a `path/nullable` occurrence
+            // entry. Prefer that structural child whenever it exists.
+            let nullable_path = format!("{path}/nullable");
+            let child_path = if remap_path_with_enum_occurrence_below(remaps, &nullable_path) {
+                nullable_path.as_str()
+            } else {
+                path
+            };
+            Ok(Value::Nullable(Some(Box::new(remap_recursive_enum_value(
+                *value, source, target, remaps, child_path,
+            )?))))
+        }
         (Value::Array(values), ValueType::Array(source), ValueType::Array(target)) => {
             Ok(Value::Array(
                 values
@@ -9427,6 +9476,16 @@ fn remap_recursive_enum_value(
             path: path.to_owned(),
         }),
     }
+}
+
+fn remap_path_with_enum_occurrence_below(remaps: &RecursiveEnumRemaps, path: &str) -> bool {
+    let below = format!("{path}/");
+    remaps
+        .scalar
+        .keys()
+        .chain(remaps.payload.keys())
+        .chain(remaps.payload_children.keys())
+        .any(|candidate| candidate == path || candidate.starts_with(&below))
 }
 
 fn projection_uses_raw_copy(

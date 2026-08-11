@@ -700,7 +700,8 @@ where
             }
             OpType::MapProject(project) => {
                 let input = self.eval_unary_input(graph_node, node)?;
-                let result = NodeState::update_map_project(project, output_desc, &input, None);
+                let result =
+                    NodeState::update_map_project(project, output_desc, &input, None, false);
                 #[cfg(feature = "cold-settle-attribution")]
                 if let Ok(output) = &result {
                     crate::cold_settle_attribution::record_map(

@@ -1432,12 +1432,11 @@ where
         ];
         for storage_table in &storage_tables {
             let logical_output = target_table.global_current_storage_tables()[0].record_schema();
-            let physical_names = physical_current_field_names(&target_table, &target_mapping)?;
-            let output = widened_projection_descriptor(
-                &logical_output,
-                &physical_names,
-                self.database.table_schema(storage_table)?,
-            )?;
+            // This query-local target is the semantic read boundary. Unlike
+            // the durable all-fields storage target, it must expose the
+            // authored descriptor itself: enum tags are translated into that
+            // descriptor, and an absent target case excludes only this row.
+            let output = logical_output;
             self.database
                 .define_variant_projection(storage_table, &projection_target, output)?;
         }
@@ -1485,12 +1484,13 @@ where
                 )?;
                 for storage_table in &storage_tables {
                     if let Some(fields) = fields.clone() {
-                        self.database.register_variant_case(
-                            storage_table,
-                            &projection_target,
-                            tag,
-                            fields,
-                        )?;
+                        self.database
+                            .register_variant_projection_case_omitting_unrepresentable_enums(
+                                storage_table,
+                                &projection_target,
+                                tag,
+                                fields,
+                            )?;
                     } else {
                         self.database.register_variant_ignore_case(
                             storage_table,
@@ -1728,11 +1728,18 @@ where
                 physical_global_current_table_name(target_mapping.table_id)
             }
         };
-        let projection_output = widened_projection_descriptor(
-            &target_storage.record_schema(),
-            &physical_names,
-            self.database.table_schema(&physical_storage)?,
-        )?;
+        let projection_output = if required_enum_columns.is_some() {
+            // Query-local enum targets are authored-descriptor boundaries;
+            // their recursive remap must validate/encode against the old
+            // schema rather than the physical registry descriptor.
+            target_storage.record_schema()
+        } else {
+            widened_projection_descriptor(
+                &target_storage.record_schema(),
+                &physical_names,
+                self.database.table_schema(&physical_storage)?,
+            )?
+        };
         let mut fields = target_storage
             .record_schema()
             .fields()
@@ -2777,8 +2784,33 @@ pub(super) fn physical_version_storage_tables(
 
         let mut nested_scalar_enum_registries =
             BTreeMap::<(PhysicalColumnId, String), BTreeSet<GlobalScalarEnumCaseId>>::new();
-        for (_, _, mapping) in &variants {
-            for (column_id, paths) in &mapping.nested_scalar_enum_cases {
+        for (schema_version, logical_table, mapping) in &variants {
+            // Bootstrap constructs physical tables before the freshly
+            // introduced mapping is hydrated into the catalogue. Seed nested
+            // occurrences from the authored descriptor in that one state;
+            // otherwise the first table gets a generic registry id and the
+            // next synchronization sees an incompatible field definition.
+            let mut bootstrap_paths = mapping.nested_scalar_enum_cases.clone();
+            if bootstrap_paths.is_empty() {
+                for column in &logical_table.columns {
+                    if matches!(column.column_type, records::ValueType::EnumTag(_)) {
+                        continue;
+                    }
+                    hydrate_nested_scalar_enum_cases(
+                        &column.column_type,
+                        *schema_version,
+                        "root",
+                        bootstrap_paths
+                            .entry(mapping.columns.get(&column.name).copied().ok_or(
+                                Error::InvalidStoredValue(
+                                    "physical nested scalar enum column mapping missing",
+                                ),
+                            )?)
+                            .or_default(),
+                    )?;
+                }
+            }
+            for (column_id, paths) in &bootstrap_paths {
                 for (path, cases) in paths {
                     nested_scalar_enum_registries
                         .entry((*column_id, path.clone()))
@@ -2808,7 +2840,7 @@ pub(super) fn physical_version_storage_tables(
             (PhysicalColumnId, String, GlobalScalarEnumCaseId),
             records::RecordDescriptor,
         >::new();
-        for (_, logical_table, mapping) in &variants {
+        for (schema_version, logical_table, mapping) in &variants {
             for column in &logical_table.columns {
                 let column_id =
                     mapping
@@ -2818,7 +2850,20 @@ pub(super) fn physical_version_storage_tables(
                         .ok_or(Error::InvalidStoredValue(
                             "physical nested payload enum column mapping missing",
                         ))?;
-                let Some(paths) = mapping.nested_payload_enum_cases.get(&column_id) else {
+                // As for nested scalar cases above, the first physical-table
+                // construction precedes catalogue hydration. Seed payload
+                // identities from the authored descriptor so reopening does
+                // not try to replace a generic nested registry.
+                let mut bootstrap_paths = mapping.nested_payload_enum_cases.clone();
+                if bootstrap_paths.is_empty() {
+                    hydrate_nested_payload_enum_cases(
+                        &column.column_type,
+                        *schema_version,
+                        "root",
+                        bootstrap_paths.entry(column_id).or_default(),
+                    )?;
+                }
+                let Some(paths) = bootstrap_paths.get(&column_id) else {
                     continue;
                 };
                 for (path, cases) in paths {
