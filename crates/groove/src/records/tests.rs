@@ -1397,6 +1397,143 @@ fn rebound_registry_projector_allows_identical_layout_but_not_added_tags() {
 }
 
 #[test]
+fn rebound_variant_projector_rejects_changed_payload_field_type_or_layout() {
+    let source = || {
+        RecordDescriptor::new([(
+            "event",
+            ValueType::Enum(Box::new(
+                EnumSchema::new(
+                    "event",
+                    [
+                        EnumCase::new(
+                            "message",
+                            RecordDescriptor::new([("level", ValueType::I32)]),
+                        ),
+                        EnumCase::new("closed", RecordDescriptor::new([("code", ValueType::I32)])),
+                    ],
+                )
+                .unwrap()
+                .with_registry_id(101),
+            )),
+        )])
+    };
+    let rejects = |target: RecordDescriptor| {
+        assert!(matches!(
+            RecordProjector::new_registry_rebound(source(), target, [(0, 0)]),
+            Err(Error::ProjectTypeMismatch { .. })
+        ));
+    };
+
+    rejects(RecordDescriptor::new([(
+        "event",
+        ValueType::Enum(Box::new(
+            EnumSchema::new(
+                "event",
+                [
+                    EnumCase::new(
+                        "message",
+                        RecordDescriptor::new([("level", ValueType::I64)]),
+                    ),
+                    EnumCase::new("closed", RecordDescriptor::new([("code", ValueType::I32)])),
+                ],
+            )
+            .unwrap()
+            .with_registry_id(202),
+        )),
+    )]));
+    rejects(RecordDescriptor::new([(
+        "event",
+        ValueType::Enum(Box::new(
+            EnumSchema::new(
+                "event",
+                [
+                    EnumCase::new(
+                        "message",
+                        RecordDescriptor::new([
+                            ("level", ValueType::I32),
+                            ("extra", ValueType::Bool),
+                        ]),
+                    ),
+                    EnumCase::new("closed", RecordDescriptor::new([("code", ValueType::I32)])),
+                ],
+            )
+            .unwrap()
+            .with_registry_id(202),
+        )),
+    )]));
+}
+
+#[test]
+fn rebound_variant_projector_rejects_changed_case_name() {
+    let enum_descriptor = |registry_id, message_case_name| {
+        RecordDescriptor::new([(
+            "event",
+            ValueType::Enum(Box::new(
+                EnumSchema::new(
+                    "event",
+                    [
+                        EnumCase::new(
+                            message_case_name,
+                            RecordDescriptor::new([("value", ValueType::I32)]),
+                        ),
+                        EnumCase::new("closed", RecordDescriptor::new([("value", ValueType::I32)])),
+                    ],
+                )
+                .unwrap()
+                .with_registry_id(registry_id),
+            )),
+        )])
+    };
+
+    assert!(matches!(
+        RecordProjector::new_registry_rebound(
+            enum_descriptor(101, "message"),
+            enum_descriptor(202, "renamed_message"),
+            [(0, 0)],
+        ),
+        Err(Error::ProjectTypeMismatch { .. })
+    ));
+}
+
+#[test]
+fn rebound_variant_projector_rejects_reordered_same_layout_cases() {
+    let enum_descriptor = |registry_id, cases: [EnumCase; 2]| {
+        RecordDescriptor::new([(
+            "event",
+            ValueType::Enum(Box::new(
+                EnumSchema::new("event", cases)
+                    .unwrap()
+                    .with_registry_id(registry_id),
+            )),
+        )])
+    };
+    let source = enum_descriptor(
+        101,
+        [
+            EnumCase::new(
+                "message",
+                RecordDescriptor::new([("value", ValueType::I32)]),
+            ),
+            EnumCase::new("closed", RecordDescriptor::new([("value", ValueType::I32)])),
+        ],
+    );
+    let target = enum_descriptor(
+        202,
+        [
+            EnumCase::new("closed", RecordDescriptor::new([("value", ValueType::I32)])),
+            EnumCase::new(
+                "message",
+                RecordDescriptor::new([("value", ValueType::I32)]),
+            ),
+        ],
+    );
+    assert!(matches!(
+        RecordProjector::new_registry_rebound(source, target, [(0, 0)]),
+        Err(Error::ProjectTypeMismatch { .. })
+    ));
+}
+
+#[test]
 fn patch_field_overwrites_fixed_width_values_without_shifting_layout() {
     let schema = RecordDescriptor::new([
         ("id", ValueType::U64),
