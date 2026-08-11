@@ -2665,6 +2665,16 @@ pub(super) fn physical_version_storage_tables(
                         "payload enum identity mapping width mismatch",
                     ));
                 }
+                if let Some(nested_root) = mapping
+                    .nested_payload_enum_cases
+                    .get(&column_id)
+                    .and_then(|paths| paths.get("root"))
+                    && nested_root != &identities
+                {
+                    return Err(Error::InvalidStoredValue(
+                        "direct and nested payload enum identity mappings diverged",
+                    ));
+                }
                 for (identity, case) in identities.iter().zip(&enum_schema.cases) {
                     let key = (column_id, identity.clone());
                     match payload_enum_layouts.entry(key) {
