@@ -1469,7 +1469,17 @@ mod tests {
             .await
             .expect("open client db");
             let transport = TestWireTransport::default();
-            db.connect_upstream(Box::new(WireTransportAdapter::current(transport.clone())));
+            // The route-test hello intentionally has no authority endpoint,
+            // so the server correctly declines scoped receipt/view features.
+            // Keep the local adapter on that exact negotiated feature set.
+            db.connect_upstream(Box::new(WireTransportAdapter::new(
+                transport.clone(),
+                WIRE_PROTOCOL_VERSION,
+                current_wire_features()
+                    & !(crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                        | crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+                None,
+            )));
             Self {
                 db,
                 transport,
