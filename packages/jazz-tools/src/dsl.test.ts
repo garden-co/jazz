@@ -26,6 +26,33 @@ describe("enum DSL invariants", () => {
     expect(() => col.enum("todo", "todo")).toThrow("Enum variants must be unique.");
   });
 
+  it("builds scalar payload enum cases and rejects unsupported payload shapes", () => {
+    const event = col.enum({
+      message: { text: col.string(), level: col.int().optional() },
+      closed: { code: col.int() },
+    });
+    expect(event._sqlType).toEqual({
+      kind: "ENUM",
+      cases: [
+        {
+          name: "message",
+          fields: [
+            { name: "text", sqlType: "TEXT", nullable: false },
+            { name: "level", sqlType: "INTEGER", nullable: true },
+          ],
+        },
+        { name: "closed", fields: [{ name: "code", sqlType: "INTEGER", nullable: false }] },
+      ],
+    });
+    expect(() => col.enum({ bad: { type: col.string() } })).toThrow("reserved");
+    expect(() => col.enum({ bad: { tags: col.array(col.string()) } })).toThrow(
+      "must be scalar columns",
+    );
+    expect(() => col.enum({ bad: { authorId: col.ref("users") } })).toThrow(
+      "cannot use references",
+    );
+  });
+
   describe("add enum", () => {
     it("rejects duplicate variants in add enum migration", () => {
       expect(() => col.add.enum("todo", "todo", { default: "todo" })).toThrow(

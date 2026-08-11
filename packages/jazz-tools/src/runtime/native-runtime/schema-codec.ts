@@ -8,6 +8,11 @@ import type {
   WasmSchema,
 } from "../../drivers/types.js";
 import { PostcardWriter, writeValueType, type ValueType } from "./native-codec.js";
+import {
+  encodeNativeRowValues,
+  storageColumnValueType,
+  writeDescriptor,
+} from "./native-row-codec.js";
 
 const OUTER_ROW_SESSION_PREFIX = "__jazz_outer_row";
 
@@ -187,6 +192,23 @@ function writeDefaultValue(writer: PostcardWriter, columnType: ColumnType, value
       writer.u64(6); // groove::records::Value::String
       writer.string(value.value);
       return;
+    case "EnumPayload": {
+      if (value.type !== "Enum") throw new Error("expected payload enum default");
+      const caseIndex = columnType.cases.findIndex((entry) => entry.name === value.value.case);
+      const entry = columnType.cases[caseIndex];
+      if (!entry || entry.fields.length !== value.value.values.length) {
+        throw new Error("invalid payload enum default case or width");
+      }
+      writer.u64(17); // groove::records::Value::Enum(EnumValue)
+      writer.u64(caseIndex);
+      const descriptor = entry.fields.map((field) => ({
+        name: field.name,
+        valueType: storageColumnValueType(field),
+      }));
+      writeDescriptor(writer, descriptor);
+      writer.bytes(encodeNativeRowValues(entry.fields, value.value.values));
+      return;
+    }
     case "Uuid":
       if (value.type !== "Uuid") throw new Error("expected Uuid default");
       writer.u64(8); // groove::records::Value::Uuid
@@ -253,6 +275,20 @@ export function columnTypeToValueType(type: ColumnType): ValueType {
     case "Json":
     case "Enum":
       return { tag: 8 };
+    case "EnumPayload":
+      return {
+        tag: 16,
+        enumSchema: {
+          name: "public_payload_enum",
+          cases: type.cases.map((entry) => ({
+            name: entry.name,
+            payload: entry.fields.map((field) => ({
+              name: field.name,
+              valueType: storageColumnValueType(field),
+            })),
+          })),
+        },
+      };
     case "Bytea":
       return { tag: 9 };
     case "Uuid":

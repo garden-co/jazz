@@ -3828,6 +3828,8 @@ function decodeBytes(
     case "Json":
     case "Enum":
       return { type: "Text", value: textDecoder.decode(bytes) };
+    case "EnumPayload":
+      return decodePayloadEnumBytes(type, bytes, storageType, nestedRowCarrier);
     case "Uuid":
       return { type: "Uuid", value: formatUuid(bytes) };
     case "Bytea":
@@ -3853,6 +3855,49 @@ function decodeBytes(
         ),
       };
   }
+}
+
+function decodePayloadEnumBytes(
+  type: Extract<ColumnType, { type: "EnumPayload" }>,
+  bytes: Uint8Array,
+  storageType: ValueType | undefined,
+  nestedRowCarrier: NestedRowCarrier,
+): Value {
+  if (bytes.byteLength < 4) throw new Error("invalid Enum payload value");
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const nameLength = view.getUint32(0, true);
+  if (bytes.byteLength < 4 + nameLength) throw new Error("invalid Enum payload case");
+  const caseName = textDecoder.decode(bytes.subarray(4, 4 + nameLength));
+  const entry = type.cases.find((candidate) => candidate.name === caseName);
+  if (!entry) throw new Error("unknown Enum payload case");
+  const enumStorage = nonNullableStorageType(storageType);
+  const payloadDescriptor =
+    enumStorage?.tag === 16
+      ? enumStorage.enumSchema?.cases?.find((candidate) => candidate.name === caseName)?.payload
+      : undefined;
+  if (!payloadDescriptor || payloadDescriptor.length !== entry.fields.length) {
+    throw new Error("Enum payload descriptor mismatch");
+  }
+  const raw = bytes.subarray(4 + nameLength);
+  const decodeRecord = createRecordValueDecoder(payloadDescriptor);
+  return {
+    type: "Enum",
+    value: {
+      case: caseName,
+      values: entry.fields.map((field, index) => {
+        const fieldBytes = decodeRecord(raw, index);
+        return fieldBytes == null
+          ? { type: "Null" }
+          : decodeBytes(
+              field.column_type,
+              fieldBytes,
+              field.name,
+              payloadDescriptor[index]?.valueType,
+              nestedRowCarrier,
+            );
+      }),
+    },
+  };
 }
 
 function nonNullableStorageType(storageType?: ValueType): ValueType | undefined {
@@ -4478,6 +4523,12 @@ function valueEqual(left: Value, right: Value | undefined): boolean {
       return right.type === "Bytea" && bytesEqual(left.value, right.value);
     case "Array":
       return right.type === "Array" && rowValuesEqual(left.value, right.value);
+    case "Enum":
+      return (
+        right.type === "Enum" &&
+        left.value.case === right.value.case &&
+        rowValuesEqual(left.value.values, right.value.values)
+      );
     case "Null":
       return right.type === "Null";
     case "Boolean":

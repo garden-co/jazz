@@ -1024,6 +1024,16 @@ function encodeNativeNonNullValue(type: ColumnType, value: Value): Uint8Array {
     case "Enum":
       if (value.type !== "Text") throw new Error(`expected ${type.type} value`);
       return new TextEncoder().encode(value.value);
+    case "EnumPayload": {
+      if (value.type !== "Enum") throw new Error("expected Enum payload value");
+      const entry = type.cases.find((candidate) => candidate.name === value.value.case);
+      if (!entry || entry.fields.length !== value.value.values.length) {
+        throw new Error("invalid Enum payload case or width");
+      }
+      const name = new TextEncoder().encode(entry.name);
+      const payload = encodeNativeRowValue(entry.fields, { values: value.value.values });
+      return concatBytes([encodeU32Le(name.length), name, payload]);
+    }
     case "Uuid":
       if (value.type !== "Uuid") throw new Error("expected Uuid value");
       return parseUuid(value.value);
@@ -1092,7 +1102,7 @@ function parseUuid(value: string): Uint8Array {
 }
 
 export function storageColumnValueType(column: ColumnDescriptor): ValueType {
-  let valueType = storageColumnTypeToValueType(column.column_type);
+  let valueType = storageColumnTypeToValueType(column.column_type, column.name);
   if (column.nullable) valueType = { tag: 14, inner: valueType };
   return column.sparse ? { tag: 14, inner: valueType } : valueType;
 }
@@ -1122,7 +1132,7 @@ export function logicalStorageColumns(
   }));
 }
 
-export function storageColumnTypeToValueType(type: ColumnType): ValueType {
+export function storageColumnTypeToValueType(type: ColumnType, enumName = "enum"): ValueType {
   switch (type.type) {
     case "Boolean":
       return { tag: 7 };
@@ -1138,12 +1148,26 @@ export function storageColumnTypeToValueType(type: ColumnType): ValueType {
     case "Json":
     case "Enum":
       return { tag: 8 };
+    case "EnumPayload":
+      return {
+        tag: 16,
+        enumSchema: {
+          name: enumName,
+          cases: type.cases.map((entry) => ({
+            name: entry.name,
+            payload: entry.fields.map((field) => ({
+              name: field.name,
+              valueType: storageColumnValueType(field),
+            })),
+          })),
+        },
+      };
     case "Bytea":
       return { tag: 9 };
     case "Uuid":
       return { tag: 10 };
     case "Array":
-      return { tag: 13, inner: storageColumnTypeToValueType(type.element) };
+      return { tag: 13, inner: storageColumnTypeToValueType(type.element, enumName) };
     case "Row":
       return { tag: 9 };
   }
@@ -1166,6 +1190,21 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
     case "Json":
     case "Enum":
       return { type: "Text", value: textDecoder.decode(bytes) };
+    case "EnumPayload": {
+      if (bytes.length < 4) throw new Error("invalid Enum payload value");
+      const nameLength = view.getUint32(0, true);
+      if (bytes.length < 4 + nameLength) throw new Error("invalid Enum payload case");
+      const caseName = textDecoder.decode(bytes.subarray(4, 4 + nameLength));
+      const entry = type.cases.find((candidate) => candidate.name === caseName);
+      if (!entry) throw new Error("unknown Enum payload case");
+      return {
+        type: "Enum",
+        value: {
+          case: caseName,
+          values: decodeRowValue(entry.fields, bytes.subarray(4 + nameLength)).values,
+        },
+      };
+    }
     case "Uuid":
       return { type: "Uuid", value: formatUuid(bytes) };
     case "Bytea":
@@ -1217,6 +1256,7 @@ function decodePlainValue(type: ColumnType, bytes: Uint8Array, columnName?: stri
       return decodePlainArray(type.element, bytes);
     case "Text":
     case "Enum":
+    case "EnumPayload":
     case "Bytea":
     case "Uuid":
     case "Boolean":

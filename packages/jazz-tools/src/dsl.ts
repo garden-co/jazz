@@ -426,10 +426,16 @@ class EnumBuilder implements ColumnBuilder {
         if (fieldName === "type") {
           throw new Error('Enum payload field name "type" is reserved for the discriminant.');
         }
+        assertUserColumnNameAllowed(fieldName);
         if (builder._references !== undefined) {
           throw new Error("Enum payload fields cannot use references; use a UUID value instead.");
         }
         const field = builder._build(fieldName);
+        if (typeof field.sqlType !== "string") {
+          throw new Error(
+            "Payload enum v1 fields must be scalar columns; arrays and nested enums are not supported yet.",
+          );
+        }
         if (containsReference(field.sqlType)) {
           throw new Error(
             "Enum payload fields cannot contain references; use UUID values instead.",

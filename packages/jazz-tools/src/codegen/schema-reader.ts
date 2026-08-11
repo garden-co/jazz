@@ -58,6 +58,9 @@ function sqlTypeToWasm(sqlType: SqlType): ColumnType {
           })),
         };
       }
+      if (!sqlType.variants) {
+        throw new Error("Enum columns must declare variants or payload cases.");
+      }
       return { type: "Enum", variants: [...sqlType.variants] };
     }
     if (sqlType.kind === "JSON") {
