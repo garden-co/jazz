@@ -341,7 +341,7 @@ impl IvmRuntime {
         }
         let persist = self.add_dedup_schema_index(&table_schema, &index)?;
         self.invalidate_table_inputs(table);
-        self.hydration_snapshot(persist, storage)?;
+        self.hydration_snapshot(persist, storage, HydrationMode::Ordinary)?;
         Ok(())
     }
 
@@ -798,7 +798,7 @@ impl IvmRuntime {
             node: output_node,
             ..
         } = self.add_dedup_graph(&graph)?;
-        let records = self.hydration_snapshot(output_node, storage);
+        let records = self.hydration_snapshot(output_node, storage, HydrationMode::Ordinary);
         for node in self.gc_ephemeral_nodes(0) {
             self.remove_node_runtime(node);
         }
@@ -845,7 +845,7 @@ impl IvmRuntime {
         for (sink, graph) in sinks {
             outputs.insert(sink, self.add_dedup_graph(&graph)?);
         }
-        let snapshots = self.hydration_snapshots(&outputs, storage);
+        let snapshots = self.hydration_snapshots(&outputs, storage, HydrationMode::Ordinary);
         for node in self.gc_ephemeral_nodes(0) {
             self.remove_node_runtime(node);
         }
@@ -1164,12 +1164,24 @@ impl IvmRuntime {
         &mut self,
         output_node: NodeId,
         storage: &S,
+        mode: HydrationMode,
     ) -> Result<RecordDeltas, IvmRuntimeError>
     where
         S: OrderedKvStorage,
     {
         let table_deltas = snapshot_table_deltas(&self.schema, &self.graph, storage, output_node)?;
         let binding_snapshots = self.binding_snapshot_deltas();
+        let context = match mode {
+            HydrationMode::Ordinary => EvalContext::root_snapshot(),
+            // Subscription hydration must rebuild arrangements for aggregate
+            // outputs, while ordinary snapshot hydration intentionally only
+            // probes them. Keep that distinction at this policy boundary so
+            // both paths share the same frontier and memo lifecycle.
+            HydrationMode::Subscription if self.output_depends_on_aggregate(output_node)? => {
+                EvalContext::root_subscription_snapshot()
+            }
+            HydrationMode::Subscription => EvalContext::root_snapshot(),
+        };
         let mut metrics = TickMetrics::default();
         let mut evaluator = TickEvaluator {
             schema: &self.schema,
@@ -1194,7 +1206,7 @@ impl IvmRuntime {
             memo_use_clock: &mut self.memo_use_clock,
             node_meta: &mut self.node_meta,
             storage: Some(storage),
-            context: EvalContext::root_snapshot(),
+            context,
             metrics: &mut metrics,
             terminal_deltas: HashMap::default(),
             root_ordering_windows: HashMap::default(),
@@ -1211,6 +1223,7 @@ impl IvmRuntime {
         &mut self,
         outputs: &BTreeMap<String, CompiledNode>,
         storage: &S,
+        mode: HydrationMode,
     ) -> Result<MultisinkDeltas, IvmRuntimeError>
     where
         S: OrderedKvStorage,
@@ -1219,84 +1232,9 @@ impl IvmRuntime {
         for (sink, output) in outputs {
             let ordering = output
                 .root_ordering_node
-                .map(|node| self.hydration_snapshot(node, storage))
+                .map(|node| self.hydration_snapshot(node, storage, mode))
                 .transpose()?;
-            let mut records = self.hydration_snapshot(output.node, storage)?;
-            if !records.descriptor.registry_compatible_with(&output.output) {
-                return Err(IvmRuntimeError::GraphOutputMismatch);
-            }
-            if let Some(ordering) = &ordering {
-                order_terminal_snapshot(&mut records, ordering)?;
-            }
-            sinks.insert(sink.clone(), records);
-        }
-        Ok(MultisinkDeltas {
-            sinks,
-            terminal_sinks: BTreeMap::new(),
-        })
-    }
-
-    fn subscription_hydration_snapshot<S>(
-        &mut self,
-        output_node: NodeId,
-        storage: &S,
-    ) -> Result<RecordDeltas, IvmRuntimeError>
-    where
-        S: OrderedKvStorage,
-    {
-        let table_deltas = snapshot_table_deltas(&self.schema, &self.graph, storage, output_node)?;
-        let binding_snapshots = self.binding_snapshot_deltas();
-        let hydrate_arrangements = self.output_depends_on_aggregate(output_node)?;
-        let mut metrics = TickMetrics::default();
-        let mut evaluator = TickEvaluator {
-            schema: &self.schema,
-            graph: &self.graph,
-            variant_projections: &self.variant_projections,
-            table_deltas: &table_deltas,
-            binding_deltas: &[],
-            binding_snapshots: &binding_snapshots,
-            current_tick: self.current_tick,
-            operator_states: &mut self.operator_states,
-            arrangement_states: &mut self.arrangement_states,
-            eval_memo: &mut self.eval_memo,
-            eval_memo_bytes: &mut self.eval_memo_bytes,
-            table_frontiers: &self.table_frontiers,
-            binding_frontiers: &self.binding_frontiers,
-            memo_use_clock: &mut self.memo_use_clock,
-            node_meta: &mut self.node_meta,
-            storage: Some(storage),
-            context: if hydrate_arrangements {
-                EvalContext::root_subscription_snapshot()
-            } else {
-                EvalContext::root_snapshot()
-            },
-            metrics: &mut metrics,
-            terminal_deltas: HashMap::default(),
-            root_ordering_windows: HashMap::default(),
-        };
-        let records = evaluator
-            .update_node(output_node)
-            .map(|records| records.as_ref().clone());
-        self.record_hydration_memo_metrics(&metrics);
-        self.evict_eval_memo();
-        records
-    }
-
-    fn subscription_hydration_snapshots<S>(
-        &mut self,
-        outputs: &BTreeMap<String, CompiledNode>,
-        storage: &S,
-    ) -> Result<MultisinkDeltas, IvmRuntimeError>
-    where
-        S: OrderedKvStorage,
-    {
-        let mut sinks = BTreeMap::new();
-        for (sink, output) in outputs {
-            let ordering = output
-                .root_ordering_node
-                .map(|node| self.subscription_hydration_snapshot(node, storage))
-                .transpose()?;
-            let mut records = self.subscription_hydration_snapshot(output.node, storage)?;
+            let mut records = self.hydration_snapshot(output.node, storage, mode)?;
             if !records.descriptor.registry_compatible_with(&output.output) {
                 return Err(IvmRuntimeError::GraphOutputMismatch);
             }
@@ -1319,13 +1257,7 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        if outputs.values().try_fold(false, |depends, output| {
-            Ok::<_, IvmRuntimeError>(depends || self.output_depends_on_aggregate(output.node)?)
-        })? {
-            self.subscription_hydration_snapshots(outputs, storage)
-        } else {
-            self.hydration_snapshots(outputs, storage)
-        }
+        self.hydration_snapshots(outputs, storage, HydrationMode::Subscription)
     }
 
     fn output_depends_on_aggregate(&self, output_node: NodeId) -> Result<bool, IvmRuntimeError> {
@@ -4005,6 +3937,14 @@ pub(super) enum EvalMode {
     #[default]
     Tick,
     Hydrate,
+}
+
+/// Hydration consumers that need aggregate arrangements rebuilt opt into the
+/// subscription policy; all other snapshot consumers retain probe semantics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HydrationMode {
+    Ordinary,
+    Subscription,
 }
 
 /// Key for one cached node evaluation within a logical tick.
@@ -13186,7 +13126,7 @@ mod tests {
                 NodeDurability::Ephemeral,
             );
             assert!(matches!(
-                runtime.hydration_snapshot(node, &storage),
+                runtime.hydration_snapshot(node, &storage, HydrationMode::Ordinary),
                 Err(IvmRuntimeError::UnsupportedOperator)
             ));
         }
