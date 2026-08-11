@@ -588,6 +588,19 @@ fn schema_lineage_gaps_and_inactive_sources_park_durably_then_drain_in_order() {
     );
     assert!(reopened.catalogue_schemas().contains_key(&v2.id));
     assert!(reopened.catalogue_schemas().contains_key(&v3.id));
+    // This is the ordering evidence enum lowering consumes: the out-of-order
+    // seq-2 envelope did not allocate an alias when it was merely parked.
+    // After seq-1 activates, the drained child receives the later alias, so a
+    // physical enum registry can append rather than reinterpret an existing
+    // local tag according to network receipt order.
+    assert_eq!(
+        reopened.catalogue.schema_version_aliases[&v2.id],
+        SchemaVersionAlias(2)
+    );
+    assert_eq!(
+        reopened.catalogue.schema_version_aliases[&v3.id],
+        SchemaVersionAlias(3)
+    );
 }
 
 #[test]
