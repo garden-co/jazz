@@ -109,6 +109,72 @@ fn physical_scalar_enum_schema(
     .map_err(|_| Error::InvalidStoredValue("invalid physical scalar enum registry"))
 }
 
+fn physical_nested_scalar_value_type(
+    value_type: &records::ValueType,
+    path: &str,
+    registries: &BTreeMap<String, Vec<GlobalScalarEnumCaseId>>,
+    column_id: PhysicalColumnId,
+) -> Result<records::ValueType, Error> {
+    use records::ValueType;
+    Ok(match value_type {
+        ValueType::EnumTag(_) => ValueType::EnumTag(physical_scalar_enum_schema(
+            column_id,
+            registries.get(path).ok_or(Error::InvalidStoredValue(
+                "physical nested scalar enum registry missing",
+            ))?,
+        )?),
+        ValueType::Nullable(inner) => {
+            ValueType::Nullable(Box::new(physical_nested_scalar_value_type(
+                inner,
+                &format!("{path}/nullable"),
+                registries,
+                column_id,
+            )?))
+        }
+        ValueType::Array(inner) => ValueType::Array(Box::new(physical_nested_scalar_value_type(
+            inner,
+            &format!("{path}/array"),
+            registries,
+            column_id,
+        )?)),
+        ValueType::Tuple(values) => ValueType::Tuple(
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    physical_nested_scalar_value_type(
+                        value,
+                        &format!("{path}/tuple/{index}"),
+                        registries,
+                        column_id,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        ValueType::Record(record) => ValueType::Record(Box::new(records::RecordDescriptor::new(
+            record
+                .fields()
+                .iter()
+                .map(|field| {
+                    let name = field.name.clone().ok_or(Error::InvalidStoredValue(
+                        "nested scalar enum record field unnamed",
+                    ))?;
+                    Ok((
+                        name.clone(),
+                        physical_nested_scalar_value_type(
+                            &field.value_type,
+                            &format!("{path}/record/{name}"),
+                            registries,
+                            column_id,
+                        )?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, Error>>()?,
+        ))),
+        _ => value_type.clone(),
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(super) struct PhysicalVariantCase {
     pub(super) tag: u32,
@@ -1808,6 +1874,29 @@ pub(super) fn physical_version_storage_tables(
             })
             .collect::<Result<BTreeMap<_, _>, Error>>()?;
 
+        let mut nested_scalar_enum_registries =
+            BTreeMap::<(PhysicalColumnId, String), BTreeSet<GlobalScalarEnumCaseId>>::new();
+        for (_, _, mapping) in &variants {
+            for (column_id, paths) in &mapping.nested_scalar_enum_cases {
+                for (path, cases) in paths {
+                    nested_scalar_enum_registries
+                        .entry((*column_id, path.clone()))
+                        .or_default()
+                        .extend(cases.iter().cloned());
+                }
+            }
+        }
+        let nested_scalar_enum_registries = nested_scalar_enum_registries
+            .into_iter()
+            .map(|((column_id, path), cases)| {
+                let mut cases = cases.into_iter().collect::<Vec<_>>();
+                cases.sort_by(|left, right| {
+                    compare_scalar_enum_cases(schema_version_aliases, left, right)
+                });
+                Ok(((column_id, path), cases))
+            })
+            .collect::<Result<BTreeMap<_, _>, Error>>()?;
+
         let mut payload_enum_registries =
             BTreeMap::<PhysicalColumnId, BTreeSet<GlobalScalarEnumCaseId>>::new();
         let mut payload_enum_layouts =
@@ -1925,6 +2014,23 @@ pub(super) fn physical_version_storage_tables(
                                 )),
                             ),
                         ))
+                        .nullable()
+                    }
+                    _ if nested_scalar_enum_registries
+                        .keys()
+                        .any(|(id, _)| *id == column_id) =>
+                    {
+                        let registries = nested_scalar_enum_registries
+                            .iter()
+                            .filter(|((id, _), _)| *id == column_id)
+                            .map(|((_, path), cases)| (path.clone(), cases.clone()))
+                            .collect::<BTreeMap<_, _>>();
+                        physical_nested_scalar_value_type(
+                            &column.column_type,
+                            "root",
+                            &registries,
+                            column_id,
+                        )?
                         .nullable()
                     }
                     _ => column
