@@ -5826,7 +5826,7 @@ function relationSubscriptionChunk({
   rootAdded?: EncodedTestRow[];
   rootUpdated?: EncodedTestRow[];
   rootRemoved?: Array<{ table: string; rowId: Uint8Array }>;
-}): unknown {
+}) {
   return {
     type: "delta",
     reset,
