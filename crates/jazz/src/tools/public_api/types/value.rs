@@ -399,6 +399,16 @@ impl PartialEq for Value {
             (Value::BatchId(a), Value::BatchId(b)) => a == b,
             (Value::Bytea(a), Value::Bytea(b)) => a == b,
             (Value::LargeValue(a), Value::LargeValue(b)) => a == b,
+            (
+                Value::Enum {
+                    case: a_case,
+                    values: a_values,
+                },
+                Value::Enum {
+                    case: b_case,
+                    values: b_values,
+                },
+            ) => a_case == b_case && a_values == b_values,
             (Value::Array(a), Value::Array(b)) => a == b,
             (
                 Value::Row {

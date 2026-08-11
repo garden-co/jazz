@@ -1211,6 +1211,7 @@ cfg_decode! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::public_api::types::EnumCaseDescriptor;
     use uuid::Uuid;
 
     fn test_descriptor() -> RowDescriptor {
@@ -1636,6 +1637,64 @@ mod tests {
 
         let err = encode_row(&descriptor, &[Value::Text("invalid".to_string())]).unwrap_err();
         assert!(matches!(err, EncodingError::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn enum_payload_roundtrip_and_rejects_invalid_case_or_width() {
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
+            "event",
+            ColumnType::EnumPayload {
+                cases: vec![
+                    EnumCaseDescriptor {
+                        name: "ping".into(),
+                        fields: vec![],
+                    },
+                    EnumCaseDescriptor {
+                        name: "message".into(),
+                        fields: vec![
+                            ColumnDescriptor::new("body", ColumnType::Text),
+                            ColumnDescriptor::new("priority", ColumnType::Integer).nullable(),
+                            ColumnDescriptor::new(
+                                "tags",
+                                ColumnType::Array {
+                                    element: Box::new(ColumnType::Text),
+                                },
+                            ),
+                        ],
+                    },
+                ],
+            },
+        )]);
+        let value = Value::Enum {
+            case: "message".into(),
+            values: vec![
+                Value::Text("hello".into()),
+                Value::Null,
+                Value::Array(vec![Value::Text("x".into())]),
+            ],
+        };
+        let encoded = encode_row(&descriptor, &[value.clone()]).unwrap();
+        assert_eq!(decode_row(&descriptor, &encoded).unwrap(), vec![value]);
+        assert!(
+            encode_row(
+                &descriptor,
+                &[Value::Enum {
+                    case: "missing".into(),
+                    values: vec![]
+                }]
+            )
+            .is_err()
+        );
+        assert!(
+            encode_row(
+                &descriptor,
+                &[Value::Enum {
+                    case: "message".into(),
+                    values: vec![Value::Text("x".into())]
+                }]
+            )
+            .is_err()
+        );
     }
 
     #[test]
