@@ -79,6 +79,10 @@ export function encodeWireClientHello(): Uint8Array {
   writer.u64(MAX_WIRE_PROTOCOL_VERSION); // max_protocol_version
   writer.u64(CLIENT_WIRE_FEATURES);
   writer.u64(0); // WirePeerRole::Client
+  // Browser carriers do not receive the authenticated session context needed
+  // to validate scoped receipts. Do not self-assert an authority endpoint:
+  // preserve ordinary sync and let the server fail closed for scoped features.
+  writer.none(); // WireHello::authority
   return writer.finish();
 }
 

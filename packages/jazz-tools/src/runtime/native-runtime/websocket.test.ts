@@ -111,6 +111,47 @@ describe("websocket frame carrier", () => {
     expect(reader.u64()).toBe(MAX_WIRE_PROTOCOL_VERSION);
     expect(reader.u64()).toBe(CLIENT_WIRE_FEATURES);
     expect(reader.u64()).toBe(0);
+    expect(reader.option((authority) => authority.bytes(false))).toBeUndefined();
+  });
+
+  it("sends an authority-unbound hello first on every reconnect", async () => {
+    const sockets: RecordingWebSocket[] = [];
+    const peerIdentity = Uint8Array.from({ length: 16 }, (_, index) => index + 1);
+    const WebSocket = class extends RecordingWebSocket {
+      constructor(url: string) {
+        super(url, (socket) => sockets.push(socket));
+      }
+    };
+
+    const first = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity,
+      onFrame: () => {},
+      WebSocket,
+    });
+    await first.ready();
+    first.close();
+    const second = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity,
+      onFrame: () => {},
+      WebSocket,
+    });
+    await second.ready();
+
+    const hello = (socket: RecordingWebSocket) => {
+      expect(socket.sent[0]).toEqual(encodeWebSocketPrelude("{}", peerIdentity));
+      const frame = decodeWebSocketFrameBatch(socket.sent[1] as Uint8Array)[0]!;
+      const reader = new PostcardReader(frame);
+      expect(reader.u64()).toBe(0);
+      reader.u64();
+      reader.u64();
+      reader.u64();
+      reader.u64();
+      return reader.option((authority) => authority.bytes(false));
+    };
+    expect(hello(sockets[0]!)).toBeUndefined();
+    expect(hello(sockets[1]!)).toBeUndefined();
   });
 
   it("decodes structured wire error frames", () => {

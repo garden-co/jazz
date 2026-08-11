@@ -1933,9 +1933,20 @@ impl WasmDb {
     #[wasm_bindgen(js_name = connectUpstream)]
     pub fn connect_upstream(&self) -> Result<WasmTransport, JsValue> {
         let queues = WasmWireQueues::default();
-        let transport = Box::new(WireTransportAdapter::current(WasmWireTransport {
-            queues: queues.clone(),
-        }));
+        // Browser WebSocket carriers negotiate ordinary sync only. They do not
+        // receive the authenticated endpoint context required for scoped
+        // receipt/view frames, so their transport must not self-advertise
+        // those features before the carrier can bind that context.
+        let transport = Box::new(WireTransportAdapter::new(
+            WasmWireTransport {
+                queues: queues.clone(),
+            },
+            jazz::wire::WIRE_PROTOCOL_VERSION,
+            jazz::wire::current_wire_features()
+                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+            None,
+        ));
         let inner = match &self.inner {
             WasmDbInner::Memory(db) => WasmTransportInner::Memory {
                 db: Rc::clone(db),

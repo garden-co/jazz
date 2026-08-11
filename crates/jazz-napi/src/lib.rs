@@ -1637,9 +1637,19 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let queues = WireQueues::default();
-        let transport = Box::new(CoreWireTransportAdapter::current(NapiWireTransport {
-            queues: queues.clone(),
-        }));
+        // The JS WebSocket carrier has no authenticated endpoint context for
+        // scoped receipt/view frames. Keep this upstream transport aligned
+        // with its authority-unbound Hello until such a context is plumbed.
+        let transport = Box::new(CoreWireTransportAdapter::new(
+            NapiWireTransport {
+                queues: queues.clone(),
+            },
+            jazz::wire::WIRE_PROTOCOL_VERSION,
+            jazz::wire::current_wire_features()
+                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+            None,
+        ));
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {
                 db: Rc::clone(db),
