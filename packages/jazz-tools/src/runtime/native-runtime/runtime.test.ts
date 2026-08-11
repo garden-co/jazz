@@ -217,6 +217,75 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(sockets[1]!.closed).toBe(true);
   });
 
+  it("retries a pending edge wait when a websocket frame arrives without a native callback", async () => {
+    let settled = false;
+    let transportTicks = 0;
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    transport.tick = () => {
+      transportTicks += 1;
+      if (transportTicks >= 3) settled = true;
+      return 0;
+    };
+    const write = {
+      batchId: "00000000000070008000000000000007",
+      payload: new Uint8Array(),
+      wait: () => {
+        if (!settled) throw new Error("transaction has not reached requested tier Edge");
+      },
+      writeState: () => ({}),
+      nextWriteStateChange: () => new Promise<void>(() => {}),
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insertWithIdEncoded: () => write,
+            connectUpstream: () => transport,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeWireServerHello()]));
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    transportTicks = 0;
+
+    const inserted = runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "pump delayed fate" } },
+      null,
+      "00000000-0000-0000-0000-000000000007",
+    );
+
+    const wait = runtime.waitForTransaction(await committedBatchId(inserted), "edge");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(transportTicks).toBe(2);
+
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([1, 42])]));
+    await wait;
+
+    expect(transportTicks).toBe(3);
+  });
+
   it("uses the binding scheduler to drive native db ticks outside server pumps", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
@@ -6414,6 +6483,17 @@ function encodeWireError(code: number, retry: number, message: string): Uint8Arr
   writer.u64(code);
   writer.u64(retry);
   writer.string(message);
+  return writer.finish();
+}
+
+function encodeWireServerHello(): Uint8Array {
+  const writer = new PostcardWriter();
+  writer.u64(0); // WireFrame::Hello
+  writer.u64(6); // min_protocol_version
+  writer.u64(6); // max_protocol_version
+  writer.u64(0); // accepted features
+  writer.u64(1); // WirePeerRole::Core
+  writer.none(); // WireHello::authority
   return writer.finish();
 }
 
