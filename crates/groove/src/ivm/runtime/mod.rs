@@ -9333,6 +9333,18 @@ fn remap_recursive_enum_value(
                     path: path.to_owned(),
                 });
             }
+            let semantic_child_root = remaps
+                .payload_children
+                .get(path)
+                .and_then(|paths| paths.get(usize::try_from(source_tag).ok()?))
+                .and_then(|path| path.as_deref());
+            let child_root = semantic_child_root
+                // Older callers which have no nested payload occurrence keep
+                // the historic local-tag spelling. Schema lowering supplies
+                // a semantic GlobalCaseId-rooted path whenever descendants
+                // are present.
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{path}/case/{source_tag}"));
             let values = value.record().to_values()?;
             let values = values
                 .into_iter()
@@ -9354,7 +9366,11 @@ fn remap_recursive_enum_value(
                         &source.value_type,
                         &target.value_type,
                         remaps,
-                        &format!("{path}/case/{source_tag}/{name}"),
+                        &if semantic_child_root.is_some() {
+                            format!("{child_root}/record/{name}")
+                        } else {
+                            format!("{child_root}/{name}")
+                        },
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -12243,6 +12259,7 @@ mod tests {
                 ),
             ]),
             payload: BTreeMap::new(),
+            payload_children: BTreeMap::new(),
         };
         let record = RecordDescriptor::new([(
             "state",
@@ -12317,10 +12334,21 @@ mod tests {
         )])));
         let remaps = RecursiveEnumRemaps {
             scalar: BTreeMap::from([(
-                "root/record/nested/case/0/state".to_owned(),
+                "root/record/nested/case/introduced-a/0/record/state".to_owned(),
                 vec![Some(0), None, Some(1)],
             )]),
             payload: BTreeMap::from([("root/record/nested".to_owned(), vec![Some(0), None])]),
+            // The payload's physical tag is an interned local value.  Its
+            // descendant path must instead remain rooted in the durable case
+            // identity, so a concurrent schema may use the same local tag for
+            // an unrelated case without redirecting this scalar remap.
+            payload_children: BTreeMap::from([(
+                "root/record/nested".to_owned(),
+                vec![
+                    Some("root/record/nested/case/introduced-a/0".to_owned()),
+                    None,
+                ],
+            )]),
         };
         let ValueType::Enum(payload_schema) = physical_payload else {
             panic!("payload expected")

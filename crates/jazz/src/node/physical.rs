@@ -114,32 +114,44 @@ fn physical_scalar_enum_schema(
     .map_err(|_| Error::InvalidStoredValue("invalid physical scalar enum registry"))
 }
 
-fn physical_nested_scalar_value_type(
+/// Lower a recursively nested authored value into the durable physical enum
+/// registries for one user column.  Scalar and payload enum occurrences have
+/// independently interned registries; payload children are addressed beneath
+/// their *global* parent identity, never an authored case ordinal.
+fn physical_nested_enum_value_type(
     value_type: &records::ValueType,
     path: &str,
-    registries: &BTreeMap<String, Vec<GlobalScalarEnumCaseId>>,
+    scalar_registries: &BTreeMap<String, Vec<GlobalScalarEnumCaseId>>,
+    payload_registries: &BTreeMap<String, Vec<GlobalScalarEnumCaseId>>,
+    payload_layouts: &BTreeMap<(String, GlobalScalarEnumCaseId), records::RecordDescriptor>,
     column_id: PhysicalColumnId,
 ) -> Result<records::ValueType, Error> {
     use records::ValueType;
     Ok(match value_type {
         ValueType::EnumTag(_) => ValueType::EnumTag(physical_scalar_enum_schema(
             column_id,
-            registries.get(path).ok_or(Error::InvalidStoredValue(
-                "physical nested scalar enum registry missing",
-            ))?,
+            scalar_registries
+                .get(path)
+                .ok_or(Error::InvalidStoredValue(
+                    "physical nested scalar enum registry missing",
+                ))?,
         )?),
         ValueType::Nullable(inner) => {
-            ValueType::Nullable(Box::new(physical_nested_scalar_value_type(
+            ValueType::Nullable(Box::new(physical_nested_enum_value_type(
                 inner,
                 &format!("{path}/nullable"),
-                registries,
+                scalar_registries,
+                payload_registries,
+                payload_layouts,
                 column_id,
             )?))
         }
-        ValueType::Array(inner) => ValueType::Array(Box::new(physical_nested_scalar_value_type(
+        ValueType::Array(inner) => ValueType::Array(Box::new(physical_nested_enum_value_type(
             inner,
             &format!("{path}/array"),
-            registries,
+            scalar_registries,
+            payload_registries,
+            payload_layouts,
             column_id,
         )?)),
         ValueType::Tuple(values) => ValueType::Tuple(
@@ -147,10 +159,12 @@ fn physical_nested_scalar_value_type(
                 .iter()
                 .enumerate()
                 .map(|(index, value)| {
-                    physical_nested_scalar_value_type(
+                    physical_nested_enum_value_type(
                         value,
                         &format!("{path}/tuple/{index}"),
-                        registries,
+                        scalar_registries,
+                        payload_registries,
+                        payload_layouts,
                         column_id,
                     )
                 })
@@ -166,18 +180,145 @@ fn physical_nested_scalar_value_type(
                     ))?;
                     Ok((
                         name.clone(),
-                        physical_nested_scalar_value_type(
+                        physical_nested_enum_value_type(
                             &field.value_type,
                             &format!("{path}/record/{name}"),
-                            registries,
+                            scalar_registries,
+                            payload_registries,
+                            payload_layouts,
                             column_id,
                         )?,
                     ))
                 })
                 .collect::<Result<Vec<_>, Error>>()?,
         ))),
+        ValueType::Enum(_) => {
+            let cases = payload_registries
+                .get(path)
+                .ok_or(Error::InvalidStoredValue(
+                    "physical nested payload enum registry missing",
+                ))?;
+            let cases = cases
+                .iter()
+                .map(|identity| {
+                    let payload = payload_layouts
+                        .get(&(path.to_owned(), identity.clone()))
+                        .ok_or(Error::InvalidStoredValue(
+                            "physical nested payload enum layout missing",
+                        ))?;
+                    let ValueType::Record(payload) = physical_nested_enum_value_type(
+                        &ValueType::Record(Box::new(payload.clone())),
+                        &global_case_path(path, identity),
+                        scalar_registries,
+                        payload_registries,
+                        payload_layouts,
+                        column_id,
+                    )?
+                    else {
+                        unreachable!("record lowering preserves record shape");
+                    };
+                    Ok(records::EnumCase::new(
+                        physical_scalar_enum_case_name(identity),
+                        *payload,
+                    ))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            ValueType::Enum(Box::new(
+                records::EnumSchema::new(format!("physical-column-{}-{path}", column_id.0), cases)
+                    .map_err(|_| {
+                        Error::InvalidStoredValue("invalid physical nested payload enum registry")
+                    })?
+                    .with_registry_id(records::variant_registry_id_for_path(&format!(
+                        "physical-column/{}/{path}",
+                        column_id.0
+                    ))),
+            ))
+        }
         _ => value_type.clone(),
     })
+}
+
+/// Collect the authored payload layout for each durable nested payload case.
+/// The same `GlobalScalarEnumCaseId` can be observed through many descendant
+/// schemas, but it must always describe one layout.  Comparing the complete
+/// descriptor here prevents a later sibling declaration from changing the
+/// meaning of an already-persisted compact tag.
+fn collect_nested_payload_enum_layouts(
+    value_type: &records::ValueType,
+    path: &str,
+    identities: &BTreeMap<String, Vec<GlobalScalarEnumCaseId>>,
+    output: &mut BTreeMap<(String, GlobalScalarEnumCaseId), records::RecordDescriptor>,
+) -> Result<(), Error> {
+    use records::ValueType;
+    match value_type {
+        ValueType::Nullable(inner) => collect_nested_payload_enum_layouts(
+            inner,
+            &format!("{path}/nullable"),
+            identities,
+            output,
+        ),
+        ValueType::Array(inner) => {
+            collect_nested_payload_enum_layouts(inner, &format!("{path}/array"), identities, output)
+        }
+        ValueType::Tuple(values) => {
+            for (index, value) in values.iter().enumerate() {
+                collect_nested_payload_enum_layouts(
+                    value,
+                    &format!("{path}/tuple/{index}"),
+                    identities,
+                    output,
+                )?;
+            }
+            Ok(())
+        }
+        ValueType::Record(record) => {
+            for field in record.fields() {
+                let name = field.name.as_deref().ok_or(Error::InvalidStoredValue(
+                    "nested payload enum record field unnamed",
+                ))?;
+                collect_nested_payload_enum_layouts(
+                    &field.value_type,
+                    &format!("{path}/record/{name}"),
+                    identities,
+                    output,
+                )?;
+            }
+            Ok(())
+        }
+        ValueType::Enum(schema) => {
+            let cases = identities.get(path).ok_or(Error::InvalidStoredValue(
+                "nested payload enum identity mapping missing",
+            ))?;
+            if cases.len() != schema.cases.len() {
+                return Err(Error::InvalidStoredValue(
+                    "nested payload enum identity mapping width mismatch",
+                ));
+            }
+            for (identity, case) in cases.iter().zip(&schema.cases) {
+                let key = (path.to_owned(), identity.clone());
+                match output.entry(key) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(case.payload.clone());
+                    }
+                    std::collections::btree_map::Entry::Occupied(entry)
+                        if entry.get() == &case.payload => {}
+                    std::collections::btree_map::Entry::Occupied(_) => {
+                        return Err(Error::InvalidStoredValue(
+                            "same nested payload enum identity has incompatible layout",
+                        ));
+                    }
+                }
+                collect_nested_payload_enum_layouts(
+                    &ValueType::Record(Box::new(case.payload.clone())),
+                    &global_case_path(path, identity),
+                    identities,
+                    output,
+                )?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -633,6 +774,40 @@ where
         Ok(cases)
     }
 
+    fn physical_nested_payload_enum_cases(
+        &self,
+        table_id: PhysicalTableId,
+        column_id: PhysicalColumnId,
+        path: &str,
+    ) -> Result<Vec<GlobalScalarEnumCaseId>, Error> {
+        let mut cases = BTreeSet::new();
+        for mapping in self.catalogue.physical_mappings.values() {
+            for table in mapping
+                .tables
+                .values()
+                .filter(|table| table.table_id == table_id)
+            {
+                if let Some(column_cases) = table
+                    .nested_payload_enum_cases
+                    .get(&column_id)
+                    .and_then(|paths| paths.get(path))
+                {
+                    cases.extend(column_cases.iter().cloned());
+                }
+            }
+        }
+        if cases.is_empty() {
+            return Err(Error::InvalidStoredValue(
+                "physical nested payload enum registry identity mapping missing",
+            ));
+        }
+        let mut cases = cases.into_iter().collect::<Vec<_>>();
+        cases.sort_by(|left, right| {
+            compare_scalar_enum_cases(&self.catalogue.schema_version_aliases, left, right)
+        });
+        Ok(cases)
+    }
+
     /// Construct the physical-to-authored side of the enum interning boundary
     /// for one user cell.  Every entry is keyed by a structural occurrence;
     /// absent target cases deliberately stay `None` so projection fails rather
@@ -690,6 +865,13 @@ where
                     })
                     .collect::<Result<_, _>>()?,
             );
+            remaps.payload_children.insert(
+                "root".to_owned(),
+                physical_cases
+                    .iter()
+                    .map(|identity| Some(global_case_path("root", identity)))
+                    .collect(),
+            );
         }
         if let Some(paths) = target_mapping.nested_scalar_enum_cases.get(&column_id) {
             for (path, target_cases) in paths {
@@ -714,6 +896,39 @@ where
                                 .transpose()
                         })
                         .collect::<Result<_, _>>()?,
+                );
+            }
+        }
+        if let Some(paths) = target_mapping.nested_payload_enum_cases.get(&column_id) {
+            for (path, target_cases) in paths {
+                let physical_cases = self
+                    .physical_nested_payload_enum_cases(target_mapping.table_id, column_id, path)
+                    .unwrap_or_else(|_| target_cases.clone());
+                remaps.payload.insert(
+                    path.clone(),
+                    physical_cases
+                        .iter()
+                        .map(|identity| {
+                            target_cases
+                                .iter()
+                                .position(|candidate| candidate == identity)
+                                .map(|tag| {
+                                    u32::try_from(tag).map_err(|_| {
+                                        Error::InvalidStoredValue(
+                                            "target nested payload enum tag exhausted",
+                                        )
+                                    })
+                                })
+                                .transpose()
+                        })
+                        .collect::<Result<_, _>>()?,
+                );
+                remaps.payload_children.insert(
+                    path.clone(),
+                    physical_cases
+                        .iter()
+                        .map(|identity| Some(global_case_path(path, identity)))
+                        .collect(),
                 );
             }
         }
@@ -1329,6 +1544,9 @@ where
                             || target_mapping.payload_enum_cases.contains_key(&column_id)
                             || target_mapping
                                 .nested_scalar_enum_cases
+                                .contains_key(&column_id)
+                            || target_mapping
+                                .nested_payload_enum_cases
                                 .contains_key(&column_id);
                     let direct_enum = matches!(
                         column.column_type,
@@ -1353,6 +1571,7 @@ where
                                             .collect(),
                                     )]),
                                     payload: BTreeMap::new(),
+                                    payload_children: BTreeMap::new(),
                                 },
                                 records::ValueType::Enum(schema) => EnumOccurrenceRemaps {
                                     scalar: BTreeMap::new(),
@@ -1360,6 +1579,12 @@ where
                                         "root".to_owned(),
                                         (0..schema.cases.len())
                                             .map(|tag| u32::try_from(tag).ok())
+                                            .collect(),
+                                    )]),
+                                    payload_children: BTreeMap::from([(
+                                        "root".to_owned(),
+                                        (0..schema.cases.len())
+                                            .map(|tag| Some(format!("root/case/bootstrap/{tag}")))
                                             .collect(),
                                     )]),
                                 },
@@ -1443,6 +1668,173 @@ where
         ))
     }
 
+    /// Re-encode every enum occurrence in a logical storage record before it
+    /// crosses into a physical table.  History, settled-current and
+    /// ahead-current writes share this boundary; allowing one of those paths
+    /// to raw-copy an authored tag would make the durable table internally
+    /// inconsistent after concurrent schema introductions.
+    pub(super) fn remap_authored_enum_cells_for_physical(
+        &self,
+        values: &mut [Value],
+        source_table: &TableSchema,
+        source_mapping: &TablePhysicalMapping,
+        physical_table: &GrooveTableSchema,
+        user_cells: usize,
+    ) -> Result<(), Error> {
+        for (column_index, column) in source_table.columns.iter().enumerate() {
+            let column_id = source_mapping.columns.get(&column.name).copied().ok_or(
+                Error::InvalidStoredValue("physical enum write column mapping missing"),
+            )?;
+            let value_index = user_cells + column_index;
+            let value = values
+                .get_mut(value_index)
+                .ok_or(Error::InvalidStoredValue(
+                    "physical enum write field missing",
+                ))?;
+            let mut remaps = EnumOccurrenceRemaps::default();
+            if let Some(authored_cases) = source_mapping.scalar_enum_cases.get(&column_id) {
+                let physical_cases =
+                    self.physical_scalar_enum_cases(source_mapping.table_id, column_id)?;
+                remaps.scalar.insert(
+                    "root".to_owned(),
+                    authored_cases
+                        .iter()
+                        .map(|identity| {
+                            physical_cases
+                                .iter()
+                                .position(|candidate| candidate == identity)
+                                .map(|tag| {
+                                    u8::try_from(tag).map_err(|_| {
+                                        Error::InvalidStoredValue(
+                                            "physical scalar enum tag exhausted",
+                                        )
+                                    })
+                                })
+                                .transpose()
+                        })
+                        .collect::<Result<_, _>>()?,
+                );
+            }
+            if let Some(authored_cases) = source_mapping.payload_enum_cases.get(&column_id) {
+                let physical_cases =
+                    self.physical_payload_enum_cases(source_mapping.table_id, column_id)?;
+                remaps.payload.insert(
+                    "root".to_owned(),
+                    authored_cases
+                        .iter()
+                        .map(|identity| {
+                            physical_cases
+                                .iter()
+                                .position(|candidate| candidate == identity)
+                                .map(|tag| {
+                                    u32::try_from(tag).map_err(|_| {
+                                        Error::InvalidStoredValue(
+                                            "physical payload enum tag exhausted",
+                                        )
+                                    })
+                                })
+                                .transpose()
+                        })
+                        .collect::<Result<_, _>>()?,
+                );
+                remaps.payload_children.insert(
+                    "root".to_owned(),
+                    authored_cases
+                        .iter()
+                        .map(|identity| Some(global_case_path("root", identity)))
+                        .collect(),
+                );
+            }
+            if let Some(authored_paths) = source_mapping.nested_scalar_enum_cases.get(&column_id) {
+                for (path, authored_cases) in authored_paths {
+                    let physical_cases = self.physical_nested_scalar_enum_cases(
+                        source_mapping.table_id,
+                        column_id,
+                        path,
+                    )?;
+                    remaps.scalar.insert(
+                        path.clone(),
+                        authored_cases
+                            .iter()
+                            .map(|identity| {
+                                physical_cases
+                                    .iter()
+                                    .position(|candidate| candidate == identity)
+                                    .map(|tag| {
+                                        u8::try_from(tag).map_err(|_| {
+                                            Error::InvalidStoredValue(
+                                                "physical nested scalar enum tag exhausted",
+                                            )
+                                        })
+                                    })
+                                    .transpose()
+                            })
+                            .collect::<Result<_, _>>()?,
+                    );
+                }
+            }
+            if let Some(authored_paths) = source_mapping.nested_payload_enum_cases.get(&column_id) {
+                for (path, authored_cases) in authored_paths {
+                    let physical_cases = self.physical_nested_payload_enum_cases(
+                        source_mapping.table_id,
+                        column_id,
+                        path,
+                    )?;
+                    remaps.payload.insert(
+                        path.clone(),
+                        authored_cases
+                            .iter()
+                            .map(|identity| {
+                                physical_cases
+                                    .iter()
+                                    .position(|candidate| candidate == identity)
+                                    .map(|tag| {
+                                        u32::try_from(tag).map_err(|_| {
+                                            Error::InvalidStoredValue(
+                                                "physical nested payload enum tag exhausted",
+                                            )
+                                        })
+                                    })
+                                    .transpose()
+                            })
+                            .collect::<Result<_, _>>()?,
+                    );
+                    remaps.payload_children.insert(
+                        path.clone(),
+                        authored_cases
+                            .iter()
+                            .map(|identity| Some(global_case_path(path, identity)))
+                            .collect(),
+                    );
+                }
+            }
+            if remaps.scalar.is_empty() && remaps.payload.is_empty() {
+                continue;
+            }
+            let physical_type = physical_table
+                .columns
+                .iter()
+                .find(|physical| physical.name == physical_user_column_field(column_id))
+                .map(|physical| &physical.column_type)
+                .ok_or(Error::InvalidStoredValue(
+                    "physical enum write column missing",
+                ))?;
+            let (Value::Nullable(Some(inner)), records::ValueType::Nullable(physical)) =
+                (value.clone(), physical_type)
+            else {
+                continue;
+            };
+            *value = Value::Nullable(Some(Box::new(remap_nested_enum_value(
+                *inner,
+                &column.column_type,
+                physical,
+                &remaps,
+                "root",
+            )?)));
+        }
+        Ok(())
+    }
+
     pub(super) fn version_storage_write_binding(
         &mut self,
         version: &VersionRow,
@@ -1494,87 +1886,146 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "history scalar enum write field missing",
                 ))?;
-            match &column.column_type {
-                records::ValueType::EnumTag(_) => {
-                    let authored_cases = source_mapping.scalar_enum_cases.get(&column_id).ok_or(
-                        Error::InvalidStoredValue("authored scalar enum identity mapping missing"),
-                    )?;
-                    let physical_cases =
-                        self.physical_scalar_enum_cases(source_mapping.table_id, column_id)?;
-                    *value = remap_authored_scalar_enum_value(
-                        value.clone(),
-                        authored_cases,
-                        &physical_cases,
-                    )?;
-                }
-                records::ValueType::Enum(authored_schema) => {
-                    let authored_cases = source_mapping.payload_enum_cases.get(&column_id).ok_or(
-                        Error::InvalidStoredValue("authored payload enum identity mapping missing"),
-                    )?;
-                    let physical_cases =
-                        self.physical_payload_enum_cases(source_mapping.table_id, column_id)?;
-                    *value = remap_authored_payload_enum_value(
-                        value.clone(),
-                        authored_schema,
-                        authored_cases,
-                        &physical_cases,
-                    )?;
-                }
-                _ => {
-                    let Some(authored_paths) =
-                        source_mapping.nested_scalar_enum_cases.get(&column_id)
-                    else {
-                        continue;
-                    };
-                    let mut remaps = EnumOccurrenceRemaps::default();
-                    for (path, authored_cases) in authored_paths {
-                        let physical_cases = self.physical_nested_scalar_enum_cases(
-                            source_mapping.table_id,
-                            column_id,
-                            path,
-                        )?;
-                        remaps.scalar.insert(
-                            path.clone(),
-                            authored_cases
-                                .iter()
-                                .map(|identity| {
-                                    physical_cases
-                                        .iter()
-                                        .position(|candidate| candidate == identity)
-                                        .map(|tag| {
-                                            u8::try_from(tag).map_err(|_| {
-                                                Error::InvalidStoredValue(
-                                                    "physical nested scalar enum tag exhausted",
-                                                )
-                                            })
-                                        })
-                                        .transpose()
-                                })
-                                .collect::<Result<Vec<_>, Error>>()?,
-                        );
-                    }
-                    let physical_type = physical_table
-                        .columns
+            let mut remaps = EnumOccurrenceRemaps::default();
+            if let Some(authored_cases) = source_mapping.scalar_enum_cases.get(&column_id) {
+                let physical_cases =
+                    self.physical_scalar_enum_cases(source_mapping.table_id, column_id)?;
+                remaps.scalar.insert(
+                    "root".to_owned(),
+                    authored_cases
                         .iter()
-                        .find(|physical| physical.name == physical_user_column_field(column_id))
-                        .map(|physical| &physical.column_type)
-                        .ok_or(Error::InvalidStoredValue(
-                            "physical nested enum write column missing",
-                        ))?;
-                    let (Value::Nullable(Some(inner)), records::ValueType::Nullable(physical)) =
-                        (value.clone(), physical_type)
-                    else {
-                        continue;
-                    };
-                    *value = Value::Nullable(Some(Box::new(remap_nested_enum_value(
-                        *inner,
-                        &column.column_type,
-                        physical,
-                        &remaps,
-                        "root",
-                    )?)));
+                        .map(|identity| {
+                            physical_cases
+                                .iter()
+                                .position(|candidate| candidate == identity)
+                                .map(|tag| {
+                                    u8::try_from(tag).map_err(|_| {
+                                        Error::InvalidStoredValue(
+                                            "physical scalar enum tag exhausted",
+                                        )
+                                    })
+                                })
+                                .transpose()
+                        })
+                        .collect::<Result<_, _>>()?,
+                );
+            }
+            if let Some(authored_cases) = source_mapping.payload_enum_cases.get(&column_id) {
+                let physical_cases =
+                    self.physical_payload_enum_cases(source_mapping.table_id, column_id)?;
+                remaps.payload.insert(
+                    "root".to_owned(),
+                    authored_cases
+                        .iter()
+                        .map(|identity| {
+                            physical_cases
+                                .iter()
+                                .position(|candidate| candidate == identity)
+                                .map(|tag| {
+                                    u32::try_from(tag).map_err(|_| {
+                                        Error::InvalidStoredValue(
+                                            "physical payload enum tag exhausted",
+                                        )
+                                    })
+                                })
+                                .transpose()
+                        })
+                        .collect::<Result<_, _>>()?,
+                );
+                remaps.payload_children.insert(
+                    "root".to_owned(),
+                    authored_cases
+                        .iter()
+                        .map(|identity| Some(global_case_path("root", identity)))
+                        .collect(),
+                );
+            }
+            if let Some(authored_paths) = source_mapping.nested_scalar_enum_cases.get(&column_id) {
+                for (path, authored_cases) in authored_paths {
+                    let physical_cases = self.physical_nested_scalar_enum_cases(
+                        source_mapping.table_id,
+                        column_id,
+                        path,
+                    )?;
+                    remaps.scalar.insert(
+                        path.clone(),
+                        authored_cases
+                            .iter()
+                            .map(|identity| {
+                                physical_cases
+                                    .iter()
+                                    .position(|candidate| candidate == identity)
+                                    .map(|tag| {
+                                        u8::try_from(tag).map_err(|_| {
+                                            Error::InvalidStoredValue(
+                                                "physical nested scalar enum tag exhausted",
+                                            )
+                                        })
+                                    })
+                                    .transpose()
+                            })
+                            .collect::<Result<_, _>>()?,
+                    );
                 }
             }
+            if let Some(authored_paths) = source_mapping.nested_payload_enum_cases.get(&column_id) {
+                for (path, authored_cases) in authored_paths {
+                    let physical_cases = self.physical_nested_payload_enum_cases(
+                        source_mapping.table_id,
+                        column_id,
+                        path,
+                    )?;
+                    remaps.payload.insert(
+                        path.clone(),
+                        authored_cases
+                            .iter()
+                            .map(|identity| {
+                                physical_cases
+                                    .iter()
+                                    .position(|candidate| candidate == identity)
+                                    .map(|tag| {
+                                        u32::try_from(tag).map_err(|_| {
+                                            Error::InvalidStoredValue(
+                                                "physical nested payload enum tag exhausted",
+                                            )
+                                        })
+                                    })
+                                    .transpose()
+                            })
+                            .collect::<Result<_, _>>()?,
+                    );
+                    remaps.payload_children.insert(
+                        path.clone(),
+                        authored_cases
+                            .iter()
+                            .map(|identity| Some(global_case_path(path, identity)))
+                            .collect(),
+                    );
+                }
+            }
+            if remaps.scalar.is_empty() && remaps.payload.is_empty() {
+                continue;
+            }
+            let physical_type = physical_table
+                .columns
+                .iter()
+                .find(|physical| physical.name == physical_user_column_field(column_id))
+                .map(|physical| &physical.column_type)
+                .ok_or(Error::InvalidStoredValue(
+                    "physical enum write column missing",
+                ))?;
+            let (Value::Nullable(Some(inner)), records::ValueType::Nullable(physical)) =
+                (value.clone(), physical_type)
+            else {
+                continue;
+            };
+            *value = Value::Nullable(Some(Box::new(remap_nested_enum_value(
+                *inner,
+                &column.column_type,
+                physical,
+                &remaps,
+                "root",
+            )?)));
         }
         let record = OwnedRecord::new(descriptor.create(&values)?, descriptor);
         Ok((
@@ -1674,7 +2125,7 @@ fn widened_projection_descriptor(
 /// widened value types. Keeping logical names here makes Groove correctly
 /// reject the record as a descriptor mismatch, but too late to explain the
 /// authored-to-physical enum boundary.
-fn physical_write_descriptor(
+pub(super) fn physical_write_descriptor(
     logical: &records::RecordDescriptor,
     physical_names: &[String],
     physical_table: &GrooveTableSchema,
@@ -1706,6 +2157,7 @@ fn physical_write_descriptor(
     ))
 }
 
+#[cfg(test)]
 fn remap_authored_scalar_enum_value(
     value: Value,
     authored_cases: &[GlobalScalarEnumCaseId],
@@ -1739,6 +2191,7 @@ fn remap_authored_scalar_enum_value(
     }
 }
 
+#[cfg(test)]
 fn remap_authored_payload_enum_value(
     value: Value,
     authored_schema: &records::EnumSchema,
@@ -1896,6 +2349,14 @@ fn remap_nested_enum_value(
                     "nested payload enum payload width changed",
                 ));
             }
+            let semantic_child_root = remaps
+                .payload_children
+                .get(path)
+                .and_then(|paths| paths.get(usize::try_from(authored_tag).ok()?))
+                .and_then(|path| path.as_deref());
+            let child_root = semantic_child_root
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{path}/case/{authored_tag}"));
             let values = value.record().to_values()?;
             let values = values
                 .into_iter()
@@ -1915,7 +2376,11 @@ fn remap_nested_enum_value(
                         &authored.value_type,
                         &physical.value_type,
                         remaps,
-                        &format!("{path}/case/{authored_tag}/{name}"),
+                        &if semantic_child_root.is_some() {
+                            format!("{child_root}/record/{name}")
+                        } else {
+                            format!("{child_root}/{name}")
+                        },
                     )
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
@@ -2098,6 +2563,70 @@ pub(super) fn physical_version_storage_tables(
             })
             .collect::<Result<BTreeMap<_, _>, Error>>()?;
 
+        // Payload enum occurrences, including those inside another payload,
+        // need the same lineage-wide union.  The path beneath a payload case
+        // is rooted by that case's GlobalCaseId, so concurrent siblings which
+        // both authored ordinal `n` never share a descendant registry.
+        let mut nested_payload_enum_registries =
+            BTreeMap::<(PhysicalColumnId, String), BTreeSet<GlobalScalarEnumCaseId>>::new();
+        let mut nested_payload_enum_layouts = BTreeMap::<
+            (PhysicalColumnId, String, GlobalScalarEnumCaseId),
+            records::RecordDescriptor,
+        >::new();
+        for (_, logical_table, mapping) in &variants {
+            for column in &logical_table.columns {
+                let column_id =
+                    mapping
+                        .columns
+                        .get(&column.name)
+                        .copied()
+                        .ok_or(Error::InvalidStoredValue(
+                            "physical nested payload enum column mapping missing",
+                        ))?;
+                let Some(paths) = mapping.nested_payload_enum_cases.get(&column_id) else {
+                    continue;
+                };
+                for (path, cases) in paths {
+                    nested_payload_enum_registries
+                        .entry((column_id, path.clone()))
+                        .or_default()
+                        .extend(cases.iter().cloned());
+                }
+                let mut layouts = BTreeMap::new();
+                collect_nested_payload_enum_layouts(
+                    &column.column_type,
+                    "root",
+                    paths,
+                    &mut layouts,
+                )?;
+                for ((path, identity), layout) in layouts {
+                    let key = (column_id, path, identity);
+                    match nested_payload_enum_layouts.entry(key) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(layout);
+                        }
+                        std::collections::btree_map::Entry::Occupied(entry)
+                            if entry.get() == &layout => {}
+                        std::collections::btree_map::Entry::Occupied(_) => {
+                            return Err(Error::InvalidStoredValue(
+                                "same nested payload enum identity has incompatible layout",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        let nested_payload_enum_registries = nested_payload_enum_registries
+            .into_iter()
+            .map(|((column_id, path), cases)| {
+                let mut cases = cases.into_iter().collect::<Vec<_>>();
+                cases.sort_by(|left, right| {
+                    compare_scalar_enum_cases(schema_version_aliases, left, right)
+                });
+                Ok(((column_id, path), cases))
+            })
+            .collect::<Result<BTreeMap<_, _>, Error>>()?;
+
         let mut payload_enum_registries =
             BTreeMap::<PhysicalColumnId, BTreeSet<GlobalScalarEnumCaseId>>::new();
         let mut payload_enum_layouts =
@@ -2200,11 +2729,39 @@ pub(super) fn physical_version_storage_tables(
                                     .get(&(column_id, identity.clone()))
                                     .ok_or(Error::InvalidStoredValue(
                                         "physical payload enum layout missing",
-                                    ))?
-                                    .clone();
+                                    ))?;
+                                let scalar_registries = nested_scalar_enum_registries
+                                    .iter()
+                                    .filter(|((id, _), _)| *id == column_id)
+                                    .map(|((_, path), cases)| (path.clone(), cases.clone()))
+                                    .collect::<BTreeMap<_, _>>();
+                                let payload_registries = nested_payload_enum_registries
+                                    .iter()
+                                    .filter(|((id, _), _)| *id == column_id)
+                                    .map(|((_, path), cases)| (path.clone(), cases.clone()))
+                                    .collect::<BTreeMap<_, _>>();
+                                let payload_layouts = nested_payload_enum_layouts
+                                    .iter()
+                                    .filter(|((id, _, _), _)| *id == column_id)
+                                    .map(|((_, path, identity), layout)| {
+                                        ((path.clone(), identity.clone()), layout.clone())
+                                    })
+                                    .collect::<BTreeMap<_, _>>();
+                                let records::ValueType::Record(payload) =
+                                    physical_nested_enum_value_type(
+                                        &records::ValueType::Record(Box::new(payload.clone())),
+                                        &global_case_path("root", identity),
+                                        &scalar_registries,
+                                        &payload_registries,
+                                        &payload_layouts,
+                                        column_id,
+                                    )?
+                                else {
+                                    unreachable!("record lowering preserves payload shape");
+                                };
                                 Ok(records::EnumCase::new(
                                     physical_scalar_enum_case_name(identity),
-                                    payload,
+                                    *payload,
                                 ))
                             })
                             .collect::<Result<Vec<_>, Error>>()?;
@@ -2227,17 +2784,34 @@ pub(super) fn physical_version_storage_tables(
                     }
                     _ if nested_scalar_enum_registries
                         .keys()
-                        .any(|(id, _)| *id == column_id) =>
+                        .any(|(id, _)| *id == column_id)
+                        || nested_payload_enum_registries
+                            .keys()
+                            .any(|(id, _)| *id == column_id) =>
                     {
-                        let registries = nested_scalar_enum_registries
+                        let scalar_registries = nested_scalar_enum_registries
                             .iter()
                             .filter(|((id, _), _)| *id == column_id)
                             .map(|((_, path), cases)| (path.clone(), cases.clone()))
                             .collect::<BTreeMap<_, _>>();
-                        physical_nested_scalar_value_type(
+                        let payload_registries = nested_payload_enum_registries
+                            .iter()
+                            .filter(|((id, _), _)| *id == column_id)
+                            .map(|((_, path), cases)| (path.clone(), cases.clone()))
+                            .collect::<BTreeMap<_, _>>();
+                        let payload_layouts = nested_payload_enum_layouts
+                            .iter()
+                            .filter(|((id, _, _), _)| *id == column_id)
+                            .map(|((_, path, identity), layout)| {
+                                ((path.clone(), identity.clone()), layout.clone())
+                            })
+                            .collect::<BTreeMap<_, _>>();
+                        physical_nested_enum_value_type(
                             &column.column_type,
                             "root",
-                            &registries,
+                            &scalar_registries,
+                            &payload_registries,
+                            &payload_layouts,
                             column_id,
                         )?
                         .nullable()
@@ -2699,7 +3273,7 @@ fn physical_history_field_names_for_case(
     Ok(fields)
 }
 
-fn physical_current_field_names(
+pub(super) fn physical_current_field_names(
     table: &TableSchema,
     mapping: &TablePhysicalMapping,
 ) -> Result<Vec<String>, Error> {
@@ -3201,6 +3775,7 @@ mod variant_case_tests {
                 ("root/tuple/1/nullable".to_owned(), vec![Some(0), Some(2)]),
             ]),
             payload: BTreeMap::new(),
+            payload_children: BTreeMap::new(),
         };
         let remapped = remap_nested_enum_value(
             Value::Tuple(vec![
@@ -3251,5 +3826,122 @@ mod variant_case_tests {
         assert_eq!(cases["root/array/nullable"].len(), 3);
         assert_eq!(cases["root/array/nullable"][0].introducing_schema, base);
         assert_eq!(cases["root/array/nullable"][2].introducing_schema, child);
+    }
+
+    #[test]
+    fn nested_payload_descriptor_unions_siblings_by_global_parent_identity() {
+        // Two concurrent parent cases both occupy authored ordinal 1. Their
+        // nested payload enum layouts must stay under separate global parent
+        // paths, and the physical descriptor must retain both after a reopen.
+        let base = schema(1);
+        let archived = schema(2);
+        let snoozed = schema(3);
+        let root = "root/record/event";
+        let base_case = GlobalScalarEnumCaseId {
+            introducing_schema: base,
+            introducing_ordinal: 0,
+        };
+        let archived_case = GlobalScalarEnumCaseId {
+            introducing_schema: archived,
+            introducing_ordinal: 1,
+        };
+        let snoozed_case = GlobalScalarEnumCaseId {
+            introducing_schema: snoozed,
+            introducing_ordinal: 1,
+        };
+        let inner = |name: &str| {
+            records::ValueType::Enum(Box::new(
+                records::EnumSchema::new(
+                    format!("inner-{name}"),
+                    [records::EnumCase::new(
+                        name,
+                        records::RecordDescriptor::new([("value", records::ValueType::String)]),
+                    )],
+                )
+                .unwrap(),
+            ))
+        };
+        let payload = |name: &str| records::RecordDescriptor::new([("detail", inner(name))]);
+        let outer = records::ValueType::Record(Box::new(records::RecordDescriptor::new([(
+            "event",
+            records::ValueType::Enum(Box::new(
+                records::EnumSchema::new(
+                    "authored-event",
+                    [
+                        records::EnumCase::new("base", payload("base")),
+                        records::EnumCase::new("archived", payload("archived")),
+                    ],
+                )
+                .unwrap(),
+            )),
+        )])));
+
+        let mut payload_registries = BTreeMap::from([(
+            root.to_owned(),
+            vec![
+                base_case.clone(),
+                archived_case.clone(),
+                snoozed_case.clone(),
+            ],
+        )]);
+        for (parent, child) in [
+            (&base_case, base),
+            (&archived_case, archived),
+            (&snoozed_case, snoozed),
+        ] {
+            payload_registries.insert(
+                format!("{}/record/detail", global_case_path(root, parent)),
+                vec![GlobalScalarEnumCaseId {
+                    introducing_schema: child,
+                    introducing_ordinal: 0,
+                }],
+            );
+        }
+        let mut layouts = BTreeMap::from([
+            ((root.to_owned(), base_case.clone()), payload("base")),
+            (
+                (root.to_owned(), archived_case.clone()),
+                payload("archived"),
+            ),
+            ((root.to_owned(), snoozed_case.clone()), payload("snoozed")),
+        ]);
+        for parent in [&base_case, &archived_case, &snoozed_case] {
+            layouts.insert(
+                (
+                    format!("{}/record/detail", global_case_path(root, parent)),
+                    GlobalScalarEnumCaseId {
+                        introducing_schema: parent.introducing_schema,
+                        introducing_ordinal: 0,
+                    },
+                ),
+                records::RecordDescriptor::new([("value", records::ValueType::String)]),
+            );
+        }
+        let physical = physical_nested_enum_value_type(
+            &outer,
+            "root",
+            &BTreeMap::new(),
+            &payload_registries,
+            &layouts,
+            PhysicalColumnId(9),
+        )
+        .unwrap();
+        let records::ValueType::Record(record) = physical else {
+            panic!("physical record expected");
+        };
+        let records::ValueType::Enum(events) = &record.fields()[0].value_type else {
+            panic!("physical payload enum expected");
+        };
+        assert_eq!(events.cases.len(), 3);
+        assert_ne!(
+            events.cases[1].name, events.cases[2].name,
+            "concurrent ordinal-one parents must not collide"
+        );
+        for case in &events.cases {
+            let records::ValueType::Enum(detail) = &case.payload.fields()[0].value_type else {
+                panic!("recursively lowered payload enum expected");
+            };
+            assert_eq!(detail.cases.len(), 1);
+        }
     }
 }

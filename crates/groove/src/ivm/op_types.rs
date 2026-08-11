@@ -142,14 +142,18 @@ pub struct MapProjectOp {
 ///
 /// The paths name an enum occurrence relative to one projected field: `root`,
 /// `root/nullable`, `root/array`, `root/tuple/<n>`, `root/record/<field>`,
-/// and payload children below `root/case/<tag>/<field>`.  The vectors map the
+/// and payload children beneath a stable case path.  The tag vectors map the
 /// compact source tag to a target tag; `None` deliberately makes that mapping
-/// non-total.  This keeps a node-local physical enum registry an optimization,
-/// rather than allowing its raw tags to escape as user semantics.
+/// non-total. `payload_children` maps each source payload tag to its semantic
+/// child root.  It is distinct from the target tag because two schemas can use
+/// the same local ordinal for different concurrently introduced cases.
+/// This keeps a node-local physical enum registry an optimization, rather
+/// than allowing its raw tags to escape as user semantics.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct RecursiveEnumRemaps {
     pub scalar: BTreeMap<String, Vec<Option<u8>>>,
     pub payload: BTreeMap<String, Vec<Option<u32>>>,
+    pub payload_children: BTreeMap<String, Vec<Option<String>>>,
 }
 
 /// One projected expression and optional output name.
