@@ -416,6 +416,13 @@ pub(super) fn physical_current_projection_target(
     format!("schema_{}_{}_current", schema_alias.0, logical_table)
 }
 
+/// A schema-agnostic physical current-row target used only until the
+/// Global/Ahead winner has been selected. Its enum tags retain their durable
+/// physical meaning; authored decoding belongs strictly after that selection.
+fn physical_current_winner_projection_target(table_id: PhysicalTableId) -> String {
+    format!("physical_{}_current_winner", table_id.0)
+}
+
 /// A query-local current-source target.  The ordinary target projects every
 /// authored enum occurrence, which is correct for a whole-row read but makes
 /// an older schema fail while decoding an enum cell that the query never
@@ -1432,12 +1439,11 @@ where
         ];
         for storage_table in &storage_tables {
             let logical_output = target_table.global_current_storage_tables()[0].record_schema();
-            let physical_names = physical_current_field_names(&target_table, &target_mapping)?;
-            let output = widened_projection_descriptor(
-                &logical_output,
-                &physical_names,
-                self.database.table_schema(storage_table)?,
-            )?;
+            // This query-local target is the semantic read boundary. Unlike
+            // the durable all-fields storage target, it must expose the
+            // authored descriptor itself: enum tags are translated into that
+            // descriptor, and an absent target case excludes only this row.
+            let output = logical_output;
             self.database
                 .define_variant_projection(storage_table, &projection_target, output)?;
         }
@@ -1485,12 +1491,13 @@ where
                 )?;
                 for storage_table in &storage_tables {
                     if let Some(fields) = fields.clone() {
-                        self.database.register_variant_case(
-                            storage_table,
-                            &projection_target,
-                            tag,
-                            fields,
-                        )?;
+                        self.database
+                            .register_variant_projection_case_omitting_unrepresentable_enums(
+                                storage_table,
+                                &projection_target,
+                                tag,
+                                fields,
+                            )?;
                     } else {
                         self.database.register_variant_ignore_case(
                             storage_table,
@@ -1502,6 +1509,166 @@ where
             }
         }
         Ok(projection_target)
+    }
+
+    /// Register the common physical descriptor used to choose the latest
+    /// Global/Ahead version before a query-local old-schema projection can
+    /// omit an unrepresentable enum case.
+    pub(super) fn ensure_physical_current_winner_projection(
+        &mut self,
+        target_schema: SchemaVersionId,
+        target_table_name: &str,
+    ) -> Result<(String, Vec<String>), Error> {
+        let target_mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&target_schema)
+            .and_then(|mapping| mapping.tables.get(target_table_name))
+            .cloned()
+            .ok_or(Error::InvalidStoredValue(
+                "target current winner physical mapping missing",
+            ))?;
+        let projection_target = physical_current_winner_projection_target(target_mapping.table_id);
+        let storage_tables = [
+            physical_global_current_table_name(target_mapping.table_id),
+            physical_ahead_current_table_name(target_mapping.table_id),
+        ];
+        let mut output_fields = None;
+        for storage_table in &storage_tables {
+            let output = self.database.table_schema(storage_table)?.record_schema();
+            let fields = output
+                .fields()
+                .iter()
+                .map(|field| {
+                    field.name.clone().ok_or(Error::InvalidStoredValue(
+                        "physical current winner field unnamed",
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some(existing) = &output_fields {
+                if existing != &fields {
+                    return Err(Error::InvalidStoredValue(
+                        "physical current winner descriptors disagree",
+                    ));
+                }
+            } else {
+                output_fields = Some(fields);
+            }
+            self.database
+                .define_variant_projection(storage_table, &projection_target, output)?;
+        }
+
+        let sources = self
+            .catalogue
+            .physical_mappings
+            .iter()
+            .flat_map(|(schema_version, mapping)| {
+                mapping
+                    .tables
+                    .iter()
+                    .filter(|(_, table)| table.table_id == target_mapping.table_id)
+                    .map(|(logical_table, table)| {
+                        (*schema_version, logical_table.clone(), table.clone())
+                    })
+            })
+            .collect::<Vec<_>>();
+        for (source_schema, source_table_name, source_mapping) in sources {
+            let source_alias = self
+                .catalogue
+                .schema_version_aliases
+                .get(&source_schema)
+                .copied()
+                .ok_or(Error::InvalidStoredValue(
+                    "physical current winner source schema alias missing",
+                ))?;
+            let source_table = self.table_in_schema(&source_table_name, source_schema)?;
+            let cases = if source_mapping.variant_cases.is_empty() {
+                vec![(groove_variant_tag(source_alias)?, None)]
+            } else {
+                source_mapping
+                    .variant_cases
+                    .iter()
+                    .map(|case| (case.tag, Some(&case.fields)))
+                    .collect()
+            };
+            for (tag, present) in cases {
+                let available =
+                    physical_current_field_names_for_case(&source_table, &source_mapping, present)?
+                        .into_iter()
+                        .collect::<BTreeSet<_>>();
+                for storage_table in &storage_tables {
+                    let output = self.database.table_schema(storage_table)?.record_schema();
+                    let fields = output
+                        .fields()
+                        .iter()
+                        .map(|field| {
+                            let name = field.name.clone().ok_or(Error::InvalidStoredValue(
+                                "physical current winner field unnamed",
+                            ))?;
+                            if available.contains(&name) {
+                                Ok(ProjectField::named(name))
+                            } else if matches!(field.value_type, records::ValueType::Nullable(_)) {
+                                Ok(ProjectField::literal_typed(
+                                    name,
+                                    Value::Nullable(None),
+                                    field.value_type.clone(),
+                                ))
+                            } else {
+                                Err(Error::InvalidStoredValue(
+                                    "physical current winner source misses required field",
+                                ))
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    self.database.refresh_variant_case_for_registry_evolution(
+                        storage_table,
+                        &projection_target,
+                        tag,
+                        fields,
+                    )?;
+                }
+            }
+        }
+        Ok((projection_target, output_fields.unwrap_or_default()))
+    }
+
+    /// Build the logical query-local projection placed after physical current
+    /// winner selection. Its enum remaps are intentionally non-total row
+    /// omissions, never generic query errors.
+    pub(super) fn physical_current_post_winner_projection_fields(
+        &mut self,
+        target_schema: SchemaVersionId,
+        target_table_name: &str,
+        required_fields: &BTreeSet<String>,
+    ) -> Result<Vec<ProjectField>, Error> {
+        let target_mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&target_schema)
+            .and_then(|mapping| mapping.tables.get(target_table_name))
+            .cloned()
+            .ok_or(Error::InvalidStoredValue(
+                "target post-winner physical mapping missing",
+            ))?;
+        let target_table = self.table_in_schema(target_table_name, target_schema)?;
+        let required_enum_columns = target_table
+            .columns
+            .iter()
+            .filter(|column| required_fields.contains(&column.name))
+            .filter_map(|column| target_mapping.columns.get(&column.name).copied())
+            .collect::<BTreeSet<_>>();
+        self.physical_current_projection_case_for_enum_columns(
+            target_schema,
+            target_table_name,
+            &target_mapping,
+            target_schema,
+            target_table_name,
+            None,
+            Some(&required_enum_columns),
+        )?
+        .ok_or(Error::InvalidStoredValue(
+            "post-winner current projection unexpectedly lacks fields",
+        ))
     }
 
     pub(super) fn synchronize_physical_version_tables(&mut self) -> Result<(), Error> {
@@ -1555,7 +1722,29 @@ where
             }
         }
         self.register_physical_history_variant_projections()?;
-        self.register_physical_current_variant_projections()
+        self.register_physical_current_variant_projections()?;
+        self.register_physical_current_winner_projections()
+    }
+
+    /// Keep the raw Global/Ahead winner targets live as the physical enum
+    /// registries evolve, so a subsequent query-local lowering pass can read
+    /// every newly introduced source variant.
+    fn register_physical_current_winner_projections(&mut self) -> Result<(), Error> {
+        let targets = self
+            .catalogue
+            .physical_mappings
+            .iter()
+            .flat_map(|(schema_version, mapping)| {
+                mapping
+                    .tables
+                    .keys()
+                    .map(|table_name| (*schema_version, table_name.clone()))
+            })
+            .collect::<BTreeSet<_>>();
+        for (schema_version, table_name) in targets {
+            self.ensure_physical_current_winner_projection(schema_version, &table_name)?;
+        }
+        Ok(())
     }
 
     fn physical_history_projection_case(
@@ -1728,11 +1917,18 @@ where
                 physical_global_current_table_name(target_mapping.table_id)
             }
         };
-        let projection_output = widened_projection_descriptor(
-            &target_storage.record_schema(),
-            &physical_names,
-            self.database.table_schema(&physical_storage)?,
-        )?;
+        let projection_output = if required_enum_columns.is_some() {
+            // Query-local enum targets are authored-descriptor boundaries;
+            // their recursive remap must validate/encode against the old
+            // schema rather than the physical registry descriptor.
+            target_storage.record_schema()
+        } else {
+            widened_projection_descriptor(
+                &target_storage.record_schema(),
+                &physical_names,
+                self.database.table_schema(&physical_storage)?,
+            )?
+        };
         let mut fields = target_storage
             .record_schema()
             .fields()
@@ -1826,19 +2022,21 @@ where
                                 _ => unreachable!("direct enum checked above"),
                             }
                         };
-                        fields.push(ProjectField::recursive_enum_remap(
-                            source,
-                            output,
-                            projection_output
-                                .field_index(&user_column_field(&column.name))
-                                .and_then(|index| projection_output.fields().get(index))
-                                .ok_or(Error::InvalidStoredValue(
-                                    "target enum projection output field missing",
-                                ))?
-                                .value_type
-                                .clone(),
-                            remaps,
-                        ));
+                        let target = projection_output
+                            .field_index(&user_column_field(&column.name))
+                            .and_then(|index| projection_output.fields().get(index))
+                            .ok_or(Error::InvalidStoredValue(
+                                "target enum projection output field missing",
+                            ))?
+                            .value_type
+                            .clone();
+                        fields.push(if required_enum_columns.is_some() {
+                            ProjectField::recursive_enum_remap_omitting_unrepresentable(
+                                source, output, target, remaps,
+                            )
+                        } else {
+                            ProjectField::recursive_enum_remap(source, output, target, remaps)
+                        });
                     } else {
                         fields.push(ProjectField::renamed(source, output));
                     }
@@ -2777,8 +2975,33 @@ pub(super) fn physical_version_storage_tables(
 
         let mut nested_scalar_enum_registries =
             BTreeMap::<(PhysicalColumnId, String), BTreeSet<GlobalScalarEnumCaseId>>::new();
-        for (_, _, mapping) in &variants {
-            for (column_id, paths) in &mapping.nested_scalar_enum_cases {
+        for (schema_version, logical_table, mapping) in &variants {
+            // Bootstrap constructs physical tables before the freshly
+            // introduced mapping is hydrated into the catalogue. Seed nested
+            // occurrences from the authored descriptor in that one state;
+            // otherwise the first table gets a generic registry id and the
+            // next synchronization sees an incompatible field definition.
+            let mut bootstrap_paths = mapping.nested_scalar_enum_cases.clone();
+            if bootstrap_paths.is_empty() {
+                for column in &logical_table.columns {
+                    if matches!(column.column_type, records::ValueType::EnumTag(_)) {
+                        continue;
+                    }
+                    hydrate_nested_scalar_enum_cases(
+                        &column.column_type,
+                        *schema_version,
+                        "root",
+                        bootstrap_paths
+                            .entry(mapping.columns.get(&column.name).copied().ok_or(
+                                Error::InvalidStoredValue(
+                                    "physical nested scalar enum column mapping missing",
+                                ),
+                            )?)
+                            .or_default(),
+                    )?;
+                }
+            }
+            for (column_id, paths) in &bootstrap_paths {
                 for (path, cases) in paths {
                     nested_scalar_enum_registries
                         .entry((*column_id, path.clone()))
@@ -2808,7 +3031,7 @@ pub(super) fn physical_version_storage_tables(
             (PhysicalColumnId, String, GlobalScalarEnumCaseId),
             records::RecordDescriptor,
         >::new();
-        for (_, logical_table, mapping) in &variants {
+        for (schema_version, logical_table, mapping) in &variants {
             for column in &logical_table.columns {
                 let column_id =
                     mapping
@@ -2818,7 +3041,20 @@ pub(super) fn physical_version_storage_tables(
                         .ok_or(Error::InvalidStoredValue(
                             "physical nested payload enum column mapping missing",
                         ))?;
-                let Some(paths) = mapping.nested_payload_enum_cases.get(&column_id) else {
+                // As for nested scalar cases above, the first physical-table
+                // construction precedes catalogue hydration. Seed payload
+                // identities from the authored descriptor so reopening does
+                // not try to replace a generic nested registry.
+                let mut bootstrap_paths = mapping.nested_payload_enum_cases.clone();
+                if bootstrap_paths.is_empty() {
+                    hydrate_nested_payload_enum_cases(
+                        &column.column_type,
+                        *schema_version,
+                        "root",
+                        bootstrap_paths.entry(column_id).or_default(),
+                    )?;
+                }
+                let Some(paths) = bootstrap_paths.get(&column_id) else {
                     continue;
                 };
                 for (path, cases) in paths {

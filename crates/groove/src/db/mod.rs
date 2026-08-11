@@ -435,6 +435,28 @@ where
             .map_err(Error::IvmRuntime)
     }
 
+    /// Append a schema-read projection case that omits only rows containing an
+    /// enum case the target descriptor cannot represent. Other projection
+    /// errors remain errors.
+    pub fn register_variant_projection_case_omitting_unrepresentable_enums(
+        &mut self,
+        table: &str,
+        target: &str,
+        variant_tag: u32,
+        fields: impl IntoIterator<Item = ProjectField>,
+    ) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        let fields = fields.into_iter().collect::<Vec<_>>();
+        self.ivm_runtime
+            .register_variant_projection_case_omitting_unrepresentable_enums(
+                table,
+                target,
+                variant_tag,
+                &fields,
+            )
+            .map_err(Error::IvmRuntime)
+    }
+
     /// Append one generic source-case mapping to a fixed-output projection.
     pub fn register_variant_case(
         &mut self,
@@ -444,6 +466,30 @@ where
         fields: impl IntoIterator<Item = ProjectField>,
     ) -> Result<(), Error> {
         self.register_variant_projection_case(table, target, variant_tag, fields)
+    }
+
+    /// Refresh an existing raw projection case after its source descriptor
+    /// grows only by append-only enum registry evolution.
+    ///
+    /// This is deliberately narrower than normal case registration: it never
+    /// accepts a changed projection mapping or incompatible field/type change.
+    pub fn refresh_variant_case_for_registry_evolution(
+        &mut self,
+        table: &str,
+        target: &str,
+        variant_tag: u32,
+        fields: impl IntoIterator<Item = ProjectField>,
+    ) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        let fields = fields.into_iter().collect::<Vec<_>>();
+        self.ivm_runtime
+            .refresh_variant_projection_case_for_registry_evolution(
+                table,
+                target,
+                variant_tag,
+                &fields,
+            )
+            .map_err(Error::IvmRuntime)
     }
 
     /// Append a physical source case that constructs one stable logical enum

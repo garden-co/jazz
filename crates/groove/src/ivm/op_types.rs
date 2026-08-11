@@ -443,6 +443,7 @@ pub enum PlanExpr {
     RecursiveEnumRemap {
         field: String,
         remaps: RecursiveEnumRemaps,
+        omit_unrepresentable: bool,
     },
 }
 
