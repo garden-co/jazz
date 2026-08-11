@@ -332,10 +332,7 @@ type SubscriptionState = {
   visibleOpened: boolean;
   deferredVisiblePublication: boolean;
   deferredVisibleReset: boolean;
-  deferredTerminalOperations: Array<{
-    operation: NativeTerminalOperation;
-    currentRowCarrier: boolean;
-  }>;
+  deferredTerminalOperations: NativeTerminalOperation[];
   callback?: Function;
   cancelled: boolean;
 };
@@ -1756,6 +1753,7 @@ export class NativeRuntimeAdapter implements Runtime {
         subscription.packedResetBatches = chunk.delta.added;
         subscription.packedResetRows = packedResetRows;
         subscription.opened = true;
+        packedResetRows.terminalOperations = chunk.terminalOperations;
         this.publishSubscriptionRows(subscription, packedResetRows, chunk.settled, true);
       } else {
         materializePackedResetRows(subscription, this.schema);
@@ -1771,11 +1769,6 @@ export class NativeRuntimeAdapter implements Runtime {
         subscription.rowIndexByKey = applied.rowIndexByKey;
         subscription.opened = true;
         applied.wireDelta.terminalOperations = chunk.terminalOperations;
-        applied.wireDelta.terminalCurrentRowOperationIndexes = chunk.terminalCurrentRowCarrier
-          ? chunk.terminalOperations?.flatMap((operation, index) =>
-              operation.path.length === 0 ? [index] : [],
-            )
-          : undefined;
         this.publishSubscriptionRows(
           subscription,
           applied.wireDelta,
@@ -1795,12 +1788,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.subscriptionCallbacksAreSettledGated(subscription) && settled === false) {
       subscription.deferredVisiblePublication = true;
       subscription.deferredVisibleReset ||= reset;
-      subscription.deferredTerminalOperations.push(
-        ...(wireDelta.terminalOperations ?? []).map((operation, index) => ({
-          operation,
-          currentRowCarrier: wireDelta.terminalCurrentRowOperationIndexes?.includes(index) ?? false,
-        })),
-      );
+      subscription.deferredTerminalOperations.push(...(wireDelta.terminalOperations ?? []));
       return;
     }
 
@@ -1831,16 +1819,10 @@ export class NativeRuntimeAdapter implements Runtime {
 
     const terminalOperations = [
       ...subscription.deferredTerminalOperations,
-      ...(wireDelta.terminalOperations ?? []).map((operation, index) => ({
-        operation,
-        currentRowCarrier: wireDelta.terminalCurrentRowOperationIndexes?.includes(index) ?? false,
-      })),
+      ...(wireDelta.terminalOperations ?? []),
     ];
     if (terminalOperations.length > 0) {
-      visibleDelta.terminalOperations = terminalOperations.map(({ operation }) => operation);
-      visibleDelta.terminalCurrentRowOperationIndexes = terminalOperations.flatMap(
-        ({ currentRowCarrier }, index) => (currentRowCarrier ? [index] : []),
-      );
+      visibleDelta.terminalOperations = terminalOperations;
     }
 
     subscription.callback?.(visibleDelta);
@@ -3937,7 +3919,6 @@ function normalizeSubscriptionChunk(chunk: unknown):
       reset?: boolean;
       delta: NativeSubscriptionDelta;
       terminalOperations?: NativeTerminalOperation[];
-      terminalCurrentRowCarrier?: boolean;
       settled?: boolean;
     }
   | {
@@ -3957,7 +3938,6 @@ function normalizeSubscriptionChunk(chunk: unknown):
     reset?: unknown;
     settled?: unknown;
     terminalOperations?: unknown;
-    terminalPayloadEncoding?: unknown;
   };
   if (record.type === "closed" || record.type === "Closed") {
     return { type: "closed" };
@@ -3979,7 +3959,6 @@ function normalizeSubscriptionChunk(chunk: unknown):
       terminalOperations: Array.isArray(record.terminalOperations)
         ? (record.terminalOperations as NativeTerminalOperation[])
         : undefined,
-      terminalCurrentRowCarrier: record.terminalPayloadEncoding === "current-row",
       settled: typeof record.settled === "boolean" ? record.settled : undefined,
     };
   }

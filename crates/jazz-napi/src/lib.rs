@@ -2330,10 +2330,6 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
                 "reset": reset,
                 "delta": delta,
                 "terminalOperations": terminal_operations,
-                // Terminal operation bytes originate from Rust CurrentRow
-                // records, whose app cells retain their nullable carrier.
-                // WASM's older logical terminal payloads omit that envelope.
-                "terminalPayloadEncoding": "current-row",
                 "settled": settled,
                 "tier": format!("{tier:?}"),
             });

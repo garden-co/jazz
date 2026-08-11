@@ -4399,6 +4399,37 @@ describe("NativeRuntimeAdapter server transport", () => {
     ordinary.close();
   });
 
+  it("preserves terminal operations through settle-gated packed Gather reset delivery", () => {
+    const rowId = uuidBytes("00000000-0000-0000-0000-000000000501");
+    const key = [10, ...rowId];
+    const terminalOperations = [{ root_key: key, path: [], edit: { Move: { key, index: 0 } } }];
+    const runtime = runtimeWithNativeRelationSubscriptionChunks([
+      {
+        ...relationSubscriptionChunk({
+          reset: true,
+          settled: false,
+          rootAdded: [{ table: "todos", rowId, title: "packed gather root" }],
+        }),
+        terminalOperations,
+      },
+      relationSubscriptionChunk({ settled: true }),
+    ]);
+    const deltas: NativeRowDelta[] = [];
+    const handle = runtime.createSubscription(
+      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      null,
+      "global",
+      null,
+    );
+
+    runtime.executeSubscription(handle, (delta: NativeRowDelta) => deltas.push(delta));
+
+    expect(deltas).toHaveLength(1);
+    expect(deltas[0]!.reset).toBe(true);
+    expect(deltas[0]!.terminalOperations).toEqual(terminalOperations);
+    runtime.close();
+  });
+
   it("rewraps user field option bytes when packed reset frames filter engine records", () => {
     const schema = {
       notes: {
@@ -5785,11 +5816,13 @@ function runtimeWithNativeRelationSubscriptionChunks(chunks: unknown[]): NativeR
 
 function relationSubscriptionChunk({
   reset = false,
+  settled = true,
   rootAdded = [],
   rootUpdated = [],
   rootRemoved = [],
 }: {
   reset?: boolean;
+  settled?: boolean;
   rootAdded?: EncodedTestRow[];
   rootUpdated?: EncodedTestRow[];
   rootRemoved?: Array<{ table: string; rowId: Uint8Array }>;
@@ -5797,7 +5830,7 @@ function relationSubscriptionChunk({
   return {
     type: "delta",
     reset,
-    settled: true,
+    settled,
     delta: encodeSubscriptionDelta({
       added: rootAdded,
       updated: rootUpdated,

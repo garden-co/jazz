@@ -5,6 +5,7 @@
 import { describe, it, expect } from "vitest";
 import { SubscriptionManager, applySubscriptionDelta } from "./subscription-manager.js";
 import type { SubscriptionDelta } from "./subscription-manager.js";
+import { encodeNativeRowValues } from "./native-runtime/native-row-codec.js";
 import type {
   ColumnDescriptor,
   NativeRowDelta,
@@ -98,15 +99,22 @@ function nativeRowData(name: string, count: number): Uint8Array {
 }
 
 function terminalRowData(id: string, name: string, count: number): Uint8Array {
-  return Uint8Array.from([...uuidBytes(id), ...nativeRowData(name, count)]);
+  return Uint8Array.from([
+    ...uuidBytes(id),
+    ...encodeNativeRowValues(currentRowColumns(nativeColumns), [
+      { type: "Text", value: name },
+      { type: "Integer", value: count },
+    ]),
+  ]);
 }
 
 function terminalRootWithEmptyChildren(id: string, title: string): Uint8Array {
   const text = new TextEncoder().encode(title);
   const bytes: number[] = [...uuidBytes(id)];
-  pushU32(bytes, 20 + text.byteLength);
-  bytes.push(...text);
-  pushU32(bytes, 0);
+  // The root uses CurrentRow's nullable carrier. The child collection stays a
+  // terminal record when it is populated by a descendant operation.
+  pushU32(bytes, 21 + text.byteLength);
+  bytes.push(1, ...text, 1, 0, 0, 0, 0);
   return Uint8Array.from(bytes);
 }
 
@@ -117,6 +125,10 @@ function nativeRootWithEmptyChildren(title: string): Uint8Array {
   bytes.push(...text);
   pushU32(bytes, 0);
   return Uint8Array.from(bytes);
+}
+
+function currentRowColumns(columns: readonly ColumnDescriptor[]): readonly ColumnDescriptor[] {
+  return columns.map((column) => ({ ...column, nullable: true, sparse: undefined }));
 }
 
 function terminalTextChild(id: string, name: string): Uint8Array {
@@ -718,6 +730,55 @@ describe("SubscriptionManager", () => {
       nativeColumns,
     );
     expect(removed).toEqual({ delta: [{ kind: 1, id, index: 0 }], all: [] });
+  });
+
+  it("decodes every root terminal payload through the CurrentRow nullable carrier", () => {
+    type NullableRoot = { id: string; title: string | null; done: boolean | null };
+    const manager = new SubscriptionManager<NullableRoot>();
+    const id = "00000000-0000-4000-8000-000000000001";
+    const key = [10, ...uuidBytes(id)];
+    const columns: ColumnDescriptor[] = [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+    ];
+    const currentRowPayload = Uint8Array.from([
+      ...uuidBytes(id),
+      ...encodeNativeRowValues(currentRowColumns(columns), [
+        { type: "Null" },
+        { type: "Boolean", value: false },
+      ]),
+    ]);
+
+    const result = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: key,
+            path: [],
+            edit: { Insert: { index: 0, key, value: [...currentRowPayload] } },
+          },
+        ],
+      },
+      (row) => {
+        const title = row.values[0];
+        const done = row.values[1];
+        return {
+          id: row.id,
+          title: title?.type === "Text" ? title.value : null,
+          done: done?.type === "Boolean" ? done.value : null,
+        };
+      },
+      columns,
+    );
+
+    expect(result.all).toEqual([{ id, title: null, done: false }]);
   });
 
   it("applies root insert positions in producer order after earlier removals", () => {
