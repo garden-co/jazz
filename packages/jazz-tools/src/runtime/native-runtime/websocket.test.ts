@@ -208,8 +208,9 @@ describe("websocket frame carrier", () => {
       onFrame: (frame) => delivered.push(frame),
       WebSocket: class extends MessageWebSocket {
         constructor(url: string) {
-          super(url);
-          socket = this;
+          super(url, (created) => {
+            socket = created;
+          });
         }
       },
     });
@@ -218,6 +219,62 @@ describe("websocket frame carrier", () => {
     await expect(carrier.ready()).rejects.toThrow("before server hello");
     await expect(carrier.send(Uint8Array.of(1))).rejects.toThrow("before server hello");
     expect(delivered).toEqual([]);
+    expect(socket!.closed).toBe(true);
+  });
+
+  it("surfaces an authentication failure before server hello without negotiating", async () => {
+    let socket: MessageWebSocket | undefined;
+    const frames: Uint8Array[] = [];
+    const errors: unknown[] = [];
+    const carrier = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: (frame) => frames.push(frame),
+      onError: (error) => errors.push(error),
+      WebSocket: class extends MessageWebSocket {
+        constructor(url: string) {
+          super(url, (created) => {
+            socket = created;
+          });
+        }
+      },
+    });
+
+    socket!.emitMessage(
+      encodeWebSocketFrameBatch([encodeWireError(3, 1, "invalid token"), encodeServerHello(1n)]),
+    );
+
+    await expect(carrier.ready()).rejects.toThrow("authentication failed before server hello");
+    expect(errors).toEqual([
+      { code: "auth_failed", retry: "after_auth", message: "invalid token" },
+    ]);
+    expect(frames).toEqual([]);
+    expect(socket!.closed).toBe(true);
+  });
+
+  it("rejects non-authentication errors before server hello", async () => {
+    let socket: MessageWebSocket | undefined;
+    const errors: unknown[] = [];
+    const carrier = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: () => {},
+      onError: (error) => errors.push(error),
+      WebSocket: class extends MessageWebSocket {
+        constructor(url: string) {
+          super(url, (created) => {
+            socket = created;
+          });
+        }
+      },
+    });
+
+    socket!.emitMessage(
+      encodeWebSocketFrameBatch([encodeWireError(5, 3, "conflicting commit unit")]),
+    );
+
+    await expect(carrier.ready()).rejects.toThrow("semantic frame before server hello");
+    expect(errors).toEqual([]);
     expect(socket!.closed).toBe(true);
   });
 
@@ -240,8 +297,9 @@ describe("websocket frame carrier", () => {
       onError: (error) => errors.push(error),
       WebSocket: class extends MessageWebSocket {
         constructor(url: string) {
-          super(url);
-          socket = this;
+          super(url, (created) => {
+            socket = created;
+          });
         }
       },
     });
@@ -339,7 +397,12 @@ class MessageWebSocket {
   readonly readyState = 1;
   private readonly messageListeners: Array<(event: { data: unknown }) => void> = [];
 
-  constructor(readonly url: string) {}
+  constructor(
+    readonly url: string,
+    onCreate?: (socket: MessageWebSocket) => void,
+  ) {
+    onCreate?.(this);
+  }
 
   send(_data: Uint8Array | string): void {}
 

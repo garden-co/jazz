@@ -220,6 +220,7 @@ export class WebSocketCarrier {
 
   private async handleMessage(data: unknown): Promise<void> {
     for (const frame of decodeWebSocketFrameBatch(await bytesFromWebSocketMessage(data))) {
+      if (this.closing) return;
       if (isWireHello(frame)) {
         if (this.negotiated) continue;
         this.negotiated = true;
@@ -227,6 +228,17 @@ export class WebSocketCarrier {
         continue;
       }
       if (!this.negotiated) {
+        if (isWireError(frame)) {
+          const error = decodeWireError(frame);
+          if (wireAuthFailureReason(error)) {
+            this.onError?.(error);
+            this.rejectNegotiation(
+              new Error("websocket authentication failed before server hello"),
+            );
+            this.close();
+            return;
+          }
+        }
         this.rejectNegotiation(new Error("websocket received semantic frame before server hello"));
         this.close();
         return;

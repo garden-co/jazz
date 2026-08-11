@@ -640,6 +640,66 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(transport.received).toEqual([]);
   });
 
+  it("reports pre-hello auth failures and reconnects with refreshed auth", async () => {
+    const sockets: FakeWebSocket[] = [];
+    let allowServerHello = false;
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+
+      override send(data: Uint8Array | string): void {
+        if (allowServerHello) super.send(data);
+        else this.sent.push(data);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    let upstreamConnections = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => {
+              upstreamConnections += 1;
+              return transport;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const authFailures: string[] = [];
+    runtime.onAuthFailure((reason) => authFailures.push(reason));
+
+    runtime.connect(
+      "ws://127.0.0.1:4200/apps/app-a/ws",
+      JSON.stringify({ jwt_token: "invalid.jwt" }),
+    );
+    await waitForFakeWebSocketNegotiation();
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(3, 1, "invalid token")]));
+    await waitForFakeWebSocketNegotiation();
+
+    expect(authFailures).toEqual(["invalid"]);
+    expect(upstreamConnections).toBe(0);
+    expect(sockets[0]!.closed).toBe(true);
+
+    allowServerHello = true;
+    await runtime.updateAuth(JSON.stringify({ jwt_token: "fresh.jwt" }));
+    await waitForFakeWebSocketNegotiation();
+
+    expect(sockets).toHaveLength(2);
+    expect(upstreamConnections).toBe(1);
+    expect(JSON.parse(sockets[1]!.sent[0] as string).jwt_token).toBe("fresh.jwt");
+  });
+
   it("does not report non-auth websocket errors as auth failures", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
