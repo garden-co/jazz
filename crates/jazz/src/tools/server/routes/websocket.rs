@@ -518,7 +518,7 @@ async fn handle_ws_connection(
         return;
     };
 
-    let mut negotiated = match negotiate_wire(
+    let negotiated = match negotiate_wire(
         &remote_hello,
         WIRE_PROTOCOL_VERSION,
         WIRE_PROTOCOL_VERSION,
@@ -544,12 +544,11 @@ async fn handle_ws_connection(
             return;
         }
     };
-    // A receipt-capable peer must bind its endpoint in the admission hello.
-    // Old hellos retain ordinary sync but never negotiate receipt semantics.
-    if remote_hello.authority.is_none() {
-        negotiated.features &= !(crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-            | crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS);
-    }
+    // A downstream browser may be authority-unbound while still accepting the
+    // server's authenticated authority in its response Hello.  The server
+    // never installs scoped authority semantics without an admitted remote
+    // endpoint (below), so this directional capability advertisement does not
+    // turn a client self-assertion into authority proof.
 
     let Some(core_server_shell) = state.core_server_shell() else {
         send_ws_error(
@@ -564,6 +563,13 @@ async fn handle_ws_connection(
         let _ = socket.close().await;
         return;
     };
+    // Every admitted server link receives a fresh server endpoint. A browser
+    // client need not (and must not) self-assert one merely to learn which
+    // authority issued its downstream fates.
+    let server_endpoint = WireAuthorityEndpoint {
+        node: NodeUuid::from_bytes([0x5e; 16]),
+        epoch: WS_NEXT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed),
+    };
     let session_context = if negotiated.features
         & (crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
             | crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)
@@ -572,10 +578,7 @@ async fn handle_ws_connection(
         remote_hello
             .authority
             .map(|remote| ConnectionSessionContext {
-                local: WireAuthorityEndpoint {
-                    node: NodeUuid::from_bytes([0x5e; 16]),
-                    epoch: WS_NEXT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed),
-                },
+                local: server_endpoint,
                 remote,
                 link_identity: admission.identity,
                 negotiated_features: negotiated.features,
@@ -604,11 +607,10 @@ async fn handle_ws_connection(
             return;
         }
     };
-    let server_hello = WireFrame::Hello(match session_context {
-        Some(context) => WireHello::current(WirePeerRole::Core, negotiated.features)
-            .with_authority(context.local.node, context.local.epoch),
-        None => WireHello::current(WirePeerRole::Core, negotiated.features),
-    });
+    let server_hello = WireFrame::Hello(
+        WireHello::current(WirePeerRole::Core, negotiated.features)
+            .with_authority(server_endpoint.node, server_endpoint.epoch),
+    );
     let server_hello = match encode_frame(&server_hello) {
         Ok(frame) => frame,
         Err(error) => {
@@ -1378,6 +1380,10 @@ mod tests {
             panic!("expected server hello");
         };
         assert_eq!(server_hello.role, WirePeerRole::Core);
+        assert!(
+            server_hello.authority.is_some(),
+            "an admitted server must bind its own downstream authority endpoint"
+        );
         ws
     }
 
@@ -1469,7 +1475,16 @@ mod tests {
             .await
             .expect("open client db");
             let transport = TestWireTransport::default();
-            db.connect_upstream(Box::new(WireTransportAdapter::current(transport.clone())));
+            // Match the authority-unbound test hello's negotiated features.
+            // Scoped semantics are not installed without an admitted remote
+            // endpoint, even though a browser may accept the server endpoint
+            // from its response Hello.
+            db.connect_upstream(Box::new(WireTransportAdapter::new(
+                transport.clone(),
+                WIRE_PROTOCOL_VERSION,
+                FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
+                None,
+            )));
             Self {
                 db,
                 transport,

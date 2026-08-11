@@ -42,7 +42,8 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz::db::{
-    Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
+    ConnectionSessionContext as CoreConnectionSessionContext, Db as CoreDb,
+    DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
     InitialSyncFlushCadence as CoreInitialSyncFlushCadence, LocalUpdates as CoreLocalUpdates,
     MergeableTxOps, PeerConnection as CorePeerConnection, PreparedQuery as PreparedQueryInner,
     Propagation as CorePropagation, QueryAttachment as CoreQueryAttachment,
@@ -72,7 +73,10 @@ use jazz::tools::server::{
 };
 use jazz::tools::{AppId, BatchId};
 use jazz::tx::{DurabilityTier as CoreDurabilityTier, Fate as CoreFate, TxId};
-use jazz::wire::{TransportError, WireTransport as CoreWireTransport};
+use jazz::wire::{
+    TransportError, WireAuthorityEndpoint as CoreWireAuthorityEndpoint,
+    WireTransport as CoreWireTransport,
+};
 
 #[derive(Clone, Debug, Deserialize)]
 struct CoreOpenDbConfig {
@@ -1637,9 +1641,78 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let queues = WireQueues::default();
-        let transport = Box::new(CoreWireTransportAdapter::current(NapiWireTransport {
-            queues: queues.clone(),
-        }));
+        // The JS WebSocket carrier has no authenticated endpoint context for
+        // scoped receipt/view frames. Keep this upstream transport aligned
+        // with its authority-unbound Hello until such a context is plumbed.
+        let transport = Box::new(CoreWireTransportAdapter::new(
+            NapiWireTransport {
+                queues: queues.clone(),
+            },
+            jazz::wire::WIRE_PROTOCOL_VERSION,
+            jazz::wire::current_wire_features()
+                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+            None,
+        ));
+        let inner = match db {
+            NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {
+                db: Rc::clone(db),
+                connection: Some(db.connect_upstream(transport)),
+            },
+            NapiDbInnerStorage::Persistent(db) => NapiTransportInner::Persistent {
+                db: Rc::clone(db),
+                connection: Some(db.connect_upstream(transport)),
+            },
+        };
+        Ok(Transport { inner, queues })
+    }
+
+    #[napi(js_name = "connectUpstreamWithSession")]
+    pub fn connect_upstream_with_session(
+        &self,
+        protocol_version: u16,
+        features: u32,
+        remote_node: Buffer,
+        remote_epoch: BigInt,
+        local_node: Buffer,
+        local_epoch: BigInt,
+    ) -> napi::Result<Transport> {
+        let remote_node: [u8; 16] = remote_node.as_ref().try_into().map_err(|_| {
+            napi::Error::from_reason("server hello authority node must be 16 bytes")
+        })?;
+        let local_node: [u8; 16] = local_node
+            .as_ref()
+            .try_into()
+            .map_err(|_| napi::Error::from_reason("local peer identity must be 16 bytes"))?;
+        let remote_epoch =
+            authority_epoch_from_bigint(remote_epoch, "server hello authority epoch")?;
+        let local_epoch = authority_epoch_from_bigint(local_epoch, "local connection epoch")?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let queues = WireQueues::default();
+        let session_context = CoreConnectionSessionContext {
+            local: CoreWireAuthorityEndpoint {
+                node: CoreNodeUuid::from_bytes(local_node),
+                epoch: local_epoch,
+            },
+            remote: CoreWireAuthorityEndpoint {
+                node: CoreNodeUuid::from_bytes(remote_node),
+                epoch: remote_epoch,
+            },
+            link_identity: CoreAuthorId::from_bytes(local_node),
+            negotiated_features: features as u64,
+        };
+        let transport = Box::new(CoreWireTransportAdapter::new_with_session_context(
+            NapiWireTransport {
+                queues: queues.clone(),
+            },
+            protocol_version,
+            features as u64,
+            None,
+            Some(session_context),
+        ));
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {
                 db: Rc::clone(db),
@@ -1742,6 +1815,16 @@ impl NapiDb {
         }
         Ok(())
     }
+}
+
+fn authority_epoch_from_bigint(value: BigInt, label: &str) -> napi::Result<u64> {
+    let (negative, epoch, lossless) = value.get_u64();
+    if negative || !lossless {
+        return Err(napi::Error::from_reason(format!(
+            "{label} must be an unsigned 64-bit integer"
+        )));
+    }
+    Ok(epoch)
 }
 
 fn decode_core_open_args(
@@ -2668,8 +2751,8 @@ mod tests {
     use std::rc::Rc;
 
     use crate::{
-        NapiDbInnerStorage, NapiTxKind, Tx, core_block_on, core_read_opts_from_json,
-        core_subscription_event_to_json, encode_core_subscription_delta,
+        NapiDbInnerStorage, NapiTxKind, Tx, authority_epoch_from_bigint, core_block_on,
+        core_read_opts_from_json, core_subscription_event_to_json, encode_core_subscription_delta,
     };
     use jazz::db::{
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
@@ -2685,7 +2768,56 @@ mod tests {
     use jazz::tools::OpenBatchId as CoreOpenBatchId;
     use jazz::tools::{ColumnType, Schema, SchemaBuilder, TableName, TableSchema, Value};
     use jazz::tx::DurabilityTier;
+    use napi::bindgen_prelude::BigInt;
     use serde_json::json;
+
+    #[test]
+    fn authority_epoch_bigint_rejects_lossy_values_and_preserves_u64() {
+        let above_u32 = BigInt {
+            sign_bit: false,
+            words: vec![u32::MAX as u64 + 1],
+        };
+        let near_safe_integer = BigInt {
+            sign_bit: false,
+            words: vec![9_007_199_254_740_993],
+        };
+        let maximum_u64 = BigInt {
+            sign_bit: false,
+            words: vec![u64::MAX],
+        };
+        assert_eq!(
+            authority_epoch_from_bigint(above_u32, "authority").unwrap(),
+            u32::MAX as u64 + 1
+        );
+        assert_eq!(
+            authority_epoch_from_bigint(near_safe_integer, "authority").unwrap(),
+            9_007_199_254_740_993
+        );
+        assert_eq!(
+            authority_epoch_from_bigint(maximum_u64, "authority").unwrap(),
+            u64::MAX
+        );
+        assert!(
+            authority_epoch_from_bigint(
+                BigInt {
+                    sign_bit: true,
+                    words: vec![1],
+                },
+                "authority",
+            )
+            .is_err()
+        );
+        assert!(
+            authority_epoch_from_bigint(
+                BigInt {
+                    sign_bit: false,
+                    words: vec![0, 1],
+                },
+                "authority",
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn native_delta_preserves_typed_union_occurrence_keys() {

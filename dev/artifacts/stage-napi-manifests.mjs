@@ -27,7 +27,8 @@ export function stageNapiManifests(root) {
     const file = `jazz-napi.${platform}.manifest.json`;
     const source = join(artifacts, file);
     const node = join(napiRoot, "npm", platform, `jazz-napi.${platform}.node`);
-    if (!existsSync(source)) throw new Error(`missing provenance manifest for ${platform}: ${source}`);
+    if (!existsSync(source))
+      throw new Error(`missing provenance manifest for ${platform}: ${source}`);
     const manifest = JSON.parse(readFileSync(source, "utf8"));
     const problem = verifyPublishedNapiManifest(manifest, target, node);
     if (problem) throw new Error(`invalid provenance for ${platform}: ${problem}`);
@@ -40,5 +41,10 @@ export function stageNapiManifests(root) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
-  try { stageNapiManifests(root); } catch (error) { console.error(`stage NAPI manifests: ${error.message}`); process.exitCode = 1; }
+  try {
+    stageNapiManifests(root);
+  } catch (error) {
+    console.error(`stage NAPI manifests: ${error.message}`);
+    process.exitCode = 1;
+  }
 }

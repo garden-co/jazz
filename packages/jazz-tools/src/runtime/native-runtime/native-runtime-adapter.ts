@@ -40,7 +40,7 @@ import {
   type ValueType,
 } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
-import { WebSocketCarrier, wireAuthFailureReason } from "./websocket.js";
+import { WebSocketCarrier, type WebSocketNegotiation, wireAuthFailureReason } from "./websocket.js";
 import {
   createNativeRowValueEncoder,
   createRecord,
@@ -194,6 +194,14 @@ type NativeDb = {
       | ((error: Error | null, urgency: string) => void),
   ): void;
   connectUpstream(): Transport;
+  connectUpstreamWithSession?(
+    protocolVersion: number,
+    features: number,
+    remoteNode: Uint8Array,
+    remoteEpoch: bigint,
+    localNode: Uint8Array,
+    localEpoch: bigint,
+  ): Transport;
   tick(): void;
   close?(): void;
   free?(): void;
@@ -290,6 +298,11 @@ type ServerTransportErrorWaiter = {
   reject: (error: Error) => void;
 };
 
+type ServerTransportWorkWaiter = {
+  active: boolean;
+  resolve: () => void;
+};
+
 type RuntimeSession = {
   user_id: string;
   claims: Record<string, unknown>;
@@ -384,6 +397,9 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverCarrierPromise: Promise<WebSocketCarrier> | null = null;
   private serverTransportError: Error | null = null;
   private serverTransportErrorWaiters: ServerTransportErrorWaiter[] = [];
+  private serverTransportWorkEpoch = 0;
+  private serverTransportWorkWaiters: ServerTransportWorkWaiter[] = [];
+  private nextServerConnectionEpoch = 1n;
   private serverEndpointUrl: string | null = null;
   private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
@@ -499,6 +515,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.completedTxs.clear();
     this.writes.clear();
     this.clearServerTransportErrorWaiters();
+    this.resolveServerTransportWorkWaiters();
     this.queuedServerFrames.length = 0;
     this.pendingInboundServerFrames.length = 0;
     this.serverTransport?.close();
@@ -809,6 +826,7 @@ export class NativeRuntimeAdapter implements Runtime {
         if (!isPendingWaitError(error)) throw error;
         this.pumpSubscriptions();
         const change = write.nextWriteStateChange();
+        const observedServerWorkEpoch = this.serverTransportWorkEpoch;
         try {
           this.pumpServerTransport();
           this.throwServerTransportErrorForTier(tier);
@@ -821,10 +839,15 @@ export class NativeRuntimeAdapter implements Runtime {
           if (!isPendingWaitError(secondError)) throw secondError;
         }
         const transportError = this.waitForServerTransportError(tier);
+        const transportWork = this.waitForServerTransportWork(tier, observedServerWorkEpoch);
         try {
-          await (transportError ? Promise.race([change, transportError.promise]) : change);
+          const wakes: Promise<unknown>[] = [change];
+          if (transportError) wakes.push(transportError.promise);
+          if (transportWork) wakes.push(transportWork.promise);
+          await Promise.race(wakes);
         } finally {
           transportError?.cancel();
+          transportWork?.cancel();
         }
       }
     }
@@ -1041,14 +1064,13 @@ export class NativeRuntimeAdapter implements Runtime {
     void this.disconnect({ rejectWaiters: false });
     this.serverTransportError = null;
     this.serverEndpointUrl = url;
-    const transport = this.db.connectUpstream();
-    this.serverTransport = transport;
     const carrier = new WebSocketCarrier({
       endpointUrl: url,
       peerIdentity: this.peerIdentity,
       authJson,
       onFrame: (frame) => {
         this.pendingInboundServerFrames.push(frame);
+        this.notifyServerTransportWork();
         this.scheduleServerPump();
       },
       onError: (error) => {
@@ -1058,7 +1080,9 @@ export class NativeRuntimeAdapter implements Runtime {
       },
     });
     this.serverCarrier = carrier;
-    this.serverCarrierPromise = carrier.ready().then(() => {
+    this.serverCarrierPromise = carrier.ready().then((negotiation) => {
+      const transport = this.connectNegotiatedUpstream(negotiation);
+      this.serverTransport = transport;
       this.flushQueuedServerFrames(carrier);
       this.pumpServerTransport();
       this.pumpSubscriptions();
@@ -1067,7 +1091,22 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverCarrierPromise.catch((error) => {
       this.handleServerTransportError(error);
     });
-    this.scheduleServerPump();
+  }
+
+  private connectNegotiatedUpstream(negotiation: WebSocketNegotiation): Transport {
+    const authority = negotiation.authority;
+    const connectWithSession = this.db.connectUpstreamWithSession;
+    if (!authority || !connectWithSession) return this.db.connectUpstream();
+    const localEpoch = this.nextServerConnectionEpoch++;
+    return connectWithSession.call(
+      this.db,
+      negotiation.protocolVersion,
+      negotiation.features,
+      authority.node,
+      authority.epoch,
+      this.peerIdentity,
+      localEpoch,
+    );
   }
 
   disconnect(options: { rejectWaiters?: boolean } = {}): Promise<void> {
@@ -1081,6 +1120,7 @@ export class NativeRuntimeAdapter implements Runtime {
     } else {
       this.clearServerTransportErrorWaiters();
     }
+    this.resolveServerTransportWorkWaiters();
     this.serverTransport?.close();
     this.serverTransport = null;
     this.serverEndpointUrl = null;
@@ -1914,7 +1954,10 @@ export class NativeRuntimeAdapter implements Runtime {
     return {
       promise,
       cancel: () => {
+        if (!waiter.active) return;
         waiter.active = false;
+        const index = this.serverTransportErrorWaiters.indexOf(waiter);
+        if (index >= 0) this.serverTransportErrorWaiters.splice(index, 1);
       },
     };
   }
@@ -1931,6 +1974,48 @@ export class NativeRuntimeAdapter implements Runtime {
       waiter.active = false;
     }
     this.serverTransportErrorWaiters.length = 0;
+  }
+
+  private waitForServerTransportWork(
+    tier: string,
+    observedEpoch: number,
+  ): { promise: Promise<void>; cancel: () => void } | null {
+    if (tier !== "edge" && tier !== "global") return null;
+    if (
+      this.serverTransportWorkEpoch !== observedEpoch ||
+      this.pendingInboundServerFrames.length > 0
+    ) {
+      return { promise: Promise.resolve(), cancel: () => {} };
+    }
+    const waiter: ServerTransportWorkWaiter = {
+      active: true,
+      resolve: () => {},
+    };
+    const promise = new Promise<void>((resolve) => {
+      waiter.resolve = resolve;
+    });
+    this.serverTransportWorkWaiters.push(waiter);
+    return {
+      promise,
+      cancel: () => {
+        if (!waiter.active) return;
+        waiter.active = false;
+        const index = this.serverTransportWorkWaiters.indexOf(waiter);
+        if (index >= 0) this.serverTransportWorkWaiters.splice(index, 1);
+      },
+    };
+  }
+
+  private notifyServerTransportWork(): void {
+    this.serverTransportWorkEpoch += 1;
+    this.resolveServerTransportWorkWaiters();
+  }
+
+  private resolveServerTransportWorkWaiters(): void {
+    const waiters = this.serverTransportWorkWaiters.splice(0);
+    for (const waiter of waiters) {
+      if (waiter.active) waiter.resolve();
+    }
   }
 }
 

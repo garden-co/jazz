@@ -14,15 +14,24 @@ const commands = {
   },
   napi: {
     debug: ["pnpm", ["--dir", "crates/jazz-napi", "exec", "napi", "build", "--platform"]],
-    release: ["pnpm", ["--dir", "crates/jazz-napi", "exec", "napi", "build", "--platform", "--release"]],
+    release: [
+      "pnpm",
+      ["--dir", "crates/jazz-napi", "exec", "napi", "build", "--platform", "--release"],
+    ],
   },
 };
 const selected = commands[kind]?.[profile];
-if (!selected) throw new Error("usage: build.mjs <wasm fast|release|profiling | napi debug|release>");
+if (!selected)
+  throw new Error("usage: build.mjs <wasm fast|release|profiling | napi debug|release>");
 const [command, args] = selected;
-if (kind !== "napi" && extraArgs.length) throw new Error("only napi builds accept extra napi CLI arguments");
+if (kind !== "napi" && extraArgs.length)
+  throw new Error("only napi builds accept extra napi CLI arguments");
 args.push(...extraArgs);
-const result = spawnSync(command, args, { cwd: root, stdio: "inherit", shell: process.platform === "win32" });
+const result = spawnSync(command, args, {
+  cwd: root,
+  stdio: "inherit",
+  shell: process.platform === "win32",
+});
 if (result.error) throw result.error;
 if (result.status !== 0) process.exit(result.status ?? 1);
 const targetIndex = extraArgs.indexOf("--target");
