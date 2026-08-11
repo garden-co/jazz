@@ -25,6 +25,18 @@ export function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/** Abruptly terminate a Db's OPFS worker without running its normal close path. */
+export function simulateCrash(db: Db): void {
+  const runtime = (db as any).runtimeSource?.persistentOwnerRuntime;
+  const worker = runtime?.worker as Worker | undefined;
+  if (!runtime || !worker) {
+    throw new Error("persistent browser worker is unavailable");
+  }
+  worker.terminate();
+  // Prevent later test cleanup from trying to exchange messages with the dead worker.
+  runtime.closed = true;
+}
+
 // ---------------------------------------------------------------------------
 // Polling helpers  (cf. Rust wait_for / wait_for_query)
 // ---------------------------------------------------------------------------

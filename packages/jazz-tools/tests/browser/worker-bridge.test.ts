@@ -14,6 +14,7 @@ import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {
   TestCleanup,
   createSyncedDb,
+  simulateCrash,
   sleep,
   uniqueDbName,
   waitForCondition,
@@ -129,8 +130,12 @@ function getActiveRoleBridge(db: Db): any {
   return getBrowserConnection(db)?.activeRoleBridge ?? null;
 }
 
+function getPersistentBrowserRuntime(db: Db): any {
+  return (db as any).runtimeSource?.persistentOwnerRuntime ?? null;
+}
+
 function getPrivateWorker(db: Db): Worker | null {
-  return getActiveRoleBridge(db)?.worker ?? null;
+  return getPersistentBrowserRuntime(db)?.worker ?? getActiveRoleBridge(db)?.worker ?? null;
 }
 
 function getPrivateWorkerBridge(db: Db): any {
@@ -139,13 +144,6 @@ function getPrivateWorkerBridge(db: Db): any {
 
 function getFollowerPortBridge(db: Db): any {
   return getActiveRoleBridge(db)?.followerPortBridge ?? null;
-}
-
-function clearPrivateWorkerBridge(db: Db): void {
-  const roleBridge = getActiveRoleBridge(db);
-  if (roleBridge) {
-    roleBridge.workerBridge = null;
-  }
 }
 
 function summarizeWorkerMessage(
@@ -573,7 +571,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(after[0].done).toBe(true);
   });
 
-  it.fails("recovers data from WAL after crash (no snapshot flush)", async () => {
+  it("recovers data from WAL after crash (no snapshot flush)", async () => {
     const dbName = uniqueDbName("crash-recovery");
 
     const db1 = track(
@@ -587,15 +585,8 @@ describe("Worker Bridge with OPFS", () => {
     await db1.insert(todos, { title: "Crash-proof", done: false }).wait({ tier: "local" });
     await db1.insert(todos, { title: "Also survives", done: true }).wait({ tier: "local" });
 
-    // Simulate crash: release OPFS handles WITHOUT flushing snapshot.
-    // WAL has the data, but snapshot is stale. Recovery must replay WAL.
-    // (Real worker.terminate() doesn't reliably release OPFS exclusive
-    // locks within the same page session — only a full page reload does.)
-    const worker = getPrivateWorker(db1);
-    await getActiveRoleBridge(db1).simulateCrash();
-    worker?.terminate();
-    // Null out dead worker bridge so Db shutdown only frees client-side resources.
-    clearPrivateWorkerBridge(db1);
+    // Crash without flushing the snapshot; recovery must replay the WAL.
+    simulateCrash(db1);
     await db1.shutdown();
 
     // New Db with same dbName — worker must recover from OPFS WAL
