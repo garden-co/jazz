@@ -286,21 +286,53 @@ impl IvmRuntime {
         for desired in columns {
             let Some(existing) = table_schema
                 .columns
-                .iter_mut()
+                .iter()
                 .find(|column| column.name == desired.name)
             else {
                 continue;
             };
             if !existing
                 .column_type
-                .registry_compatible_with(&desired.column_type)
+                .can_evolve_registry_to(&desired.column_type)
             {
                 return Err(IvmRuntimeError::TableFieldAlreadyExists {
                     table: table.to_owned(),
                     field: desired.name.clone(),
                 });
             }
+            for variant in &table_schema.variants {
+                for field in &variant.payload_fields {
+                    if field.shared_column.as_deref() != Some(desired.name.as_str()) {
+                        continue;
+                    }
+                    if !field
+                        .value_type
+                        .can_evolve_registry_to(&desired.column_type)
+                    {
+                        return Err(IvmRuntimeError::TableFieldAlreadyExists {
+                            table: table.to_owned(),
+                            field: desired.name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        for desired in columns {
+            let Some(existing) = table_schema
+                .columns
+                .iter_mut()
+                .find(|column| column.name == desired.name)
+            else {
+                continue;
+            };
             existing.column_type = desired.column_type.clone();
+            for variant in &mut table_schema.variants {
+                for field in &mut variant.payload_fields {
+                    if field.shared_column.as_deref() == Some(desired.name.as_str()) {
+                        field.value_type = desired.column_type.clone();
+                    }
+                }
+            }
             desired
                 .column_type
                 .collect_variant_registries(&mut table_schema.value_variant_registries);
@@ -645,10 +677,17 @@ impl IvmRuntime {
                 target: variant_projection_target_name(&target).to_owned(),
             }
         })?;
+        // An explicitly typed literal is also a descriptor boundary: it does
+        // not copy the source cell at all, so a physical enum registry in the
+        // input cannot leak through it.  Jazz uses this for requirement-none
+        // auxiliary sources, whose enum cells are deliberately typed-null.
         let allow_recursive_replacement = fields.is_some_and(|fields| {
-            fields
-                .iter()
-                .any(|field| matches!(field.expression, ProjectExpr::RecursiveEnumRemap { .. }))
+            fields.iter().any(|field| {
+                matches!(
+                    field.expression,
+                    ProjectExpr::RecursiveEnumRemap { .. } | ProjectExpr::TypedLiteral { .. }
+                )
+            })
         });
         let case = if let Some(fields) = fields {
             let projected = project_descriptor(&source, fields)?;
@@ -695,17 +734,19 @@ impl IvmRuntime {
         } else {
             VariantProjectionCase::Ignore { source }
         };
-        match projection.cases.entry(variant_tag) {
+        let changed = match projection.cases.entry(variant_tag) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(case);
+                true
             }
-            std::collections::hash_map::Entry::Occupied(entry) if entry.get() == &case => {}
+            std::collections::hash_map::Entry::Occupied(entry) if entry.get() == &case => false,
             std::collections::hash_map::Entry::Occupied(mut entry)
                 if allow_recursive_replacement =>
             {
                 // The physical registry can append while this authored target
                 // stays fixed. Refresh its non-total tag map in place.
                 entry.insert(case);
+                true
             }
             std::collections::hash_map::Entry::Occupied(_) => {
                 return Err(IvmRuntimeError::VariantProjectionCaseAlreadyRegistered {
@@ -714,8 +755,10 @@ impl IvmRuntime {
                     version: u64::from(variant_tag),
                 });
             }
+        };
+        if changed {
+            self.invalidate_table_inputs(table);
         }
-        self.invalidate_table_inputs(table);
         Ok(())
     }
 

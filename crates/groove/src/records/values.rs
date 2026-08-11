@@ -477,6 +477,69 @@ impl ValueType {
         }
     }
 
+    /// Whether this durable value occurrence may advance to `next` without
+    /// changing the interpretation of any value already stored under `self`.
+    ///
+    /// `registry_compatible_with` is deliberately symmetric: it is useful at
+    /// read/projection boundaries where either descriptor may describe an
+    /// existing value.  Live table evolution is stricter.  It is directional:
+    /// only `next` may append cases, while names, payload layouts, nesting and
+    /// registry identities remain fixed.
+    pub(crate) fn can_evolve_registry_to(&self, next: &Self) -> bool {
+        match (self, next) {
+            (Self::EnumTag(current), Self::EnumTag(next))
+                if current.registry_id == next.registry_id =>
+            {
+                next.variants.starts_with(&current.variants)
+            }
+            (Self::Enum(current), Self::Enum(next)) if current.registry_id == next.registry_id => {
+                next.cases.len() >= current.cases.len()
+                    && current
+                        .cases
+                        .iter()
+                        .zip(&next.cases)
+                        .all(|(current, next)| {
+                            current.name == next.name
+                                && current.payload.fields().len() == next.payload.fields().len()
+                                && current
+                                    .payload
+                                    .fields()
+                                    .iter()
+                                    .zip(next.payload.fields())
+                                    .all(|(current, next)| {
+                                        current.name == next.name
+                                            && current
+                                                .value_type
+                                                .can_evolve_registry_to(&next.value_type)
+                                    })
+                        })
+            }
+            (Self::Tuple(current), Self::Tuple(next)) => {
+                current.len() == next.len()
+                    && current
+                        .iter()
+                        .zip(next)
+                        .all(|(current, next)| current.can_evolve_registry_to(next))
+            }
+            (Self::Array(current), Self::Array(next))
+            | (Self::Nullable(current), Self::Nullable(next)) => {
+                current.can_evolve_registry_to(next)
+            }
+            (Self::Record(current), Self::Record(next)) => {
+                current.fields().len() == next.fields().len()
+                    && current
+                        .fields()
+                        .iter()
+                        .zip(next.fields())
+                        .all(|(current, next)| {
+                            current.name == next.name
+                                && current.value_type.can_evolve_registry_to(&next.value_type)
+                        })
+            }
+            _ => self == next,
+        }
+    }
+
     pub(crate) fn collect_variant_registries(&self, output: &mut BTreeMap<u64, VariantRegistry>) {
         match self {
             Self::EnumTag(schema) => {
