@@ -4,8 +4,10 @@
 //! their FFI frameworks differ. Keeping those conversions here prevents the
 //! native bindings from developing subtly incompatible wire formats.
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, VecDeque};
 use std::num::NonZeroUsize;
+use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -22,6 +24,54 @@ use crate::node::{CurrentRow, RelationEdge, RelationSnapshot};
 use crate::query::{Query, RelationExpr, RelationQuery};
 use crate::schema::JazzSchema;
 use crate::tx::{DurabilityTier, Fate, TxId};
+use crate::wire::{TransportError, WireTransport};
+
+/// The frame queues shared between a binding's transport handle and the
+/// [`WireTransport`] the core drives.
+///
+/// Both sides are cloned handles onto the same queues: the binding pushes
+/// inbound frames and drains outbound ones, while [`QueueWireTransport`] does
+/// the mirror image from inside the core.
+#[derive(Clone, Default)]
+pub struct WireQueues {
+    inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
+    outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
+}
+
+impl WireQueues {
+    /// Enqueue frames received from the peer for the core to consume.
+    pub fn push_inbound(&self, frames: impl IntoIterator<Item = Vec<u8>>) {
+        self.inbound.borrow_mut().extend(frames);
+    }
+
+    /// Take every frame the core has produced for the peer.
+    pub fn drain_outbound(&self) -> Vec<Vec<u8>> {
+        self.outbound.borrow_mut().drain(..).collect()
+    }
+
+    /// Build the core-side transport for these queues.
+    pub fn transport(&self) -> QueueWireTransport {
+        QueueWireTransport {
+            queues: self.clone(),
+        }
+    }
+}
+
+/// Core-side [`WireTransport`] backed by a [`WireQueues`] pair.
+pub struct QueueWireTransport {
+    queues: WireQueues,
+}
+
+impl WireTransport for QueueWireTransport {
+    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+        self.queues.outbound.borrow_mut().push_back(frame);
+        Ok(())
+    }
+
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+        self.queues.inbound.borrow_mut().pop_front()
+    }
+}
 
 /// A binding-neutral conversion or wait-state failure.
 #[derive(Debug, Error)]
@@ -359,7 +409,7 @@ pub fn relation_query_from_json(query_json: &str) -> Result<RelationQuery, Bindi
 }
 
 /// Check whether a write has reached a requested durability tier.
-pub fn check_write_state(state: &WriteState, tier: DurabilityTier) -> Result<(), BindingError> {
+fn check_write_state(state: &WriteState, tier: DurabilityTier) -> Result<(), BindingError> {
     if tier <= DurabilityTier::Local {
         return Ok(());
     }
@@ -516,15 +566,6 @@ pub fn subscription_event_to_json(event: &SubscriptionEvent) -> Result<JsonValue
         }
         EncodedSubscriptionEvent::Closed => Ok(serde_json::json!({ "type": "closed" })),
     }
-}
-
-/// Convert a subscription event directly to its JSON string representation.
-pub fn subscription_event_to_json_string(
-    event: &SubscriptionEvent,
-) -> Result<String, BindingError> {
-    let value = subscription_event_to_json(event)?;
-    serde_json::to_string(&value)
-        .map_err(|error| BindingError::Encode(format!("encode subscription event: {error}")))
 }
 
 fn encode_subscription_delta(

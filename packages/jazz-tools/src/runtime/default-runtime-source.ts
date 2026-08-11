@@ -9,7 +9,7 @@ import {
   RuntimeSource,
   type RuntimeClientContext,
   type RuntimeTelemetryContext,
-  type RuntimeTokenOptions,
+  type RuntimeTokenModule,
 } from "./runtime-source.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import { PersistentBrowserOpfsRuntime } from "./native-runtime/persistent-browser-runtime.js";
@@ -68,19 +68,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
 
     return JazzClient.connectWithRuntime(
       mainThreadPeerRuntime,
-      {
-        appId: config.appId,
-        schema,
-        driver: config.driver,
-        serverUrl: config.serverUrl,
-        env: config.env,
-        userBranch: config.userBranch,
-        jwtToken: config.jwtToken,
-        cookieSession: config.cookieSession,
-        backendSecret: config.backendSecret,
-        adminSecret: config.adminSecret,
-        tier: "local",
-      },
+      this.connectContext(config, schema),
       runtimeOptions,
     );
   }
@@ -98,22 +86,8 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     });
   }
 
-  override mintLocalFirstToken(options: RuntimeTokenOptions): string {
-    return this.wasmModule.mintLocalFirstToken(
-      options.secret,
-      options.audience,
-      options.ttlSeconds,
-      options.nowSeconds,
-    );
-  }
-
-  override mintAnonymousToken(options: RuntimeTokenOptions): string {
-    return this.wasmModule.mintAnonymousToken(
-      options.secret,
-      options.audience,
-      options.ttlSeconds,
-      options.nowSeconds,
-    );
+  protected override tokenModule(): RuntimeTokenModule {
+    return this.wasmModule;
   }
 }
 

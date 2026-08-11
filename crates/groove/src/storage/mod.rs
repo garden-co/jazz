@@ -54,6 +54,38 @@ pub enum Durability {
     WalNoSync,
 }
 
+/// Counts write batches between explicit durable boundaries.
+///
+/// The arithmetic is backend-agnostic — only the action taken when a boundary
+/// comes due is engine-specific — so every file-backed backend shares this.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WriteFlushCadence {
+    every: usize,
+    pending: usize,
+}
+
+impl WriteFlushCadence {
+    pub(crate) fn new(every: usize) -> Self {
+        assert!(every > 0, "write flush cadence must be non-zero");
+        Self { every, pending: 0 }
+    }
+
+    /// Records one write batch, reporting whether a boundary is now due.
+    pub(crate) fn tick(&mut self) -> bool {
+        self.pending += 1;
+        if self.pending == self.every {
+            self.pending = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.pending = 0;
+    }
+}
+
 pub type ColumnFamilyName = str;
 pub type Key = [u8];
 pub type Value = Vec<u8>;
@@ -2646,13 +2678,6 @@ pub enum Error {
     #[cfg(feature = "sqlite")]
     #[error(transparent)]
     Sqlite(#[from] ::rusqlite::Error),
-    #[cfg(feature = "sqlite")]
-    #[error("wal checkpoint incomplete (busy={busy}): {checkpointed}/{log} frames")]
-    SqliteCheckpointIncomplete {
-        busy: i64,
-        log: i64,
-        checkpointed: i64,
-    },
     #[error(transparent)]
     Opfs(#[from] opfs_btree::BTreeError),
 }
@@ -2856,6 +2881,10 @@ pub(crate) mod conformance {
         for (key, value) in [
             (b"idx:a".to_vec(), b"1".to_vec()),
             (b"idx:b".to_vec(), b"2".to_vec()),
+            // Sorts immediately after `idx:b`, so any backend that treats an
+            // inclusive upper as a prefix bound wrongly returns this for
+            // `before_or_at("idx:b")`.
+            (b"idx:b:1".to_vec(), b"2a".to_vec()),
             (b"idx:c".to_vec(), b"3".to_vec()),
             (vec![0xff, 0x01], b"f1".to_vec()),
             (vec![0xff, 0x02], b"f2".to_vec()),
@@ -2899,6 +2928,14 @@ pub(crate) mod conformance {
                 .last_with_prefix_before_or_at("records", b"idx:", b"idx:aa")
                 .unwrap(),
             Some((b"idx:a".to_vec(), b"1".to_vec()))
+        );
+        // The upper is inclusive of itself but exclusive of its own
+        // extensions: `idx:b:1` sorts above `idx:b` and must not be returned.
+        assert_eq!(
+            storage
+                .last_with_prefix_before_or_at("records", b"idx:b", b"idx:b")
+                .unwrap(),
+            Some((b"idx:b".to_vec(), b"2".to_vec()))
         );
     }
 

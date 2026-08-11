@@ -1,3 +1,4 @@
+import { deterministicRuntimeBytes as deterministicBytes } from "../runtime-identity.js";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { createRequire } from "node:module";
@@ -115,18 +116,4 @@ export async function createWasmRuntime(
   });
 
   return runtime;
-}
-
-function deterministicBytes(seed: string): Uint8Array {
-  let hash = 0x811c9dc5;
-  const bytes = new Uint8Array(16);
-  const view = new DataView(bytes.buffer);
-  for (let round = 0; round < 4; round += 1) {
-    for (let i = 0; i < seed.length; i += 1) {
-      hash ^= seed.charCodeAt(i) + round;
-      hash = Math.imul(hash, 0x01000193);
-    }
-    view.setUint32(round * 4, hash >>> 0, true);
-  }
-  return bytes;
 }

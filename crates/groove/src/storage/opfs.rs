@@ -12,8 +12,8 @@ pub use opfs_btree::SyncPolicy as BtreeSyncPolicy;
 use opfs_btree::{BTreeOptions, OpfsBTree, SyncFile};
 
 use super::{
-    ColumnFamilyName, Error, Key, OrderedKvStorage, ScanVisitor, Value, WriteOperation,
-    apply_storage_delta, key_codec,
+    ColumnFamilyName, Error, Key, OrderedKvStorage, ScanVisitor, Value, WriteFlushCadence,
+    WriteOperation, apply_storage_delta, key_codec,
 };
 
 #[derive(Clone)]
@@ -21,12 +21,6 @@ pub struct BtreeStorage<F: SyncFile> {
     tree: Rc<RefCell<OpfsBTree<F>>>,
     column_families: Rc<RefCell<BTreeSet<String>>>,
     write_flush_cadence: Rc<RefCell<Option<WriteFlushCadence>>>,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct WriteFlushCadence {
-    every: usize,
-    pending: usize,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -166,8 +160,7 @@ where
     }
 
     fn set_write_flush_cadence(&self, every: usize) -> Result<(), Error> {
-        assert!(every > 0, "write flush cadence must be non-zero");
-        *self.write_flush_cadence.borrow_mut() = Some(WriteFlushCadence { every, pending: 0 });
+        *self.write_flush_cadence.borrow_mut() = Some(WriteFlushCadence::new(every));
         Ok(())
     }
 
@@ -176,7 +169,7 @@ where
         tree.flush_wal()?;
         tree.flush_file()?;
         if let Some(cadence) = self.write_flush_cadence.borrow_mut().as_mut() {
-            cadence.pending = 0;
+            cadence.reset();
         }
         Ok(())
     }
@@ -279,15 +272,7 @@ where
             }
         }
         let should_flush = match self.write_flush_cadence.borrow_mut().as_mut() {
-            Some(cadence) => {
-                cadence.pending += 1;
-                if cadence.pending == cadence.every {
-                    cadence.pending = 0;
-                    true
-                } else {
-                    false
-                }
-            }
+            Some(cadence) => cadence.tick(),
             None => true,
         };
         if should_flush {

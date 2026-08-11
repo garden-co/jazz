@@ -10,7 +10,7 @@ import {
   RuntimeSource,
   type RuntimeClientContext,
   type RuntimeTelemetryContext,
-  type RuntimeTokenOptions,
+  type RuntimeTokenModule,
 } from "../runtime/runtime-source.js";
 import { RnDbShim, type JazzRnModule } from "./native-db.js";
 import { importJazzRn } from "./jazz-rn-importer.js";
@@ -99,19 +99,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
 
     return JazzClient.connectWithRuntime(
       runtime,
-      {
-        appId: config.appId,
-        schema,
-        driver: config.driver,
-        serverUrl: config.serverUrl,
-        env: config.env,
-        userBranch: config.userBranch,
-        jwtToken: config.jwtToken,
-        cookieSession: config.cookieSession,
-        backendSecret: config.backendSecret,
-        adminSecret: config.adminSecret,
-        tier: "local",
-      },
+      this.connectContext(config, schema),
       runtimeOptions,
     );
   }
@@ -122,21 +110,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
     return null;
   }
 
-  override mintLocalFirstToken(options: RuntimeTokenOptions): string {
-    return this.nativeModule.mintLocalFirstToken(
-      options.secret,
-      options.audience,
-      options.ttlSeconds,
-      options.nowSeconds,
-    );
-  }
-
-  override mintAnonymousToken(options: RuntimeTokenOptions): string {
-    return this.nativeModule.mintAnonymousToken(
-      options.secret,
-      options.audience,
-      options.ttlSeconds,
-      options.nowSeconds,
-    );
+  protected override tokenModule(): RuntimeTokenModule {
+    return this.nativeModule;
   }
 }

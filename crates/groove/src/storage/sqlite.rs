@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 use super::{
-    ColumnFamilyName, Durability, Error, Key, KeyValue, ScanVisitor, Value, WriteOperation,
-    apply_storage_delta,
+    ColumnFamilyName, Durability, Error, Key, KeyValue, ScanVisitor, Value, WriteFlushCadence,
+    WriteOperation, apply_storage_delta, key_codec,
 };
 
 const FORMAT: &[u8] = b"jazz-groove-kv";
@@ -25,10 +25,22 @@ const CREATE_COLUMN_FAMILIES: &str =
     "CREATE TABLE column_families (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE)";
 const CREATE_KV: &str = "CREATE TABLE kv (\n  cf INTEGER NOT NULL,\n  k  BLOB    NOT NULL,\n  v  BLOB    NOT NULL,\n  PRIMARY KEY (cf, k)\n) WITHOUT ROWID";
 
-#[derive(Clone, Copy, Debug)]
-struct WriteFlushCadence {
-    every: usize,
-    pending: usize,
+const SET_KV: &str = "INSERT OR REPLACE INTO kv (cf, k, v) VALUES (?1, ?2, ?3)";
+const GET_KV: &str = "SELECT v FROM kv WHERE cf = ?1 AND k = ?2";
+const DELETE_KV: &str = "DELETE FROM kv WHERE cf = ?1 AND k = ?2";
+
+/// Wait this long for a competing writer before reporting `SQLITE_BUSY`.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Shutdown uses a much shorter wait: a busy checkpoint is not fatal (see
+/// [`SqliteStorage::close`]), so blocking the caller for seconds is not worth it.
+const CLOSE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// SQLite's `synchronous` pragma for a local durability tier.
+fn synchronous_pragma(durability: Durability) -> &'static str {
+    match durability {
+        Durability::FullSync => "FULL",
+        Durability::WalNoSync => "NORMAL",
+    }
 }
 
 /// SQLite implementation of [`super::OrderedKvStorage`].
@@ -78,20 +90,13 @@ impl SqliteStorage {
                 "sqlite journal_mode is {mode:?}, expected wal"
             )));
         }
-        connection.pragma_update(
-            None,
-            "synchronous",
-            match durability {
-                Durability::FullSync => "FULL",
-                Durability::WalNoSync => "NORMAL",
-            },
-        )?;
+        connection.pragma_update(None, "synchronous", synchronous_pragma(durability))?;
         // These pragmas select F_FULLFSYNC on Apple platforms and are no-ops
         // elsewhere. Ordinary fsync is insufficient for the Apple power-loss
         // guarantee this durability mode advertises.
         connection.pragma_update(None, "fullfsync", "ON")?;
         connection.pragma_update(None, "checkpoint_fullfsync", "ON")?;
-        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        connection.busy_timeout(BUSY_TIMEOUT)?;
 
         // Freshness is based on schema objects, not file existence. A crash
         // before the atomic initialization transaction commits may leave a
@@ -229,21 +234,17 @@ impl SqliteStorage {
                 "INSERT OR IGNORE INTO column_families (name) VALUES (?1)",
                 [name],
             )?;
-            let id: i64 = connection.query_row(
-                "SELECT id FROM column_families WHERE name = ?1",
-                [name],
-                |row| row.get(0),
-            )?;
-            interned.insert((*name).to_owned(), id);
         }
 
+        // One scan covers both the families just interned and any already
+        // present in the file, so no per-name id lookup is needed.
         let mut statement = connection.prepare("SELECT name, id FROM column_families")?;
         let rows = statement.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
         for row in rows {
             let (name, id) = row?;
-            interned.entry(name).or_insert(id);
+            interned.insert(name, id);
         }
         Ok(())
     }
@@ -275,7 +276,17 @@ impl SqliteStorage {
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error> {
         let cf_id = self.cf_id(cf)?;
-        let upper = prefix_upper_bound(prefix);
+        // Express the whole range in SQL so the index seeks straight to the
+        // first matching row rather than fetching and discarding keys outside
+        // it. The prefix contributes an exclusive bound (absent only for an
+        // all-0xFF prefix, which nothing sorts above); `upper_inclusive` is
+        // applied as-is, since bytewise order makes `upper` sort below its own
+        // extensions and no finite exclusive bound would express that.
+        let prefix_end = key_codec::prefix_upper_bound(prefix);
+        // Inside a finite prefix bound every row matches the prefix by
+        // construction, so SQL can stop after one. Without it the scan is
+        // open-ended and non-matching keys still have to be filtered below.
+        let bounded = prefix_end.is_some();
         let order = match direction {
             ScanDirection::Forward => "ORDER BY k",
             ScanDirection::Reverse => "ORDER BY k DESC",
@@ -283,11 +294,17 @@ impl SqliteStorage {
         self.with_connection(|connection| {
             let mut clause = String::from("AND k >= ?2");
             let mut parameters: Vec<&dyn rusqlite::ToSql> = vec![&cf_id, &prefix];
-            if let Some(upper) = upper.as_ref() {
+            if let Some(end) = prefix_end.as_ref() {
                 clause.push_str(" AND k < ?3");
+                parameters.push(end);
+            }
+            if let Some(upper) = upper_inclusive.as_ref() {
+                let placeholder = parameters.len() + 1;
+                clause.push_str(&format!(" AND k <= ?{placeholder}"));
                 parameters.push(upper);
             }
-            let query = format!("SELECT k, v FROM kv WHERE cf = ?1 {clause} {order}");
+            let limit = if limit_one && bounded { " LIMIT 1" } else { "" };
+            let query = format!("SELECT k, v FROM kv WHERE cf = ?1 {clause} {order}{limit}");
             let mut statement = connection.prepare_cached(&query)?;
             let mut rows = statement.query(&parameters[..])?;
             while let Some(row) = rows.next()? {
@@ -295,16 +312,9 @@ impl SqliteStorage {
                 if !key.starts_with(prefix) {
                     match direction {
                         ScanDirection::Forward => break,
-                        ScanDirection::Reverse => {
-                            if key.as_slice() < prefix {
-                                break;
-                            }
-                            continue;
-                        }
+                        ScanDirection::Reverse if key.as_slice() < prefix => break,
+                        ScanDirection::Reverse => continue,
                     }
-                }
-                if upper_inclusive.is_some_and(|upper| key.as_slice() > upper) {
-                    continue;
                 }
                 let value: Vec<u8> = row.get(1)?;
                 visit(&key, &value)?;
@@ -315,24 +325,35 @@ impl SqliteStorage {
             Ok(())
         })
     }
+
+    /// Reverse-scans `prefix` for the greatest key, optionally capped at an
+    /// inclusive `upper`.
+    fn last_with_prefix_bounded(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        upper: Option<&Key>,
+    ) -> Result<Option<KeyValue>, Error> {
+        let mut last = None;
+        self.scan_prefix_directed(
+            cf,
+            prefix,
+            ScanDirection::Reverse,
+            true,
+            upper,
+            &mut |key, value| {
+                last = Some((key.to_vec(), value.to_vec()));
+                Ok(())
+            },
+        )?;
+        Ok(last)
+    }
 }
 
 #[derive(Clone, Copy)]
 enum ScanDirection {
     Forward,
     Reverse,
-}
-
-fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
-    let mut bound = prefix.to_vec();
-    for index in (0..bound.len()).rev() {
-        if bound[index] != u8::MAX {
-            bound[index] += 1;
-            bound.truncate(index + 1);
-            return Some(bound);
-        }
-    }
-    None
 }
 
 #[inline(always)]
@@ -348,11 +369,10 @@ impl super::OrderedKvStorage for SqliteStorage {
         let cf_id = self.cf_id(cf)?;
         self.with_connection(|connection| {
             Ok(connection
-                .query_row(
-                    "SELECT v FROM kv WHERE cf = ?1 AND k = ?2",
-                    rusqlite::params![cf_id, key],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
+                .prepare_cached(GET_KV)?
+                .query_row(rusqlite::params![cf_id, key], |row| {
+                    row.get::<_, Vec<u8>>(0)
+                })
                 .optional()?)
         })
     }
@@ -360,10 +380,9 @@ impl super::OrderedKvStorage for SqliteStorage {
     fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
         let cf_id = self.cf_id(cf)?;
         self.with_connection(|connection| {
-            connection.execute(
-                "INSERT OR REPLACE INTO kv (cf, k, v) VALUES (?1, ?2, ?3)",
-                rusqlite::params![cf_id, key, value],
-            )?;
+            connection
+                .prepare_cached(SET_KV)?
+                .execute(rusqlite::params![cf_id, key, value])?;
             Ok(())
         })
     }
@@ -371,10 +390,9 @@ impl super::OrderedKvStorage for SqliteStorage {
     fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
         let cf_id = self.cf_id(cf)?;
         self.with_connection(|connection| {
-            connection.execute(
-                "DELETE FROM kv WHERE cf = ?1 AND k = ?2",
-                rusqlite::params![cf_id, key],
-            )?;
+            connection
+                .prepare_cached(DELETE_KV)?
+                .execute(rusqlite::params![cf_id, key])?;
             Ok(())
         })
     }
@@ -424,19 +442,7 @@ impl super::OrderedKvStorage for SqliteStorage {
         cf: &ColumnFamilyName,
         prefix: &Key,
     ) -> Result<Option<KeyValue>, Error> {
-        let mut last = None;
-        self.scan_prefix_directed(
-            cf,
-            prefix,
-            ScanDirection::Reverse,
-            true,
-            None,
-            &mut |key, value| {
-                last = Some((key.to_vec(), value.to_vec()));
-                Ok(())
-            },
-        )?;
-        Ok(last)
+        self.last_with_prefix_bounded(cf, prefix, None)
     }
 
     fn last_with_prefix_before_or_at(
@@ -445,87 +451,62 @@ impl super::OrderedKvStorage for SqliteStorage {
         prefix: &Key,
         upper: &Key,
     ) -> Result<Option<KeyValue>, Error> {
-        let mut last = None;
-        self.scan_prefix_directed(
-            cf,
-            prefix,
-            ScanDirection::Reverse,
-            true,
-            Some(upper),
-            &mut |key, value| {
-                last = Some((key.to_vec(), value.to_vec()));
-                Ok(())
-            },
-        )?;
-        Ok(last)
+        self.last_with_prefix_bounded(cf, prefix, Some(upper))
     }
 
     fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
-        // Validate every family before opening the transaction so a bad name
-        // can never leave a partial batch.
-        for operation in operations {
-            let cf = match operation {
-                WriteOperation::Set { cf, .. }
-                | WriteOperation::Delete { cf, .. }
-                | WriteOperation::Delta { cf, .. } => *cf,
-            };
-            self.cf_id(cf)?;
-        }
+        // Resolve every family before opening the transaction so a bad name
+        // can never leave a partial batch, and so the write loop below does
+        // not repeat the lookup per operation.
+        let cf_ids = operations
+            .iter()
+            .map(|operation| {
+                let cf = match operation {
+                    WriteOperation::Set { cf, .. }
+                    | WriteOperation::Delete { cf, .. }
+                    | WriteOperation::Delta { cf, .. } => *cf,
+                };
+                self.cf_id(cf)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         {
             let mut connection = self.connection.borrow_mut();
             let connection = connection.as_mut().ok_or(Error::StorageClosed)?;
             let transaction = connection.transaction()?;
-            for (index, operation) in operations.iter().enumerate() {
+            // Prepare each statement once for the whole batch; `execute`
+            // and `query_row` would recompile the SQL per row.
+            let mut set = transaction.prepare_cached(SET_KV)?;
+            let mut delete = transaction.prepare_cached(DELETE_KV)?;
+            let mut get = transaction.prepare_cached(GET_KV)?;
+            for ((index, operation), cf_id) in operations.iter().enumerate().zip(cf_ids) {
                 maybe_test_kill_barrier(index);
                 match operation {
-                    WriteOperation::Set { cf, key, value } => {
-                        let cf_id = self.cf_id(cf)?;
-                        transaction.execute(
-                            "INSERT OR REPLACE INTO kv (cf, k, v) VALUES (?1, ?2, ?3)",
-                            rusqlite::params![cf_id, key, value],
-                        )?;
+                    WriteOperation::Set { key, value, .. } => {
+                        set.execute(rusqlite::params![cf_id, key, value])?;
                     }
-                    WriteOperation::Delete { cf, key } => {
-                        let cf_id = self.cf_id(cf)?;
-                        transaction.execute(
-                            "DELETE FROM kv WHERE cf = ?1 AND k = ?2",
-                            rusqlite::params![cf_id, key],
-                        )?;
+                    WriteOperation::Delete { key, .. } => {
+                        delete.execute(rusqlite::params![cf_id, key])?;
                     }
-                    WriteOperation::Delta { cf, key, delta } => {
-                        let cf_id = self.cf_id(cf)?;
-                        let current: Option<Vec<u8>> = transaction
-                            .query_row(
-                                "SELECT v FROM kv WHERE cf = ?1 AND k = ?2",
-                                rusqlite::params![cf_id, key],
-                                |row| row.get(0),
-                            )
+                    WriteOperation::Delta { key, delta, .. } => {
+                        let current: Option<Vec<u8>> = get
+                            .query_row(rusqlite::params![cf_id, key], |row| row.get(0))
                             .optional()?;
                         let encoded = delta.encode()?;
                         let merged = apply_storage_delta(current.as_deref(), &encoded)?;
-                        transaction.execute(
-                            "INSERT OR REPLACE INTO kv (cf, k, v) VALUES (?1, ?2, ?3)",
-                            rusqlite::params![cf_id, key, merged],
-                        )?;
+                        set.execute(rusqlite::params![cf_id, key, merged])?;
                     }
                 }
             }
+            drop((set, delete, get));
             transaction.commit()?;
         }
 
-        let should_flush = match self.write_flush_cadence.borrow_mut().as_mut() {
-            Some(cadence) => {
-                cadence.pending += 1;
-                if cadence.pending == cadence.every {
-                    cadence.pending = 0;
-                    true
-                } else {
-                    false
-                }
-            }
-            None => false,
-        };
+        let should_flush = self
+            .write_flush_cadence
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(WriteFlushCadence::tick);
         if should_flush {
             self.flush_write_boundary()?;
         }
@@ -533,9 +514,8 @@ impl super::OrderedKvStorage for SqliteStorage {
     }
 
     fn set_write_flush_cadence(&self, every: usize) -> Result<(), Error> {
-        assert!(every > 0, "write flush cadence must be non-zero");
         self.with_connection(|_| Ok(()))?;
-        *self.write_flush_cadence.borrow_mut() = Some(WriteFlushCadence { every, pending: 0 });
+        *self.write_flush_cadence.borrow_mut() = Some(WriteFlushCadence::new(every));
         Ok(())
     }
 
@@ -576,16 +556,13 @@ impl super::OrderedKvStorage for SqliteStorage {
                 transaction.commit()?;
                 Ok(())
             })();
-            let restore = match self.durability {
-                Durability::FullSync => "FULL",
-                Durability::WalNoSync => "NORMAL",
-            };
-            let restore_result = connection.pragma_update(None, "synchronous", restore);
+            let restore_result =
+                connection.pragma_update(None, "synchronous", synchronous_pragma(self.durability));
             result?;
             restore_result?;
         }
         if let Some(cadence) = self.write_flush_cadence.borrow_mut().as_mut() {
-            cadence.pending = 0;
+            cadence.reset();
         }
         Ok(())
     }
@@ -594,7 +571,7 @@ impl super::OrderedKvStorage for SqliteStorage {
         let Some(connection) = self.connection.borrow_mut().take() else {
             return Ok(());
         };
-        if let Err(error) = connection.busy_timeout(std::time::Duration::from_millis(250)) {
+        if let Err(error) = connection.busy_timeout(CLOSE_BUSY_TIMEOUT) {
             self.connection.borrow_mut().replace(connection);
             return Err(Error::Sqlite(error));
         }

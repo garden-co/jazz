@@ -18,7 +18,7 @@ use futures::FutureExt;
 use jazz::binding_support::BindingError;
 use jazz::db::{Error as DbError, ErrorCode};
 
-use actor::{ActorHandle, TransactionKind, WaiterSignal, WriteOpened};
+use actor::{ActorHandle, TransactionKind, WaiterSignal};
 
 /// Stable error boundary for the React Native runtime.
 #[derive(Clone, Debug, thiserror::Error, uniffi::Error)]
@@ -170,10 +170,33 @@ fn ensure_same_actor(
     }
 }
 
-fn write_object(actor: Arc<ActorHandle>, opened: WriteOpened) -> Arc<RnWrite> {
+/// Rejects use of a handle whose owner already closed it.
+///
+/// Every closable handle guards its methods this way; `kind` names the handle
+/// in the message the TypeScript shim surfaces.
+fn ensure_open(closed: &AtomicBool, kind: &str) -> Result<(), JazzRnError> {
+    if closed.load(Ordering::SeqCst) {
+        Err(JazzRnError::Runtime {
+            message: format!("{kind} is closed"),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+/// Runs `release` only on the first close, whether that is an explicit
+/// `close()` or the handle being dropped. Without the flag the actor would see
+/// a second release for an id it may already have reissued.
+fn release_once(closed: &AtomicBool, release: impl FnOnce()) {
+    if !closed.swap(true, Ordering::SeqCst) {
+        release();
+    }
+}
+
+fn write_object(actor: Arc<ActorHandle>, id: u64) -> Arc<RnWrite> {
     Arc::new(RnWrite {
         actor,
-        id: opened.id,
+        id,
         closed: AtomicBool::new(false),
     })
 }
@@ -825,9 +848,7 @@ pub struct RnQueryAttachment {
 
 impl Drop for RnQueryAttachment {
     fn drop(&mut self) {
-        if !self.detached.swap(true, Ordering::SeqCst) {
-            self.actor.release_attachment(self.id);
-        }
+        release_once(&self.detached, || self.actor.release_attachment(self.id));
     }
 }
 
@@ -841,13 +862,7 @@ pub struct RnTx {
 
 impl RnTx {
     fn ensure_open(&self) -> Result<(), JazzRnError> {
-        if self.closed.load(Ordering::SeqCst) {
-            Err(JazzRnError::Runtime {
-                message: "transaction is already closed".to_owned(),
-            })
-        } else {
-            Ok(())
-        }
+        ensure_open(&self.closed, "transaction")
     }
 }
 
@@ -972,9 +987,7 @@ impl RnTx {
 
 impl Drop for RnTx {
     fn drop(&mut self) {
-        if !self.closed.swap(true, Ordering::SeqCst) {
-            self.actor.release_transaction(self.id);
-        }
+        release_once(&self.closed, || self.actor.release_transaction(self.id));
     }
 }
 
@@ -988,13 +1001,7 @@ pub struct RnWrite {
 
 impl RnWrite {
     fn ensure_open(&self) -> Result<(), JazzRnError> {
-        if self.closed.load(Ordering::SeqCst) {
-            Err(JazzRnError::Runtime {
-                message: "write is closed".to_owned(),
-            })
-        } else {
-            Ok(())
-        }
+        ensure_open(&self.closed, "write")
     }
 }
 
@@ -1050,9 +1057,7 @@ impl RnWrite {
 
 impl Drop for RnWrite {
     fn drop(&mut self) {
-        if !self.closed.swap(true, Ordering::SeqCst) {
-            self.actor.release_write(self.id);
-        }
+        release_once(&self.closed, || self.actor.release_write(self.id));
     }
 }
 
@@ -1137,9 +1142,7 @@ impl RnSubscription {
 
 impl Drop for RnSubscription {
     fn drop(&mut self) {
-        if !self.closed.swap(true, Ordering::SeqCst) {
-            self.actor.release_subscription(self.id);
-        }
+        release_once(&self.closed, || self.actor.release_subscription(self.id));
     }
 }
 
@@ -1153,13 +1156,7 @@ pub struct RnTransport {
 
 impl RnTransport {
     fn ensure_open(&self) -> Result<(), JazzRnError> {
-        if self.closed.load(Ordering::SeqCst) {
-            Err(JazzRnError::Runtime {
-                message: "transport is closed".to_owned(),
-            })
-        } else {
-            Ok(())
-        }
+        ensure_open(&self.closed, "transport")
     }
 }
 
@@ -1210,9 +1207,7 @@ impl RnTransport {
 
 impl Drop for RnTransport {
     fn drop(&mut self) {
-        if !self.closed.swap(true, Ordering::SeqCst) {
-            self.actor.release_transport(self.id);
-        }
+        release_once(&self.closed, || self.actor.release_transport(self.id));
     }
 }
 

@@ -18,8 +18,8 @@ use rocksdb::{
 };
 
 use super::{
-    ColumnFamilyName, Error, Key, OrderedKvStorage, ScanVisitor, Value, WriteOperation,
-    apply_storage_delta, compact_storage_delta_operand,
+    ColumnFamilyName, Error, Key, OrderedKvStorage, ScanVisitor, Value, WriteFlushCadence,
+    WriteOperation, apply_storage_delta, compact_storage_delta_operand,
 };
 
 pub use super::Durability;
@@ -48,12 +48,6 @@ pub struct RocksDbStorage {
     db: DB,
     write_options: WriteOptions,
     write_flush_cadence: RefCell<Option<WriteFlushCadence>>,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct WriteFlushCadence {
-    every: usize,
-    pending: usize,
 }
 
 impl RocksDbStorage {
@@ -286,15 +280,14 @@ impl OrderedKvStorage for RocksDbStorage {
     }
 
     fn set_write_flush_cadence(&self, every: usize) -> Result<(), Error> {
-        assert!(every > 0, "write flush cadence must be non-zero");
-        *self.write_flush_cadence.borrow_mut() = Some(WriteFlushCadence { every, pending: 0 });
+        *self.write_flush_cadence.borrow_mut() = Some(WriteFlushCadence::new(every));
         Ok(())
     }
 
     fn flush_write_boundary(&self) -> Result<(), Error> {
         self.db.flush_wal(true)?;
         if let Some(cadence) = self.write_flush_cadence.borrow_mut().as_mut() {
-            cadence.pending = 0;
+            cadence.reset();
         }
         Ok(())
     }
@@ -453,15 +446,7 @@ impl OrderedKvStorage for RocksDbStorage {
         }
 
         let should_flush = match self.write_flush_cadence.borrow_mut().as_mut() {
-            Some(cadence) => {
-                cadence.pending += 1;
-                if cadence.pending == cadence.every {
-                    cadence.pending = 0;
-                    true
-                } else {
-                    false
-                }
-            }
+            Some(cadence) => cadence.tick(),
             None => return Ok(self.db.write_opt(&batch, &self.write_options)?),
         };
         let mut write_options = WriteOptions::default();

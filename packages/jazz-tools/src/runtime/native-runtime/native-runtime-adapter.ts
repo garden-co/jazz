@@ -1,3 +1,4 @@
+import { deterministicRuntimeBytes as deterministicBytes } from "../runtime-identity.js";
 import type {
   ColumnDescriptor,
   ColumnType,
@@ -4550,20 +4551,6 @@ function uuidBytes(value: string): Uint8Array | null {
 
 function authorBytesForSubject(subject: string): Uint8Array {
   return uuidBytes(subject) ?? deterministicBytes(`session:${subject}:author`);
-}
-
-function deterministicBytes(seed: string): Uint8Array {
-  let hash = 0x811c9dc5;
-  const bytes = new Uint8Array(16);
-  const view = new DataView(bytes.buffer);
-  for (let round = 0; round < 4; round += 1) {
-    for (let i = 0; i < seed.length; i += 1) {
-      hash ^= seed.charCodeAt(i) + round;
-      hash = Math.imul(hash, 0x01000193);
-    }
-    view.setUint32(round * 4, hash >>> 0, true);
-  }
-  return bytes;
 }
 
 export function formatUuid(bytes: Uint8Array): string {

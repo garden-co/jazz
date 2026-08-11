@@ -34,14 +34,13 @@ use napi_derive::napi;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use jazz::binding_support as core_binding;
+use jazz::binding_support::{self as core_binding, WireQueues};
 use jazz::db::{
     Db as CoreDb, MergeableTxOps, PeerConnection as CorePeerConnection,
     PreparedQuery as PreparedQueryInner, QueryAttachment as CoreQueryAttachment,
@@ -64,7 +63,6 @@ use jazz::tools::server::{
     TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
 };
 use jazz::tx::{DurabilityTier as CoreDurabilityTier, TxId};
-use jazz::wire::{TransportError, WireTransport as CoreWireTransport};
 
 type NapiDbInner = Rc<RefCell<Option<NapiDbInnerStorage>>>;
 
@@ -84,16 +82,6 @@ enum NapiWrite {
     },
 }
 
-#[derive(Clone, Default)]
-struct WireQueues {
-    inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
-    outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
-}
-
-struct NapiWireTransport {
-    queues: WireQueues,
-}
-
 struct NapiTickScheduler {
     callback: ThreadsafeFunction<String, ()>,
 }
@@ -108,17 +96,6 @@ impl CoreTickScheduler for NapiTickScheduler {
             Ok(urgency.to_string()),
             ThreadsafeFunctionCallMode::NonBlocking,
         );
-    }
-}
-
-impl CoreWireTransport for NapiWireTransport {
-    fn send_frame(&mut self, frame: Vec<u8>) -> std::result::Result<(), TransportError> {
-        self.queues.outbound.borrow_mut().push_back(frame);
-        Ok(())
-    }
-
-    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
-        self.queues.inbound.borrow_mut().pop_front()
     }
 }
 
@@ -260,25 +237,22 @@ impl Write {
 impl Transport {
     #[napi(js_name = "sendWireFrame")]
     pub fn send_wire_frame(&self, frame: Uint8Array) {
-        self.queues.inbound.borrow_mut().push_back(frame.to_vec());
+        self.queues.push_inbound([frame.to_vec()]);
     }
 
     #[napi(js_name = "sendWireFrames")]
     pub fn send_wire_frames(&self, frames: Vec<Uint8Array>) {
-        let mut inbound = self.queues.inbound.borrow_mut();
-        for frame in frames {
-            inbound.push_back(frame.to_vec());
-        }
+        self.queues
+            .push_inbound(frames.into_iter().map(|frame| frame.to_vec()));
     }
 
     #[napi(js_name = "recvWireFrames")]
     pub fn recv_wire_frames(&self) -> Vec<Uint8Array> {
-        let mut frames = Vec::new();
-        let mut outbound = self.queues.outbound.borrow_mut();
-        while let Some(frame) = outbound.pop_front() {
-            frames.push(Uint8Array::new(frame));
-        }
-        frames
+        self.queues
+            .drain_outbound()
+            .into_iter()
+            .map(Uint8Array::new)
+            .collect()
     }
 
     #[napi]
@@ -1325,9 +1299,7 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let queues = WireQueues::default();
-        let transport = Box::new(CoreWireTransportAdapter::current(NapiWireTransport {
-            queues: queues.clone(),
-        }));
+        let transport = Box::new(CoreWireTransportAdapter::current(queues.transport()));
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {
                 db: Rc::clone(db),

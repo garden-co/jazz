@@ -307,14 +307,23 @@ function callGenerated<Result>(call: () => Result): Result {
 }
 
 function normalizeGeneratedObject<ObjectType extends object>(object: ObjectType): ObjectType {
+  // One wrapper per method, memoized. The trap fires on every FFI call, so
+  // building a fresh closure each time would allocate per call and make each
+  // call site megamorphic, defeating Hermes' inline caches.
+  const wrappers = new Map<PropertyKey, unknown>();
   return new Proxy(object, {
     get(target, property, receiver) {
+      const cached = wrappers.get(property);
+      if (cached !== undefined) {
+        return cached;
+      }
+
       const value = Reflect.get(target, property, receiver) as unknown;
       if (typeof value !== "function") {
         return value;
       }
 
-      return (...args: unknown[]) => {
+      const wrapper = (...args: unknown[]) => {
         return callGenerated(() => {
           const result = value.apply(target, args) as unknown;
           if (result instanceof Promise) {
@@ -325,6 +334,8 @@ function normalizeGeneratedObject<ObjectType extends object>(object: ObjectType)
           return result;
         });
       };
+      wrappers.set(property, wrapper);
+      return wrapper;
     },
   });
 }
@@ -429,18 +440,29 @@ class RnTxShim implements Tx {
     this.transaction.rollback();
   }
 
+  /** Shared marshalling for the staged encoded writes; see {@link RnDbShim}. */
+  private encodedWrite(
+    method: "insertWithIdEncoded" | "restoreEncoded" | "updateEncoded" | "upsertEncoded",
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    updatedAtMs?: number | null,
+  ): void {
+    this.transaction[method](
+      table,
+      toArrayBuffer(rowId),
+      toArrayBuffer(cells),
+      optionalNumber(updatedAtMs),
+    );
+  }
+
   insertWithIdEncoded(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
     updatedAtMs?: number | null,
   ): void {
-    this.transaction.insertWithIdEncoded(
-      table,
-      toArrayBuffer(rowId),
-      toArrayBuffer(cells),
-      optionalNumber(updatedAtMs),
-    );
+    this.encodedWrite("insertWithIdEncoded", table, rowId, cells, updatedAtMs);
   }
 
   restoreEncoded(
@@ -449,12 +471,7 @@ class RnTxShim implements Tx {
     cells: Uint8Array,
     updatedAtMs?: number | null,
   ): void {
-    this.transaction.restoreEncoded(
-      table,
-      toArrayBuffer(rowId),
-      toArrayBuffer(cells),
-      optionalNumber(updatedAtMs),
-    );
+    this.encodedWrite("restoreEncoded", table, rowId, cells, updatedAtMs);
   }
 
   updateEncoded(
@@ -463,12 +480,7 @@ class RnTxShim implements Tx {
     patch: Uint8Array,
     updatedAtMs?: number | null,
   ): void {
-    this.transaction.updateEncoded(
-      table,
-      toArrayBuffer(rowId),
-      toArrayBuffer(patch),
-      optionalNumber(updatedAtMs),
-    );
+    this.encodedWrite("updateEncoded", table, rowId, patch, updatedAtMs);
   }
 
   upsertEncoded(
@@ -477,12 +489,7 @@ class RnTxShim implements Tx {
     cells: Uint8Array,
     updatedAtMs?: number | null,
   ): void {
-    this.transaction.upsertEncoded(
-      table,
-      toArrayBuffer(rowId),
-      toArrayBuffer(cells),
-      optionalNumber(updatedAtMs),
-    );
+    this.encodedWrite("upsertEncoded", table, rowId, cells, updatedAtMs);
   }
 
   delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): void {
@@ -611,20 +618,58 @@ export class RnDbShim implements NativeDb {
     );
   }
 
-  insertWithIdEncoded(
+  /**
+   * The encoded write calls differ only in which generated method they reach,
+   * so they share one marshalling body. Naming the method through a union
+   * keeps each call checked against `GeneratedDb`.
+   */
+  private encodedWrite(
+    method: "insertWithIdEncoded" | "restoreEncoded" | "updateEncoded" | "upsertEncoded",
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
     updatedAtMs?: number | null,
   ): Write {
     return new RnWriteShim(
-      this.db.insertWithIdEncoded(
+      this.db[method](
         table,
         toArrayBuffer(rowId),
         toArrayBuffer(cells),
         optionalNumber(updatedAtMs),
       ),
     );
+  }
+
+  private encodedWriteForIdentity(
+    method:
+      | "insertWithIdEncodedForIdentity"
+      | "restoreEncodedForIdentity"
+      | "updateEncodedForIdentity"
+      | "upsertEncodedForIdentity",
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    author: Uint8Array,
+    updatedAtMs?: number | null,
+  ): Write {
+    return new RnWriteShim(
+      this.db[method](
+        table,
+        toArrayBuffer(rowId),
+        toArrayBuffer(cells),
+        toArrayBuffer(author),
+        optionalNumber(updatedAtMs),
+      ),
+    );
+  }
+
+  insertWithIdEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    updatedAtMs?: number | null,
+  ): Write {
+    return this.encodedWrite("insertWithIdEncoded", table, rowId, cells, updatedAtMs);
   }
 
   insertWithIdEncodedForIdentity(
@@ -634,14 +679,13 @@ export class RnDbShim implements NativeDb {
     author: Uint8Array,
     updatedAtMs?: number | null,
   ): Write {
-    return new RnWriteShim(
-      this.db.insertWithIdEncodedForIdentity(
-        table,
-        toArrayBuffer(rowId),
-        toArrayBuffer(cells),
-        toArrayBuffer(author),
-        optionalNumber(updatedAtMs),
-      ),
+    return this.encodedWriteForIdentity(
+      "insertWithIdEncodedForIdentity",
+      table,
+      rowId,
+      cells,
+      author,
+      updatedAtMs,
     );
   }
 
@@ -651,14 +695,7 @@ export class RnDbShim implements NativeDb {
     cells: Uint8Array,
     updatedAtMs?: number | null,
   ): Write {
-    return new RnWriteShim(
-      this.db.restoreEncoded(
-        table,
-        toArrayBuffer(rowId),
-        toArrayBuffer(cells),
-        optionalNumber(updatedAtMs),
-      ),
-    );
+    return this.encodedWrite("restoreEncoded", table, rowId, cells, updatedAtMs);
   }
 
   restoreEncodedForIdentity(
@@ -668,14 +705,13 @@ export class RnDbShim implements NativeDb {
     author: Uint8Array,
     updatedAtMs?: number | null,
   ): Write {
-    return new RnWriteShim(
-      this.db.restoreEncodedForIdentity(
-        table,
-        toArrayBuffer(rowId),
-        toArrayBuffer(cells),
-        toArrayBuffer(author),
-        optionalNumber(updatedAtMs),
-      ),
+    return this.encodedWriteForIdentity(
+      "restoreEncodedForIdentity",
+      table,
+      rowId,
+      cells,
+      author,
+      updatedAtMs,
     );
   }
 
@@ -685,14 +721,7 @@ export class RnDbShim implements NativeDb {
     patch: Uint8Array,
     updatedAtMs?: number | null,
   ): Write {
-    return new RnWriteShim(
-      this.db.updateEncoded(
-        table,
-        toArrayBuffer(rowId),
-        toArrayBuffer(patch),
-        optionalNumber(updatedAtMs),
-      ),
-    );
+    return this.encodedWrite("updateEncoded", table, rowId, patch, updatedAtMs);
   }
 
   updateEncodedForIdentity(
@@ -702,14 +731,13 @@ export class RnDbShim implements NativeDb {
     author: Uint8Array,
     updatedAtMs?: number | null,
   ): Write {
-    return new RnWriteShim(
-      this.db.updateEncodedForIdentity(
-        table,
-        toArrayBuffer(rowId),
-        toArrayBuffer(patch),
-        toArrayBuffer(author),
-        optionalNumber(updatedAtMs),
-      ),
+    return this.encodedWriteForIdentity(
+      "updateEncodedForIdentity",
+      table,
+      rowId,
+      patch,
+      author,
+      updatedAtMs,
     );
   }
 
@@ -719,14 +747,7 @@ export class RnDbShim implements NativeDb {
     cells: Uint8Array,
     updatedAtMs?: number | null,
   ): Write {
-    return new RnWriteShim(
-      this.db.upsertEncoded(
-        table,
-        toArrayBuffer(rowId),
-        toArrayBuffer(cells),
-        optionalNumber(updatedAtMs),
-      ),
-    );
+    return this.encodedWrite("upsertEncoded", table, rowId, cells, updatedAtMs);
   }
 
   upsertEncodedForIdentity(
@@ -736,14 +757,13 @@ export class RnDbShim implements NativeDb {
     author: Uint8Array,
     updatedAtMs?: number | null,
   ): Write {
-    return new RnWriteShim(
-      this.db.upsertEncodedForIdentity(
-        table,
-        toArrayBuffer(rowId),
-        toArrayBuffer(cells),
-        toArrayBuffer(author),
-        optionalNumber(updatedAtMs),
-      ),
+    return this.encodedWriteForIdentity(
+      "upsertEncodedForIdentity",
+      table,
+      rowId,
+      cells,
+      author,
+      updatedAtMs,
     );
   }
 

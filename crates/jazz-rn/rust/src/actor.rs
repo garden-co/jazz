@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -7,22 +7,35 @@ use std::sync::{Arc, Mutex, Weak, mpsc};
 use std::thread::JoinHandle;
 
 use futures::channel::oneshot;
-use jazz::binding_support as binding;
+use jazz::binding_support::{self as binding, WireQueues};
 use jazz::db::{
-    Db, ExclusiveTxOps, MergeableTxOps, PeerConnection, PreparedQuery, QueryAttachment,
-    SubscriptionStream, WireTransportAdapter, WriteHandle, block_on,
+    Db, Error as DbError, ExclusiveTxOps, MergeableTxOps, PeerConnection, PreparedQuery,
+    QueryAttachment, SubscriptionStream, WireTransportAdapter, WriteHandle, block_on,
 };
 use jazz::groove::storage::{MemoryStorage, SqliteStorage};
 use jazz::ids::RowUuid;
 use jazz::node::OpenTxId;
 use jazz::tx::TxId;
-use jazz::wire::{TransportError, WireTransport};
 
 use crate::scheduler::RnScheduler;
 use crate::{
     JazzRnError, RnSubscriptionEvent, TickSchedulerCallback, closed_error, core_error,
     panic_to_jazz_error, poisoned_error,
 };
+
+/// Runs `body` against whichever storage backend the core was opened with.
+///
+/// `Db<MemoryStorage>` and `Db<SqliteStorage>` share one generic `impl`, so a
+/// body written once type-checks in both arms. Without this every operation
+/// would be spelled twice and the two copies could silently drift apart.
+macro_rules! with_db {
+    ($state:expr, |$db:ident| $body:expr) => {
+        match &$state.db {
+            CoreDb::Memory($db) => $body,
+            CoreDb::Persistent($db) => $body,
+        }
+    };
+}
 
 type Job = Box<dyn ActorJob>;
 
@@ -445,7 +458,7 @@ impl ActorHandle {
         cells: Vec<u8>,
         author: Option<Vec<u8>>,
         updated_at_ms: Option<u64>,
-    ) -> Result<WriteOpened, JazzRnError> {
+    ) -> Result<u64, JazzRnError> {
         let id = self.next_id();
         self.call("insert_with_id", move |state| {
             state.insert_with_id(
@@ -466,7 +479,7 @@ impl ActorHandle {
         patch: Vec<u8>,
         author: Option<Vec<u8>>,
         updated_at_ms: Option<u64>,
-    ) -> Result<WriteOpened, JazzRnError> {
+    ) -> Result<u64, JazzRnError> {
         let id = self.next_id();
         self.call("update", move |state| {
             state.update(
@@ -487,7 +500,7 @@ impl ActorHandle {
         cells: Vec<u8>,
         author: Option<Vec<u8>>,
         updated_at_ms: Option<u64>,
-    ) -> Result<WriteOpened, JazzRnError> {
+    ) -> Result<u64, JazzRnError> {
         let id = self.next_id();
         self.call("upsert", move |state| {
             state.upsert(
@@ -507,7 +520,7 @@ impl ActorHandle {
         row_id: Vec<u8>,
         author: Option<Vec<u8>>,
         updated_at_ms: Option<u64>,
-    ) -> Result<WriteOpened, JazzRnError> {
+    ) -> Result<u64, JazzRnError> {
         let id = self.next_id();
         self.call("delete", move |state| {
             state.delete(id, &table, &row_id, author.as_deref(), updated_at_ms)
@@ -521,7 +534,7 @@ impl ActorHandle {
         cells: Vec<u8>,
         author: Option<Vec<u8>>,
         updated_at_ms: Option<u64>,
-    ) -> Result<WriteOpened, JazzRnError> {
+    ) -> Result<u64, JazzRnError> {
         let id = self.next_id();
         self.call("restore", move |state| {
             state.restore(
@@ -598,7 +611,7 @@ impl ActorHandle {
         })
     }
 
-    pub(crate) fn commit_transaction(&self, transaction: u64) -> Result<WriteOpened, JazzRnError> {
+    pub(crate) fn commit_transaction(&self, transaction: u64) -> Result<u64, JazzRnError> {
         let write_id = self.next_id();
         self.call("commit_transaction", move |state| {
             state.commit_transaction(transaction, write_id)
@@ -617,7 +630,8 @@ impl ActorHandle {
 
     pub(crate) fn write_payload(&self, write: u64) -> Result<Vec<u8>, JazzRnError> {
         self.call("write_payload", move |state| {
-            Ok(state.write(write)?.payload.clone())
+            let entry = *state.write(write)?;
+            binding::encode_write_result(entry.row_id, entry.tx_id).map_err(Into::into)
         })
     }
 
@@ -908,13 +922,13 @@ struct TransactionEntry {
     open_tx: OpenTxId,
 }
 
+/// The ids a completed write exposes. Both are `Copy`, and the postcard
+/// payload the runtime reads is encoded on demand rather than retained per
+/// write — most writes are never asked for it.
+#[derive(Clone, Copy)]
 struct WriteEntry {
+    row_id: RowUuid,
     tx_id: TxId,
-    payload: Vec<u8>,
-}
-
-pub(crate) struct WriteOpened {
-    pub(crate) id: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -926,27 +940,6 @@ pub(crate) enum WaiterSignal {
 
 struct WaiterEntry {
     completion: Rc<RefCell<Option<oneshot::Sender<WaiterSignal>>>>,
-}
-
-#[derive(Clone, Default)]
-struct WireQueues {
-    inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
-    outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
-}
-
-struct RnWireTransport {
-    queues: WireQueues,
-}
-
-impl WireTransport for RnWireTransport {
-    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
-        self.queues.outbound.borrow_mut().push_back(frame);
-        Ok(())
-    }
-
-    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
-        self.queues.inbound.borrow_mut().pop_front()
-    }
 }
 
 enum TransportEntry {
@@ -963,18 +956,18 @@ enum TransportEntry {
 }
 
 impl TransportEntry {
-    fn send(&self, frames: Vec<Vec<u8>>) {
-        let queues = match self {
+    fn queues(&self) -> &WireQueues {
+        match self {
             Self::Memory { queues, .. } | Self::Persistent { queues, .. } => queues,
-        };
-        queues.inbound.borrow_mut().extend(frames);
+        }
+    }
+
+    fn send(&self, frames: Vec<Vec<u8>>) {
+        self.queues().push_inbound(frames);
     }
 
     fn recv(&self) -> Vec<Vec<u8>> {
-        let queues = match self {
-            Self::Memory { queues, .. } | Self::Persistent { queues, .. } => queues,
-        };
-        queues.outbound.borrow_mut().drain(..).collect()
+        self.queues().drain_outbound()
     }
 
     fn tick(&self) -> Result<u32, JazzRnError> {
@@ -1071,27 +1064,16 @@ impl CoreState {
     fn set_tick_scheduler(&mut self, callback: Box<dyn TickSchedulerCallback>) {
         self.scheduler.set_callback(Some(callback));
         let scheduler = Rc::new(self.scheduler.clone());
-        match &self.db {
-            CoreDb::Memory(db) => db.set_tick_scheduler(Some(scheduler)),
-            CoreDb::Persistent(db) => db.set_tick_scheduler(Some(scheduler)),
-        }
+        with_db!(self, |db| db.set_tick_scheduler(Some(scheduler)))
     }
 
     fn tick(&mut self) -> Result<(), JazzRnError> {
-        match &self.db {
-            CoreDb::Memory(db) => db.tick(),
-            CoreDb::Persistent(db) => db.tick(),
-        }
-        .map_err(core_error)
+        with_db!(self, |db| db.tick()).map_err(core_error)
     }
 
     fn prepare_query(&mut self, id: u64, bytes: &[u8]) -> Result<(), JazzRnError> {
         let query = binding::decode_query(bytes)?;
-        let prepared = match &self.db {
-            CoreDb::Memory(db) => db.prepare_query(&query),
-            CoreDb::Persistent(db) => db.prepare_query(&query),
-        }
-        .map_err(core_error)?;
+        let prepared = with_db!(self, |db| db.prepare_query(&query)).map_err(core_error)?;
         self.queries.insert(id, prepared);
         Ok(())
     }
@@ -1125,16 +1107,12 @@ impl CoreState {
         let query = self.query(query)?;
         let opts = binding::read_opts_from_json_str(opts_json)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let rows = match (&self.db, author) {
-            (CoreDb::Memory(db), Some(author)) => {
+        let rows = with_db!(self, |db| match author {
+            Some(author) => {
                 block_on(db.all_for_identity(&query, opts, author))
             }
-            (CoreDb::Persistent(db), Some(author)) => {
-                block_on(db.all_for_identity(&query, opts, author))
-            }
-            (CoreDb::Memory(db), None) => block_on(db.all(&query, opts)),
-            (CoreDb::Persistent(db), None) => block_on(db.all(&query, opts)),
-        }
+            None => block_on(db.all(&query, opts)),
+        })
         .map_err(core_error)?;
         binding::encode_rows(&rows).map_err(Into::into)
     }
@@ -1148,16 +1126,12 @@ impl CoreState {
         let query = self.query(query)?;
         let opts = binding::read_opts_from_json_str(opts_json)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let snapshot = match (&self.db, author) {
-            (CoreDb::Memory(db), Some(author)) => {
+        let snapshot = with_db!(self, |db| match author {
+            Some(author) => {
                 block_on(db.all_relation_snapshot_for_identity(&query, opts, author))
             }
-            (CoreDb::Persistent(db), Some(author)) => {
-                block_on(db.all_relation_snapshot_for_identity(&query, opts, author))
-            }
-            (CoreDb::Memory(db), None) => block_on(db.all_relation_snapshot(&query, opts)),
-            (CoreDb::Persistent(db), None) => block_on(db.all_relation_snapshot(&query, opts)),
-        }
+            None => block_on(db.all_relation_snapshot(&query, opts)),
+        })
         .map_err(core_error)?;
         binding::encode_relation_snapshot(&snapshot).map_err(Into::into)
     }
@@ -1171,16 +1145,12 @@ impl CoreState {
         let query = binding::relation_query_from_json(query_json)?;
         let opts = binding::read_opts_from_json_str(opts_json)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let snapshot = match (&self.db, author) {
-            (CoreDb::Memory(db), Some(author)) => {
+        let snapshot = with_db!(self, |db| match author {
+            Some(author) => {
                 block_on(db.all_relation_query_for_identity(&query, opts, author))
             }
-            (CoreDb::Persistent(db), Some(author)) => {
-                block_on(db.all_relation_query_for_identity(&query, opts, author))
-            }
-            (CoreDb::Memory(db), None) => block_on(db.all_relation_query(&query, opts)),
-            (CoreDb::Persistent(db), None) => block_on(db.all_relation_query(&query, opts)),
-        }
+            None => block_on(db.all_relation_query(&query, opts)),
+        })
         .map_err(core_error)?;
         binding::encode_rows(&snapshot.rows).map_err(Into::into)
     }
@@ -1201,31 +1171,21 @@ impl CoreState {
             });
         }
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let rows = match (&self.db, author) {
-            (CoreDb::Memory(db), Some(author)) => db
+        let rows = with_db!(self, |db| match author {
+            Some(author) => db
                 .exclusive_tx_ref(transaction.open_tx)
                 .all_prepared_for_identity(&query, author),
-            (CoreDb::Persistent(db), Some(author)) => db
-                .exclusive_tx_ref(transaction.open_tx)
-                .all_prepared_for_identity(&query, author),
-            (CoreDb::Memory(db), None) => db
+            None => db
                 .exclusive_tx_ref(transaction.open_tx)
                 .all_prepared(&query),
-            (CoreDb::Persistent(db), None) => db
-                .exclusive_tx_ref(transaction.open_tx)
-                .all_prepared(&query),
-        }
+        })
         .map_err(core_error)?;
         binding::encode_rows(&rows).map_err(Into::into)
     }
 
     fn local_current_row(&mut self, table: &str, row_id: &[u8]) -> Result<Vec<u8>, JazzRnError> {
         let row_id = binding::row_uuid_from_bytes(row_id)?;
-        let row = match &self.db {
-            CoreDb::Memory(db) => db.local_current_row(table, row_id),
-            CoreDb::Persistent(db) => db.local_current_row(table, row_id),
-        }
-        .map_err(core_error)?;
+        let row = with_db!(self, |db| db.local_current_row(table, row_id)).map_err(core_error)?;
         binding::encode_rows(&row.into_iter().collect::<Vec<_>>()).map_err(Into::into)
     }
 
@@ -1243,10 +1203,7 @@ impl CoreState {
             })
             .transpose()?;
         let claims = binding::claims_from_json(author, claims)?;
-        match &self.db {
-            CoreDb::Memory(db) => db.set_identity_claims(author, claims),
-            CoreDb::Persistent(db) => db.set_identity_claims(author, claims),
-        }
+        with_db!(self, |db| db.set_identity_claims(author, claims));
         Ok(())
     }
 
@@ -1258,25 +1215,17 @@ impl CoreState {
     ) -> Result<bool, JazzRnError> {
         let cells = binding::decode_cells(cells)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        match (&self.db, author) {
-            (CoreDb::Memory(db), Some(author)) => db.can_insert_for_identity(table, cells, author),
-            (CoreDb::Persistent(db), Some(author)) => {
-                db.can_insert_for_identity(table, cells, author)
-            }
-            (CoreDb::Memory(db), None) => db.can_insert(table, cells),
-            (CoreDb::Persistent(db), None) => db.can_insert(table, cells),
-        }
+        with_db!(self, |db| match author {
+            Some(author) => db.can_insert_for_identity(table, cells, author),
+            None => db.can_insert(table, cells),
+        })
         .map_err(core_error)
     }
 
     fn can_read(&mut self, table: &str, row_id: &[u8], author: &[u8]) -> Result<bool, JazzRnError> {
         let row_id = binding::row_uuid_from_bytes(row_id)?;
         let author = binding::author_id_from_bytes(author)?;
-        match &self.db {
-            CoreDb::Memory(db) => db.can_read_for_identity(table, row_id, author),
-            CoreDb::Persistent(db) => db.can_read_for_identity(table, row_id, author),
-        }
-        .map_err(core_error)
+        with_db!(self, |db| db.can_read_for_identity(table, row_id, author)).map_err(core_error)
     }
 
     fn can_update(
@@ -1287,11 +1236,7 @@ impl CoreState {
     ) -> Result<bool, JazzRnError> {
         let row_id = binding::row_uuid_from_bytes(row_id)?;
         let author = binding::author_id_from_bytes(author)?;
-        match &self.db {
-            CoreDb::Memory(db) => db.can_update_for_identity(table, row_id, author),
-            CoreDb::Persistent(db) => db.can_update_for_identity(table, row_id, author),
-        }
-        .map_err(core_error)
+        with_db!(self, |db| db.can_update_for_identity(table, row_id, author)).map_err(core_error)
     }
 
     fn can_delete(
@@ -1302,11 +1247,7 @@ impl CoreState {
     ) -> Result<bool, JazzRnError> {
         let row_id = binding::row_uuid_from_bytes(row_id)?;
         let author = binding::author_id_from_bytes(author)?;
-        match &self.db {
-            CoreDb::Memory(db) => db.can_delete_for_identity(table, row_id, author),
-            CoreDb::Persistent(db) => db.can_delete_for_identity(table, row_id, author),
-        }
-        .map_err(core_error)
+        with_db!(self, |db| db.can_delete_for_identity(table, row_id, author)).map_err(core_error)
     }
 
     fn attach_query(
@@ -1319,16 +1260,12 @@ impl CoreState {
         let query = self.query(query)?;
         let opts = binding::read_opts_from_json_str(opts_json)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let attachment = match (&self.db, author) {
-            (CoreDb::Memory(db), Some(author)) => {
+        let attachment = with_db!(self, |db| match author {
+            Some(author) => {
                 db.attach_query_with_opts_for_identity(&query, opts, author)
             }
-            (CoreDb::Persistent(db), Some(author)) => {
-                db.attach_query_with_opts_for_identity(&query, opts, author)
-            }
-            (CoreDb::Memory(db), None) => db.attach_query_with_opts(&query, opts),
-            (CoreDb::Persistent(db), None) => db.attach_query_with_opts(&query, opts),
-        }
+            None => db.attach_query_with_opts(&query, opts),
+        })
         .map_err(core_error)?;
         self.attachments.insert(id, attachment);
         Ok(())
@@ -1339,10 +1276,7 @@ impl CoreState {
             .attachments
             .get(&id)
             .ok_or_else(|| invalid_handle("query attachment", id))?;
-        Ok(match &self.db {
-            CoreDb::Memory(db) => db.query_attachment_is_covered(attachment),
-            CoreDb::Persistent(db) => db.query_attachment_is_covered(attachment),
-        })
+        Ok(with_db!(self, |db| db.query_attachment_is_covered(attachment)))
     }
 
     fn detach_query(&mut self, id: u64) -> Result<(), JazzRnError> {
@@ -1350,19 +1284,13 @@ impl CoreState {
             .attachments
             .remove(&id)
             .ok_or_else(|| invalid_handle("query attachment", id))?;
-        match &self.db {
-            CoreDb::Memory(db) => db.detach_query(attachment),
-            CoreDb::Persistent(db) => db.detach_query(attachment),
-        }
+        with_db!(self, |db| db.detach_query(attachment));
         Ok(())
     }
 
     fn detach_query_if_present(&mut self, id: u64) -> Result<(), JazzRnError> {
         if let Some(attachment) = self.attachments.remove(&id) {
-            match &self.db {
-                CoreDb::Memory(db) => db.detach_query(attachment),
-                CoreDb::Persistent(db) => db.detach_query(attachment),
-            }
+            with_db!(self, |db| db.detach_query(attachment))
         }
         Ok(())
     }
@@ -1377,16 +1305,12 @@ impl CoreState {
         let query = self.query(query)?;
         let opts = binding::read_opts_from_json_str(opts_json)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let stream = match (&self.db, author) {
-            (CoreDb::Memory(db), Some(author)) => {
+        let stream = with_db!(self, |db| match author {
+            Some(author) => {
                 block_on(db.subscribe_for_identity(&query, opts, author))
             }
-            (CoreDb::Persistent(db), Some(author)) => {
-                block_on(db.subscribe_for_identity(&query, opts, author))
-            }
-            (CoreDb::Memory(db), None) => block_on(db.subscribe(&query, opts)),
-            (CoreDb::Persistent(db), None) => block_on(db.subscribe(&query, opts)),
-        }
+            None => block_on(db.subscribe(&query, opts)),
+        })
         .map_err(core_error)?;
         self.subscriptions.insert(id, stream);
         Ok(())
@@ -1402,16 +1326,12 @@ impl CoreState {
         let query = binding::relation_query_from_json(query_json)?;
         let opts = binding::read_opts_from_json_str(opts_json)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let stream = match (&self.db, author) {
-            (CoreDb::Memory(db), Some(author)) => {
+        let stream = with_db!(self, |db| match author {
+            Some(author) => {
                 block_on(db.subscribe_relation_query_for_identity(&query, opts, author))
             }
-            (CoreDb::Persistent(db), Some(author)) => {
-                block_on(db.subscribe_relation_query_for_identity(&query, opts, author))
-            }
-            (CoreDb::Memory(db), None) => block_on(db.subscribe_relation_query(&query, opts)),
-            (CoreDb::Persistent(db), None) => block_on(db.subscribe_relation_query(&query, opts)),
-        }
+            None => block_on(db.subscribe_relation_query(&query, opts)),
+        })
         .map_err(core_error)?;
         self.subscriptions.insert(id, stream);
         Ok(())
@@ -1476,44 +1396,19 @@ impl CoreState {
         cells: &[u8],
         author: Option<&[u8]>,
         updated_at_ms: Option<u64>,
-    ) -> Result<WriteOpened, JazzRnError> {
+    ) -> Result<u64, JazzRnError> {
         let row_id = binding::row_uuid_from_bytes(row_id)?;
         let cells = binding::decode_cells(cells)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let (row_id, tx_id) = match (&self.db, author, updated_at_ms) {
-            (CoreDb::Memory(db), Some(author), Some(now)) => write_parts(
+        let (row_id, tx_id) = with_db!(self, |db| match (author, updated_at_ms) {
+            (Some(author), Some(now)) => write_parts(
                 db.insert_with_id_for_identity_at_ms(author, table, row_id, cells, now)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Persistent(db), Some(author), Some(now)) => write_parts(
-                db.insert_with_id_for_identity_at_ms(author, table, row_id, cells, now)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Memory(db), Some(author), None) => write_parts(
-                db.insert_with_id_for_identity(author, table, row_id, cells)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Persistent(db), Some(author), None) => write_parts(
-                db.insert_with_id_for_identity(author, table, row_id, cells)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Memory(db), None, Some(now)) => write_parts(
-                db.insert_with_id_at_ms(table, row_id, cells, now)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Persistent(db), None, Some(now)) => write_parts(
-                db.insert_with_id_at_ms(table, row_id, cells, now)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Memory(db), None, None) => write_parts(
-                db.insert_with_id(table, row_id, cells)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Persistent(db), None, None) => write_parts(
-                db.insert_with_id(table, row_id, cells)
-                    .map_err(core_error)?,
-            ),
-        };
+            )?,
+            (Some(author), None) =>
+                write_parts(db.insert_with_id_for_identity(author, table, row_id, cells))?,
+            (None, Some(now)) => write_parts(db.insert_with_id_at_ms(table, row_id, cells, now))?,
+            (None, None) => write_parts(db.insert_with_id(table, row_id, cells))?,
+        });
         self.register_write(id, row_id, tx_id)
     }
 
@@ -1525,42 +1420,20 @@ impl CoreState {
         patch: &[u8],
         author: Option<&[u8]>,
         updated_at_ms: Option<u64>,
-    ) -> Result<WriteOpened, JazzRnError> {
+    ) -> Result<u64, JazzRnError> {
         let row_id = binding::row_uuid_from_bytes(row_id)?;
         let patch = binding::decode_cells(patch)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let (row_id, tx_id) = match (&self.db, author, updated_at_ms) {
-            (CoreDb::Memory(db), Some(author), Some(now)) => write_parts(
-                db.update_for_identity_at_ms(author, table, row_id, patch, now)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Persistent(db), Some(author), Some(now)) => write_parts(
-                db.update_for_identity_at_ms(author, table, row_id, patch, now)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Memory(db), Some(author), None) => write_parts(
-                db.update_for_identity(author, table, row_id, patch)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Persistent(db), Some(author), None) => write_parts(
-                db.update_for_identity(author, table, row_id, patch)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Memory(db), None, Some(now)) => write_parts(
-                db.update_at_ms(table, row_id, patch, now)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Persistent(db), None, Some(now)) => write_parts(
-                db.update_at_ms(table, row_id, patch, now)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Memory(db), None, None) => {
-                write_parts(db.update(table, row_id, patch).map_err(core_error)?)
+        let (row_id, tx_id) = with_db!(self, |db| match (author, updated_at_ms) {
+            (Some(author), Some(now)) =>
+                write_parts(db.update_for_identity_at_ms(author, table, row_id, patch, now))?,
+            (Some(author), None) =>
+                write_parts(db.update_for_identity(author, table, row_id, patch))?,
+            (None, Some(now)) => write_parts(db.update_at_ms(table, row_id, patch, now))?,
+            (None, None) => {
+                write_parts(db.update(table, row_id, patch))?
             }
-            (CoreDb::Persistent(db), None, None) => {
-                write_parts(db.update(table, row_id, patch).map_err(core_error)?)
-            }
-        };
+        });
         self.register_write(id, row_id, tx_id)
     }
 
@@ -1572,42 +1445,20 @@ impl CoreState {
         cells: &[u8],
         author: Option<&[u8]>,
         updated_at_ms: Option<u64>,
-    ) -> Result<WriteOpened, JazzRnError> {
+    ) -> Result<u64, JazzRnError> {
         let row_id = binding::row_uuid_from_bytes(row_id)?;
         let cells = binding::decode_cells(cells)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let (row_id, tx_id) = match (&self.db, author, updated_at_ms) {
-            (CoreDb::Memory(db), Some(author), Some(now)) => write_parts(
-                db.upsert_for_identity_at_ms(author, table, row_id, cells, now)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Persistent(db), Some(author), Some(now)) => write_parts(
-                db.upsert_for_identity_at_ms(author, table, row_id, cells, now)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Memory(db), Some(author), None) => write_parts(
-                db.upsert_for_identity(author, table, row_id, cells)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Persistent(db), Some(author), None) => write_parts(
-                db.upsert_for_identity(author, table, row_id, cells)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Memory(db), None, Some(now)) => write_parts(
-                db.upsert_at_ms(table, row_id, cells, now)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Persistent(db), None, Some(now)) => write_parts(
-                db.upsert_at_ms(table, row_id, cells, now)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Memory(db), None, None) => {
-                write_parts(db.upsert(table, row_id, cells).map_err(core_error)?)
+        let (row_id, tx_id) = with_db!(self, |db| match (author, updated_at_ms) {
+            (Some(author), Some(now)) =>
+                write_parts(db.upsert_for_identity_at_ms(author, table, row_id, cells, now))?,
+            (Some(author), None) =>
+                write_parts(db.upsert_for_identity(author, table, row_id, cells))?,
+            (None, Some(now)) => write_parts(db.upsert_at_ms(table, row_id, cells, now))?,
+            (None, None) => {
+                write_parts(db.upsert(table, row_id, cells))?
             }
-            (CoreDb::Persistent(db), None, None) => {
-                write_parts(db.upsert(table, row_id, cells).map_err(core_error)?)
-            }
-        };
+        });
         self.register_write(id, row_id, tx_id)
     }
 
@@ -1618,39 +1469,20 @@ impl CoreState {
         row_id: &[u8],
         author: Option<&[u8]>,
         updated_at_ms: Option<u64>,
-    ) -> Result<WriteOpened, JazzRnError> {
+    ) -> Result<u64, JazzRnError> {
         let row_id = binding::row_uuid_from_bytes(row_id)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let (row_id, tx_id) = match (&self.db, author, updated_at_ms) {
-            (CoreDb::Memory(db), Some(author), Some(now)) => write_parts(
-                db.delete_for_identity_at_ms(author, table, row_id, now)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Persistent(db), Some(author), Some(now)) => write_parts(
-                db.delete_for_identity_at_ms(author, table, row_id, now)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Memory(db), Some(author), None) => write_parts(
-                db.delete_for_identity(author, table, row_id)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Persistent(db), Some(author), None) => write_parts(
-                db.delete_for_identity(author, table, row_id)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Memory(db), None, Some(now)) => {
-                write_parts(db.delete_at_ms(table, row_id, now).map_err(core_error)?)
+        let (row_id, tx_id) = with_db!(self, |db| match (author, updated_at_ms) {
+            (Some(author), Some(now)) =>
+                write_parts(db.delete_for_identity_at_ms(author, table, row_id, now))?,
+            (Some(author), None) => write_parts(db.delete_for_identity(author, table, row_id))?,
+            (None, Some(now)) => {
+                write_parts(db.delete_at_ms(table, row_id, now))?
             }
-            (CoreDb::Persistent(db), None, Some(now)) => {
-                write_parts(db.delete_at_ms(table, row_id, now).map_err(core_error)?)
+            (None, None) => {
+                write_parts(db.delete(table, row_id))?
             }
-            (CoreDb::Memory(db), None, None) => {
-                write_parts(db.delete(table, row_id).map_err(core_error)?)
-            }
-            (CoreDb::Persistent(db), None, None) => {
-                write_parts(db.delete(table, row_id).map_err(core_error)?)
-            }
-        };
+        });
         self.register_write(id, row_id, tx_id)
     }
 
@@ -1662,42 +1494,20 @@ impl CoreState {
         cells: &[u8],
         author: Option<&[u8]>,
         updated_at_ms: Option<u64>,
-    ) -> Result<WriteOpened, JazzRnError> {
+    ) -> Result<u64, JazzRnError> {
         let row_id = binding::row_uuid_from_bytes(row_id)?;
         let cells = binding::decode_cells(cells)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let (row_id, tx_id) = match (&self.db, author, updated_at_ms) {
-            (CoreDb::Memory(db), Some(author), Some(now)) => write_parts(
-                db.restore_for_identity_at_ms(author, table, row_id, cells, now)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Persistent(db), Some(author), Some(now)) => write_parts(
-                db.restore_for_identity_at_ms(author, table, row_id, cells, now)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Memory(db), Some(author), None) => write_parts(
-                db.restore_for_identity(author, table, row_id, cells)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Persistent(db), Some(author), None) => write_parts(
-                db.restore_for_identity(author, table, row_id, cells)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Memory(db), None, Some(now)) => write_parts(
-                db.restore_at_ms(table, row_id, cells, now)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Persistent(db), None, Some(now)) => write_parts(
-                db.restore_at_ms(table, row_id, cells, now)
-                    .map_err(core_error)?,
-            ),
-            (CoreDb::Memory(db), None, None) => {
-                write_parts(db.restore(table, row_id, cells).map_err(core_error)?)
+        let (row_id, tx_id) = with_db!(self, |db| match (author, updated_at_ms) {
+            (Some(author), Some(now)) =>
+                write_parts(db.restore_for_identity_at_ms(author, table, row_id, cells, now))?,
+            (Some(author), None) =>
+                write_parts(db.restore_for_identity(author, table, row_id, cells))?,
+            (None, Some(now)) => write_parts(db.restore_at_ms(table, row_id, cells, now))?,
+            (None, None) => {
+                write_parts(db.restore(table, row_id, cells))?
             }
-            (CoreDb::Persistent(db), None, None) => {
-                write_parts(db.restore(table, row_id, cells).map_err(core_error)?)
-            }
-        };
+        });
         self.register_write(id, row_id, tx_id)
     }
 
@@ -1706,16 +1516,9 @@ impl CoreState {
         id: u64,
         row_id: RowUuid,
         tx_id: TxId,
-    ) -> Result<WriteOpened, JazzRnError> {
-        let payload = binding::encode_write_result(row_id, tx_id)?;
-        self.writes.insert(
-            id,
-            WriteEntry {
-                tx_id,
-                payload: payload.clone(),
-            },
-        );
-        Ok(WriteOpened { id })
+    ) -> Result<u64, JazzRnError> {
+        self.writes.insert(id, WriteEntry { row_id, tx_id });
+        Ok(id)
     }
 
     fn begin_transaction(
@@ -1725,18 +1528,13 @@ impl CoreState {
         author: Option<&[u8]>,
     ) -> Result<(), JazzRnError> {
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let open_tx = match (&self.db, kind, author) {
-            (CoreDb::Memory(db), TransactionKind::Mergeable, Some(author)) => {
+        let open_tx = with_db!(self, |db| match (kind, author) {
+            (TransactionKind::Mergeable, Some(author)) => {
                 db.begin_mergeable_for_identity(author)
             }
-            (CoreDb::Persistent(db), TransactionKind::Mergeable, Some(author)) => {
-                db.begin_mergeable_for_identity(author)
-            }
-            (CoreDb::Memory(db), TransactionKind::Mergeable, None) => db.begin_mergeable(),
-            (CoreDb::Persistent(db), TransactionKind::Mergeable, None) => db.begin_mergeable(),
-            (CoreDb::Memory(db), TransactionKind::Exclusive, _) => db.begin_exclusive(),
-            (CoreDb::Persistent(db), TransactionKind::Exclusive, _) => db.begin_exclusive(),
-        }
+            (TransactionKind::Mergeable, None) => db.begin_mergeable(),
+            (TransactionKind::Exclusive, _) => db.begin_exclusive(),
+        })
         .map_err(core_error)?;
         self.transactions
             .insert(id, TransactionEntry { kind, open_tx });
@@ -1754,26 +1552,17 @@ impl CoreState {
         let transaction = self.transaction(transaction)?;
         let row_id = binding::row_uuid_from_bytes(row_id)?;
         let cells = binding::decode_cells(cells)?;
-        match (&self.db, transaction.kind, updated_at_ms) {
-            (CoreDb::Memory(db), TransactionKind::Mergeable, Some(now)) => db
+        with_db!(self, |db| match (transaction.kind, updated_at_ms) {
+            (TransactionKind::Mergeable, Some(now)) => db
                 .mergeable_tx_ref(transaction.open_tx)
                 .insert_with_id_at_ms(table, row_id, cells, now),
-            (CoreDb::Persistent(db), TransactionKind::Mergeable, Some(now)) => db
-                .mergeable_tx_ref(transaction.open_tx)
-                .insert_with_id_at_ms(table, row_id, cells, now),
-            (CoreDb::Memory(db), TransactionKind::Mergeable, None) => db
+            (TransactionKind::Mergeable, None) => db
                 .mergeable_tx_ref(transaction.open_tx)
                 .insert_with_id(table, row_id, cells),
-            (CoreDb::Persistent(db), TransactionKind::Mergeable, None) => db
-                .mergeable_tx_ref(transaction.open_tx)
-                .insert_with_id(table, row_id, cells),
-            (CoreDb::Memory(db), TransactionKind::Exclusive, _) => db
+            (TransactionKind::Exclusive, _) => db
                 .exclusive_tx_ref(transaction.open_tx)
                 .insert_with_id(table, row_id, cells),
-            (CoreDb::Persistent(db), TransactionKind::Exclusive, _) => db
-                .exclusive_tx_ref(transaction.open_tx)
-                .insert_with_id(table, row_id, cells),
-        }
+        })
         .map_err(core_error)
     }
 
@@ -1788,26 +1577,17 @@ impl CoreState {
         let transaction = self.transaction(transaction)?;
         let row_id = binding::row_uuid_from_bytes(row_id)?;
         let patch = binding::decode_cells(patch)?;
-        match (&self.db, transaction.kind, updated_at_ms) {
-            (CoreDb::Memory(db), TransactionKind::Mergeable, Some(now)) => db
+        with_db!(self, |db| match (transaction.kind, updated_at_ms) {
+            (TransactionKind::Mergeable, Some(now)) => db
                 .mergeable_tx_ref(transaction.open_tx)
                 .update_at_ms(table, row_id, patch, now),
-            (CoreDb::Persistent(db), TransactionKind::Mergeable, Some(now)) => db
-                .mergeable_tx_ref(transaction.open_tx)
-                .update_at_ms(table, row_id, patch, now),
-            (CoreDb::Memory(db), TransactionKind::Mergeable, None) => db
+            (TransactionKind::Mergeable, None) => db
                 .mergeable_tx_ref(transaction.open_tx)
                 .update(table, row_id, patch),
-            (CoreDb::Persistent(db), TransactionKind::Mergeable, None) => db
-                .mergeable_tx_ref(transaction.open_tx)
-                .update(table, row_id, patch),
-            (CoreDb::Memory(db), TransactionKind::Exclusive, _) => db
+            (TransactionKind::Exclusive, _) => db
                 .exclusive_tx_ref(transaction.open_tx)
                 .update(table, row_id, patch),
-            (CoreDb::Persistent(db), TransactionKind::Exclusive, _) => db
-                .exclusive_tx_ref(transaction.open_tx)
-                .update(table, row_id, patch),
-        }
+        })
         .map_err(core_error)
     }
 
@@ -1820,26 +1600,17 @@ impl CoreState {
     ) -> Result<(), JazzRnError> {
         let transaction = self.transaction(transaction)?;
         let row_id = binding::row_uuid_from_bytes(row_id)?;
-        match (&self.db, transaction.kind, updated_at_ms) {
-            (CoreDb::Memory(db), TransactionKind::Mergeable, Some(now)) => db
+        with_db!(self, |db| match (transaction.kind, updated_at_ms) {
+            (TransactionKind::Mergeable, Some(now)) => db
                 .mergeable_tx_ref(transaction.open_tx)
                 .delete_at_ms(table, row_id, now),
-            (CoreDb::Persistent(db), TransactionKind::Mergeable, Some(now)) => db
-                .mergeable_tx_ref(transaction.open_tx)
-                .delete_at_ms(table, row_id, now),
-            (CoreDb::Memory(db), TransactionKind::Mergeable, None) => db
+            (TransactionKind::Mergeable, None) => db
                 .mergeable_tx_ref(transaction.open_tx)
                 .delete(table, row_id),
-            (CoreDb::Persistent(db), TransactionKind::Mergeable, None) => db
-                .mergeable_tx_ref(transaction.open_tx)
-                .delete(table, row_id),
-            (CoreDb::Memory(db), TransactionKind::Exclusive, _) => db
+            (TransactionKind::Exclusive, _) => db
                 .exclusive_tx_ref(transaction.open_tx)
                 .delete(table, row_id),
-            (CoreDb::Persistent(db), TransactionKind::Exclusive, _) => db
-                .exclusive_tx_ref(transaction.open_tx)
-                .delete(table, row_id),
-        }
+        })
         .map_err(core_error)
     }
 
@@ -1854,26 +1625,17 @@ impl CoreState {
         let transaction = self.transaction(transaction)?;
         let row_id = binding::row_uuid_from_bytes(row_id)?;
         let cells = binding::decode_cells(cells)?;
-        match (&self.db, transaction.kind, updated_at_ms) {
-            (CoreDb::Memory(db), TransactionKind::Mergeable, Some(now)) => db
+        with_db!(self, |db| match (transaction.kind, updated_at_ms) {
+            (TransactionKind::Mergeable, Some(now)) => db
                 .mergeable_tx_ref(transaction.open_tx)
                 .restore_at_ms(table, row_id, cells, now),
-            (CoreDb::Persistent(db), TransactionKind::Mergeable, Some(now)) => db
-                .mergeable_tx_ref(transaction.open_tx)
-                .restore_at_ms(table, row_id, cells, now),
-            (CoreDb::Memory(db), TransactionKind::Mergeable, None) => db
+            (TransactionKind::Mergeable, None) => db
                 .mergeable_tx_ref(transaction.open_tx)
                 .restore(table, row_id, cells),
-            (CoreDb::Persistent(db), TransactionKind::Mergeable, None) => db
-                .mergeable_tx_ref(transaction.open_tx)
-                .restore(table, row_id, cells),
-            (CoreDb::Memory(db), TransactionKind::Exclusive, _) => db
+            (TransactionKind::Exclusive, _) => db
                 .exclusive_tx_ref(transaction.open_tx)
                 .restore(table, row_id, cells),
-            (CoreDb::Persistent(db), TransactionKind::Exclusive, _) => db
-                .exclusive_tx_ref(transaction.open_tx)
-                .restore(table, row_id, cells),
-        }
+        })
         .map_err(core_error)
     }
 
@@ -1881,22 +1643,16 @@ impl CoreState {
         &mut self,
         transaction_id: u64,
         write_id: u64,
-    ) -> Result<WriteOpened, JazzRnError> {
+    ) -> Result<u64, JazzRnError> {
         let transaction = self.transaction(transaction_id)?;
-        let tx_id = match (&self.db, transaction.kind) {
-            (CoreDb::Memory(db), TransactionKind::Mergeable) => {
+        let tx_id = with_db!(self, |db| match transaction.kind {
+            TransactionKind::Mergeable => {
                 db.commit_mergeable_handle(transaction.open_tx)
             }
-            (CoreDb::Persistent(db), TransactionKind::Mergeable) => {
-                db.commit_mergeable_handle(transaction.open_tx)
-            }
-            (CoreDb::Memory(db), TransactionKind::Exclusive) => {
+            TransactionKind::Exclusive => {
                 db.commit_exclusive_handle(transaction.open_tx)
             }
-            (CoreDb::Persistent(db), TransactionKind::Exclusive) => {
-                db.commit_exclusive_handle(transaction.open_tx)
-            }
-        }
+        })
         .map_err(core_error)?;
         self.transactions.remove(&transaction_id);
         self.register_write(write_id, RowUuid::from_bytes([0; 16]), tx_id)
@@ -1904,10 +1660,8 @@ impl CoreState {
 
     fn rollback_transaction(&mut self, transaction_id: u64) -> Result<(), JazzRnError> {
         let transaction = self.transaction(transaction_id)?;
-        match &self.db {
-            CoreDb::Memory(db) => db.abandon_transaction_handle(transaction.open_tx),
-            CoreDb::Persistent(db) => db.abandon_transaction_handle(transaction.open_tx),
-        }
+        with_db!(self, |db| db
+            .abandon_transaction_handle(transaction.open_tx))
         .map_err(core_error)?;
         self.transactions.remove(&transaction_id);
         Ok(())
@@ -1917,30 +1671,20 @@ impl CoreState {
         let Some(transaction) = self.transactions.remove(&transaction_id) else {
             return Ok(());
         };
-        match &self.db {
-            CoreDb::Memory(db) => db.abandon_transaction_handle(transaction.open_tx),
-            CoreDb::Persistent(db) => db.abandon_transaction_handle(transaction.open_tx),
-        }
+        with_db!(self, |db| db
+            .abandon_transaction_handle(transaction.open_tx))
         .map_err(core_error)
     }
 
     fn wait_for_write(&mut self, write: u64, tier: &str) -> Result<(), JazzRnError> {
         let tx_id = self.write(write)?.tx_id;
         let tier = binding::durability_tier_from_str(tier)?;
-        match &self.db {
-            CoreDb::Memory(db) => binding::wait_for_tx(db, tx_id, tier),
-            CoreDb::Persistent(db) => binding::wait_for_tx(db, tx_id, tier),
-        }
-        .map_err(Into::into)
+        with_db!(self, |db| binding::wait_for_tx(db, tx_id, tier)).map_err(Into::into)
     }
 
     fn write_state(&mut self, write: u64) -> Result<String, JazzRnError> {
         let tx_id = self.write(write)?.tx_id;
-        let state = match &self.db {
-            CoreDb::Memory(db) => db.write_state(tx_id),
-            CoreDb::Persistent(db) => db.write_state(tx_id),
-        }
-        .map_err(core_error)?;
+        let state = with_db!(self, |db| db.write_state(tx_id)).map_err(core_error)?;
         serde_json::to_string(&binding::write_state_to_json(&state)).map_err(|error| {
             JazzRnError::Internal {
                 message: format!("encode write state json: {error}"),
@@ -1957,27 +1701,18 @@ impl CoreState {
         let (sender, receiver) = oneshot::channel();
         let completion = Rc::new(RefCell::new(Some(sender)));
         let callback_completion = Rc::clone(&completion);
-        match &self.db {
-            CoreDb::Memory(db) => db.on_next_write_state_change(tx_id, move || {
-                if let Some(sender) = callback_completion.borrow_mut().take() {
-                    let _ = sender.send(WaiterSignal::Changed);
-                }
-            }),
-            CoreDb::Persistent(db) => db.on_next_write_state_change(tx_id, move || {
-                if let Some(sender) = callback_completion.borrow_mut().take() {
-                    let _ = sender.send(WaiterSignal::Changed);
-                }
-            }),
-        }
+        with_db!(self, |db| db.on_next_write_state_change(tx_id, move || {
+            if let Some(sender) = callback_completion.borrow_mut().take() {
+                let _ = sender.send(WaiterSignal::Changed);
+            }
+        }));
         self.waiters.insert(waiter, WaiterEntry { completion });
         Ok(receiver)
     }
 
     fn connect_upstream(&mut self, id: u64) -> Result<(), JazzRnError> {
         let queues = WireQueues::default();
-        let transport = Box::new(WireTransportAdapter::current(RnWireTransport {
-            queues: queues.clone(),
-        }));
+        let transport = Box::new(WireTransportAdapter::current(queues.transport()));
         let entry = match &self.db {
             CoreDb::Memory(db) => TransportEntry::Memory {
                 db: Rc::clone(db),
@@ -2042,54 +1777,38 @@ impl CoreState {
             return Ok(());
         }
         self.cancel_waiters(waiter_signal);
-        match &self.db {
-            CoreDb::Memory(db) => db.set_tick_scheduler(None),
-            CoreDb::Persistent(db) => db.set_tick_scheduler(None),
-        }
+        with_db!(self, |db| db.set_tick_scheduler(None));
         self.scheduler.shutdown();
         for (_, transport) in self.transports.drain() {
             transport.close();
         }
         self.subscriptions.clear();
-        let attachments = self
-            .attachments
-            .drain()
-            .map(|(_, value)| value)
-            .collect::<Vec<_>>();
-        for attachment in attachments {
-            match &self.db {
-                CoreDb::Memory(db) => db.detach_query(attachment),
-                CoreDb::Persistent(db) => db.detach_query(attachment),
-            }
+        for (_, attachment) in self.attachments.drain() {
+            with_db!(self, |db| db.detach_query(attachment));
         }
-        let transactions = self
-            .transactions
-            .drain()
-            .map(|(_, value)| value)
-            .collect::<Vec<_>>();
-        for transaction in transactions {
-            let _ = match &self.db {
-                CoreDb::Memory(db) => db.abandon_transaction_handle(transaction.open_tx),
-                CoreDb::Persistent(db) => db.abandon_transaction_handle(transaction.open_tx),
-            };
+        for (_, transaction) in self.transactions.drain() {
+            let _ = with_db!(self, |db| db
+                .abandon_transaction_handle(transaction.open_tx));
         }
         self.writes.clear();
         self.queries.clear();
-        let result = match &self.db {
-            CoreDb::Memory(db) => db.close(),
-            CoreDb::Persistent(db) => db.close(),
-        }
-        .map_err(core_error);
+        let result = with_db!(self, |db| db.close()).map_err(core_error);
         self.closed = true;
         result
     }
 }
 
-fn write_parts<S>(write: WriteHandle<S>) -> (RowUuid, TxId)
+/// Erases a storage-typed write handle down to the ids the bindings return.
+///
+/// Write calls are dispatched per storage backend, so their handle types
+/// differ per `with_db!` arm; this collapses both to one type at the arm
+/// boundary and maps the core error while it is there.
+fn write_parts<S>(write: Result<WriteHandle<S>, DbError>) -> Result<(RowUuid, TxId), JazzRnError>
 where
     S: jazz::groove::storage::OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
 {
-    (write.row_uuid(), write.mergeable_tx_id())
+    let write = write.map_err(core_error)?;
+    Ok((write.row_uuid(), write.mergeable_tx_id()))
 }
 
 fn invalid_handle(kind: &str, id: u64) -> JazzRnError {
