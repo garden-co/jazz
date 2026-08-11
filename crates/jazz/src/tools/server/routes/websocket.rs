@@ -564,6 +564,13 @@ async fn handle_ws_connection(
         let _ = socket.close().await;
         return;
     };
+    // Every admitted server link receives a fresh server endpoint. A browser
+    // client need not (and must not) self-assert one merely to learn which
+    // authority issued its downstream fates.
+    let server_endpoint = WireAuthorityEndpoint {
+        node: NodeUuid::from_bytes([0x5e; 16]),
+        epoch: WS_NEXT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed),
+    };
     let session_context = if negotiated.features
         & (crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
             | crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)
@@ -572,10 +579,7 @@ async fn handle_ws_connection(
         remote_hello
             .authority
             .map(|remote| ConnectionSessionContext {
-                local: WireAuthorityEndpoint {
-                    node: NodeUuid::from_bytes([0x5e; 16]),
-                    epoch: WS_NEXT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed),
-                },
+                local: server_endpoint,
                 remote,
                 link_identity: admission.identity,
                 negotiated_features: negotiated.features,
@@ -604,11 +608,10 @@ async fn handle_ws_connection(
             return;
         }
     };
-    let server_hello = WireFrame::Hello(match session_context {
-        Some(context) => WireHello::current(WirePeerRole::Core, negotiated.features)
-            .with_authority(context.local.node, context.local.epoch),
-        None => WireHello::current(WirePeerRole::Core, negotiated.features),
-    });
+    let server_hello = WireFrame::Hello(
+        WireHello::current(WirePeerRole::Core, negotiated.features)
+            .with_authority(server_endpoint.node, server_endpoint.epoch),
+    );
     let server_hello = match encode_frame(&server_hello) {
         Ok(frame) => frame,
         Err(error) => {
@@ -1378,6 +1381,10 @@ mod tests {
             panic!("expected server hello");
         };
         assert_eq!(server_hello.role, WirePeerRole::Core);
+        assert!(
+            server_hello.authority.is_some(),
+            "an admitted server must bind its own downstream authority endpoint"
+        );
         ws
     }
 
