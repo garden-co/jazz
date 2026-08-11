@@ -132,6 +132,33 @@ Compatible schema versions share the `PhysicalTableId` established by their
 published lenses while retaining distinct Groove descriptor variants
 (`INV-LENS-4`, ch. 2).
 
+Each physical lineage has one stable Groove field catalogue derived from its
+`PhysicalColumnId`s. A content row carries its local `SchemaVersionAlias` as
+its descriptor discriminator; the surrounding physical table and that
+alias select the row's descriptor. The alias, its schema mapping, and the
+descriptor registry are durable local storage state and are recovered before
+any payload is decoded. They never appear in a public value or on the wire.
+An alias or mapping remains retained while any retained history, current row,
+branch, snapshot, or rejected payload can name it.
+
+Jazz registers a schema variant and every projection needed for its logical
+views before activating a catalogue bundle or accepting a row under that
+alias. Variant registration is append-only: extending a lineage with a new
+descriptor or projection case neither changes the identity or output
+descriptor of an existing lowered plan nor resets its active subscriptions.
+Each projection case either emits the declared logical row or deliberately
+`Ignore`s a variant that cannot supply the projection; an unregistered variant
+is a configuration error. This is the only boundary at which opaque physical
+variant rows become logical Jazz rows (ch. 14).
+
+Physical secondary indexes are append-only for a lineage. A schema may use an
+index only when it declares the corresponding logical index, but dropping that
+declaration does not remove the physical index. Adding an index for an
+existing physical column registers and backfills it across retained variants
+before the schema bundle becomes Active. A variant missing an indexed field
+contributes no entry; later compatible variants extend the same physical index
+rather than creating a schema-version partition.
+
 Publishing a non-genesis schema first derives its complete physical mapping
 from the bundled lineage lens: compatible unchanged/renamed tables and columns
 reuse source physical ids; added tables, added/copied columns, and incompatible
