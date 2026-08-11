@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Verify that the artifacts consumed by local tooling are newer than their inputs.
+# Verify that the artifacts consumed by local tooling match this exact checkout.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-for required in find; do
+for required in find node git; do
   command -v "$required" >/dev/null 2>&1 || {
     echo "artifacts-fresh: required command not found: $required" >&2
     exit 127
@@ -91,10 +91,20 @@ check_layer \
   "pnpm --filter jazz-napi build:debug" \
   "${napi_artifacts[@]}"
 
+if ! node dev/artifacts/provenance.mjs verify napi debug; then
+  echo "Fix: pnpm --filter jazz-napi build:debug" >&2
+  failed=1
+fi
+
 source_roots=(crates/jazz-wasm/src crates/jazz-wasm/Cargo.toml crates/jazz-wasm/package.json crates/jazz/src crates/groove/src crates/opfs-btree/src crates/jazz/Cargo.toml crates/groove/Cargo.toml crates/opfs-btree/Cargo.toml Cargo.toml Cargo.lock)
 check_layer \
   "crates/jazz-wasm/pkg" \
   "pnpm --filter jazz-wasm build" \
   crates/jazz-wasm/pkg
+
+if ! node dev/artifacts/provenance.mjs verify wasm release; then
+  echo "Fix: pnpm --filter jazz-wasm build" >&2
+  failed=1
+fi
 
 exit "$failed"

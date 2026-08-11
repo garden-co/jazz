@@ -1,2 +1,3 @@
 *.node
 index.js
+.jazz-artifact-manifest.json
