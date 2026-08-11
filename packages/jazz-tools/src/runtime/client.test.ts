@@ -7,6 +7,7 @@ import {
   type TransactionalRuntime,
   PersistedWriteRejectedError,
   type BatchId,
+  type MutationErrorEvent,
   type OpenBatchId,
   type WriteReceipt,
 } from "./client.js";
@@ -14,6 +15,7 @@ import type { AppContext } from "./context.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 function makeFakeRuntime() {
+  let mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
   let nextTransactionNumber = 0;
 
   function openBatchIdFromWriteContext(writeContextJson?: string | null): OpenBatchId | undefined {
@@ -86,6 +88,9 @@ function makeFakeRuntime() {
       >(),
     executeSubscription: vi.fn<(handle: number, on_update: Function) => void>(),
     unsubscribe: vi.fn<(handle: number) => void>(),
+    onMutationError: vi.fn<Runtime["onMutationError"]>((callback) => {
+      mutationErrorCallback = callback;
+    }),
     beginTransaction: vi.fn<TransactionalRuntime["beginTransaction"]>((_kind, id) => {
       nextTransactionNumber += 1;
       return id;
@@ -100,7 +105,11 @@ function makeFakeRuntime() {
     close: vi.fn(),
   } satisfies TransactionalRuntime;
 
-  return runtime;
+  return Object.assign(runtime, {
+    emitMutationError(event: MutationErrorEvent) {
+      mutationErrorCallback?.(event);
+    },
+  });
 }
 
 function makeContext(): AppContext {
@@ -366,5 +375,54 @@ describe("JazzClient runtime transaction waits", () => {
     });
 
     await expect(waitPromise).rejects.toBeInstanceOf(PersistedWriteRejectedError);
+  });
+});
+
+describe("JazzClient mutation error handling", () => {
+  function makeRejectedTransactionRecord(batchId: BatchId) {
+    return {
+      batchId,
+      kind: "mergeable" as const,
+      sealed: true,
+      latestSettlement: {
+        kind: "rejected" as const,
+        batchId,
+        code: "permission_denied",
+        reason: "write rejected by policy",
+      },
+    };
+  }
+
+  it("forwards pushed runtime mutation errors to the registered listener", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const listener = vi.fn();
+    client.onMutationError(listener);
+    const batchId = "batch-rejected" as BatchId;
+    const event: MutationErrorEvent = {
+      code: "permission_denied",
+      reason: "write rejected by policy",
+      transaction: makeRejectedTransactionRecord(batchId),
+    };
+
+    runtime.emitMutationError(event);
+
+    expect(listener).toHaveBeenCalledWith(event);
+  });
+
+  it("logs pushed mutation errors when no application listener replaces the fallback", () => {
+    const runtime = makeFakeRuntime();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const batchId = "batch-unhandled" as BatchId;
+    const event: MutationErrorEvent = {
+      code: "permission_denied",
+      reason: "write rejected by policy",
+      transaction: makeRejectedTransactionRecord(batchId),
+    };
+
+    runtime.emitMutationError(event);
+
+    expect(consoleError).toHaveBeenCalledWith("Unhandled Jazz mutation error", event);
   });
 });

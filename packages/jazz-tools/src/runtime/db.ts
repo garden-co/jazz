@@ -24,6 +24,7 @@ import {
   ExclusiveWriteResult,
   WriteResult,
   JazzClient,
+  type MutationErrorEvent,
   WriteHandle,
   type TransactionKind,
   type CreateOptions,
@@ -943,6 +944,8 @@ export class Db {
   >();
   private readonly activeQuerySubscriptionTraceListeners =
     new Set<ActiveQuerySubscriptionTraceListener>();
+  private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
+  private readonly pendingMutationErrorEvents: MutationErrorEvent[] = [];
   private nextActiveQuerySubscriptionTraceId = 1;
   private isTransportDisconnected = false;
 
@@ -1080,6 +1083,8 @@ export class Db {
         },
       });
 
+      this.attachMutationErrorHandler(client);
+
       if (this.config.serverUrl && !this.isTransportDisconnected) {
         client.connectTransport(this.config.serverUrl, this.transportAuthConfig());
       } else if (this.config.serverUrl) {
@@ -1106,6 +1111,19 @@ export class Db {
 
   protected getRuntimeOperationContext(): DbRuntimeOperationContext | null {
     return this.runtimeOperationContextOverride;
+  }
+
+  private attachMutationErrorHandler(client: JazzClient): void {
+    client.onMutationError((event) => {
+      if (this.mutationErrorListeners.size === 0) {
+        console.error("Unhandled Jazz mutation error", event);
+        this.pendingMutationErrorEvents.push(event);
+        return;
+      }
+      for (const listener of this.mutationErrorListeners) {
+        listener(event);
+      }
+    });
   }
 
   /**
@@ -1174,6 +1192,22 @@ export class Db {
     return this.authStateStore.onChange((state) => {
       listener(state);
     });
+  }
+
+  /**
+   * Attach a fallback listener for write rejections that are not handled by an
+   * active {@link WriteHandle.wait} call.
+   *
+   * @returns an unsubscribe callback
+   */
+  onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
+    this.mutationErrorListeners.add(listener);
+    while (this.pendingMutationErrorEvents.length > 0) {
+      listener(this.pendingMutationErrorEvents.shift()!);
+    }
+    return () => {
+      this.mutationErrorListeners.delete(listener);
+    };
   }
 
   getConfig(): DbConfig {
@@ -1784,6 +1818,7 @@ export class Db {
       this.localFirstRefreshTimer = null;
     }
     this.clearActiveQuerySubscriptionTraces();
+    this.mutationErrorListeners.clear();
 
     this.disposeCoreTelemetry?.();
     this.disposeCoreTelemetry = null;

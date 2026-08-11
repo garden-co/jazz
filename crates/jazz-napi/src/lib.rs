@@ -45,7 +45,8 @@ use jazz::db::{
     ConnectionSessionContext as CoreConnectionSessionContext, Db as CoreDb,
     DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
     InitialSyncFlushCadence as CoreInitialSyncFlushCadence, LocalUpdates as CoreLocalUpdates,
-    MergeableTxOps, PeerConnection as CorePeerConnection, PreparedQuery as PreparedQueryInner,
+    MergeableTxOps, MutationErrorCallback as CoreMutationErrorCallback,
+    PeerConnection as CorePeerConnection, PreparedQuery as PreparedQueryInner,
     Propagation as CorePropagation, QueryAttachment as CoreQueryAttachment,
     ReadOpts as CoreReadOpts, RowCells as CoreRowCells, SeededRowIdSource as CoreSeededRowIdSource,
     SubscriptionEvent, SubscriptionStream, TickScheduler as CoreTickScheduler,
@@ -72,7 +73,7 @@ use jazz::tools::server::{
     TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
 };
 use jazz::tools::{AppId, BatchId};
-use jazz::tx::{DurabilityTier as CoreDurabilityTier, Fate as CoreFate, TxId};
+use jazz::tx::{DurabilityTier as CoreDurabilityTier, TxId};
 use jazz::wire::{
     TransportError, WireAuthorityEndpoint as CoreWireAuthorityEndpoint,
     WireTransport as CoreWireTransport,
@@ -292,6 +293,39 @@ macro_rules! with_napi_exclusive_tx {
     }};
 }
 
+impl Write {
+    fn wait_promise(
+        &self,
+        env: Env,
+        tier: CoreDurabilityTier,
+    ) -> napi::Result<PromiseRaw<'static, ()>> {
+        let Some(write) = &self.inner else {
+            return Err(napi::Error::from_reason("write state is unavailable"));
+        };
+        let mut deferred = std::ptr::null_mut();
+        let mut promise = std::ptr::null_mut();
+        let env = env.raw();
+        let status = unsafe { sys::napi_create_promise(env, &mut deferred, &mut promise) };
+        if status != sys::Status::napi_ok {
+            return Err(napi::Error::from_reason(
+                "failed to create transaction wait promise",
+            ));
+        }
+        let callback = move |result: std::result::Result<TxId, jazz::db::Error>| {
+            finish_wait_promise(env, deferred, result);
+        };
+        match write {
+            NapiWrite::Memory { db, tx_id } => {
+                db.wait_for_transaction_with(*tx_id, tier, callback);
+            }
+            NapiWrite::Persistent { db, tx_id } => {
+                db.wait_for_transaction_with(*tx_id, tier, callback);
+            }
+        }
+        Ok(PromiseRaw::new(env, promise))
+    }
+}
+
 #[napi]
 impl Write {
     #[napi(getter, js_name = "batchId")]
@@ -302,18 +336,6 @@ impl Write {
     #[napi(getter)]
     pub fn payload(&self) -> Uint8Array {
         Uint8Array::new(self.payload.clone())
-    }
-
-    #[napi]
-    pub fn wait(&self, tier: String) -> napi::Result<()> {
-        let tier = core_durability_tier_from_str(&tier)?;
-        if let Some(write) = &self.inner {
-            match write {
-                NapiWrite::Memory { db, tx_id } => core_wait_for_tx(db, *tx_id, tier)?,
-                NapiWrite::Persistent { db, tx_id } => core_wait_for_tx(db, *tx_id, tier)?,
-            }
-        }
-        Ok(())
     }
 
     #[napi(js_name = "writeState")]
@@ -329,33 +351,9 @@ impl Write {
         Ok(core_write_state_to_json(&state))
     }
 
-    #[napi(js_name = "nextWriteStateChange")]
-    pub fn next_write_state_change(&self, env: Env) -> napi::Result<PromiseRaw<'static, ()>> {
-        let Some(write) = &self.inner else {
-            return Err(napi::Error::from_reason("write state is unavailable"));
-        };
-        let mut deferred = std::ptr::null_mut();
-        let mut promise = std::ptr::null_mut();
-        let env = env.raw();
-        let status = unsafe { sys::napi_create_promise(env, &mut deferred, &mut promise) };
-        if status != sys::Status::napi_ok {
-            return Err(napi::Error::from_reason(
-                "failed to create write-state promise",
-            ));
-        }
-        match write {
-            NapiWrite::Memory { db, tx_id } => {
-                db.on_next_write_state_change(*tx_id, move || {
-                    resolve_raw_promise(env, deferred);
-                });
-            }
-            NapiWrite::Persistent { db, tx_id } => {
-                db.on_next_write_state_change(*tx_id, move || {
-                    resolve_raw_promise(env, deferred);
-                });
-            }
-        }
-        Ok(PromiseRaw::new(env, promise))
+    #[napi]
+    pub fn wait(&self, env: Env, tier: String) -> napi::Result<PromiseRaw<'static, ()>> {
+        self.wait_promise(env, core_durability_tier_from_str(&tier)?)
     }
 
     #[napi]
@@ -837,6 +835,31 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => db.set_tick_scheduler(Some(scheduler)),
             NapiDbInnerStorage::Persistent(db) => db.set_tick_scheduler(Some(scheduler)),
+        }
+        Ok(())
+    }
+
+    #[napi(
+        js_name = "onMutationError",
+        ts_args_type = "callback: (event: any) => void"
+    )]
+    pub fn on_mutation_error(
+        &self,
+        callback: ThreadsafeFunction<JsonValue, ()>,
+    ) -> napi::Result<()> {
+        let callback: CoreMutationErrorCallback = Rc::new(move |event| {
+            let Ok(event) = serde_json::to_value(event) else {
+                return;
+            };
+            let _ = callback.call(Ok(event), ThreadsafeFunctionCallMode::NonBlocking);
+        });
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => db.on_mutation_error(Rc::clone(&callback)),
+            NapiDbInnerStorage::Persistent(db) => db.on_mutation_error(Rc::clone(&callback)),
         }
         Ok(())
     }
@@ -2031,37 +2054,6 @@ where
     Ok(stats.subscription_events as u32)
 }
 
-fn core_wait_for_tx<S>(db: &CoreDb<S>, tx_id: TxId, tier: CoreDurabilityTier) -> napi::Result<()>
-where
-    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
-{
-    if tier <= CoreDurabilityTier::Local {
-        return Ok(());
-    }
-    let state = db
-        .write_state(tx_id)
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-    match state.fate {
-        CoreFate::Rejected(reason) => {
-            return Err(napi::Error::from_reason(format!(
-                "transaction was rejected: {reason:?}"
-            )));
-        }
-        CoreFate::Pending if tier >= CoreDurabilityTier::Edge => {
-            return Err(napi::Error::from_reason(format!(
-                "transaction has not been accepted at requested tier {tier:?}"
-            )));
-        }
-        CoreFate::Pending | CoreFate::Accepted => {}
-    }
-    if state.durability >= tier {
-        return Ok(());
-    }
-    Err(napi::Error::from_reason(format!(
-        "transaction has not reached requested tier {tier:?}"
-    )))
-}
-
 fn core_write_state_to_json(state: &jazz::db::WriteState) -> serde_json::Value {
     serde_json::to_value(state).unwrap_or_else(|_| serde_json::json!({}))
 }
@@ -2072,6 +2064,39 @@ fn resolve_raw_promise(env: sys::napi_env, deferred: sys::napi_deferred) {
     if status == sys::Status::napi_ok {
         let _ = unsafe { sys::napi_resolve_deferred(env, deferred, undefined) };
     }
+}
+
+fn finish_wait_promise(
+    env: sys::napi_env,
+    deferred: sys::napi_deferred,
+    result: std::result::Result<TxId, jazz::db::Error>,
+) {
+    let Err(error) = result else {
+        resolve_raw_promise(env, deferred);
+        return;
+    };
+    let message = error.to_string();
+    let mut js_message = std::ptr::null_mut();
+    let status = unsafe {
+        sys::napi_create_string_utf8(
+            env,
+            message.as_ptr().cast(),
+            message.len() as isize,
+            &mut js_message,
+        )
+    };
+    if status != sys::Status::napi_ok {
+        return;
+    }
+    let mut js_error = std::ptr::null_mut();
+    let status =
+        unsafe { sys::napi_create_error(env, std::ptr::null_mut(), js_message, &mut js_error) };
+    let rejection = if status == sys::Status::napi_ok {
+        js_error
+    } else {
+        js_message
+    };
+    let _ = unsafe { sys::napi_reject_deferred(env, deferred, rejection) };
 }
 
 fn core_commit_tx<S>(db: &CoreDb<S>, open_tx: CoreOpenBatchId) -> napi::Result<TxId>

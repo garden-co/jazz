@@ -14625,6 +14625,231 @@ fn db_sync_surface_returns_exclusive_conflict_fate_to_client() {
     );
 }
 
+/// An authority rejection with no application waiter is delivered once through
+/// the mutation-error callback on the following scheduled database tick.
+#[test]
+fn unhandled_rejection_is_delivered_as_mutation_error() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, author, &schema);
+    let (client_transport, mut authority_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let callback_events = Rc::clone(&events);
+    client.on_mutation_error(Rc::new(move |event| {
+        callback_events.borrow_mut().push(event.clone());
+    }));
+
+    let write = client
+        .insert("todos", cells("rejected", false, author))
+        .unwrap();
+    authority_transport
+        .send(SyncMessage::FateUpdate {
+            tx_id: write.mergeable_tx_id(),
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_seq: None,
+            durability: Some(DurabilityTier::Edge),
+        })
+        .unwrap();
+
+    client.tick().unwrap();
+    assert!(events.borrow().is_empty());
+    client.tick().unwrap();
+
+    let events = events.borrow();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].code, "permission_denied");
+    assert_eq!(
+        events[0].transaction.batch_id,
+        BatchId::from_committed_tx(write.mergeable_tx_id())
+    );
+    assert_eq!(events[0].transaction.kind, TransactionKind::Mergeable);
+}
+
+/// A live application waiter consumes an authority rejection and prevents the
+/// fallback mutation-error callback from firing.
+#[test]
+fn waited_rejection_is_not_delivered_as_mutation_error() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xc2; 16]);
+    let client = open_db(0xc2, author, &schema);
+    let (client_transport, mut authority_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let callback_events = Rc::clone(&events);
+    client.on_mutation_error(Rc::new(move |event| {
+        callback_events.borrow_mut().push(event.clone());
+    }));
+
+    let write = client
+        .insert("todos", cells("waited rejection", false, author))
+        .unwrap();
+    let wait_result = Rc::new(RefCell::new(None));
+    let callback_result = Rc::clone(&wait_result);
+    client.wait_for_transaction_with(
+        write.mergeable_tx_id(),
+        DurabilityTier::Edge,
+        move |result| *callback_result.borrow_mut() = Some(result),
+    );
+    authority_transport
+        .send(SyncMessage::FateUpdate {
+            tx_id: write.mergeable_tx_id(),
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_seq: None,
+            durability: Some(DurabilityTier::Edge),
+        })
+        .unwrap();
+
+    client.tick().unwrap();
+    assert_eq!(
+        wait_result.borrow_mut().take().unwrap().unwrap_err().code,
+        ErrorCode::WriteRejected
+    );
+    client.tick().unwrap();
+
+    assert!(events.borrow().is_empty());
+    assert!(
+        client
+            .node
+            .node()
+            .borrow()
+            .rejected_transaction(write.mergeable_tx_id())
+            .is_none()
+    );
+}
+
+/// An explicit wait that begins after the rejection was queued still consumes
+/// it before the next-tick fallback callback can deliver it.
+#[test]
+fn wait_after_rejection_suppresses_queued_mutation_error() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xc4; 16]);
+    let client = open_db(0xc4, author, &schema);
+    let (client_transport, mut authority_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let callback_events = Rc::clone(&events);
+    client.on_mutation_error(Rc::new(move |event| {
+        callback_events.borrow_mut().push(event.clone());
+    }));
+
+    let write = client
+        .insert("todos", cells("late wait rejection", false, author))
+        .unwrap();
+    authority_transport
+        .send(SyncMessage::FateUpdate {
+            tx_id: write.mergeable_tx_id(),
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_seq: None,
+            durability: Some(DurabilityTier::Edge),
+        })
+        .unwrap();
+    client.tick().unwrap();
+
+    let error =
+        block_on(client.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Edge))
+            .unwrap_err();
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    client.tick().unwrap();
+
+    assert!(events.borrow().is_empty());
+    assert!(
+        client
+            .node
+            .node()
+            .borrow()
+            .rejected_transaction(write.mergeable_tx_id())
+            .is_none()
+    );
+}
+
+/// A rejected transaction that was not delivered before shutdown is recovered
+/// from durable storage and delivered after the reopened client registers its
+/// callback.
+#[test]
+fn undelivered_mutation_error_is_recovered_after_reopen() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xc3; 16]);
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0xc3; 16]),
+        author,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let client = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity,
+        id_source: Some(Box::new(SeededRowIdSource::new(0xc3))),
+        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    }))
+    .unwrap();
+    let (client_transport, mut authority_transport) = duplex();
+    let upstream = client.connect_upstream(client_transport);
+    let write = client
+        .insert("todos", cells("rejected before reopen", false, author))
+        .unwrap();
+    let tx_id = write.mergeable_tx_id();
+    authority_transport
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_seq: None,
+            durability: Some(DurabilityTier::Edge),
+        })
+        .unwrap();
+    client.tick().unwrap();
+
+    drop(write);
+    drop(upstream);
+    drop(authority_transport);
+    drop(client);
+
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let reopened = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity,
+        id_source: Some(Box::new(SeededRowIdSource::new(0xc3))),
+        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    }))
+    .unwrap();
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let callback_events = Rc::clone(&events);
+    reopened.on_mutation_error(Rc::new(move |event| {
+        callback_events.borrow_mut().push(event.clone());
+    }));
+    reopened.tick().unwrap();
+
+    let events = events.borrow();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].transaction.batch_id,
+        BatchId::from_committed_tx(tx_id)
+    );
+    drop(events);
+    drop(reopened);
+
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let acknowledged_reopen = block_on(Db::open(DbConfig {
+        schema,
+        storage,
+        identity,
+        id_source: Some(Box::new(SeededRowIdSource::new(0xc3))),
+        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    }))
+    .unwrap();
+    let replayed_events = Rc::new(RefCell::new(Vec::new()));
+    let callback_events = Rc::clone(&replayed_events);
+    acknowledged_reopen.on_mutation_error(Rc::new(move |event| {
+        callback_events.borrow_mut().push(event.clone());
+    }));
+    acknowledged_reopen.tick().unwrap();
+    assert!(replayed_events.borrow().is_empty());
+}
+
 #[test]
 fn write_fate_and_durability_are_queryable_through_facade() {
     let schema = schema();

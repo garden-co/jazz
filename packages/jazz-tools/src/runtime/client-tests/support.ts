@@ -63,6 +63,7 @@ export const runtimeTransactionRecordStubs = {
   disconnect: async () => {},
   updateAuth: () => {},
   onAuthFailure: () => {},
+  onMutationError: () => {},
 };
 
 export function makeClient() {

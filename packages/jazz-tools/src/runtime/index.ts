@@ -2,6 +2,7 @@ export {
   type CreateOptions,
   type AuthConfig,
   type LocalTransactionRecord,
+  type MutationErrorEvent,
   type TransactionFate,
   type LocalUpdatesMode,
   type PermissionAdvice,
