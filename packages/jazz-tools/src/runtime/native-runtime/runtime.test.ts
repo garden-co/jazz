@@ -690,6 +690,10 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(authFailures).toEqual(["invalid"]);
     expect(upstreamConnections).toBe(0);
     expect(sockets[0]!.closed).toBe(true);
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeWireServerHello()]));
+    await waitForFakeWebSocketNegotiation();
+    expect(authFailures).toEqual(["invalid"]);
+    expect(upstreamConnections).toBe(0);
 
     allowServerHello = true;
     await runtime.updateAuth(JSON.stringify({ jwt_token: "fresh.jwt" }));

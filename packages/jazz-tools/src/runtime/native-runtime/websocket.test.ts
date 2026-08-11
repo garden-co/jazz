@@ -240,11 +240,13 @@ describe("websocket frame carrier", () => {
       },
     });
 
-    socket!.emitMessage(
-      encodeWebSocketFrameBatch([encodeWireError(3, 1, "invalid token"), encodeServerHello(1n)]),
-    );
+    socket!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(3, 1, "invalid token")]));
 
     await expect(carrier.ready()).rejects.toThrow("authentication failed before server hello");
+    socket!.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n)]));
+    socket!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.of(1, 6, 0, 0)]));
+    await Promise.resolve();
+
     expect(errors).toEqual([
       { code: "auth_failed", retry: "after_auth", message: "invalid token" },
     ]);
