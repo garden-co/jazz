@@ -40,7 +40,11 @@ import {
   type ValueType,
 } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
-import { WebSocketCarrier, wireAuthFailureReason } from "./websocket.js";
+import {
+  WebSocketCarrier,
+  type WebSocketNegotiation,
+  wireAuthFailureReason,
+} from "./websocket.js";
 import {
   createNativeRowValueEncoder,
   createRecord,
@@ -194,6 +198,14 @@ type NativeDb = {
       | ((error: Error | null, urgency: string) => void),
   ): void;
   connectUpstream(): Transport;
+  connectUpstreamWithSession?(
+    protocolVersion: number,
+    features: number,
+    remoteNode: Uint8Array,
+    remoteEpoch: number,
+    localNode: Uint8Array,
+    localEpoch: number,
+  ): Transport;
   tick(): void;
   close?(): void;
   free?(): void;
@@ -384,6 +396,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverCarrierPromise: Promise<WebSocketCarrier> | null = null;
   private serverTransportError: Error | null = null;
   private serverTransportErrorWaiters: ServerTransportErrorWaiter[] = [];
+  private nextServerConnectionEpoch = 1;
   private serverEndpointUrl: string | null = null;
   private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
@@ -1041,8 +1054,6 @@ export class NativeRuntimeAdapter implements Runtime {
     void this.disconnect({ rejectWaiters: false });
     this.serverTransportError = null;
     this.serverEndpointUrl = url;
-    const transport = this.db.connectUpstream();
-    this.serverTransport = transport;
     const carrier = new WebSocketCarrier({
       endpointUrl: url,
       peerIdentity: this.peerIdentity,
@@ -1058,7 +1069,9 @@ export class NativeRuntimeAdapter implements Runtime {
       },
     });
     this.serverCarrier = carrier;
-    this.serverCarrierPromise = carrier.ready().then(() => {
+    this.serverCarrierPromise = carrier.ready().then((negotiation) => {
+      const transport = this.connectNegotiatedUpstream(negotiation);
+      this.serverTransport = transport;
       this.flushQueuedServerFrames(carrier);
       this.pumpServerTransport();
       this.pumpSubscriptions();
@@ -1067,7 +1080,22 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverCarrierPromise.catch((error) => {
       this.handleServerTransportError(error);
     });
-    this.scheduleServerPump();
+  }
+
+  private connectNegotiatedUpstream(negotiation: WebSocketNegotiation): Transport {
+    const authority = negotiation.authority;
+    const connectWithSession = this.db.connectUpstreamWithSession;
+    if (!authority || !connectWithSession) return this.db.connectUpstream();
+    const localEpoch = this.nextServerConnectionEpoch++;
+    return connectWithSession.call(
+      this.db,
+      negotiation.protocolVersion,
+      negotiation.features,
+      authority.node,
+      authority.epoch,
+      this.peerIdentity,
+      localEpoch,
+    );
   }
 
   disconnect(options: { rejectWaiters?: boolean } = {}): Promise<void> {

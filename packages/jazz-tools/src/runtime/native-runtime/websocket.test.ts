@@ -152,6 +152,34 @@ describe("websocket frame carrier", () => {
     };
     expect(hello(sockets[0]!)).toBeUndefined();
     expect(hello(sockets[1]!)).toBeUndefined();
+    const firstNegotiation = await first.ready();
+    const secondNegotiation = await second.ready();
+    expect(firstNegotiation.authority?.node).toEqual(
+      Uint8Array.from({ length: 16 }, () => 0x5e),
+    );
+    expect(secondNegotiation.authority?.epoch).toBeGreaterThan(firstNegotiation.authority?.epoch ?? 0);
+  });
+
+  it("does not send or deliver semantic frames before the server hello", async () => {
+    let socket: MessageWebSocket | undefined;
+    const delivered: Uint8Array[] = [];
+    const carrier = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: (frame) => delivered.push(frame),
+      WebSocket: class extends MessageWebSocket {
+        constructor(url: string) {
+          super(url);
+          socket = this;
+        }
+      },
+    });
+
+    socket!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.of(1, 6, 0, 0)]));
+    await expect(carrier.ready()).rejects.toThrow("before server hello");
+    await expect(carrier.send(Uint8Array.of(1))).rejects.toThrow("before server hello");
+    expect(delivered).toEqual([]);
+    expect(socket!.closed).toBe(true);
   });
 
   it("decodes structured wire error frames", () => {
@@ -179,7 +207,12 @@ describe("websocket frame carrier", () => {
       },
     });
 
-    socket!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(3, 1, "expired")]));
+    socket!.emitMessage(
+      encodeWebSocketFrameBatch([
+        encodeServerHello(1),
+        encodeWireError(3, 1, "expired"),
+      ]),
+    );
     await Promise.resolve();
 
     expect(frames).toEqual([]);
@@ -248,6 +281,20 @@ function encodeWireError(code: number, retry: number, message: string): Uint8Arr
   return writer.finish();
 }
 
+function encodeServerHello(epoch: number): Uint8Array {
+  const writer = new PostcardWriter();
+  writer.u64(0); // WireFrame::Hello
+  writer.u64(WIRE_PROTOCOL_VERSION);
+  writer.u64(WIRE_PROTOCOL_VERSION);
+  writer.u64(CLIENT_WIRE_FEATURES);
+  writer.u64(1); // WirePeerRole::Core
+  writer.some((authority) => {
+    authority.bytes(Uint8Array.from({ length: 16 }, () => 0x5e), false);
+    authority.u64(epoch);
+  });
+  return writer.finish();
+}
+
 class MessageWebSocket {
   binaryType: "arraybuffer" | "blob" = "arraybuffer";
   readonly readyState = 1;
@@ -257,7 +304,11 @@ class MessageWebSocket {
 
   send(_data: Uint8Array | string): void {}
 
-  close(): void {}
+  closed = false;
+
+  close(): void {
+    this.closed = true;
+  }
 
   addEventListener(type: "open", listener: () => void): void;
   addEventListener(type: "message", listener: (event: { data: unknown }) => void): void;
@@ -287,5 +338,10 @@ class RecordingWebSocket extends MessageWebSocket {
 
   override send(data: Uint8Array | string): void {
     this.sent.push(data);
+    if (data instanceof Uint8Array && isWireHello(decodeWebSocketFrameBatch(data)[0]!)) {
+      this.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(RecordingWebSocket.epoch++)]));
+    }
   }
+
+  private static epoch = 1;
 }

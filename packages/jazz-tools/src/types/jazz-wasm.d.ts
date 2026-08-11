@@ -156,6 +156,14 @@ declare module "jazz-wasm" {
     tick(): void;
     close(): boolean;
     connectUpstream(): WasmTransport;
+    connectUpstreamWithSession(
+      protocolVersion: number,
+      features: number,
+      remoteNode: Uint8Array,
+      remoteEpoch: number,
+      localNode: Uint8Array,
+      localEpoch: number,
+    ): WasmTransport;
     acceptSubscriber(identity: Uint8Array): WasmTransport;
     mergeableTx(openBatchId: string): WasmTx;
     mergeableTxForIdentity(openBatchId: string, author: Uint8Array): WasmTx;

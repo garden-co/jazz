@@ -518,7 +518,7 @@ async fn handle_ws_connection(
         return;
     };
 
-    let mut negotiated = match negotiate_wire(
+    let negotiated = match negotiate_wire(
         &remote_hello,
         WIRE_PROTOCOL_VERSION,
         WIRE_PROTOCOL_VERSION,
@@ -544,12 +544,11 @@ async fn handle_ws_connection(
             return;
         }
     };
-    // A receipt-capable peer must bind its endpoint in the admission hello.
-    // Old hellos retain ordinary sync but never negotiate receipt semantics.
-    if remote_hello.authority.is_none() {
-        negotiated.features &= !(crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-            | crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS);
-    }
+    // A downstream browser may be authority-unbound while still accepting the
+    // server's authenticated authority in its response Hello.  The server
+    // never installs scoped authority semantics without an admitted remote
+    // endpoint (below), so this directional capability advertisement does not
+    // turn a client self-assertion into authority proof.
 
     let Some(core_server_shell) = state.core_server_shell() else {
         send_ws_error(
@@ -1476,15 +1475,14 @@ mod tests {
             .await
             .expect("open client db");
             let transport = TestWireTransport::default();
-            // The route-test hello intentionally has no authority endpoint,
-            // so the server correctly declines scoped receipt/view features.
-            // Keep the local adapter on that exact negotiated feature set.
+            // Match the authority-unbound test hello's negotiated features.
+            // Scoped semantics are not installed without an admitted remote
+            // endpoint, even though a browser may accept the server endpoint
+            // from its response Hello.
             db.connect_upstream(Box::new(WireTransportAdapter::new(
                 transport.clone(),
                 WIRE_PROTOCOL_VERSION,
-                current_wire_features()
-                    & !(crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                        | crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+                FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
                 None,
             )));
             Self {

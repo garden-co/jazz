@@ -691,15 +691,7 @@ pub fn negotiate_wire(
             ),
         ));
     }
-    let mut features = remote.features & local_features;
-    // Receipt semantics need a handshake-bound issuer epoch.  A peer that
-    // merely advertises the bit but cannot provide that endpoint is treated as
-    // old for this feature, so semantic receipt variants stay fail-closed.
-    if features & (FEATURE_AUTHORIZATION_SCOPE_RECEIPTS | FEATURE_AUTHORIZATION_SCOPE_VIEWS) != 0
-        && remote.authority.is_none()
-    {
-        features &= !(FEATURE_AUTHORIZATION_SCOPE_RECEIPTS | FEATURE_AUTHORIZATION_SCOPE_VIEWS);
-    }
+    let features = remote.features & local_features;
     Ok(WireNegotiated {
         protocol_version: max,
         features,
@@ -743,7 +735,8 @@ mod tests {
                     "min_protocol_version": 6,
                     "max_protocol_version": 6,
                     "features": 5,
-                    "role": "client"
+                    "role": "client",
+                    "authority": null
                 }
             })
         );
@@ -1344,15 +1337,20 @@ mod tests {
     }
 
     #[test]
-    fn receipt_feature_requires_handshake_bound_authority_endpoint() {
+    fn negotiation_keeps_directional_scope_capability_without_remote_authority() {
         let feature = FEATURE_AUTHORIZATION_SCOPE_RECEIPTS;
-        let old = WireHello::current(WirePeerRole::Core, feature);
+        let unbound = WireHello::current(WirePeerRole::Core, feature);
         assert_eq!(
-            negotiate_wire(&old, WIRE_PROTOCOL_VERSION, WIRE_PROTOCOL_VERSION, feature)
-                .unwrap()
-                .features
+            negotiate_wire(
+                &unbound,
+                WIRE_PROTOCOL_VERSION,
+                WIRE_PROTOCOL_VERSION,
+                feature
+            )
+            .unwrap()
+            .features
                 & feature,
-            0
+            feature
         );
         let accepted = WireHello::current(WirePeerRole::Core, feature)
             .with_authority(NodeUuid::from_bytes([0x71; 16]), 9);

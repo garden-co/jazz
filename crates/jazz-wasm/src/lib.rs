@@ -7,10 +7,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use futures_util::{Stream, StreamExt};
 use jazz::db::{
-    block_on, Db, DbConfig, DbIdentity, ExclusiveTxOps, InitialSyncFlushCadence, LocalUpdates,
-    MergeableTxOps, PeerConnection, PermissionAdvice, PreparedQuery, Propagation, QueryAttachment,
-    ReadOpts, RowCells, SeededRowIdSource, SubscriptionEvent, TickScheduler, TickUrgency,
-    WireTransportAdapter, WriteHandle,
+    block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, ExclusiveTxOps,
+    InitialSyncFlushCadence, LocalUpdates, MergeableTxOps, PeerConnection, PermissionAdvice,
+    PreparedQuery, Propagation, QueryAttachment, ReadOpts, RowCells, SeededRowIdSource,
+    SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter, WriteHandle,
 };
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 #[cfg(target_arch = "wasm32")]
@@ -22,7 +22,7 @@ use jazz::query::{Query, RelationExpr, RelationQuery};
 use jazz::schema::JazzSchema;
 use jazz::tools::{BatchId, OpenBatchId};
 use jazz::tx::{DurabilityTier, TxId};
-use jazz::wire::{TransportError, WireTransport};
+use jazz::wire::{TransportError, WireAuthorityEndpoint, WireTransport};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -1946,6 +1946,62 @@ impl WasmDb {
                 & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
                     | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
             None,
+        ));
+        let inner = match &self.inner {
+            WasmDbInner::Memory(db) => WasmTransportInner::Memory {
+                db: Rc::clone(db),
+                connection: Some(db.connect_upstream(transport)),
+            },
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => WasmTransportInner::Browser {
+                db: Rc::clone(db),
+                connection: Some(db.connect_upstream(transport)),
+            },
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        };
+        Ok(WasmTransport { inner, queues })
+    }
+
+    /// Connect after the browser carrier has accepted the server Hello. The
+    /// browser never asserts an authority endpoint itself; this context binds
+    /// the authority advertised by the authenticated server response.
+    #[wasm_bindgen(js_name = connectUpstreamWithSession)]
+    pub fn connect_upstream_with_session(
+        &self,
+        protocol_version: u16,
+        features: u32,
+        remote_node: Vec<u8>,
+        remote_epoch: u32,
+        local_node: Vec<u8>,
+        local_epoch: u32,
+    ) -> Result<WasmTransport, JsValue> {
+        let remote_node: [u8; 16] = remote_node
+            .try_into()
+            .map_err(|_| JsValue::from_str("server hello authority node must be 16 bytes"))?;
+        let local_node: [u8; 16] = local_node
+            .try_into()
+            .map_err(|_| JsValue::from_str("local peer identity must be 16 bytes"))?;
+        let queues = WasmWireQueues::default();
+        let session_context = ConnectionSessionContext {
+            local: WireAuthorityEndpoint {
+                node: NodeUuid::from_bytes(local_node),
+                epoch: local_epoch as u64,
+            },
+            remote: WireAuthorityEndpoint {
+                node: NodeUuid::from_bytes(remote_node),
+                epoch: remote_epoch as u64,
+            },
+            link_identity: AuthorId::from_bytes(local_node),
+            negotiated_features: features as u64,
+        };
+        let transport = Box::new(WireTransportAdapter::new_with_session_context(
+            WasmWireTransport {
+                queues: queues.clone(),
+            },
+            protocol_version,
+            features as u64,
+            None,
+            Some(session_context),
         ));
         let inner = match &self.inner {
             WasmDbInner::Memory(db) => WasmTransportInner::Memory {

@@ -42,7 +42,8 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz::db::{
-    Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
+    ConnectionSessionContext as CoreConnectionSessionContext, Db as CoreDb,
+    DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
     InitialSyncFlushCadence as CoreInitialSyncFlushCadence, LocalUpdates as CoreLocalUpdates,
     MergeableTxOps, PeerConnection as CorePeerConnection, PreparedQuery as PreparedQueryInner,
     Propagation as CorePropagation, QueryAttachment as CoreQueryAttachment,
@@ -72,7 +73,10 @@ use jazz::tools::server::{
 };
 use jazz::tools::{AppId, BatchId};
 use jazz::tx::{DurabilityTier as CoreDurabilityTier, Fate as CoreFate, TxId};
-use jazz::wire::{TransportError, WireTransport as CoreWireTransport};
+use jazz::wire::{
+    TransportError, WireAuthorityEndpoint as CoreWireAuthorityEndpoint,
+    WireTransport as CoreWireTransport,
+};
 
 #[derive(Clone, Debug, Deserialize)]
 struct CoreOpenDbConfig {
@@ -1649,6 +1653,62 @@ impl NapiDb {
                 & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
                     | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
             None,
+        ));
+        let inner = match db {
+            NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {
+                db: Rc::clone(db),
+                connection: Some(db.connect_upstream(transport)),
+            },
+            NapiDbInnerStorage::Persistent(db) => NapiTransportInner::Persistent {
+                db: Rc::clone(db),
+                connection: Some(db.connect_upstream(transport)),
+            },
+        };
+        Ok(Transport { inner, queues })
+    }
+
+    #[napi(js_name = "connectUpstreamWithSession")]
+    pub fn connect_upstream_with_session(
+        &self,
+        protocol_version: u16,
+        features: u32,
+        remote_node: Buffer,
+        remote_epoch: u32,
+        local_node: Buffer,
+        local_epoch: u32,
+    ) -> napi::Result<Transport> {
+        let remote_node: [u8; 16] = remote_node.as_ref().try_into().map_err(|_| {
+            napi::Error::from_reason("server hello authority node must be 16 bytes")
+        })?;
+        let local_node: [u8; 16] = local_node
+            .as_ref()
+            .try_into()
+            .map_err(|_| napi::Error::from_reason("local peer identity must be 16 bytes"))?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let queues = WireQueues::default();
+        let session_context = CoreConnectionSessionContext {
+            local: CoreWireAuthorityEndpoint {
+                node: CoreNodeUuid::from_bytes(local_node),
+                epoch: local_epoch as u64,
+            },
+            remote: CoreWireAuthorityEndpoint {
+                node: CoreNodeUuid::from_bytes(remote_node),
+                epoch: remote_epoch as u64,
+            },
+            link_identity: CoreAuthorId::from_bytes(local_node),
+            negotiated_features: features as u64,
+        };
+        let transport = Box::new(CoreWireTransportAdapter::new_with_session_context(
+            NapiWireTransport {
+                queues: queues.clone(),
+            },
+            protocol_version,
+            features as u64,
+            None,
+            Some(session_context),
         ));
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {

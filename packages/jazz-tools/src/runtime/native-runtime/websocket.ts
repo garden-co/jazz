@@ -12,6 +12,12 @@ export type WireError = {
   message: string;
 };
 
+export type WebSocketNegotiation = {
+  protocolVersion: number;
+  features: number;
+  authority?: { node: Uint8Array; epoch: number };
+};
+
 export type WebSocketCarrierOptions = {
   endpointUrl: string;
   peerIdentity: Uint8Array;
@@ -44,11 +50,15 @@ export const FEATURE_SYNC_MESSAGE_PAYLOAD = 1 << 0;
 export const FEATURE_STRUCTURED_ERRORS = 1 << 2;
 export const FEATURE_PAYLOAD_ZSTD = 1 << 4;
 export const FEATURE_MESSAGE_FRAGMENTATION = 1 << 5;
+export const FEATURE_AUTHORIZATION_SCOPE_RECEIPTS = 1 << 6;
+export const FEATURE_AUTHORIZATION_SCOPE_VIEWS = 1 << 7;
 export const CLIENT_WIRE_FEATURES =
   FEATURE_SYNC_MESSAGE_PAYLOAD |
   FEATURE_STRUCTURED_ERRORS |
   FEATURE_PAYLOAD_ZSTD |
-  FEATURE_MESSAGE_FRAGMENTATION;
+  FEATURE_MESSAGE_FRAGMENTATION |
+  FEATURE_AUTHORIZATION_SCOPE_RECEIPTS |
+  FEATURE_AUTHORIZATION_SCOPE_VIEWS;
 
 // The server route accepts WebSocket messages up to one MiB. Reserve enough
 // postcard framing bytes that a burst of otherwise-valid wire frames remains
@@ -119,7 +129,10 @@ export class WebSocketCarrier {
   private readonly socket: BrowserWebSocket;
   private readonly onFrame: WebSocketFrameHandler;
   private readonly onError?: WebSocketErrorHandler;
-  private readonly opened: Promise<void>;
+  private readonly opened: Promise<WebSocketNegotiation>;
+  private resolveNegotiation!: (value: WebSocketNegotiation) => void;
+  private rejectNegotiation!: (reason: unknown) => void;
+  private negotiated = false;
   private closing = false;
 
   constructor(options: WebSocketCarrierOptions) {
@@ -129,15 +142,23 @@ export class WebSocketCarrier {
     this.onError = options.onError;
     this.socket = new WebSocketCtor(this.url);
     this.socket.binaryType = "arraybuffer";
-    this.opened = waitForOpen(this.socket).then(() => {
+    this.opened = new Promise<WebSocketNegotiation>((resolve, reject) => {
+      this.resolveNegotiation = resolve;
+      this.rejectNegotiation = reject;
+    });
+    void waitForOpen(this.socket).then(() => {
       this.socket.send(encodeWebSocketPrelude(options.authJson ?? "{}", options.peerIdentity));
       this.socket.send(encodeWebSocketFrameBatch([encodeWireClientHello()]));
-    });
+    }, (error) => this.rejectNegotiation(error));
     this.socket.addEventListener("message", (event) => {
-      void this.handleMessage(event.data);
+      void this.handleMessage(event.data).catch((error) => {
+        this.rejectNegotiation(error);
+        this.close();
+      });
     });
     this.socket.addEventListener("error", () => {
       if (this.closing) return;
+      this.rejectNegotiation(new Error("websocket transport error"));
       this.onError?.({
         code: "websocket_error",
         retry: "later",
@@ -146,6 +167,7 @@ export class WebSocketCarrier {
     });
     this.socket.addEventListener("close", (event) => {
       if (this.closing) return;
+      this.rejectNegotiation(new Error("websocket transport closed during negotiation"));
       const close = websocketCloseDetails(event);
       this.onError?.({
         code: "websocket_closed",
@@ -178,7 +200,7 @@ export class WebSocketCarrier {
     }
   }
 
-  ready(): Promise<void> {
+  ready(): Promise<WebSocketNegotiation> {
     return this.opened;
   }
 
@@ -195,7 +217,17 @@ export class WebSocketCarrier {
 
   private async handleMessage(data: unknown): Promise<void> {
     for (const frame of decodeWebSocketFrameBatch(await bytesFromWebSocketMessage(data))) {
-      if (isWireHello(frame)) continue;
+      if (isWireHello(frame)) {
+        if (this.negotiated) continue;
+        this.negotiated = true;
+        this.resolveNegotiation(decodeServerHello(frame));
+        continue;
+      }
+      if (!this.negotiated) {
+        this.rejectNegotiation(new Error("websocket received semantic frame before server hello"));
+        this.close();
+        return;
+      }
       if (isWireError(frame)) {
         this.onError?.(decodeWireError(frame));
         continue;
@@ -203,6 +235,23 @@ export class WebSocketCarrier {
       this.onFrame(frame);
     }
   }
+}
+
+function decodeServerHello(frame: Uint8Array): WebSocketNegotiation {
+  const reader = new PostcardReader(frame);
+  if (reader.u64() !== 0) throw new Error("expected WireFrame::Hello");
+  const min = reader.u64();
+  const max = reader.u64();
+  if (min > WIRE_PROTOCOL_VERSION || max < WIRE_PROTOCOL_VERSION) {
+    throw new Error(`server does not support wire protocol ${WIRE_PROTOCOL_VERSION}`);
+  }
+  const features = reader.u64();
+  if (features & ~CLIENT_WIRE_FEATURES) {
+    throw new Error(`server accepted unsupported wire features 0x${features.toString(16)}`);
+  }
+  if (reader.u64() !== 1) throw new Error("expected WirePeerRole::Core server hello");
+  const authority = reader.option((value) => ({ node: value.bytes(false), epoch: value.u64() }));
+  return { protocolVersion: WIRE_PROTOCOL_VERSION, features, authority };
 }
 
 function websocketCloseDetails(event: unknown): { code?: number; reason?: string } {
