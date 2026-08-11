@@ -7131,6 +7131,21 @@ pub enum Error {
     SubscriptionClosed,
 }
 
+/// Whether encoding a projected current row failed solely because the read
+/// schema does not know the selected enum case.
+///
+/// Schema projection is deliberately fail-closed at this boundary: callers
+/// omit that row, while every other lens, materialization, and record error
+/// remains visible to the query caller.
+pub(super) fn is_unrepresentable_enum_projection(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Record(
+            records::Error::InvalidEnumDiscriminant { .. } | records::Error::UnknownEnumTag { .. }
+        )
+    )
+}
+
 impl From<QueryError> for Error {
     fn from(error: QueryError) -> Self {
         Self::Query(Box::new(error))

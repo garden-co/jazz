@@ -47,7 +47,7 @@ Invariant digest:
 - `INV-LOWER-25`: A lens-projected maintained source MUST emit the same net weighted current-row and witness deltas as applying the selected natural lens path to the authoritative source.
 - `INV-LOWER-26`: A structured query MUST expose one authoritative terminal output relation. Groove MUST assemble nested paths into that terminal; a child change semantically replaces or patches its owning root output, and public carriers MUST NOT require a second relation-edge delta stream.
 - `INV-LOWER-27`: An enum case's authored discriminant is scoped to its row `SchemaVersionId`; lowering MUST translate it through the persistent case identity of its physical occurrence before using a local storage tag, predicate, grouping key, or ordering key.
-- `INV-LOWER-28`: An additive enum case MUST be a row-level incompatibility for an older read schema, never a query or subscription error. Sources remove an unrepresentable row before any semantic consumer (filter, ordering, grouping, aggregation, policy, relation requirement, pagination, or maintained delta) observes it; unused enum occurrences remain undecoded and do not affect row visibility.
+- `INV-LOWER-28`: An additive enum case MUST be a row-level incompatibility for an older read schema, never a query or subscription error. For a current read, Global/Ahead candidates first choose their single canonical winner; the compatibility boundary then removes that unrepresentable winner before any semantic consumer (filter, ordering, grouping, aggregation, policy, relation requirement, pagination, or maintained delta) observes it. It MUST NOT fall back to an older compatible candidate. Unused enum occurrences remain undecoded and do not affect row visibility.
 
 ## Details
 
@@ -147,9 +147,11 @@ representations of schema-qualified case identities; simultaneous sibling ordina
 allocations cannot alias one another.
 
 _Further invariant._ `INV-LOWER-28` — enum compatibility is evaluated at the
-source boundary, so one-shot and maintained reads have the same row-membership
-semantics and no downstream operator can turn an unrepresentable value into a
-runtime failure.
+source boundary immediately after Global/Ahead currentness selection (or after
+the equivalent historical/branch winner materialization), so one-shot and
+maintained reads have the same row-membership semantics. A later incompatible
+winner retracts rather than exposing a stale compatible predecessor, and no
+downstream operator can turn it into a runtime failure.
 
 _Further invariants._ `INV-LOWER-2`, `INV-LOWER-4` — content and deletion lower
 to distinct tables belonging to the resolved `PhysicalTableId`, each with PK

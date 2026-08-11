@@ -1113,11 +1113,11 @@ where
             if projected_table.as_deref() != Some(table) {
                 continue;
             }
-            rows.push(current_row_from_materialized_cells(
-                table_schema,
-                &content,
-                &cells,
-            )?);
+            match current_row_from_materialized_cells(table_schema, &content, &cells) {
+                Ok(row) => rows.push(row),
+                Err(error) if is_unrepresentable_enum_projection(&error) => {}
+                Err(error) => return Err(error),
+            }
         }
         sort_current_rows(&mut rows);
         Ok(rows)

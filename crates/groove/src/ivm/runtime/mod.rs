@@ -5234,15 +5234,25 @@ fn lift_literal_filter(
                             source,
                             target,
                             remaps,
+                            omit_unrepresentable,
                         } => {
                             let source =
                                 project_source_from_joined_filter_input(&input_output, source)?;
-                            Ok(ProjectField::recursive_enum_remap(
-                                source,
-                                field.output_name.clone(),
-                                target.clone(),
-                                remaps.clone(),
-                            ))
+                            Ok(if *omit_unrepresentable {
+                                ProjectField::recursive_enum_remap_omitting_unrepresentable(
+                                    source,
+                                    field.output_name.clone(),
+                                    target.clone(),
+                                    remaps.clone(),
+                                )
+                            } else {
+                                ProjectField::recursive_enum_remap(
+                                    source,
+                                    field.output_name.clone(),
+                                    target.clone(),
+                                    remaps.clone(),
+                                )
+                            })
                         }
                     })
                     .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
@@ -5552,17 +5562,27 @@ fn project_fields_against_rewritten_input(
                     source,
                     target,
                     remaps,
+                    omit_unrepresentable,
                 } => {
                     let source = field_ref_name(&original_output, source)?;
                     if rewritten_output.field_index(&source).is_none() {
                         return Err(IvmRuntimeError::GraphFieldNotFound(source));
                     }
-                    return Ok(ProjectField::recursive_enum_remap(
-                        source,
-                        field.output_name.clone(),
-                        target.clone(),
-                        remaps.clone(),
-                    ));
+                    return Ok(if *omit_unrepresentable {
+                        ProjectField::recursive_enum_remap_omitting_unrepresentable(
+                            source,
+                            field.output_name.clone(),
+                            target.clone(),
+                            remaps.clone(),
+                        )
+                    } else {
+                        ProjectField::recursive_enum_remap(
+                            source,
+                            field.output_name.clone(),
+                            target.clone(),
+                            remaps.clone(),
+                        )
+                    });
                 }
                 ProjectExpr::Literal(_)
                 | ProjectExpr::TypedLiteral { .. }
@@ -6234,6 +6254,16 @@ impl NodeState {
         raw_projection: Option<&[RawProjectionField]>,
         omit_unrepresentable_enum_rows: bool,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
+        let omit_unrepresentable_enum_rows = omit_unrepresentable_enum_rows
+            || project.expressions.iter().any(|expression| {
+                matches!(
+                    expression.expression,
+                    PlanExpr::RecursiveEnumRemap {
+                        omit_unrepresentable: true,
+                        ..
+                    }
+                )
+            });
         let estimated_output_bytes = input
             .deltas
             .iter()
@@ -9200,12 +9230,16 @@ fn project_field_expr(
             field: field_ref_name(input, source)?,
             tags: tags.clone(),
         }),
-        ProjectExpr::RecursiveEnumRemap { source, remaps, .. } => {
-            Ok(PlanExpr::RecursiveEnumRemap {
-                field: field_ref_name(input, source)?,
-                remaps: remaps.clone(),
-            })
-        }
+        ProjectExpr::RecursiveEnumRemap {
+            source,
+            remaps,
+            omit_unrepresentable,
+            ..
+        } => Ok(PlanExpr::RecursiveEnumRemap {
+            field: field_ref_name(input, source)?,
+            remaps: remaps.clone(),
+            omit_unrepresentable: *omit_unrepresentable,
+        }),
     }
 }
 
@@ -9244,7 +9278,7 @@ fn project_record(
                 remap_enum_tag(input.get(field)?.clone(), tags)?
             }
             PlanExpr::EnumRemap { field, tags } => remap_enum(input.get(field)?.clone(), tags)?,
-            PlanExpr::RecursiveEnumRemap { field, remaps } => {
+            PlanExpr::RecursiveEnumRemap { field, remaps, .. } => {
                 let source_idx = input_desc
                     .field_index(field)
                     .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
@@ -10767,12 +10801,15 @@ fn resolve_aggregate_expr(
             field: resolve_field_name(input, field)?,
             tags: tags.clone(),
         }),
-        Some(PlanExpr::RecursiveEnumRemap { field, remaps }) => {
-            Some(PlanExpr::RecursiveEnumRemap {
-                field: resolve_field_name(input, field)?,
-                remaps: remaps.clone(),
-            })
-        }
+        Some(PlanExpr::RecursiveEnumRemap {
+            field,
+            remaps,
+            omit_unrepresentable,
+        }) => Some(PlanExpr::RecursiveEnumRemap {
+            field: resolve_field_name(input, field)?,
+            remaps: remaps.clone(),
+            omit_unrepresentable: *omit_unrepresentable,
+        }),
         Some(PlanExpr::Literal(_)) | Some(PlanExpr::Null(_)) | None => aggregate.expression.clone(),
     };
     Ok(AggregateExpr {

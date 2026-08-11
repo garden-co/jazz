@@ -1339,19 +1339,7 @@ where
         if let Some(target) = self.current_projection_targets.get(&request.source) {
             return Ok(target.clone());
         }
-        let required_fields = match &request.requirements.app_fields {
-            // `All` still goes through the query-local boundary. The durable
-            // all-fields projection predates compatibility-sensitive reads and
-            // reports a non-total enum remap as an execution error; a read
-            // must instead omit precisely that row before its query graph.
-            FieldRequirement::All => table
-                .columns
-                .iter()
-                .map(|column| column.name.clone())
-                .collect(),
-            FieldRequirement::None => BTreeSet::new(),
-            FieldRequirement::Fields(fields) => fields.clone(),
-        };
+        let required_fields = self.current_projection_required_fields(request, table);
         let target = self
             .node
             .ensure_physical_current_projection_for_enum_columns(
@@ -1363,6 +1351,26 @@ where
         self.current_projection_targets
             .insert(request.source.clone(), target.clone());
         Ok(target)
+    }
+
+    fn current_projection_required_fields(
+        &self,
+        request: &SourceRequest,
+        table: &TableSchema,
+    ) -> BTreeSet<String> {
+        match &request.requirements.app_fields {
+            // `All` still goes through the query-local boundary. The durable
+            // all-fields projection predates compatibility-sensitive reads and
+            // reports a non-total enum remap as an execution error; a read
+            // must instead omit precisely that row before its query graph.
+            FieldRequirement::All => table
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
+            FieldRequirement::None => BTreeSet::new(),
+            FieldRequirement::Fields(fields) => fields.clone(),
+        }
     }
 
     fn selected_global_current_source_graph(
@@ -1551,7 +1559,22 @@ where
         exclude_deleted: bool,
     ) -> Result<GraphBuilder, SourceResolutionError> {
         let fields = global_current_storage_fields(read_table, true, include_global_seq);
-        let projection_target = self.current_projection_target(request, read_table)?;
+        let required_fields = self.current_projection_required_fields(request, read_table);
+        let (projection_target, physical_fields) = self
+            .node
+            .ensure_physical_current_winner_projection(
+                self.read_view.read_schema,
+                &request.source.table,
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let post_winner_fields = self
+            .node
+            .physical_current_post_winner_projection_fields(
+                self.read_view.read_schema,
+                &request.source.table,
+                &required_fields,
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         let access_path = self.access_paths.get(&request.source).cloned();
         let global = match &access_path {
             Some(CurrentAccessPath::PrimaryKey(prefix)) => {
@@ -1566,17 +1589,19 @@ where
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
             }
-            Some(CurrentAccessPath::Index { column, prefix }) if tier == DurabilityTier::Global => {
-                self.node.query_engine_read_metrics.source_index_probes += 1;
+            Some(CurrentAccessPath::Index { .. }) if tier == DurabilityTier::Global => {
+                // The physical index's eager variant projection would decode
+                // before current-winner selection. Keep this path as a normal
+                // physical scan until index probing can return raw winners.
+                self.node.query_engine_read_metrics.source_full_scans += 1;
                 self.node
-                    .physical_global_current_source_for_index_scan(
-                        read_table,
+                    .physical_current_source_graph_with_projection_target(
                         self.read_view.read_schema,
-                        column,
-                        prefix,
-                        &projection_target,
+                        &request.source.table,
+                        PhysicalCurrentClass::Global,
+                        projection_target.clone(),
                     )
-                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
             }
             _ => {
                 self.node.query_engine_read_metrics.source_full_scans += 1;
@@ -1593,7 +1618,7 @@ where
         let content = if tier == DurabilityTier::Global {
             global
         } else {
-            let global = global.project(fields.clone());
+            let global = global.project(physical_fields.clone());
             let ahead = match &access_path {
                 Some(CurrentAccessPath::PrimaryKey(prefix)) => self
                     .node
@@ -1615,17 +1640,18 @@ where
             }
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
             let ahead = if tier == DurabilityTier::Edge {
-                edge_visible_ahead_current_source_graph(ahead, fields.clone())
+                edge_visible_ahead_current_source_graph(ahead, physical_fields.clone())
             } else {
-                ahead.project(fields.clone())
+                ahead.project(physical_fields.clone())
             };
             GraphBuilder::arg_max_by(
                 GraphBuilder::union([global, ahead]),
                 ["row_uuid"],
                 ["tx_time", "tx_node_id"],
             )
-            .project(fields.clone())
+            .project(physical_fields)
         };
+        let content = content.project_fields(post_winner_fields);
         if !exclude_deleted {
             return Ok(content.project(fields));
         }

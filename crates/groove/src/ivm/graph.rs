@@ -940,6 +940,27 @@ impl ProjectField {
                 source: FieldRef::name(source_name),
                 target,
                 remaps,
+                omit_unrepresentable: false,
+            },
+            output_name: output_name.into(),
+        }
+    }
+
+    /// Recursively re-encode enum tags and omit a row when a target schema
+    /// cannot represent one of its cases. This is reserved for Jazz's
+    /// compatibility boundary; ordinary descriptor errors still surface.
+    pub fn recursive_enum_remap_omitting_unrepresentable(
+        source_name: impl Into<String>,
+        output_name: impl Into<String>,
+        target: ValueType,
+        remaps: RecursiveEnumRemaps,
+    ) -> Self {
+        Self {
+            expression: ProjectExpr::RecursiveEnumRemap {
+                source: FieldRef::name(source_name),
+                target,
+                remaps,
+                omit_unrepresentable: true,
             },
             output_name: output_name.into(),
         }
@@ -983,6 +1004,7 @@ pub enum ProjectExpr {
         source: FieldRef,
         target: ValueType,
         remaps: RecursiveEnumRemaps,
+        omit_unrepresentable: bool,
     },
 }
 

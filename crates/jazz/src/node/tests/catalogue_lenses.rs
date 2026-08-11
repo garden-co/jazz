@@ -3522,6 +3522,15 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     // introduced an additive case.
     let status_required = Query::from("items").validate(&base).unwrap();
     let status_binding = status_required.bind(BTreeMap::new()).unwrap();
+    let status_options = crate::protocol::RegisterShapeOptions {
+        tier: DurabilityTier::Local,
+        read_view: Default::default(),
+    };
+    let status_subscription = SubscriptionKey {
+        shape_id: status_required.shape_id(),
+        binding_id: status_binding.binding_id(),
+        read_view: status_options.read_view_key(),
+    };
     let whole_rows = core.query_rows(&status_required, &status_binding, DurabilityTier::Local)
         .expect("one-shot whole-row read omits only the unknown row");
     assert_eq!(
@@ -3532,7 +3541,12 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     );
     let mut status_peer = PeerState::new();
     let update = status_peer
-        .rehydrate_query(&mut core, &status_required, &status_binding)
+        .rehydrate_query_with_opts(
+            &mut core,
+            &status_required,
+            &status_binding,
+            status_options.clone(),
+        )
         .expect("required unknown enum case is a row exclusion");
     let SyncMessage::ViewUpdate { result_member_adds, .. } = update else {
         panic!("expected initial maintained view update");
@@ -3543,17 +3557,23 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     }));
 
     // Maintained membership follows the same compatibility boundary on every
-    // delta: moving a visible old row into an unknown case removes it, and
-    // moving it back to a known case re-adds it without a subscription error.
-    accept_global(
-        &mut core,
+    // delta: a newer local/Ahead unknown winner retracts the older Global row,
+    // then a newer known winner re-adds it without a subscription error.
+    core.commit_mergeable(
         MergeableCommit::new("items", known, 3).cells(BTreeMap::from([
             ("title".to_owned(), v("now incompatible")),
             ("status".to_owned(), Value::EnumTag(1)),
         ])),
-    );
+    )
+    .unwrap();
     let update = status_peer
-        .query_update(&mut core, &status_required, &status_binding)
+        .query_update_for_subscription_with_opts(
+            &mut core,
+            status_subscription,
+            &status_required,
+            &status_binding,
+            status_options.clone(),
+        )
         .expect("newly incompatible delta removes the row");
     let SyncMessage::ViewUpdate { result_member_removes, .. } = update else {
         panic!("expected maintained view update");
@@ -3561,15 +3581,21 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     assert!(result_member_removes.iter().any(|member| {
         member.as_row().is_some_and(|(_, row_uuid, _)| row_uuid == known)
     }));
-    accept_global(
-        &mut core,
+    core.commit_mergeable(
         MergeableCommit::new("items", known, 4).cells(BTreeMap::from([
             ("title".to_owned(), v("compatible again")),
             ("status".to_owned(), Value::EnumTag(0)),
         ])),
-    );
+    )
+    .unwrap();
     let update = status_peer
-        .query_update(&mut core, &status_required, &status_binding)
+        .query_update_for_subscription_with_opts(
+            &mut core,
+            status_subscription,
+            &status_required,
+            &status_binding,
+            status_options,
+        )
         .expect("newly compatible delta re-adds the row");
     let SyncMessage::ViewUpdate { result_member_adds, .. } = update else {
         panic!("expected maintained view update");
@@ -3836,9 +3862,17 @@ fn enum_projection_requirement_closure_includes_hidden_policy_fields() {
         pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
     })
     .unwrap();
+    let item = row(0x77);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("items", item, 1).cells(BTreeMap::from([
+            ("title".to_owned(), v("globally allowed")),
+            ("status".to_owned(), Value::EnumTag(0)),
+        ])),
+    );
     core.commit_mergeable(
-        MergeableCommit::new("items", row(0x77), 1).cells(BTreeMap::from([
-            ("title".to_owned(), v("hidden-policy-dependency")),
+        MergeableCommit::new("items", item, 2).cells(BTreeMap::from([
+            ("title".to_owned(), v("new local case")),
             ("status".to_owned(), Value::EnumTag(1)),
         ])),
     )
@@ -3853,6 +3887,151 @@ fn enum_projection_requirement_closure_includes_hidden_policy_fields() {
         user(0x77),
     );
     assert!(result.unwrap().is_empty(), "policy must hide incompatible row");
+
+    // The same post-winner boundary applies before windowing and aggregation:
+    // an unknown newer local version cannot leak the older global winner into
+    // a page or count.
+    let whole = Query::from("items").validate(&base).unwrap();
+    assert!(core
+        .query_rows(
+            &whole,
+            &whole.bind(BTreeMap::new()).unwrap(),
+            DurabilityTier::Local,
+        )
+        .unwrap()
+        .is_empty());
+    let page = Query::from("items")
+        .select(["title"])
+        .order_by("status", crate::query::OrderDirection::Asc)
+        .offset(0)
+        .limit(1)
+        .validate(&base)
+        .unwrap();
+    assert!(core
+        .query_rows(
+            &page,
+            &page.bind(BTreeMap::new()).unwrap(),
+            DurabilityTier::Local,
+        )
+        .unwrap()
+        .is_empty());
+    let count = Query::from("items")
+        .count()
+        .group_by("status")
+        .validate(&base)
+        .unwrap();
+    assert!(core
+        .query_rows(
+            &count,
+            &count.bind(BTreeMap::new()).unwrap(),
+            DurabilityTier::Local,
+        )
+        .unwrap()
+        .is_empty());
+
+    core.commit_mergeable(
+        MergeableCommit::new("items", item, 3).cells(BTreeMap::from([
+            ("title".to_owned(), v("local known again")),
+            ("status".to_owned(), Value::EnumTag(0)),
+        ])),
+    )
+    .unwrap();
+    assert_eq!(
+        core.query_rows(
+            &whole,
+            &whole.bind(BTreeMap::new()).unwrap(),
+            DurabilityTier::Local,
+        )
+        .unwrap()
+        .len(),
+        1,
+    );
+}
+
+#[test]
+fn old_enum_schema_omits_unknown_rows_from_materialized_query_sources() {
+    // Contract: an old reader must receive an empty result—not an encoding
+    // failure—when a selected winner uses a later enum case, even along source
+    // paths that materialize projected rows before lowering.
+    //
+    // Actors: an evolved writer publishes `closed`; an old reader queries the
+    // same physical row through history, a branch overlay, and deleted-row
+    // inspection.
+    //
+    // ```text
+    // evolved writer: closed ──► old reader: omitted
+    //                         ├─ historical cut
+    //                         ├─ branch overlay
+    //                         └─ including-deleted source
+    // ```
+    let base = enum_projection_schema(&["open"]);
+    let evolved = SchemaVersion::new(enum_projection_schema(&["open", "closed"]));
+    let (_dir, mut core) = open_history_complete_node_with_schema(node(0x7b), base.clone());
+    publish_schema_lineage(
+        &mut core,
+        evolved.clone(),
+        enum_identity_lens(base.version_id(), evolved.id),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
+    })
+    .unwrap();
+
+    let old_shape = Query::from("items").validate(&base).unwrap();
+    let old_binding = old_shape.bind(BTreeMap::new()).unwrap();
+    let global_row = row(0x7b);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("items", global_row, 1).cells(BTreeMap::from([
+            ("title".to_owned(), v("later global case")),
+            ("status".to_owned(), Value::EnumTag(1)),
+        ])),
+    );
+
+    assert!(core
+        .projected_historical_current_rows("items", base.version_id(), GlobalSeq(0))
+        .unwrap()
+        .is_empty());
+
+    assert!(core
+        .query_rows_at(&old_shape, &old_binding, GlobalSeq(0))
+        .unwrap()
+        .is_empty());
+
+    core.commit_mergeable(
+        MergeableCommit::new("items", global_row, 2).deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
+    assert!(core
+        .query_rows_including_deleted_in_authorization_mode(
+            &old_shape,
+            &old_binding,
+            DurabilityTier::Local,
+            None,
+            AuthorId::SYSTEM,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .unwrap()
+        .is_empty());
+
+    let branch_id = branch(0x7b);
+    core.create_root_branch(branch_id).unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("items", row(0x7c), 3).cells(BTreeMap::from([
+            ("title".to_owned(), v("later branch case")),
+            ("status".to_owned(), Value::EnumTag(1)),
+        ])),
+    )
+    .unwrap();
+    assert!(core
+        .query_rows_on_branch(branch_id, &old_shape, &old_binding)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
