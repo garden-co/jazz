@@ -645,6 +645,11 @@ impl IvmRuntime {
                 target: variant_projection_target_name(&target).to_owned(),
             }
         })?;
+        let allow_recursive_replacement = fields.is_some_and(|fields| {
+            fields
+                .iter()
+                .any(|field| matches!(field.expression, ProjectExpr::RecursiveEnumRemap { .. }))
+        });
         let case = if let Some(fields) = fields {
             let projected = project_descriptor(&source, fields)?;
             // A recursive enum projector is an explicit descriptor boundary:
@@ -652,10 +657,7 @@ impl IvmRuntime {
             // registries. The operation validates and re-encodes the values
             // against the fixed output descriptor at execution time, so the
             // usual raw-descriptor compatibility shortcut is inapplicable.
-            let recursive_enum_boundary = fields
-                .iter()
-                .any(|field| matches!(field.expression, ProjectExpr::RecursiveEnumRemap { .. }));
-            if !recursive_enum_boundary
+            if !allow_recursive_replacement
                 && !record_descriptors_registry_compatible(&projected, &projection.output)
             {
                 return Err(IvmRuntimeError::VariantProjectionOutputMismatch {
@@ -698,6 +700,13 @@ impl IvmRuntime {
                 entry.insert(case);
             }
             std::collections::hash_map::Entry::Occupied(entry) if entry.get() == &case => {}
+            std::collections::hash_map::Entry::Occupied(mut entry)
+                if allow_recursive_replacement =>
+            {
+                // The physical registry can append while this authored target
+                // stays fixed. Refresh its non-total tag map in place.
+                entry.insert(case);
+            }
             std::collections::hash_map::Entry::Occupied(_) => {
                 return Err(IvmRuntimeError::VariantProjectionCaseAlreadyRegistered {
                     table: table.to_owned(),

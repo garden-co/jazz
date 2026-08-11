@@ -101,7 +101,7 @@ fn physical_scalar_enum_schema(
     )
     .map(|schema| {
         schema.with_registry_id(records::variant_registry_id_for_path(&format!(
-            "physical-column/{}",
+            "physical-column/{}/nullable",
             column_id.0
         )))
     })
@@ -2482,14 +2482,18 @@ fn merge_physical_value_type(
             // path supplies schema-qualified identities and replaces these
             // names with its durable registry; retain a deterministic union
             // here so descriptor construction never aliases sibling cases.
-            let variants = left
+            // This is a physical registry, so its declaration order is the
+            // stored tag order. Preserve the established prefix and append
+            // only newly observed opaque case names; a sorted set would
+            // silently retag existing values.
+            let mut variants = left.variants.clone();
+            let appended = right
                 .variants
                 .iter()
-                .chain(&right.variants)
+                .filter(|variant| !variants.contains(variant))
                 .cloned()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
                 .collect::<Vec<_>>();
+            variants.extend(appended);
             Ok(ValueType::EnumTag(
                 records::ScalarEnumSchema::new(left.name.clone(), variants)
                     .map_err(|_| Error::InvalidStoredValue("invalid physical enum registry"))?
