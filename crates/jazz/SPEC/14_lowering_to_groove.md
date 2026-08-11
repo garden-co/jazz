@@ -46,6 +46,7 @@ Invariant digest:
 - `INV-LOWER-24`: Dry-run policy probes and recursion seed hydration MUST use the same deterministic source access-path selection as ordinary one-shot reads, with equivalence to the full-scan path and counters proving the selected path.
 - `INV-LOWER-25`: A lens-projected maintained source MUST emit the same net weighted current-row and witness deltas as applying the selected natural lens path to the authoritative source.
 - `INV-LOWER-26`: A structured query MUST expose one authoritative terminal output relation. Groove MUST assemble nested paths into that terminal; a child change semantically replaces or patches its owning root output, and public carriers MUST NOT require a second relation-edge delta stream.
+- `INV-LOWER-27`: A scalar enum's authored discriminant is scoped to its row `SchemaVersionId`; lowering MUST translate it through the persistent case identity of its physical column occurrence before using a local storage tag, predicate, grouping key, or ordering key.
 
 ## Details
 
@@ -81,6 +82,58 @@ the recovered physical lineages (ch. 2, `INV-DATA-20`).
 Wire identities remain UUIDs. Lowered storage may intern those identities into
 node-local `u64` aliases in `jazz_nodes`/`jazz_schema_versions`, but those
 aliases must never appear on the wire (ch. 2, `INV-LOWER-3`).
+
+### 14.2.1 Concurrent scalar enum cases
+
+Jazz explicitly permits concurrent schema versions. Therefore the compact scalar
+enum discriminant in a wire row is an **authored ordinal**, qualified by the
+row's `SchemaVersionId`; it is not a global enum tag. For a physical column
+occurrence, the semantic identity of a case is its `GlobalCaseId`:
+
+```text
+(introducing SchemaVersionId, introducing authored ordinal)
+```
+
+An inherited case retains the identity of the schema version that introduced it.
+For example, if a base schema declares `draft` and `published`, concurrent
+children A and B may both declare authored ordinal `2`, respectively `archived`
+and `snoozed`. They are distinct cases: `(A, 2)` and `(B, 2)`. A later merge
+schema maps both into its own authored ordinal space. The physical column
+occurrence is part of every lookup of that identity; similarly named cases in
+different columns never share a registry.
+
+The catalogue supplies the evidence for the introducing schema and its lineage.
+Nodes can hold different catalogue subsets, so local receipt order is not a
+permitted source of semantic identity or sort order. A node may assign arbitrary
+durable dense local tags after resolving `GlobalCaseId`, but it must persist the
+mapping and translate at the wire/storage and storage/projection boundaries.
+The compact wire representation remains `SchemaVersionId + authored ordinal`,
+because the row already carries the former; values which escape that row context
+(for example standalone parameters or caches) must carry equivalent schema or
+case context.
+
+For ordering, a node uses the target schema's current representable case view.
+Within that view an ancestrally earlier introduction MUST sort before a later
+introduction. Concurrent siblings have no ancestral order, so their order is the
+deterministic lexicographic order of their introducing `SchemaVersionId` followed
+by the introducing ordinal. This is a semantic tie-break, not local arrival order.
+It may be optimized into an authoritative physical registry ordinal where the
+catalogue has enough evidence, but a partial node must produce the same order for
+the cases it can represent.
+
+Projection from a physical case back into an authored schema is non-total. If a
+query does not read, filter, join, order, group, or authorize through that column,
+the row remains usable without decoding it. If a query semantically requires a
+case absent from its target schema, it MUST fail explicitly unless an authored
+down-grade lens supplies a default or nullable mapping. It MUST NOT silently hide
+the row or substitute an old case. Equality predicates for a known case may treat
+an absent newer case as non-matching. Payload enum cases are intentionally out of
+scope for the initial scalar implementation; they require the same global-case and
+payload-compatibility rules before concurrent lowering is supported.
+
+_Further invariant._ `INV-LOWER-27` — local scalar enum tags are only interned
+representations of schema-qualified case identities; simultaneous sibling ordinal
+allocations cannot alias one another.
 
 _Further invariants._ `INV-LOWER-2`, `INV-LOWER-4` — content and deletion lower
 to distinct tables belonging to the resolved `PhysicalTableId`, each with PK
