@@ -47,7 +47,11 @@ import {
   createRecord,
   createRecordValueDecoder,
   decodeNativeRowValues,
+  encodeNativeColumnValue,
+  encodeNativeNullValue,
+  encodeU32Le,
   logicalStorageColumns,
+  nativeFixedValueSize,
   storageColumnTypeToValueType,
   storageColumnValueType,
   writeDescriptor,
@@ -363,7 +367,6 @@ type NativeRowFieldPlan = {
   includeInValues: boolean;
 };
 
-const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 const byteHex = Array.from({ length: 256 }, (_, byte) => byte.toString(16).padStart(2, "0"));
 const nativeRowFieldPlanCache = new WeakMap<WasmSchema, Map<string, NativeRowFieldPlan[]>>();
@@ -3411,7 +3414,7 @@ function encodeCells(
     .sort((left, right) => left.name.localeCompare(right.name))
     .map((column) => ({ name: column.name, valueType: storageColumnValueType(column), column }));
   const values = descriptor.map(({ column }) =>
-    encodeValue(column, valueFor(column), requireMissingDefaults),
+    encodeCellValue(column, valueFor(column), requireMissingDefaults),
   );
   const writer = new PostcardWriter();
   writeDescriptor(writer, descriptor);
@@ -3436,151 +3439,30 @@ function assertRequiredRowColumnsPresent(
   }
 }
 
-function encodeValue(
+/**
+ * Mutation cells deliberately differ from packed rows only when a field is
+ * omitted: inserts can leave a server default unresolved, whereas patches
+ * never synthesize a missing field. Every present value is encoded by the row
+ * codec so scalar tags, arrays, nested rows, nullable values, and sparse
+ * carriers have one binary authority.
+ */
+function encodeCellValue(
   column: ColumnDescriptor,
   value: Value | undefined,
   requireMissingDefaults: boolean,
 ): Uint8Array {
   const resolved = value;
-  if (!resolved || resolved.type === "Null") {
-    if (column.nullable) return encodeNullValue(storageColumnValueType(column));
+  if (!resolved) {
+    if (column.nullable) return encodeNativeNullValue(storageColumnValueType(column));
     if (column.column_type.type === "Array") {
-      return encodeNonNullValue(column.column_type, { type: "Array", value: [] });
+      return encodeNativeColumnValue(column, { type: "Array", value: [] });
     }
     if (requireMissingDefaults && column.default == null) {
       throw new Error(`missing required column ${column.name}`);
     }
     return new Uint8Array();
   }
-  const bytes = encodeNonNullValue(column.column_type, resolved);
-  return column.nullable ? concatBytes([Uint8Array.of(1), bytes]) : bytes;
-}
-
-function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
-  const view = new DataView(new ArrayBuffer(8));
-  switch (type.type) {
-    case "Boolean":
-      return Uint8Array.of(value.type === "Boolean" && value.value ? 1 : 0);
-    case "Integer":
-      view.setInt32(0, expectI32(value, "Integer"), true);
-      return new Uint8Array(view.buffer, 0, 4);
-    case "Timestamp":
-      view.setBigUint64(0, BigInt(expectNumber(value, type.type)), true);
-      return new Uint8Array(view.buffer);
-    case "BigInt":
-      view.setBigInt64(0, expectI64(value, "BigInt"), true);
-      return new Uint8Array(view.buffer);
-    case "Double":
-      view.setFloat64(0, expectNumber(value, "Double"), true);
-      return new Uint8Array(view.buffer);
-    case "Text":
-    case "Json":
-    case "Enum":
-      return textEncoder.encode(expectString(value, type.type));
-    case "Uuid":
-      return parseUuid(expectString(value, "Uuid"));
-    case "Bytea":
-      if (value.type !== "Bytea") throw new Error("expected Bytea value");
-      return value.value;
-    case "Array":
-      return encodeArrayValue(type.element, value);
-    case "Row":
-      throw new Error(`Native runtime does not encode ${type.type} values yet`);
-  }
-}
-
-function encodeArrayValue(elementType: ColumnType, value: Value): Uint8Array {
-  if (value.type !== "Array") throw new Error("expected Array value");
-  const encoded = value.value.map((item) => encodeNonNullValue(elementType, item));
-  const elementWidth = fixedValueSize(storageColumnTypeToValueType(elementType));
-  if (elementWidth != null) return concatBytes(encoded);
-
-  const offsets = new PostcardWriter();
-  let nextOffset = 4 + Math.max(0, encoded.length - 1) * 4;
-  for (const chunk of encoded.slice(0, -1)) {
-    nextOffset += chunk.length;
-    offsets.u32Le(nextOffset);
-  }
-  return concatBytes([u32Le(encoded.length), offsets.finish(), ...encoded]);
-}
-
-function u32Le(value: number): Uint8Array {
-  const bytes = new Uint8Array(4);
-  new DataView(bytes.buffer).setUint32(0, value, true);
-  return bytes;
-}
-
-function encodeNullValue(valueType: ValueType): Uint8Array {
-  const width = fixedValueSize(valueType);
-  return width == null ? Uint8Array.of(0) : new Uint8Array(width);
-}
-
-function fixedValueSize(valueType: ValueType): number | undefined {
-  switch (valueType.tag) {
-    case 0:
-    case 7:
-    case 11:
-      return 1;
-    case 1:
-      return 2;
-    case 2:
-    case 4:
-      return 4;
-    case 3:
-    case 5:
-    case 6:
-      return 8;
-    case 10:
-      return 16;
-    case 12: {
-      const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
-      return members.reduce<number | undefined>((total, member) => {
-        if (total == null) return undefined;
-        const memberSize = fixedValueSize(member);
-        return memberSize == null ? undefined : total + memberSize;
-      }, 0);
-    }
-    case 14: {
-      const innerSize = valueType.inner ? fixedValueSize(valueType.inner) : undefined;
-      return innerSize == null ? undefined : innerSize + 1;
-    }
-    default:
-      return undefined;
-  }
-}
-
-function expectNumber(value: Value, type: string): number {
-  if (
-    (value.type === "Integer" || value.type === "Double" || value.type === "Timestamp") &&
-    typeof value.value === "number"
-  ) {
-    return value.value;
-  }
-  throw new Error(`expected ${type} value`);
-}
-
-function expectI32(value: Value, type: string): number {
-  const number = expectNumber(value, type);
-  if (!Number.isSafeInteger(number) || number < -0x80000000 || number > 0x7fffffff) {
-    throw new Error(`${type} value must be a signed 32-bit integer`);
-  }
-  return number;
-}
-
-function expectI64(value: Value, type: string): bigint {
-  if (value.type !== "BigInt") throw new Error(`expected ${type} value`);
-  const number = BigInt(value.value);
-  if (number < -(1n << 63n) || number > (1n << 63n) - 1n) {
-    throw new Error(`${type} value must be a signed 64-bit integer`);
-  }
-  return number;
-}
-
-function expectString(value: Value, type: string): string {
-  if ((value.type === "Text" || value.type === "Uuid") && typeof value.value === "string") {
-    return value.value;
-  }
-  throw new Error(`expected ${type} value`);
+  return encodeNativeColumnValue(column, resolved);
 }
 
 function readRowBatches(payload: Uint8Array): NativeRowBatch[] {
@@ -3995,7 +3877,7 @@ function decodeArrayBytes(
   storageElementType?: ValueType,
   nestedRowCarrier: NestedRowCarrier = "full-record",
 ): Value[] {
-  const elementWidth = fixedValueSize(
+  const elementWidth = nativeFixedValueSize(
     storageElementType ?? storageColumnTypeToValueType(elementType),
   );
   if (elementWidth != null) {
@@ -4227,7 +4109,7 @@ function nativeResetDeltaFromBatches(
       : (raw: Uint8Array) => raw;
     for (const row of batch.rows) {
       const raw = encodeFrameRow(row.raw);
-      chunks.push(row.rowId, u32Le(rowIndex), u32Le(raw.byteLength), raw);
+      chunks.push(row.rowId, encodeU32Le(rowIndex), encodeU32Le(raw.byteLength), raw);
       rowIndex += 1;
     }
   }
@@ -4302,9 +4184,9 @@ function createRawNativeFrameRowEncoder(
     const values = columns.map((column) => {
       const sourceIndex = sourceIndexesByPublicName.get(column.name);
       const outputValueType = storageColumnValueType(column);
-      if (sourceIndex === undefined) return encodeNullValue(outputValueType);
+      if (sourceIndex === undefined) return encodeNativeNullValue(outputValueType);
       const decoded = decodeRecord(raw, sourceIndex);
-      if (decoded == null) return encodeNullValue(outputValueType);
+      if (decoded == null) return encodeNativeNullValue(outputValueType);
       return encodeFrameColumnValue(decoded, outputValueType);
     });
     return createRecord(outputDescriptor, values);
@@ -4403,9 +4285,9 @@ function encodeNativeRows(
         `${String(error)} while encoding ${row.table}: ${columns.map((column, index) => `${column.name}:${column.column_type.type}=${frameValues[index]?.type}`).join(", ")}`,
       );
     }
-    chunks.push(requiredUuidBytes(row.id), u32Le(rowIndexByKey.get(rowStateKey(row)) ?? 0));
+    chunks.push(requiredUuidBytes(row.id), encodeU32Le(rowIndexByKey.get(rowStateKey(row)) ?? 0));
     if (updated) chunks.push(Uint8Array.of(1));
-    chunks.push(u32Le(raw.byteLength), raw);
+    chunks.push(encodeU32Le(raw.byteLength), raw);
   }
   return concatBytes(chunks);
 }
@@ -4426,7 +4308,7 @@ function valuesForNativeFrame(row: RowState, columns: readonly ColumnDescriptor[
 }
 
 function encodeNativeRemoves(removed: Array<{ id: string; index: number }>): Uint8Array {
-  return concatBytes(removed.flatMap((row) => [requiredUuidBytes(row.id), u32Le(row.index)]));
+  return concatBytes(removed.flatMap((row) => [requiredUuidBytes(row.id), encodeU32Le(row.index)]));
 }
 
 function legacyResultKey(id: string): Uint8Array {

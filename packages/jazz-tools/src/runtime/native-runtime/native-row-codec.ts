@@ -459,7 +459,7 @@ export function createNativeRowValueEncoder(
     const encoded: Uint8Array[] = [];
     encoded.length = columns.length;
     for (let index = 0; index < columns.length; index += 1) {
-      encoded[index] = encodeValueForColumn(columns[index], values[index]);
+      encoded[index] = encodeNativeColumnValue(columns[index], values[index]);
     }
     return createRecordWithLayout(layout, encoded);
   };
@@ -611,31 +611,42 @@ function descriptorFromColumns(columns: readonly ColumnDescriptor[]): Descriptor
   }));
 }
 
-function encodeValueForColumn(column: ColumnDescriptor, value: Value | undefined): Uint8Array {
+/**
+ * Encode a physical storage value for a declared column.
+ *
+ * This is the single authority for the value bytes shared by packed rows and
+ * mutation-cell records. Callers retain responsibility for their distinct
+ * omission/default policies, but a present value must always use this path so
+ * nullable and sparse carrier layers remain part of the descriptor contract.
+ */
+export function encodeNativeColumnValue(
+  column: ColumnDescriptor,
+  value: Value | undefined,
+): Uint8Array {
   const logicalType = storageColumnTypeToValueType(column.column_type);
   const nullableType: ValueType = column.nullable ? { tag: 14, inner: logicalType } : logicalType;
 
   if (!value) {
-    if (column.sparse) return encodeNullValue({ tag: 14, inner: nullableType });
+    if (column.sparse) return encodeNativeNullValue({ tag: 14, inner: nullableType });
     if (!column.nullable) {
       throw new Error(`missing non-nullable value for ${column.name}`);
     }
-    return encodeNullValue(nullableType);
+    return encodeNativeNullValue(nullableType);
   }
   if (value.type === "Null") {
     if (!column.nullable) {
       throw new Error(`missing non-nullable value for ${column.name}`);
     }
-    const encodedNull = encodeNullValue(nullableType);
-    return column.sparse ? encodePresentValue(encodedNull, nullableType) : encodedNull;
+    const encodedNull = encodeNativeNullValue(nullableType);
+    return column.sparse ? encodeNativePresentValue(encodedNull, nullableType) : encodedNull;
   }
-  let encoded = encodeNonNullValue(column.column_type, value);
-  if (column.nullable) encoded = encodePresentValue(encoded, logicalType);
-  return column.sparse ? encodePresentValue(encoded, nullableType) : encoded;
+  let encoded = encodeNativeNonNullValue(column.column_type, value);
+  if (column.nullable) encoded = encodeNativePresentValue(encoded, logicalType);
+  return column.sparse ? encodeNativePresentValue(encoded, nullableType) : encoded;
 }
 
-function encodePresentValue(encoded: Uint8Array, inner: ValueType): Uint8Array {
-  if (fixedSize(inner) == null) {
+function encodeNativePresentValue(encoded: Uint8Array, inner: ValueType): Uint8Array {
+  if (nativeFixedValueSize(inner) == null) {
     return concatBytes([Uint8Array.of(1), encoded]);
   }
   const output = new Uint8Array(1 + encoded.length);
@@ -644,12 +655,12 @@ function encodePresentValue(encoded: Uint8Array, inner: ValueType): Uint8Array {
   return output;
 }
 
-function encodeNullValue(valueType: ValueType): Uint8Array {
-  const width = fixedSize(valueType);
+export function encodeNativeNullValue(valueType: ValueType): Uint8Array {
+  const width = nativeFixedValueSize(valueType);
   return width == null ? Uint8Array.of(0) : new Uint8Array(width);
 }
 
-function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
+function encodeNativeNonNullValue(type: ColumnType, value: Value): Uint8Array {
   switch (type.type) {
     case "Boolean":
       if (value.type !== "Boolean") throw new Error("expected Boolean value");
@@ -693,14 +704,14 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
       return value.value;
     case "Array":
       if (value.type !== "Array") throw new Error("expected Array value");
-      return encodeArrayValue(type.element, value.value);
+      return encodeNativeArrayValue(type.element, value.value);
     case "Row":
       if (value.type !== "Row") throw new Error("expected Row value");
-      return encodeRowValue(type.columns, value.value);
+      return encodeNativeRowValue(type.columns, value.value);
   }
 }
 
-function encodeRowValue(
+function encodeNativeRowValue(
   columns: readonly ColumnDescriptor[],
   value: { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> },
 ): Uint8Array {
@@ -718,14 +729,14 @@ function encodeRowValue(
   return concatBytes([
     Uint8Array.of(value.id ? 1 : 0),
     idBytes,
-    u32Le(encodedValues.byteLength),
+    encodeU32Le(encodedValues.byteLength),
     encodedValues,
   ]);
 }
 
-function encodeArrayValue(elementType: ColumnType, values: readonly Value[]): Uint8Array {
-  const encoded = values.map((value) => encodeNonNullValue(elementType, value));
-  const elementWidth = fixedSize(storageColumnTypeToValueType(elementType));
+function encodeNativeArrayValue(elementType: ColumnType, values: readonly Value[]): Uint8Array {
+  const encoded = values.map((value) => encodeNativeNonNullValue(elementType, value));
+  const elementWidth = nativeFixedValueSize(storageColumnTypeToValueType(elementType));
   if (elementWidth != null) return concatBytes(encoded);
 
   const offsets = new Uint8Array(Math.max(0, values.length - 1) * 4);
@@ -735,10 +746,10 @@ function encodeArrayValue(elementType: ColumnType, values: readonly Value[]): Ui
     nextOffset += chunk.length;
     view.setUint32(index * 4, nextOffset, true);
   });
-  return concatBytes([u32Le(values.length), offsets, ...encoded]);
+  return concatBytes([encodeU32Le(values.length), offsets, ...encoded]);
 }
 
-function u32Le(value: number): Uint8Array {
+export function encodeU32Le(value: number): Uint8Array {
   const bytes = new Uint8Array(4);
   new DataView(bytes.buffer).setUint32(0, value, true);
   return bytes;
@@ -905,7 +916,7 @@ function decodeArrayElements<T>(
   bytes: Uint8Array,
   decodeElement: (bytes: Uint8Array) => T,
 ): T[] {
-  const elementWidth = fixedSize(storageColumnTypeToValueType(elementType));
+  const elementWidth = nativeFixedValueSize(storageColumnTypeToValueType(elementType));
   if (elementWidth != null) {
     if (elementWidth === 0) return [];
     if (bytes.length % elementWidth !== 0) {
@@ -957,7 +968,7 @@ function formatUuid(bytes: Uint8Array): string {
   )}-${hex.slice(20)}`;
 }
 
-function fixedSize(valueType: ValueType): number | undefined {
+export function nativeFixedValueSize(valueType: ValueType): number | undefined {
   switch (valueType.tag) {
     case 0:
     case 7:
@@ -978,14 +989,14 @@ function fixedSize(valueType: ValueType): number | undefined {
       const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
       return members.reduce<number | undefined>((total, member) => {
         if (total == null) return undefined;
-        const memberSize = fixedSize(member);
+        const memberSize = nativeFixedValueSize(member);
         return memberSize == null ? undefined : total + memberSize;
       }, 0);
     }
     case 13:
       return undefined;
     case 14: {
-      const innerSize = valueType.inner ? fixedSize(valueType.inner) : undefined;
+      const innerSize = valueType.inner ? nativeFixedValueSize(valueType.inner) : undefined;
       return innerSize == null ? undefined : innerSize + 1;
     }
     default:
@@ -1019,7 +1030,7 @@ function recordLayout(descriptor: DescriptorField[]): {
   let fixedOffset = 0;
 
   for (let logicalIndex = 0; logicalIndex < descriptor.length; logicalIndex += 1) {
-    const size = fixedSize(descriptor[logicalIndex].valueType);
+    const size = nativeFixedValueSize(descriptor[logicalIndex].valueType);
     if (size == null) continue;
     const layout = { kind: "fixed" as const, logicalIndex, offset: fixedOffset, size };
     fields[logicalIndex] = layout;
@@ -1028,7 +1039,7 @@ function recordLayout(descriptor: DescriptorField[]): {
   }
 
   for (let logicalIndex = 0; logicalIndex < descriptor.length; logicalIndex += 1) {
-    if (fixedSize(descriptor[logicalIndex].valueType) != null) continue;
+    if (nativeFixedValueSize(descriptor[logicalIndex].valueType) != null) continue;
     const layout = {
       kind: "variable" as const,
       logicalIndex,
