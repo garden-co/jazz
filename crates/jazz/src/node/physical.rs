@@ -3848,7 +3848,7 @@ mod variant_case_tests {
     }
 
     #[test]
-    fn concurrent_scalar_enum_additions_preserve_schema_qualified_case_identity() {
+    fn concurrent_scalar_enum_merge_preserves_established_prefix_and_distinct_cases() {
         // This is deliberately an internal lowering test: the failure happens
         // before a public row can be decoded. Two concurrent authored schemas
         // both use ordinal 2, so accepting the raw tags as one physical tag
@@ -3866,17 +3866,32 @@ mod variant_case_tests {
         let merged_ab = merge_physical_value_type(&archived, &snoozed)
             .expect("concurrent enum cases must coexist in one physical registry");
         let merged_ba = merge_physical_value_type(&snoozed, &archived)
-            .expect("local arrival order must not choose semantic enum order");
-        assert_eq!(merged_ab, merged_ba);
+            .expect("the opposite established prefix also accepts its sibling");
 
-        // The implementation must additionally translate authored ordinal 2
-        // through a schema-qualified identity at both storage boundaries. This
-        // assertion only establishes the prerequisite: the physical registry
-        // has distinct slots for the sibling introductions.
-        let records::ValueType::EnumTag(registry) = merged_ab else {
+        // This compatibility helper operates on an already-established local
+        // physical descriptor. It is intentionally directional: canonical
+        // catalogue ordering has already happened before this point, so
+        // sorting or rebuilding this descriptor would retag stored values.
+        // The schema-qualified physical lowering path supplies that canonical
+        // order; this helper must only append a distinct sibling case.
+        let records::ValueType::EnumTag(merged_ab) = merged_ab else {
             panic!("expected scalar enum registry");
         };
-        assert_eq!(registry.variants.len(), 4);
+        let records::ValueType::EnumTag(merged_ba) = merged_ba else {
+            panic!("expected scalar enum registry");
+        };
+        assert_eq!(
+            merged_ab.variants,
+            vec!["draft", "published", "archived", "snoozed"],
+            "left registry stays an exact physical prefix"
+        );
+        assert_eq!(
+            merged_ba.variants,
+            vec!["draft", "published", "snoozed", "archived"],
+            "the reverse call preserves its own established prefix"
+        );
+        assert_eq!(merged_ab.variants.len(), 4);
+        assert_eq!(merged_ba.variants.len(), 4);
     }
 
     #[test]
