@@ -24,8 +24,10 @@ import {
   formatUuid,
   NativeRuntimeAdapter,
   applySubscriptionDeltaWithWireDelta,
+  rowsFromBatches,
   type Transport,
 } from "./native-runtime-adapter.js";
+import { nativeRowFieldPlanCacheKey, valueTypeCacheKey } from "./native-row-descriptor-key.js";
 import { encodeSchema } from "./schema-codec.js";
 import {
   applySubscriptionDelta,
@@ -63,6 +65,207 @@ describe("formatUuid", () => {
     ]);
 
     expect(formatUuid(bytes.subarray(2, 18))).toBe("00010203-0405-0607-0809-0a0b0c0d0e0f");
+  });
+});
+
+describe("native row descriptor cache keys", () => {
+  it("includes the table identity", () => {
+    const descriptor = [{ name: "value", valueType: { tag: 8 } }];
+
+    expect(nativeRowFieldPlanCacheKey({ table: "first", descriptor })).not.toBe(
+      nativeRowFieldPlanCacheKey({ table: "second", descriptor }),
+    );
+  });
+
+  it("includes payload enum registry identity when cases match", () => {
+    const firstRegistry = {
+      tag: 16,
+      enumSchema: {
+        registryId: 3,
+        name: "event",
+        cases: [{ name: "message", payload: [{ name: "body", valueType: { tag: 8 } }] }],
+      },
+    };
+    const secondRegistry = {
+      tag: 16,
+      enumSchema: {
+        registryId: 4,
+        name: "event",
+        cases: [{ name: "message", payload: [{ name: "body", valueType: { tag: 8 } }] }],
+      },
+    };
+
+    expect(valueTypeCacheKey(firstRegistry)).not.toBe(valueTypeCacheKey(secondRegistry));
+  });
+
+  it("includes recursive descriptor and enum schema data", () => {
+    const nestedText = {
+      tag: 15,
+      record: [{ name: "body", valueType: { tag: 8 } }],
+    };
+    const nestedInteger = {
+      tag: 15,
+      record: [{ name: "body", valueType: { tag: 4 } }],
+    };
+    const tupleWithText = { tag: 12, members: [{ tag: 7 }, { tag: 8 }] };
+    const tupleWithInteger = { tag: 12, members: [{ tag: 7 }, { tag: 4 }] };
+    const textArray = { tag: 13, inner: { tag: 8 } };
+    const integerArray = { tag: 13, inner: { tag: 4 } };
+    const nullableText = { tag: 14, inner: { tag: 8 } };
+    const nullableInteger = { tag: 14, inner: { tag: 4 } };
+    const scalarEnum = {
+      tag: 11,
+      enumSchema: { registryId: 7, name: "status", variants: ["draft", "published"] },
+    };
+    const otherScalarEnumRegistry = {
+      tag: 11,
+      enumSchema: { registryId: 8, name: "status", variants: ["draft", "published"] },
+    };
+    const otherScalarEnumVariants = {
+      tag: 11,
+      enumSchema: { registryId: 7, name: "status", variants: ["draft", "archived"] },
+    };
+    const payloadEnum = {
+      tag: 16,
+      enumSchema: {
+        registryId: 3,
+        name: "event",
+        cases: [{ name: "message", payload: [{ name: "body", valueType: { tag: 8 } }] }],
+      },
+    };
+    const changedPayloadEnum = {
+      tag: 16,
+      enumSchema: {
+        registryId: 3,
+        name: "event",
+        cases: [{ name: "message", payload: [{ name: "body", valueType: { tag: 4 } }] }],
+      },
+    };
+    const changedPayloadEnumCase = {
+      tag: 16,
+      enumSchema: {
+        registryId: 3,
+        name: "event",
+        cases: [{ name: "reaction", payload: [{ name: "body", valueType: { tag: 8 } }] }],
+      },
+    };
+
+    expect(valueTypeCacheKey(nestedText)).not.toBe(valueTypeCacheKey(nestedInteger));
+    expect(valueTypeCacheKey(tupleWithText)).not.toBe(valueTypeCacheKey(tupleWithInteger));
+    expect(valueTypeCacheKey(textArray)).not.toBe(valueTypeCacheKey(integerArray));
+    expect(valueTypeCacheKey(nullableText)).not.toBe(valueTypeCacheKey(nullableInteger));
+    expect(valueTypeCacheKey(scalarEnum)).not.toBe(valueTypeCacheKey(otherScalarEnumRegistry));
+    expect(valueTypeCacheKey(scalarEnum)).not.toBe(valueTypeCacheKey(otherScalarEnumVariants));
+    expect(valueTypeCacheKey(payloadEnum)).not.toBe(valueTypeCacheKey(changedPayloadEnum));
+    expect(valueTypeCacheKey(payloadEnum)).not.toBe(valueTypeCacheKey(changedPayloadEnumCase));
+    expect(
+      nativeRowFieldPlanCacheKey({
+        table: "events",
+        descriptor: [{ name: "event", valueType: payloadEnum }],
+      }),
+    ).not.toBe(
+      nativeRowFieldPlanCacheKey({
+        table: "events",
+        descriptor: [{ name: "event", valueType: changedPayloadEnum }],
+      }),
+    );
+  });
+
+  it("rebuilds a row decoder plan when a nested record descriptor changes", () => {
+    const childColumns: ColumnDescriptor[] = [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+    ];
+    const schema = {
+      parents: {
+        columns: [
+          {
+            name: "child",
+            column_type: { type: "Row", columns: childColumns },
+            nullable: false,
+          },
+        ],
+      },
+    } satisfies WasmSchema;
+    const firstChildDescriptor = [
+      { name: "row_uuid", valueType: { tag: 10 } },
+      { name: "title", valueType: { tag: 8 } },
+    ];
+    const secondChildDescriptor = [
+      { name: "row_uuid", valueType: { tag: 10 } },
+      { name: "title", valueType: { tag: 8 } },
+      { name: "ignored_fixed_field", valueType: { tag: 4 } },
+    ];
+    const firstDescriptor = [
+      { name: "child", valueType: { tag: 15, record: firstChildDescriptor } },
+    ];
+    const secondDescriptor = [
+      { name: "child", valueType: { tag: 15, record: secondChildDescriptor } },
+    ];
+    const childId = "00000000-0000-0000-0000-0000000000c1";
+    const firstBatch = {
+      table: "parents",
+      descriptor: firstDescriptor,
+      rows: [
+        {
+          rowId: uuidBytes("00000000-0000-0000-0000-0000000000a1"),
+          deleted: false,
+          raw: createRecord(firstDescriptor, [
+            createRecord(firstChildDescriptor, [
+              uuidBytes(childId),
+              new TextEncoder().encode("first"),
+            ]),
+          ]),
+        },
+      ],
+    };
+    const secondBatch = {
+      table: "parents",
+      descriptor: secondDescriptor,
+      rows: [
+        {
+          rowId: uuidBytes("00000000-0000-0000-0000-0000000000a2"),
+          deleted: false,
+          raw: createRecord(secondDescriptor, [
+            createRecord(secondChildDescriptor, [
+              uuidBytes(childId),
+              new TextEncoder().encode("second"),
+              i32Bytes(42),
+            ]),
+          ]),
+        },
+      ],
+    };
+
+    expect(rowsFromBatches([firstBatch], schema)).toEqual([
+      {
+        table: "parents",
+        id: "00000000-0000-0000-0000-0000000000a1",
+        values: [
+          {
+            type: "Row",
+            value: {
+              id: childId,
+              values: [{ type: "Text", value: "first" }],
+            },
+          },
+        ],
+      },
+    ]);
+    expect(rowsFromBatches([secondBatch], schema)).toEqual([
+      {
+        table: "parents",
+        id: "00000000-0000-0000-0000-0000000000a2",
+        values: [
+          {
+            type: "Row",
+            value: {
+              id: childId,
+              values: [{ type: "Text", value: "second" }],
+            },
+          },
+        ],
+      },
+    ]);
   });
 });
 
@@ -7166,6 +7369,12 @@ function formatUuidForTest(bytes: Uint8Array): string {
 function doubleBytes(value: number): Uint8Array {
   const bytes = new Uint8Array(8);
   new DataView(bytes.buffer).setFloat64(0, value, true);
+  return bytes;
+}
+
+function i32Bytes(value: number): Uint8Array {
+  const bytes = new Uint8Array(4);
+  new DataView(bytes.buffer).setInt32(0, value, true);
   return bytes;
 }
 

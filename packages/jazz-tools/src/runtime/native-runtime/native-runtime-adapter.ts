@@ -40,6 +40,7 @@ import {
   type ValueType,
 } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
+import { nativeRowFieldPlanCacheKey, valueTypeCacheKey } from "./native-row-descriptor-key.js";
 import { WebSocketCarrier, type WebSocketNegotiation, wireAuthFailureReason } from "./websocket.js";
 import {
   createNativeRowValueEncoder,
@@ -3590,7 +3591,7 @@ function readRelationSnapshot(payload: Uint8Array): NativeRelationSubscriptionSn
   return readNativeRelationSubscriptionSnapshot(new PostcardReader(payload));
 }
 
-function rowsFromBatches(
+export function rowsFromBatches(
   batches: NativeRowBatch[],
   schema: WasmSchema,
   projectedColumns?: readonly ColumnDescriptor[],
@@ -3674,18 +3675,6 @@ function isCurrentRowPhysicalField(fieldName: string): boolean {
   return (
     fieldName === "schema_version" || fieldName === "parents" || fieldName === "authored_columns"
   );
-}
-
-function nativeRowFieldPlanCacheKey(batch: NativeRowBatch): string {
-  let key = batch.table;
-  for (const field of batch.descriptor) {
-    key += `\0${field.name ?? ""}:${valueTypeCacheKey(field.valueType)}`;
-  }
-  return key;
-}
-
-function valueTypeCacheKey(type: ValueType): string {
-  return type.inner ? `${type.tag}<${valueTypeCacheKey(type.inner)}>` : String(type.tag);
 }
 
 function rowsFromRelationSnapshot(
