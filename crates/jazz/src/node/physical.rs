@@ -4693,7 +4693,7 @@ mod variant_case_tests {
         let base = schema(1);
         let archived = schema(2);
         let snoozed = schema(3);
-        let base_cases = vec![
+        let base_cases = [
             GlobalScalarEnumCaseId {
                 introducing_schema: base,
                 introducing_ordinal: 0,

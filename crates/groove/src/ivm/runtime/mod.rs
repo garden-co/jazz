@@ -12784,14 +12784,14 @@ mod tests {
         let ValueType::Enum(payload_schema) = physical_payload else {
             panic!("payload expected")
         };
-        let payload = payload_schema.case(0).unwrap().payload.clone();
+        let payload = payload_schema.case(0).unwrap().payload;
         let nested = Value::Enum(EnumValue::create(0, payload, &[Value::EnumTag(2)]).unwrap());
         let ValueType::Record(source_record) = &source else {
             panic!("record expected")
         };
         let value = Value::Record(OwnedRecord::new(
             source_record.create(&[nested]).unwrap(),
-            (**source_record).clone(),
+            **source_record,
         ));
         let projected =
             remap_recursive_enum_value(value, &source, &target, &remaps, "root").unwrap();
@@ -12819,7 +12819,7 @@ mod tests {
         );
         let value = Value::Record(OwnedRecord::new(
             source_record.create(&[unknown]).unwrap(),
-            (**source_record).clone(),
+            **source_record,
         ));
         assert!(matches!(
             remap_recursive_enum_value(value, &source, &target, &remaps, "root"),

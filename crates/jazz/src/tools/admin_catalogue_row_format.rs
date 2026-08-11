@@ -1673,7 +1673,7 @@ mod tests {
                 Value::Array(vec![Value::Text("x".into())]),
             ],
         };
-        let encoded = encode_row(&descriptor, &[value.clone()]).unwrap();
+        let encoded = encode_row(&descriptor, std::slice::from_ref(&value)).unwrap();
         assert_eq!(decode_row(&descriptor, &encoded).unwrap(), vec![value]);
         assert!(
             encode_row(
