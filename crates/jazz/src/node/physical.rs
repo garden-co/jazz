@@ -1043,7 +1043,21 @@ where
             schema_version,
             version.table(),
         )?;
-        let record = OwnedRecord::new(version.record.raw().to_vec(), binding.descriptor);
+        let source_table = self.table_in_schema(version.table(), schema_version)?;
+        let source_mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(version.table()))
+            .ok_or(Error::InvalidStoredValue(
+                "physical history table mapping missing",
+            ))?;
+        let descriptor = physical_write_descriptor(
+            &source_table.history_storage_table().record_schema(),
+            &physical_history_field_names(&source_table, source_mapping)?,
+            self.database.table_schema(&binding.storage_table)?,
+        )?;
+        let record = OwnedRecord::new(version.record.raw().to_vec(), descriptor);
         Ok((
             groove::Intern::new(binding.storage_table),
             groove::records::VariantRecord::new(
@@ -1130,6 +1144,41 @@ fn widened_projection_descriptor(
                         "physical projection logical field unnamed",
                     ))?,
                     widen_projection_value_type(&field.value_type, &physical.column_type),
+                ))
+            })
+            .collect::<Result<Vec<_>, Error>>()?,
+    ))
+}
+
+/// The write-side counterpart of `widened_projection_descriptor`: a physical
+/// variant record must use the table's physical field names as well as its
+/// widened value types. Keeping logical names here makes Groove correctly
+/// reject the record as a descriptor mismatch, but too late to explain the
+/// authored-to-physical enum boundary.
+fn physical_write_descriptor(
+    logical: &records::RecordDescriptor,
+    physical_names: &[String],
+    physical_table: &GrooveTableSchema,
+) -> Result<records::RecordDescriptor, Error> {
+    if logical.fields().len() != physical_names.len() {
+        return Err(Error::InvalidStoredValue(
+            "physical write descriptor width mismatch",
+        ));
+    }
+    Ok(records::RecordDescriptor::new(
+        logical
+            .fields()
+            .iter()
+            .zip(physical_names)
+            .map(|(logical, name)| {
+                let physical = physical_table
+                    .columns
+                    .iter()
+                    .find(|column| column.name == *name)
+                    .ok_or(Error::InvalidStoredValue("physical write column missing"))?;
+                Ok((
+                    name.clone(),
+                    widen_projection_value_type(&logical.value_type, &physical.column_type),
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()?,
