@@ -1659,7 +1659,7 @@ fn merge_physical_record_descriptor(
 
 /// Merge two snapshots of one physical value occurrence. Registry identity,
 /// rather than structural descriptor equality, is authoritative for enums and
-/// unions; the older declaration must be an exact prefix of the newer one.
+/// enums; the older declaration must be an exact prefix of the newer one.
 fn merge_physical_value_type(
     existing: &records::ValueType,
     incoming: &records::ValueType,
@@ -1691,7 +1691,7 @@ fn merge_physical_value_type(
                     (Some(a), Some(b)) => {
                         if a.name != b.name {
                             return Err(Error::InvalidStoredValue(
-                                "physical union registry changed non-additively",
+                                "physical enum registry changed non-additively",
                             ));
                         }
                         cases.push(records::EnumCase::new(
@@ -1705,7 +1705,7 @@ fn merge_physical_value_type(
             }
             Ok(ValueType::Enum(Box::new(
                 records::EnumSchema::new(right.name.clone(), cases)
-                    .map_err(|_| Error::InvalidStoredValue("invalid physical union registry"))?
+                    .map_err(|_| Error::InvalidStoredValue("invalid physical enum registry"))?
                     .with_registry_id(left.registry_id),
             )))
         }

@@ -46,6 +46,42 @@ describe("native row codec", () => {
     expect(reader.u64()).toBe(42);
   });
 
+  it("round-trips a payload enum descriptor at ValueType tag 16", () => {
+    // Keep this fixture explicit: a tag-16 decoder which merely consumes the
+    // enum header, or skips a case payload descriptor, leaves the trailing
+    // value unread and is rejected below.
+    const descriptor: Parameters<typeof writeDescriptor>[1] = [
+      {
+        name: "event",
+        valueType: {
+          tag: 16,
+          enumSchema: {
+            registryId: 41,
+            name: "event",
+            cases: [
+              { name: "connected", payload: [] },
+              {
+                name: "message",
+                payload: [
+                  { name: "body", valueType: { tag: 8 } },
+                  { name: "priority", valueType: { tag: 14, inner: { tag: 4 } } },
+                ],
+              },
+            ],
+          },
+        },
+      },
+      { name: "following", valueType: { tag: 4 } },
+    ];
+    const writer = new PostcardWriter();
+    writeDescriptor(writer, descriptor);
+    writer.u64(42);
+
+    const reader = new PostcardReader(writer.finish());
+    expect(readDescriptor(reader)).toEqual(descriptor);
+    expect(reader.u64()).toBe(42);
+  });
+
   it("round-trips every Groove ValueType fixture, including depth-three nesting", () => {
     const fixture = nativeRowCodecFixture();
     const testCase = fixture.cases.find(
