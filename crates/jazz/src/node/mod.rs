@@ -4466,13 +4466,41 @@ where
                     Ok((target_name, column_id))
                 })
                 .collect::<Result<BTreeMap<_, _>, Error>>()?;
+            let mut scalar_enum_cases = BTreeMap::new();
+            for column in &target_table_schema.columns {
+                let records::ValueType::EnumTag(enum_schema) = &column.column_type else {
+                    continue;
+                };
+                let id = *columns.get(&column.name).ok_or(Error::InvalidStoredValue(
+                    "scalar enum physical column missing",
+                ))?;
+                let mut cases = source_table
+                    .scalar_enum_cases
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_default();
+                if cases.len() > enum_schema.variants.len() {
+                    return Err(Error::InvalidStoredValue(
+                        "scalar enum registry changed non-additively",
+                    ));
+                }
+                for ordinal in cases.len()..enum_schema.variants.len() {
+                    cases.push(GlobalScalarEnumCaseId {
+                        introducing_schema: target_schema_version.id,
+                        introducing_ordinal: u8::try_from(ordinal).map_err(|_| {
+                            Error::InvalidStoredValue("scalar enum ordinal exhausted")
+                        })?,
+                    });
+                }
+                scalar_enum_cases.insert(id, cases);
+            }
             target_mapping.tables.insert(
                 table_lens.target_table.clone(),
                 TablePhysicalMapping {
                     table_id: source_table.table_id,
                     columns,
                     variant_cases: Vec::new(),
-                    scalar_enum_cases: BTreeMap::new(),
+                    scalar_enum_cases,
                 },
             );
         }
