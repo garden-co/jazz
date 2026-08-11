@@ -910,12 +910,29 @@ impl ProjectField {
         }
     }
 
+    /// Remap a payload enum's case tag while retaining its selected payload.
+    /// As for scalar enums, `None` is a deliberate non-total projection.
+    pub fn enum_remap(
+        source_name: impl Into<String>,
+        output_name: impl Into<String>,
+        tags: Vec<Option<u32>>,
+    ) -> Self {
+        Self {
+            expression: ProjectExpr::EnumRemap {
+                source: FieldRef::name(source_name),
+                tags,
+            },
+            output_name: output_name.into(),
+        }
+    }
+
     pub fn source(&self) -> Option<&FieldRef> {
         match &self.expression {
             ProjectExpr::Field(source)
             | ProjectExpr::Nullable(source)
             | ProjectExpr::NullableFlat(source)
-            | ProjectExpr::EnumTagRemap { source, .. } => Some(source),
+            | ProjectExpr::EnumTagRemap { source, .. }
+            | ProjectExpr::EnumRemap { source, .. } => Some(source),
             ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => {
                 None
             }
@@ -937,6 +954,10 @@ pub enum ProjectExpr {
     EnumTagRemap {
         source: FieldRef,
         tags: Vec<Option<u8>>,
+    },
+    EnumRemap {
+        source: FieldRef,
+        tags: Vec<Option<u32>>,
     },
 }
 

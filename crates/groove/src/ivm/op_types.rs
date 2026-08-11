@@ -416,6 +416,10 @@ pub enum PlanExpr {
         field: String,
         tags: Vec<Option<u8>>,
     },
+    EnumRemap {
+        field: String,
+        tags: Vec<Option<u32>>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

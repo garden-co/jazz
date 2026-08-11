@@ -957,6 +957,12 @@ where
 
         let source_table = self.table_in_schema(source_table_name, source_schema)?;
         let target_table = self.table_in_schema(target_table_name, target_schema)?;
+        let source_physical_table = match shape {
+            ContentProjectionShape::History => physical_history_table_name(source_mapping.table_id),
+            ContentProjectionShape::Current => {
+                physical_global_current_table_name(source_mapping.table_id)
+            }
+        };
         let mut cells = source_table
             .columns
             .iter()
@@ -1084,6 +1090,48 @@ where
                             })
                             .collect::<Result<Vec<_>, Error>>()?;
                         fields.push(ProjectField::enum_tag_remap(source, output, tags));
+                    } else if let records::ValueType::Enum(target_enum_schema) = &column.column_type
+                    {
+                        let column_id = self
+                            .catalogue
+                            .physical_mappings
+                            .get(&target_schema)
+                            .and_then(|mapping| mapping.tables.get(target_table_name))
+                            .and_then(|mapping| mapping.columns.get(&column.name))
+                            .copied()
+                            .ok_or(Error::InvalidStoredValue(
+                                "target payload enum physical column mapping missing",
+                            ))?;
+                        let physical_column = self
+                            .database
+                            .table_schema(&source_physical_table)?
+                            .columns
+                            .iter()
+                            .find(|physical| physical.name == physical_user_column_field(column_id))
+                            .ok_or(Error::InvalidStoredValue(
+                                "physical payload enum projection column missing",
+                            ))?;
+                        let physical_schema =
+                            physical_payload_enum_schema(&physical_column.column_type)?;
+                        let tags = physical_schema
+                            .cases
+                            .iter()
+                            .map(|physical_case| {
+                                target_enum_schema
+                                    .cases
+                                    .iter()
+                                    .position(|target_case| target_case.name == physical_case.name)
+                                    .map(|tag| {
+                                        u32::try_from(tag).map_err(|_| {
+                                            Error::InvalidStoredValue(
+                                                "target payload enum tag exhausted",
+                                            )
+                                        })
+                                    })
+                                    .transpose()
+                            })
+                            .collect::<Result<Vec<_>, Error>>()?;
+                        fields.push(ProjectField::enum_remap(source, output, tags));
                     } else {
                         fields.push(ProjectField::renamed(source, output));
                     }
@@ -1457,7 +1505,7 @@ fn widen_projection_value_type(
         // the target schema's declaration-local enum descriptor after the
         // explicit tag remap above, not leak the physical descriptor/tag space.
         (ValueType::EnumTag(logical), ValueType::EnumTag(_)) => ValueType::EnumTag(logical.clone()),
-        (ValueType::Enum(_), ValueType::Enum(schema)) => ValueType::Enum(schema.clone()),
+        (ValueType::Enum(logical), ValueType::Enum(_)) => ValueType::Enum(logical.clone()),
         (logical, ValueType::Nullable(physical)) if !matches!(logical, ValueType::Nullable(_)) => {
             widen_projection_value_type(logical, physical)
         }

@@ -5131,6 +5131,15 @@ fn lift_literal_filter(
                                 tags.clone(),
                             ))
                         }
+                        ProjectExpr::EnumRemap { source, tags } => {
+                            let source =
+                                project_source_from_joined_filter_input(&input_output, source)?;
+                            Ok(ProjectField::enum_remap(
+                                source,
+                                field.output_name.clone(),
+                                tags.clone(),
+                            ))
+                        }
                     })
                     .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
                 fields.push(ProjectField::renamed(
@@ -5419,6 +5428,17 @@ fn project_fields_against_rewritten_input(
                         return Err(IvmRuntimeError::GraphFieldNotFound(source));
                     }
                     return Ok(ProjectField::enum_tag_remap(
+                        source,
+                        field.output_name.clone(),
+                        tags.clone(),
+                    ));
+                }
+                ProjectExpr::EnumRemap { source, tags } => {
+                    let source = field_ref_name(&original_output, source)?;
+                    if rewritten_output.field_index(&source).is_none() {
+                        return Err(IvmRuntimeError::GraphFieldNotFound(source));
+                    }
+                    return Ok(ProjectField::enum_remap(
                         source,
                         field.output_name.clone(),
                         tags.clone(),
@@ -6374,7 +6394,8 @@ fn plan_expr_names(expressions: &[PlanExpr]) -> Vec<String> {
             PlanExpr::Field(name)
             | PlanExpr::Nullable(name)
             | PlanExpr::NullableFlat(name)
-            | PlanExpr::EnumTagRemap { field: name, .. } => Some(name.clone()),
+            | PlanExpr::EnumTagRemap { field: name, .. }
+            | PlanExpr::EnumRemap { field: name, .. } => Some(name.clone()),
             PlanExpr::Literal(_) | PlanExpr::Null(_) => None,
         })
         .collect()
@@ -8545,6 +8566,15 @@ fn project_descriptor(
                         .value_type
                         .clone()
                 }
+                ProjectExpr::EnumRemap { source, .. } => {
+                    let source_idx = resolve_field_ref(input, source)?;
+                    input
+                        .fields()
+                        .get(source_idx)
+                        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(source_idx))?
+                        .value_type
+                        .clone()
+                }
             };
             Ok((project_field.output_name.clone(), value_type))
         })
@@ -9032,6 +9062,10 @@ fn project_field_expr(
             field: field_ref_name(input, source)?,
             tags: tags.clone(),
         }),
+        ProjectExpr::EnumRemap { source, tags } => Ok(PlanExpr::EnumRemap {
+            field: field_ref_name(input, source)?,
+            tags: tags.clone(),
+        }),
     }
 }
 
@@ -9069,6 +9103,7 @@ fn project_record(
             PlanExpr::EnumTagRemap { field, tags } => {
                 remap_enum_tag(input.get(field)?.clone(), tags)?
             }
+            PlanExpr::EnumRemap { field, tags } => remap_enum(input.get(field)?.clone(), tags)?,
         });
     }
     Ok(output_desc.create(&values)?)
@@ -9086,6 +9121,30 @@ fn remap_enum_tag(value: Value, tags: &[Option<u8>]) -> Result<Value, IvmRuntime
             *value, tags,
         )?)))),
         _ => Err(IvmRuntimeError::EnumTagProjectionNonEnum),
+    }
+}
+
+fn remap_enum(value: Value, tags: &[Option<u32>]) -> Result<Value, IvmRuntimeError> {
+    match value {
+        Value::Enum(value) => {
+            let tag = value.tag();
+            let mapped = tags
+                .get(
+                    usize::try_from(tag)
+                        .map_err(|_| IvmRuntimeError::EnumProjectionAbsent { tag })?,
+                )
+                .and_then(|tag| *tag)
+                .ok_or(IvmRuntimeError::EnumProjectionAbsent { tag })?;
+            Ok(Value::Enum(crate::records::EnumValue::new(
+                mapped,
+                value.into_record(),
+            )))
+        }
+        Value::Nullable(None) => Ok(Value::Nullable(None)),
+        Value::Nullable(Some(value)) => {
+            Ok(Value::Nullable(Some(Box::new(remap_enum(*value, tags)?))))
+        }
+        _ => Err(IvmRuntimeError::EnumProjectionNonEnum),
     }
 }
 
@@ -9143,7 +9202,7 @@ fn raw_projection_fields(
                 )
                 .ok()?,
             }),
-            PlanExpr::EnumTagRemap { .. } => None,
+            PlanExpr::EnumTagRemap { .. } | PlanExpr::EnumRemap { .. } => None,
         })
         .collect::<Option<Vec<_>>>();
     Ok(fields)
@@ -9336,7 +9395,8 @@ fn aggregate_expr_value_type(
         PlanExpr::Field(field)
         | PlanExpr::Nullable(field)
         | PlanExpr::NullableFlat(field)
-        | PlanExpr::EnumTagRemap { field, .. } => {
+        | PlanExpr::EnumTagRemap { field, .. }
+        | PlanExpr::EnumRemap { field, .. } => {
             let field_idx = input
                 .field_index(field)
                 .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
@@ -10360,6 +10420,10 @@ fn resolve_aggregate_expr(
             field: resolve_field_name(input, field)?,
             tags: tags.clone(),
         }),
+        Some(PlanExpr::EnumRemap { field, tags }) => Some(PlanExpr::EnumRemap {
+            field: resolve_field_name(input, field)?,
+            tags: tags.clone(),
+        }),
         Some(PlanExpr::Literal(_)) | Some(PlanExpr::Null(_)) | None => aggregate.expression.clone(),
     };
     Ok(AggregateExpr {
@@ -10678,6 +10742,7 @@ fn evaluate_aggregate_expr(
             record.get(field).map_err(IvmRuntimeError::RecordEncoding)
         }
         PlanExpr::EnumTagRemap { field, tags } => remap_enum_tag(record.get(field)?, tags),
+        PlanExpr::EnumRemap { field, tags } => remap_enum(record.get(field)?, tags),
         PlanExpr::Literal(literal) => Ok(literal.to_value()),
         PlanExpr::Null(value_type) => Ok(Value::Nullable(match value_type {
             ValueType::Nullable(_) => None,
@@ -11750,6 +11815,10 @@ pub enum IvmRuntimeError {
     EnumTagProjectionAbsent { tag: u8 },
     #[error("enum tag projection requires an enum value")]
     EnumTagProjectionNonEnum,
+    #[error("payload enum tag {tag} is absent from this projection target")]
+    EnumProjectionAbsent { tag: u32 },
+    #[error("payload enum projection requires an enum value")]
+    EnumProjectionNonEnum,
     #[error("index not found: {0}")]
     IndexNotFound(String),
     #[error("join key arity mismatch: left={left}, right={right}")]
@@ -11892,6 +11961,23 @@ mod tests {
         ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey,
     };
     use crate::storage::{RecordStore, RocksDbStorage};
+
+    #[test]
+    fn payload_enum_remap_changes_only_the_case_tag() {
+        let descriptor = RecordDescriptor::new([("value", ValueType::String)]);
+        let value = Value::Enum(
+            EnumValue::create(2, descriptor, &[Value::String("later".to_owned())]).unwrap(),
+        );
+        let remapped = remap_enum(value, &[Some(0), Some(1), Some(3)]).unwrap();
+        let Value::Enum(remapped) = remapped else {
+            panic!("expected payload enum");
+        };
+        assert_eq!(remapped.tag(), 3);
+        assert_eq!(
+            remapped.record().to_values().unwrap(),
+            vec![Value::String("later".to_owned())]
+        );
+    }
 
     #[test]
     fn collect_by_terminal_records_preserve_nullable_descriptor_wrappers() {
