@@ -17,8 +17,18 @@ seen=' '
 newline='
 '
 
-root_members=$(sed -n '/^members[[:space:]]*=[[:space:]]*\[/,/^]/p' Cargo.toml |
-  sed -n 's/^[[:space:]]*"\([^"]*\)".*/\1/p')
+metadata=$(mktemp "${TMPDIR:-/tmp}/clippy-metadata.XXXXXX")
+members=$(mktemp "${TMPDIR:-/tmp}/clippy-members.XXXXXX")
+trap 'rm -f "$metadata" "$members"' EXIT HUP INT TERM
+if ! cargo metadata --no-deps --format-version 1 >"$metadata"; then
+  echo "Clippy: unable to determine Cargo workspace members" >&2
+  exit 1
+fi
+if ! node "$root/dev/scripts/clippy-workspace-metadata.mjs" \
+  <"$metadata" >"$members"; then
+  echo "Clippy: unable to parse Cargo workspace metadata" >&2
+  exit 1
+fi
 
 is_root_member_manifest() {
   manifest=$1
@@ -27,11 +37,8 @@ is_root_member_manifest() {
     *) manifest_abs=$root/$manifest ;;
   esac
   while IFS= read -r member; do
-    [ -n "$member" ] || continue
-    [ "$manifest_abs" = "$root/$member/Cargo.toml" ] && return 0
-  done <<EOF
-$root_members
-EOF
+    [ "$manifest_abs" = "$member" ] && return 0
+  done <"$members"
   return 1
 }
 
