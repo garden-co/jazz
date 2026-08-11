@@ -1620,7 +1620,7 @@ where
                             }
                         })
                         .collect::<Result<Vec<_>, _>>()?;
-                    self.database.register_variant_case(
+                    self.database.refresh_variant_case_for_registry_evolution(
                         storage_table,
                         &projection_target,
                         tag,
@@ -1722,7 +1722,29 @@ where
             }
         }
         self.register_physical_history_variant_projections()?;
-        self.register_physical_current_variant_projections()
+        self.register_physical_current_variant_projections()?;
+        self.register_physical_current_winner_projections()
+    }
+
+    /// Keep the raw Global/Ahead winner targets live as the physical enum
+    /// registries evolve, so a subsequent query-local lowering pass can read
+    /// every newly introduced source variant.
+    fn register_physical_current_winner_projections(&mut self) -> Result<(), Error> {
+        let targets = self
+            .catalogue
+            .physical_mappings
+            .iter()
+            .flat_map(|(schema_version, mapping)| {
+                mapping
+                    .tables
+                    .keys()
+                    .map(|table_name| (*schema_version, table_name.clone()))
+            })
+            .collect::<BTreeSet<_>>();
+        for (schema_version, table_name) in targets {
+            self.ensure_physical_current_winner_projection(schema_version, &table_name)?;
+        }
+        Ok(())
     }
 
     fn physical_history_projection_case(

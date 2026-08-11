@@ -4035,6 +4035,141 @@ fn old_enum_schema_omits_unknown_rows_from_materialized_query_sources() {
 }
 
 #[test]
+fn old_enum_winner_projection_refreshes_after_later_registry_append() {
+    // Contract: a raw current-winner projection installed for an old reader
+    // survives later append-only enum registry growth without accepting a
+    // changed projection mapping or type.
+    //
+    // Actors: an old reader opens while `closed` is the newest case; a latest
+    // writer subsequently introduces and writes `archived`.
+    //
+    // ```text
+    // base(open) ──► middle(+closed) ──► latest(+archived)
+    // old query installs raw winner target        old query skips archived
+    // ```
+    let base = enum_projection_schema(&["open"]);
+    let middle = SchemaVersion::new(enum_projection_schema(&["open", "closed"]));
+    let latest = SchemaVersion::new(enum_projection_schema(&["open", "closed", "archived"]));
+    let (_dir, mut core) = open_node_with_schema(node(0x7d), base.clone());
+    publish_schema_lineage(
+        &mut core,
+        middle.clone(),
+        enum_identity_lens(base.version_id(), middle.id),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema { revision: 1, schema: middle.id },
+    })
+    .unwrap();
+
+    let item = row(0x7d);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("items", item, 1).cells(BTreeMap::from([
+            ("title".to_owned(), v("compatible middle case")),
+            ("status".to_owned(), Value::EnumTag(0)),
+        ])),
+    );
+    let old_shape = Query::from("items").validate(&base).unwrap();
+    let old_binding = old_shape.bind(BTreeMap::new()).unwrap();
+    assert_eq!(
+        core.query_rows(&old_shape, &old_binding, DurabilityTier::Local)
+            .unwrap()
+            .len(),
+        1,
+        "old read installs a current-winner projection before later growth",
+    );
+    publish_schema_lineage(
+        &mut core,
+        latest.clone(),
+        enum_identity_lens(middle.id, latest.id),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema { revision: 2, schema: latest.id },
+    })
+    .unwrap();
+    core.commit_mergeable(
+        MergeableCommit::new("items", item, 2).cells(BTreeMap::from([
+            ("title".to_owned(), v("later archived case")),
+            ("status".to_owned(), Value::EnumTag(2)),
+        ])),
+    )
+    .unwrap();
+
+    assert!(core
+        .query_rows(&old_shape, &old_binding, DurabilityTier::Local)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn old_enum_index_read_uses_global_index_before_post_winner_omission() {
+    // Contract: an indexed Global read retains its physical index access path
+    // while the old-schema compatibility boundary still runs after the chosen
+    // winner. The unknown row must be omitted, not force a full table scan.
+    let schema = |statuses: &[&str]| {
+        JazzSchema::new([TableSchema::new(
+            "items",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new(
+                    "status",
+                    ColumnType::EnumTag(
+                        groove::records::ScalarEnumSchema::new("status", statuses.iter().copied())
+                            .unwrap(),
+                    ),
+                ),
+            ],
+        )
+        .with_indexed_column("title")])
+    };
+    let base = schema(&["open"]);
+    let evolved = SchemaVersion::new(schema(&["open", "closed"]));
+    let (_dir, mut core) = open_node_with_schema(node(0x7e), base.clone());
+    publish_schema_lineage(
+        &mut core,
+        evolved.clone(),
+        enum_identity_lens(base.version_id(), evolved.id),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
+    })
+    .unwrap();
+    accept_global(
+        &mut core,
+        MergeableCommit::new("items", row(0x7e), 1).cells(BTreeMap::from([
+            ("title".to_owned(), v("indexed")),
+            ("status".to_owned(), Value::EnumTag(1)),
+        ])),
+    );
+
+    let query = Query::from("items")
+        .filter(eq(col("title"), lit("indexed")))
+        .validate(&base)
+        .unwrap();
+    let binding = query.bind(BTreeMap::new()).unwrap();
+    core.reset_query_engine_read_metrics();
+    assert!(core
+        .query_rows(&query, &binding, DurabilityTier::Global)
+        .unwrap()
+        .is_empty());
+    let metrics = core.query_engine_read_metrics();
+    assert_eq!(metrics.source_index_probes, 1);
+    assert_eq!(metrics.source_full_scans, 0);
+}
+
+#[test]
 fn enum_projection_requirement_none_allows_unused_relation_enum() {
     let schema = |states: &[&str]| JazzSchema::new([
         TableSchema::new("items", [

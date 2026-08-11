@@ -1575,6 +1575,17 @@ where
                 &required_fields,
             )
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let raw_global_output = self
+            .node
+            .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
+            .and_then(|table_id| {
+                self.node
+                    .database
+                    .table_schema(&physical_global_current_table_name(table_id))
+                    .map(|schema| schema.record_schema())
+                    .map_err(Error::Groove)
+            })
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         let access_path = self.access_paths.get(&request.source).cloned();
         let global = match &access_path {
             Some(CurrentAccessPath::PrimaryKey(prefix)) => {
@@ -1589,19 +1600,21 @@ where
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
             }
-            Some(CurrentAccessPath::Index { .. }) if tier == DurabilityTier::Global => {
-                // The physical index's eager variant projection would decode
-                // before current-winner selection. Keep this path as a normal
-                // physical scan until index probing can return raw winners.
-                self.node.query_engine_read_metrics.source_full_scans += 1;
+            Some(CurrentAccessPath::Index { column, prefix }) if tier == DurabilityTier::Global => {
+                // A Global index already selects from the canonical settled
+                // winner relation. Project those raw physical rows first, then
+                // apply the compatibility boundary below.
+                self.node.query_engine_read_metrics.source_index_probes += 1;
                 self.node
-                    .physical_current_source_graph_with_projection_target(
+                    .physical_global_current_source_for_index_scan_with_output(
+                        read_table,
                         self.read_view.read_schema,
-                        &request.source.table,
-                        PhysicalCurrentClass::Global,
-                        projection_target.clone(),
+                        column,
+                        prefix,
+                        &projection_target,
+                        raw_global_output.clone(),
                     )
-                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
             }
             _ => {
                 self.node.query_engine_read_metrics.source_full_scans += 1;
@@ -5893,6 +5906,25 @@ where
         prefix: &[Value],
         projection_target: &str,
     ) -> Result<GraphBuilder, Error> {
+        self.physical_global_current_source_for_index_scan_with_output(
+            table,
+            schema_version,
+            column,
+            prefix,
+            projection_target,
+            table.global_current_storage_tables()[0].record_schema(),
+        )
+    }
+
+    fn physical_global_current_source_for_index_scan_with_output(
+        &self,
+        table: &TableSchema,
+        schema_version: SchemaVersionId,
+        column: &str,
+        prefix: &[Value],
+        projection_target: &str,
+        output: RecordDescriptor,
+    ) -> Result<GraphBuilder, Error> {
         let mapping = self
             .catalogue
             .physical_mappings
@@ -5925,10 +5957,7 @@ where
                 records.push(projected.raw().to_vec());
             }
         }
-        Ok(GraphBuilder::inline_records(
-            table.global_current_storage_tables()[0].record_schema(),
-            records,
-        ))
+        Ok(GraphBuilder::inline_records(output, records))
     }
 
     fn compile_historical_query_program(

@@ -100,6 +100,37 @@ impl VariantProjectionCase {
             }
         }
     }
+
+    /// A raw source case may refresh after live registry evolution only when
+    /// its projection program is unchanged and its input descriptor advances
+    /// append-only. In particular, this rejects a replacement mapping, a
+    /// dropped/renamed field, and an enum payload/type mutation.
+    fn can_refresh_registries_to(&self, next: &Self) -> bool {
+        match (self, next) {
+            (
+                Self::Project {
+                    source: current_source,
+                    project: current_project,
+                    omit_unrepresentable_enum_rows: current_omit,
+                    ..
+                },
+                Self::Project {
+                    source: next_source,
+                    project: next_project,
+                    omit_unrepresentable_enum_rows: next_omit,
+                    ..
+                },
+            ) => {
+                current_omit == next_omit
+                    && current_project == next_project
+                    && current_source.can_evolve_registry_to(next_source)
+            }
+            (Self::Ignore { source: current }, Self::Ignore { source: next }) => {
+                current.can_evolve_registry_to(next)
+            }
+            _ => false,
+        }
+    }
 }
 
 // These maps are keyed by local runtime/schema/graph metadata produced after
@@ -442,6 +473,26 @@ impl IvmRuntime {
             variant_tag,
             Some(fields),
             false,
+            false,
+        )
+    }
+
+    /// Refresh a raw variant source descriptor after append-only enum registry
+    /// evolution. The existing mapping must remain byte-for-byte identical.
+    pub(crate) fn refresh_variant_projection_case_for_registry_evolution(
+        &mut self,
+        table: &str,
+        target: &str,
+        variant_tag: u32,
+        fields: &[ProjectField],
+    ) -> Result<(), IvmRuntimeError> {
+        self.register_variant_projection_target_case(
+            table,
+            VariantProjectionTarget::Named(target.to_owned()),
+            variant_tag,
+            Some(fields),
+            false,
+            true,
         )
     }
 
@@ -461,6 +512,7 @@ impl IvmRuntime {
             variant_tag,
             Some(fields),
             true,
+            false,
         )
     }
 
@@ -595,6 +647,7 @@ impl IvmRuntime {
             variant_tag,
             None,
             false,
+            false,
         )
     }
 
@@ -683,6 +736,7 @@ impl IvmRuntime {
         variant_tag: u32,
         fields: Option<&[ProjectField]>,
         omit_unrepresentable_enum_rows: bool,
+        allow_registry_refresh: bool,
     ) -> Result<(), IvmRuntimeError> {
         let source = self
             .schema
@@ -775,6 +829,12 @@ impl IvmRuntime {
                 entry.insert(case);
                 true
             }
+            std::collections::hash_map::Entry::Occupied(mut entry)
+                if allow_registry_refresh && entry.get().can_refresh_registries_to(&case) =>
+            {
+                entry.insert(case);
+                true
+            }
             std::collections::hash_map::Entry::Occupied(_) => {
                 return Err(IvmRuntimeError::VariantProjectionCaseAlreadyRegistered {
                     table: table.to_owned(),
@@ -835,6 +895,7 @@ impl IvmRuntime {
             VariantProjectionTarget::SchemaIndex(index.name.clone()),
             variant_tag,
             fields.as_deref(),
+            false,
             false,
         )
     }
@@ -12352,6 +12413,49 @@ mod tests {
         ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey,
     };
     use crate::storage::{RecordStore, RocksDbStorage};
+
+    #[test]
+    fn raw_variant_case_registry_refresh_rejects_projection_replacement() {
+        // A live physical registry may append a case, but refreshing its raw
+        // source descriptor must not become a back door for changing how an
+        // already-installed case maps its fields.
+        let descriptor = |variants: &[&str]| {
+            RecordDescriptor::new([(
+                "status",
+                ValueType::EnumTag(
+                    records::ScalarEnumSchema::new("status", variants.iter().copied())
+                        .unwrap()
+                        .with_registry_id(0x71),
+                ),
+            )])
+        };
+        let case = |source, mapping| VariantProjectionCase::Project {
+            source,
+            project: MapProjectOp {
+                expressions: Vec::new(),
+                mapping,
+            },
+            raw_projection: None,
+            omit_unrepresentable_enum_rows: false,
+        };
+        let current = case(descriptor(&["open"]), vec![(0, 0)]);
+        let appended = case(descriptor(&["open", "closed"]), vec![(0, 0)]);
+        assert!(current.can_refresh_registries_to(&appended));
+
+        let replaced_mapping = case(descriptor(&["open", "closed"]), Vec::new());
+        assert!(
+            !current.can_refresh_registries_to(&replaced_mapping),
+            "registry refresh must not replace an existing projection mapping"
+        );
+        let incompatible_type = case(
+            RecordDescriptor::new([("status", ValueType::String)]),
+            vec![(0, 0)],
+        );
+        assert!(
+            !current.can_refresh_registries_to(&incompatible_type),
+            "registry refresh must reject a field-type mutation"
+        );
+    }
 
     #[test]
     fn payload_enum_remap_changes_only_the_case_tag() {
