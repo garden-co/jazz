@@ -2918,6 +2918,118 @@ fn independent_enum_schema(a: &[&str], b: &[&str]) -> JazzSchema {
     )])
 }
 
+fn enum_projection_schema(statuses: &[&str]) -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "items",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new(
+                "status",
+                ColumnType::EnumTag(
+                    groove::records::ScalarEnumSchema::new("status", statuses.iter().copied())
+                        .unwrap(),
+                ),
+            ),
+        ],
+    )])
+}
+
+#[test]
+fn old_enum_schema_only_decodes_cases_required_by_the_query() {
+    // This is an internal current-source boundary test.  The public query API
+    // supplies the requirement closure; the old read schema must not decode a
+    // physical case it neither returns nor uses semantically.
+    let base = enum_projection_schema(&["open"]);
+    let evolved_schema = enum_projection_schema(&["open", "closed"]);
+    let evolved = SchemaVersion::new(evolved_schema.clone());
+    let (_dir, mut core) = open_node_with_schema(node(0x75), base.clone());
+    let enum_lens = MigrationLens::new(
+        base.version_id(),
+        evolved.id,
+        vec![TableLens {
+            source_table: "items".to_owned(),
+            target_table: "items".to_owned(),
+            ops: vec![LensOp::TransformColumn {
+                column: "status".to_owned(),
+                transform: "jazz.identity".to_owned(),
+            }],
+        }],
+    );
+    publish_schema_lineage(
+        &mut core,
+        evolved.clone(),
+        enum_lens,
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
+        },
+    })
+    .unwrap();
+    let closed = row(0x75);
+    core.commit_mergeable(
+        MergeableCommit::new("items", closed, 1).cells(BTreeMap::from([
+            ("title".to_owned(), v("still-readable")),
+            ("status".to_owned(), Value::EnumTag(1)),
+        ])),
+    )
+    .unwrap();
+
+    let title_only = Query::from("items").select(["title"]).validate(&base).unwrap();
+    assert_eq!(
+        core.query_rows(
+            &title_only,
+            &title_only.bind(BTreeMap::new()).unwrap(),
+            DurabilityTier::Local,
+        )
+        .unwrap()
+        .into_iter()
+        .map(current_row_pair)
+        .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(closed, BTreeMap::from([("title".to_owned(), v("still-readable"))]))])
+    );
+
+    // Whole-row output semantically consumes `status`, so the non-total
+    // projection must report the incompatible case rather than silently
+    // inventing an old value or suppressing the row.
+    let whole_row = Query::from("items").validate(&base).unwrap();
+    assert!(core
+        .query_rows(
+            &whole_row,
+            &whole_row.bind(BTreeMap::new()).unwrap(),
+            DurabilityTier::Local,
+        )
+        .is_err());
+
+    // The closure is semantic rather than merely output-shaped: a hidden
+    // predicate or order key must force the same explicit incompatibility.
+    for query in [
+        Query::from("items")
+            .select(["title"])
+            .filter(eq(col("status"), lit(Value::EnumTag(0))))
+            .validate(&base)
+            .unwrap(),
+        Query::from("items")
+            .select(["title"])
+            .order_by("status", crate::query::OrderDirection::Asc)
+            .validate(&base)
+            .unwrap(),
+    ] {
+        assert!(core
+            .query_rows(
+                &query,
+                &query.bind(BTreeMap::new()).unwrap(),
+                DurabilityTier::Local,
+            )
+            .is_err());
+    }
+}
+
 #[test]
 fn independent_column_enum_registries_evolve_additively_across_reopen() {
     // Registry allocation is physical catalogue metadata, so this internal

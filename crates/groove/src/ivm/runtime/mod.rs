@@ -695,17 +695,19 @@ impl IvmRuntime {
         } else {
             VariantProjectionCase::Ignore { source }
         };
-        match projection.cases.entry(variant_tag) {
+        let changed = match projection.cases.entry(variant_tag) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(case);
+                true
             }
-            std::collections::hash_map::Entry::Occupied(entry) if entry.get() == &case => {}
+            std::collections::hash_map::Entry::Occupied(entry) if entry.get() == &case => false,
             std::collections::hash_map::Entry::Occupied(mut entry)
                 if allow_recursive_replacement =>
             {
                 // The physical registry can append while this authored target
                 // stays fixed. Refresh its non-total tag map in place.
                 entry.insert(case);
+                true
             }
             std::collections::hash_map::Entry::Occupied(_) => {
                 return Err(IvmRuntimeError::VariantProjectionCaseAlreadyRegistered {
@@ -714,8 +716,10 @@ impl IvmRuntime {
                     version: u64::from(variant_tag),
                 });
             }
+        };
+        if changed {
+            self.invalidate_table_inputs(table);
         }
-        self.invalidate_table_inputs(table);
         Ok(())
     }
 

@@ -417,6 +417,27 @@ pub(super) fn physical_current_projection_target(
     format!("schema_{}_{}_current", schema_alias.0, logical_table)
 }
 
+/// A query-local current-source target.  The ordinary target projects every
+/// authored enum occurrence, which is correct for a whole-row read but makes
+/// an older schema fail while decoding an enum cell that the query never
+/// consumes.  A narrowed target keeps the fixed logical row shape while
+/// replacing unneeded enum cells with typed nulls; the query compiler's
+/// requirement closure is therefore the only route by which an enum value is
+/// materialized into an authored descriptor.
+fn physical_current_projection_target_for_enum_columns(
+    schema_alias: SchemaVersionAlias,
+    logical_table: &str,
+    enum_columns: &BTreeSet<PhysicalColumnId>,
+) -> String {
+    let base = physical_current_projection_target(schema_alias, logical_table);
+    let suffix = enum_columns
+        .iter()
+        .map(|column| column.0.to_string())
+        .collect::<Vec<_>>()
+        .join("_");
+    format!("{base}_enum_fields_{suffix}")
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum PhysicalCurrentClass {
     Global,
@@ -1021,6 +1042,26 @@ where
         ))
     }
 
+    pub(super) fn physical_current_source_graph_with_projection_target(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+        class: PhysicalCurrentClass,
+        projection_target: impl Into<String>,
+    ) -> Result<GraphBuilder, Error> {
+        let binding = physical_current_binding(
+            &self.catalogue.catalogue_schemas,
+            &self.catalogue.physical_mappings,
+            schema_version,
+            logical_table,
+            class,
+        )?;
+        Ok(GraphBuilder::variant_source(
+            binding.storage_table,
+            projection_target,
+        ))
+    }
+
     pub(super) fn physical_current_source_scan_graph(
         &self,
         schema_version: SchemaVersionId,
@@ -1046,6 +1087,28 @@ where
         Ok(GraphBuilder::variant_source_scan(
             binding.storage_table,
             physical_current_projection_target(alias, logical_table),
+            scan,
+        ))
+    }
+
+    pub(super) fn physical_current_source_scan_graph_with_projection_target(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+        class: PhysicalCurrentClass,
+        projection_target: impl Into<String>,
+        scan: groove::ivm::StaticScanSpec,
+    ) -> Result<GraphBuilder, Error> {
+        let binding = physical_current_binding(
+            &self.catalogue.catalogue_schemas,
+            &self.catalogue.physical_mappings,
+            schema_version,
+            logical_table,
+            class,
+        )?;
+        Ok(GraphBuilder::variant_source_scan(
+            binding.storage_table,
+            projection_target,
             scan,
         ))
     }
@@ -1308,6 +1371,140 @@ where
         Ok(())
     }
 
+    /// Register (or refresh) a current-source projection that decodes only
+    /// the enum columns required by one query source.  The fixed output shape
+    /// deliberately retains the ordinary logical row descriptor: callers can
+    /// share the normal current-source lowering, while enum values outside the
+    /// requirement closure are represented by typed nulls and never expose a
+    /// physical tag.
+    pub(super) fn ensure_physical_current_projection_for_enum_columns(
+        &mut self,
+        target_schema: SchemaVersionId,
+        target_table_name: &str,
+        required_fields: &BTreeSet<String>,
+    ) -> Result<String, Error> {
+        let target_alias = self
+            .catalogue
+            .schema_version_aliases
+            .get(&target_schema)
+            .copied()
+            .ok_or(Error::InvalidStoredValue(
+                "physical current projection target schema alias missing",
+            ))?;
+        let target_table = self.table_in_schema(target_table_name, target_schema)?;
+        let target_mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&target_schema)
+            .and_then(|mapping| mapping.tables.get(target_table_name))
+            .cloned()
+            .ok_or(Error::InvalidStoredValue(
+                "target enum physical mapping missing",
+            ))?;
+        let required_enum_columns = target_table
+            .columns
+            .iter()
+            .filter(|column| required_fields.contains(&column.name))
+            .filter_map(|column| {
+                let column_id = target_mapping.columns.get(&column.name).copied()?;
+                let has_enum_boundary = target_mapping.scalar_enum_cases.contains_key(&column_id)
+                    || target_mapping.payload_enum_cases.contains_key(&column_id)
+                    || target_mapping
+                        .nested_scalar_enum_cases
+                        .contains_key(&column_id)
+                    || target_mapping
+                        .nested_payload_enum_cases
+                        .contains_key(&column_id)
+                    || matches!(
+                        column.column_type,
+                        records::ValueType::EnumTag(_) | records::ValueType::Enum(_)
+                    );
+                has_enum_boundary.then_some(column_id)
+            })
+            .collect::<BTreeSet<_>>();
+        let projection_target = physical_current_projection_target_for_enum_columns(
+            target_alias,
+            target_table_name,
+            &required_enum_columns,
+        );
+        let storage_tables = [
+            physical_global_current_table_name(target_mapping.table_id),
+            physical_ahead_current_table_name(target_mapping.table_id),
+        ];
+        for storage_table in &storage_tables {
+            let logical_output = target_table.global_current_storage_tables()[0].record_schema();
+            let physical_names = physical_current_field_names(&target_table, &target_mapping)?;
+            let output = widened_projection_descriptor(
+                &logical_output,
+                &physical_names,
+                self.database.table_schema(storage_table)?,
+            )?;
+            self.database
+                .define_variant_projection(storage_table, &projection_target, output)?;
+        }
+        let sources = self
+            .catalogue
+            .physical_mappings
+            .iter()
+            .flat_map(|(schema_version, mapping)| {
+                mapping
+                    .tables
+                    .iter()
+                    .filter(|(_, table)| table.table_id == target_mapping.table_id)
+                    .map(|(logical_table, table)| {
+                        (*schema_version, logical_table.clone(), table.clone())
+                    })
+            })
+            .collect::<Vec<_>>();
+        for (source_schema, source_table_name, source_mapping) in sources {
+            let source_alias = self
+                .catalogue
+                .schema_version_aliases
+                .get(&source_schema)
+                .copied()
+                .ok_or(Error::InvalidStoredValue(
+                    "physical current projection source schema alias missing",
+                ))?;
+            let cases = if source_mapping.variant_cases.is_empty() {
+                vec![(groove_variant_tag(source_alias)?, None)]
+            } else {
+                source_mapping
+                    .variant_cases
+                    .iter()
+                    .map(|case| (case.tag, Some(&case.fields)))
+                    .collect()
+            };
+            for (tag, present) in cases {
+                let fields = self.physical_current_projection_case_for_enum_columns(
+                    source_schema,
+                    &source_table_name,
+                    &source_mapping,
+                    target_schema,
+                    target_table_name,
+                    present,
+                    Some(&required_enum_columns),
+                )?;
+                for storage_table in &storage_tables {
+                    if let Some(fields) = fields.clone() {
+                        self.database.register_variant_case(
+                            storage_table,
+                            &projection_target,
+                            tag,
+                            fields,
+                        )?;
+                    } else {
+                        self.database.register_variant_ignore_case(
+                            storage_table,
+                            &projection_target,
+                            tag,
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(projection_target)
+    }
+
     pub(super) fn synchronize_physical_version_tables(&mut self) -> Result<(), Error> {
         for desired in physical_version_storage_tables(
             &self.catalogue.catalogue_schemas,
@@ -1379,6 +1576,7 @@ where
             target_table_name,
             ContentProjectionShape::History,
             present,
+            None,
         )
     }
 
@@ -1391,6 +1589,27 @@ where
         target_table_name: &str,
         present: Option<&BTreeSet<String>>,
     ) -> Result<Option<Vec<ProjectField>>, Error> {
+        self.physical_current_projection_case_for_enum_columns(
+            source_schema,
+            source_table_name,
+            source_mapping,
+            target_schema,
+            target_table_name,
+            present,
+            None,
+        )
+    }
+
+    fn physical_current_projection_case_for_enum_columns(
+        &mut self,
+        source_schema: SchemaVersionId,
+        source_table_name: &str,
+        source_mapping: &TablePhysicalMapping,
+        target_schema: SchemaVersionId,
+        target_table_name: &str,
+        present: Option<&BTreeSet<String>>,
+        required_enum_columns: Option<&BTreeSet<PhysicalColumnId>>,
+    ) -> Result<Option<Vec<ProjectField>>, Error> {
         self.physical_content_projection_case(
             source_schema,
             source_table_name,
@@ -1399,6 +1618,7 @@ where
             target_table_name,
             ContentProjectionShape::Current,
             present,
+            required_enum_columns,
         )
     }
 
@@ -1411,6 +1631,7 @@ where
         target_table_name: &str,
         shape: ContentProjectionShape,
         present: Option<&BTreeSet<String>>,
+        required_enum_columns: Option<&BTreeSet<PhysicalColumnId>>,
     ) -> Result<Option<Vec<ProjectField>>, Error> {
         #[derive(Clone)]
         enum CellProjection {
@@ -1553,6 +1774,21 @@ where
                         records::ValueType::EnumTag(_) | records::ValueType::Enum(_)
                     );
                     if has_enum_boundary || direct_enum {
+                        if required_enum_columns
+                            .is_some_and(|required| !required.contains(&column_id))
+                        {
+                            // This source does not semantically consume the
+                            // cell.  Do not decode an unknown physical case
+                            // merely to populate an otherwise unused logical
+                            // field, and do not let the physical tag cross the
+                            // boundary as an authored value.
+                            fields.push(ProjectField::literal_typed(
+                                output,
+                                Value::Nullable(None),
+                                records::ValueType::Nullable(Box::new(column.column_type.clone())),
+                            ));
+                            continue;
+                        }
                         let remaps = if has_enum_boundary {
                             self.physical_to_authored_enum_remaps(target_mapping, column_id)?
                         } else {
