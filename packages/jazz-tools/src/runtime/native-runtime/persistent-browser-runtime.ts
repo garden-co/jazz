@@ -139,6 +139,11 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   private closing = false;
   private readonly opened: Promise<void>;
 
+  /** @internal */
+  isClosed(): boolean {
+    return this.closed;
+  }
+
   constructor(
     private readonly runtimeSources: RuntimeSourcesConfig | undefined,
     private readonly schema: WasmSchema,

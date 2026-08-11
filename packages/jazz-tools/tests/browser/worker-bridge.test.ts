@@ -634,7 +634,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(rows).toEqual([]);
   });
 
-  it.fails("deletes OPFS storage for the current namespace and keeps the same Db usable", async () => {
+  it("deletes OPFS storage for the current namespace and keeps the same Db usable", async () => {
     const db = track(
       await createDb({
         appId: "test-app",
@@ -662,7 +662,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(afterReinsert[0].done).toBe(true);
   });
 
-  it.fails("resolves a storage reset requested before any schema use", async () => {
+  it("resolves a storage reset requested before any schema use", async () => {
     const db = track(
       await createDb({
         appId: "test-app",
