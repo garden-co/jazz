@@ -152,12 +152,19 @@ export type TypedColumnBuilder<
   optional(): ColumnAlias<Sql, true, Ref, HasDefault, Value>;
 };
 
-export type AnyTypedColumnBuilder = TypedColumnBuilder<
-  SqlType,
-  boolean,
-  string | undefined,
-  boolean
->;
+// This is a constraint for builder input positions, not a public builder
+// surface. Omitting its generic mutator methods avoids contravariant method
+// parameter collapse when a payload enum's discriminated SQL type is widened.
+export type AnyTypedColumnBuilder = Omit<
+  ColumnBuilder,
+  "optional" | "default" | "merge" | "transform"
+> & {
+  readonly __jazzSqlType: SqlType;
+  readonly __jazzOptional: boolean;
+  readonly __jazzReferences: string | undefined;
+  readonly __jazzHasDefault: boolean;
+  readonly __jazzValue: unknown;
+};
 export type ColumnBuilderSqlType<TBuilder extends AnyTypedColumnBuilder> =
   TBuilder["__jazzSqlType"];
 export type ColumnBuilderOptional<TBuilder extends AnyTypedColumnBuilder> =
@@ -296,6 +303,11 @@ export type ColumnAlias<
                           variants: infer Variants extends readonly string[];
                         }
                       ? EnumColumn<Variants, Optional, HasDefault, Value>
+                      : Sql extends {
+                            kind: "ENUM";
+                            cases: infer Cases extends readonly EnumCaseSqlType[];
+                          }
+                        ? EnumCasesColumn<Cases, Optional, HasDefault, Value>
                       : TypedColumnBuilder<Sql, Optional, Ref, HasDefault, Value>;
 
 type RefColumnKey = `${string}Id` | `${string}_id`;
@@ -918,7 +930,7 @@ export const col = {
   ref: <const TargetTable extends string>(targetTable: TargetTable) =>
     new RefBuilder(targetTable) as unknown as RefColumn<TargetTable>,
   array: <Builder extends AnyTypedColumnBuilder>(element: Builder) =>
-    new ArrayBuilder(element) as unknown as ArrayColumn<
+    new ArrayBuilder(element as unknown as ColumnBuilder) as unknown as ArrayColumn<
       ColumnBuilderSqlType<Builder>,
       false,
       ColumnBuilderReferences<Builder>
