@@ -7,7 +7,7 @@ cd "$ROOT"
 
 usage() {
   cat <<'EOF'
-Usage: dev/rebuild-artifacts.sh [tools] [server] [napi] [wasm]
+Usage: dev/rebuild-artifacts.sh [tools] [server] [napi] [wasm] [wasm-fast]
 
 With no arguments, rebuild every layer. Specify one or more layers to skip
 expensive layers such as wasm.
@@ -22,7 +22,7 @@ fi
 
 for layer in "${layers[@]}"; do
   case "$layer" in
-    tools|server|napi|wasm) ;;
+    tools|server|napi|wasm|wasm-fast) ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "unknown artifact layer: $layer" >&2
@@ -69,6 +69,9 @@ for layer in "${layers[@]}"; do
       ;;
     wasm)
       run_layer wasm pnpm --filter jazz-wasm build
+      ;;
+    wasm-fast)
+      run_layer wasm-fast pnpm --filter jazz-wasm build:fast
       ;;
   esac
 done

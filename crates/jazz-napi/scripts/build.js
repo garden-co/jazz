@@ -1,4 +1,5 @@
 const { spawnSync } = require("node:child_process");
+const { resolve } = require("node:path");
 
 const release = !process.argv.includes("--debug") && process.env.JAZZ_NAPI_RELEASE !== "0";
 const profileIndex = process.argv.indexOf("--profile");
@@ -23,6 +24,18 @@ if (result.error) {
 if ((result.status ?? 1) !== 0) {
   process.exit(result.status ?? 1);
 }
+const artifactRoot = resolve(__dirname, "../../..");
+const artifactProfile = profile ?? (release ? "release" : "debug");
+const manifest = spawnSync(
+  "node",
+  ["dev/artifacts/provenance.mjs", "write", "napi", artifactProfile],
+  {
+    cwd: artifactRoot,
+    stdio: "inherit",
+    shell: process.platform === "win32",
+  },
+);
+if ((manifest.status ?? 1) !== 0) process.exit(manifest.status ?? 1);
 process.exit(0);
 
 // Cache-salt 2026-07-19: a corrupt turbo cache archive for jazz-napi#build
