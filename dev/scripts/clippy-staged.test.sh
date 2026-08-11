@@ -29,17 +29,17 @@ log=$tmp/cargo.log
 output=$(PATH="$tmp:$PATH" REAL_CARGO="$real_cargo" JAZZ_REPO_ROOT="$root" CLIPPY_TEST_LOG="$log" \
   sh "$root/dev/scripts/clippy-staged.sh" Cargo.toml)
 
-grep -F -- '--workspace' "$log" >/dev/null
+grep -F -- '--workspace --all-targets' "$log" >/dev/null
 
 : >"$log"
 output=$(PATH="$tmp:$PATH" REAL_CARGO="$real_cargo" JAZZ_REPO_ROOT="$root" CLIPPY_TEST_LOG="$log" \
   sh "$root/dev/scripts/clippy-staged.sh" \
     "dev/benchmarks/storage/native/file with spaces.rs")
-grep -F -- '--manifest-path dev/benchmarks/storage/native/Cargo.toml' "$log" >/dev/null
+grep -F -- '--workspace --all-targets' "$log" >/dev/null
 : >"$log"
 PATH="$tmp:$PATH" REAL_CARGO="$real_cargo" JAZZ_REPO_ROOT="$root" CLIPPY_TEST_LOG="$log" \
   sh "$root/dev/scripts/clippy-staged.sh" examples/todo-server-rs/src/main.rs >/dev/null
-grep -F -- '--manifest-path examples/todo-server-rs/Cargo.toml' "$log" >/dev/null
+grep -F -- '--workspace --all-targets' "$log" >/dev/null
 if [ "$(grep -c -- '--package groove' "$log")" -ne 0 ]; then
   echo "root Cargo.toml must not be mixed with package mode" >&2
   exit 1

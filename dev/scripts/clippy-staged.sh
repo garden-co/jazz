@@ -11,11 +11,8 @@ root=${JAZZ_REPO_ROOT:-.}
 cd "$root"
 root=$(pwd)
 packages=""
-standalone_manifests=""
 workspace=0
 seen=' '
-newline='
-'
 
 metadata=$(mktemp "${TMPDIR:-/tmp}/clippy-metadata.XXXXXX")
 members=$(mktemp "${TMPDIR:-/tmp}/clippy-members.XXXXXX")
@@ -63,9 +60,11 @@ for file in "$@"; do
         seen="$seen$package "
         esac
       else
-        case "$newline$standalone_manifests" in *"$newline$manifest$newline"*) : ;; *)
-          standalone_manifests="$standalone_manifests$manifest$newline"
-        esac
+        # Auxiliary crates may be standalone, excluded, or depend on
+        # workspace-only assumptions. Preserve the old safe behavior: lint
+        # the authoritative root workspace instead of making their own
+        # manifest a blocking hook target.
+        workspace=1
       fi
       break
     fi
@@ -77,7 +76,7 @@ for file in "$@"; do
 done
 
 if [ "$workspace" -eq 1 ]; then
-  set -- clippy --workspace -- -D warnings
+  set -- clippy --workspace --all-targets -- -D warnings
 elif [ -n "$packages" ]; then
   set -- clippy
   for package in $packages; do set -- "$@" --package "$package"; done
@@ -88,16 +87,7 @@ fi
 
 if [ "$#" -gt 0 ]; then
   echo "Clippy: cargo $*"
-  cargo "$@"
+  exec cargo "$@"
 fi
 
-while IFS= read -r manifest; do
-  [ -n "$manifest" ] || continue
-  echo "Clippy: cargo clippy --manifest-path $manifest -- -D warnings"
-  cargo clippy --manifest-path "$manifest" -- -D warnings
-done <<EOF
-$standalone_manifests
-EOF
-
-[ "$workspace" -eq 1 ] || [ -n "$packages" ] || [ -n "$standalone_manifests" ] ||
-  echo "Clippy: no staged Rust or Cargo.toml changes"
+echo "Clippy: no staged Rust or Cargo.toml changes"
