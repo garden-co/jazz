@@ -40,6 +40,51 @@ pub(super) struct GlobalScalarEnumCaseId {
     pub(super) introducing_ordinal: u8,
 }
 
+/// A scalar enum discriminant in a physical table is an interned spelling of
+/// this identity, never an authored declaration ordinal.  The textual enum
+/// names used in the physical descriptor are intentionally opaque: tags are
+/// only decoded through this durable catalogue mapping.
+fn physical_scalar_enum_case_name(case: &GlobalScalarEnumCaseId) -> String {
+    format!(
+        "case-{}-{}",
+        case.introducing_schema.0.simple(),
+        case.introducing_ordinal
+    )
+}
+
+fn compare_scalar_enum_cases(
+    aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+    left: &GlobalScalarEnumCaseId,
+    right: &GlobalScalarEnumCaseId,
+) -> std::cmp::Ordering {
+    // Schema aliases are allocated by authoritative catalogue publication.
+    // They are therefore the only ordering that is both shared by partial
+    // catalogue replicas and meaningful for an enum's default order. UUID is
+    // solely a deterministic tie-breaker for corrupt/incomplete catalogues.
+    aliases
+        .get(&left.introducing_schema)
+        .cmp(&aliases.get(&right.introducing_schema))
+        .then_with(|| left.introducing_schema.cmp(&right.introducing_schema))
+        .then(left.introducing_ordinal.cmp(&right.introducing_ordinal))
+}
+
+fn physical_scalar_enum_schema(
+    column_id: PhysicalColumnId,
+    cases: &[GlobalScalarEnumCaseId],
+) -> Result<records::ScalarEnumSchema, Error> {
+    records::ScalarEnumSchema::new(
+        format!("physical-column-{}", column_id.0),
+        cases.iter().map(physical_scalar_enum_case_name),
+    )
+    .map(|schema| {
+        schema.with_registry_id(records::variant_registry_id_for_path(&format!(
+            "physical-column/{}",
+            column_id.0
+        )))
+    })
+    .map_err(|_| Error::InvalidStoredValue("invalid physical scalar enum registry"))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(super) struct PhysicalVariantCase {
     pub(super) tag: u32,
@@ -398,6 +443,35 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    fn physical_scalar_enum_cases(
+        &self,
+        table_id: PhysicalTableId,
+        column_id: PhysicalColumnId,
+    ) -> Result<Vec<GlobalScalarEnumCaseId>, Error> {
+        let mut cases = BTreeSet::new();
+        for mapping in self.catalogue.physical_mappings.values() {
+            for table in mapping
+                .tables
+                .values()
+                .filter(|table| table.table_id == table_id)
+            {
+                if let Some(column_cases) = table.scalar_enum_cases.get(&column_id) {
+                    cases.extend(column_cases.iter().cloned());
+                }
+            }
+        }
+        if cases.is_empty() {
+            return Err(Error::InvalidStoredValue(
+                "physical scalar enum registry identity mapping missing",
+            ));
+        }
+        let mut cases = cases.into_iter().collect::<Vec<_>>();
+        cases.sort_by(|left, right| {
+            compare_scalar_enum_cases(&self.catalogue.schema_version_aliases, left, right)
+        });
+        Ok(cases)
+    }
+
     pub(super) fn physical_table_id_for_schema(
         &self,
         schema_version: SchemaVersionId,
@@ -972,7 +1046,47 @@ where
             };
             match projection {
                 CellProjection::Field(source) => {
-                    fields.push(ProjectField::renamed(source, output));
+                    if matches!(column.column_type, records::ValueType::EnumTag(_)) {
+                        let target_mapping = self
+                            .catalogue
+                            .physical_mappings
+                            .get(&target_schema)
+                            .and_then(|mapping| mapping.tables.get(target_table_name))
+                            .ok_or(Error::InvalidStoredValue(
+                                "target scalar enum physical mapping missing",
+                            ))?;
+                        let column_id = target_mapping.columns.get(&column.name).copied().ok_or(
+                            Error::InvalidStoredValue(
+                                "target scalar enum physical column mapping missing",
+                            ),
+                        )?;
+                        let target_cases = target_mapping.scalar_enum_cases.get(&column_id).ok_or(
+                            Error::InvalidStoredValue(
+                                "target scalar enum identity mapping missing",
+                            ),
+                        )?;
+                        let physical_cases =
+                            self.physical_scalar_enum_cases(target_mapping.table_id, column_id)?;
+                        let tags = physical_cases
+                            .iter()
+                            .map(|identity| {
+                                target_cases
+                                    .iter()
+                                    .position(|candidate| candidate == identity)
+                                    .map(|tag| {
+                                        u8::try_from(tag).map_err(|_| {
+                                            Error::InvalidStoredValue(
+                                                "target scalar enum tag exhausted",
+                                            )
+                                        })
+                                    })
+                                    .transpose()
+                            })
+                            .collect::<Result<Vec<_>, Error>>()?;
+                        fields.push(ProjectField::enum_tag_remap(source, output, tags));
+                    } else {
+                        fields.push(ProjectField::renamed(source, output));
+                    }
                 }
                 CellProjection::Literal(Value::Nullable(None)) => {
                     fields.push(ProjectField::literal_typed(
@@ -1069,7 +1183,33 @@ where
             &physical_history_field_names(&source_table, source_mapping)?,
             self.database.table_schema(&binding.storage_table)?,
         )?;
-        let record = OwnedRecord::new(version.record.raw().to_vec(), descriptor);
+        // The authored row carries declaration-local enum ordinals.  Rewrite
+        // those cells through their durable schema-qualified identities before
+        // giving the record to the physical table; raw-copying would alias two
+        // concurrent siblings which both authored ordinal 2.
+        let mut values = version.record.to_values()?;
+        for (column_index, column) in source_table.columns.iter().enumerate() {
+            if !matches!(column.column_type, records::ValueType::EnumTag(_)) {
+                continue;
+            }
+            let column_id = source_mapping.columns.get(&column.name).copied().ok_or(
+                Error::InvalidStoredValue("physical scalar enum write column mapping missing"),
+            )?;
+            let authored_cases = source_mapping.scalar_enum_cases.get(&column_id).ok_or(
+                Error::InvalidStoredValue("authored scalar enum identity mapping missing"),
+            )?;
+            let physical_cases =
+                self.physical_scalar_enum_cases(source_mapping.table_id, column_id)?;
+            let value_index = HistoryRowRecord::USER_CELLS + column_index;
+            let value = values
+                .get_mut(value_index)
+                .ok_or(Error::InvalidStoredValue(
+                    "history scalar enum write field missing",
+                ))?;
+            *value =
+                remap_authored_scalar_enum_value(value.clone(), authored_cases, &physical_cases)?;
+        }
+        let record = OwnedRecord::new(descriptor.create(&values)?, descriptor);
         Ok((
             groove::Intern::new(binding.storage_table),
             groove::records::VariantRecord::new(
@@ -1197,13 +1337,49 @@ fn physical_write_descriptor(
     ))
 }
 
+fn remap_authored_scalar_enum_value(
+    value: Value,
+    authored_cases: &[GlobalScalarEnumCaseId],
+    physical_cases: &[GlobalScalarEnumCaseId],
+) -> Result<Value, Error> {
+    match value {
+        Value::EnumTag(authored_tag) => {
+            let identity =
+                authored_cases
+                    .get(usize::from(authored_tag))
+                    .ok_or(Error::InvalidStoredValue(
+                        "authored scalar enum tag outside identity mapping",
+                    ))?;
+            let physical_tag = physical_cases
+                .iter()
+                .position(|candidate| candidate == identity)
+                .ok_or(Error::InvalidStoredValue(
+                    "authored scalar enum identity absent from physical registry",
+                ))?;
+            Ok(Value::EnumTag(u8::try_from(physical_tag).map_err(
+                |_| Error::InvalidStoredValue("physical scalar enum tag exhausted"),
+            )?))
+        }
+        Value::Nullable(None) => Ok(Value::Nullable(None)),
+        Value::Nullable(Some(value)) => Ok(Value::Nullable(Some(Box::new(
+            remap_authored_scalar_enum_value(*value, authored_cases, physical_cases)?,
+        )))),
+        _ => Err(Error::InvalidStoredValue(
+            "authored scalar enum value has non-enum representation",
+        )),
+    }
+}
+
 fn widen_projection_value_type(
     logical: &records::ValueType,
     physical: &records::ValueType,
 ) -> records::ValueType {
     use records::ValueType;
     match (logical, physical) {
-        (ValueType::EnumTag(_), ValueType::EnumTag(schema)) => ValueType::EnumTag(schema.clone()),
+        // Projection crosses the physical interning boundary.  It must expose
+        // the target schema's declaration-local enum descriptor after the
+        // explicit tag remap above, not leak the physical descriptor/tag space.
+        (ValueType::EnumTag(logical), ValueType::EnumTag(_)) => ValueType::EnumTag(logical.clone()),
         (ValueType::Enum(_), ValueType::Enum(schema)) => ValueType::Enum(schema.clone()),
         (logical, ValueType::Nullable(physical)) if !matches!(logical, ValueType::Nullable(_)) => {
             widen_projection_value_type(logical, physical)
@@ -1280,6 +1456,49 @@ pub(super) fn physical_version_storage_tables(
             .skip(HistoryRowRecord::USER_CELLS + template_table.columns.len())
             .cloned()
             .collect::<Vec<_>>();
+        // First form the persistent registry for every scalar enum occurrence.
+        // Concurrent schemas may use the same authored ordinal for distinct
+        // cases; their schema-qualified identities must therefore be unioned
+        // before any descriptor assigns compact local tags.
+        let mut scalar_enum_registries =
+            BTreeMap::<PhysicalColumnId, BTreeSet<GlobalScalarEnumCaseId>>::new();
+        for (_, logical_table, mapping) in &variants {
+            for column in &logical_table.columns {
+                if !matches!(column.column_type, records::ValueType::EnumTag(_)) {
+                    continue;
+                }
+                let column_id =
+                    mapping
+                        .columns
+                        .get(&column.name)
+                        .copied()
+                        .ok_or(Error::InvalidStoredValue(
+                            "physical scalar enum column mapping missing",
+                        ))?;
+                let cases =
+                    mapping
+                        .scalar_enum_cases
+                        .get(&column_id)
+                        .ok_or(Error::InvalidStoredValue(
+                            "physical scalar enum identity mapping missing",
+                        ))?;
+                scalar_enum_registries
+                    .entry(column_id)
+                    .or_default()
+                    .extend(cases.iter().cloned());
+            }
+        }
+        let scalar_enum_registries = scalar_enum_registries
+            .into_iter()
+            .map(|(column_id, cases)| {
+                let mut cases = cases.into_iter().collect::<Vec<_>>();
+                cases.sort_by(|left, right| {
+                    compare_scalar_enum_cases(schema_version_aliases, left, right)
+                });
+                Ok((column_id, cases))
+            })
+            .collect::<Result<BTreeMap<_, _>, Error>>()?;
+
         let mut physical_columns = BTreeMap::new();
         for (_, logical_table, mapping) in &variants {
             for column in &logical_table.columns {
@@ -1291,11 +1510,22 @@ pub(super) fn physical_version_storage_tables(
                         .ok_or(Error::InvalidStoredValue(
                             "physical history column mapping missing",
                         ))?;
-                let storage_type = column
-                    .column_type
-                    .clone()
-                    .nullable()
-                    .rebind_variant_registries(&format!("physical-column/{}", column_id.0));
+                let storage_type = match &column.column_type {
+                    records::ValueType::EnumTag(_) => {
+                        records::ValueType::EnumTag(physical_scalar_enum_schema(
+                            column_id,
+                            scalar_enum_registries.get(&column_id).ok_or(
+                                Error::InvalidStoredValue("physical scalar enum registry missing"),
+                            )?,
+                        )?)
+                        .nullable()
+                    }
+                    _ => column
+                        .column_type
+                        .clone()
+                        .nullable()
+                        .rebind_variant_registries(&format!("physical-column/{}", column_id.0)),
+                };
                 if let Some(existing) = physical_columns.get_mut(&column_id) {
                     *existing = merge_physical_value_type(existing, &storage_type)?;
                 } else {
@@ -1530,17 +1760,26 @@ fn merge_physical_value_type(
         (ValueType::EnumTag(left), ValueType::EnumTag(right))
             if left.registry_id() == right.registry_id() =>
         {
-            let (shorter, longer) = if left.variants.len() <= right.variants.len() {
-                (&left.variants, right)
-            } else {
-                (&right.variants, left)
-            };
-            if !longer.variants.starts_with(shorter) {
-                return Err(Error::InvalidStoredValue(
-                    "physical enum registry changed non-additively",
-                ));
-            }
-            Ok(ValueType::EnumTag(longer.clone()))
+            // This helper is also used while combining independently authored
+            // snapshots.  A shared authored registry id does not make ordinal
+            // `n` globally meaningful: concurrent siblings can legitimately
+            // introduce distinct cases at that ordinal.  The physical-table
+            // path supplies schema-qualified identities and replaces these
+            // names with its durable registry; retain a deterministic union
+            // here so descriptor construction never aliases sibling cases.
+            let variants = left
+                .variants
+                .iter()
+                .chain(&right.variants)
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            Ok(ValueType::EnumTag(
+                records::ScalarEnumSchema::new(left.name.clone(), variants)
+                    .map_err(|_| Error::InvalidStoredValue("invalid physical enum registry"))?
+                    .with_registry_id(left.registry_id()),
+            ))
         }
         (ValueType::Enum(left), ValueType::Enum(right))
             if left.registry_id == right.registry_id =>
@@ -2038,5 +2277,59 @@ mod variant_case_tests {
             panic!("expected scalar enum registry");
         };
         assert_eq!(registry.variants.len(), 4);
+    }
+
+    #[test]
+    fn concurrent_scalar_enum_write_remap_never_aliases_sibling_ordinals() {
+        let base = schema(1);
+        let archived = schema(2);
+        let snoozed = schema(3);
+        let base_cases = vec![
+            GlobalScalarEnumCaseId {
+                introducing_schema: base,
+                introducing_ordinal: 0,
+            },
+            GlobalScalarEnumCaseId {
+                introducing_schema: base,
+                introducing_ordinal: 1,
+            },
+        ];
+        let archived_cases = base_cases
+            .iter()
+            .cloned()
+            .chain(std::iter::once(GlobalScalarEnumCaseId {
+                introducing_schema: archived,
+                introducing_ordinal: 2,
+            }))
+            .collect::<Vec<_>>();
+        let snoozed_cases = base_cases
+            .iter()
+            .cloned()
+            .chain(std::iter::once(GlobalScalarEnumCaseId {
+                introducing_schema: snoozed,
+                introducing_ordinal: 2,
+            }))
+            .collect::<Vec<_>>();
+        let physical_cases = archived_cases
+            .iter()
+            .cloned()
+            .chain(snoozed_cases.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        let archived_tag = remap_authored_scalar_enum_value(
+            Value::Nullable(Some(Box::new(Value::EnumTag(2)))),
+            &archived_cases,
+            &physical_cases,
+        )
+        .unwrap();
+        let snoozed_tag = remap_authored_scalar_enum_value(
+            Value::Nullable(Some(Box::new(Value::EnumTag(2)))),
+            &snoozed_cases,
+            &physical_cases,
+        )
+        .unwrap();
+        assert_ne!(archived_tag, snoozed_tag);
     }
 }
