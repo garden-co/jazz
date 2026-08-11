@@ -85,8 +85,6 @@ export interface NativeRowDelta {
   updatedOccurrenceKeys?: Uint8Array[];
   removedOccurrenceKeys?: Uint8Array[];
   terminalOperations?: NativeTerminalOperation[];
-  /** Indices of terminal operations encoded as NAPI CurrentRow payloads. */
-  terminalCurrentRowOperationIndexes?: number[];
 }
 
 export type SubscriptionWireDelta = RowDelta | NativeRowDelta;

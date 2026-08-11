@@ -313,7 +313,6 @@ export class SubscriptionManager<T extends { id: string }> {
             delta.terminalOperations,
             transform,
             nativeColumns,
-            new Set(delta.terminalCurrentRowOperationIndexes),
           );
           return reset
             ? { delta: terminalResult.delta, all: terminalResult.all ?? this.all(), reset: true }
@@ -353,7 +352,6 @@ export class SubscriptionManager<T extends { id: string }> {
     operations: NativeTerminalOperation[],
     transform: (row: WasmRow) => T,
     rootColumns: readonly ColumnDescriptor[],
-    currentRowOperationIndexes: ReadonlySet<number>,
   ): SubscriptionDelta<T> {
     const beforeIndices = new Map(this.orderedIdIndex);
     const affectedRoots = new Set<string>();
@@ -361,7 +359,7 @@ export class SubscriptionManager<T extends { id: string }> {
     // batches are addressable. Positional insertion remains in producer order:
     // applying its index before an earlier root Remove makes the outcome depend
     // on operation-key ordering.
-    for (const [operationIndex, operation] of operations.entries()) {
+    for (const operation of operations) {
       if (operation.path.length !== 0 || !("Insert" in operation.edit)) continue;
       const rootId = this.terminalAddress(operation.root_key);
       const rootRowId = terminalPayloadRowId(operation.root_key);
@@ -372,15 +370,13 @@ export class SubscriptionManager<T extends { id: string }> {
         rootId,
         decodeNativeTerminalRow(
           rootRowId,
-          currentRowOperationIndexes.has(operationIndex)
-            ? rootTerminalCurrentRowColumns(rootColumns)
-            : rootColumns,
+          rootTerminalCurrentRowColumns(rootColumns),
           Uint8Array.from(edit.Insert.value),
         ),
       );
     }
 
-    for (const [operationIndex, operation] of operations.entries()) {
+    for (const operation of operations) {
       const rootId = this.terminalRootId(operation.root_key);
       const edit = operation.edit;
       if (operation.path.length === 0) {
@@ -400,9 +396,7 @@ export class SubscriptionManager<T extends { id: string }> {
             rootId,
             decodeNativeTerminalRow(
               terminalPayloadRowId(operation.root_key),
-              currentRowOperationIndexes.has(operationIndex)
-                ? rootTerminalCurrentRowColumns(rootColumns)
-                : rootColumns,
+              rootTerminalCurrentRowColumns(rootColumns),
               Uint8Array.from(edit.Update.value),
             ),
           );
