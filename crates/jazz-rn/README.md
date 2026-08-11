@@ -29,11 +29,14 @@ From the repository root:
 cargo test -p jazz-rn
 pnpm --filter jazz-rn typecheck
 pnpm --filter jazz-rn test
+dev/gates/rn-bindings-fresh.sh
 pnpm --filter jazz-rn ubrn:ios
 pnpm --filter jazz-rn ubrn:android
 ```
 
 `ubrn:*` rebuilds the Rust artifacts and regenerates the TypeScript/C++ bridge.
+The freshness gate rebuilds the host library and checks both committed generated
+TypeScript files without requiring an iOS or Android toolchain.
 The iOS command sets `IPHONEOS_DEPLOYMENT_TARGET=15.1`; Android requires an NDK
 configured for the React Native project.
 

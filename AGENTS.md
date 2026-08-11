@@ -35,6 +35,9 @@ For ordinary Rust/core work, the full gate set is:
 - `cargo check -p jazz-sim --benches` (always; it is cheap enough and catches bench API rot)
 - `dev/gates/ts-wire-codec.sh` for TypeScript/native-runtime wire-codec coverage
   (Anselm-approved 2026-07-07)
+- `dev/gates/rn-bindings-fresh.sh` after any `jazz-rn` UniFFI surface change;
+  it rebuilds the host library and verifies both committed TypeScript binding
+  files match fresh UniFFI output.
 - `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
   for maintained-vs-one-shot equivalence coverage (Anselm-approved 2026-07-08)
 - `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact`

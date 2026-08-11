@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use jazz::db::{TickScheduler, TickUrgency};
 
@@ -22,6 +22,16 @@ impl SchedulerJob {
 }
 
 type SharedCallback = Arc<Mutex<Option<Arc<dyn TickSchedulerCallback>>>>;
+
+const MIN_DISPATCH_INTERVAL: Duration = Duration::from_millis(1);
+
+fn dispatch_delay(last_dispatch: Option<Instant>, now: Instant) -> Duration {
+    last_dispatch
+        .and_then(|last_dispatch| {
+            MIN_DISPATCH_INTERVAL.checked_sub(now.duration_since(last_dispatch))
+        })
+        .unwrap_or_default()
+}
 
 /// Bridges Jazz's same-thread scheduler to a detached foreign-callback worker.
 #[derive(Clone, Default)]
@@ -89,10 +99,16 @@ impl RnScheduler {
         let spawned = std::thread::Builder::new()
             .name("jazz-rn-notifier".to_owned())
             .spawn(move || {
+                let mut last_dispatch = None;
                 while let Ok(job) = receiver.recv() {
-                    // This tiny delay coalesces scheduler bursts and prevents
-                    // synchronous JS re-entry from turning into a hot loop.
-                    std::thread::sleep(Duration::from_millis(1));
+                    // Throttle only callbacks that follow a recent dispatch.
+                    // The first wake after an idle period should not pay the
+                    // anti-hot-loop delay.
+                    let delay = dispatch_delay(last_dispatch, Instant::now());
+                    if !delay.is_zero() {
+                        std::thread::sleep(delay);
+                    }
+                    last_dispatch = Some(Instant::now());
                     match job {
                         SchedulerJob::Immediate => {
                             immediate_scheduled.store(false, Ordering::SeqCst)
@@ -180,5 +196,23 @@ mod tests {
         scheduler.shutdown();
         scheduler.schedule_tick(TickUrgency::Immediate);
         assert!(receiver.recv_timeout(Duration::from_millis(30)).is_err());
+    }
+
+    #[test]
+    fn dispatch_throttle_skips_idle_wakes_and_spaces_bursts() {
+        // Dispatch timing belongs to the foreign-callback scheduler rather
+        // than Jazz's public database behavior, so exercise the deterministic
+        // throttle calculation directly instead of relying on wall-clock
+        // sleeps in a test.
+        let now = Instant::now();
+        assert_eq!(dispatch_delay(None, now), Duration::ZERO);
+        assert_eq!(
+            dispatch_delay(Some(now), now + Duration::from_micros(400)),
+            Duration::from_micros(600)
+        );
+        assert_eq!(
+            dispatch_delay(Some(now), now + MIN_DISPATCH_INTERVAL),
+            Duration::ZERO
+        );
     }
 }

@@ -12,6 +12,8 @@ const envAppId = process.env.EXPO_PUBLIC_JAZZ_APP_ID;
 const envServerUrl = process.env.EXPO_PUBLIC_JAZZ_SERVER_URL;
 const e2eSeedTitle = process.env.EXPO_PUBLIC_JAZZ_E2E_SEED_TITLE;
 const e2eSecret = process.env.EXPO_PUBLIC_JAZZ_E2E_SECRET;
+// E2E only: Metro embeds this admin credential in the application bundle.
+// Never copy this option into, or set this variable for, a shipped build.
 const e2eAdminSecret = process.env.EXPO_PUBLIC_JAZZ_E2E_ADMIN_SECRET;
 
 function buildConfig(secret: string): DbConfig {

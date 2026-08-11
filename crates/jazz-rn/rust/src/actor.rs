@@ -20,8 +20,8 @@ use jazz::wire::{TransportError, WireTransport};
 
 use crate::scheduler::RnScheduler;
 use crate::{
-    JazzRnError, TickSchedulerCallback, closed_error, core_error, panic_to_jazz_error,
-    poisoned_error,
+    JazzRnError, RnSubscriptionEvent, TickSchedulerCallback, closed_error, core_error,
+    panic_to_jazz_error, poisoned_error,
 };
 
 type Job = Box<dyn ActorJob>;
@@ -416,7 +416,10 @@ impl ActorHandle {
         })
     }
 
-    pub(crate) fn subscription_read_all(&self, id: u64) -> Result<Vec<String>, JazzRnError> {
+    pub(crate) fn subscription_read_all(
+        &self,
+        id: u64,
+    ) -> Result<Vec<RnSubscriptionEvent>, JazzRnError> {
         self.call("subscription_read_all", move |state| {
             state.subscription_read_all(id)
         })
@@ -744,7 +747,7 @@ impl Drop for ActorHandle {
 }
 
 fn close_control(control: &Arc<Mutex<Control>>) -> Result<(), JazzRnError> {
-    let (reply_receiver, join, poisoned) = {
+    let (reply_receiver, join, early_error) = {
         let mut control = control.lock().map_err(|_| JazzRnError::Internal {
             message: "actor lifecycle lock poisoned during close".to_owned(),
         })?;
@@ -754,43 +757,58 @@ fn close_control(control: &Arc<Mutex<Control>>) -> Result<(), JazzRnError> {
             Lifecycle::Poisoned(reason) => {
                 let reason = reason.clone();
                 let join = control.join.take();
-                (None, join, Some(reason))
+                (None, join, Some(poisoned_error(reason)))
             }
             Lifecycle::Open => {
                 control.lifecycle = Lifecycle::Closing;
-                let sender = control.sender.take().ok_or_else(closed_error)?;
-                let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
-                let job: Job = Box::new(CallJob {
-                    call: Some(|state: &mut CoreState| state.shutdown(WaiterSignal::Closed)),
-                    reply: Some(reply_sender),
-                });
-                sender.send(job).map_err(|_| closed_error())?;
-                drop(sender);
-                (Some(reply_receiver), control.join.take(), None)
+                match control.sender.take() {
+                    None => {
+                        control.lifecycle = Lifecycle::Closed;
+                        (None, control.join.take(), Some(closed_error()))
+                    }
+                    Some(sender) => {
+                        let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
+                        let job: Job = Box::new(CallJob {
+                            call: Some(|state: &mut CoreState| {
+                                state.shutdown(WaiterSignal::Closed)
+                            }),
+                            reply: Some(reply_sender),
+                        });
+                        if sender.send(job).is_err() {
+                            control.lifecycle = Lifecycle::Closed;
+                            (None, control.join.take(), Some(closed_error()))
+                        } else {
+                            drop(sender);
+                            (Some(reply_receiver), control.join.take(), None)
+                        }
+                    }
+                }
             }
         }
     };
 
-    let result = if let Some(reason) = poisoned {
-        Err(poisoned_error(reason))
+    let result = if let Some(error) = early_error {
+        Err(error)
     } else {
         reply_receiver
             .expect("open close has a reply")
             .recv()
             .map_err(|_| JazzRnError::Internal {
                 message: "Jazz core thread exited before close completed".to_owned(),
-            })?
+            })
+            .and_then(|result| result)
     };
-    if let Some(join) = join
-        && let Err(payload) = join.join()
-    {
-        return Err(panic_to_jazz_error("joining Jazz core thread", payload));
-    }
+    let join_error = join
+        .and_then(|join| join.join().err())
+        .map(|payload| panic_to_jazz_error("joining Jazz core thread", payload));
     if let Ok(mut control) = control.lock() {
         control.lifecycle = Lifecycle::Closed;
         control.sender = None;
     }
-    result
+    match join_error {
+        Some(error) => Err(error),
+        None => result,
+    }
 }
 
 fn join_from_control(control: &Arc<Mutex<Control>>) {
@@ -1399,14 +1417,53 @@ impl CoreState {
         Ok(())
     }
 
-    fn subscription_read_all(&mut self, id: u64) -> Result<Vec<String>, JazzRnError> {
+    fn subscription_read_all(&mut self, id: u64) -> Result<Vec<RnSubscriptionEvent>, JazzRnError> {
         let stream = self
             .subscriptions
             .get_mut(&id)
             .ok_or_else(|| invalid_handle("subscription", id))?;
         let mut events = Vec::new();
         while let Some(event) = stream.try_next_event() {
-            events.push(binding::subscription_event_to_json_string(&event)?);
+            let event = match binding::encode_subscription_event(&event)? {
+                binding::EncodedSubscriptionEvent::Delta {
+                    reset,
+                    delta,
+                    relation_delta,
+                    settled,
+                    tier,
+                } => RnSubscriptionEvent {
+                    event_type: "delta".to_owned(),
+                    reset: Some(reset),
+                    delta: Some(delta),
+                    relation_delta: Some(relation_delta),
+                    settled: Some(settled),
+                    tier: Some(tier),
+                    reason_json: None,
+                },
+                binding::EncodedSubscriptionEvent::Rejected { reason } => RnSubscriptionEvent {
+                    event_type: "rejected".to_owned(),
+                    reset: None,
+                    delta: None,
+                    relation_delta: None,
+                    settled: None,
+                    tier: None,
+                    reason_json: Some(serde_json::to_string(&reason).map_err(|error| {
+                        JazzRnError::Internal {
+                            message: format!("encode subscription rejection: {error}"),
+                        }
+                    })?),
+                },
+                binding::EncodedSubscriptionEvent::Closed => RnSubscriptionEvent {
+                    event_type: "closed".to_owned(),
+                    reset: None,
+                    delta: None,
+                    relation_delta: None,
+                    settled: None,
+                    tier: None,
+                    reason_json: None,
+                },
+            };
+            events.push(event);
         }
         Ok(events)
     }
@@ -2074,6 +2131,54 @@ mod tests {
         let actor = open_actor();
         actor.close().unwrap();
         assert!(matches!(actor.tick(), Err(JazzRnError::Closed { .. })));
+    }
+
+    #[test]
+    fn failed_shutdown_send_finishes_the_close_transition() {
+        // A dead actor receiver is a binding-thread failure that cannot be
+        // induced through Jazz's public database API. The close controller
+        // must nevertheless leave its lifecycle terminal and idempotent.
+        let (sender, receiver) = mpsc::channel::<Job>();
+        drop(receiver);
+        let control = Arc::new(Mutex::new(Control {
+            lifecycle: Lifecycle::Open,
+            sender: Some(sender),
+            join: None,
+        }));
+
+        assert!(matches!(
+            close_control(&control),
+            Err(JazzRnError::Closed { .. })
+        ));
+        assert!(matches!(
+            control.lock().unwrap().lifecycle,
+            Lifecycle::Closed
+        ));
+        assert!(close_control(&control).is_ok());
+    }
+
+    #[test]
+    fn failed_shutdown_reply_finishes_the_close_transition() {
+        // The actor may disappear after accepting the shutdown job but before
+        // completing its reply. Closing must still join it and become
+        // idempotent instead of leaving the handle stuck in `Closing`.
+        let (sender, receiver) = mpsc::channel::<Job>();
+        let join = std::thread::spawn(move || drop(receiver.recv().unwrap()));
+        let control = Arc::new(Mutex::new(Control {
+            lifecycle: Lifecycle::Open,
+            sender: Some(sender),
+            join: Some(join),
+        }));
+
+        assert!(matches!(
+            close_control(&control),
+            Err(JazzRnError::Internal { .. })
+        ));
+        assert!(matches!(
+            control.lock().unwrap().lifecycle,
+            Lifecycle::Closed
+        ));
+        assert!(close_control(&control).is_ok());
     }
 
     #[test]

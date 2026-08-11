@@ -23,10 +23,20 @@ interface GeneratedWrite {
   writeState(): string;
 }
 
+interface GeneratedSubscriptionEvent {
+  eventType: string;
+  reset: boolean | undefined;
+  delta: ArrayBuffer | undefined;
+  relationDelta: ArrayBuffer | undefined;
+  settled: boolean | undefined;
+  tier: string | undefined;
+  reasonJson: string | undefined;
+}
+
 interface GeneratedSubscription {
   close(): boolean;
-  drain(): string[];
-  readAll(): string[];
+  drain(): GeneratedSubscriptionEvent[];
+  readAll(): GeneratedSubscriptionEvent[];
 }
 
 interface GeneratedTransport {
@@ -242,6 +252,34 @@ function parseJson(value: string): unknown {
   return JSON.parse(value) as unknown;
 }
 
+function subscriptionEvent(event: GeneratedSubscriptionEvent): unknown {
+  switch (event.eventType) {
+    case "delta": {
+      if (event.delta === undefined || event.relationDelta === undefined) {
+        throw new Error("React Native subscription delta is missing binary payloads");
+      }
+      return {
+        type: "delta",
+        reset: event.reset === true,
+        delta: toUint8Array(event.delta),
+        relation_delta: toUint8Array(event.relationDelta),
+        settled: event.settled === true,
+        tier: event.tier,
+      };
+    }
+    case "rejected": {
+      if (event.reasonJson === undefined) {
+        throw new Error("React Native subscription rejection is missing its reason");
+      }
+      return { type: "rejected", reason: parseJson(event.reasonJson) };
+    }
+    case "closed":
+      return { type: "closed" };
+    default:
+      throw new Error(`Unknown React Native subscription event ${JSON.stringify(event.eventType)}`);
+  }
+}
+
 function normalizeJazzRnError(error: unknown): unknown {
   if (!(error instanceof Error)) {
     return error;
@@ -307,11 +345,11 @@ class RnSubscriptionShim implements Subscription {
   }
 
   readAll(): unknown[] {
-    return this.subscription.readAll().map(parseJson);
+    return this.subscription.readAll().map(subscriptionEvent);
   }
 
   drain(): unknown[] {
-    return this.subscription.drain().map(parseJson);
+    return this.subscription.drain().map(subscriptionEvent);
   }
 
   close(): boolean {

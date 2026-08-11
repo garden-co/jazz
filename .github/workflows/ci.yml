@@ -45,6 +45,7 @@ jobs:
         run: pnpm run ensure:rust-toolchain
 
       - run: cargo check --workspace --all-targets
+      - run: dev/gates/rn-bindings-fresh.sh
 
   lint:
     runs-on: blacksmith-4vcpu-ubuntu-2404

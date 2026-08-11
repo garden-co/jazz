@@ -94,8 +94,40 @@ describe("RnDbShim", () => {
     const db = shim({
       subscribe: () => ({
         close: () => true,
-        drain: () => [JSON.stringify({ type: "closed" })],
-        readAll: () => [JSON.stringify({ type: "delta", rows: [] })],
+        drain: () => [
+          {
+            eventType: "closed",
+            reset: undefined,
+            delta: undefined,
+            relationDelta: undefined,
+            settled: undefined,
+            tier: undefined,
+            reasonJson: undefined,
+          },
+        ],
+        readAll: () => [
+          {
+            eventType: "delta",
+            reset: true,
+            delta: buffer(1, 2),
+            relationDelta: buffer(3, 4),
+            settled: true,
+            tier: "Local",
+            reasonJson: undefined,
+          },
+          {
+            eventType: "rejected",
+            reset: undefined,
+            delta: undefined,
+            relationDelta: undefined,
+            settled: undefined,
+            tier: undefined,
+            reasonJson: JSON.stringify({
+              type: "ServerFailure",
+              code: "Internal",
+            }),
+          },
+        ],
       }),
       insertWithIdEncoded: () => ({
         close: () => true,
@@ -108,7 +140,22 @@ describe("RnDbShim", () => {
       }),
     });
 
-    expect(db.subscribe({}, null).readAll()).toEqual([{ type: "delta", rows: [] }]);
+    const subscription = db.subscribe({}, null);
+    expect(subscription.readAll()).toEqual([
+      {
+        type: "delta",
+        reset: true,
+        delta: new Uint8Array([1, 2]),
+        relation_delta: new Uint8Array([3, 4]),
+        settled: true,
+        tier: "Local",
+      },
+      {
+        type: "rejected",
+        reason: { type: "ServerFailure", code: "Internal" },
+      },
+    ]);
+    expect(subscription.drain?.()).toEqual([{ type: "closed" }]);
     const write = db.insertWithIdEncoded("todos", new Uint8Array(16), new Uint8Array());
     try {
       write.wait("edge");

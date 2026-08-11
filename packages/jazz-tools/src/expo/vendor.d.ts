@@ -1,26 +1,3 @@
 declare module "react-native/Libraries/Utilities/PolyfillFunctions" {
   export function polyfillGlobal(name: string, getValue: () => unknown): void;
 }
-
-declare module "web-streams-polyfill" {
-  export const ReadableStream: typeof globalThis.ReadableStream;
-}
-
-declare module "expo-crypto" {
-  export function getRandomBytes(byteCount: number): Uint8Array;
-  export function getRandomValues<T extends ArrayBufferView | null>(typedArray: T): T;
-}
-
-declare module "expo-secure-store" {
-  export function getItemAsync(key: string): Promise<string | null>;
-  export function setItemAsync(key: string, value: string): Promise<void>;
-  export function deleteItemAsync(key: string): Promise<void>;
-}
-
-declare module "expo-file-system" {
-  export const Paths: {
-    readonly document: {
-      readonly uri: string;
-    };
-  };
-}

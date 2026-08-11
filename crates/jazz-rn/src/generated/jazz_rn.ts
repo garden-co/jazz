@@ -62,6 +62,7 @@ import {
   destructorGuardSymbol,
   pointerLiteralSymbol,
   uniffiCreateFfiConverterString,
+  uniffiCreateRecord,
   uniffiRustCallAsync,
   uniffiTraitInterfaceCall,
   uniffiTypeNameSymbol,
@@ -189,6 +190,111 @@ const uniffiCallbackInterfaceTickSchedulerCallback: {
 // FfiConverter protocol for callback interfaces
 const FfiConverterTypeTickSchedulerCallback =
   new FfiConverterCallback<TickSchedulerCallback>();
+
+/**
+ * Pull-based subscription event crossing the UniFFI boundary.
+ *
+ * Delta payloads remain byte buffers so Hermes does not need to materialize
+ * JSON arrays with one number per postcard byte.
+ */
+export type RnSubscriptionEvent = {
+  /**
+   * `delta`, `rejected`, or `closed`.
+   */
+  eventType: string;
+  /**
+   * Reset marker for delta events.
+   */
+  reset: boolean | undefined;
+  /**
+   * Postcard-encoded row delta.
+   */
+  delta: ArrayBuffer | undefined;
+  /**
+   * Postcard-encoded relation delta.
+   */
+  relationDelta: ArrayBuffer | undefined;
+  /**
+   * Read-tier settlement marker for delta events.
+   */
+  settled: boolean | undefined;
+  /**
+   * Durability tier for delta events.
+   */
+  tier: string | undefined;
+  /**
+   * Structured rejection metadata for rejected events.
+   */
+  reasonJson: string | undefined;
+};
+
+/**
+ * Generated factory for {@link RnSubscriptionEvent} record objects.
+ */
+export const RnSubscriptionEvent = (() => {
+  const defaults = () => ({});
+  const create = (() => {
+    return uniffiCreateRecord<RnSubscriptionEvent, ReturnType<typeof defaults>>(
+      defaults
+    );
+  })();
+  return Object.freeze({
+    /**
+     * Create a frozen instance of {@link RnSubscriptionEvent}, with defaults specified
+     * in Rust, in the {@link jazz_rn} crate.
+     */
+    create,
+
+    /**
+     * Create a frozen instance of {@link RnSubscriptionEvent}, with defaults specified
+     * in Rust, in the {@link jazz_rn} crate.
+     */
+    new: create,
+
+    /**
+     * Defaults specified in the {@link jazz_rn} crate.
+     */
+    defaults: () => Object.freeze(defaults()) as Partial<RnSubscriptionEvent>,
+  });
+})();
+
+const FfiConverterTypeRnSubscriptionEvent = (() => {
+  type TypeName = RnSubscriptionEvent;
+  class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+    read(from: RustBuffer): TypeName {
+      return {
+        eventType: FfiConverterString.read(from),
+        reset: FfiConverterOptionalBool.read(from),
+        delta: FfiConverterOptionalArrayBuffer.read(from),
+        relationDelta: FfiConverterOptionalArrayBuffer.read(from),
+        settled: FfiConverterOptionalBool.read(from),
+        tier: FfiConverterOptionalString.read(from),
+        reasonJson: FfiConverterOptionalString.read(from),
+      };
+    }
+    write(value: TypeName, into: RustBuffer): void {
+      FfiConverterString.write(value.eventType, into);
+      FfiConverterOptionalBool.write(value.reset, into);
+      FfiConverterOptionalArrayBuffer.write(value.delta, into);
+      FfiConverterOptionalArrayBuffer.write(value.relationDelta, into);
+      FfiConverterOptionalBool.write(value.settled, into);
+      FfiConverterOptionalString.write(value.tier, into);
+      FfiConverterOptionalString.write(value.reasonJson, into);
+    }
+    allocationSize(value: TypeName): number {
+      return (
+        FfiConverterString.allocationSize(value.eventType) +
+        FfiConverterOptionalBool.allocationSize(value.reset) +
+        FfiConverterOptionalArrayBuffer.allocationSize(value.delta) +
+        FfiConverterOptionalArrayBuffer.allocationSize(value.relationDelta) +
+        FfiConverterOptionalBool.allocationSize(value.settled) +
+        FfiConverterOptionalString.allocationSize(value.tier) +
+        FfiConverterOptionalString.allocationSize(value.reasonJson)
+      );
+    }
+  }
+  return new FFIConverter();
+})();
 
 const stringConverter = {
   stringToBytes: (s: string) =>
@@ -2316,11 +2422,11 @@ export interface RnSubscriptionInterface {
   /**
    * Alias for `read_all`.
    */
-  drain() /*throws*/ : Array<string>;
+  drain() /*throws*/ : Array<RnSubscriptionEvent>;
   /**
-   * Drain all currently queued events as JSON strings.
+   * Drain all currently queued events with binary deltas kept as bytes.
    */
-  readAll() /*throws*/ : Array<string>;
+  readAll() /*throws*/ : Array<RnSubscriptionEvent>;
 }
 
 /**
@@ -2364,8 +2470,8 @@ export class RnSubscription
   /**
    * Alias for `read_all`.
    */
-  drain(): Array<string> /*throws*/ {
-    return FfiConverterArrayString.lift(
+  drain(): Array<RnSubscriptionEvent> /*throws*/ {
+    return FfiConverterArrayTypeRnSubscriptionEvent.lift(
       uniffiCaller.rustCallWithError(
         /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
           FfiConverterTypeJazzRnError
@@ -2382,10 +2488,10 @@ export class RnSubscription
   }
 
   /**
-   * Drain all currently queued events as JSON strings.
+   * Drain all currently queued events with binary deltas kept as bytes.
    */
-  readAll(): Array<string> /*throws*/ {
-    return FfiConverterArrayString.lift(
+  readAll(): Array<RnSubscriptionEvent> /*throws*/ {
+    return FfiConverterArrayTypeRnSubscriptionEvent.lift(
       uniffiCaller.rustCallWithError(
         /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
           FfiConverterTypeJazzRnError
@@ -3410,6 +3516,14 @@ const FfiConverterTypeRnWriteStateWaiter = new FfiConverterObject(
   uniffiTypeRnWriteStateWaiterObjectFactory
 );
 
+// FfiConverter for boolean | undefined
+const FfiConverterOptionalBool = new FfiConverterOptional(FfiConverterBool);
+
+// FfiConverter for ArrayBuffer | undefined
+const FfiConverterOptionalArrayBuffer = new FfiConverterOptional(
+  FfiConverterArrayBuffer
+);
+
 // FfiConverter for /*f64*/number | undefined
 const FfiConverterOptionalFloat64 = new FfiConverterOptional(
   FfiConverterFloat64
@@ -3423,8 +3537,10 @@ const FfiConverterArrayArrayBuffer = new FfiConverterArray(
   FfiConverterArrayBuffer
 );
 
-// FfiConverter for Array<string>
-const FfiConverterArrayString = new FfiConverterArray(FfiConverterString);
+// FfiConverter for Array<RnSubscriptionEvent>
+const FfiConverterArrayTypeRnSubscriptionEvent = new FfiConverterArray(
+  FfiConverterTypeRnSubscriptionEvent
+);
 
 /**
  * This should be called before anything else.
@@ -3796,7 +3912,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnsubscription_drain() !==
-    33973
+    39880
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnsubscription_drain'
@@ -3804,7 +3920,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnsubscription_read_all() !==
-    20604
+    65298
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnsubscription_read_all'
@@ -3985,6 +4101,7 @@ export default Object.freeze({
     FfiConverterTypeRnPreparedQuery,
     FfiConverterTypeRnQueryAttachment,
     FfiConverterTypeRnSubscription,
+    FfiConverterTypeRnSubscriptionEvent,
     FfiConverterTypeRnTransport,
     FfiConverterTypeRnTx,
     FfiConverterTypeRnWrite,

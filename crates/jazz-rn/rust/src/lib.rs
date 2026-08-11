@@ -56,6 +56,28 @@ impl From<BindingError> for JazzRnError {
     }
 }
 
+/// Pull-based subscription event crossing the UniFFI boundary.
+///
+/// Delta payloads remain byte buffers so Hermes does not need to materialize
+/// JSON arrays with one number per postcard byte.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct RnSubscriptionEvent {
+    /// `delta`, `rejected`, or `closed`.
+    pub event_type: String,
+    /// Reset marker for delta events.
+    pub reset: Option<bool>,
+    /// Postcard-encoded row delta.
+    pub delta: Option<Vec<u8>>,
+    /// Postcard-encoded relation delta.
+    pub relation_delta: Option<Vec<u8>>,
+    /// Read-tier settlement marker for delta events.
+    pub settled: Option<bool>,
+    /// Durability tier for delta events.
+    pub tier: Option<String>,
+    /// Structured rejection metadata for rejected events.
+    pub reason_json: Option<String>,
+}
+
 pub(crate) fn core_error(error: DbError) -> JazzRnError {
     if error.code == ErrorCode::Schema {
         JazzRnError::Schema {
@@ -1085,8 +1107,8 @@ pub struct RnSubscription {
 
 #[uniffi::export]
 impl RnSubscription {
-    /// Drain all currently queued events as JSON strings.
-    pub fn read_all(&self) -> Result<Vec<String>, JazzRnError> {
+    /// Drain all currently queued events with binary deltas kept as bytes.
+    pub fn read_all(&self) -> Result<Vec<RnSubscriptionEvent>, JazzRnError> {
         with_panic_boundary("RnSubscription.read_all", || {
             if self.closed.load(Ordering::SeqCst) {
                 return Err(JazzRnError::Runtime {
@@ -1098,7 +1120,7 @@ impl RnSubscription {
     }
 
     /// Alias for `read_all`.
-    pub fn drain(&self) -> Result<Vec<String>, JazzRnError> {
+    pub fn drain(&self) -> Result<Vec<RnSubscriptionEvent>, JazzRnError> {
         self.read_all()
     }
 

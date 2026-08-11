@@ -580,8 +580,9 @@ impl super::OrderedKvStorage for SqliteStorage {
                 Durability::FullSync => "FULL",
                 Durability::WalNoSync => "NORMAL",
             };
-            connection.pragma_update(None, "synchronous", restore)?;
+            let restore_result = connection.pragma_update(None, "synchronous", restore);
             result?;
+            restore_result?;
         }
         if let Some(cadence) = self.write_flush_cadence.borrow_mut().as_mut() {
             cadence.pending = 0;
@@ -593,22 +594,31 @@ impl super::OrderedKvStorage for SqliteStorage {
         let Some(connection) = self.connection.borrow_mut().take() else {
             return Ok(());
         };
-        connection.busy_timeout(std::time::Duration::from_millis(250))?;
-        let (busy, log, checkpointed): (i64, i64, i64) =
-            connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?;
-        if busy != 0 || log != checkpointed {
-            return Err(Error::SqliteCheckpointIncomplete {
-                busy,
-                log,
-                checkpointed,
-            });
+        if let Err(error) = connection.busy_timeout(std::time::Duration::from_millis(250)) {
+            self.connection.borrow_mut().replace(connection);
+            return Err(Error::Sqlite(error));
         }
-        connection
-            .close()
-            .map_err(|(_, error)| Error::Sqlite(error))?;
-        Ok(())
+        if let Err(error) = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        }) {
+            self.connection.borrow_mut().replace(connection);
+            return Err(Error::Sqlite(error));
+        }
+        // A busy TRUNCATE is only a missed compaction opportunity. Committed
+        // frames remain in the WAL and SQLite replays them on the next open,
+        // so closing the handle is both safe and preferable to surfacing a
+        // non-retryable shutdown error through mobile bindings.
+        match connection.close() {
+            Ok(()) => Ok(()),
+            Err((connection, error)) => {
+                self.connection.borrow_mut().replace(connection);
+                Err(Error::Sqlite(error))
+            }
+        }
     }
 
     fn column_family_names(&self) -> Option<Vec<String>> {
@@ -934,7 +944,10 @@ mod tests {
     }
 
     #[test]
-    fn close_reports_checkpoint_blocked_by_concurrent_reader() {
+    fn close_with_blocked_checkpoint_leaves_recoverable_wal() {
+        // This close-time storage behavior is not observable through a higher
+        // database API: the external reader deliberately blocks SQLite's WAL
+        // compaction while the storage handle itself shuts down.
         let dir = tempfile::tempdir().unwrap();
         let storage = open_records(&dir);
         storage.set("records", b"a", b"one").unwrap();
@@ -943,10 +956,19 @@ mod tests {
         let _: i64 = tx
             .query_row("SELECT COUNT(*) FROM kv", [], |row| row.get(0))
             .unwrap();
-        let error = storage.close().unwrap_err();
-        assert!(matches!(error, Error::SqliteCheckpointIncomplete { .. }));
+        storage.close().unwrap();
+        assert!(matches!(
+            storage.get("records", b"a").unwrap_err(),
+            Error::StorageClosed
+        ));
         drop(tx);
         drop(reader);
+
+        let reopened = SqliteStorage::open(db_path(&dir), &["records"]).unwrap();
+        assert_eq!(
+            reopened.get("records", b"a").unwrap(),
+            Some(b"one".to_vec())
+        );
     }
 
     #[test]

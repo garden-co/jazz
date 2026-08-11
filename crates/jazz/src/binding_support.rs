@@ -45,6 +45,35 @@ pub enum BindingError {
     },
 }
 
+/// Binding-neutral subscription event with postcard payloads kept as bytes.
+///
+/// Object-oriented FFIs can carry this shape without expanding binary deltas
+/// into JSON integer arrays. Adapters that expose JSON can convert it at their
+/// outer boundary with [`subscription_event_to_json`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum EncodedSubscriptionEvent {
+    /// Incremental or reset result change.
+    Delta {
+        /// Whether this delta replaces all previously observed state.
+        reset: bool,
+        /// Postcard-encoded row delta.
+        delta: Vec<u8>,
+        /// Postcard-encoded relation delta.
+        relation_delta: Vec<u8>,
+        /// Whether the requested read tier is settled.
+        settled: bool,
+        /// Debug-stable durability-tier spelling used by JavaScript adapters.
+        tier: String,
+    },
+    /// The serving peer rejected the subscription.
+    Rejected {
+        /// Small structured rejection payload retained as JSON metadata.
+        reason: JsonValue,
+    },
+    /// The producer closed the stream.
+    Closed,
+}
+
 /// Encoded database identity shared by the JavaScript runtimes.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct OpenDbIdentity {
@@ -398,8 +427,10 @@ pub fn encode_relation_snapshot(snapshot: &RelationSnapshot) -> Result<Vec<u8>, 
     .map_err(|error| BindingError::Encode(format!("encode relation snapshot: {error}")))
 }
 
-/// Convert a subscription event to the JSON object shared by native adapters.
-pub fn subscription_event_to_json(event: &SubscriptionEvent) -> Result<JsonValue, BindingError> {
+/// Encode a subscription event while retaining binary deltas as byte buffers.
+pub fn encode_subscription_event(
+    event: &SubscriptionEvent,
+) -> Result<EncodedSubscriptionEvent, BindingError> {
     match event {
         SubscriptionEvent::Delta {
             reset,
@@ -429,14 +460,13 @@ pub fn subscription_event_to_json(event: &SubscriptionEvent) -> Result<JsonValue
                 added_edges,
                 removed_edges,
             )?;
-            Ok(serde_json::json!({
-                "type": "delta",
-                "reset": reset,
-                "delta": delta,
-                "relation_delta": relation_delta,
-                "settled": settled,
-                "tier": format!("{tier:?}"),
-            }))
+            Ok(EncodedSubscriptionEvent::Delta {
+                reset: *reset,
+                delta,
+                relation_delta,
+                settled: *settled,
+                tier: format!("{tier:?}"),
+            })
         }
         SubscriptionEvent::Rejected { reason } => {
             let reason = match reason {
@@ -458,9 +488,33 @@ pub fn subscription_event_to_json(event: &SubscriptionEvent) -> Result<JsonValue
                     })
                 }
             };
+            Ok(EncodedSubscriptionEvent::Rejected { reason })
+        }
+        SubscriptionEvent::Closed => Ok(EncodedSubscriptionEvent::Closed),
+    }
+}
+
+/// Convert a subscription event to the JSON object shared by JSON adapters.
+pub fn subscription_event_to_json(event: &SubscriptionEvent) -> Result<JsonValue, BindingError> {
+    match encode_subscription_event(event)? {
+        EncodedSubscriptionEvent::Delta {
+            reset,
+            delta,
+            relation_delta,
+            settled,
+            tier,
+        } => Ok(serde_json::json!({
+            "type": "delta",
+            "reset": reset,
+            "delta": delta,
+            "relation_delta": relation_delta,
+            "settled": settled,
+            "tier": tier,
+        })),
+        EncodedSubscriptionEvent::Rejected { reason } => {
             Ok(serde_json::json!({ "type": "rejected", "reason": reason }))
         }
-        SubscriptionEvent::Closed => Ok(serde_json::json!({ "type": "closed" })),
+        EncodedSubscriptionEvent::Closed => Ok(serde_json::json!({ "type": "closed" })),
     }
 }
 
