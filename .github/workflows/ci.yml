@@ -84,6 +84,8 @@ jobs:
         run: cargo install cargo-nextest --locked
       - name: Workspace Rust tests (bounded, sharded, receipted)
         run: node dev/gates/run-rust-tests.mjs --timeout-seconds 780 -- --workspace --lib --bins --tests --features test
+      - name: Verify Nextest partition coverage
+        run: node --test dev/gates/test/nextest-partitions.test.mjs
       - name: Upload Rust test receipt
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

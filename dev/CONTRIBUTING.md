@@ -37,8 +37,8 @@ cargo test -p jazz --no-default-features --features test   # rust core only
 
 Use the repository launcher when a test could hang or when comparing local and
 CI run time. It writes a machine-readable JSON receipt containing the exact
-command, commit/dirty state, toolchain, cache configuration, shard, timing,
-and direct exit status.
+command, exact dirty-tree fingerprint (without source contents), toolchain,
+cache configuration, shard, timing, and direct exit status.
 
 ```sh
 # Recommended: per-test slow timeout, named hung-test output, deterministic shard.

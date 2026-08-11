@@ -11,6 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { sourceIdentity } from "./source-identity.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const now = () => new Date().toISOString();
@@ -120,6 +121,7 @@ const result = await new Promise((resolve) => {
 });
 clearTimeout(timer);
 const finishedAt = now();
+const source = sourceIdentity(root);
 const data = {
   schemaVersion: 1,
   kind: "rust-test-receipt",
@@ -144,7 +146,7 @@ const data = {
   command: [command, ...commandArgs],
   source: {
     commit: run("git", ["rev-parse", "HEAD"]),
-    dirty: run("git", ["status", "--porcelain"]) !== "",
+    ...source,
   },
   environment: {
     platform: process.platform,
