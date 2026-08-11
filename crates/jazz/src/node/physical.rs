@@ -57,7 +57,6 @@ pub(super) struct GlobalScalarEnumCaseId {
 /// `tuple/<n>`, `record/<field>`) and payload children extend the selected
 /// parent case identity. Keeping this separate from the compact local tag is
 /// what lets recursive values cross the authored/physical boundary safely.
-#[cfg(test)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct EnumOccurrenceRemaps {
     scalar: BTreeMap<String, Vec<Option<u8>>>,
@@ -585,6 +584,35 @@ where
             return Err(Error::InvalidStoredValue(
                 "physical payload enum registry identity mapping missing",
             ));
+        }
+        let mut cases = cases.into_iter().collect::<Vec<_>>();
+        cases.sort_by(|left, right| {
+            compare_scalar_enum_cases(&self.catalogue.schema_version_aliases, left, right)
+        });
+        Ok(cases)
+    }
+
+    fn physical_nested_scalar_enum_cases(
+        &self,
+        table_id: PhysicalTableId,
+        column_id: PhysicalColumnId,
+        path: &str,
+    ) -> Result<Vec<GlobalScalarEnumCaseId>, Error> {
+        let mut cases = BTreeSet::new();
+        for mapping in self.catalogue.physical_mappings.values() {
+            for table in mapping
+                .tables
+                .values()
+                .filter(|table| table.table_id == table_id)
+            {
+                if let Some(column_cases) = table
+                    .nested_scalar_enum_cases
+                    .get(&column_id)
+                    .and_then(|paths| paths.get(path))
+                {
+                    cases.extend(column_cases.iter().cloned());
+                }
+            }
         }
         let mut cases = cases.into_iter().collect::<Vec<_>>();
         cases.sort_by(|left, right| {
@@ -1385,7 +1413,60 @@ where
                         &physical_cases,
                     )?;
                 }
-                _ => continue,
+                _ => {
+                    let Some(authored_paths) =
+                        source_mapping.nested_scalar_enum_cases.get(&column_id)
+                    else {
+                        continue;
+                    };
+                    let mut remaps = EnumOccurrenceRemaps::default();
+                    for (path, authored_cases) in authored_paths {
+                        let physical_cases = self.physical_nested_scalar_enum_cases(
+                            source_mapping.table_id,
+                            column_id,
+                            path,
+                        )?;
+                        remaps.scalar.insert(
+                            path.clone(),
+                            authored_cases
+                                .iter()
+                                .map(|identity| {
+                                    physical_cases
+                                        .iter()
+                                        .position(|candidate| candidate == identity)
+                                        .map(|tag| {
+                                            u8::try_from(tag).map_err(|_| {
+                                                Error::InvalidStoredValue(
+                                                    "physical nested scalar enum tag exhausted",
+                                                )
+                                            })
+                                        })
+                                        .transpose()
+                                })
+                                .collect::<Result<Vec<_>, Error>>()?,
+                        );
+                    }
+                    let physical_type = physical_table
+                        .columns
+                        .iter()
+                        .find(|physical| physical.name == physical_user_column_field(column_id))
+                        .map(|physical| &physical.column_type)
+                        .ok_or(Error::InvalidStoredValue(
+                            "physical nested enum write column missing",
+                        ))?;
+                    let (Value::Nullable(Some(inner)), records::ValueType::Nullable(physical)) =
+                        (value.clone(), physical_type)
+                    else {
+                        continue;
+                    };
+                    *value = Value::Nullable(Some(Box::new(remap_nested_enum_value(
+                        *inner,
+                        &column.column_type,
+                        physical,
+                        &remaps,
+                        "root",
+                    )?)));
+                }
             }
         }
         let record = OwnedRecord::new(descriptor.create(&values)?, descriptor);
@@ -1596,7 +1677,6 @@ fn remap_authored_payload_enum_value(
     }
 }
 
-#[cfg(test)]
 fn remap_nested_enum_value(
     value: Value,
     authored: &records::ValueType,
