@@ -2779,7 +2779,11 @@ mod tests {
         };
         let near_safe_integer = BigInt {
             sign_bit: false,
-            words: vec![9_007_199_254_740_992],
+            words: vec![9_007_199_254_740_993],
+        };
+        let maximum_u64 = BigInt {
+            sign_bit: false,
+            words: vec![u64::MAX],
         };
         assert_eq!(
             authority_epoch_from_bigint(above_u32, "authority").unwrap(),
@@ -2787,7 +2791,11 @@ mod tests {
         );
         assert_eq!(
             authority_epoch_from_bigint(near_safe_integer, "authority").unwrap(),
-            9_007_199_254_740_992
+            9_007_199_254_740_993
+        );
+        assert_eq!(
+            authority_epoch_from_bigint(maximum_u64, "authority").unwrap(),
+            u64::MAX
         );
         assert!(
             authority_epoch_from_bigint(

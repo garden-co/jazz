@@ -161,7 +161,7 @@ describe("websocket frame carrier", () => {
   });
 
   it("preserves full u64 server authority epochs across stale/current hellos", async () => {
-    const staleEpoch = 9_007_199_254_740_991n;
+    const staleEpoch = 9_007_199_254_740_993n;
     const currentEpoch = staleEpoch + 1n;
     const sockets: MessageWebSocket[] = [];
     const WebSocket = class extends MessageWebSocket {
@@ -191,6 +191,12 @@ describe("websocket frame carrier", () => {
     expect(staleNegotiation.authority?.epoch).toBe(staleEpoch);
     expect(currentNegotiation.authority?.epoch).toBe(currentEpoch);
     expect(currentNegotiation.authority!.epoch > staleNegotiation.authority!.epoch).toBe(true);
+
+    const writer = new PostcardWriter();
+    writer.u64(staleEpoch);
+    const encodedEpoch = writer.finish();
+    expect(new PostcardReader(encodedEpoch).u64BigInt()).toBe(staleEpoch);
+    expect(BigInt(new PostcardReader(encodedEpoch).u64())).not.toBe(staleEpoch);
   });
 
   it("does not send or deliver semantic frames before the server hello", async () => {

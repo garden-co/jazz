@@ -13,6 +13,7 @@ import {
 import {
   CLIENT_WIRE_FEATURES,
   decodeWebSocketFrameBatch,
+  encodeWireClientHello,
   encodeWebSocketPrelude,
   encodeWebSocketFrameBatch,
   isWireHello,
@@ -220,6 +221,26 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.disconnect();
 
     expect(sockets[1]!.closed).toBe(true);
+  });
+
+  it("does not emit the fake server hello before the client prelude and hello", async () => {
+    const socket = new FakeWebSocket("ws://127.0.0.1:4200/apps/app-a/ws");
+    const received: Uint8Array[] = [];
+    socket.addEventListener("message", (event) => received.push(event.data as Uint8Array));
+
+    socket.send(encodeWebSocketFrameBatch([Uint8Array.from([1, 42])]));
+    await Promise.resolve();
+    expect(received).toEqual([]);
+
+    socket.send(encodeWebSocketPrelude("{}", new Uint8Array(16)));
+    await Promise.resolve();
+    expect(received).toEqual([]);
+
+    socket.send(encodeWebSocketFrameBatch([encodeWireClientHello()]));
+    await Promise.resolve();
+
+    expect(received).toHaveLength(1);
+    expect(isWireHello(decodeWebSocketFrameBatch(received[0]!)[0]!)).toBe(true);
   });
 
   it("retries a pending edge wait when a websocket frame arrives without a native callback", async () => {
@@ -6459,14 +6480,23 @@ class FakeWebSocket {
   private readonly messageListeners: Array<(event: { data: unknown }) => void> = [];
   closed = false;
 
-  constructor(readonly url: string) {
-    queueMicrotask(() => {
-      if (!this.closed) this.emitMessage(encodeWebSocketFrameBatch([encodeWireServerHello()]));
-    });
-  }
+  private sawClientPrelude = false;
+  private serverHelloScheduled = false;
+
+  constructor(readonly url: string) {}
 
   send(data: Uint8Array | string): void {
     this.sent.push(data);
+    if (typeof data === "string") {
+      this.sawClientPrelude = isClientPrelude(data);
+      return;
+    }
+    if (!this.sawClientPrelude || this.serverHelloScheduled) return;
+    if (!isClientHelloBatch(data)) return;
+    this.serverHelloScheduled = true;
+    queueMicrotask(() => {
+      if (!this.closed) this.emitMessage(encodeWebSocketFrameBatch([encodeWireServerHello()]));
+    });
   }
 
   close(): void {
@@ -6506,6 +6536,34 @@ function encodeWireServerHello(epoch: bigint = 1n): Uint8Array {
     authority.u64(epoch);
   });
   return writer.finish();
+}
+
+function isClientPrelude(data: string): boolean {
+  try {
+    const prelude = JSON.parse(data) as { peer_identity?: unknown; auth?: unknown };
+    return (
+      typeof prelude.peer_identity === "string" &&
+      prelude.auth !== null &&
+      typeof prelude.auth === "object"
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isClientHelloBatch(data: Uint8Array): boolean {
+  try {
+    const frames = decodeWebSocketFrameBatch(data);
+    if (frames.length !== 1 || !isWireHello(frames[0]!)) return false;
+    const hello = new PostcardReader(frames[0]!);
+    hello.u64(); // WireFrame::Hello
+    hello.u64(); // min_protocol_version
+    hello.u64(); // max_protocol_version
+    hello.u64(); // features
+    return hello.u64() === 0; // WirePeerRole::Client
+  } catch {
+    return false;
+  }
 }
 
 type EncodedTestRow = {
