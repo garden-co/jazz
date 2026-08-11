@@ -477,6 +477,54 @@ impl ValueType {
         }
     }
 
+    /// True when two descriptors have exactly the same byte layout and differ
+    /// only in the durable identities assigned to their enum registries.
+    ///
+    /// Unlike [`Self::registry_compatible_with`], this deliberately does not
+    /// admit append-only growth: a raw record projector copies enum bytes, so
+    /// the target must be able to decode every tag without a semantic remap.
+    pub(crate) fn registry_rebound_layout_compatible_with(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::EnumTag(left), Self::EnumTag(right)) => left.variants == right.variants,
+            (Self::Enum(left), Self::Enum(right)) => {
+                left.cases.len() == right.cases.len()
+                    && left.cases.iter().zip(&right.cases).all(|(a, b)| {
+                        a.name == b.name
+                            && a.payload.fields().len() == b.payload.fields().len()
+                            && a.payload
+                                .fields()
+                                .iter()
+                                .zip(b.payload.fields())
+                                .all(|(x, y)| {
+                                    x.name == y.name
+                                        && x.value_type
+                                            .registry_rebound_layout_compatible_with(&y.value_type)
+                                })
+                    })
+            }
+            (Self::Tuple(left), Self::Tuple(right)) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|(a, b)| a.registry_rebound_layout_compatible_with(b))
+            }
+            (Self::Array(left), Self::Array(right))
+            | (Self::Nullable(left), Self::Nullable(right)) => {
+                left.registry_rebound_layout_compatible_with(right)
+            }
+            (Self::Record(left), Self::Record(right)) => {
+                left.fields().len() == right.fields().len()
+                    && left.fields().iter().zip(right.fields()).all(|(a, b)| {
+                        a.name == b.name
+                            && a.value_type
+                                .registry_rebound_layout_compatible_with(&b.value_type)
+                    })
+            }
+            _ => self == other,
+        }
+    }
+
     /// Whether this durable value occurrence may advance to `next` without
     /// changing the interpretation of any value already stored under `self`.
     ///

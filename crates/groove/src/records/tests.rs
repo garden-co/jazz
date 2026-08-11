@@ -1364,6 +1364,39 @@ fn record_projector_rejects_incomplete_duplicate_and_type_mismatched_mappings() 
 }
 
 #[test]
+fn rebound_registry_projector_allows_identical_layout_but_not_added_tags() {
+    let source_status = ValueType::EnumTag(
+        ScalarEnumSchema::new("status", ["open"])
+            .unwrap()
+            .with_registry_id(11),
+    );
+    let rebound_status = ValueType::EnumTag(
+        ScalarEnumSchema::new("status", ["open"])
+            .unwrap()
+            .with_registry_id(22),
+    );
+    let source = RecordDescriptor::new([("status", source_status)]);
+    let rebound = RecordDescriptor::new([("status", rebound_status)]);
+    let projector = RecordProjector::new_registry_rebound(source, rebound, [(0, 0)])
+        .expect("same enum encoding may cross a registry rebinding");
+    let raw = source.create(&[Value::EnumTag(0)]).unwrap();
+    assert_eq!(projector.project(source.bind(&raw)).unwrap().raw(), raw);
+
+    let evolved = RecordDescriptor::new([(
+        "status",
+        ValueType::EnumTag(
+            ScalarEnumSchema::new("status", ["open", "closed"])
+                .unwrap()
+                .with_registry_id(33),
+        ),
+    )]);
+    assert!(matches!(
+        RecordProjector::new_registry_rebound(source, evolved, [(0, 0)]),
+        Err(Error::ProjectTypeMismatch { .. })
+    ));
+}
+
+#[test]
 fn patch_field_overwrites_fixed_width_values_without_shifting_layout() {
     let schema = RecordDescriptor::new([
         ("id", ValueType::U64),
