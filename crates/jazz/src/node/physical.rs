@@ -1178,10 +1178,11 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "physical history table mapping missing",
             ))?;
+        let physical_table = self.database.table_schema(&binding.storage_table)?.clone();
         let descriptor = physical_write_descriptor(
             &source_table.history_storage_table().record_schema(),
             &physical_history_field_names(&source_table, source_mapping)?,
-            self.database.table_schema(&binding.storage_table)?,
+            &physical_table,
         )?;
         // The authored row carries declaration-local enum ordinals.  Rewrite
         // those cells through their durable schema-qualified identities before
@@ -1189,25 +1190,54 @@ where
         // concurrent siblings which both authored ordinal 2.
         let mut values = version.record.to_values()?;
         for (column_index, column) in source_table.columns.iter().enumerate() {
-            if !matches!(column.column_type, records::ValueType::EnumTag(_)) {
-                continue;
-            }
+            let physical_column = physical_table
+                .columns
+                .iter()
+                .find(|candidate| {
+                    candidate.name
+                        == physical_user_column_field(
+                            *source_mapping
+                                .columns
+                                .get(&column.name)
+                                .expect("physical mapping was validated below"),
+                        )
+                })
+                .ok_or(Error::InvalidStoredValue(
+                    "physical enum write column missing",
+                ))?;
             let column_id = source_mapping.columns.get(&column.name).copied().ok_or(
                 Error::InvalidStoredValue("physical scalar enum write column mapping missing"),
             )?;
-            let authored_cases = source_mapping.scalar_enum_cases.get(&column_id).ok_or(
-                Error::InvalidStoredValue("authored scalar enum identity mapping missing"),
-            )?;
-            let physical_cases =
-                self.physical_scalar_enum_cases(source_mapping.table_id, column_id)?;
             let value_index = HistoryRowRecord::USER_CELLS + column_index;
             let value = values
                 .get_mut(value_index)
                 .ok_or(Error::InvalidStoredValue(
                     "history scalar enum write field missing",
                 ))?;
-            *value =
-                remap_authored_scalar_enum_value(value.clone(), authored_cases, &physical_cases)?;
+            match &column.column_type {
+                records::ValueType::EnumTag(_) => {
+                    let authored_cases = source_mapping.scalar_enum_cases.get(&column_id).ok_or(
+                        Error::InvalidStoredValue("authored scalar enum identity mapping missing"),
+                    )?;
+                    let physical_cases =
+                        self.physical_scalar_enum_cases(source_mapping.table_id, column_id)?;
+                    *value = remap_authored_scalar_enum_value(
+                        value.clone(),
+                        authored_cases,
+                        &physical_cases,
+                    )?;
+                }
+                records::ValueType::Enum(authored_schema) => {
+                    let physical_schema =
+                        physical_payload_enum_schema(&physical_column.column_type)?;
+                    *value = remap_authored_payload_enum_value(
+                        value.clone(),
+                        authored_schema,
+                        physical_schema,
+                    )?;
+                }
+                _ => continue,
+            }
         }
         let record = OwnedRecord::new(descriptor.create(&values)?, descriptor);
         Ok((
@@ -1366,6 +1396,53 @@ fn remap_authored_scalar_enum_value(
         )))),
         _ => Err(Error::InvalidStoredValue(
             "authored scalar enum value has non-enum representation",
+        )),
+    }
+}
+
+fn physical_payload_enum_schema(
+    value_type: &records::ValueType,
+) -> Result<&records::EnumSchema, Error> {
+    match value_type {
+        records::ValueType::Enum(schema) => Ok(schema),
+        records::ValueType::Nullable(inner) => physical_payload_enum_schema(inner),
+        _ => Err(Error::InvalidStoredValue(
+            "physical payload enum descriptor missing",
+        )),
+    }
+}
+
+fn remap_authored_payload_enum_value(
+    value: Value,
+    authored_schema: &records::EnumSchema,
+    physical_schema: &records::EnumSchema,
+) -> Result<Value, Error> {
+    match value {
+        Value::Enum(value) => {
+            let authored_case = authored_schema.case(value.tag())?;
+            let physical_tag = physical_schema
+                .cases
+                .iter()
+                .position(|case| case.name == authored_case.name)
+                .ok_or(Error::InvalidStoredValue(
+                    "authored payload enum case absent from physical registry",
+                ))?;
+            // Payload descriptors are checked again by the physical record
+            // encoder.  A same-name sibling with a different layout therefore
+            // fails rather than being silently reinterpreted.
+            Ok(Value::Enum(records::EnumValue::new(
+                u32::try_from(physical_tag).map_err(|_| {
+                    Error::InvalidStoredValue("physical payload enum tag exhausted")
+                })?,
+                value.into_record(),
+            )))
+        }
+        Value::Nullable(None) => Ok(Value::Nullable(None)),
+        Value::Nullable(Some(value)) => Ok(Value::Nullable(Some(Box::new(
+            remap_authored_payload_enum_value(*value, authored_schema, physical_schema)?,
+        )))),
+        _ => Err(Error::InvalidStoredValue(
+            "authored payload enum value has non-enum representation",
         )),
     }
 }
@@ -2383,5 +2460,41 @@ mod variant_case_tests {
             records::ValueType::U64,
         )]));
         assert!(merge_physical_value_type(&left, &right).is_err());
+    }
+
+    #[test]
+    fn concurrent_payload_enum_write_remap_never_aliases_sibling_ordinals() {
+        let descriptor = records::RecordDescriptor::new([("value", records::ValueType::String)]);
+        let authored = |new_case| {
+            records::EnumSchema::new(
+                "status",
+                [
+                    records::EnumCase::new("draft", descriptor.clone()),
+                    records::EnumCase::new("published", descriptor.clone()),
+                    records::EnumCase::new(new_case, descriptor.clone()),
+                ],
+            )
+            .unwrap()
+        };
+        let archived = authored("archived");
+        let snoozed = authored("snoozed");
+        let physical = match merge_physical_value_type(
+            &records::ValueType::Enum(Box::new(archived.clone().with_registry_id(94))),
+            &records::ValueType::Enum(Box::new(snoozed.clone().with_registry_id(94))),
+        )
+        .unwrap()
+        {
+            records::ValueType::Enum(schema) => *schema,
+            _ => unreachable!(),
+        };
+        let payload =
+            records::EnumValue::create(2, descriptor.clone(), &[Value::String("x".to_owned())])
+                .unwrap();
+        let archived_value =
+            remap_authored_payload_enum_value(Value::Enum(payload.clone()), &archived, &physical)
+                .unwrap();
+        let snoozed_value =
+            remap_authored_payload_enum_value(Value::Enum(payload), &snoozed, &physical).unwrap();
+        assert_ne!(archived_value, snoozed_value);
     }
 }
