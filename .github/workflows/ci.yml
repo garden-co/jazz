@@ -57,6 +57,8 @@ jobs:
 
       - run: pnpm format:check
       - run: pnpm lint
+      # Keep workflow assertions required without adding another Rust build.
+      - run: pnpm test:ci-workflow
 
   test-rust:
     runs-on: blacksmith-4vcpu-ubuntu-2404

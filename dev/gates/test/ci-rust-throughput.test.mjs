@@ -5,6 +5,7 @@ import test from "node:test";
 
 const root = path.resolve(import.meta.dirname, "../../..");
 const workflow = fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8");
+const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const job = (name, nextName) => {
   const start = workflow.indexOf(`  ${name}:`);
   const end = nextName ? workflow.indexOf(`  ${nextName}:`, start + 1) : workflow.length;
@@ -31,4 +32,13 @@ test("lint keeps its one workspace Clippy invocation inside pnpm lint", () => {
   const lint = job("lint", "test-rust");
   assert.match(lint, /run: pnpm lint/);
   assert.doesNotMatch(lint, /^\s*- run: cargo clippy/m);
+});
+
+test("CI runs the workflow contract test through its package script", () => {
+  const lint = job("lint", "test-rust");
+  assert.equal(
+    packageJson.scripts["test:ci-workflow"],
+    "node --test dev/gates/test/ci-rust-throughput.test.mjs",
+  );
+  assert.match(lint, /run: pnpm test:ci-workflow/);
 });
