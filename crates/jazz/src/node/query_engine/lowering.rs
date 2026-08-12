@@ -1852,6 +1852,24 @@ fn source_requirements(
         requirements.insert(source, SourceRequirements::default());
     }
 
+    // Every closure hop consumes its parent reference as an executable join
+    // key, even when that intermediate source contributes no application
+    // payload.  Source projections are allowed to elide unrequested fields;
+    // without this requirement a nested include such as `project.org` can
+    // resolve `projects` with `user_org` replaced by its sparse projection
+    // default, making the second hop look universally missing.
+    for path in &request.input.shape.closure_paths {
+        for segment in closure_path_segments(path) {
+            let source_requirements = requirements.get_mut(&segment.parent).ok_or_else(|| {
+                single_gap_report(UnsupportedReason::Runtime(format!(
+                    "closure parent source {:?} was not initialized",
+                    segment.parent
+                )))
+            })?;
+            add_required_app_field(source_requirements, segment.source_field.clone());
+        }
+    }
+
     // A flat output carries an occurrence-addressed tuple. Keep source
     // version metadata available at the source boundary so joined-side
     // changes can be represented as maintained replacements.
@@ -1904,10 +1922,13 @@ fn source_requirements(
                 SourceMetadataRequirement::Provenance(ProvenanceField::UpdatedBy),
             ]);
         }
-        root_requirements.app_fields = match &app_rows.projection {
-            PayloadProjection::ShapeDefault => FieldRequirement::All,
-            PayloadProjection::Tree(tree) => tree.fields.clone().into(),
-        };
+        merge_field_requirement(
+            &mut root_requirements.app_fields,
+            match &app_rows.projection {
+                PayloadProjection::ShapeDefault => FieldRequirement::All,
+                PayloadProjection::Tree(tree) => tree.fields.clone().into(),
+            },
+        );
         if let PayloadProjection::Tree(tree) = &app_rows.projection {
             if let FieldProjection::Fields(fields) = &tree.fields {
                 for field in fields {
@@ -2013,6 +2034,19 @@ fn source_requirements(
     collect_plan_requirements(plan, &mut requirements)?;
 
     Ok(requirements)
+}
+
+#[cfg(test)]
+pub(super) fn source_requirements_for_test(
+    request: &QueryProgramRequest,
+) -> CapabilityResult<BTreeMap<SourceId, SourceRequirements>> {
+    let plan = analyze_query_plan(request).map_err(|gaps| {
+        Box::new(CapabilityReport {
+            gaps,
+            explain: ExplainPlan::default(),
+        })
+    })?;
+    source_requirements(request, &plan)
 }
 
 fn collect_app_path_projection_requirements(
