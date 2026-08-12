@@ -28,7 +28,11 @@ class TestRuntimeSource extends RuntimeSource<DbConfig> {
   }
 
   override createClient(_context: RuntimeClientContext<DbConfig>): JazzClient {
-    throw new Error("createClient should not be called by telemetry tests");
+    return {
+      getSchema: () => ({}),
+      onMutationError: vi.fn(),
+      shutdown: vi.fn(async () => undefined),
+    } as unknown as JazzClient;
   }
 
   override installTelemetry(context: RuntimeTelemetryContext<DbConfig>): (() => void) | null {
@@ -36,9 +40,15 @@ class TestRuntimeSource extends RuntimeSource<DbConfig> {
   }
 }
 
+class TestDb extends Db {
+  touchClient(): void {
+    this.getClient({ telemetry_test: { columns: [] } });
+  }
+}
+
 async function createTestDb(config: DbConfig, coreSource: TestRuntimeSource): Promise<Db> {
   await coreSource.load(config);
-  return Db.create(config, coreSource);
+  return new TestDb(config, coreSource);
 }
 
 afterEach(() => {
@@ -53,7 +63,7 @@ describe("Db core telemetry", () => {
     const coreSource = new TestRuntimeSource();
     const db = await createTestDb({ appId: "main-no-telemetry" }, coreSource);
 
-    (db as any).installMainThreadCoreTelemetry();
+    (db as TestDb).touchClient();
 
     expect(coreSource.installTelemetryMock).not.toHaveBeenCalled();
     await db.shutdown();
@@ -68,7 +78,7 @@ describe("Db core telemetry", () => {
     };
     const db = await createTestDb(config, coreSource);
 
-    (db as any).installMainThreadCoreTelemetry();
+    (db as TestDb).touchClient();
 
     expect(coreSource.installTelemetryMock).toHaveBeenCalledTimes(1);
     expect(coreSource.installTelemetryMock).toHaveBeenCalledWith({

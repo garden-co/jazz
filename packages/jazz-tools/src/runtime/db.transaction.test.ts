@@ -288,6 +288,7 @@ describe("Db transactions", () => {
   });
 
   it("commits an empty exclusive batch opened at begin", async () => {
+    await allTodos();
     const tx = db.beginExclusiveTransaction();
     await expect(tx.commit()).resolves.toBeDefined();
   });
@@ -328,17 +329,29 @@ describe("Db transactions", () => {
     );
   });
 
-  it("stages exclusive writes from multiple schema views in one batch", async () => {
+  it("rejects exclusive writes from a second schema view", async () => {
     const tx = db.beginExclusiveTransaction();
     tx.insert(app.todos, { title: "Primary client", done: false });
-    tx.insert(otherApp.todos, { title: "Second schema", done: false, note: "kept" });
-    await tx.commit();
-    await expect(allTodos()).resolves.toHaveLength(2);
+    expect(() =>
+      tx.insert(otherApp.todos, { title: "Second schema", done: false, note: "kept" }),
+    ).toThrow(
+      "Db is already initialized with a different schema. Create a separate Db for each schema/app.",
+    );
+    await tx.rollback();
   });
 });
 
 describe("Db mergeable transactions", () => {
-  it("rejects committing an empty mergeable batch", () => {
+  it("requires a table operation before committing on a fresh Db", () => {
+    const tx = db.beginTransaction();
+
+    expect(() => tx.commit()).toThrow(
+      "DbTransaction.commit() requires at least one table operation first",
+    );
+  });
+
+  it("rejects committing an empty mergeable batch after Db initialization", async () => {
+    await allTodos();
     const tx = db.beginTransaction();
 
     expect(() => tx.commit()).toThrow(
@@ -414,12 +427,15 @@ describe("Db mergeable transactions", () => {
     }
   });
 
-  it("stages mergeable writes from multiple schema views in one batch", async () => {
+  it("rejects mergeable writes from a second schema view", async () => {
     const tx = db.beginTransaction();
     tx.insert(app.todos, { title: "Primary client", done: false });
-    tx.insert(otherApp.todos, { title: "Second schema", done: false, note: "kept" });
-    await tx.commit();
-    await expect(allTodos()).resolves.toHaveLength(2);
+    expect(() =>
+      tx.insert(otherApp.todos, { title: "Second schema", done: false, note: "kept" }),
+    ).toThrow(
+      "Db is already initialized with a different schema. Create a separate Db for each schema/app.",
+    );
+    await tx.rollback();
   });
 
   it("keeps client permission advice unknown across uncommitted transaction rows", async () => {

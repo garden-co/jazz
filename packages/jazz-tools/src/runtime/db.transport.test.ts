@@ -24,6 +24,9 @@ class TestDb extends Db {
   public exposeGetClient(schema: WasmSchema): JazzClient {
     return this.getClient(schema);
   }
+  public exposeEnsureReady(): Promise<void> {
+    return this.ensureReady();
+  }
 }
 
 class TestRuntimeSource extends RuntimeSource<DbConfig> {
@@ -229,6 +232,25 @@ describe("runtime/Db native runtime path upstream wiring", () => {
     });
   });
 
+  it("DBRT-U02d keeps readiness behind the reconnect barrier", async () => {
+    const db = new TestDb({
+      appId: "app",
+      serverUrl: "https://example.test",
+    });
+
+    await db.disconnect();
+    let isReady = false;
+    const readiness = db.exposeEnsureReady().then(() => {
+      isReady = true;
+    });
+    await Promise.resolve();
+    expect(isReady).toBe(false);
+
+    await db.reconnect();
+    await readiness;
+    expect(isReady).toBe(true);
+  });
+
   it("DBRT-U03 strips local policies for memory-driver admin-secret clients", () => {
     const client = makeClientStub();
     const connectWithRuntimeSpy = vi
@@ -413,6 +435,37 @@ describe("runtime/Db native runtime path upstream wiring", () => {
         onAuthFailure: expect.any(Function),
       }),
     );
+  });
+
+  it("creates one client for one schema and rejects a different schema", () => {
+    const client = makeClientStub();
+    class RecordingRuntimeSource extends RuntimeSource<DbConfig> {
+      readonly createClientMock = vi.fn((_context: RuntimeClientContext<DbConfig>) => client);
+
+      override createClient(context: RuntimeClientContext<DbConfig>): JazzClient {
+        return this.createClientMock(context);
+      }
+    }
+
+    const runtimeSource = new RecordingRuntimeSource();
+    const db = new TestDb({ appId: "single-schema" }, runtimeSource);
+    const schema = makeSchema();
+
+    expect(db.exposeGetClient(schema)).toBe(client);
+    expect(db.exposeGetClient(structuredClone(schema))).toBe(client);
+    expect(() =>
+      db.exposeGetClient({
+        todos: {
+          columns: [
+            { name: "title", column_type: { type: "Text" }, nullable: false },
+            { name: "done", column_type: { type: "Boolean" }, nullable: false },
+          ],
+        },
+      }),
+    ).toThrow(
+      "Db is already initialized with a different schema. Create a separate Db for each schema/app.",
+    );
+    expect(runtimeSource.createClientMock).toHaveBeenCalledTimes(1);
   });
 
   it("sends auth refreshes to memoized runtime clients", () => {
