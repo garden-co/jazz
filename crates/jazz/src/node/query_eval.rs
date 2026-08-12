@@ -13071,10 +13071,15 @@ fn local_maintained_view_content_witness<'a>(
     table: &str,
     row_uuid: RowUuid,
 ) -> Option<&'a VersionRow> {
-    versions
-        .iter()
-        .find(|version| version.table() == table && version.row_uuid() == row_uuid)
-        .filter(|version| version.deletion().is_none())
+    // `versions_by_tx` is canonically ordered by encoded record, not by write time.
+    // Within one transaction the complete content witness sorts after the
+    // metadata-only register projection, so search from the back.
+    versions.iter().rev().find(|version| {
+        version.table() == table
+            && version.row_uuid() == row_uuid
+            && !version.is_register_record()
+            && version.deletion().is_none()
+    })
 }
 
 fn contiguous_tx_time_spans(times: &BTreeSet<TxTime>) -> Vec<(TxTime, Option<TxTime>)> {
