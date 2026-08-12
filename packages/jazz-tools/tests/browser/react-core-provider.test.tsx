@@ -466,6 +466,8 @@ describe("react-core provider/hooks browser coverage", () => {
       alice: makeDeferred<Todo[]>(),
       bob: makeDeferred<Todo[]>(),
     };
+    const aliceRefreshStarted = makeDeferred<void>();
+    let aliceRefreshStartedResolved = false;
     const subscribeCalls: Array<{
       session: string;
       callback: (delta: SubscriptionDelta<Todo>) => void;
@@ -495,7 +497,13 @@ describe("react-core provider/hooks browser coverage", () => {
       },
       all(_query: QueryBuilder<Todo>, _options?: QueryOptions, session?: Session) {
         const userId = session?.user_id ?? liveSession?.user_id ?? "anon";
-        if (userId === "alice") return refreshes.alice;
+        if (userId === "alice") {
+          if (!aliceRefreshStartedResolved) {
+            aliceRefreshStartedResolved = true;
+            aliceRefreshStarted.resolve();
+          }
+          return refreshes.alice;
+        }
         if (userId === "bob") return refreshes.bob;
         return Promise.resolve([]);
       },
@@ -531,6 +539,7 @@ describe("react-core provider/hooks browser coverage", () => {
       "expected initial session-A subscription",
     );
     subscribeCalls[0]!.callback({ reset: true, all: [], delta: [] });
+    await aliceRefreshStarted;
 
     liveSession = sessionB;
     const authState: AuthState = { authMode: "external", session: sessionB };

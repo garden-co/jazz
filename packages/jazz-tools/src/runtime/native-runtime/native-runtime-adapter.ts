@@ -1920,8 +1920,9 @@ export class NativeRuntimeAdapter implements Runtime {
     subscription.deferredPlaceholderChunks = reset ? 1 : subscription.deferredPlaceholderChunks + 1;
     subscription.deferredPlaceholderRows = subscription.rows.length;
     subscription.deferredPlaceholderBytes = reset
-      ? subscriptionDeltaPayloadBytes(delta)
-      : subscription.deferredPlaceholderBytes + subscriptionDeltaPayloadBytes(delta);
+      ? subscriptionDeltaPayloadBytes(delta, terminalOperations)
+      : subscription.deferredPlaceholderBytes +
+        subscriptionDeltaPayloadBytes(delta, terminalOperations);
     if (
       subscription.deferredPlaceholderChunks > MAX_DEFERRED_PLACEHOLDER_CHUNKS ||
       subscription.deferredPlaceholderRows > MAX_DEFERRED_PLACEHOLDER_ROWS ||
@@ -4343,8 +4344,11 @@ function materializePackedResetRows(subscription: SubscriptionState, schema: Was
   subscription.packedResetRows = null;
 }
 
-function subscriptionDeltaPayloadBytes(delta: NativeSubscriptionDelta): number {
-  return delta.added
+function subscriptionDeltaPayloadBytes(
+  delta: NativeSubscriptionDelta,
+  terminalOperations?: NativeTerminalOperation[],
+): number {
+  const rowBytes = delta.added
     .concat(delta.updated)
     .reduce(
       (sum, batch) =>
@@ -4352,6 +4356,39 @@ function subscriptionDeltaPayloadBytes(delta: NativeSubscriptionDelta): number {
         batch.rows.reduce((rowSum, row) => rowSum + row.raw.byteLength + row.rowId.byteLength, 0),
       0,
     );
+  const occurrenceBytes = delta.addedOccurrenceKeys
+    .concat(delta.updatedOccurrenceKeys, delta.removedOccurrenceKeys)
+    .reduce((sum, key) => sum + key.byteLength, 0);
+  const terminalBytes =
+    terminalOperations?.reduce(
+      (sum, operation) => sum + nativeTerminalOperationBytes(operation),
+      0,
+    ) ?? 0;
+  return rowBytes + occurrenceBytes + terminalBytes;
+}
+
+function nativeTerminalOperationBytes(operation: NativeTerminalOperation): number {
+  const descriptorBytes = operation.rootDescriptor?.length ?? 0;
+  const rootKeyBytes = operation.root_key.length;
+  const pathBytes = operation.path.reduce((sum, segment) => {
+    if ("Collection" in segment) {
+      return sum + utf8ByteLength(segment.Collection);
+    }
+    return sum + segment.Key.length;
+  }, 0);
+  const editBytes =
+    "Insert" in operation.edit
+      ? operation.edit.Insert.key.length + operation.edit.Insert.value.length
+      : "Update" in operation.edit
+        ? operation.edit.Update.key.length + operation.edit.Update.value.length
+        : "Remove" in operation.edit
+          ? operation.edit.Remove.key.length
+          : operation.edit.Move.key.length;
+  return descriptorBytes + rootKeyBytes + pathBytes + editBytes;
+}
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
 }
 
 function nativeDeltaFromChanges(
