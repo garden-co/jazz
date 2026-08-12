@@ -6,7 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "../../..");
@@ -44,36 +44,51 @@ function containsInput(graph, task, suffix) {
   return Object.keys(graph.get(task).inputs).some((path) => path.endsWith(suffix));
 }
 
-const relevant = resolve(root, "crates/jazz/src/lib.rs");
+const closures = [
+  { name: "jazz", file: resolve(root, "crates/jazz/src/lib.rs") },
+  { name: "groove", file: resolve(root, "crates/groove/src/lib.rs") },
+  { name: "opfs-btree", file: resolve(root, "crates/opfs-btree/src/lib.rs") },
+];
 const unrelated = resolve(root, "crates/jazz-sim/src/lib.rs");
-const relevantOriginal = readFileSync(relevant, "utf8");
+const originals = new Map(closures.map(({ file }) => [file, readFileSync(file, "utf8")]));
 const unrelatedOriginal = readFileSync(unrelated, "utf8");
 
 try {
   const baseline = dryGraph();
-  assert(containsInput(baseline, "@jazz/rust#build:crates", "jazz/src/lib.rs"));
-  assert(containsInput(baseline, "jazz-wasm#build", "jazz/src/lib.rs"));
-  assert(containsInput(baseline, "jazz-napi#build", "jazz/src/lib.rs"));
+  for (const { name } of closures)
+    for (const task of tasks)
+      assert(
+        containsInput(baseline, task, `${name}/src/lib.rs`),
+        `${task} omits its ${name} dependency`,
+      );
   for (const task of tasks)
     assert(
       !containsInput(baseline, task, "jazz-sim/src/lib.rs"),
       `${task} includes unrelated jazz-sim`,
     );
 
-  const beforeRelevant = hashes(baseline);
-  writeFileSync(relevant, `${relevantOriginal}\n// turbo cache-input sensitivity probe\n`);
-  const afterRelevant = hashes(dryGraph());
-  for (const task of tasks)
-    assert.notEqual(afterRelevant[task], beforeRelevant[task], `${task} missed a shared Rust edit`);
+  const baselineHashes = hashes(baseline);
+  for (const { name, file } of closures) {
+    const original = originals.get(file);
+    writeFileSync(file, `${original}\n// turbo cache-input ${name} edit probe\n`);
+    const afterEdit = hashes(dryGraph());
+    for (const task of tasks)
+      assert.notEqual(afterEdit[task], baselineHashes[task], `${task} missed a ${name} edit`);
 
-  writeFileSync(relevant, relevantOriginal);
-  const beforeUnrelated = hashes(dryGraph());
+    writeFileSync(file, original);
+    rmSync(file);
+    const afterRemoval = hashes(dryGraph());
+    for (const task of tasks)
+      assert.notEqual(afterRemoval[task], baselineHashes[task], `${task} missed a ${name} removal`);
+    writeFileSync(file, original);
+  }
+
   writeFileSync(unrelated, `${unrelatedOriginal}\n// turbo cache-input isolation probe\n`);
   const afterUnrelated = hashes(dryGraph());
   for (const task of tasks)
-    assert.equal(afterUnrelated[task], beforeUnrelated[task], `${task} hashes unrelated jazz-sim`);
+    assert.equal(afterUnrelated[task], baselineHashes[task], `${task} hashes unrelated jazz-sim`);
 } finally {
-  writeFileSync(relevant, relevantOriginal);
+  for (const { file } of closures) writeFileSync(file, originals.get(file));
   writeFileSync(unrelated, unrelatedOriginal);
 }
 

@@ -59,6 +59,8 @@ jobs:
       - run: pnpm lint
       # Keep workflow assertions required without adding another Rust build.
       - run: pnpm test:ci-workflow
+      - name: Verify Turbo artifact cache inputs
+        run: pnpm test:turbo-cache-inputs
 
   test-rust:
     runs-on: blacksmith-4vcpu-ubuntu-2404
