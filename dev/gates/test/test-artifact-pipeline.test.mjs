@@ -103,13 +103,28 @@ test("Turbo invalidates each native artifact only for its Cargo closure", () => 
   const cli = turbo.tasks["build:crates"];
   assert.equal(napi.dependsOn, undefined);
   assert.equal(wasm.dependsOn, undefined);
-  for (const [task, closure] of [
-    [napi, ["jazz-napi", "jazz", "groove", "opfs-btree"]],
-    [wasm, ["jazz-wasm", "jazz", "groove", "opfs-btree"]],
-    [cli, ["jazz", "groove", "opfs-btree"]],
+  for (const [task, inputs] of [
+    [
+      napi,
+      ["jazz-napi", "jazz", "groove", "opfs-btree"].map(
+        (crate) => `$TURBO_ROOT$/crates/${crate}/**`,
+      ),
+    ],
+    [
+      wasm,
+      ["jazz-wasm", "jazz", "groove", "opfs-btree"].map(
+        (crate) => `$TURBO_ROOT$/crates/${crate}/**`,
+      ),
+    ],
+    [
+      cli,
+      ["jazz", "groove", "opfs-btree"].flatMap((crate) => [
+        `$TURBO_ROOT$/crates/${crate}/Cargo.toml`,
+        `$TURBO_ROOT$/crates/${crate}/src/**/*.rs`,
+      ]),
+    ],
   ]) {
-    for (const crate of closure)
-      assert.ok(task.inputs.includes(`$TURBO_ROOT$/crates/${crate}/**`), crate);
+    for (const input of inputs) assert.ok(task.inputs.includes(input), input);
     assert.equal(task.inputs.includes("$TURBO_ROOT$/crates/**/*.rs"), false);
   }
 });
