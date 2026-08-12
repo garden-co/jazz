@@ -12061,6 +12061,79 @@ fn db_sync_surface_edge_session_read_policy_filters_private_table_query() {
     assert!(prepared_all(&reader, &query, edge_subscribe_opts()).is_empty());
 }
 
+/// A prepared trusted-serving read binds each request session's text `user_id`
+/// independently: Alice receives her seeded message while Bob receives none.
+///
+/// ```text
+/// system ──seed owner_id=alice──► server prepared read
+///                                      │
+///                         Alice session ─┼──► [alice message]
+///                           Bob session ─└──► []
+/// ```
+#[test]
+fn prepared_server_read_binds_text_session_user_id_per_session() {
+    // Mirror the public test app: a nullable camel-case `ownerId` grants to
+    // its matching session or to every session when unowned. In particular,
+    // this exercises the disjunctive policy plan rather than only the
+    // scalar-equality fast path.
+    let read_policy = Query::from("todos").filter(any_of([
+        eq(col("ownerId"), claim("user_id")),
+        is_null(col("ownerId")),
+    ]));
+    let schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("done", ColumnType::Bool),
+            ColumnSchema::new("ownerId", ColumnType::String.nullable()),
+        ],
+    )
+    .with_read_policy(Policy::shape(read_policy))
+    .with_write_policy(Policy::public())]);
+    let server = open_db(0x5e, AuthorId::SYSTEM, &schema);
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let alice_subject = "alice-session-subject";
+    let bob_subject = "bob-session-subject";
+    server.set_identity_claims(
+        alice,
+        BTreeMap::from([(String::from("user_id"), Value::String(alice_subject.into()))]),
+    );
+    server.set_identity_claims(
+        bob,
+        BTreeMap::from([(String::from("user_id"), Value::String(bob_subject.into()))]),
+    );
+
+    let seeded = server
+        .insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("for alice".to_owned())),
+                ("done".to_owned(), Value::Bool(false)),
+                (
+                    "ownerId".to_owned(),
+                    Value::Nullable(Some(Box::new(Value::String(alice_subject.into())))),
+                ),
+            ]),
+        )
+        .expect("system seed must write the protected message");
+    block_on(seeded.wait(DurabilityTier::Local)).expect("seed must settle locally");
+
+    // The public `where({ id })` facade contributes an ordinary prepared
+    // parameter alongside the hidden policy claim. Keep that mixed binding in
+    // this regression so the descriptor cannot accidentally bind Alice's
+    // claim into the query-id slot (or vice versa).
+    let query = Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(seeded.row_uuid().0))));
+    let prepared = prepared(&server, &query);
+    let alice_rows = block_on(server.all_for_identity(&prepared, ReadOpts::default(), alice))
+        .expect("Alice's prepared read must evaluate against her session claims");
+    let bob_rows = block_on(server.all_for_identity(&prepared, ReadOpts::default(), bob))
+        .expect("Bob's prepared read must evaluate against his session claims");
+
+    assert_eq!(row_ids(&alice_rows), vec![seeded.row_uuid()]);
+    assert!(bob_rows.is_empty());
+}
+
 #[test]
 fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish() {
     let public_schema = owner_id_public_schema();
@@ -12069,6 +12142,7 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
     let bob = AuthorId::from_bytes([0xb2; 16]);
     let server = open_core(0x5e, AuthorId::SYSTEM, &public_schema);
     let writer = open_db(0xa1, alice, &permission_schema);
+    let alice_reader = open_db(0xa2, alice, &permission_schema);
     let reader = open_db(0xb2, bob, &permission_schema);
 
     let schema_version = SchemaVersion::new(permission_schema.clone());
@@ -12122,6 +12196,33 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
     writer.tick().unwrap();
     server.tick().unwrap();
 
+    let (alice_transport, server_alice_transport) = duplex();
+    let _alice_upstream = alice_reader.connect_upstream(alice_transport);
+    let _alice_subscriber = server.accept_subscriber_with_claims(
+        server_alice_transport,
+        alice,
+        BTreeMap::from([("user_id".to_owned(), Value::String(alice.0.to_string()))]),
+    );
+    let query = Query::from("messages");
+    let mut alice_subscription =
+        prepared_subscribe(&alice_reader, &query, edge_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(alice_subscription.next_event()).unwrap()).is_empty());
+    alice_reader.tick().unwrap();
+    server.tick().unwrap();
+    alice_reader.tick().unwrap();
+    let (added, updated, removed) = delta_rows(block_on(alice_subscription.next_event()).unwrap());
+    assert_eq!(
+        added.len(),
+        1,
+        "Alice's matching text session claim must read the seeded row"
+    );
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    assert_eq!(
+        row_ids(&prepared_all(&alice_reader, &query, edge_subscribe_opts())),
+        vec![added[0].row_uuid()],
+    );
+
     let (reader_transport, server_reader_transport) = duplex();
     let _reader_upstream = reader.connect_upstream(reader_transport);
     let _reader_subscriber = server.accept_subscriber_with_claims(
@@ -12129,7 +12230,6 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
         bob,
         BTreeMap::from([("user_id".to_owned(), Value::String(bob.0.to_string()))]),
     );
-    let query = Query::from("messages");
     let mut subscription = prepared_subscribe(&reader, &query, edge_subscribe_opts()).unwrap();
     assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
 

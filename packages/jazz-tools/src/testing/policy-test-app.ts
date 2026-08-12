@@ -20,12 +20,18 @@ type PendingWrite = {
 };
 type SeedWrite<T> = {
   readonly value: T;
-  wait(options: { tier: "local" }): Promise<T>;
+  wait(options: { tier: "local" | "edge" }): Promise<T>;
 };
 
 /** @internal */
 export async function settlePolicySeed<T>(write: SeedWrite<T>): Promise<T> {
   return write.wait({ tier: "local" });
+}
+
+/** @internal */
+export async function settlePolicySeedForSessionReads<T>(write: SeedWrite<T>): Promise<T> {
+  await settlePolicySeed(write);
+  return write.wait({ tier: "edge" });
 }
 
 /**
@@ -90,13 +96,14 @@ export class PolicyTestApp {
   ) {}
 
   /**
-   * Seed the database with one admin write and wait until it is locally
-   * visible before returning. This prevents the following session-scoped read
-   * from racing the asynchronous native runtime commit.
+   * Seed the database with one admin write and wait until the serving
+   * authority has accepted it before returning. Session-scoped reads default
+   * to the edge tier, so local staging alone can otherwise race their first
+   * policy-evaluated query.
    */
   async seed<T>(callback: (db: Db) => SeedWrite<T>): Promise<T> {
     const db = this.jazzContext.asBackend();
-    return settlePolicySeed(callback(db));
+    return settlePolicySeedForSessionReads(callback(db));
   }
 
   /**
