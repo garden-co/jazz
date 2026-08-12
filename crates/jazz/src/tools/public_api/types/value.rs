@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -11,7 +13,7 @@ use super::*;
 /// `PartialEq`/`Eq` are implemented manually because `f64` does not implement
 /// `Eq`. We use bitwise comparison (`f64::to_bits`) so that NaN == NaN and
 /// -0.0 != 0.0, which is the correct semantics for storage identity.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Value {
     Integer(i32),
     BigInt(i64),
@@ -37,9 +39,43 @@ pub enum Value {
     Null,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LargeValueHandle {
     bytes: Vec<u8>,
+}
+
+impl fmt::Debug for LargeValueHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LargeValueHandle")
+            .field("len", &self.bytes.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Integer(value) => f.debug_tuple("Integer").field(value).finish(),
+            Self::BigInt(value) => f.debug_tuple("BigInt").field(value).finish(),
+            Self::Double(value) => f.debug_tuple("Double").field(value).finish(),
+            Self::Boolean(value) => f.debug_tuple("Boolean").field(value).finish(),
+            Self::Text(value) => f.debug_tuple("Text").field(value).finish(),
+            Self::Timestamp(value) => f.debug_tuple("Timestamp").field(value).finish(),
+            Self::Uuid(value) => f.debug_tuple("Uuid").field(value).finish(),
+            // Batch ids are fixed-size semantic identifiers, unlike payloads.
+            Self::BatchId(value) => write!(f, "BatchId({})", hex::encode(value)),
+            Self::Bytea(value) => f.debug_struct("Bytea").field("len", &value.len()).finish(),
+            Self::LargeValue(value) => f.debug_tuple("LargeValue").field(value).finish(),
+            // Avoid a collection of nested byte values making an error log unbounded.
+            Self::Array(values) => f.debug_struct("Array").field("len", &values.len()).finish(),
+            Self::Row { id, values } => f
+                .debug_struct("Row")
+                .field("id", id)
+                .field("values_len", &values.len())
+                .finish(),
+            Self::Null => f.write_str("Null"),
+        }
+    }
 }
 
 impl LargeValueHandle {
@@ -521,6 +557,36 @@ macro_rules! row_input {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn binary_value_debug_is_bounded_and_content_safe_even_when_nested() {
+        assert_eq!(format!("{:?}", Value::Bytea(vec![])), "Bytea { len: 0 }");
+        assert_eq!(
+            format!(
+                "{:?}",
+                Value::LargeValue(LargeValueHandle::from_bytes(vec![7; 3]))
+            ),
+            "LargeValue(LargeValueHandle { len: 3 })"
+        );
+
+        let secret = b"do-not-log-this-payload";
+        let nested = Value::Row {
+            id: None,
+            values: vec![Value::Array(vec![Value::Bytea(vec![b'x'; 1_000_000])])],
+        };
+        let debug = format!("{nested:?}");
+        assert_eq!(debug, "Row { id: None, values_len: 1 }");
+        assert!(debug.len() < 64);
+        assert!(!debug.contains(std::str::from_utf8(secret).unwrap()));
+    }
+
+    #[test]
+    fn batch_id_debug_keeps_the_compact_semantic_id() {
+        assert_eq!(
+            format!("{:?}", Value::BatchId([0xab; 16])),
+            "BatchId(abababababababababababababababab)"
+        );
+    }
 
     // ── From<bool> ──────────────────────────────────────────────────
 
