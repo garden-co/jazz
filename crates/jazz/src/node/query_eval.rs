@@ -1582,6 +1582,68 @@ where
         exclude_deleted: bool,
     ) -> Result<GraphBuilder, SourceResolutionError> {
         let fields = global_current_storage_fields(read_table, true, include_global_seq);
+        // Global current storage has already selected the physical winner.  Apply
+        // the ordinary lens-aware projection directly so added-column defaults
+        // survive instead of being replaced with physical nulls by the raw
+        // winner projection.  Local and Edge reads still need to choose between
+        // Global and Ahead candidates before their compatibility boundary.
+        if tier == DurabilityTier::Global {
+            let projection_target = self.current_projection_target(request, read_table)?;
+            let content = match self.access_paths.get(&request.source).cloned() {
+                Some(CurrentAccessPath::PrimaryKey(prefix)) => {
+                    self.node.query_engine_read_metrics.source_primary_key_scans += 1;
+                    self.node
+                        .physical_current_source_scan_graph_with_projection_target(
+                            self.read_view.read_schema,
+                            &request.source.table,
+                            PhysicalCurrentClass::Global,
+                            projection_target,
+                            static_scan_for_prefix(prefix, 1),
+                        )
+                        .map_err(|_| {
+                            source_resolution_error(request, SourceGap::SchemaProjection)
+                        })?
+                }
+                Some(CurrentAccessPath::Index { column, prefix }) => {
+                    self.node.query_engine_read_metrics.source_index_probes += 1;
+                    self.node
+                        .physical_global_current_source_for_index_scan(
+                            read_table,
+                            self.read_view.read_schema,
+                            &column,
+                            &prefix,
+                            &projection_target,
+                        )
+                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                }
+                None => {
+                    self.node.query_engine_read_metrics.source_full_scans += 1;
+                    self.node
+                        .physical_current_source_graph_with_projection_target(
+                            self.read_view.read_schema,
+                            &request.source.table,
+                            PhysicalCurrentClass::Global,
+                            projection_target,
+                        )
+                        .map_err(|_| {
+                            source_resolution_error(request, SourceGap::SchemaProjection)
+                        })?
+                }
+            };
+            if !exclude_deleted {
+                return Ok(content.project(fields));
+            }
+            let deleted_winners = self
+                .projected_deletion_register_current_source_graph(request, tier)?
+                .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
+                .project(["row_uuid"]);
+            return Ok(GraphBuilder::anti_join(
+                content,
+                deleted_winners,
+                ["row_uuid"],
+                ["row_uuid"],
+            ));
+        }
         let required_fields = self.current_projection_required_fields(request, read_table);
         let (projection_target, physical_fields) = self
             .node
@@ -14613,6 +14675,11 @@ mod tests {
 
         assert!(resolver.needs_projected_current_source("users"));
         let resolved = resolver.resolve_source(&source_request).unwrap();
+        assert_eq!(
+            resolver.current_projection_targets.len(),
+            1,
+            "the Global source and its content-version sidecar share one cached projection target",
+        );
         let content_version = resolved
             .content_version
             .expect("version-payload requirements need a content-version source");

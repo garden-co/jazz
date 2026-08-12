@@ -52,6 +52,164 @@ pub(super) struct TablePhysicalMapping {
         BTreeMap<PhysicalColumnId, BTreeMap<String, Vec<GlobalScalarEnumCaseId>>>,
 }
 
+/// A source cell while lowering a migration-lens path into a physical current
+/// winner projection.  The symbolic field survives rename/copy chains until
+/// the projection is registered, whereas literal defaults are materialized at
+/// that projection boundary.
+#[derive(Clone)]
+enum CurrentWinnerCellProjection {
+    Field {
+        name: String,
+        column_id: PhysicalColumnId,
+        column_type: records::ValueType,
+    },
+    Literal(Value),
+    Null,
+}
+
+fn physical_mapping_has_enum_boundary(
+    mapping: &TablePhysicalMapping,
+    column_id: PhysicalColumnId,
+) -> bool {
+    mapping.scalar_enum_cases.contains_key(&column_id)
+        || mapping.payload_enum_cases.contains_key(&column_id)
+        || mapping
+            .nested_scalar_enum_cases
+            .get(&column_id)
+            .is_some_and(|paths| !paths.is_empty())
+        || mapping
+            .nested_payload_enum_cases
+            .get(&column_id)
+            .is_some_and(|paths| !paths.is_empty())
+}
+
+fn value_type_has_enum_boundary(value_type: &records::ValueType) -> bool {
+    use records::ValueType;
+    match value_type {
+        ValueType::EnumTag(_) | ValueType::Enum(_) => true,
+        ValueType::Nullable(inner) | ValueType::Array(inner) => value_type_has_enum_boundary(inner),
+        ValueType::Tuple(values) => values.iter().any(value_type_has_enum_boundary),
+        ValueType::Record(record) => record
+            .fields()
+            .iter()
+            .any(|field| value_type_has_enum_boundary(&field.value_type)),
+        _ => false,
+    }
+}
+
+/// Bootstrap mappings have no durable per-column registry entries yet. Their
+/// physical tags still follow the validated authored layout, so initialize the
+/// same recursive copy plan by ordinal and let durable mappings replace each
+/// occurrence as soon as they are available.
+fn bootstrap_copy_enum_remaps(
+    source: &records::ValueType,
+    target: &records::ValueType,
+    path: &str,
+    remaps: &mut EnumOccurrenceRemaps,
+) -> Result<(), Error> {
+    use records::ValueType;
+    match (source, target) {
+        (ValueType::EnumTag(source), ValueType::EnumTag(target)) => {
+            remaps.scalar.entry(path.to_owned()).or_insert(
+                source
+                    .variants
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, _)| {
+                        target
+                            .variants
+                            .get(ordinal)
+                            .map(|_| {
+                                u8::try_from(ordinal).map_err(|_| {
+                                    Error::InvalidStoredValue(
+                                        "bootstrap copied scalar enum tag exhausted",
+                                    )
+                                })
+                            })
+                            .transpose()
+                    })
+                    .collect::<Result<_, _>>()?,
+            );
+        }
+        (ValueType::Enum(source), ValueType::Enum(target)) => {
+            remaps.payload.entry(path.to_owned()).or_insert(
+                source
+                    .cases
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, _)| {
+                        target
+                            .cases
+                            .get(ordinal)
+                            .map(|_| {
+                                u32::try_from(ordinal).map_err(|_| {
+                                    Error::InvalidStoredValue(
+                                        "bootstrap copied payload enum tag exhausted",
+                                    )
+                                })
+                            })
+                            .transpose()
+                    })
+                    .collect::<Result<_, _>>()?,
+            );
+            remaps.payload_children.entry(path.to_owned()).or_insert(
+                source
+                    .cases
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, _)| {
+                        target
+                            .cases
+                            .get(ordinal)
+                            .map(|_| format!("{path}/case/bootstrap/{ordinal}"))
+                    })
+                    .collect(),
+            );
+            for (ordinal, (source_case, target_case)) in
+                source.cases.iter().zip(&target.cases).enumerate()
+            {
+                bootstrap_copy_enum_remaps(
+                    &ValueType::Record(Box::new(source_case.payload.clone())),
+                    &ValueType::Record(Box::new(target_case.payload.clone())),
+                    &format!("{path}/case/bootstrap/{ordinal}"),
+                    remaps,
+                )?;
+            }
+        }
+        (ValueType::Nullable(source), ValueType::Nullable(target)) => {
+            bootstrap_copy_enum_remaps(source, target, &format!("{path}/nullable"), remaps)?;
+        }
+        (ValueType::Array(source), ValueType::Array(target)) => {
+            bootstrap_copy_enum_remaps(source, target, &format!("{path}/array"), remaps)?;
+        }
+        (ValueType::Tuple(source), ValueType::Tuple(target)) => {
+            for (index, (source, target)) in source.iter().zip(target).enumerate() {
+                bootstrap_copy_enum_remaps(
+                    source,
+                    target,
+                    &format!("{path}/tuple/{index}"),
+                    remaps,
+                )?;
+            }
+        }
+        (ValueType::Record(source), ValueType::Record(target)) => {
+            for (source, target) in source.fields().iter().zip(target.fields()) {
+                let name = source.name.as_deref().ok_or(Error::InvalidStoredValue(
+                    "bootstrap copied enum record field unnamed",
+                ))?;
+                bootstrap_copy_enum_remaps(
+                    &source.value_type,
+                    &target.value_type,
+                    &format!("{path}/record/{name}"),
+                    remaps,
+                )?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
 pub(super) struct GlobalScalarEnumCaseId {
     pub(super) introducing_schema: SchemaVersionId,
@@ -969,6 +1127,209 @@ where
         Ok(remaps)
     }
 
+    /// Re-encode a source physical enum occurrence into a distinct copied
+    /// column's physical registry. Copying an enum's raw tag is invalid: each
+    /// physical column owns an independent durable registry, even when the
+    /// authored enum layouts are identical. The lens validates compatible
+    /// layouts, so ordinal correspondence is the authored copy relation while
+    /// this remap translates both sides' physical tags and nested payload
+    /// paths.
+    fn physical_copy_enum_remaps(
+        &self,
+        source_mapping: &TablePhysicalMapping,
+        source_column_id: PhysicalColumnId,
+        target_mapping: &TablePhysicalMapping,
+        target_column_id: PhysicalColumnId,
+        source_column_type: &records::ValueType,
+        target_column_type: &records::ValueType,
+    ) -> Result<EnumOccurrenceRemaps, Error> {
+        let mut remaps = EnumOccurrenceRemaps::default();
+        if let Some(source_cases) = source_mapping.scalar_enum_cases.get(&source_column_id) {
+            let source_cases = self
+                .physical_scalar_enum_cases(source_mapping.table_id, source_column_id)
+                .unwrap_or_else(|_| source_cases.clone());
+            let target_cases = target_mapping
+                .scalar_enum_cases
+                .get(&target_column_id)
+                .map(|fallback| {
+                    self.physical_scalar_enum_cases(target_mapping.table_id, target_column_id)
+                        .unwrap_or_else(|_| fallback.clone())
+                })
+                .unwrap_or_default();
+            remaps.scalar.insert(
+                "root".to_owned(),
+                source_cases
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, _)| {
+                        target_cases
+                            .get(ordinal)
+                            .map(|_| {
+                                u8::try_from(ordinal).map_err(|_| {
+                                    Error::InvalidStoredValue("copied scalar enum tag exhausted")
+                                })
+                            })
+                            .transpose()
+                    })
+                    .collect::<Result<_, _>>()?,
+            );
+        }
+        if let Some(source_cases) = source_mapping.payload_enum_cases.get(&source_column_id) {
+            let source_cases = self
+                .physical_payload_enum_cases(source_mapping.table_id, source_column_id)
+                .unwrap_or_else(|_| source_cases.clone());
+            let target_cases = target_mapping
+                .payload_enum_cases
+                .get(&target_column_id)
+                .map(|fallback| {
+                    self.physical_payload_enum_cases(target_mapping.table_id, target_column_id)
+                        .unwrap_or_else(|_| fallback.clone())
+                })
+                .unwrap_or_default();
+            remaps.payload.insert(
+                "root".to_owned(),
+                source_cases
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, _)| {
+                        target_cases
+                            .get(ordinal)
+                            .map(|_| {
+                                u32::try_from(ordinal).map_err(|_| {
+                                    Error::InvalidStoredValue("copied payload enum tag exhausted")
+                                })
+                            })
+                            .transpose()
+                    })
+                    .collect::<Result<_, _>>()?,
+            );
+            remaps.payload_children.insert(
+                "root".to_owned(),
+                source_cases
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, _)| {
+                        target_cases
+                            .get(ordinal)
+                            .map(|identity| global_case_path("root", identity))
+                    })
+                    .collect(),
+            );
+        }
+        if let Some(source_paths) = source_mapping
+            .nested_scalar_enum_cases
+            .get(&source_column_id)
+        {
+            for (path, source_cases) in source_paths {
+                if source_cases.is_empty() {
+                    continue;
+                }
+                let source_cases = self
+                    .physical_nested_scalar_enum_cases(
+                        source_mapping.table_id,
+                        source_column_id,
+                        path,
+                    )
+                    .unwrap_or_else(|_| source_cases.clone());
+                let target_cases = target_mapping
+                    .nested_scalar_enum_cases
+                    .get(&target_column_id)
+                    .and_then(|paths| paths.get(path))
+                    .map(|fallback| {
+                        self.physical_nested_scalar_enum_cases(
+                            target_mapping.table_id,
+                            target_column_id,
+                            path,
+                        )
+                        .unwrap_or_else(|_| fallback.clone())
+                    })
+                    .unwrap_or_default();
+                remaps.scalar.insert(
+                    path.clone(),
+                    source_cases
+                        .iter()
+                        .enumerate()
+                        .map(|(ordinal, _)| {
+                            target_cases
+                                .get(ordinal)
+                                .map(|_| {
+                                    u8::try_from(ordinal).map_err(|_| {
+                                        Error::InvalidStoredValue(
+                                            "copied nested scalar enum tag exhausted",
+                                        )
+                                    })
+                                })
+                                .transpose()
+                        })
+                        .collect::<Result<_, _>>()?,
+                );
+            }
+        }
+        if let Some(source_paths) = source_mapping
+            .nested_payload_enum_cases
+            .get(&source_column_id)
+        {
+            for (path, source_cases) in source_paths {
+                if source_cases.is_empty() {
+                    continue;
+                }
+                let source_cases = self
+                    .physical_nested_payload_enum_cases(
+                        source_mapping.table_id,
+                        source_column_id,
+                        path,
+                    )
+                    .unwrap_or_else(|_| source_cases.clone());
+                let target_cases = target_mapping
+                    .nested_payload_enum_cases
+                    .get(&target_column_id)
+                    .and_then(|paths| paths.get(path))
+                    .map(|fallback| {
+                        self.physical_nested_payload_enum_cases(
+                            target_mapping.table_id,
+                            target_column_id,
+                            path,
+                        )
+                        .unwrap_or_else(|_| fallback.clone())
+                    })
+                    .unwrap_or_default();
+                remaps.payload.insert(
+                    path.clone(),
+                    source_cases
+                        .iter()
+                        .enumerate()
+                        .map(|(ordinal, _)| {
+                            target_cases
+                                .get(ordinal)
+                                .map(|_| {
+                                    u32::try_from(ordinal).map_err(|_| {
+                                        Error::InvalidStoredValue(
+                                            "copied nested payload enum tag exhausted",
+                                        )
+                                    })
+                                })
+                                .transpose()
+                        })
+                        .collect::<Result<_, _>>()?,
+                );
+                remaps.payload_children.insert(
+                    path.clone(),
+                    source_cases
+                        .iter()
+                        .enumerate()
+                        .map(|(ordinal, _)| {
+                            target_cases
+                                .get(ordinal)
+                                .map(|identity| global_case_path(path, identity))
+                        })
+                        .collect(),
+                );
+            }
+        }
+        bootstrap_copy_enum_remaps(source_column_type, target_column_type, "root", &mut remaps)?;
+        Ok(remaps)
+    }
+
     pub(super) fn physical_table_id_for_schema(
         &self,
         schema_version: SchemaVersionId,
@@ -1608,6 +1969,12 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "physical current winner source schema alias missing",
                 ))?;
+            let source_table = self.table_in_schema(&source_table_name, source_schema)?;
+            let target_columns_by_physical_field = target_mapping
+                .columns
+                .iter()
+                .map(|(column, id)| (physical_user_column_field(*id), column.clone()))
+                .collect::<BTreeMap<_, _>>();
             let cases = if source_mapping.variant_cases.is_empty() {
                 vec![(groove_variant_tag(source_alias)?, None)]
             } else {
@@ -1618,92 +1985,124 @@ where
                     .collect()
             };
             for (tag, present) in cases {
+                let available =
+                    physical_current_field_names_for_case(&source_table, &source_mapping, present)?
+                        .into_iter()
+                        .collect::<BTreeSet<_>>();
                 for storage_table in &storage_tables {
-                    match self.physical_current_winner_projection_case(
-                        source_schema,
-                        &source_table_name,
-                        &source_mapping,
-                        target_schema,
-                        target_table_name,
-                        &target_mapping,
-                        output,
-                        present,
-                    )? {
-                        Some(fields) => self.database.refresh_variant_case_for_registry_evolution(
-                            storage_table,
-                            &projection_target,
-                            tag,
-                            fields,
-                        )?,
-                        None => self.database.register_variant_ignore_case(
-                            storage_table,
-                            &projection_target,
-                            tag,
-                        )?,
-                    }
+                    let fields = output
+                        .fields()
+                        .iter()
+                        .map(|field| {
+                            let name = field.name.clone().ok_or(Error::InvalidStoredValue(
+                                "physical current winner field unnamed",
+                            ))?;
+                            if available.contains(&name) {
+                                Ok(ProjectField::named(name))
+                            } else if let Some(column) = target_columns_by_physical_field.get(&name)
+                            {
+                                // Only mapped user columns can be absent because
+                                // of a lens. Witness and system fields must remain
+                                // raw physical fields. The resulting field may be
+                                // an Add default or a value carried through a
+                                // Rename/Copy chain from the source variant.
+                                Ok(self
+                                    .lens_projection_for_missing_current_field(
+                                        source_schema,
+                                        &source_table_name,
+                                        &source_mapping,
+                                        &available,
+                                        target_schema,
+                                        target_table_name,
+                                        &target_mapping,
+                                        column,
+                                        name.clone(),
+                                        field.value_type.clone(),
+                                    )?
+                                    .unwrap_or_else(|| {
+                                        ProjectField::literal_typed(
+                                            name,
+                                            Value::Nullable(None),
+                                            field.value_type.clone(),
+                                        )
+                                    }))
+                            } else if matches!(field.value_type, records::ValueType::Nullable(_)) {
+                                Ok(ProjectField::literal_typed(
+                                    name,
+                                    Value::Nullable(None),
+                                    field.value_type.clone(),
+                                ))
+                            } else {
+                                Err(Error::InvalidStoredValue(
+                                    "physical current winner source misses required field",
+                                ))
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    self.database.refresh_variant_case_for_registry_evolution(
+                        storage_table,
+                        &projection_target,
+                        tag,
+                        fields,
+                    )?;
                 }
             }
         }
         Ok((projection_target, output_fields.unwrap_or_default()))
     }
 
-    /// Map one authored physical row into the shared winner layout.  This is
-    /// deliberately *not* the authored read boundary: enum cells remain in
-    /// their physical representation until after `arg_max_by` has selected
-    /// the Global/Ahead winner.  Ordinary lens operations do belong here,
-    /// though.  In particular an old authored row must acquire an `AddColumn`
-    /// default before the later target-layout projection decodes it.
-    fn physical_current_winner_projection_case(
+    /// Resolve a missing target user field through the migration path before
+    /// the Global/Ahead arg-max. This deliberately yields a projection field,
+    /// not only a literal: `CopyColumn` chains must read their actual source
+    /// physical field while the winner still has its source variant layout.
+    fn lens_projection_for_missing_current_field(
         &mut self,
         source_schema: SchemaVersionId,
         source_table_name: &str,
         source_mapping: &TablePhysicalMapping,
+        available: &BTreeSet<String>,
         target_schema: SchemaVersionId,
         target_table_name: &str,
         target_mapping: &TablePhysicalMapping,
-        output: records::RecordDescriptor,
-        present: Option<&BTreeSet<String>>,
-    ) -> Result<Option<Vec<ProjectField>>, Error> {
-        #[derive(Clone)]
-        enum CellProjection {
-            Field(String),
-            Literal(Value),
-        }
-
+        target_column: &str,
+        output_name: String,
+        output_type: records::ValueType,
+    ) -> Result<Option<ProjectField>, Error> {
         let source_table = self.table_in_schema(source_table_name, source_schema)?;
-        let target_table = self.table_in_schema(target_table_name, target_schema)?;
         let mut cells = source_table
             .columns
             .iter()
-            .filter(|column| present.is_none_or(|present| present.contains(&column.name)))
             .map(|column| {
-                let column_id = source_mapping.columns.get(&column.name).copied().ok_or(
-                    Error::InvalidStoredValue("physical winner source column mapping missing"),
-                )?;
-                Ok((
-                    column.name.clone(),
-                    CellProjection::Field(physical_user_column_field(column_id)),
-                ))
+                let projection = source_mapping
+                    .columns
+                    .get(&column.name)
+                    .and_then(|column_id| {
+                        let name = physical_user_column_field(*column_id);
+                        available
+                            .contains(&name)
+                            .then_some(CurrentWinnerCellProjection::Field {
+                                name,
+                                column_id: *column_id,
+                                column_type: column.column_type.clone(),
+                            })
+                    })
+                    .unwrap_or(CurrentWinnerCellProjection::Null);
+                (column.name.clone(), projection)
             })
-            .collect::<Result<BTreeMap<_, _>, Error>>()?;
-
-        if source_schema != target_schema || source_table_name != target_table_name {
-            let mut path = None;
-            for direction in [LensPathDirection::Forward, LensPathDirection::Reverse] {
-                if let Some(candidate) = self.compiled_lens_path(
-                    source_schema,
-                    target_schema,
-                    direction,
-                    source_table_name,
-                )? && candidate.target_table == target_table_name
-                {
-                    path = Some(candidate);
-                    break;
-                }
-            }
-            let Some(path) = path else {
-                return Ok(None);
+            .collect::<BTreeMap<_, _>>();
+        for direction in [LensPathDirection::Forward, LensPathDirection::Reverse] {
+            let Some(path) = self.compiled_lens_path(
+                source_schema,
+                target_schema,
+                direction,
+                source_table_name,
+            )?
+            else {
+                continue;
             };
+            if path.target_table != target_table_name {
+                continue;
+            }
             for op in path.ops {
                 match op {
                     CompiledLensOp::Rename { from, to } => {
@@ -1719,82 +2118,75 @@ where
                     CompiledLensOp::Add { column, default } => {
                         cells
                             .entry(column)
-                            .or_insert(CellProjection::Literal(default));
+                            .or_insert(CurrentWinnerCellProjection::Literal(default));
                     }
                     CompiledLensOp::Drop { column } => {
                         cells.remove(&column);
                     }
                 }
             }
-        }
-
-        let mut fields = output
-            .fields()
-            .iter()
-            .take(GlobalCurrentRowRecord::USER_CELLS)
-            .map(|field| {
-                field
-                    .name
-                    .clone()
-                    .map(ProjectField::named)
-                    .ok_or(Error::InvalidStoredValue(
-                        "physical current winner system field unnamed",
-                    ))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        for column in &target_table.columns {
-            let output_name = physical_user_column_field(
-                target_mapping.columns.get(&column.name).copied().ok_or(
-                    Error::InvalidStoredValue("physical winner target column mapping missing"),
-                )?,
-            );
-            let output_type = output
-                .field_index(&output_name)
-                .and_then(|index| output.fields().get(index))
-                .map(|field| field.value_type.clone())
-                .ok_or(Error::InvalidStoredValue(
-                    "physical winner target output field missing",
-                ))?;
-            match cells.remove(&column.name) {
-                Some(CellProjection::Field(source)) => {
-                    fields.push(ProjectField::renamed(source, output_name));
-                }
-                Some(CellProjection::Literal(Value::Nullable(None))) | None
-                    if present.is_some() =>
-                {
-                    fields.push(ProjectField::literal_typed(
-                        output_name,
-                        Value::Nullable(None),
-                        output_type,
-                    ));
-                }
-                Some(CellProjection::Literal(value)) => {
-                    fields.push(ProjectField::literal_typed(
-                        output_name,
-                        Value::Nullable(Some(Box::new(value))),
-                        output_type,
-                    ));
-                }
-                None => return Ok(None),
-            }
-        }
-        fields.extend(
-            output
-                .fields()
-                .iter()
-                .skip(GlobalCurrentRowRecord::USER_CELLS + target_table.columns.len())
-                .map(|field| {
-                    field
-                        .name
-                        .clone()
-                        .map(ProjectField::named)
+            return Ok(match cells.remove(target_column) {
+                Some(CurrentWinnerCellProjection::Field {
+                    name: source,
+                    column_id: source_column_id,
+                    column_type: source_column_type,
+                }) => {
+                    let target_column_id =
+                        target_mapping.columns.get(target_column).copied().ok_or(
+                            Error::InvalidStoredValue(
+                                "target current winner column mapping missing",
+                            ),
+                        )?;
+                    let target_column_type = self
+                        .table_in_schema(target_table_name, target_schema)?
+                        .columns
+                        .iter()
+                        .find(|column| column.name == target_column)
+                        .map(|column| column.column_type.clone())
                         .ok_or(Error::InvalidStoredValue(
-                            "physical current winner trailing field unnamed",
+                            "target current winner column schema missing",
+                        ))?;
+                    if source_column_id == target_column_id
+                        || !physical_mapping_has_enum_boundary(source_mapping, source_column_id)
+                            && !physical_mapping_has_enum_boundary(target_mapping, target_column_id)
+                            && !value_type_has_enum_boundary(&source_column_type)
+                            && !value_type_has_enum_boundary(&target_column_type)
+                    {
+                        Some(ProjectField::renamed(source, output_name))
+                    } else {
+                        Some(ProjectField::recursive_enum_remap(
+                            source,
+                            output_name,
+                            output_type,
+                            self.physical_copy_enum_remaps(
+                                source_mapping,
+                                source_column_id,
+                                target_mapping,
+                                target_column_id,
+                                &source_column_type,
+                                &target_column_type,
+                            )?,
                         ))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        );
-        Ok(Some(fields))
+                    }
+                }
+                Some(CurrentWinnerCellProjection::Literal(default)) => {
+                    let default = if matches!(output_type, records::ValueType::Nullable(_))
+                        && !matches!(default, Value::Nullable(_))
+                    {
+                        Value::Nullable(Some(Box::new(default)))
+                    } else {
+                        default
+                    };
+                    Some(ProjectField::literal_typed(
+                        output_name,
+                        default,
+                        output_type,
+                    ))
+                }
+                Some(CurrentWinnerCellProjection::Null) | None => None,
+            });
+        }
+        Ok(None)
     }
 
     /// Build the logical query-local projection placed after physical current
