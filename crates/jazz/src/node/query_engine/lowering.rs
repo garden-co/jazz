@@ -5319,6 +5319,18 @@ fn lowered_terminals(
         &root_route_fields,
         &closure_root_carrier_fields,
     )?;
+    // Correlated include paths can preserve routes in the graph while their
+    // conservative root field set omits them. Use the graph's declared output
+    // after closure lowering when choosing the fields retained by maintained
+    // result-membership facts.
+    let root_route_fields = graph_declared_output_fields(&closure.visible_root)
+        .map(|fields| {
+            routing_param_fields
+                .intersection(&fields)
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or(root_route_fields);
     let visible_root_with_routes = if root_route_fields.is_empty() {
         closure.visible_root.clone()
     } else {
