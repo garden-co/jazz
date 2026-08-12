@@ -9,7 +9,7 @@
  * future package build cannot silently change test semantics.
  */
 import { execFileSync, spawn } from "node:child_process";
-import { linkSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { linkSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
@@ -80,9 +80,13 @@ function readLockOwner(lockPath) {
 function lockError(lockPath, owner) {
   const started = typeof owner.startedAt === "string" ? owner.startedAt : "unknown";
   const cwd = typeof owner.cwd === "string" ? basename(owner.cwd) : "unknown";
+  const state = ownerIsAlive(owner) ? "active" : "stale";
+  const action =
+    state === "active"
+      ? "Wait for it to finish."
+      : "Run `pnpm artifacts:unlock` to verify and clear it.";
   return new Error(
-    `test-artifacts: another artifact build is active (pid ${owner.pid}, cwd ${cwd}, started ${started}). ` +
-      "Wait for it to finish, or if it is no longer running retry to recover its stale lock.",
+    `test-artifacts: ${state} artifact lock (pid ${owner.pid}, cwd ${cwd}, started ${started}). ${action}`,
   );
 }
 
@@ -102,52 +106,23 @@ export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
     rmSync(staging, { force: true });
     throw error;
   }
-  for (;;) {
-    try {
-      // Hard-linking the fully-written receipt is atomic and unlike rename
-      // never replaces an existing live or malformed lock on POSIX/Windows.
-      linkSync(staging, lockPath);
+  try {
+    // Hard-linking the fully-written receipt is atomic and unlike rename
+    // never replaces an existing live or malformed lock on POSIX/Windows.
+    linkSync(staging, lockPath);
+    rmSync(staging, { force: true });
+  } catch (error) {
+    if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") {
       rmSync(staging, { force: true });
-      break;
-    } catch (error) {
-      if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") {
-        rmSync(staging, { force: true });
-        throw error;
-      }
+      throw error;
     }
     const existing = readLockOwner(lockPath);
     if (!existing || !Number.isInteger(existing.pid) || existing.pid <= 0) {
       rmSync(staging, { force: true });
       throw new Error("test-artifacts: lock has no usable owner metadata; refusing to delete it.");
     }
-    if (ownerIsAlive(existing)) {
-      rmSync(staging, { force: true });
-      throw lockError(lockPath, existing);
-    }
-    // rename is atomic on all supported local filesystems. Exactly one stale
-    // recovery contender can quarantine the observed directory; it never
-    // recursively removes the canonical name after observing it.
-    const quarantine = `${lockPath}.stale-${owner.token}`;
-    try {
-      renameSync(lockPath, quarantine);
-    } catch (renameError) {
-      if (renameError.code === "ENOENT" || renameError.code === "EEXIST") continue;
-      rmSync(staging, { force: true });
-      throw renameError;
-    }
-    try {
-      const quarantined = readLockOwner(quarantine);
-      if (quarantined?.token !== existing.token || ownerIsAlive(quarantined))
-        throw new Error(
-          "test-artifacts: stale lock changed while quarantining it; refusing to remove it.",
-        );
-      rmSync(quarantine, { force: false });
-    } catch (quarantineError) {
-      // Preserve an ambiguous quarantine for inspection. Its distinct name
-      // cannot block a fresh canonical acquisition.
-      rmSync(staging, { force: true });
-      throw quarantineError;
-    }
+    rmSync(staging, { force: true });
+    throw lockError(lockPath, existing);
   }
   console.log(`test-artifacts: acquired shared artifact lock (pid ${owner.pid})`);
   let released = false;
@@ -162,6 +137,31 @@ export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
       console.log("test-artifacts: released shared artifact lock");
     },
   };
+}
+
+export function unlockArtifactBuildLock(lockPath = artifactLockPath()) {
+  const guard = `${lockPath}.unlocking`;
+  const receipt = `${guard}-${process.pid}-${Date.now()}`;
+  try {
+    writeFileSync(receipt, `${process.pid}\n`, { flag: "wx", mode: 0o600 });
+    linkSync(receipt, guard);
+  } catch (error) {
+    rmSync(receipt, { force: true });
+    if (error.code === "EEXIST" || error.code === "ENOTEMPTY")
+      throw new Error("test-artifacts: another unlock is in progress; retry shortly.");
+    throw error;
+  }
+  rmSync(receipt, { force: true });
+  try {
+    const owner = readLockOwner(lockPath);
+    if (!owner || !Number.isInteger(owner.pid) || owner.pid <= 0)
+      throw new Error("test-artifacts: lock has no usable owner metadata; refusing to delete it.");
+    if (ownerIsAlive(owner)) throw lockError(lockPath, owner);
+    rmSync(lockPath, { force: false });
+    console.log("test-artifacts: cleared verified stale artifact lock");
+  } finally {
+    rmSync(guard, { force: true });
+  }
 }
 
 export async function withArtifactBuildLock(run, lockPath = artifactLockPath()) {
@@ -320,24 +320,21 @@ export async function buildTestArtifacts(run = command, scope = createBuildScope
   );
 
   try {
-    await guardedRun("node", ["-e", "require('./crates/jazz-napi')"], "load release NAPI");
+    // A load failure is expected to enter the bounded repair path, so unlike a
+    // build failure it must not abort the parent scope before repair starts.
+    await scope.track(
+      run("node", ["-e", "require('./crates/jazz-napi')"], "load release NAPI", {
+        signal: scope.signal,
+      }),
+    );
   } catch (error) {
     // A damaged native artifact must not make every run pay a second build.
     // Repair only after the first load proves it necessary, then prove repair.
     console.warn(`test-artifacts: release NAPI did not load; repairing (${error.message})`);
-    // The first load failure aborts only the already-completed first phase.
-    // Use a fresh controller for the bounded repair and its validation.
-    scope.abort(error);
-    const repairController = new AbortController();
-    const repairRun = (command, args, label, env) =>
-      run(command, args, label, { env, signal: repairController.signal }).catch((repairError) => {
-        repairController.abort(repairError);
-        throw repairError;
-      });
-    await repairRun("pnpm", ["--filter", "jazz-napi", "build"], "repair release NAPI");
-    await repairRun("node", ["-e", "require('./crates/jazz-napi')"], "load repaired release NAPI");
+    await guardedRun("pnpm", ["--filter", "jazz-napi", "build"], "repair release NAPI");
+    await guardedRun("node", ["-e", "require('./crates/jazz-napi')"], "load repaired release NAPI");
   }
-  await run(
+  await guardedRun(
     "node",
     ["dev/artifacts/provenance.mjs", "verify", "napi", "release"],
     "verify release NAPI provenance",
@@ -345,8 +342,19 @@ export async function buildTestArtifacts(run = command, scope = createBuildScope
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  withArtifactBuildLock((scope) => buildTestArtifacts(command, scope)).catch((error) => {
-    console.error(`test-artifacts: ${error.message}`);
+  if (process.argv[2] === "unlock") {
+    try {
+      unlockArtifactBuildLock();
+    } catch (error) {
+      console.error(`test-artifacts: ${error.message}`);
+      process.exitCode = 1;
+    }
+  } else if (process.argv[2]) {
+    console.error("test-artifacts: expected no argument or `unlock`");
     process.exitCode = 1;
-  });
+  } else
+    withArtifactBuildLock((scope) => buildTestArtifacts(command, scope)).catch((error) => {
+      console.error(`test-artifacts: ${error.message}`);
+      process.exitCode = 1;
+    });
 }

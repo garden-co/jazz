@@ -8,6 +8,7 @@ import {
   acquireArtifactBuildLock,
   buildTestArtifacts,
   command,
+  unlockArtifactBuildLock,
   withArtifactBuildLock,
 } from "../build-test-artifacts.mjs";
 
@@ -19,7 +20,7 @@ function childWithLock(lockPath, body) {
     [
       "--input-type=module",
       "-e",
-      `import { command, withArtifactBuildLock } from ${JSON.stringify(pipelineUrl)}; ${body}`,
+      `import fs from 'node:fs'; import { buildTestArtifacts, command, withArtifactBuildLock } from ${JSON.stringify(pipelineUrl)}; ${body}`,
     ],
     {
       env: { ...process.env, JAZZ_TEST_ARTIFACT_LOCK_PATH: lockPath },
@@ -58,10 +59,7 @@ test("artifact lock rejects a concurrent real subprocess with actionable ownersh
     const contender = childWithLock(lockPath, "await withArtifactBuildLock(async () => {});");
     const result = await contender.closed;
     assert.equal(result.code, 1);
-    assert.match(
-      contender.output(),
-      /another artifact build is active \(pid \d+, cwd .+, started .+\)/,
-    );
+    assert.match(contender.output(), /active artifact lock \(pid \d+, cwd .+, started .+\)/);
     const message = contender.output().match(/Error: ([^\n]+)/)?.[1] ?? "";
     assert.doesNotMatch(message, /Lock:|\/tmp\/|\/work\//);
   } finally {
@@ -71,7 +69,7 @@ test("artifact lock rejects a concurrent real subprocess with actionable ownersh
   }
 });
 
-test("artifact lock recovers only a positively stale owner", () => {
+test("artifact lock refuses stale owners until explicit verified unlock", () => {
   const fixture = mkdtempSync(join(tmpdir(), "jazz-test-artifact-stale-"));
   const lockPath = join(fixture, "lock");
   writeFileSync(
@@ -83,14 +81,16 @@ test("artifact lock recovers only a positively stale owner", () => {
       token: "dead",
     }),
   );
-  const lock = acquireArtifactBuildLock(lockPath);
+  assert.throws(() => acquireArtifactBuildLock(lockPath), /stale artifact lock.*artifacts:unlock/);
   assert.equal(existsSync(lockPath), true);
+  unlockArtifactBuildLock(lockPath);
+  const lock = acquireArtifactBuildLock(lockPath);
   lock.release();
   assert.equal(existsSync(lockPath), false);
   rmSync(fixture, { recursive: true, force: true });
 });
 
-test("simultaneous stale recovery contenders produce exactly one owner", async () => {
+test("80 simultaneous stale contenders never auto-steal; unlock permits exactly one next owner", async () => {
   const fixture = mkdtempSync(join(tmpdir(), "jazz-test-artifact-stale-race-"));
   const lockPath = join(fixture, "lock");
   writeFileSync(
@@ -102,22 +102,28 @@ test("simultaneous stale recovery contenders produce exactly one owner", async (
       token: "dead",
     }),
   );
-  const contenders = Array.from({ length: 8 }, () =>
+  const contenders = Array.from({ length: 80 }, () =>
     childWithLock(
       lockPath,
       "await withArtifactBuildLock(() => new Promise(() => setInterval(() => {}, 1000)));",
     ),
   );
   try {
-    await waitFor(() => existsSync(lockPath), "no contender acquired lock");
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    const active = contenders.filter((contender) => contender.child.exitCode === null);
-    assert.equal(active.length, 1);
-    for (const contender of contenders.filter((contender) => contender !== active[0])) {
+    for (const contender of contenders) {
       const result = await contender.closed;
       assert.equal(result.code, 1);
-      assert.match(contender.output(), /another artifact build is active/);
+      assert.match(contender.output(), /stale artifact lock.*artifacts:unlock/);
     }
+    assert.equal(existsSync(lockPath), true);
+    unlockArtifactBuildLock(lockPath);
+    const winner = childWithLock(
+      lockPath,
+      "await withArtifactBuildLock(() => new Promise(() => setInterval(() => {}, 1000)));",
+    );
+    await waitFor(() => existsSync(lockPath), "next contender did not acquire lock");
+    assert.equal(winner.child.exitCode, null);
+    winner.child.kill("SIGTERM");
+    await winner.closed;
   } finally {
     for (const contender of contenders) contender.child.kill("SIGTERM");
     await Promise.all(contenders.map((contender) => contender.closed));
@@ -188,8 +194,42 @@ test("signal keeps the lock until its delayed child has exited", async () => {
     assert.equal(existsSync(lockPath), true, "lock released before child exit");
     const contender = childWithLock(lockPath, "await withArtifactBuildLock(async () => {});");
     assert.equal((await contender.closed).code, 1);
-    assert.match(contender.output(), /another artifact build is active/);
+    assert.match(contender.output(), /active artifact lock/);
     assert.equal((await holder.closed).signal, "SIGTERM");
+    assert.equal(existsSync(lockPath), false);
+  } finally {
+    holder.child.kill("SIGKILL");
+    await holder.closed;
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("signal during NAPI repair drains the parent scope before unlock", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "jazz-test-artifact-repair-signal-"));
+  const lockPath = join(fixture, "lock");
+  const repairing = join(fixture, "repairing");
+  const received = join(fixture, "received");
+  const stopped = join(fixture, "stopped");
+  const holder = childWithLock(
+    lockPath,
+    `await withArtifactBuildLock((scope) => buildTestArtifacts((command, args, label, { signal }) => {
+      if (label === 'load release NAPI') return Promise.reject(new Error('load failed'));
+      if (label === 'repair release NAPI') return new Promise((resolve) => {
+        fs.writeFileSync(${JSON.stringify(repairing)}, 'repairing');
+        const timer = setInterval(() => {}, 1000);
+        signal.addEventListener('abort', () => { fs.writeFileSync(${JSON.stringify(received)}, 'received'); setTimeout(() => { clearInterval(timer); fs.writeFileSync(${JSON.stringify(stopped)}, 'stopped'); resolve(); }, 150); }, { once: true });
+      });
+      return Promise.resolve();
+    }, scope));`,
+  );
+  try {
+    await waitFor(() => existsSync(repairing), "repair did not start");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    holder.child.kill("SIGTERM");
+    await waitFor(() => existsSync(received), "repair did not receive shutdown");
+    assert.equal(existsSync(lockPath), true, "lock released during repair shutdown");
+    assert.equal((await holder.closed).signal, "SIGTERM");
+    assert.equal(existsSync(stopped), true);
     assert.equal(existsSync(lockPath), false);
   } finally {
     holder.child.kill("SIGKILL");
@@ -371,6 +411,10 @@ test("CI uses the correctness artifact path while package builds keep release WA
   const pipeline = readFileSync(new URL("../build-test-artifacts.mjs", import.meta.url), "utf8");
   assert.match(workflow, /pnpm build:test-artifacts/);
   assert.match(packageJson, /"build:test-artifacts": "node dev\/gates\/build-test-artifacts\.mjs"/);
+  assert.match(
+    packageJson,
+    /"artifacts:unlock": "node dev\/gates\/build-test-artifacts\.mjs unlock"/,
+  );
   assert.match(
     packageJson,
     /"build:ci": "turbo run build:crates.*jazz-wasm.*jazz-napi.*jazz-tools/,
