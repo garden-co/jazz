@@ -108,3 +108,30 @@ invariants difficult to see.
 **Exit criteria:** New APIs use role-specific names, existing ambiguous APIs
 are renamed as touched, and architecture documents reserve “projection” for at
 most one clearly defined operation.
+
+### Route
+
+**Meaning today:** Metadata carried through a prepared or maintained query so
+an incremental result can be associated with the binding, claim value, source
+row, or nested result path that produced it. Depending on the call site, a
+“route field” may distinguish parameterized query instances, keep authorization
+results isolated, or address an included child inside a returned result tree.
+It is query-engine bookkeeping, not a network route and not public row data.
+
+**Why it is opaque:** “Route” does not say what is being associated or where it
+is going. The same word currently covers binding identity, incremental-result
+partitioning, and nested child addressing, which have different invariants.
+
+**Prefer:** Name the role: “binding identity field,” “claim partition key,”
+“result-instance key,” or “nested result path.” When several roles genuinely
+share one mechanism, describe it as “internal query association metadata.”
+
+**Design debt:** Internal association fields can travel beside public output
+fields and have repeatedly been mistaken for application columns. Their
+visibility and lifetime should be explicit in typed query plans so bindings,
+incremental updates, and decoders agree by construction.
+
+**Exit criteria:** Binding identity, result partitioning, and nested child
+addressing have role-specific types and names. Public-output schemas cannot
+contain this metadata, and new code, diagnostics, and design prose no longer
+need the unqualified term “route.”
