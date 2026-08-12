@@ -128,9 +128,78 @@ is propagation fan-out, not settlement. Gates (`[needs: column-delta]`, `[needs:
 text-merge]`, `[needs: payload-inventory]`) stay _visibly_ gated, never silently
 counted as measured.
 
+### C.6 Developer feedback throughput (implementation guidance)
+
+Compile, lint, and test latency is an implementation constraint: slow feedback
+reduces the number of correctness experiments and adversarial checks that fit in
+an engineering cycle. This section is non-normative and does not weaken any
+runtime, compatibility, or merge invariant. Changes to the feedback pipeline
+must retain an equivalent complete merge gate and must be justified with
+before/after GitHub job and step timings under `INV-PERF-1`.
+
+The optimization order is:
+
+1. remove duplicated or release-only work from correctness jobs;
+2. execute independent artifact builds and test partitions concurrently;
+3. make artifacts and compiler results safely reusable by source fingerprint;
+4. reduce compilation and test invalidation domains with deliberate boundaries;
+5. consider process or language boundaries only after measured pipeline waste is
+   removed.
+
+The August 2026 #1348 receipts identify two critical paths. `test-ts` took
+10m46s: 6m52s in `build:ci`, 42s rebuilding NAPI after it had already been
+built, and 1m57s in Node/browser tests. Its release WASM task took 3m37s, of
+which 1m23s was Rust compilation and the remainder was binding/`wasm-opt`
+work. NAPI compilation then took about 2m07s. `test-rust` reached its 15-minute
+job limit after spending about 2m40s compiling `cargo-nextest`, 1m55s compiling
+workspace tests, and roughly nine minutes executing a timeout-heavy suite.
+These receipts make orchestration and test completion the first targets, not a
+core-language rewrite.
+
+The near-term implementation plan is:
+
+- install pinned prebuilt test/build tools instead of compiling them per job;
+- remove duplicate Clippy and duplicate named-test execution;
+- give setup, compilation, and execution coherent separate budgets and retain
+  structured partial receipts on failure or cancellation;
+- use the existing fast, unoptimized WASM artifact for correctness tests while
+  retaining optimized WASM validation in package/publish workflows;
+- build NAPI once, verifying it before any conditional repair;
+- run independent WASM and NAPI builds concurrently;
+- shard the complete Rust inventory after removing per-shard setup taxes, then
+  evolve from deterministic hash partitions to receipt-driven balanced shards;
+- preserve fast PR diagnosis and a complete merge gate rather than silently
+  skipping coverage.
+
+Cache correctness precedes cache scale. Turbo task inputs should describe each
+artifact's actual dependency closure rather than all `crates/**/*.rs`; native
+artifacts remain content-addressed and provenance-checked. CI reports Turbo and
+`sccache` hit rates so a cache claim is observable. Active worktrees keep
+separate Cargo target directories to avoid lock contention and share compiled
+work through `sccache`. Optional fast linkers and local caches are detected
+accelerators, never prerequisites for colleagues outside the devbox setup.
+
+If those changes leave Rust invalidation as a major local bottleneck, prefer a
+small number of acyclic capability boundaries over microcrates. The first
+candidate is a lean Jazz engine (model, protocol, query, node, database, peer,
+and codecs) beneath native-only server, CLI, admin, and storage shells, with the
+existing `jazz` crate retaining a compatibility facade. A boundary is accepted
+only when measurements show that representative edits avoid rebuilding an
+unrelated outer layer.
+
+The binding architecture should also be tested against a thinner endpoint. A
+portable WASM runtime may serve browsers, ordinary Node consumers, and most
+cross-platform tests, while an optional thin NAPI host supplies only capabilities
+that require native storage, server integration, threading, or demonstrated
+performance. This is a measured architecture spike, not a commitment to remove
+NAPI: the test must compare capability coverage, artifact/build latency, runtime
+performance, and packaging complexity. Rewriting the engine in another language,
+introducing an unstable Rust dynamic-library boundary, or migrating build systems
+does not precede these lower-risk measurements.
+
 ### In flight & measured receipts (non-normative)
 
-_C.1–C.5 above are the durable performance discipline. The following is the live
+_C.1–C.6 above are the durable performance discipline. The following is the live
 performance backlog with measured receipts, profile shares, and accepted
 residuals, from the former `PERF.md`._
 
