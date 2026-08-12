@@ -850,6 +850,108 @@ describe("SubscriptionManager", () => {
     expect(result.all).toEqual([{ id, name: "logical", count: 7 }]);
   });
 
+  it("fails closed for missing, incompatible, unknown, or trailing terminal descriptors", () => {
+    const id = "00000000-0000-4000-8000-000000000001";
+    const key = [10, ...uuidBytes(id)];
+    const payload = Uint8Array.from([
+      ...uuidBytes(id),
+      ...encodeNativeRowValues(nativeColumns, [
+        { type: "Text", value: "logical" },
+        { type: "Integer", value: 7 },
+      ]),
+    ]);
+    const wrongOrder = terminalDescriptor([nativeColumns[1]!, nativeColumns[0]!]);
+    const wrongType = terminalDescriptor([
+      { ...nativeColumns[0]!, column_type: { type: "Integer" } },
+      nativeColumns[1]!,
+    ]);
+    const unknownTagWriter = new PostcardWriter();
+    writeDescriptor(unknownTagWriter, [
+      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+      { name: "name", valueType: { tag: 99 } },
+      { name: "count", valueType: { tag: 4 } },
+    ]);
+    const descriptors: Array<number[] | undefined> = [
+      undefined,
+      wrongOrder,
+      wrongType,
+      [...unknownTagWriter.finish()],
+      [...terminalDescriptor(nativeColumns), 0],
+    ];
+
+    for (const rootDescriptor of descriptors) {
+      const manager = new SubscriptionManager<TestItem>();
+      expect(() =>
+        manager.handleDelta(
+          {
+            __jazzNativeRowDelta: true,
+            added: new Uint8Array(),
+            removed: new Uint8Array(),
+            updated: new Uint8Array(),
+            addedCount: 0,
+            removedCount: 0,
+            updatedCount: 0,
+            terminalOperations: [
+              {
+                root_key: key,
+                ...(rootDescriptor === undefined ? {} : { rootDescriptor }),
+                path: [],
+                edit: { Insert: { index: 0, key, value: [...payload] } },
+              },
+            ],
+          },
+          transform,
+          nativeColumns,
+        ),
+      ).toThrow(/terminal (operation is missing its root descriptor|root descriptor)/);
+    }
+  });
+
+  it("accepts terminal root descriptors that retain sparse current-row carriers", () => {
+    const id = "00000000-0000-4000-8000-000000000001";
+    const key = [10, ...uuidBytes(id)];
+    const sparseColumns: ColumnDescriptor[] = [
+      { name: "name", column_type: { type: "Text" }, nullable: false, sparse: true },
+      { name: "ownerId", column_type: { type: "Uuid" }, nullable: true, sparse: true },
+    ];
+    const payload = Uint8Array.from([
+      ...uuidBytes(id),
+      ...encodeNativeRowValues(sparseColumns, [
+        { type: "Text", value: "logical" },
+        { type: "Null" },
+      ]),
+    ]);
+    const manager = new SubscriptionManager<{ id: string; name: string }>();
+    const transform = (row: WasmRow) => ({
+      id: row.id,
+      name: (row.values[0] as { type: "Text"; value: string }).value,
+    });
+
+    const result = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: key,
+            rootDescriptor: terminalDescriptor(sparseColumns),
+            path: [],
+            edit: { Insert: { index: 0, key, value: [...payload] } },
+          },
+        ],
+      },
+      transform,
+      sparseColumns,
+    );
+
+    expect(result.all).toEqual([{ id, name: "logical" }]);
+  });
+
   it("applies root insert positions in producer order after earlier removals", () => {
     const manager = new SubscriptionManager<TestItem>();
     const ids = {

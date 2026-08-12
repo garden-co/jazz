@@ -2755,7 +2755,10 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             set_prop(
                 &object,
                 "terminalOperations",
-                serde_wasm_bindgen::to_value(&terminal_operations_to_json(&terminal_operations)?)
+                terminal_operations_to_json(&terminal_operations)?
+                    .serialize(
+                        &serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true),
+                    )
                     .map_err(to_js_error)?,
             )?;
             set_prop(&object, "reset", JsValue::from_bool(reset))?;

@@ -693,12 +693,12 @@ function decodeNativeTerminalRoot(
   if (!operation.rootDescriptor) {
     throw new Error("terminal operation is missing its root descriptor");
   }
-  return decodeNativeTerminalRowWithDescriptor(
-    id,
-    readDescriptor(new PostcardReader(Uint8Array.from(operation.rootDescriptor))),
-    columns,
-    raw,
-  );
+  const reader = new PostcardReader(Uint8Array.from(operation.rootDescriptor));
+  const descriptor = readDescriptor(reader);
+  if (!reader.done()) {
+    throw new Error("terminal root descriptor has trailing bytes");
+  }
+  return decodeNativeTerminalRowWithDescriptor(id, descriptor, columns, raw);
 }
 
 export function isNativeRowDelta(delta: SubscriptionWireDelta): delta is NativeRowDelta {

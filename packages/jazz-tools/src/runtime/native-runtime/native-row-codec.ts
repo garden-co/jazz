@@ -416,9 +416,8 @@ export function decodeNativeTerminalRowWithDescriptor(
   columns: readonly ColumnDescriptor[],
   raw: Uint8Array,
 ): WasmRow {
-  if (descriptor.length !== columns.length + 1 || descriptor[0]?.valueType.tag !== 10) {
-    throw new Error("terminal root descriptor does not match the public projection");
-  }
+  assertTerminalRootDescriptorCompatible(descriptor, columns);
+  assertRecordLayoutIsComplete(descriptor, raw);
   const key = decodeRecordValue(descriptor, raw, 0);
   if (key == null || formatUuid(key) !== id) {
     throw new Error("terminal record key does not match addressed key");
@@ -437,6 +436,165 @@ export function decodeNativeTerminalRowWithDescriptor(
     configurable: true,
   });
   return row;
+}
+
+/**
+ * Verify that an operation-supplied terminal descriptor can describe this
+ * public projection.  This is intentionally stricter than layout matching:
+ * a same-width scalar of the wrong type can otherwise be decoded as a valid,
+ * but corrupt, public value.
+ */
+export function assertTerminalRootDescriptorCompatible(
+  descriptor: DescriptorField[],
+  columns: readonly ColumnDescriptor[],
+): void {
+  if (
+    descriptor.length !== columns.length + 1 ||
+    descriptor[0]?.valueType.tag !== 10 ||
+    !isKnownValueType(descriptor[0].valueType)
+  ) {
+    throw new Error("terminal root descriptor does not match the public projection");
+  }
+
+  const publicColumns = logicalStorageColumns(columns);
+  const matchesLogical = publicColumns.every((column, index) =>
+    terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, false),
+  );
+  const matchesPhysical = columns.every((column, index) =>
+    terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, false),
+  );
+  const matchesCurrentRow = publicColumns.every((column, index) =>
+    terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, true),
+  );
+  if (!matchesLogical && !matchesPhysical && !matchesCurrentRow) {
+    throw new Error("terminal root descriptor does not match the public projection");
+  }
+}
+
+function terminalValueTypeMatchesColumn(
+  valueType: ValueType | undefined,
+  column: ColumnDescriptor,
+  forceNullable: boolean,
+): boolean {
+  if (!valueType || !isKnownValueType(valueType)) return false;
+  if (column.sparse) {
+    return (
+      valueType.tag === 14 &&
+      valueType.inner !== undefined &&
+      terminalValueTypeMatchesColumn(
+        valueType.inner,
+        { ...column, sparse: undefined },
+        forceNullable,
+      )
+    );
+  }
+  if (forceNullable || column.nullable) {
+    return (
+      valueType.tag === 14 &&
+      valueType.inner !== undefined &&
+      terminalValueTypeMatchesColumn(valueType.inner, { ...column, nullable: false }, false)
+    );
+  }
+  switch (column.column_type.type) {
+    case "Boolean":
+      return valueType.tag === 7;
+    case "Integer":
+      return valueType.tag === 4;
+    case "BigInt":
+      return valueType.tag === 5;
+    case "Timestamp":
+      return valueType.tag === 3;
+    case "Double":
+      return valueType.tag === 6;
+    case "Text":
+    case "Json":
+    case "Enum":
+      return valueType.tag === 8;
+    case "Uuid":
+      return valueType.tag === 10;
+    case "Bytea":
+      return valueType.tag === 9;
+    case "Array":
+      return (
+        valueType.tag === 13 &&
+        valueType.inner !== undefined &&
+        terminalValueTypeMatchesColumn(
+          valueType.inner,
+          { name: column.name, column_type: column.column_type.element, nullable: false },
+          false,
+        )
+      );
+    case "Row":
+      // Terminal trees retain nested records, while ordinary packed rows use
+      // an opaque byte envelope. Both are sanctioned producer representations;
+      // any other variable-width type is not.
+      return (
+        valueType.tag === 9 ||
+        (valueType.tag === 15 &&
+          valueType.record !== undefined &&
+          valueType.record.length === column.column_type.columns.length + 1 &&
+          valueType.record[0]?.valueType.tag === 10 &&
+          column.column_type.columns.every((nested, index) =>
+            terminalValueTypeMatchesColumn(valueType.record?.[index + 1]?.valueType, nested, false),
+          ))
+      );
+  }
+}
+
+function isKnownValueType(valueType: ValueType): boolean {
+  switch (valueType.tag) {
+    case 0:
+    case 1:
+    case 2:
+    case 3:
+    case 4:
+    case 5:
+    case 6:
+    case 7:
+    case 8:
+    case 9:
+    case 10:
+      return true;
+    case 11:
+      return valueType.enumSchema?.variants !== undefined;
+    case 12:
+      return valueType.members !== undefined && valueType.members.every(isKnownValueType);
+    case 13:
+    case 14:
+      return valueType.inner !== undefined && isKnownValueType(valueType.inner);
+    case 15:
+      return (
+        valueType.record !== undefined &&
+        valueType.record.every((field) => isKnownValueType(field.valueType))
+      );
+    case 16:
+      return (
+        valueType.enumSchema?.cases !== undefined &&
+        valueType.enumSchema.cases.every((enumCase) =>
+          enumCase.payload.every((field) => isKnownValueType(field.valueType)),
+        )
+      );
+    default:
+      return false;
+  }
+}
+
+function assertRecordLayoutIsComplete(descriptor: DescriptorField[], raw: Uint8Array): void {
+  const layout = recordLayout(descriptor);
+  const variableCount = layout.variable.length;
+  const offsetTableLength = Math.max(0, variableCount - 1) * 4;
+  const variableStart = layout.fixedSize + offsetTableLength;
+  if (raw.length < variableStart || (variableCount === 0 && raw.length !== layout.fixedSize)) {
+    throw new Error("terminal record has trailing or truncated bytes");
+  }
+  let previous = variableStart;
+  for (let index = 0; index < variableCount - 1; index++) {
+    const next = readU32Le(raw, layout.fixedSize + index * 4);
+    if (next < previous || next > raw.length) {
+      throw new Error("terminal record has invalid variable-field offsets");
+    }
+    previous = next;
+  }
 }
 
 /**

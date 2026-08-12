@@ -719,6 +719,10 @@ export class PostcardReader {
     return Array.from({ length }, () => readItem(this));
   }
 
+  done(): boolean {
+    return this.offset === this.bytesValue.length;
+  }
+
   private readByte(): number {
     if (this.offset >= this.bytesValue.length) throw new Error("postcard eof");
     return this.bytesValue[this.offset++];

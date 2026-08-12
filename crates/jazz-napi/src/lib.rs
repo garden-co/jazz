@@ -2788,7 +2788,9 @@ mod tests {
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
         MergeableTxOps, Propagation as CorePropagation, SubscriptionEvent,
     };
+    use jazz::groove::ivm::{TerminalEdit, TerminalOperation};
     use jazz::groove::records::Value as CoreValue;
+    use jazz::groove::records::{RecordDescriptor, ValueType};
     use jazz::groove::schema::ColumnType as GrooveColumnType;
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
     use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
@@ -2965,6 +2967,38 @@ mod tests {
 
         assert!(payload.get("relation_delta").is_none());
         assert!(payload.get("output_mode").is_none());
+    }
+
+    #[test]
+    fn terminal_operations_use_json_objects_with_descriptor_bytes() {
+        let payload = super::terminal_operations_to_json(&[TerminalOperation {
+            root_descriptor: RecordDescriptor::new([
+                ("__jazz_terminal_row_key", ValueType::Uuid),
+                ("title", ValueType::String),
+            ]),
+            root_key: vec![10; 17],
+            path: Vec::new(),
+            edit: TerminalEdit::Insert {
+                index: 0,
+                key: vec![10; 17],
+                value: vec![0; 16],
+            },
+        }])
+        .expect("terminal operations serialize");
+
+        let operation = payload
+            .as_array()
+            .and_then(|operations| operations.first())
+            .and_then(serde_json::Value::as_object)
+            .expect("terminal operation is a JSON object");
+        assert!(operation.get("path").is_some());
+        assert!(operation.get("edit").is_some());
+        assert!(
+            operation
+                .get("rootDescriptor")
+                .is_some_and(serde_json::Value::is_array)
+        );
+        assert!(operation.get("root_descriptor").is_none());
     }
     /// A short-lived NAPI schema attachment must not own or abandon the
     /// owner-wide OpenBatch lifetime when its JS wrapper is collected.

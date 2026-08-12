@@ -1757,17 +1757,57 @@ export class NativeRuntimeAdapter implements Runtime {
         this.publishSubscriptionRows(subscription, packedResetRows, chunk.settled, true);
       } else {
         materializePackedResetRows(subscription, this.schema);
-        const applied = applySubscriptionDeltaWithWireDelta(
-          subscription.rows,
-          subscription.rowIndexByKey,
-          chunk.delta,
-          this.schema,
-          chunk.reset === true,
-          subscription.outputColumns,
-        );
+        let applied;
+        try {
+          applied = applySubscriptionDeltaWithWireDelta(
+            subscription.rows,
+            subscription.rowIndexByKey,
+            chunk.delta,
+            this.schema,
+            chunk.reset === true,
+            subscription.outputColumns,
+          );
+        } catch (error) {
+          const buffered = applySubscriptionDeltaToState(
+            subscription.rows,
+            subscription.rowIndexByKey,
+            chunk.delta,
+            this.schema,
+            chunk.reset === true,
+            subscription.outputColumns,
+          );
+          if (
+            subscriptionRowsRequireBufferedPublication(
+              buffered.rows,
+              this.schema,
+              subscription.outputColumns,
+            )
+          ) {
+            subscription.rows = buffered.rows;
+            subscription.rowIndexByKey = buffered.rowIndexByKey;
+            subscription.opened = true;
+            this.deferSubscriptionRows(
+              subscription,
+              chunk.terminalOperations,
+              chunk.reset === true,
+            );
+            return;
+          }
+          throw error;
+        }
         subscription.rows = applied.rows;
         subscription.rowIndexByKey = applied.rowIndexByKey;
         subscription.opened = true;
+        if (
+          subscriptionRowsRequireBufferedPublication(
+            subscription.rows,
+            this.schema,
+            subscription.outputColumns,
+          )
+        ) {
+          this.deferSubscriptionRows(subscription, chunk.terminalOperations, chunk.reset === true);
+          return;
+        }
         applied.wireDelta.terminalOperations = chunk.terminalOperations;
         this.publishSubscriptionRows(
           subscription,
@@ -1841,6 +1881,16 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private subscriptionCallbacksAreSettledGated(subscription: SubscriptionState): boolean {
     return (subscription.opts as { tier?: unknown }).tier === "global";
+  }
+
+  private deferSubscriptionRows(
+    subscription: SubscriptionState,
+    terminalOperations: NativeTerminalOperation[] | undefined,
+    reset: boolean,
+  ): void {
+    subscription.deferredVisiblePublication = true;
+    subscription.deferredVisibleReset ||= reset;
+    subscription.deferredTerminalOperations.push(...(terminalOperations ?? []));
   }
 
   private scheduleServerPump(): void {
@@ -3606,6 +3656,46 @@ export function applySubscriptionDeltaWithWireDelta(
   reset = false,
   outputColumns: SubscriptionOutputColumns | null = null,
 ): { rows: RowState[]; rowIndexByKey: Map<string, number>; wireDelta: NativeRowDelta } {
+  const { addedRows, updatedRows, removedEntries, rows, rowIndexByKey } =
+    applySubscriptionDeltaToState(
+      currentRows,
+      currentIndexByKey,
+      delta,
+      schema,
+      reset,
+      outputColumns,
+    );
+  return {
+    rows,
+    rowIndexByKey,
+    wireDelta: {
+      ...nativeDeltaFromChanges(
+        addedRows,
+        updatedRows,
+        removedEntries,
+        rowIndexByKey,
+        schema,
+        outputColumns,
+      ),
+      ...(reset ? { reset: true } : {}),
+    },
+  };
+}
+
+function applySubscriptionDeltaToState(
+  currentRows: RowState[],
+  currentIndexByKey: Map<string, number>,
+  delta: NativeSubscriptionDelta,
+  schema: WasmSchema,
+  reset = false,
+  outputColumns: SubscriptionOutputColumns | null = null,
+): {
+  addedRows: RowState[];
+  updatedRows: RowState[];
+  removedEntries: Array<{ id: string; index: number; resultKeyBytes?: Uint8Array }>;
+  rows: RowState[];
+  rowIndexByKey: Map<string, number>;
+} {
   const rowsByKey = reset
     ? new Map<string, RowState>()
     : new Map(currentRows.map((row) => [rowStateKey(row), row]));
@@ -3634,19 +3724,11 @@ export function applySubscriptionDeltaWithWireDelta(
   const rows = Array.from(rowsByKey.values());
   const rowIndexByKey = indexRowsByKey(rows);
   return {
+    addedRows,
+    updatedRows,
+    removedEntries,
     rows,
     rowIndexByKey,
-    wireDelta: {
-      ...nativeDeltaFromChanges(
-        addedRows,
-        updatedRows,
-        removedEntries,
-        rowIndexByKey,
-        schema,
-        outputColumns,
-      ),
-      ...(reset ? { reset: true } : {}),
-    },
   };
 }
 
@@ -4284,6 +4366,26 @@ function valuesForNativeFrame(row: RowState, columns: readonly ColumnDescriptor[
       (column.column_type.type === "Array" ? { type: "Array", value: [] } : { type: "Null" });
   }
   return values;
+}
+
+function subscriptionRowsRequireBufferedPublication(
+  rows: RowState[],
+  schema: WasmSchema,
+  outputColumns: SubscriptionOutputColumns | null,
+): boolean {
+  return rows.some((row) => {
+    const columns =
+      outputColumns && row.table === outputColumns.rootTable
+        ? outputColumns.rootColumns
+        : schema[row.table]?.columns;
+    if (!columns) return false;
+    return valuesForNativeFrame(row, logicalStorageColumns(columns)).some(
+      (value, index) =>
+        value.type === "Null" &&
+        logicalStorageColumns(columns)[index]?.nullable === false &&
+        logicalStorageColumns(columns)[index]?.column_type.type !== "Array",
+    );
+  });
 }
 
 function encodeNativeRemoves(removed: Array<{ id: string; index: number }>): Uint8Array {

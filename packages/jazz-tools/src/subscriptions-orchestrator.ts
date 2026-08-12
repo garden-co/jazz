@@ -143,6 +143,7 @@ interface InternalCacheEntry<T extends { id: string }> {
   rejectfulfilled: (error: unknown) => void;
   listeners: Set<QueryEntryCallbacks<T>>;
   cleanupTimeoutId: ReturnType<typeof setTimeout> | null;
+  emptyRefreshScheduled: boolean;
   unsubscribe?: () => void;
   status: UseAllState<T>["status"];
   error: unknown;
@@ -164,6 +165,11 @@ const SHARED_PENDING: UseAllStatePending<any> = {
 };
 
 interface DbLike {
+  all?<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+    session?: Session,
+  ): Promise<T[]> | T[];
   subscribeAll<T extends { id: string }>(
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
@@ -321,6 +327,7 @@ export class SubscriptionsOrchestrator {
       },
       listeners: new Set(),
       cleanupTimeoutId: null,
+      emptyRefreshScheduled: false,
       subscribe: (callbacks) => {
         this.cancelCleanup(entry);
         entry.listeners.add(callbacks);
@@ -421,6 +428,10 @@ export class SubscriptionsOrchestrator {
           if (entry.listeners.size === 0) {
             this.scheduleCleanup(entry);
           }
+
+          if (wasPending && data.length === 0) {
+            this.scheduleEmptyRefresh(entry);
+          }
         },
         entry.options,
         this.session ?? undefined,
@@ -437,6 +448,35 @@ export class SubscriptionsOrchestrator {
       }
       this.scheduleCleanup(entry);
     }
+  }
+
+  private scheduleEmptyRefresh<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
+    if (entry.emptyRefreshScheduled || !this.db.all) return;
+    entry.emptyRefreshScheduled = true;
+    setTimeout(() => {
+      entry.emptyRefreshScheduled = false;
+      if (!this.entries.has(entry.key)) return;
+      void Promise.resolve(this.db.all!(entry.query, entry.options, this.session ?? undefined))
+        .then((snapshot) => {
+          if (!this.entries.has(entry.key)) return;
+          if (entry.state.status === "rejected") return;
+          if (entry.state.status === "fulfilled" && entry.state.data.length > 0) return;
+          if (snapshot.length === 0) return;
+
+          entry.state = {
+            status: "fulfilled",
+            data: [...snapshot],
+            error: null,
+          };
+          entry.resolvefulfilled(snapshot);
+
+          for (const listener of Array.from(entry.listeners)) {
+            listener.onReset?.();
+            listener.onfulfilled?.(entry.state.data);
+          }
+        })
+        .catch(() => undefined);
+    }, 0);
   }
 
   /**

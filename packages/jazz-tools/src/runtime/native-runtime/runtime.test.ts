@@ -37,7 +37,7 @@ import {
 import { definePermissions } from "../../permissions/index.js";
 import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
-import { storageColumnValueType } from "./native-row-codec.js";
+import { encodeNativeNullValue, storageColumnValueType } from "./native-row-codec.js";
 import { createOpenBatchId, type BatchId, type OpenBatchId, type WriteReceipt } from "../client.js";
 
 function beginTestBatch(runtime: NativeRuntimeAdapter, userId?: string): OpenBatchId {
@@ -4430,6 +4430,66 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.close();
   });
 
+  it("buffers non-packed unsettled Gather resets until a settled row is public-shape compatible", () => {
+    const teamsSchema = {
+      teams: {
+        columns: [
+          { name: "name", column_type: { type: "Text" }, nullable: false },
+          { name: "org_id", column_type: { type: "Uuid" }, nullable: true },
+          { name: "parent_id", column_type: { type: "Uuid" }, nullable: true },
+        ],
+      },
+    } satisfies WasmSchema;
+    const rowId = uuidBytes("00000000-0000-0000-0000-000000000551");
+    const resultKey = typedOccurrenceKey("gather-root");
+    const runtime = runtimeWithNativeRelationSubscriptionChunks(
+      [
+        {
+          type: "delta",
+          reset: true,
+          settled: false,
+          delta: encodeTeamGatherSubscriptionDelta({
+            added: [{ rowId, name: null }],
+            addedOccurrenceKeys: [resultKey],
+          }),
+        },
+        {
+          type: "delta",
+          settled: true,
+          delta: encodeTeamGatherSubscriptionDelta({
+            updated: [{ rowId, name: "leaf" }],
+            updatedOccurrenceKeys: [resultKey],
+          }),
+        },
+      ],
+      teamsSchema,
+    );
+    const deltas: NativeRowDelta[] = [];
+    const handle = runtime.createSubscription(
+      JSON.stringify({ table: "teams", relation_ir: { Gather: {} } }),
+      null,
+      null,
+      null,
+    );
+
+    runtime.executeSubscription(handle, (delta: NativeRowDelta) => deltas.push(delta));
+
+    expect(deltas).toHaveLength(1);
+    expect(deltas[0]!.reset).toBe(true);
+    expect(decodeNativeDelta(deltas[0]!, teamsSchema.teams.columns)).toEqual([
+      {
+        kind: 0,
+        id: `result:${Array.from(resultKey, (byte) => byte.toString(16).padStart(2, "0")).join("")}`,
+        index: 0,
+        row: {
+          id: formatUuid(rowId),
+          values: [{ type: "Text", value: "leaf" }, { type: "Null" }, { type: "Null" }],
+        },
+      },
+    ]);
+    runtime.close();
+  });
+
   it("rewraps user field option bytes when packed reset frames filter engine records", () => {
     const schema = {
       notes: {
@@ -5791,7 +5851,10 @@ function runtimeWithNativeSubscriptionChunk(
   );
 }
 
-function runtimeWithNativeRelationSubscriptionChunks(chunks: unknown[]): NativeRuntimeAdapter {
+function runtimeWithNativeRelationSubscriptionChunks(
+  chunks: unknown[],
+  schema: WasmSchema = testSchema,
+): NativeRuntimeAdapter {
   return new NativeRuntimeAdapter(
     {
       openMemory: () =>
@@ -5806,7 +5869,7 @@ function runtimeWithNativeRelationSubscriptionChunks(chunks: unknown[]): NativeR
         throw new Error("not used");
       },
     } as never,
-    testSchema,
+    schema,
     new Uint8Array(16),
     new Uint8Array(16),
     1,
@@ -7249,6 +7312,85 @@ function encodeUserWrappedSubscriptionDelta(row: {
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
   return delta.finish();
+}
+
+function encodeTeamGatherSubscriptionDelta(delta: {
+  added?: Array<{ rowId: Uint8Array; name: string | null }>;
+  updated?: Array<{ rowId: Uint8Array; name: string | null }>;
+  addedOccurrenceKeys?: Uint8Array[];
+  updatedOccurrenceKeys?: Uint8Array[];
+}): Uint8Array {
+  const descriptor = [
+    { name: "row_uuid", valueType: { tag: 10 } },
+    { name: "user_name", valueType: { tag: 14, inner: { tag: 8 } } },
+    { name: "user_org_id", valueType: { tag: 14, inner: { tag: 10 } } },
+    { name: "user_parent_id", valueType: { tag: 14, inner: { tag: 10 } } },
+    { name: "$createdBy", valueType: { tag: 10 } },
+    { name: "$createdAt", valueType: { tag: 3 } },
+    { name: "$updatedBy", valueType: { tag: 10 } },
+    { name: "$updatedAt", valueType: { tag: 3 } },
+  ];
+  const added = delta.added ?? [];
+  const updated = delta.updated ?? [];
+  const writer = new PostcardWriter();
+  writeTeamGatherBatches(writer, added, descriptor);
+  writeTeamGatherBatches(writer, updated, descriptor);
+  writer.vec(() => undefined, 0);
+  for (const keys of [
+    delta.addedOccurrenceKeys ?? added.map((row) => Uint8Array.from([1, ...row.rowId])),
+    delta.updatedOccurrenceKeys ?? updated.map((row) => Uint8Array.from([1, ...row.rowId])),
+    [],
+  ]) {
+    writer.vec((key, index) => key.bytes(keys[index]!), keys.length);
+  }
+  return writer.finish();
+}
+
+function writeTeamGatherBatches(
+  writer: PostcardWriter,
+  rows: Array<{ rowId: Uint8Array; name: string | null }>,
+  descriptor: Array<{ name: string; valueType: { tag: number; inner?: { tag: number } } }>,
+): void {
+  writer.vec(
+    (batch) => {
+      batch.string("teams");
+      writeDescriptor(batch, descriptor);
+      batch.vec((row, index) => {
+        const source = rows[index]!;
+        row.bytes(source.rowId);
+        row.bool(false);
+        row.bytes(
+          createRecord(descriptor, [
+            source.rowId,
+            source.name === null
+              ? encodeNativeNullValue(descriptor[1]!.valueType)
+              : presentBytes(new TextEncoder().encode(source.name)),
+            encodeNativeNullValue(descriptor[2]!.valueType),
+            encodeNativeNullValue(descriptor[3]!.valueType),
+            uuidBytes("00000000-0000-0000-0000-0000000000aa"),
+            u64Bytes(123),
+            uuidBytes("00000000-0000-0000-0000-0000000000aa"),
+            u64Bytes(123),
+          ]),
+        );
+      }, rows.length);
+    },
+    rows.length === 0 ? 0 : 1,
+  );
+}
+
+function typedOccurrenceKey(label: string): Uint8Array {
+  const labelBytes = new TextEncoder().encode(label);
+  const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length);
+  key[0] = 2;
+  key.fill(1, 1, 17);
+  new DataView(key.buffer).setUint32(17, 1);
+  key.fill(2, 21, 37);
+  new DataView(key.buffer).setUint32(37, 1);
+  new DataView(key.buffer).setUint32(41, 0);
+  new DataView(key.buffer).setUint32(45, labelBytes.length);
+  key.set(labelBytes, 49);
+  return key;
 }
 
 function presentBytes(bytes: Uint8Array): Uint8Array {

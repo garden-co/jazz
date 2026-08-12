@@ -20,7 +20,11 @@ use crate::protocol::SyncMessage;
 use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_len};
 
 /// Current Jazz wire protocol version.
-pub const WIRE_PROTOCOL_VERSION: u16 = 6;
+/// Version 7 carries the exact root record descriptor for terminal operations
+/// inside `SyncMessage::ViewUpdate`.  This is a semantic payload-layout change:
+/// older peers cannot safely decode maintained terminal rows, so negotiation
+/// deliberately rejects them rather than guessing a layout.
+pub const WIRE_PROTOCOL_VERSION: u16 = 7;
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
@@ -732,8 +736,8 @@ mod tests {
             serde_json::to_value(frame).unwrap(),
             json!({
                 "Hello": {
-                    "min_protocol_version": 6,
-                    "max_protocol_version": 6,
+                    "min_protocol_version": WIRE_PROTOCOL_VERSION,
+                    "max_protocol_version": WIRE_PROTOCOL_VERSION,
                     "features": 5,
                     "role": "client",
                     "authority": null
@@ -1334,6 +1338,28 @@ mod tests {
 
         assert_eq!(err.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(err.retry, WireRetry::Never);
+    }
+
+    #[test]
+    fn current_wire_version_rejects_previous_release_peer() {
+        let remote = WireHello {
+            min_protocol_version: WIRE_PROTOCOL_VERSION - 1,
+            max_protocol_version: WIRE_PROTOCOL_VERSION - 1,
+            features: FEATURE_SYNC_MESSAGE_PAYLOAD,
+            role: WirePeerRole::Core,
+            authority: None,
+        };
+
+        let error = negotiate_wire(
+            &remote,
+            WIRE_PROTOCOL_VERSION,
+            WIRE_PROTOCOL_VERSION,
+            FEATURE_SYNC_MESSAGE_PAYLOAD,
+        )
+        .expect_err("terminal descriptor protocol must not negotiate with an old peer");
+
+        assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+        assert_eq!(error.retry, WireRetry::Never);
     }
 
     #[test]
