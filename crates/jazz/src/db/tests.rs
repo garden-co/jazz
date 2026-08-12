@@ -546,6 +546,34 @@ fn owner_id_public_schema() -> JazzSchema {
     .with_write_policy(Policy::public())])
 }
 
+fn owner_id_session_write_schema() -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "messages",
+        [
+            ColumnSchema::new("body", ColumnType::String),
+            ColumnSchema::new("owner_id", ColumnType::String),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::shape(
+        Query::from("messages").filter(eq(col("owner_id"), claim("user_id"))),
+    ))])
+}
+
+fn owner_uuid_session_write_schema() -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "messages",
+        [
+            ColumnSchema::new("body", ColumnType::String),
+            ColumnSchema::new("owner_id", ColumnType::Uuid),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::shape(
+        Query::from("messages").filter(eq(col("owner_id"), claim("user_id"))),
+    ))])
+}
+
 fn benchmark_shaped_recursive_reachable_read_schema() -> JazzSchema {
     let resource_policy = Policy::shape(
         Query::from("res_a")
@@ -15049,6 +15077,185 @@ fn session_upload_uses_connection_identity_for_write_policy() {
     let rows = server.read(&Query::from("todos")).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), row);
+}
+
+// This sync-boundary test is intentionally lower-level: the public policy
+// test app reaches this same prepared server write-policy path, but cannot
+// distinguish a malformed prepared claim binding from an ordinary denial.
+#[test]
+fn admitted_server_prepared_write_policy_binds_text_user_id_claim() {
+    let schema = owner_id_session_write_schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let alice_client = open_db(0xa1, alice, &schema);
+    let bob_client = open_db(0xb2, bob, &schema);
+    let alice_claims = BTreeMap::from([(
+        "user_id".to_owned(),
+        Value::String("alice-subject".to_owned()),
+    )]);
+    alice_client.set_identity_claims(alice, alice_claims.clone());
+    let bob_claims = BTreeMap::from([(
+        "user_id".to_owned(),
+        Value::String("bob-subject".to_owned()),
+    )]);
+    bob_client.set_identity_claims(bob, bob_claims.clone());
+
+    let (alice_transport, alice_server_transport) = duplex();
+    let _alice_upstream = alice_client.connect_upstream(alice_transport);
+    let _alice_subscriber =
+        server.accept_subscriber_with_claims(alice_server_transport, alice, alice_claims);
+    let (bob_transport, bob_server_transport) = duplex();
+    let _bob_upstream = bob_client.connect_upstream(bob_transport);
+    let _bob_subscriber =
+        server.accept_subscriber_with_claims(bob_server_transport, bob, bob_claims);
+
+    let accepted = alice_client
+        .insert(
+            "messages",
+            BTreeMap::from([
+                (
+                    "body".to_owned(),
+                    Value::String("owned by alice".to_owned()),
+                ),
+                (
+                    "owner_id".to_owned(),
+                    Value::String("alice-subject".to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+    alice_client.tick().unwrap();
+    server.tick().unwrap();
+    alice_client.tick().unwrap();
+    assert_eq!(
+        block_on(accepted.wait(DurabilityTier::Global)).unwrap(),
+        accepted.mergeable_tx_id(),
+        "the admitted server must bind public session.user_id as Text in its prepared write-policy plan"
+    );
+
+    let denied = bob_client
+        .insert_with_id_for_identity(
+            bob,
+            "messages",
+            row(0xb2),
+            BTreeMap::from([
+                (
+                    "body".to_owned(),
+                    Value::String("spoofed by bob".to_owned()),
+                ),
+                (
+                    "owner_id".to_owned(),
+                    Value::String("alice-subject".to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+    assert_authority_rejects_staged_write(&bob_client, &server, &denied);
+    let rows = server.read(&Query::from("messages")).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), accepted.row_uuid());
+}
+
+#[test]
+fn admitted_server_prepared_write_policy_coerces_string_user_id_to_uuid_column() {
+    let schema = owner_uuid_session_write_schema();
+    let alice = AuthorId::from_bytes([0xa3; 16]);
+    let bob = AuthorId::from_bytes([0xb3; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let alice_client = open_db(0xa3, alice, &schema);
+    let bob_client = open_db(0xb3, bob, &schema);
+    let alice_claims = BTreeMap::from([("user_id".to_owned(), Value::String(alice.0.to_string()))]);
+    let bob_claims = BTreeMap::from([("user_id".to_owned(), Value::String(bob.0.to_string()))]);
+    alice_client.set_identity_claims(alice, alice_claims.clone());
+    bob_client.set_identity_claims(bob, bob_claims.clone());
+
+    let (alice_transport, alice_server_transport) = duplex();
+    let _alice_upstream = alice_client.connect_upstream(alice_transport);
+    let _alice_subscriber =
+        server.accept_subscriber_with_claims(alice_server_transport, alice, alice_claims);
+    let (bob_transport, bob_server_transport) = duplex();
+    let _bob_upstream = bob_client.connect_upstream(bob_transport);
+    let _bob_subscriber =
+        server.accept_subscriber_with_claims(bob_server_transport, bob, bob_claims);
+
+    let accepted = alice_client
+        .insert(
+            "messages",
+            BTreeMap::from([
+                (
+                    "body".to_owned(),
+                    Value::String("owned by alice".to_owned()),
+                ),
+                ("owner_id".to_owned(), Value::Uuid(alice.0)),
+            ]),
+        )
+        .unwrap();
+    alice_client.tick().unwrap();
+    server.tick().unwrap();
+    alice_client.tick().unwrap();
+    assert_eq!(
+        block_on(accepted.wait(DurabilityTier::Global)).unwrap(),
+        accepted.mergeable_tx_id(),
+        "the prepared descriptor must preserve UUID policy columns while coercing public user_id text"
+    );
+
+    let denied = bob_client
+        .insert_with_id_for_identity(
+            bob,
+            "messages",
+            row(0xb3),
+            BTreeMap::from([
+                (
+                    "body".to_owned(),
+                    Value::String("spoofed by bob".to_owned()),
+                ),
+                ("owner_id".to_owned(), Value::Uuid(alice.0)),
+            ]),
+        )
+        .unwrap();
+    assert_authority_rejects_staged_write(&bob_client, &server, &denied);
+    let rows = server.read(&Query::from("messages")).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), accepted.row_uuid());
+}
+
+#[test]
+fn admitted_server_prepared_write_policy_fails_closed_for_wrong_user_id_type() {
+    let schema = owner_id_session_write_schema();
+    let author = AuthorId::from_bytes([0xa4; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xa4, author, &schema);
+    let claims = BTreeMap::from([("user_id".to_owned(), Value::Bool(true))]);
+    client.set_identity_claims(author, claims.clone());
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber_with_claims(server_transport, author, claims);
+    let write = client
+        .insert(
+            "messages",
+            BTreeMap::from([
+                (
+                    "body".to_owned(),
+                    Value::String("must not ingest".to_owned()),
+                ),
+                ("owner_id".to_owned(), Value::String("true".to_owned())),
+            ]),
+        )
+        .unwrap();
+
+    client.tick().unwrap();
+    let error = server.tick().unwrap_err();
+    assert!(
+        error.to_string().contains("user_id has wrong type"),
+        "a non-coercible claim must fail before authorization support can admit the write: {error}"
+    );
+    assert!(
+        server.read(&Query::from("messages")).unwrap().is_empty(),
+        "a malformed session claim must never ingest a protected row"
+    );
+    drop(write);
 }
 
 #[test]
