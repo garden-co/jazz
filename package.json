@@ -8,7 +8,7 @@
     "test:tooling": "sh dev/scripts/clippy-staged.test.sh",
     "test:turbo-cache-inputs": "node dev/gates/test/turbo-cache-inputs.test.mjs",
     "test:tooling:real": "sh dev/scripts/clippy-staged.real.test.sh",
-    "test:ci-workflow": "node --test dev/gates/test/ci-rust-throughput.test.mjs",
+    "test:ci-workflow": "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs",
     "ensure:rust-toolchain": "rustup target add wasm32-unknown-unknown && (wasm-pack --version >/dev/null 2>&1 || cargo install wasm-pack@0.13.1 --locked)",
     "build:vercel-docs": "bash dev/scripts/install-vercel-deps.sh && turbo run --env-mode=loose build:crates --filter=@jazz/rust && turbo run --env-mode=loose build --filter=docs --only",
     "build:vercel-inspector": "pnpm --filter inspector run build:vercel",
