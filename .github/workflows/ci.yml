@@ -31,7 +31,9 @@ jobs:
   # one property we can guarantee, and is fast and flake-free. Promote the other
   # jobs to gates individually as each goes green.
   build-integration:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Trusted branches use the persistent runner; fork PRs remain isolated on
+    # hosted infrastructure because this job executes repository code.
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'blacksmith-4vcpu-ubuntu-2404' || 'jazz-ci' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -40,6 +42,7 @@ jobs:
         with:
           rust-targets: wasm32-unknown-unknown
           sccache: "true"
+          sccache-sticky-disk: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'true' || 'false' }}
 
       - run: cargo check --workspace --all-targets
 
@@ -103,7 +106,7 @@ jobs:
           JAZZ_SEED_COUNT=50 cargo test -p jazz m3_maintained_one_shot_differential_oracle
 
   test-ts:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'blacksmith-4vcpu-ubuntu-2404' || 'jazz-ci' }}
     timeout-minutes: 20
     # JAZZ_NAPI_RELEASE=0 (debug builds) removed 2026-07-19: debug-profile
     # jazz-napi .node files fail dlopen on the Linux runners deterministically
@@ -117,6 +120,7 @@ jobs:
           rust-targets: wasm32-unknown-unknown
           rust-components: clippy,rustfmt
           sccache: "true"
+          sccache-sticky-disk: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'true' || 'false' }}
 
       - name: Install WASM packager
         # Only this job builds jazz-wasm. Other Rust jobs receive their target
