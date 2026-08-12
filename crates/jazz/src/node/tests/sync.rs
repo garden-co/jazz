@@ -703,6 +703,98 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
     assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 0);
 }
 
+#[test]
+fn receiver_batch_merges_complementary_projections_for_same_version() {
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(2));
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let row_uuid = row(1);
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("visible")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected commit unit");
+    };
+    let [fate] = core
+        .ingest_commit_unit(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate {
+        global_seq: Some(global_seq),
+        durability: Some(durability),
+        ..
+    } = fate
+    else {
+        panic!("expected accepted fate");
+    };
+    let full = versions.into_iter().next().unwrap();
+    let hidden = VersionRecord::encode(
+        &schema().tables[0],
+        full.schema_version(),
+        full.row_uuid(),
+        full.parents(),
+        full.created_by(),
+        full.created_at(),
+        full.updated_by(),
+        full.updated_at(),
+        &[None],
+        full.deletion(),
+    )
+    .unwrap()
+    .with_authored_columns(full.authored_columns().cloned());
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let update = |version, result_member_adds| ViewUpdateParts {
+        subscription,
+        settled_through: global_seq,
+        defer_settlement: false,
+        reset_result_set: false,
+        version_carriers: Vec::new(),
+        version_bundles: vec![VersionBundle {
+            tx: tx.clone(),
+            versions: vec![version],
+            fate: Fate::Accepted,
+            global_seq: Some(global_seq),
+            durability,
+        }],
+        peer_complete_tx_payload_refs: Vec::new(),
+        authorization_progress: None,
+        result_member_adds,
+        result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    };
+
+    reader
+        .apply_view_updates_in_batch(vec![
+            update(hidden, Vec::new()),
+            update(
+                full,
+                vec![ResultMemberEntry::row((
+                    "todos".to_owned().into(),
+                    row_uuid,
+                    tx_id,
+                ))],
+            ),
+        ])
+        .unwrap();
+
+    assert_eq!(
+        reader
+            .subscription_current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row_uuid, title_cells("visible"))])
+    );
+    assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 1);
+    assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 0);
+}
+
 // This stays internal because it directly exercises the protocol receiver's
 // single-message fragment assembly boundary.
 #[test]
