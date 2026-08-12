@@ -895,7 +895,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     runtime.unsubscribe(handle);
   });
 
-  it("applies session ownership policy to local native NAPI inserts and reads", async () => {
+  it("stages client-local session writes without treating a session as serving authority", async () => {
     const { NapiDb } = await loadNapiModule();
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
@@ -937,33 +937,28 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { type: "Text", value: ALICE_ID },
     ]);
 
-    try {
-      const foreignOwnerTodo = runtime.insert(
-        "todos",
-        {
-          title: { type: "Text", value: "alice cannot claim bob" },
-          done: { type: "Boolean", value: false },
-          owner_id: { type: "Text", value: BOB_ID },
-        },
-        aliceSession,
-      );
-      await runtime.waitForTransaction(await committedBatchId(foreignOwnerTodo), "local");
-    } catch (error) {
-      if (!String(error).includes("policy denied INSERT on table todos")) throw error;
-    }
+    const foreignOwnerTodo = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "alice locally stages bob-owned row" },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: BOB_ID },
+      },
+      aliceSession,
+    );
+    await runtime.waitForTransaction(await committedBatchId(foreignOwnerTodo), "local");
 
     const aliceRowsAfterForeignOwnerInsert = await runtime.query(
       JSON.stringify({ table: "todos" }),
       aliceSession,
       "local",
     );
-    expect(aliceRowsAfterForeignOwnerInsert).toHaveLength(1);
-    expect(aliceRowsAfterForeignOwnerInsert).toEqual([
-      expect.objectContaining({
-        id: aliceTodo.id,
-        table: "todos",
-      }),
-    ]);
+    expect(aliceRowsAfterForeignOwnerInsert).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: aliceTodo.id, table: "todos" }),
+        expect.objectContaining({ id: foreignOwnerTodo.id, table: "todos" }),
+      ]),
+    );
 
     const bobTodo = runtime.insert(
       "todos",
@@ -981,23 +976,17 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       aliceSession,
       "local",
     );
-    expect(aliceRowsAfterBobInsert).toHaveLength(1);
-    expect(aliceRowsAfterBobInsert).toEqual([
-      expect.objectContaining({
-        id: aliceTodo.id,
-        table: "todos",
-      }),
-    ]);
-    expect(
-      (aliceRowsAfterBobInsert as Array<{ values: unknown[] }>)[0]?.values.slice(0, 3),
-    ).toEqual([
-      { type: "Text", value: "alice local row" },
-      { type: "Boolean", value: false },
-      { type: "Text", value: ALICE_ID },
-    ]);
+    expect(aliceRowsAfterBobInsert).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: aliceTodo.id, table: "todos" }),
+        expect.objectContaining({ id: foreignOwnerTodo.id, table: "todos" }),
+        expect.objectContaining({ id: bobTodo.id, table: "todos" }),
+      ]),
+    );
+    expect(aliceRowsAfterBobInsert).toHaveLength(3);
   });
 
-  it("applies session ownership policy to native NAPI subscriptions", async () => {
+  it("delivers all client-local subscription rows even when callers supply sessions", async () => {
     const { NapiDb } = await loadNapiModule();
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
@@ -1051,14 +1040,20 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       runtime.waitForTransaction(await committedBatchId(bobTodo), "local"),
     ]);
 
-    expect(await runtime.query(query, aliceSession, "local")).toEqual([
-      expect.objectContaining({ id: aliceTodo.id }),
-    ]);
-    expect(await runtime.query(query, bobSession, "local")).toEqual([
-      expect.objectContaining({ id: bobTodo.id }),
-    ]);
+    await expect(runtime.query(query, aliceSession, "local")).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: aliceTodo.id }),
+        expect.objectContaining({ id: bobTodo.id }),
+      ]),
+    );
+    await expect(runtime.query(query, bobSession, "local")).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: aliceTodo.id }),
+        expect.objectContaining({ id: bobTodo.id }),
+      ]),
+    );
 
-    expect(aliceUpdates).toHaveLength(2);
+    expect(aliceUpdates).toHaveLength(3);
     expect(decodeAliceDelta(aliceUpdates[1])).toEqual(
       expect.objectContaining({
         all: [expect.objectContaining({ id: aliceTodo.id })],
@@ -1078,34 +1073,17 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         ],
       }),
     );
-    expect(aliceUpdates).toEqual([
-      expect.objectContaining({ __jazzNativeRowDelta: true, addedCount: 0 }),
-      expect.objectContaining({
-        __jazzNativeRowDelta: true,
-        addedCount: 1,
-        removedCount: 0,
-        updatedCount: 0,
-      }),
+    expect(decodeAliceDelta(aliceUpdates[2]).all).toEqual([
+      expect.objectContaining({ id: bobTodo.id }),
     ]);
-    expect(decodeAliceDelta(aliceUpdates[1]).delta).toEqual([
-      expect.objectContaining({
-        kind: 0,
-        id: aliceTodo.id,
-        item: expect.objectContaining({
-          id: aliceTodo.id,
-          values: [
-            { type: "Text", value: "alice subscribed row" },
-            { type: "Boolean", value: false },
-            { type: "Text", value: ALICE_ID },
-          ],
-        }),
-      }),
+    expect(decodeAliceDelta(aliceUpdates[2]).delta).toEqual([
+      expect.objectContaining({ kind: 0, id: bobTodo.id }),
     ]);
 
     runtime.unsubscribe(aliceHandle);
   });
 
-  it("isolates two session identities sharing one native NAPI runtime for owned deletes", async () => {
+  it("uses session identity for trusted-serving NAPI reads", async () => {
     const { NapiDb } = await loadNapiModule();
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
@@ -1114,6 +1092,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       deterministicBytes("jazz-napi-native-runtime-delete-policy:author"),
       12,
       true,
+      { readAuthorizationHost: "trusted-serving" },
     );
     const aliceSession = JSON.stringify({ user_id: ALICE_ID });
     const bobSession = JSON.stringify({ user_id: BOB_ID });
@@ -1142,30 +1121,31 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       runtime.waitForTransaction(await committedBatchId(bobTodo), "local"),
     ]);
 
-    expect(() => runtime.delete("todos", bobTodo.id, aliceSession)).toThrow(
-      'Delete failed: WriteError("policy denied DELETE on table todos")',
-    );
-    expect(() => runtime.delete("todos", aliceTodo.id, bobSession)).toThrow(
-      'Delete failed: WriteError("policy denied DELETE on table todos")',
-    );
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local"),
+    ).resolves.toEqual([expect.objectContaining({ id: aliceTodo.id })]);
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), bobSession, "local"),
+    ).resolves.toEqual([expect.objectContaining({ id: bobTodo.id })]);
 
-    const aliceDelete = runtime.delete("todos", aliceTodo.id, aliceSession);
-    const bobDelete = runtime.delete("todos", bobTodo.id, bobSession);
-
+    // This adapter's direct writes are advisory: capture both cross-identity
+    // deletes and prove their local effects through identity-scoped reads.
+    const aliceDeletesBob = runtime.delete("todos", bobTodo.id, aliceSession);
+    const bobDeletesAlice = runtime.delete("todos", aliceTodo.id, bobSession);
     await Promise.all([
-      runtime.waitForTransaction(await committedBatchId(aliceDelete), "local"),
-      runtime.waitForTransaction(await committedBatchId(bobDelete), "local"),
+      runtime.waitForTransaction(await committedBatchId(aliceDeletesBob), "local"),
+      runtime.waitForTransaction(await committedBatchId(bobDeletesAlice), "local"),
     ]);
 
-    await expect(runtime.query(JSON.stringify({ table: "todos" }), aliceSession)).resolves.toEqual(
-      [],
-    );
-    await expect(runtime.query(JSON.stringify({ table: "todos" }), bobSession)).resolves.toEqual(
-      [],
-    );
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local"),
+    ).resolves.toEqual([]);
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), bobSession, "local"),
+    ).resolves.toEqual([]);
   });
 
-  it("isolates two session identities sharing one upstream native NAPI runtime for owned deletes", async () => {
+  it("does not authenticate client-local session identities to an upstream authority", async () => {
     globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
 
     const { NapiDb } = await loadNapiModule();
@@ -1214,46 +1194,22 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     );
 
     await Promise.all([
-      waitForPromise(
-        runtime.waitForTransaction(await committedBatchId(aliceTodo), "edge"),
-        "alice insert did not settle at edge",
-      ),
-      waitForPromise(
-        runtime.waitForTransaction(await committedBatchId(bobTodo), "edge"),
-        "bob insert did not settle at edge",
-      ),
+      runtime.waitForTransaction(await committedBatchId(aliceTodo), "local"),
+      runtime.waitForTransaction(await committedBatchId(bobTodo), "local"),
     ]);
-
-    expect(() => runtime.delete("todos", bobTodo.id, aliceSession)).toThrow(
-      'Delete failed: WriteError("policy denied DELETE on table todos")',
-    );
-    expect(() => runtime.delete("todos", aliceTodo.id, bobSession)).toThrow(
-      'Delete failed: WriteError("policy denied DELETE on table todos")',
-    );
-
-    const aliceDelete = runtime.delete("todos", aliceTodo.id, aliceSession);
-    const bobDelete = runtime.delete("todos", bobTodo.id, bobSession);
-
-    await Promise.all([
-      waitForPromise(
-        runtime.waitForTransaction(await committedBatchId(aliceDelete), "edge"),
-        "alice delete did not settle at edge",
-      ),
-      waitForPromise(
-        runtime.waitForTransaction(await committedBatchId(bobDelete), "edge"),
-        "bob delete did not settle at edge",
-      ),
-    ]);
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local"),
+    ).resolves.toHaveLength(2);
 
     await expect(
-      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "edge"),
-    ).resolves.toEqual([]);
+      runtime.waitForTransaction(await committedBatchId(aliceTodo), "edge"),
+    ).rejects.toThrow("AuthorizationDenied");
     await expect(
-      runtime.query(JSON.stringify({ table: "todos" }), bobSession, "edge"),
-    ).resolves.toEqual([]);
+      runtime.waitForTransaction(await committedBatchId(bobTodo), "edge"),
+    ).rejects.toThrow("AuthorizationDenied");
   }, 15_000);
 
-  it("isolates two session identities sharing one persistent upstream native NAPI runtime for owned deletes", async () => {
+  it("keeps persistent client-local session writes optimistic until the authority rejects them", async () => {
     globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
 
     const { NapiDb } = await loadNapiModule();
@@ -1309,43 +1265,19 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       );
 
       await Promise.all([
-        waitForPromise(
-          runtime.waitForTransaction(await committedBatchId(aliceTodo), "edge"),
-          "alice persistent insert did not settle at edge",
-        ),
-        waitForPromise(
-          runtime.waitForTransaction(await committedBatchId(bobTodo), "edge"),
-          "bob persistent insert did not settle at edge",
-        ),
+        runtime.waitForTransaction(await committedBatchId(aliceTodo), "local"),
+        runtime.waitForTransaction(await committedBatchId(bobTodo), "local"),
       ]);
-
-      expect(() => runtime.delete("todos", bobTodo.id, aliceSession)).toThrow(
-        'Delete failed: WriteError("policy denied DELETE on table todos")',
-      );
-      expect(() => runtime.delete("todos", aliceTodo.id, bobSession)).toThrow(
-        'Delete failed: WriteError("policy denied DELETE on table todos")',
-      );
-
-      const aliceDelete = runtime.delete("todos", aliceTodo.id, aliceSession);
-      const bobDelete = runtime.delete("todos", bobTodo.id, bobSession);
-
-      await Promise.all([
-        waitForPromise(
-          runtime.waitForTransaction(await committedBatchId(aliceDelete), "edge"),
-          "alice persistent delete did not settle at edge",
-        ),
-        waitForPromise(
-          runtime.waitForTransaction(await committedBatchId(bobDelete), "edge"),
-          "bob persistent delete did not settle at edge",
-        ),
-      ]);
+      await expect(
+        runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local"),
+      ).resolves.toHaveLength(2);
 
       await expect(
-        runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "edge"),
-      ).resolves.toEqual([]);
+        runtime.waitForTransaction(await committedBatchId(aliceTodo), "edge"),
+      ).rejects.toThrow("AuthorizationDenied");
       await expect(
-        runtime.query(JSON.stringify({ table: "todos" }), bobSession, "edge"),
-      ).resolves.toEqual([]);
+        runtime.waitForTransaction(await committedBatchId(bobTodo), "edge"),
+      ).rejects.toThrow("AuthorizationDenied");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
