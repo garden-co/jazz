@@ -6257,7 +6257,12 @@ impl CurrentRow {
             .filter_map(|(idx, field)| {
                 let name = field.name.as_ref()?.as_str();
                 let name = if name.starts_with("user_") {
-                    self::query_engine::logical_user_column(name).to_owned()
+                    let name = self::query_engine::logical_user_column(name);
+                    self::query_engine::aggregate_output_logical_name(name)
+                        .unwrap_or(name)
+                        .to_owned()
+                } else if let Some(name) = self::query_engine::aggregate_output_logical_name(name) {
+                    name.to_owned()
                 } else if matches!(field.value_type, records::ValueType::Nullable(_))
                     && !matches!(name, "authored_columns" | "settle_position")
                 {

@@ -2582,6 +2582,9 @@ pub(crate) fn binding_id_for_values(values: &BTreeMap<String, Value>) -> Binding
 /// Query validation error.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum QueryError {
+    /// Aggregate aliases cannot occupy compiler-owned output names.
+    #[error("aggregate alias {0} uses a reserved compiler namespace")]
+    ReservedAggregateAlias(String),
     /// Flat tuple output currently has a deliberately narrow executable envelope.
     #[error("flat join cannot be combined with {feature}")]
     UnsupportedFlatJoinCombination {
@@ -2961,6 +2964,9 @@ fn validate_aggregate(table: &TableSchema, aggregate: &AggregateQuery) -> Result
         planner_column_type(table, group_by)?;
     }
     for aggregate in &aggregate.aggregates {
+        if aggregate.alias.starts_with("__jazz_aggregate_") {
+            return Err(QueryError::ReservedAggregateAlias(aggregate.alias.clone()));
+        }
         match aggregate.function {
             AggregateFunction::Count => {
                 if let Some(column) = &aggregate.column {
@@ -4978,6 +4984,26 @@ mod tests {
             .validate(&schema())
             .unwrap_err();
         assert!(matches!(err, QueryError::UnknownColumn { .. }));
+
+        let valid_user_alias = Query::from("issues")
+            .aggregate([Aggregate::sum("priority").alias("user_total")])
+            .validate(&schema())
+            .expect("explicit aliases are logical names, not compiler fields");
+        assert_eq!(
+            valid_user_alias
+                .query()
+                .aggregate
+                .as_ref()
+                .unwrap()
+                .aggregates[0]
+                .alias,
+            "user_total"
+        );
+        let err = Query::from("issues")
+            .aggregate([Aggregate::sum("priority").alias("__jazz_aggregate_user_total")])
+            .validate(&schema())
+            .unwrap_err();
+        assert!(matches!(err, QueryError::ReservedAggregateAlias(_)));
 
         let err = Query::from("issues")
             .count()

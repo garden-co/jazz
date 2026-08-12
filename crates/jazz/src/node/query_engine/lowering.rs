@@ -4726,7 +4726,7 @@ fn lower_aggregate(
     fields.extend(
         outputs
             .iter()
-            .map(|aggregate| logical_user_column(&aggregate.output.name).to_owned()),
+            .map(|aggregate| aggregate_output_field(&aggregate.output.name)),
     );
     Ok(LoweredRelationInput {
         graph: GraphBuilder::aggregate(graph, group_cols, aggregates),
@@ -4762,7 +4762,7 @@ fn lower_aggregate_expr(
         },
         expression,
         distinct: false,
-        output_name: Some(logical_user_column(&aggregate.output.name).to_owned()),
+        output_name: Some(aggregate_output_field(&aggregate.output.name)),
     })
 }
 
@@ -7712,7 +7712,7 @@ fn fact_terminal_graph(
                             ) =>
                     {
                         graph.filter(GroovePredicateExpr::Neq {
-                            field: logical_user_column(&outputs[0].output.name).to_owned(),
+                            field: aggregate_output_field(&outputs[0].output.name),
                             value: LiteralValue::U64(0),
                         })
                     }
@@ -8096,7 +8096,7 @@ fn aggregate_app_row_descriptor(
             .iter()
             .map(|output| {
                 Ok((
-                    logical_user_column(&output.output.name).to_owned(),
+                    aggregate_output_field(&output.output.name),
                     aggregate_output_value_type(output, source)?,
                 ))
             })
@@ -8182,7 +8182,7 @@ fn aggregate_result_membership_fields(
     // runtime boundary, so it cannot be mistaken for row version metadata.
     if let Some(first_output) = outputs.first() {
         fields.push(ProjectField::renamed(
-            logical_user_column(&first_output.output.name),
+            aggregate_output_field(&first_output.output.name),
             "synthetic_replacement",
         ));
     } else {
@@ -8198,7 +8198,7 @@ fn aggregate_result_membership_fields(
     fields.extend(
         outputs
             .iter()
-            .map(|output| ProjectField::named(logical_user_column(&output.output.name))),
+            .map(|output| ProjectField::named(aggregate_output_field(&output.output.name))),
     );
     fields.extend(routing_param_fields.into_iter().map(ProjectField::named));
     Ok(fields)
@@ -8228,7 +8228,7 @@ fn aggregate_typed_output_field(
     source: &ResolvedSource,
 ) -> CapabilityResult<TypedOutputField> {
     Ok(TypedOutputField {
-        name: logical_user_column(&output.output.name).to_owned(),
+        name: aggregate_output_field(&output.output.name),
         ty: aggregate_output_value_type(output, source)?,
     })
 }

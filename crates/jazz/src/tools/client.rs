@@ -2104,7 +2104,11 @@ fn aggregate_public_values(
     let Some(aggregate) = &query.aggregate else {
         return Ok(Vec::new());
     };
-    let mut columns: Vec<(String, Option<ColumnType>)> = Vec::new();
+    // Aggregate result descriptors are compiler records, not public table
+    // rows. Like all compiler records, their application-facing fields carry
+    // the `user_` prefix. Keep the public label only for diagnostics and
+    // translate the lookup to that physical field name at this boundary.
+    let mut columns: Vec<(String, String, Option<ColumnType>)> = Vec::new();
     if let Some(group_by) = &aggregate.group_by {
         let idx = table_schema.columns.column_index(group_by).ok_or_else(|| {
             JazzError::Query(format!(
@@ -2114,12 +2118,15 @@ fn aggregate_public_values(
         })?;
         columns.push((
             group_by.clone(),
+            crate::node::query_engine::user_column_field(group_by),
             Some(table_schema.columns.columns[idx].column_type.clone()),
         ));
     }
     for output in &aggregate.outputs {
+        let public_name = aggregate_output_name(output);
         columns.push((
-            aggregate_output_name(output),
+            public_name.clone(),
+            crate::node::query_engine::aggregate_output_app_field(&public_name),
             aggregate_output_column_type(output, table_schema, query.table.as_str())?,
         ));
     }
@@ -2127,9 +2134,11 @@ fn aggregate_public_values(
     let borrowed = crate::groove::records::BorrowedRecord::new(raw, descriptor);
     columns
         .into_iter()
-        .map(|(column, column_type)| {
-            let idx = descriptor.field_index(&column).ok_or_else(|| {
-                JazzError::Query(format!("aggregate row missing column {column}"))
+        .map(|(public_column, physical_column, column_type)| {
+            let idx = descriptor.field_index(&physical_column).ok_or_else(|| {
+                JazzError::Query(format!(
+                    "aggregate row missing column {public_column} (physical field {physical_column})"
+                ))
             })?;
             let value = borrowed
                 .get_idx(idx)
