@@ -188,6 +188,15 @@ struct MaintainedRehydrateRequest<'a> {
     result_table_filter: Option<&'a str>,
     tier: DurabilityTier,
     read_view: &'a ReadViewSpec,
+    purpose: RehydratePurpose,
+}
+
+/// Regular queries require all prepared values. CommitUnit authorization
+/// support turns an absent policy claim into an empty proof instead.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RehydratePurpose {
+    Query,
+    AuthorizationSupport,
 }
 
 type RowKey = OutputOccurrenceId;
@@ -481,6 +490,7 @@ impl PeerState {
                     result_table_filter: Some(table),
                     tier: DurabilityTier::Global,
                     read_view: &ReadViewSpec::default(),
+                    purpose: RehydratePurpose::Query,
                 },
             );
         }
@@ -659,6 +669,7 @@ impl PeerState {
                 result_table_filter: None,
                 tier: opts.tier,
                 read_view: &opts.read_view,
+                purpose: RehydratePurpose::Query,
             },
         )
     }
@@ -737,6 +748,7 @@ impl PeerState {
                     result_table_filter,
                     tier,
                     read_view: &ReadViewSpec::default(),
+                    purpose: RehydratePurpose::Query,
                 },
             );
         }
@@ -1053,20 +1065,57 @@ impl PeerState {
             result_table_filter,
             tier,
             read_view,
+            purpose,
         } = request;
         let trace_rehydrate = std::env::var_os("JAZZ_REHYDRATE_TRACE").is_some();
         let open_start = Instant::now();
         if trace_rehydrate {
             node.reset_storage_read_metrics();
         }
-        let (receiver, maintained, terminal_schemas, transitions, tables) = node
-            .open_seeded_maintained_subscription_view(
+        let opened = match purpose {
+            RehydratePurpose::Query => node.open_seeded_maintained_subscription_view(
                 shape,
                 binding,
                 self.identity(),
                 tier,
                 read_view,
-            )?;
+            ),
+            RehydratePurpose::AuthorizationSupport => node
+                .open_seeded_authorization_support_subscription_view(
+                    shape,
+                    binding,
+                    self.identity(),
+                    tier,
+                    read_view,
+                ),
+        };
+        let (receiver, maintained, terminal_schemas, transitions, tables) = match opened {
+            Ok(opened) => opened,
+            Err(Error::AuthorizationSupportMissingClaim(_))
+                if purpose == RehydratePurpose::AuthorizationSupport =>
+            {
+                let update = SyncMessage::ViewUpdate {
+                    subscription,
+                    settled_through: node.applied_global_watermark(),
+                    reset_result_set,
+                    version_carriers: Vec::new(),
+                    version_bundles: Vec::new(),
+                    peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+                    result_member_adds: Vec::new(),
+                    result_member_removes: previous_member_result_set.iter().cloned().collect(),
+                    terminal_operations: Vec::new(),
+                    program_fact_adds: Vec::new(),
+                    program_fact_removes: Vec::new(),
+                };
+                self.record_outgoing_view_update(&update);
+                self.subscriptions
+                    .entry(subscription)
+                    .or_default()
+                    .has_served_authorization_progress = true;
+                return Ok(update);
+            }
+            Err(error) => return Err(error),
+        };
         let open_elapsed = open_start.elapsed();
         let open_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         let raw_add_count = transitions.adds.len();
@@ -1314,6 +1363,28 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
+        self.rehydrate_query_for_subscription_with_purpose(
+            node,
+            subscription,
+            shape,
+            binding,
+            opts,
+            RehydratePurpose::Query,
+        )
+    }
+
+    fn rehydrate_query_for_subscription_with_purpose<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        subscription: SubscriptionKey,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        opts: RegisterShapeOptions,
+        purpose: RehydratePurpose,
+    ) -> Result<SyncMessage, Error>
+    where
+        S: OrderedKvStorage,
+    {
         self.clear_stale_groove_runtime_handles(node, subscription);
         self.ensure_query_subscription_registered(node, subscription, shape, binding)?;
         let previous_member_result_set = self
@@ -1365,7 +1436,33 @@ impl PeerState {
                 result_table_filter: None,
                 tier: opts.tier,
                 read_view: &opts.read_view,
+                purpose,
             },
+        )
+    }
+
+    pub(crate) fn rehydrate_authorization_support_query<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        opts: RegisterShapeOptions,
+    ) -> Result<SyncMessage, Error>
+    where
+        S: OrderedKvStorage,
+    {
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: opts.read_view_key(),
+        };
+        self.rehydrate_query_for_subscription_with_purpose(
+            node,
+            subscription,
+            shape,
+            binding,
+            opts,
+            RehydratePurpose::AuthorizationSupport,
         )
     }
 
@@ -1984,7 +2081,12 @@ impl PeerState {
                     // transient client role would still bind policy claims as
                     // `SYSTEM` here.
                     self.permission_identity = Some(writer);
-                    let update = self.rehydrate_query(node, &shape, &binding);
+                    let update = self.rehydrate_authorization_support_query(
+                        node,
+                        &shape,
+                        &binding,
+                        scope.options.clone(),
+                    );
                     self.role = previous_role;
                     self.permission_identity = previous_permission_identity;
                     let SyncMessage::ViewUpdate {
@@ -2080,9 +2182,17 @@ impl PeerState {
                     continue;
                 }
                 let previous_role = self.role;
+                let previous_permission_identity = self.permission_identity;
                 self.role = PeerRole::ClientLink { identity: writer };
-                let rehydrate = self.rehydrate_query(node, &shape, &binding);
+                self.permission_identity = Some(writer);
+                let rehydrate = self.rehydrate_authorization_support_query(
+                    node,
+                    &shape,
+                    &binding,
+                    scope.options.clone(),
+                );
                 self.role = previous_role;
+                self.permission_identity = previous_permission_identity;
                 let update = rehydrate?;
                 let SyncMessage::ViewUpdate {
                     settled_through, ..
@@ -2569,7 +2679,7 @@ mod tests {
         Aggregate, ArraySubquery, OrderDirection, Query, claim, col, eq, gt, is_null, lit, ne, not,
         param,
     };
-    use crate::schema::{JazzSchema, Policy, TableSchema};
+    use crate::schema::{JazzSchema, Policy, TableSchema, WritePolicies};
     use crate::time::{GlobalSeq, TxTime};
     use crate::tools::OpenBatchId;
     use crate::tx::DeletionEvent;
@@ -2990,6 +3100,189 @@ mod tests {
             )
             .with_reference("doc", "docs"),
         ])
+    }
+
+    fn session_claim_read_policy_schema() -> JazzSchema {
+        let policy = Query::from("resources").filter(eq(col("owner"), claim("session_id")));
+        JazzSchema::new([TableSchema::new(
+            "resources",
+            [ColumnSchema::new("owner", ColumnType::Uuid)],
+        )
+        .with_read_policy(policy.clone())
+        .with_write_policies(WritePolicies {
+            insert_check: Some(policy),
+            ..WritePolicies::default()
+        })])
+    }
+
+    fn session_seed_write_policy_schema() -> JazzSchema {
+        let mut policy = Query::from("resources").reachable_via(
+            "resourceAccess",
+            "resource",
+            "team",
+            lit("seeded-by-session"),
+            "teamMemberships",
+            "member",
+            "parent",
+            [],
+        );
+        policy.reachable[0].seed = Some(crate::query::ReachableSeed {
+            table: "teamSeeds".to_owned(),
+            user_column: Some("user".to_owned()),
+            user_claim: Some("session_id".to_owned()),
+            team_column: "team".to_owned(),
+            filters: Vec::new(),
+        });
+        JazzSchema::new([
+            TableSchema::new("resources", [ColumnSchema::new("owner", ColumnType::Uuid)])
+                .with_write_policies(WritePolicies {
+                    insert_check: Some(policy),
+                    ..WritePolicies::default()
+                }),
+            TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
+            TableSchema::new(
+                "teamSeeds",
+                [
+                    ColumnSchema::new("team", ColumnType::Uuid),
+                    ColumnSchema::new("user", ColumnType::Uuid),
+                ],
+            )
+            .with_reference("team", "teams"),
+            TableSchema::new(
+                "resourceAccess",
+                [
+                    ColumnSchema::new("resource", ColumnType::Uuid),
+                    ColumnSchema::new("team", ColumnType::Uuid),
+                ],
+            )
+            .with_reference("resource", "resources")
+            .with_reference("team", "teams"),
+            TableSchema::new(
+                "teamMemberships",
+                [
+                    ColumnSchema::new("member", ColumnType::Uuid),
+                    ColumnSchema::new("parent", ColumnType::Uuid),
+                ],
+            )
+            .with_reference("member", "teams")
+            .with_reference("parent", "teams"),
+        ])
+    }
+
+    fn resource_commit_unit(
+        writer: &mut NodeState<RocksDbStorage>,
+        author: AuthorId,
+        row_uuid: RowUuid,
+    ) -> (Transaction, Vec<VersionRecord>) {
+        let (_, unit) = writer
+            .commit_mergeable_unit(
+                MergeableCommit::new("resources", row_uuid, 10)
+                    .made_by(author)
+                    .cells(BTreeMap::from([(
+                        "owner".to_owned(),
+                        Value::Uuid(author.0),
+                    )])),
+            )
+            .expect("writer creates policy-protected resource commit");
+        let SyncMessage::CommitUnit { tx, versions } = unit else {
+            panic!("mergeable unit must carry a CommitUnit");
+        };
+        (tx, versions)
+    }
+
+    #[test]
+    fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
+        let schema = session_claim_read_policy_schema();
+        let writer = AuthorId::from_bytes([0xa1; 16]);
+        let transport_identity = AuthorId::from_bytes([0xa2; 16]);
+        let resource = row(0xa3);
+        let (_writer_dir, mut writer_node) = open_node_with_schema(node(0xa4), schema.clone());
+        let (tx, versions) = resource_commit_unit(&mut writer_node, writer, resource);
+
+        // The public edge/deferred entrypoint must turn a missing custom
+        // session claim into a settled empty support view, not a binding
+        // error. The edge parks the first hydration turn by design.
+        let (_missing_dir, mut missing_edge) = open_node_with_schema(node(0xa5), schema.clone());
+        let mut missing_peer = PeerState::edge_client(writer);
+        let missing_updates = missing_peer
+            .ingest_edge_mergeable_commit_unit(&mut missing_edge, tx.clone(), versions.clone(), 10)
+            .expect("missing policy claim must fail closed, not abort edge ingest");
+        assert!(missing_updates.is_empty(), "{missing_updates:?}");
+        assert_eq!(missing_peer.deferred_edge_fate_count(), 1);
+
+        // A backend/transport identity is not the commit permission subject.
+        // The support rehydrate must temporarily evaluate the writer's bound
+        // session claim even while the peer normally serves as another user.
+        let (_bound_dir, mut bound_edge) = open_node_with_schema(node(0xa6), schema.clone());
+        bound_edge.set_session_claims(
+            writer,
+            BTreeMap::from([("session_id".to_owned(), Value::Uuid(writer.0))]),
+        );
+        let prior = bound_edge
+            .commit_mergeable(
+                MergeableCommit::new("resources", row(0xa8), 1)
+                    .made_by(AuthorId::SYSTEM)
+                    .cells(BTreeMap::from([(
+                        "owner".to_owned(),
+                        Value::Uuid(writer.0),
+                    )])),
+            )
+            .expect("seed readable resource at the edge");
+        accept_global(&mut bound_edge, prior, 1);
+        let mut wrong_subject_peer =
+            PeerState::edge_client_with_permission_identity(transport_identity, transport_identity);
+        let bound_subscriptions = wrong_subject_peer
+            .unsettled_authority_scope_subscriptions(&mut bound_edge, writer, &versions, true)
+            .expect("edge support must bind the writer rather than the transport identity");
+        let bound_subscription = bound_subscriptions
+            .and_then(|subscriptions| subscriptions.into_iter().next())
+            .expect("write support must register one policy subscription");
+        assert!(
+            !wrong_subject_peer
+                .subscriptions
+                .get(&bound_subscription)
+                .expect("bound support subscription state")
+                .result_member_set
+                .is_empty(),
+            "the writer's bound claim must authorize the seeded resource"
+        );
+        assert_eq!(wrong_subject_peer.link_identity(), transport_identity);
+        assert_eq!(wrong_subject_peer.identity(), transport_identity);
+
+        // A present but ill-typed claim remains a real binding error; only an
+        // absent claim receives the fail-closed empty-proof treatment.
+        let (_wrong_type_dir, mut wrong_type_edge) = open_node_with_schema(node(0xa7), schema);
+        wrong_type_edge.set_session_claims(
+            writer,
+            BTreeMap::from([(
+                "session_id".to_owned(),
+                Value::String("not-a-uuid".to_owned()),
+            )]),
+        );
+        let mut wrong_type_peer =
+            PeerState::edge_client_with_permission_identity(transport_identity, transport_identity);
+        wrong_type_peer
+            .unsettled_authority_scope_subscriptions(&mut wrong_type_edge, writer, &versions, true)
+            .expect_err("present ill-typed claim must remain an error");
+        assert_eq!(wrong_type_peer.link_identity(), transport_identity);
+        assert_eq!(wrong_type_peer.identity(), transport_identity);
+    }
+
+    #[test]
+    fn edge_ingest_turns_missing_prepared_seed_claim_into_deferred_empty_support() {
+        let schema = session_seed_write_policy_schema();
+        let writer = AuthorId::from_bytes([0xb1; 16]);
+        let resource = row(0xb2);
+        let (_writer_dir, mut writer_node) = open_node_with_schema(node(0xb3), schema.clone());
+        let (tx, versions) = resource_commit_unit(&mut writer_node, writer, resource);
+        let (_edge_dir, mut edge) = open_node_with_schema(node(0xb4), schema);
+        let mut peer = PeerState::edge_client(writer);
+
+        let updates = peer
+            .ingest_edge_mergeable_commit_unit(&mut edge, tx, versions, 10)
+            .expect("missing prepared seed claim must be a deferred empty support proof");
+        assert!(updates.is_empty());
+        assert_eq!(peer.deferred_edge_fate_count(), 1);
     }
 
     fn scored_doc_cells(title: impl Into<String>, score: u64) -> BTreeMap<String, Value> {

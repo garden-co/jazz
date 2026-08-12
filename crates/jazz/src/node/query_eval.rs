@@ -65,6 +65,16 @@ use crate::tools::{ObjectId, OutputOccurrenceId};
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
 
+/// The caller-owned meaning of an absent claim while binding a prepared plan.
+/// Ordinary prepared queries require all declared bindings. Authorization
+/// support, on the other hand, must represent an absent policy claim as an
+/// empty proof for the commit's permission subject.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PreparedClaimBindingMode {
+    Strict,
+    FailClosedAuthorizationSupport,
+}
+
 /// Exact, action-specific policy support compiled for a hypothetical operation.
 ///
 /// The support key deliberately excludes the row/candidate operation key: two
@@ -4950,6 +4960,27 @@ where
         claim_params: BTreeMap<String, ProgramClaimParam>,
         policy: &PolicyContext,
     ) -> Result<ProgramBinding, Error> {
+        self.program_binding_for_shape_and_policy_with_prepared_claim_mode(
+            shape,
+            binding,
+            source_shape,
+            extra_user_params,
+            claim_params,
+            policy,
+            PreparedClaimBindingMode::Strict,
+        )
+    }
+
+    fn program_binding_for_shape_and_policy_with_prepared_claim_mode(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        source_shape: Option<String>,
+        extra_user_params: BTreeMap<String, ColumnType>,
+        claim_params: BTreeMap<String, ProgramClaimParam>,
+        policy: &PolicyContext,
+        prepared_claim_binding_mode: PreparedClaimBindingMode,
+    ) -> Result<ProgramBinding, Error> {
         let mut program_binding = self.program_binding_for_shape(
             shape,
             binding,
@@ -4961,6 +4992,13 @@ where
             let mut values = binding.values().clone();
             for (name, claim) in &claim_params {
                 let Some(value) = prepared_claim_value(&claim.path, policy)? else {
+                    if prepared_claim_binding_mode
+                        == PreparedClaimBindingMode::FailClosedAuthorizationSupport
+                    {
+                        return Err(Error::AuthorizationSupportMissingClaim(
+                            claim.path.0.join("."),
+                        ));
+                    }
                     // An absent claim cannot establish a policy proof. Leave
                     // it as a capability gap so the policy source resolver
                     // lowers the proof to an empty authorization graph.
@@ -5818,7 +5856,7 @@ where
         settled_binding_view: Option<BindingViewKey>,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
-        let request = self.current_query_program_request(
+        self.compile_current_query_program_with_settled_view_and_prepared_claim_mode(
             shape,
             binding,
             tier,
@@ -5827,6 +5865,32 @@ where
             read_view,
             settled_binding_view,
             authorization_mode,
+            PreparedClaimBindingMode::Strict,
+        )
+    }
+
+    fn compile_current_query_program_with_settled_view_and_prepared_claim_mode(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        output: CurrentQueryProgramOutput,
+        read_view: &ReadViewSpec,
+        settled_binding_view: Option<BindingViewKey>,
+        authorization_mode: QueryAuthorizationMode,
+        prepared_claim_binding_mode: PreparedClaimBindingMode,
+    ) -> Result<QueryProgram, Error> {
+        let request = self.current_query_program_request_with_prepared_claim_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            output,
+            read_view,
+            settled_binding_view,
+            authorization_mode,
+            prepared_claim_binding_mode,
         )?;
         self.compile_query_program_request(request)
     }
@@ -6507,6 +6571,31 @@ where
         settled_binding_view: Option<BindingViewKey>,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgramRequest, Error> {
+        self.current_query_program_request_with_prepared_claim_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            output,
+            read_view,
+            settled_binding_view,
+            authorization_mode,
+            PreparedClaimBindingMode::Strict,
+        )
+    }
+
+    fn current_query_program_request_with_prepared_claim_mode(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        output: CurrentQueryProgramOutput,
+        read_view: &ReadViewSpec,
+        settled_binding_view: Option<BindingViewKey>,
+        authorization_mode: QueryAuthorizationMode,
+        prepared_claim_binding_mode: PreparedClaimBindingMode,
+    ) -> Result<QueryProgramRequest, Error> {
         let lowered_shape;
         let lowered_binding;
         // Prepared binding sources are a serving-side optimization. Client
@@ -6569,13 +6658,14 @@ where
             })
             .flatten();
         let input = RowSetProgramInput {
-            binding: self.program_binding_for_shape_and_policy(
+            binding: self.program_binding_for_shape_and_policy_with_prepared_claim_mode(
                 shape,
                 binding,
                 source_shape,
                 BTreeMap::new(),
                 binding_claim_params,
                 &policy,
+                prepared_claim_binding_mode,
             )?,
             shape: input_shape,
         };
@@ -7322,8 +7412,12 @@ where
                     self.database.query_graph(graph).map_err(Error::Groove)?
                 }
                 PreparedQueryPlan::Prepared { shape, params } => {
-                    let values =
-                        binding_values_for_plan(&binding, &params, &program.request.policy)?;
+                    let values = binding_values_for_plan(
+                        &binding,
+                        &params,
+                        &program.request.policy,
+                        PreparedClaimBindingMode::Strict,
+                    )?;
                     take_required_sink_deltas(
                         self.bind_shape_snapshot(shape, &values)?,
                         JAZZ_APP_ROWS_SINK,
@@ -7586,7 +7680,12 @@ where
                 .map_err(Error::Groove),
             Some(plan) => match plan.as_ref() {
                 PreparedQueryPlan::Prepared { shape, params } => {
-                    let values = binding_values_for_plan(binding, params, &policy)?;
+                    let values = binding_values_for_plan(
+                        binding,
+                        params,
+                        &policy,
+                        PreparedClaimBindingMode::Strict,
+                    )?;
                     self.bind_shape_snapshot(*shape, &values)
                         .and_then(|deltas| take_required_sink_deltas(deltas, JAZZ_APP_ROWS_SINK))
                 }
@@ -7742,7 +7841,12 @@ where
                 .map_err(Error::Groove),
             Some(plan) => match plan.as_ref() {
                 PreparedQueryPlan::Prepared { shape, params } => {
-                    let values = binding_values_for_plan(binding, params, &policy)?;
+                    let values = binding_values_for_plan(
+                        binding,
+                        params,
+                        &policy,
+                        PreparedClaimBindingMode::Strict,
+                    )?;
                     self.bind_shape_snapshot(*shape, &values)
                         .and_then(|deltas| take_required_sink_deltas(deltas, JAZZ_APP_ROWS_SINK))
                 }
@@ -8300,6 +8404,7 @@ where
                 read_view,
                 authorization_mode,
                 settled_binding_view,
+                PreparedClaimBindingMode::Strict,
             )?;
         let mut local = LocalMaintainedViewSubscription {
             subscription,
@@ -10669,6 +10774,39 @@ where
             read_view,
             QueryAuthorizationMode::TrustedServing,
             None,
+            PreparedClaimBindingMode::Strict,
+        )
+    }
+
+    /// Hydrate a terminal CommitUnit authorization-support clause. Unlike an
+    /// ordinary prepared query, a missing policy claim is a denied proof and
+    /// is surfaced to the peer as an empty, settled authorization view.
+    pub(crate) fn open_seeded_authorization_support_subscription_view(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorId,
+        tier: DurabilityTier,
+        read_view: &ReadViewSpec,
+    ) -> Result<
+        (
+            MultisinkSubscription,
+            MaintainedSubscriptionView,
+            MaintainedTerminalSchemas,
+            super::maintained_subscription_view::ResultTransitions,
+            BTreeMap<String, TableSchema>,
+        ),
+        Error,
+    > {
+        self.open_seeded_maintained_subscription_view_in_authorization_mode(
+            shape,
+            binding,
+            identity,
+            tier,
+            read_view,
+            QueryAuthorizationMode::TrustedServing,
+            None,
+            PreparedClaimBindingMode::FailClosedAuthorizationSupport,
         )
     }
 
@@ -10681,6 +10819,7 @@ where
         read_view: &ReadViewSpec,
         authorization_mode: QueryAuthorizationMode,
         settled_binding_view: Option<BindingViewKey>,
+        prepared_claim_binding_mode: PreparedClaimBindingMode,
     ) -> Result<
         (
             MultisinkSubscription,
@@ -10703,16 +10842,18 @@ where
             ParamBindingMode::RetainAllParams,
         )?;
         let binding = shape.bind(binding.values().clone())?;
-        let program = self.compile_current_query_program_with_settled_view(
-            &shape,
-            &binding,
-            tier,
-            identity,
-            CurrentQueryProgramOutput::MaintainedView,
-            read_view,
-            settled_binding_view,
-            authorization_mode,
-        )?;
+        let program = self
+            .compile_current_query_program_with_settled_view_and_prepared_claim_mode(
+                &shape,
+                &binding,
+                tier,
+                identity,
+                CurrentQueryProgramOutput::MaintainedView,
+                read_view,
+                settled_binding_view,
+                authorization_mode,
+                prepared_claim_binding_mode,
+            )?;
         let tables = program.lowered.maintained_terminal_tables.clone();
         let terminal_schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
         let binding_source_shape = program
@@ -10726,8 +10867,12 @@ where
                     &program.lowered.parameters,
                 ))
             });
-        let subscription =
-            self.subscribe_lowered_program(program, &binding, binding_source_shape)?;
+        let subscription = self.subscribe_lowered_program(
+            program,
+            &binding,
+            binding_source_shape,
+            prepared_claim_binding_mode,
+        )?;
         let mut maintained = MaintainedSubscriptionView::default();
         let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
         let snapshot = subscription.recv().map_err(|_| {
@@ -10805,6 +10950,7 @@ where
         program: QueryProgram,
         binding: &Binding,
         binding_source_shape: String,
+        prepared_claim_binding_mode: PreparedClaimBindingMode,
     ) -> Result<MultisinkSubscription, Error> {
         let params = prepared_params_from_domain(&program.lowered.parameters);
         let route_params = prepared_route_param_names(&program.lowered.parameters);
@@ -10827,7 +10973,12 @@ where
                 .cloned()
                 .zip(params.iter().map(|param| param.ty.clone())),
         );
-        let values = binding_values_for_plan(binding, &params, &program.request.policy)?;
+        let values = binding_values_for_plan(
+            binding,
+            &params,
+            &program.request.policy,
+            prepared_claim_binding_mode,
+        )?;
         let terminals = program
             .lowered
             .terminals
@@ -13163,6 +13314,7 @@ fn binding_values_for_plan(
     binding: &Binding,
     params: &[PreparedQueryParam],
     policy: &PolicyContext,
+    prepared_claim_binding_mode: PreparedClaimBindingMode,
 ) -> Result<Vec<Value>, Error> {
     params
         .iter()
@@ -13176,9 +13328,19 @@ fn binding_values_for_plan(
                 Ok::<_, Error>(coerce_prepared_binding_value(value, &param.ty))
             }
             PreparedQueryParamSource::Claim(ref path) => {
-                let value = prepared_claim_value(path, policy)?.ok_or(
-                    Error::InvalidStoredValue("claim prepared param is not bound"),
-                )?;
+                let value = match prepared_claim_value(path, policy)? {
+                    Some(value) => value,
+                    None if prepared_claim_binding_mode
+                        == PreparedClaimBindingMode::FailClosedAuthorizationSupport =>
+                    {
+                        return Err(Error::AuthorizationSupportMissingClaim(path.0.join(".")));
+                    }
+                    None => {
+                        return Err(Error::InvalidStoredValue(
+                            "claim prepared param is not bound",
+                        ));
+                    }
+                };
                 Ok::<_, Error>(coerce_prepared_binding_value(value, &param.ty))
             }
         })
@@ -16143,6 +16305,87 @@ mod tests {
             .map(|row| row.row_uuid())
             .collect::<BTreeSet<_>>();
         assert_eq!(allowed_rows, BTreeSet::from([resource]));
+    }
+
+    #[test]
+    fn missing_policy_seed_claim_denies_authorization_support_rehydration() {
+        // Terminal CommitUnit admission rehydrates a compiled read-policy
+        // support subscription. This is distinct from the one-shot policy
+        // read above: the support shape itself has no user parameter, while
+        // its protected source carries the seed claim as a prepared route.
+        let schema = missing_session_seed_policy_schema();
+        let (_dir, mut node) =
+            open_node_with_uuid(NodeUuid::from_bytes([0xc7; 16]), schema.clone());
+        let writer = author(0xc8);
+        let team = row(0xc9);
+        let resource = row(0xca);
+        commit_global_cells(
+            &mut node,
+            "resources",
+            resource,
+            BTreeMap::from([("name".to_owned(), Value::String("secret".to_owned()))]),
+            1,
+            1,
+        );
+        commit_global_cells(
+            &mut node,
+            "resourceAccess",
+            row(0xcb),
+            BTreeMap::from([
+                ("resource".to_owned(), Value::Uuid(resource.0)),
+                ("team".to_owned(), Value::Uuid(team.0)),
+            ]),
+            2,
+            2,
+        );
+        commit_global_cells(
+            &mut node,
+            "teamSeeds",
+            row(0xcc),
+            BTreeMap::from([
+                ("team".to_owned(), Value::Uuid(team.0)),
+                ("user".to_owned(), Value::Uuid(writer.0)),
+            ]),
+            3,
+            3,
+        );
+
+        let scope = node
+            .authorization_support_scope(
+                writer,
+                &PermissionAdviceAction::Read {
+                    table: "resources".to_owned(),
+                    row: resource,
+                },
+            )
+            .expect("missing policy claim is represented by a denied support shape");
+        let options = scope.options.clone();
+        let (shape, binding) = scope
+            .subscriptions
+            .into_iter()
+            .next()
+            .expect("read policy requires one support subscription");
+        let mut peer = PeerState::client_link(writer);
+        let ordinary_error = peer
+            .rehydrate_query(&mut node, &shape, &binding)
+            .expect_err(
+                "ordinary prepared subscription hydration must retain missing-claim errors",
+            );
+        assert!(matches!(ordinary_error, Error::InvalidStoredValue(_)));
+
+        let update = peer
+            .rehydrate_authorization_support_query(&mut node, &shape, &binding, options)
+            .expect("missing policy seed claim must hydrate as an empty authorization proof");
+        let SyncMessage::ViewUpdate {
+            result_member_adds,
+            result_member_removes,
+            ..
+        } = update
+        else {
+            panic!("authorization support must return a settled view update");
+        };
+        assert!(result_member_adds.is_empty());
+        assert!(result_member_removes.is_empty());
     }
 
     fn commit_global_cells(

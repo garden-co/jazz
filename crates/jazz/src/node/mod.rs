@@ -7183,6 +7183,11 @@ pub enum Error {
     /// Query-engine capability report for a currently unsupported program.
     #[error("query capability unsupported: {0}")]
     QueryCapability(String),
+    /// A terminal authorization-support subscription depends on a session
+    /// claim the permission subject did not provide. This is a denied proof,
+    /// not malformed persisted state.
+    #[error("authorization support policy claim is not bound: {0}")]
+    AuthorizationSupportMissingClaim(String),
     /// A membership-policy proof revisited a table already on its compilation
     /// stack. The named error prevents stack exhaustion while diagnosing a
     /// policy cycle.
