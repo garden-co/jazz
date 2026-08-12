@@ -59,24 +59,22 @@ fn merge_receiver_version_bundle_ref(
     let mut seen = existing
         .versions
         .iter()
-        .map(|version| {
-            (
-                version_bundle_record_key(version),
-                version.record().raw().to_vec(),
-            )
-        })
-        .collect::<BTreeMap<_, Vec<u8>>>();
+        .cloned()
+        .map(|version| (version_bundle_record_key(&version), version))
+        .collect::<BTreeMap<_, VersionRecord>>();
     for version in bundle.versions {
         let key = version_bundle_record_key(version);
-        match seen.get(&key) {
-            Some(raw) if raw.as_slice() == version.record().raw() => {}
-            Some(_) => return Err(Error::ConflictingCommitUnit(bundle.tx.tx_id)),
+        match seen.get_mut(&key) {
+            Some(existing) => match existing.merge_view_projection(version) {
+                Ok(merged) => *existing = merged,
+                Err(()) => return Err(Error::ConflictingCommitUnit(bundle.tx.tx_id)),
+            },
             None => {
-                seen.insert(key, version.record().raw().to_vec());
-                existing.versions.push(version.clone());
+                seen.insert(key, version.clone());
             }
         }
     }
+    existing.versions = seen.into_values().collect();
     Ok(())
 }
 

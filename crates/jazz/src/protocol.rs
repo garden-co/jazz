@@ -759,6 +759,55 @@ impl VersionRecord {
             .ok()
             .flatten()
     }
+
+    /// Combines two compatible, view-scoped projections of the same immutable
+    /// version. A subscription may carry a row once as a full result and once
+    /// as an authorization or relation witness, where hidden cells are absent.
+    /// Only absent/present cells may be combined; different present values are
+    /// a protocol conflict.
+    pub(crate) fn merge_view_projection(&self, other: &Self) -> Result<Self, ()> {
+        if self.table != other.table
+            || self.schema_version != other.schema_version
+            || self.authored_columns != other.authored_columns
+            || self.record.descriptor() != other.record.descriptor()
+        {
+            return Err(());
+        }
+        let descriptor = self.record.descriptor().clone();
+        let mut values = Vec::with_capacity(descriptor.fields().len());
+        for index in 0..descriptor.fields().len() {
+            let left = self.record.borrowed().get_idx(index).map_err(|_| ())?;
+            let right = other.record.borrowed().get_idx(index).map_err(|_| ())?;
+            let value = if index < WireRowRecord::USER_CELLS {
+                if left != right {
+                    return Err(());
+                }
+                left
+            } else {
+                match (left, right) {
+                    (Value::Nullable(None), Value::Nullable(None)) => Value::Nullable(None),
+                    (Value::Nullable(Some(value)), Value::Nullable(None))
+                    | (Value::Nullable(None), Value::Nullable(Some(value))) => {
+                        Value::Nullable(Some(value))
+                    }
+                    (Value::Nullable(Some(left)), Value::Nullable(Some(right)))
+                        if left == right =>
+                    {
+                        Value::Nullable(Some(left))
+                    }
+                    _ => return Err(()),
+                }
+            };
+            values.push(value);
+        }
+        let raw = descriptor.create(&values).map_err(|_| ())?;
+        Ok(Self {
+            table: self.table.clone(),
+            schema_version: self.schema_version,
+            record: OwnedRecord::new(raw, descriptor),
+            authored_columns: self.authored_columns.clone(),
+        })
+    }
 }
 
 trait NullableValue {
@@ -3041,6 +3090,61 @@ mod tests {
 
         assert_ne!(base, authored);
         assert_ne!(base.cmp(&authored), Ordering::Equal);
+    }
+
+    #[test]
+    fn version_record_merges_compatible_view_projections_without_hiding_payload() {
+        let table = TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]);
+        let full = VersionRecord::from_cells(
+            &table,
+            schema_id(1),
+            RowUuid::from_bytes([1; 16]),
+            Vec::new(),
+            AuthorId::SYSTEM,
+            TxTime(1),
+            AuthorId::SYSTEM,
+            TxTime(1),
+            &BTreeMap::from([("title".to_owned(), Value::String("visible".to_owned()))]),
+            None,
+        )
+        .unwrap();
+        let hidden = VersionRecord::from_cells(
+            &table,
+            schema_id(1),
+            RowUuid::from_bytes([1; 16]),
+            Vec::new(),
+            AuthorId::SYSTEM,
+            TxTime(1),
+            AuthorId::SYSTEM,
+            TxTime(1),
+            &BTreeMap::<String, Value>::new(),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            hidden.merge_view_projection(&full).unwrap().cell_at(0),
+            Some(Value::String("visible".to_owned()))
+        );
+        assert_eq!(
+            full.merge_view_projection(&hidden).unwrap().cell_at(0),
+            Some(Value::String("visible".to_owned()))
+        );
+
+        let conflicting = VersionRecord::from_cells(
+            &table,
+            schema_id(1),
+            RowUuid::from_bytes([1; 16]),
+            Vec::new(),
+            AuthorId::SYSTEM,
+            TxTime(1),
+            AuthorId::SYSTEM,
+            TxTime(1),
+            &BTreeMap::from([("title".to_owned(), Value::String("other".to_owned()))]),
+            None,
+        )
+        .unwrap();
+        assert!(full.merge_view_projection(&conflicting).is_err());
     }
 
     fn sample_lens() -> MigrationLens {
