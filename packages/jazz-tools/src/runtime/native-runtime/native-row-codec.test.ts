@@ -10,6 +10,7 @@ import {
   decodeNativeRowValues,
   decodeRecordValue,
   encodeNativeRowValues,
+  assertTerminalRootDescriptorCompatible,
   readDescriptor,
   storageColumnValueType,
   writeDescriptor,
@@ -27,6 +28,58 @@ type NativeRowCodecCase = {
 };
 
 describe("native row codec", () => {
+  it("accepts nested terminal descriptors with producer fields beyond the root output", () => {
+    const columns: ColumnDescriptor[] = [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+    ];
+    const descriptor = [
+      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+      { name: "title", valueType: { tag: 8 } },
+      {
+        name: "members",
+        valueType: { tag: 13, inner: { tag: 15, record: [] } },
+      },
+    ];
+
+    expect(() => assertTerminalRootDescriptorCompatible(descriptor, columns)).not.toThrow();
+  });
+
+  it("rejects terminal descriptors that omit, reorder, rename, or change required root fields", () => {
+    const columns: ColumnDescriptor[] = [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "body", column_type: { type: "Text" }, nullable: false },
+    ];
+    const missingRootField = [{ name: "__jazz_terminal_row_key", valueType: { tag: 10 } }];
+    const wrongRootType = [
+      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+      { name: "title", valueType: { tag: 4 } },
+      { name: "members", valueType: { tag: 13, inner: { tag: 15, record: [] } } },
+    ];
+    const reorderedSameTypeFields = [
+      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+      { name: "body", valueType: { tag: 8 } },
+      { name: "title", valueType: { tag: 8 } },
+    ];
+    const wrongKeyName = [
+      { name: "not_the_terminal_key", valueType: { tag: 10 } },
+      { name: "title", valueType: { tag: 8 } },
+      { name: "body", valueType: { tag: 8 } },
+    ];
+
+    expect(() => assertTerminalRootDescriptorCompatible(missingRootField, columns)).toThrow(
+      "terminal root descriptor does not match the public projection",
+    );
+    expect(() => assertTerminalRootDescriptorCompatible(wrongRootType, columns)).toThrow(
+      "terminal root descriptor does not match the public projection",
+    );
+    expect(() => assertTerminalRootDescriptorCompatible(reorderedSameTypeFields, columns)).toThrow(
+      "terminal root descriptor does not match the public projection",
+    );
+    expect(() => assertTerminalRootDescriptorCompatible(wrongKeyName, columns)).toThrow(
+      "terminal root descriptor does not match the public projection",
+    );
+  });
+
   it("keeps mutation cells byte-for-byte aligned with packed row values", () => {
     const nestedColumns: ColumnDescriptor[] = [
       { name: "label", column_type: { type: "Text" }, nullable: false },

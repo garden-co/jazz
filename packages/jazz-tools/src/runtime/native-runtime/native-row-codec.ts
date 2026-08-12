@@ -449,7 +449,8 @@ export function assertTerminalRootDescriptorCompatible(
   columns: readonly ColumnDescriptor[],
 ): void {
   if (
-    descriptor.length !== columns.length + 1 ||
+    descriptor.length < columns.length + 1 ||
+    descriptor[0]?.name !== "__jazz_terminal_row_key" ||
     descriptor[0]?.valueType.tag !== 10 ||
     !isKnownValueType(descriptor[0].valueType)
   ) {
@@ -457,14 +458,20 @@ export function assertTerminalRootDescriptorCompatible(
   }
 
   const publicColumns = logicalStorageColumns(columns);
-  const matchesLogical = publicColumns.every((column, index) =>
-    terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, false),
+  const matchesLogical = publicColumns.every(
+    (column, index) =>
+      descriptor[index + 1]?.name === column.name &&
+      terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, false),
   );
-  const matchesPhysical = columns.every((column, index) =>
-    terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, false),
+  const matchesPhysical = columns.every(
+    (column, index) =>
+      descriptor[index + 1]?.name === column.name &&
+      terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, false),
   );
-  const matchesCurrentRow = publicColumns.every((column, index) =>
-    terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, true),
+  const matchesCurrentRow = publicColumns.every(
+    (column, index) =>
+      descriptor[index + 1]?.name === column.name &&
+      terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, true),
   );
   if (!matchesLogical && !matchesPhysical && !matchesCurrentRow) {
     throw new Error("terminal root descriptor does not match the public projection");

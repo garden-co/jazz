@@ -669,14 +669,14 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     const delivered = updates[1]?.delta[0];
     expect(delivered?.id).toBe(inserted.id);
-    const deliveredValue = delivered?.item?.values[0];
+    if (!delivered || !("item" in delivered)) {
+      throw new Error("expected a delivered row item");
+    }
+    const deliveredValue = delivered.item?.values[0];
     expect(deliveredValue?.type).toBe("Bytea");
     if (deliveredValue?.type !== "Bytea") throw new Error("expected a delivered Bytea value");
-    // Groove terminal rows retain the latest inline/non-null carrier byte.
     expect(deliveredValue.value).toBeInstanceOf(Uint8Array);
-    expect(deliveredValue.value.byteLength).toBe(fullByteRange.byteLength + 1);
-    expect(deliveredValue.value[0]).toBe(1);
-    expect(deliveredValue.value.subarray(1)).toEqual(fullByteRange);
+    expect(deliveredValue.value).toEqual(fullByteRange);
 
     runtime.unsubscribe(handle);
   });
