@@ -1608,7 +1608,6 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "physical current winner source schema alias missing",
                 ))?;
-            let source_table = self.table_in_schema(&source_table_name, source_schema)?;
             let cases = if source_mapping.variant_cases.is_empty() {
                 vec![(groove_variant_tag(source_alias)?, None)]
             } else {
@@ -1619,43 +1618,183 @@ where
                     .collect()
             };
             for (tag, present) in cases {
-                let available =
-                    physical_current_field_names_for_case(&source_table, &source_mapping, present)?
-                        .into_iter()
-                        .collect::<BTreeSet<_>>();
                 for storage_table in &storage_tables {
-                    let fields = output
-                        .fields()
-                        .iter()
-                        .map(|field| {
-                            let name = field.name.clone().ok_or(Error::InvalidStoredValue(
-                                "physical current winner field unnamed",
-                            ))?;
-                            if available.contains(&name) {
-                                Ok(ProjectField::named(name))
-                            } else if matches!(field.value_type, records::ValueType::Nullable(_)) {
-                                Ok(ProjectField::literal_typed(
-                                    name,
-                                    Value::Nullable(None),
-                                    field.value_type.clone(),
-                                ))
-                            } else {
-                                Err(Error::InvalidStoredValue(
-                                    "physical current winner source misses required field",
-                                ))
-                            }
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    self.database.refresh_variant_case_for_registry_evolution(
-                        storage_table,
-                        &projection_target,
-                        tag,
-                        fields,
-                    )?;
+                    match self.physical_current_winner_projection_case(
+                        source_schema,
+                        &source_table_name,
+                        &source_mapping,
+                        target_schema,
+                        target_table_name,
+                        &target_mapping,
+                        output,
+                        present,
+                    )? {
+                        Some(fields) => self.database.refresh_variant_case_for_registry_evolution(
+                            storage_table,
+                            &projection_target,
+                            tag,
+                            fields,
+                        )?,
+                        None => self.database.register_variant_ignore_case(
+                            storage_table,
+                            &projection_target,
+                            tag,
+                        )?,
+                    }
                 }
             }
         }
         Ok((projection_target, output_fields.unwrap_or_default()))
+    }
+
+    /// Map one authored physical row into the shared winner layout.  This is
+    /// deliberately *not* the authored read boundary: enum cells remain in
+    /// their physical representation until after `arg_max_by` has selected
+    /// the Global/Ahead winner.  Ordinary lens operations do belong here,
+    /// though.  In particular an old authored row must acquire an `AddColumn`
+    /// default before the later target-layout projection decodes it.
+    fn physical_current_winner_projection_case(
+        &mut self,
+        source_schema: SchemaVersionId,
+        source_table_name: &str,
+        source_mapping: &TablePhysicalMapping,
+        target_schema: SchemaVersionId,
+        target_table_name: &str,
+        target_mapping: &TablePhysicalMapping,
+        output: records::RecordDescriptor,
+        present: Option<&BTreeSet<String>>,
+    ) -> Result<Option<Vec<ProjectField>>, Error> {
+        #[derive(Clone)]
+        enum CellProjection {
+            Field(String),
+            Literal(Value),
+        }
+
+        let source_table = self.table_in_schema(source_table_name, source_schema)?;
+        let target_table = self.table_in_schema(target_table_name, target_schema)?;
+        let mut cells = source_table
+            .columns
+            .iter()
+            .filter(|column| present.is_none_or(|present| present.contains(&column.name)))
+            .map(|column| {
+                let column_id = source_mapping.columns.get(&column.name).copied().ok_or(
+                    Error::InvalidStoredValue("physical winner source column mapping missing"),
+                )?;
+                Ok((
+                    column.name.clone(),
+                    CellProjection::Field(physical_user_column_field(column_id)),
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, Error>>()?;
+
+        if source_schema != target_schema || source_table_name != target_table_name {
+            let mut path = None;
+            for direction in [LensPathDirection::Forward, LensPathDirection::Reverse] {
+                if let Some(candidate) = self.compiled_lens_path(
+                    source_schema,
+                    target_schema,
+                    direction,
+                    source_table_name,
+                )? && candidate.target_table == target_table_name
+                {
+                    path = Some(candidate);
+                    break;
+                }
+            }
+            let Some(path) = path else {
+                return Ok(None);
+            };
+            for op in path.ops {
+                match op {
+                    CompiledLensOp::Rename { from, to } => {
+                        if let Some(value) = cells.remove(&from) {
+                            cells.insert(to, value);
+                        }
+                    }
+                    CompiledLensOp::Copy { from, to } => {
+                        if let Some(value) = cells.get(&from).cloned() {
+                            cells.insert(to, value);
+                        }
+                    }
+                    CompiledLensOp::Add { column, default } => {
+                        cells
+                            .entry(column)
+                            .or_insert(CellProjection::Literal(default));
+                    }
+                    CompiledLensOp::Drop { column } => {
+                        cells.remove(&column);
+                    }
+                }
+            }
+        }
+
+        let mut fields = output
+            .fields()
+            .iter()
+            .take(GlobalCurrentRowRecord::USER_CELLS)
+            .map(|field| {
+                field
+                    .name
+                    .clone()
+                    .map(ProjectField::named)
+                    .ok_or(Error::InvalidStoredValue(
+                        "physical current winner system field unnamed",
+                    ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for column in &target_table.columns {
+            let output_name = physical_user_column_field(
+                target_mapping.columns.get(&column.name).copied().ok_or(
+                    Error::InvalidStoredValue("physical winner target column mapping missing"),
+                )?,
+            );
+            let output_type = output
+                .field_index(&output_name)
+                .and_then(|index| output.fields().get(index))
+                .map(|field| field.value_type.clone())
+                .ok_or(Error::InvalidStoredValue(
+                    "physical winner target output field missing",
+                ))?;
+            match cells.remove(&column.name) {
+                Some(CellProjection::Field(source)) => {
+                    fields.push(ProjectField::renamed(source, output_name));
+                }
+                Some(CellProjection::Literal(Value::Nullable(None))) | None
+                    if present.is_some() =>
+                {
+                    fields.push(ProjectField::literal_typed(
+                        output_name,
+                        Value::Nullable(None),
+                        output_type,
+                    ));
+                }
+                Some(CellProjection::Literal(value)) => {
+                    fields.push(ProjectField::literal_typed(
+                        output_name,
+                        Value::Nullable(Some(Box::new(value))),
+                        output_type,
+                    ));
+                }
+                None => return Ok(None),
+            }
+        }
+        fields.extend(
+            output
+                .fields()
+                .iter()
+                .skip(GlobalCurrentRowRecord::USER_CELLS + target_table.columns.len())
+                .map(|field| {
+                    field
+                        .name
+                        .clone()
+                        .map(ProjectField::named)
+                        .ok_or(Error::InvalidStoredValue(
+                            "physical current winner trailing field unnamed",
+                        ))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        Ok(Some(fields))
     }
 
     /// Build the logical query-local projection placed after physical current
