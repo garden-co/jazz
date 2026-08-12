@@ -3253,8 +3253,8 @@ where
         column: &str,
         kind: LargeValueKind,
     ) -> Result<Vec<u8>, Error> {
-        let canonical = self.canonical_maintained_view_witness(version)?;
-        let version = canonical.as_ref().unwrap_or(version);
+        let canonical = self.canonical_history_version_for_maintained_witness(version)?;
+        let version = &canonical;
         let authored_schema = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue(

@@ -703,8 +703,11 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
     assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 0);
 }
 
+// This stays internal because it directly exercises the protocol receiver's
+// receiver-batch boundary. The public serving tests below assert the matching
+// producer-side whole-row payload rule.
 #[test]
-fn receiver_batch_merges_complementary_projections_for_same_version() {
+fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
     let projection_schema = JazzSchema::new([TableSchema::new(
         "todos",
         [
@@ -741,26 +744,25 @@ fn receiver_batch_merges_complementary_projections_for_same_version() {
         panic!("expected accepted fate");
     };
     let full = versions.into_iter().next().unwrap();
-    let projection = |cells: Vec<Option<Value>>| {
-        VersionRecord::encode(
-            &projection_schema.tables[0],
-            full.schema_version(),
-            full.row_uuid(),
-            full.parents(),
-            full.created_by(),
-            full.created_at(),
-            full.updated_by(),
-            full.updated_at(),
-            &cells,
-            full.deletion(),
-        )
-        .unwrap()
-        .with_authored_columns(full.authored_columns().cloned())
-    };
-    let title_only = projection(vec![full.cell_at(0), None]);
-    let body_only = projection(vec![None, full.cell_at(1)]);
+    let conflicting = VersionRecord::encode(
+        &projection_schema.tables[0],
+        full.schema_version(),
+        full.row_uuid(),
+        full.parents(),
+        full.created_by(),
+        full.created_at(),
+        full.updated_by(),
+        full.updated_at(),
+        &[
+            Some(Value::String("conflicting title".to_owned())),
+            full.cell_at(1),
+        ],
+        full.deletion(),
+    )
+    .unwrap()
+    .with_authored_columns(full.authored_columns().cloned());
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
-    let update = |version, result_member_adds| ViewUpdateParts {
+    let update = |version, fate, update_global_seq, update_durability, result_member_adds| ViewUpdateParts {
         subscription,
         settled_through: global_seq,
         defer_settlement: false,
@@ -769,9 +771,9 @@ fn receiver_batch_merges_complementary_projections_for_same_version() {
         version_bundles: vec![VersionBundle {
             tx: tx.clone(),
             versions: vec![version],
-            fate: Fate::Accepted,
-            global_seq: Some(global_seq),
-            durability,
+            fate,
+            global_seq: update_global_seq,
+            durability: update_durability,
         }],
         peer_complete_tx_payload_refs: Vec::new(),
         authorization_progress: None,
@@ -782,10 +784,33 @@ fn receiver_batch_merges_complementary_projections_for_same_version() {
         program_fact_removes: Vec::new(),
     };
 
+    assert!(matches!(
+        reader.apply_view_updates_in_batch(vec![
+            update(
+                full.clone(),
+                Fate::Accepted,
+                Some(global_seq),
+                durability,
+                Vec::new(),
+            ),
+            update(
+                conflicting.clone(),
+                Fate::Accepted,
+                Some(global_seq),
+                durability,
+                Vec::new(),
+            ),
+        ]),
+        Err(Error::ConflictingCommitUnit(conflicting_tx)) if conflicting_tx == tx_id
+    ));
+
     reader
         .apply_view_updates_in_batch(vec![
             update(
-                title_only,
+                full.clone(),
+                Fate::Accepted,
+                Some(global_seq),
+                durability,
                 vec![ResultMemberEntry::row((
                     "todos".to_owned().into(),
                     row_uuid,
@@ -793,7 +818,10 @@ fn receiver_batch_merges_complementary_projections_for_same_version() {
                 ))],
             ),
             update(
-                body_only,
+                full.clone(),
+                Fate::Accepted,
+                Some(global_seq),
+                durability,
                 vec![ResultMemberEntry::row((
                     "todos".to_owned().into(),
                     row_uuid,
@@ -820,6 +848,34 @@ fn receiver_batch_merges_complementary_projections_for_same_version() {
     );
     assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 1);
     assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 0);
+
+    // A later subscription can replay the exact same immutable row payload
+    // with weaker fate metadata. The payload stays idempotent while fate and
+    // durability remain monotone.
+    reader
+        .apply_view_updates_in_batch(vec![update(
+            full.clone(),
+            Fate::Pending,
+            None,
+            DurabilityTier::Edge,
+            Vec::new(),
+        )])
+        .unwrap();
+    assert_eq!(
+        reader.transaction_state(tx_id).unwrap(),
+        (Fate::Accepted, Some(global_seq), DurabilityTier::Global),
+    );
+
+    assert!(matches!(
+        reader.apply_view_updates_in_batch(vec![update(
+            conflicting,
+            Fate::Accepted,
+            Some(global_seq),
+            durability,
+            Vec::new(),
+        )]),
+        Err(Error::ConflictingCommitUnit(conflicting_tx)) if conflicting_tx == tx_id
+    ));
 }
 
 // This stays internal because it directly exercises the protocol receiver's
