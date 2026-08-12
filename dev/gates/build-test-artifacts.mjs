@@ -17,11 +17,29 @@ import { fileURLToPath } from "node:url";
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
 function sharedGitDirectory(cwd = root) {
-  const directory = execFileSync("git", ["rev-parse", "--git-common-dir"], {
-    cwd,
-    encoding: "utf8",
-  }).trim();
-  return isAbsolute(directory) ? directory : resolve(cwd, directory);
+  try {
+    const directory = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return isAbsolute(directory) ? directory : resolve(cwd, directory);
+  } catch (error) {
+    throw lockFilesystemError("find shared Git directory", error);
+  }
+}
+
+function lockFilesystemError(operation, error) {
+  const code = typeof error?.code === "string" ? error.code : "unknown error";
+  return new Error(`test-artifacts: ${operation} failed (${code}).`);
+}
+
+function removeQuietly(path) {
+  try {
+    rmSync(path, { force: true });
+  } catch {
+    // A cleanup failure must not replace the primary, already-redacted error.
+  }
 }
 
 function processStartIdentity(pid = process.pid) {
@@ -33,7 +51,7 @@ function processStartIdentity(pid = process.pid) {
     return readFileSync(`/proc/${pid}/stat`, "utf8").trim().split(" ")[21];
   } catch (error) {
     if (error.code === "ENOENT") return undefined;
-    throw error;
+    throw lockFilesystemError("read process identity", error);
   }
 }
 
@@ -73,7 +91,7 @@ function readLockOwner(lockPath) {
     return JSON.parse(readFileSync(lockPath, "utf8"));
   } catch (error) {
     if (error.code === "ENOENT") return undefined;
-    throw new Error(`test-artifacts: lock has unreadable owner metadata: ${error.message}`);
+    throw lockFilesystemError("read lock receipt", error);
   }
 }
 
@@ -103,25 +121,29 @@ export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
   try {
     writeFileSync(staging, `${JSON.stringify(owner)}\n`, { mode: 0o600, flag: "wx" });
   } catch (error) {
-    rmSync(staging, { force: true });
-    throw error;
+    removeQuietly(staging);
+    throw lockFilesystemError("create lock receipt", error);
   }
   try {
     // Hard-linking the fully-written receipt is atomic and unlike rename
     // never replaces an existing live or malformed lock on POSIX/Windows.
     linkSync(staging, lockPath);
-    rmSync(staging, { force: true });
+    try {
+      rmSync(staging, { force: true });
+    } catch (error) {
+      throw lockFilesystemError("remove published lock receipt", error);
+    }
   } catch (error) {
     if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") {
-      rmSync(staging, { force: true });
-      throw error;
+      removeQuietly(staging);
+      throw lockFilesystemError("publish lock receipt", error);
     }
     const existing = readLockOwner(lockPath);
     if (!existing || !Number.isInteger(existing.pid) || existing.pid <= 0) {
-      rmSync(staging, { force: true });
+      removeQuietly(staging);
       throw new Error("test-artifacts: lock has no usable owner metadata; refusing to delete it.");
     }
-    rmSync(staging, { force: true });
+    removeQuietly(staging);
     throw lockError(lockPath, existing);
   }
   console.log(`test-artifacts: acquired shared artifact lock (pid ${owner.pid})`);
@@ -132,8 +154,12 @@ export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
       released = true;
       const current = readLockOwner(lockPath);
       if (current?.token !== owner.token)
-        throw new Error(`test-artifacts: lock ownership changed before release at ${lockPath}`);
-      rmSync(lockPath, { force: false });
+        throw new Error("test-artifacts: lock ownership changed before release.");
+      try {
+        rmSync(lockPath, { force: false });
+      } catch (error) {
+        throw lockFilesystemError("release lock", error);
+      }
       console.log("test-artifacts: released shared artifact lock");
     },
   };
@@ -146,21 +172,34 @@ export function unlockArtifactBuildLock(lockPath = artifactLockPath()) {
     writeFileSync(receipt, `${process.pid}\n`, { flag: "wx", mode: 0o600 });
     linkSync(receipt, guard);
   } catch (error) {
-    rmSync(receipt, { force: true });
+    removeQuietly(receipt);
     if (error.code === "EEXIST" || error.code === "ENOTEMPTY")
       throw new Error("test-artifacts: another unlock is in progress; retry shortly.");
-    throw error;
+    throw lockFilesystemError("acquire unlock guard", error);
   }
-  rmSync(receipt, { force: true });
+  try {
+    rmSync(receipt, { force: true });
+  } catch (error) {
+    removeQuietly(guard);
+    throw lockFilesystemError("remove unlock receipt", error);
+  }
   try {
     const owner = readLockOwner(lockPath);
     if (!owner || !Number.isInteger(owner.pid) || owner.pid <= 0)
       throw new Error("test-artifacts: lock has no usable owner metadata; refusing to delete it.");
     if (ownerIsAlive(owner)) throw lockError(lockPath, owner);
-    rmSync(lockPath, { force: false });
+    try {
+      rmSync(lockPath, { force: false });
+    } catch (error) {
+      throw lockFilesystemError("clear stale lock", error);
+    }
     console.log("test-artifacts: cleared verified stale artifact lock");
   } finally {
-    rmSync(guard, { force: true });
+    try {
+      rmSync(guard, { force: true });
+    } catch (error) {
+      throw lockFilesystemError("release unlock guard", error);
+    }
   }
 }
 

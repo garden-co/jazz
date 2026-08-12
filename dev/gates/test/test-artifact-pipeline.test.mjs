@@ -135,8 +135,25 @@ test("artifact lock refuses an unowned directory instead of deleting a possibly 
   const fixture = mkdtempSync(join(tmpdir(), "jazz-test-artifact-unowned-"));
   const lockPath = join(fixture, "lock");
   writeFileSync(lockPath, "not a receipt");
-  assert.throws(() => acquireArtifactBuildLock(lockPath), /unreadable owner metadata/);
+  assert.throws(() => acquireArtifactBuildLock(lockPath), /read lock receipt failed/);
   assert.equal(existsSync(lockPath), true);
+  rmSync(fixture, { recursive: true, force: true });
+});
+
+test("lock filesystem failures redact missing absolute paths", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "jazz-test-artifact-path-redaction-"));
+  const missingParent = join(fixture, "missing-parent");
+  const lockPath = join(missingParent, "lock");
+  // This planted raw filesystem call proves the underlying diagnostic would
+  // disclose the absolute path if the lock layer ever rethrows it directly.
+  assert.throws(() => writeFileSync(lockPath, "raw"), new RegExp(missingParent));
+  assert.throws(
+    () => acquireArtifactBuildLock(lockPath),
+    (error) =>
+      /create lock receipt failed \(ENOENT\)/.test(error.message) &&
+      !error.message.includes(fixture) &&
+      !error.message.includes(lockPath),
+  );
   rmSync(fixture, { recursive: true, force: true });
 });
 
