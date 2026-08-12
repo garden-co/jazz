@@ -14,26 +14,73 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
+export const testArtifactTargets = {
+  napi: resolve(root, "target/test-artifacts-napi"),
+  wasm: resolve(root, "target/test-artifacts-wasm"),
+};
 
-export function command(command, args, label = [command, ...args].join(" "), env) {
+export function command(command, args, label = [command, ...args].join(" "), options = {}) {
+  const { env, signal } = options;
   const started = performance.now();
   console.log(`test-artifacts: start ${label}`);
   return new Promise((resolvePromise, reject) => {
+    let settled = false;
+    let forceKillTimer;
     const child = spawn(command, args, {
       cwd: root,
       stdio: "inherit",
       shell: process.platform === "win32",
       env: { ...process.env, ...env },
+      // pnpm, wasm-pack and napi all spawn Cargo. A process group lets one
+      // failed sibling terminate the complete command tree instead of leaving
+      // compilers running after the pipeline has already failed.
+      detached: process.platform !== "win32",
     });
-    child.once("error", reject);
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(forceKillTimer);
+      signal?.removeEventListener("abort", abort);
+      process.removeListener("SIGINT", abort);
+      process.removeListener("SIGTERM", abort);
+      callback();
+    };
+    const abort = () => {
+      if (child.exitCode !== null) return;
+      if (process.platform === "win32") {
+        spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      } else {
+        try {
+          process.kill(-child.pid, "SIGTERM");
+        } catch (error) {
+          if (error.code !== "ESRCH") throw error;
+        }
+        forceKillTimer = setTimeout(() => {
+          try {
+            process.kill(-child.pid, "SIGKILL");
+          } catch (error) {
+            if (error.code !== "ESRCH")
+              console.warn(`test-artifacts: force-kill failed: ${error.message}`);
+          }
+        }, 5_000);
+        forceKillTimer.unref();
+      }
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    process.once("SIGINT", abort);
+    process.once("SIGTERM", abort);
+    if (signal?.aborted) abort();
+    child.once("error", (error) => finish(() => reject(error)));
     child.once("exit", (status, signal) => {
       const seconds = ((performance.now() - started) / 1000).toFixed(1);
       if (status === 0) {
         console.log(`test-artifacts: done ${label} (${seconds}s)`);
-        resolvePromise();
+        finish(resolvePromise);
       } else {
-        reject(
-          new Error(`${label} failed with ${signal ?? `exit ${status ?? 1}`} after ${seconds}s`),
+        finish(() =>
+          reject(
+            new Error(`${label} failed with ${signal ?? `exit ${status ?? 1}`} after ${seconds}s`),
+          ),
         );
       }
     });
@@ -41,57 +88,73 @@ export function command(command, args, label = [command, ...args].join(" "), env
 }
 
 export async function buildTestArtifacts(run = command) {
+  const controller = new AbortController();
+  let firstBuildError;
+  const guardedRun = (command, args, label, env) =>
+    run(command, args, label, { env, signal: controller.signal }).catch((error) => {
+      if (!firstBuildError) {
+        firstBuildError = error;
+        controller.abort(error);
+      }
+      throw error;
+    });
+
   // These are independent Cargo invocations. In particular, neither binding
   // needs the CLI binary, and jazz-tools only needs that binary plus WASM.
-  const cli = run("pnpm", ["--filter", "@jazz/rust", "build:crates"], "CLI");
+  const cli = guardedRun("pnpm", ["--filter", "@jazz/rust", "build:crates"], "CLI");
   // Separate target directories avoid Cargo's artifact-directory lock while
   // preserving stable per-lane incremental caches. CI's sccache still shares
   // compiled units across the target directories.
-  const wasm = run("pnpm", ["--filter", "jazz-wasm", "build:fast"], "fast WASM", {
-    CARGO_BUILD_JOBS: "2",
-    CARGO_TARGET_DIR: "target/test-artifacts-wasm",
+  const wasm = guardedRun("pnpm", ["--filter", "jazz-wasm", "build:fast"], "fast WASM", {
+    CARGO_TARGET_DIR: testArtifactTargets.wasm,
   });
-  const napi = run("pnpm", ["--filter", "jazz-napi", "build"], "release NAPI", {
-    CARGO_BUILD_JOBS: "2",
-    CARGO_TARGET_DIR: "target/test-artifacts-napi",
+  const napi = guardedRun("pnpm", ["--filter", "jazz-napi", "build"], "release NAPI", {
+    CARGO_TARGET_DIR: testArtifactTargets.napi,
   });
 
   const tools = Promise.all([cli, wasm]).then(() =>
-    run("pnpm", ["--filter", "jazz-tools", "build"], "jazz-tools"),
+    guardedRun("pnpm", ["--filter", "jazz-tools", "build"], "jazz-tools"),
   );
-  await Promise.all([tools, napi]);
+  try {
+    await Promise.all([tools, napi]);
+  } catch (error) {
+    throw firstBuildError ?? error;
+  }
 
   // A manifest is the contract that makes a cached/generated artifact safe to
   // consume. NAPI is built release because that is the loadable Linux mode;
   // the fast profile is intentionally WASM-only and correctness-only.
-  await run(
+  await guardedRun(
     "node",
     ["dev/artifacts/provenance.mjs", "verify", "wasm", "fast"],
     "verify fast WASM provenance",
   );
+
+  try {
+    await guardedRun("node", ["-e", "require('./crates/jazz-napi')"], "load release NAPI");
+  } catch (error) {
+    // A damaged native artifact must not make every run pay a second build.
+    // Repair only after the first load proves it necessary, then prove repair.
+    console.warn(`test-artifacts: release NAPI did not load; repairing (${error.message})`);
+    // The first load failure aborts only the already-completed first phase.
+    // Use a fresh controller for the bounded repair and its validation.
+    controller.abort(error);
+    const repairController = new AbortController();
+    const repairRun = (command, args, label, env) =>
+      run(command, args, label, { env, signal: repairController.signal }).catch((repairError) => {
+        repairController.abort(repairError);
+        throw repairError;
+      });
+    await repairRun("pnpm", ["--filter", "jazz-napi", "build"], "repair release NAPI", {
+      CARGO_TARGET_DIR: testArtifactTargets.napi,
+    });
+    await repairRun("node", ["-e", "require('./crates/jazz-napi')"], "load repaired release NAPI");
+  }
   await run(
     "node",
     ["dev/artifacts/provenance.mjs", "verify", "napi", "release"],
     "verify release NAPI provenance",
   );
-
-  try {
-    await run("node", ["-e", "require('./crates/jazz-napi')"], "load release NAPI");
-  } catch (error) {
-    // A damaged native artifact must not make every run pay a second build.
-    // Repair only after the first load proves it necessary, then prove repair.
-    console.warn(`test-artifacts: release NAPI did not load; repairing (${error.message})`);
-    await run("pnpm", ["--filter", "jazz-napi", "build"], "repair release NAPI", {
-      CARGO_BUILD_JOBS: "2",
-      CARGO_TARGET_DIR: "target/test-artifacts-napi",
-    });
-    await run(
-      "node",
-      ["dev/artifacts/provenance.mjs", "verify", "napi", "release"],
-      "verify repaired NAPI provenance",
-    );
-    await run("node", ["-e", "require('./crates/jazz-napi')"], "load repaired release NAPI");
-  }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

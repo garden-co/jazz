@@ -25,7 +25,6 @@
       "outputs": [".next/**", "!.next/cache/**"]
     },
     "jazz-napi#build": {
-      "dependsOn": ["@jazz/rust#build:crates"],
       "inputs": [
         "package.json",
         "Cargo.toml",
@@ -49,7 +48,6 @@
       "outputs": ["*.node", "index.js", "index.d.ts", ".jazz-artifact-manifest.json"]
     },
     "jazz-wasm#build": {
-      "dependsOn": ["@jazz/rust#build:crates"],
       "inputs": [
         "package.json",
         "Cargo.toml",
