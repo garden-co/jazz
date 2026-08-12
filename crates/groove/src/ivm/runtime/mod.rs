@@ -11487,11 +11487,18 @@ fn update_unbounded_collect_by_terminal_state(
         state.groups.clear();
         state.roots.clear();
     }
+    // A weighted update arrives as a post-image addition and pre-image
+    // removal. Consolidate exact records and canonicalize every surviving
+    // transition before emitting terminal edits: net removals first, then net
+    // additions. This makes replacement (`-before, +after`) unambiguous to
+    // consumers and cancels transient insert/delete pairs within one batch.
+    let deltas =
+        canonical_collect_by_terminal_deltas(input_desc, collect_by, direct_tree_slot, deltas)?;
     let root_groups_before = direct_tree_slot
         .is_none()
         .then(|| state.groups.keys().cloned().collect::<BTreeSet<_>>());
     let mut operations = Vec::new();
-    for delta in deltas {
+    for delta in &deltas {
         let group_key =
             encoded_record_key_part(input_desc, delta.raw(), &collect_by.group_field_indices)?;
         if let Some(presence_field) = direct_tree_slot.and_then(|slot| slot.presence_field_index)
@@ -11681,6 +11688,72 @@ fn update_unbounded_collect_by_terminal_state(
         }
     }
     Ok(operations)
+}
+
+fn canonical_collect_by_terminal_deltas(
+    input_desc: RecordDescriptor,
+    collect_by: &CollectByOp,
+    direct_tree_slot: Option<&CollectBySlot>,
+    deltas: &[RecordDelta],
+) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+    let (sort_field_indices, sort_directions) = direct_tree_slot.map_or(
+        (
+            collect_by.sort_field_indices.as_slice(),
+            collect_by.sort_directions.as_slice(),
+        ),
+        |slot| {
+            (
+                slot.sort_field_indices.as_slice(),
+                slot.sort_directions.as_slice(),
+            )
+        },
+    );
+    let keyed = deltas
+        .iter()
+        .map(|delta| {
+            Ok::<_, IvmRuntimeError>((
+                encoded_record_key_part(input_desc, delta.raw(), &collect_by.group_field_indices)?,
+                collect_by_sort_key_for_fields(
+                    input_desc,
+                    delta.raw(),
+                    sort_field_indices,
+                    sort_directions,
+                )?,
+                delta.record.clone(),
+                delta.weight,
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(canonicalize_collect_by_terminal_weights(keyed)
+        .into_iter()
+        .map(|(_, _, record, weight)| RecordDelta { record, weight })
+        .collect())
+}
+
+fn canonicalize_collect_by_terminal_weights(
+    keyed: Vec<(Vec<u8>, Vec<TopBySortPart>, Bytes, i64)>,
+) -> Vec<(Vec<u8>, Vec<TopBySortPart>, Bytes, i64)> {
+    let mut consolidated = BTreeMap::<(Vec<u8>, Vec<TopBySortPart>, Bytes), i64>::new();
+    for (group_key, sort_key, record, weight) in keyed {
+        *consolidated
+            .entry((group_key, sort_key, record))
+            .or_default() += weight;
+    }
+    let mut canonical = consolidated
+        .into_iter()
+        .filter_map(|((group_key, sort_key, record), weight)| {
+            (weight != 0).then_some((group_key, sort_key, record, weight))
+        })
+        .collect::<Vec<_>>();
+    canonical.sort_by(
+        |(left_group, left_sort, _, left_weight), (right_group, right_sort, _, right_weight)| {
+            left_group
+                .cmp(right_group)
+                .then_with(|| left_weight.is_positive().cmp(&right_weight.is_positive()))
+                .then_with(|| left_sort.cmp(right_sort))
+        },
+    );
+    canonical
 }
 
 fn update_collect_by_root_terminal_state(
@@ -12447,6 +12520,47 @@ mod tests {
         ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey,
     };
     use crate::storage::{RecordStore, RocksDbStorage};
+
+    #[test]
+    fn terminal_collect_canonicalization_emits_net_remove_before_net_insert() {
+        let record = |label: u8| Bytes::from(vec![label]);
+        let keyed = |record: Bytes, weight| (vec![1], Vec::new(), record, weight);
+
+        // An update followed by deletion of its post-image is a final delete,
+        // not an ambiguous replacement. An intermediate update that cancels
+        // within the batch disappears, while independent roots stay ordered.
+        let canonical = canonicalize_collect_by_terminal_weights(vec![
+            keyed(record(1), -1),
+            keyed(record(2), 1),
+            keyed(record(2), -1),
+            keyed(record(3), 1),
+            (vec![2], Vec::new(), record(4), 1),
+            (vec![2], Vec::new(), record(4), -1),
+        ]);
+        assert_eq!(
+            canonical,
+            vec![
+                (vec![1], Vec::new(), record(1), -1),
+                (vec![1], Vec::new(), record(3), 1)
+            ]
+        );
+
+        // Grouped/interleaved multiple replacements retain only the final
+        // post-image and put the pre-image removal before it.
+        let replacements = canonicalize_collect_by_terminal_weights(vec![
+            keyed(record(1), -1),
+            keyed(record(2), 1),
+            keyed(record(2), -1),
+            keyed(record(3), 1),
+        ]);
+        assert_eq!(
+            replacements,
+            vec![
+                (vec![1], Vec::new(), record(1), -1),
+                (vec![1], Vec::new(), record(3), 1)
+            ]
+        );
+    }
 
     #[test]
     fn raw_variant_case_registry_refresh_rejects_projection_replacement() {

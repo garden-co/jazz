@@ -1170,6 +1170,41 @@ describe("SubscriptionManager", () => {
     ]);
     expect(result.delta).toEqual([{ kind: 0, id: rootId, index: 0, item: result.all![0] }]);
 
+    // Producers canonicalize a weighted child replacement as Remove(old),
+    // Insert(new); consumers apply that wire contract without inference.
+    const replacement = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: rootKey,
+            path: [{ Collection: "__jazz_include_project" }],
+            edit: { Remove: { key: childKey } },
+          },
+          {
+            root_key: rootKey,
+            path: [{ Collection: "__jazz_include_project" }],
+            edit: {
+              Insert: {
+                index: 0,
+                key: childKey,
+                value: [...terminalTextChild(childId, "Revised announcements")],
+              },
+            },
+          },
+        ],
+      },
+      transformIncluded,
+      rootColumns,
+    );
+    expect(replacement.all?.[0]?.project?.name).toBe("Revised announcements");
+
     expect(() =>
       manager.handleDelta(
         {
@@ -1197,7 +1232,7 @@ describe("SubscriptionManager", () => {
         rootColumns,
       ),
     ).toThrow(/does not match addressed key/);
-    expect(manager.all()).toEqual(result.all);
+    expect(manager.all()).toEqual(replacement.all);
 
     const nestedUpdate = manager.handleDelta(
       {

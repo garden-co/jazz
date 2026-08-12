@@ -4051,14 +4051,33 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
         BTreeMap::from([("body".to_owned(), Value::String("edited".to_owned()))]),
     )
     .unwrap();
-    assert!(matches!(
-        block_on(subscription.next_event()).unwrap(),
-        SubscriptionEvent::Delta { terminal_operations, .. }
-            if terminal_operations.iter().any(|operation| matches!(
-                operation.edit,
-                groove::ivm::TerminalEdit::Insert { .. } | groove::ivm::TerminalEdit::Update { .. }
-            ))
-    ));
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = block_on(subscription.next_event()).unwrap()
+    else {
+        panic!("child update must emit a terminal delta");
+    };
+    let child_operations = terminal_operations
+        .iter()
+        .filter(|operation| !operation.path.is_empty())
+        .collect::<Vec<_>>();
+    let [remove, insert] = child_operations.as_slice() else {
+        panic!("a child replacement must emit exactly one remove and one insert");
+    };
+    let groove::ivm::TerminalEdit::Remove { key: remove_key } = &remove.edit else {
+        panic!("a child replacement must begin with Remove");
+    };
+    let groove::ivm::TerminalEdit::Insert {
+        key: insert_key, ..
+    } = &insert.edit
+    else {
+        panic!("a child replacement must end with Insert");
+    };
+    assert_eq!(
+        remove_key, insert_key,
+        "canonical replacement must address one stable child identity"
+    );
 
     db.delete("comments", row(0xc1)).unwrap();
     assert!(matches!(
