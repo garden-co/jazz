@@ -15,9 +15,29 @@ const job = (name, nextName) => {
   assert.notEqual(end, -1, `missing boundary after ${name} job`);
   return workflow.slice(start, end);
 };
+const integrationCheckStep = (typescriptJob) => {
+  const start = typescriptJob.indexOf("name: Check integration workspace");
+  assert.notEqual(start, -1, "missing integration workspace check");
+  const end = typescriptJob.indexOf("\n      - ", start + 1);
+  return typescriptJob.slice(start, end === -1 ? typescriptJob.length : end);
+};
+const assertIntegrationCheckIsGating = (typescriptJob) => {
+  // Job-level continue-on-error makes every failed step non-gating. Reject the
+  // property rather than only the literal `true`, because expressions are
+  // equally able to accidentally suppress an integration failure.
+  assert.doesNotMatch(
+    typescriptJob,
+    /^    continue-on-error:/m,
+    "test-ts must not suppress job failures",
+  );
+  assert.doesNotMatch(
+    integrationCheckStep(typescriptJob),
+    /^\s+continue-on-error:/m,
+    "integration workspace check must not suppress its failure",
+  );
+};
 
 test("Rust CI uses pinned prebuilt tools without charging Rust-only jobs for wasm-pack", () => {
-  const buildIntegration = job("build-integration", "lint");
   const lint = job("lint", "test-rust");
   const rust = job("test-rust", "test-ts");
   const typescript = job("test-ts");
@@ -27,8 +47,50 @@ test("Rust CI uses pinned prebuilt tools without charging Rust-only jobs for was
   assert.doesNotMatch(rust, /ensure:rust-toolchain|wasm-pack/);
   assert.doesNotMatch(rust, /rust-components:/);
   assert.doesNotMatch(lint, /ensure:rust-toolchain|wasm-pack/);
-  assert.doesNotMatch(buildIntegration, /ensure:rust-toolchain|wasm-pack/);
   assert.match(typescript, /tool: wasm-pack@0\.13\.1/);
+});
+
+test("the single trusted-runner job checks the integration workspace before TypeScript artifacts", () => {
+  const typescript = job("test-ts");
+
+  // The dedicated jazz-ci runner has one worker. Splitting these phases into
+  // jobs serializes their checkout/setup work in GitHub's runner queue.
+  assert.doesNotMatch(workflow, /^  build-integration:/m);
+  assert.match(
+    typescript,
+    /name: Check integration workspace\s+run: cargo check --workspace --all-targets/,
+  );
+  assertIntegrationCheckIsGating(typescript);
+  assert.ok(
+    typescript.indexOf("name: Check integration workspace") <
+      typescript.indexOf("name: Build correctness-test artifacts"),
+    "workspace check must fail before the expensive correctness artifact build",
+  );
+  assert.match(typescript, /runs-on: \$\{\{ github\.event_name == 'pull_request'.*'jazz-ci' \}\}/);
+});
+
+test("integration workspace check contract rejects planted failure suppression", () => {
+  const typescript = job("test-ts");
+  const check =
+    "name: Check integration workspace\n        run: cargo check --workspace --all-targets";
+
+  assert.throws(
+    () =>
+      assertIntegrationCheckIsGating(
+        typescript.replace(check, `${check}\n        continue-on-error: true`),
+      ),
+    /integration workspace check must not suppress its failure/,
+  );
+  assert.throws(
+    () =>
+      assertIntegrationCheckIsGating(
+        typescript.replace(
+          "    timeout-minutes: 20",
+          "    continue-on-error: true\n    timeout-minutes: 20",
+        ),
+      ),
+    /test-ts must not suppress job failures/,
+  );
 });
 
 test("lint keeps its one workspace Clippy invocation inside pnpm lint", () => {
