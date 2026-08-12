@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -46,11 +48,78 @@ test("CI runs the workflow contract test through its package script", () => {
 
 test("TypeScript CI overlaps independent Node and browser suites after one artifact build", () => {
   const typescript = job("test-ts");
-  assert.match(typescript, /name: Build correctness-test artifacts\s+run: pnpm build:test-artifacts/);
+  const runner = fs.readFileSync(path.join(root, "dev/gates/run-ts-tests.sh"), "utf8");
+  assert.match(
+    typescript,
+    /name: Build correctness-test artifacts\s+run: pnpm build:test-artifacts/,
+  );
   assert.match(typescript, /name: Run Node and browser test suites in parallel/);
-  assert.match(typescript, /pnpm test .* &\s+node_tests_pid=\$!/);
-  assert.match(typescript, /pnpm --filter jazz-tools test:browser &\s+browser_tests_pid=\$!/);
-  assert.match(typescript, /wait "\$\{node_tests_pid\}"/);
-  assert.match(typescript, /wait "\$\{browser_tests_pid\}"/);
+  assert.match(typescript, /run: dev\/gates\/run-ts-tests\.sh/);
+  assert.match(runner, /--concurrency=2/);
+  assert.match(runner, /setsid bash -c "\$\{node_tests_command\}" &/);
+  assert.match(runner, /setsid bash -c "\$\{browser_tests_command\}" &/);
+  assert.match(runner, /trap 'interrupt 130' INT/);
+  assert.match(runner, /trap 'interrupt 143' TERM/);
+  assert.match(runner, /kill -TERM -- "-\$\{child_pid\}"/);
+  assert.match(runner, /wait "\$\{node_tests_pid\}"/);
+  assert.match(runner, /node_tests_status=\$\?/);
+  assert.match(runner, /wait "\$\{browser_tests_pid\}"/);
+  assert.match(runner, /browser_tests_status=\$\?/);
+  assert.match(runner, /Node test suite exit status:/);
+  assert.match(runner, /Browser test suite exit status:/);
+  assert.match(runner, /node_tests_status.*-ne 0 \|\|.*browser_tests_status.*-ne 0/);
   assert.doesNotMatch(typescript, /rust-components: clippy,rustfmt/);
+});
+
+test("parallel TypeScript runner waits for both suites and combines their failures", () => {
+  const runner = path.join(root, "dev/gates/run-ts-tests.sh");
+  const cases = [
+    { node: 0, browser: 0, expected: 0 },
+    { node: 7, browser: 0, expected: 1 },
+    { node: 0, browser: 9, expected: 1 },
+    { node: 7, browser: 9, expected: 1 },
+  ];
+  for (const testCase of cases) {
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-runner-"));
+    const nodeMarker = path.join(fixture, "node");
+    const browserMarker = path.join(fixture, "browser");
+    const result = spawnSync("bash", [runner], {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        JAZZ_NODE_TEST_COMMAND: `sleep 0.05; touch ${JSON.stringify(nodeMarker)}; exit ${testCase.node}`,
+        JAZZ_BROWSER_TEST_COMMAND: `sleep 0.1; touch ${JSON.stringify(browserMarker)}; exit ${testCase.browser}`,
+      },
+    });
+    assert.equal(result.status, testCase.expected, result.stderr);
+    assert.equal(fs.existsSync(nodeMarker), true, "node suite was not reaped");
+    assert.equal(fs.existsSync(browserMarker), true, "browser suite was not reaped");
+    assert.match(result.stdout, new RegExp(`Node test suite exit status: ${testCase.node}`));
+    assert.match(result.stdout, new RegExp(`Browser test suite exit status: ${testCase.browser}`));
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("parallel TypeScript runner terminates both child process groups", async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-interrupt-"));
+  const nodeMarker = path.join(fixture, "node-orphan");
+  const browserMarker = path.join(fixture, "browser-orphan");
+  const child = spawn("bash", [path.join(root, "dev/gates/run-ts-tests.sh")], {
+    cwd: root,
+    env: {
+      ...process.env,
+      JAZZ_NODE_TEST_COMMAND: `sleep 0.5; touch ${JSON.stringify(nodeMarker)}`,
+      JAZZ_BROWSER_TEST_COMMAND: `sleep 0.5; touch ${JSON.stringify(browserMarker)}`,
+    },
+    stdio: "ignore",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  child.kill("SIGTERM");
+  const status = await new Promise((resolve) => child.once("exit", (code) => resolve(code)));
+  assert.equal(status, 143);
+  await new Promise((resolve) => setTimeout(resolve, 550));
+  assert.equal(fs.existsSync(nodeMarker), false, "node descendant survived TERM");
+  assert.equal(fs.existsSync(browserMarker), false, "browser descendant survived TERM");
+  fs.rmSync(fixture, { recursive: true, force: true });
 });

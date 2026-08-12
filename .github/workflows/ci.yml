@@ -152,16 +152,4 @@ jobs:
       # outputs. Running them together avoids extending the PR critical path
       # while retaining the complete Node and browser coverage in this gate.
       - name: Run Node and browser test suites in parallel
-        run: |
-          set +e
-          pnpm test --filter=!moon-lander-react --filter=!@jazz/rust --filter=!auth-simple-chat --filter=!auth-workos-chat --filter=!auth-betterauth-chat --filter=!chat-react --filter=!world-tour --filter=!jazz-rn --concurrency=2 &
-          node_tests_pid=$!
-          pnpm --filter jazz-tools test:browser &
-          browser_tests_pid=$!
-          wait "${node_tests_pid}"
-          node_tests_status=$?
-          wait "${browser_tests_pid}"
-          browser_tests_status=$?
-          if [ "${node_tests_status}" -ne 0 ] || [ "${browser_tests_status}" -ne 0 ]; then
-            exit 1
-          fi
+        run: dev/gates/run-ts-tests.sh
