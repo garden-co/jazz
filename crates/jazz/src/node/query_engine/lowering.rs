@@ -354,6 +354,7 @@ fn source_authorization_for_source(
                 protected_row_field: "row_uuid".to_owned(),
                 binding_source_shape: request.input.binding.source_shape.clone(),
                 binding_user_params: binding_user_param_types(&request.input.binding)?,
+                binding_claim_params: request.input.binding.claim_params.clone(),
             },
         }),
         // Auxiliary closure and payload sources do not establish policy
@@ -3706,12 +3707,17 @@ fn lower_value_source(
                     (!projected.contains(&route_field))
                         .then(|| ProjectField::renamed(param.clone(), route_field))
                 })
-                .chain(domain.claim_params.keys().filter_map(|param| {
-                    source_user_params
-                        .contains(param)
-                        .then(|| (!projected.contains(param)).then(|| ProjectField::named(param)))
-                        .flatten()
-                }))
+                // A nested policy graph can consume an enclosing claim only
+                // in a sibling/ancestor branch. The shared binding descriptor
+                // nevertheless needs that slot to survive this value-source
+                // projection so downstream authorization joins can route it.
+                .chain(
+                    domain
+                        .claim_params
+                        .keys()
+                        .filter(|param| !projected.contains(*param))
+                        .map(ProjectField::named),
+                )
                 .collect::<Vec<_>>();
             Ok(
                 GraphBuilder::binding_source(shape.to_owned(), input_descriptor).project_fields(

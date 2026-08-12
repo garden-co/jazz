@@ -3600,6 +3600,7 @@ fn identity_policy_context_requests_policy_filtered_sources() {
                 protected_row_field: "row_uuid".to_owned(),
                 binding_source_shape: None,
                 binding_user_params: BTreeMap::new(),
+                binding_claim_params: BTreeMap::new(),
             },
         }
     );
@@ -3691,6 +3692,7 @@ fn binding_descriptor_types_do_not_depend_on_runtime_array_values() {
                     "teams".to_owned(),
                     ColumnType::Array(Box::new(ColumnType::Uuid)),
                 )]),
+                binding_claim_params: BTreeMap::new(),
             },
         }
     );
