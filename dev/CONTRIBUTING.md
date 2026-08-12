@@ -47,6 +47,26 @@ pnpm test          # everything (via turbo)
 cargo test -p jazz --no-default-features --features test   # rust core only
 ```
 
+### Focus one Rust test safely
+
+`dev/t` first asks Cargo for the test inventory using the same target and
+features it will run. It refuses an empty selection, prints the selected binary,
+feature and cache context, and separately reports inventory/compile and test-run
+elapsed time.
+
+```sh
+# Default: Jazz library tests, substring matching.
+dev/t subscription::tests::reopens
+
+# Fully-qualified exact library test.
+dev/t --exact db::tests::round_trips
+
+# An integration target is explicit, so Cargo cannot search an unintended bin.
+dev/t --test incremental_delivery_canary maintained_relation -- --nocapture
+```
+
+Run `pnpm test:focused-rust` to test the wrapper with a mocked Cargo inventory.
+
 ### Bounded Rust runs and receipts
 
 Use the repository launcher when a test could hang or when comparing local and
