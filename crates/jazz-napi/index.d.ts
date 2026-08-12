@@ -108,8 +108,8 @@ export declare class Tx {
 export declare class Write {
   get batchId(): string
   get payload(): Uint8Array
-  wait(tier: string): Promise<undefined>
   writeState(): any
+  wait(tier: string): Promise<undefined>
   close(): boolean
 }
 
@@ -124,6 +124,7 @@ export interface SubscriptionDeltaEvent {
   reset: boolean
   delta: Uint8Array
   terminalOperations: Array<SubscriptionTerminalOperation>
+  terminalLayouts: Array<SubscriptionTerminalLayout>
   settled: boolean
   tier: 'None' | 'Local' | 'Edge' | 'Global'
 }
@@ -169,6 +170,20 @@ export interface SubscriptionTerminalKeyPathSegment {
   Key: Array<number>
 }
 
+/**
+ * Immutable producer-owned root record contract.  The descriptor and public
+ * slots are published once per NAPI subscription, before an operation may
+ * reference `id`; TypeScript never has to infer a CurrentRow/layout family.
+ */
+export interface SubscriptionTerminalLayout {
+  id: string
+  rootDescriptor: Array<number>
+  rootKeySlot: number
+  rootKeyFieldName: string
+  publicFields: Array<SubscriptionTerminalPublicField>
+  carrier: string
+}
+
 export interface SubscriptionTerminalMove {
   key: Array<number>
   index: number
@@ -179,7 +194,7 @@ export interface SubscriptionTerminalMoveEdit {
 }
 
 export interface SubscriptionTerminalOperation {
-  rootDescriptor: Array<number>
+  rootLayoutId: string
   root_key: Array<number>
   path: Array<SubscriptionTerminalPathSegment>
   edit: SubscriptionTerminalEdit
@@ -187,6 +202,13 @@ export interface SubscriptionTerminalOperation {
 
 export type SubscriptionTerminalPathSegment =
   SubscriptionTerminalCollectionPathSegment | SubscriptionTerminalKeyPathSegment
+
+export interface SubscriptionTerminalPublicField {
+  name: string
+  descriptorFieldName: string
+  slot: number
+  carrier: string
+}
 
 export interface SubscriptionTerminalRemove {
   key: Array<number>

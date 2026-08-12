@@ -7,6 +7,7 @@ import { SubscriptionManager, applySubscriptionDelta } from "./subscription-mana
 import type { SubscriptionDelta } from "./subscription-manager.js";
 import {
   encodeNativeRowValues,
+  logicalStorageColumns,
   storageColumnValueType,
   writeDescriptor,
 } from "./native-runtime/native-row-codec.js";
@@ -153,6 +154,19 @@ function currentRowTerminalDescriptor(columns: readonly ColumnDescriptor[]): num
   writeDescriptor(writer, [
     { name: "row_uuid", valueType: { tag: 10 } },
     ...currentRowColumns(columns).map((column) => ({
+      name: `user_${column.name}`,
+      valueType: storageColumnValueType(column),
+    })),
+  ]);
+  return [...writer.finish()];
+}
+
+function collectorTerminalDescriptor(columns: readonly ColumnDescriptor[]): number[] {
+  const logicalColumns = logicalStorageColumns(columns);
+  const writer = new PostcardWriter();
+  writeDescriptor(writer, [
+    { name: "row_uuid", valueType: { tag: 10 } },
+    ...logicalColumns.map((column) => ({
       name: `user_${column.name}`,
       valueType: storageColumnValueType(column),
     })),
@@ -958,6 +972,182 @@ describe("SubscriptionManager", () => {
     );
 
     expect(result.all).toEqual([{ id, name: "logical" }]);
+  });
+
+  it("registers a producer-owned root layout before decoding its operations", () => {
+    const id = "00000000-0000-4000-8000-000000000001";
+    const key = [10, ...uuidBytes(id)];
+    const manager = new SubscriptionManager<TestItem>();
+    const result = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalLayouts: [
+          {
+            id: "current-row-v1",
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
+            rootKeySlot: 0,
+            rootKeyFieldName: "row_uuid",
+            publicFields: [
+              { name: "name", descriptorFieldName: "user_name", slot: 1 },
+              { name: "count", descriptorFieldName: "user_count", slot: 2 },
+            ],
+            carrier: "CurrentRow",
+          },
+        ],
+        terminalOperations: [
+          {
+            rootLayoutId: "current-row-v1",
+            root_key: key,
+            path: [],
+            edit: { Insert: { index: 0, key, value: [...terminalRowData(id, "layout", 9)] } },
+          },
+        ],
+      },
+      transform,
+      nativeColumns,
+    );
+    expect(result.all).toEqual([{ id, name: "layout", count: 9 }]);
+  });
+
+  it("decodes logical collector roots and rejects the wrong carrier kind", () => {
+    const id = "00000000-0000-4000-8000-000000000001";
+    const key = [10, ...uuidBytes(id)];
+    const sparseLogicalColumns = nativeColumns.map((column) => ({ ...column, sparse: true }));
+    const descriptor = collectorTerminalDescriptor(sparseLogicalColumns);
+    const value = [
+      ...uuidBytes(id),
+      ...encodeNativeRowValues(nativeColumns, [
+        { type: "Text", value: "collector" },
+        { type: "Integer", value: 11 },
+      ]),
+    ];
+    const delta = (carrier: "Logical" | "CurrentRow"): NativeRowDelta => ({
+      __jazzNativeRowDelta: true,
+      added: new Uint8Array(),
+      removed: new Uint8Array(),
+      updated: new Uint8Array(),
+      addedCount: 0,
+      removedCount: 0,
+      updatedCount: 0,
+      terminalLayouts: [
+        {
+          id: `collector-${carrier}`,
+          rootDescriptor: descriptor,
+          rootKeySlot: 0,
+          rootKeyFieldName: "row_uuid",
+          publicFields: [
+            { name: "name", descriptorFieldName: "user_name", slot: 1 },
+            { name: "count", descriptorFieldName: "user_count", slot: 2 },
+          ],
+          carrier,
+        },
+      ],
+      terminalOperations: [
+        {
+          rootLayoutId: `collector-${carrier}`,
+          root_key: key,
+          path: [],
+          edit: { Insert: { index: 0, key, value } },
+        },
+      ],
+    });
+
+    expect(
+      new SubscriptionManager<TestItem>().handleDelta(
+        delta("Logical"),
+        transform,
+        sparseLogicalColumns,
+      ).all,
+    ).toEqual([{ id, name: "collector", count: 11 }]);
+    expect(() =>
+      new SubscriptionManager<TestItem>().handleDelta(
+        delta("CurrentRow"),
+        transform,
+        sparseLogicalColumns,
+      ),
+    ).toThrow(/terminal root layout does not match/);
+  });
+
+  it("normalizes sparse logical trees but preserves CurrentRow nullable carriers", () => {
+    const columns: ColumnDescriptor[] = [
+      {
+        name: "profile",
+        column_type: {
+          type: "Row",
+          columns: [{ name: "label", column_type: { type: "Text" }, nullable: true, sparse: true }],
+        },
+        nullable: true,
+        sparse: true,
+      },
+    ];
+    const layoutDelta = (
+      id: string,
+      carrier: "Logical" | "CurrentRow",
+      rootDescriptor: number[],
+      fieldCarrier = carrier,
+    ): NativeRowDelta => ({
+      __jazzNativeRowDelta: true,
+      added: new Uint8Array(),
+      removed: new Uint8Array(),
+      updated: new Uint8Array(),
+      addedCount: 0,
+      removedCount: 0,
+      updatedCount: 0,
+      terminalLayouts: [
+        {
+          id,
+          rootDescriptor,
+          rootKeySlot: 0,
+          rootKeyFieldName: "row_uuid",
+          publicFields: [
+            {
+              name: "profile",
+              descriptorFieldName: "user_profile",
+              slot: 1,
+              carrier: fieldCarrier,
+            },
+          ],
+          carrier,
+        },
+      ],
+    });
+    expect(() =>
+      new SubscriptionManager().handleDelta(
+        layoutDelta("logical-tree", "CurrentRow", collectorTerminalDescriptor(columns), "Logical"),
+        (row) => row,
+        columns,
+      ),
+    ).not.toThrow();
+
+    const normalized = { ...columns[0]!, sparse: undefined };
+    const writer = new PostcardWriter();
+    writeDescriptor(writer, [
+      { name: "row_uuid", valueType: { tag: 10 } },
+      {
+        name: "user_profile",
+        valueType: { tag: 14, inner: storageColumnValueType(normalized) },
+      },
+    ]);
+    expect(() =>
+      new SubscriptionManager().handleDelta(
+        layoutDelta("current-row-nullable", "CurrentRow", [...writer.finish()]),
+        (row) => row,
+        columns,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      new SubscriptionManager().handleDelta(
+        layoutDelta("wrong-current-row", "CurrentRow", collectorTerminalDescriptor(columns)),
+        (row) => row,
+        columns,
+      ),
+    ).toThrow(/terminal root layout does not match/);
   });
 
   it("applies root insert positions in producer order after earlier removals", () => {

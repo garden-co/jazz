@@ -34,7 +34,7 @@ use napi_derive::napi;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -226,6 +226,9 @@ pub struct Transport {
 #[napi(js_name = "Subscription")]
 pub struct Subscription {
     inner: Option<NapiSubscription>,
+    /// Layout definitions are installed atomically with the first event that
+    /// references them.  Later terminal operations only carry this stable id.
+    published_terminal_layouts: HashSet<String>,
 }
 
 #[napi(object)]
@@ -236,6 +239,8 @@ pub struct SubscriptionDeltaEvent {
     pub delta: Uint8Array,
     #[napi(js_name = "terminalOperations")]
     pub terminal_operations: Vec<SubscriptionTerminalOperation>,
+    #[napi(js_name = "terminalLayouts")]
+    pub terminal_layouts: Vec<SubscriptionTerminalLayout>,
     pub settled: bool,
     #[napi(ts_type = "'None' | 'Local' | 'Edge' | 'Global'")]
     pub tier: String,
@@ -282,12 +287,38 @@ pub struct SubscriptionServerFailureReason {
 
 #[napi(object)]
 pub struct SubscriptionTerminalOperation {
-    #[napi(js_name = "rootDescriptor")]
-    pub root_descriptor: Vec<u32>,
+    #[napi(js_name = "rootLayoutId")]
+    pub root_layout_id: String,
     #[napi(js_name = "root_key")]
     pub root_key: Vec<u32>,
     pub path: Vec<SubscriptionTerminalPathSegment>,
     pub edit: SubscriptionTerminalEdit,
+}
+
+/// Immutable producer-owned root record contract.  The descriptor and public
+/// slots are published once per NAPI subscription, before an operation may
+/// reference `id`; TypeScript never has to infer a CurrentRow/layout family.
+#[napi(object)]
+pub struct SubscriptionTerminalLayout {
+    pub id: String,
+    #[napi(js_name = "rootDescriptor")]
+    pub root_descriptor: Vec<u32>,
+    #[napi(js_name = "rootKeySlot")]
+    pub root_key_slot: f64,
+    #[napi(js_name = "rootKeyFieldName")]
+    pub root_key_field_name: String,
+    #[napi(js_name = "publicFields")]
+    pub public_fields: Vec<SubscriptionTerminalPublicField>,
+    pub carrier: String,
+}
+
+#[napi(object)]
+pub struct SubscriptionTerminalPublicField {
+    pub name: String,
+    #[napi(js_name = "descriptorFieldName")]
+    pub descriptor_field_name: String,
+    pub slot: f64,
+    pub carrier: String,
 }
 
 #[napi(object)]
@@ -578,7 +609,10 @@ impl Subscription {
             let Some(event) = event else {
                 break;
             };
-            events.push(core_subscription_event_to_napi(&event)?);
+            events.push(core_subscription_event_to_napi(
+                &event,
+                &mut self.published_terminal_layouts,
+            )?);
         }
         Ok(events)
     }
@@ -1327,7 +1361,10 @@ impl NapiDb {
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         };
-        Ok(Subscription { inner: Some(inner) })
+        Ok(Subscription {
+            inner: Some(inner),
+            published_terminal_layouts: HashSet::new(),
+        })
     }
 
     #[napi(js_name = "subscribeForIdentity")]
@@ -1356,7 +1393,10 @@ impl NapiDb {
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         };
-        Ok(Subscription { inner: Some(inner) })
+        Ok(Subscription {
+            inner: Some(inner),
+            published_terminal_layouts: HashSet::new(),
+        })
     }
 
     #[napi(js_name = "subscribeRelationQuery")]
@@ -1384,7 +1424,10 @@ impl NapiDb {
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         };
-        Ok(Subscription { inner: Some(inner) })
+        Ok(Subscription {
+            inner: Some(inner),
+            published_terminal_layouts: HashSet::new(),
+        })
     }
 
     #[napi(js_name = "subscribeRelationQueryForIdentity")]
@@ -1414,7 +1457,10 @@ impl NapiDb {
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         };
-        Ok(Subscription { inner: Some(inner) })
+        Ok(Subscription {
+            inner: Some(inner),
+            published_terminal_layouts: HashSet::new(),
+        })
     }
 
     #[napi(js_name = "insertWithIdEncoded")]
@@ -2472,6 +2518,7 @@ fn core_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> CoreRow<'a> {
 
 fn core_subscription_event_to_napi(
     event: &CoreSubscriptionEvent,
+    published_terminal_layouts: &mut HashSet<String>,
 ) -> napi::Result<SubscriptionEvent> {
     match event {
         CoreSubscriptionEvent::Delta {
@@ -2480,6 +2527,7 @@ fn core_subscription_event_to_napi(
             updated,
             removed,
             terminal_operations,
+            terminal_layout,
             settled,
             tier,
             ..
@@ -2497,15 +2545,43 @@ fn core_subscription_event_to_napi(
                 },
             )
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-            let terminal_operations = terminal_operations
-                .iter()
-                .map(core_terminal_operation_to_napi)
-                .collect::<std::result::Result<_, _>>()?;
+            let (terminal_layouts, terminal_operations) = if terminal_operations.is_empty() {
+                (Vec::new(), Vec::new())
+            } else {
+                let terminal_layout = terminal_layout.as_ref().ok_or_else(|| {
+                    napi::Error::from_reason(
+                        "terminal operation arrived without a prepared root layout".to_owned(),
+                    )
+                })?;
+                if terminal_operations
+                    .iter()
+                    .any(|operation| operation.root_descriptor != terminal_layout.root_descriptor)
+                {
+                    return Err(napi::Error::from_reason(
+                        "terminal operation descriptor disagrees with its prepared root layout"
+                            .to_owned(),
+                    ));
+                }
+                let terminal_layouts = published_terminal_layouts
+                    .insert(terminal_layout.id.clone())
+                    .then(|| core_terminal_layout_to_napi(terminal_layout))
+                    .transpose()?
+                    .into_iter()
+                    .collect();
+                let terminal_operations = terminal_operations
+                    .iter()
+                    .map(|operation| {
+                        core_terminal_operation_to_napi(operation, terminal_layout.id.clone())
+                    })
+                    .collect::<std::result::Result<_, _>>()?;
+                (terminal_layouts, terminal_operations)
+            };
             Ok(Either3::A(SubscriptionDeltaEvent {
                 event_type: "delta".to_string(),
                 reset: *reset,
                 delta: Uint8Array::new(delta),
                 terminal_operations,
+                terminal_layouts,
                 settled: *settled,
                 tier: format!("{tier:?}"),
             }))
@@ -2570,7 +2646,9 @@ mod test_fixture_export {
             SubscriptionEvent::Closed,
         ]
         .iter()
-        .map(super::core_subscription_event_to_napi)
+        .scan(std::collections::HashSet::new(), |layouts, event| {
+            Some(super::core_subscription_event_to_napi(event, layouts))
+        })
         .collect()
     }
 }
@@ -2581,11 +2659,10 @@ mod test_fixture_export {
 /// representation for the existing TypeScript terminal consumer.
 fn core_terminal_operation_to_napi(
     operation: &jazz::groove::ivm::TerminalOperation,
+    root_layout_id: String,
 ) -> napi::Result<SubscriptionTerminalOperation> {
     use jazz::groove::ivm::{TerminalEdit, TerminalPathSegment};
 
-    let root_descriptor = postcard::to_allocvec(&operation.root_descriptor)
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
     let path = operation
         .path
         .iter()
@@ -2628,10 +2705,40 @@ fn core_terminal_operation_to_napi(
     };
 
     Ok(SubscriptionTerminalOperation {
-        root_descriptor: terminal_bytes_to_numbers(&root_descriptor),
+        root_layout_id,
         root_key: terminal_bytes_to_numbers(&operation.root_key),
         path,
         edit,
+    })
+}
+
+fn core_terminal_layout_to_napi(
+    layout: &jazz::db::TerminalRootLayout,
+) -> napi::Result<SubscriptionTerminalLayout> {
+    let root_descriptor = postcard::to_allocvec(&layout.root_descriptor)
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    Ok(SubscriptionTerminalLayout {
+        id: layout.id.clone(),
+        root_descriptor: terminal_bytes_to_numbers(&root_descriptor),
+        root_key_slot: layout.root_key_slot as f64,
+        root_key_field_name: layout.root_key_field_name.clone(),
+        public_fields: layout
+            .public_fields
+            .iter()
+            .map(|field| SubscriptionTerminalPublicField {
+                name: field.name.clone(),
+                descriptor_field_name: field.descriptor_field_name.clone(),
+                slot: field.slot as f64,
+                carrier: match field.carrier {
+                    jazz::db::TerminalRootCarrier::CurrentRow => "CurrentRow".to_owned(),
+                    jazz::db::TerminalRootCarrier::Logical => "Logical".to_owned(),
+                },
+            })
+            .collect(),
+        carrier: match layout.carrier {
+            jazz::db::TerminalRootCarrier::CurrentRow => "CurrentRow".to_owned(),
+            jazz::db::TerminalRootCarrier::Logical => "Logical".to_owned(),
+        },
     })
 }
 
@@ -3018,7 +3125,7 @@ pub fn verify_local_first_identity_proof_napi(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashSet};
     use std::rc::Rc;
 
     use crate::{
@@ -3029,6 +3136,7 @@ mod tests {
     use jazz::db::{
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
         MergeableTxOps, Propagation as CorePropagation, SubscriptionEvent as CoreSubscriptionEvent,
+        TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField,
     };
     use jazz::groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
     use jazz::groove::records::Value as CoreValue;
@@ -3196,15 +3304,19 @@ mod tests {
 
     #[test]
     fn subscription_payload_exposes_only_terminal_rows() {
-        let payload = core_subscription_event_to_napi(&CoreSubscriptionEvent::Delta {
-            reset: false,
-            added: Vec::new(),
-            updated: Vec::new(),
-            removed: Vec::new(),
-            terminal_operations: Vec::new(),
-            settled: true,
-            tier: DurabilityTier::Local,
-        })
+        let payload = core_subscription_event_to_napi(
+            &CoreSubscriptionEvent::Delta {
+                reset: false,
+                added: Vec::new(),
+                updated: Vec::new(),
+                removed: Vec::new(),
+                terminal_operations: Vec::new(),
+                terminal_layout: None,
+                settled: true,
+                tier: DurabilityTier::Local,
+            },
+            &mut HashSet::new(),
+        )
         .expect("encode terminal delta");
 
         let Either3::A(payload) = payload else {
@@ -3218,8 +3330,11 @@ mod tests {
     #[test]
     fn subscription_payload_preserves_typed_terminal_operations_and_descriptor() {
         let descriptor = RecordDescriptor::new([
-            ("__jazz_terminal_row_key", ValueType::Uuid),
-            ("title", ValueType::String),
+            ("row_uuid", ValueType::Uuid),
+            (
+                "user_title",
+                ValueType::Nullable(Box::new(ValueType::String)),
+            ),
         ]);
         let expected_descriptor = postcard::to_allocvec(&descriptor).unwrap();
         let operations = vec![
@@ -3261,15 +3376,32 @@ mod tests {
                 },
             },
         ];
-        let payload = core_subscription_event_to_napi(&CoreSubscriptionEvent::Delta {
-            reset: false,
-            added: Vec::new(),
-            updated: Vec::new(),
-            removed: Vec::new(),
-            terminal_operations: operations,
-            settled: false,
-            tier: DurabilityTier::Edge,
-        })
+        let terminal_layout = TerminalRootLayout {
+            id: "test-terminal-layout".to_owned(),
+            root_descriptor: descriptor,
+            root_key_slot: 0,
+            root_key_field_name: "row_uuid".to_owned(),
+            public_fields: vec![TerminalRootPublicField {
+                name: "title".to_owned(),
+                descriptor_field_name: "user_title".to_owned(),
+                slot: 1,
+                carrier: TerminalRootCarrier::CurrentRow,
+            }],
+            carrier: TerminalRootCarrier::CurrentRow,
+        };
+        let payload = core_subscription_event_to_napi(
+            &CoreSubscriptionEvent::Delta {
+                reset: false,
+                added: Vec::new(),
+                updated: Vec::new(),
+                removed: Vec::new(),
+                terminal_operations: operations,
+                terminal_layout: Some(terminal_layout),
+                settled: false,
+                tier: DurabilityTier::Edge,
+            },
+            &mut HashSet::new(),
+        )
         .expect("encode terminal operations");
 
         let Either3::A(payload) = payload else {
@@ -3278,8 +3410,9 @@ mod tests {
         assert_eq!(payload.tier, "Edge");
         assert_eq!(payload.terminal_operations.len(), 4);
         let insert = &payload.terminal_operations[0];
+        assert_eq!(insert.root_layout_id, "test-terminal-layout");
         assert_eq!(
-            insert.root_descriptor,
+            payload.terminal_layouts[0].root_descriptor,
             terminal_bytes_to_numbers(&expected_descriptor)
         );
         assert_eq!(insert.root_key, vec![0, 255]);
@@ -3313,11 +3446,14 @@ mod tests {
     fn subscription_payload_preserves_rejection_and_closed_variants() {
         use jazz::protocol::{SubscribeRejectReason, SubscribeServerFailureCode};
 
-        let unsupported = core_subscription_event_to_napi(&CoreSubscriptionEvent::Rejected {
-            reason: SubscribeRejectReason::UnsupportedShapeCapability {
-                detail: "unsupported maintained shape".to_owned(),
+        let unsupported = core_subscription_event_to_napi(
+            &CoreSubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::UnsupportedShapeCapability {
+                    detail: "unsupported maintained shape".to_owned(),
+                },
             },
-        })
+            &mut HashSet::new(),
+        )
         .expect("encode unsupported rejection");
         assert!(matches!(
             unsupported,
@@ -3332,9 +3468,12 @@ mod tests {
                 && detail == "unsupported maintained shape"
         ));
 
-        let pending = core_subscription_event_to_napi(&CoreSubscriptionEvent::Rejected {
-            reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
-        })
+        let pending = core_subscription_event_to_napi(
+            &CoreSubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
+            },
+            &mut HashSet::new(),
+        )
         .expect("encode pending rejection");
         assert!(matches!(
             pending,
@@ -3347,11 +3486,14 @@ mod tests {
                 && reason_type == "ShapeRegistrationPendingCatalogueAdmission"
         ));
 
-        let server_failure = core_subscription_event_to_napi(&CoreSubscriptionEvent::Rejected {
-            reason: SubscribeRejectReason::ServerFailure {
-                code: SubscribeServerFailureCode::QueryValidation,
+        let server_failure = core_subscription_event_to_napi(
+            &CoreSubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::ServerFailure {
+                    code: SubscribeServerFailureCode::QueryValidation,
+                },
             },
-        })
+            &mut HashSet::new(),
+        )
         .expect("encode server rejection");
         assert!(matches!(
             server_failure,
@@ -3366,8 +3508,9 @@ mod tests {
                 && code == "QueryValidation"
         ));
 
-        let closed = core_subscription_event_to_napi(&CoreSubscriptionEvent::Closed)
-            .expect("encode closed event");
+        let closed =
+            core_subscription_event_to_napi(&CoreSubscriptionEvent::Closed, &mut HashSet::new())
+                .expect("encode closed event");
         assert!(matches!(
             closed,
             Either3::C(crate::SubscriptionClosedEvent { event_type }) if event_type == "closed"

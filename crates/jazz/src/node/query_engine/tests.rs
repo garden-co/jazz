@@ -964,6 +964,7 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
                 OutputTerminalSchema::AppRows(AppRowSchema {
                     descriptor,
                     hidden_fields,
+                    carrier: AppRowCarrier::CurrentRow,
                     ..
                 }) if descriptor.field_index("user_title").is_some()
                     && hidden_fields.is_empty()
@@ -2355,13 +2356,15 @@ fn collector_layout_retains_public_magic_timestamp_fields_on_child_rows() {
     let program = lower_query_program(request, &mut InlineCollectorResolver::new(None))
         .expect("magic timestamp child projection should lower");
     let ProgramOutputSchemas::RowSet(outputs) = &program.lowered.output;
-    let descriptor = outputs
+    let schema = outputs
         .iter()
         .find_map(|output| match output {
-            OutputTerminalSchema::AppRows(schema) => Some(&schema.descriptor),
+            OutputTerminalSchema::AppRows(schema) => Some(schema),
             OutputTerminalSchema::Fact(_) => None,
         })
         .expect("app rows descriptor");
+    assert_eq!(schema.carrier, AppRowCarrier::Logical);
+    let descriptor = &schema.descriptor;
     let tags = descriptor
         .fields()
         .iter()
@@ -2379,6 +2382,57 @@ fn collector_layout_retains_public_magic_timestamp_fields_on_child_rows() {
     assert!(row.field_index("$updatedAt").is_some());
     assert!(row.field_index("$createdBy").is_none());
     assert!(row.field_index("$updatedBy").is_none());
+}
+
+#[test]
+fn flat_collectors_bind_preserved_and_unwrapped_root_carriers() {
+    let mut collect_all = collector_request(system_policy_context());
+    let PayloadProjection::Tree(projection) = &mut collect_all
+        .output
+        .app_rows
+        .as_mut()
+        .expect("app rows")
+        .projection
+    else {
+        panic!("collector request must use a tree projection");
+    };
+    projection.paths.clear();
+    let program = lower_query_program(collect_all, &mut InlineCollectorResolver::new(None))
+        .expect("flat collect-all should lower");
+    let ProgramOutputSchemas::RowSet(outputs) = &program.lowered.output;
+    let schema = outputs
+        .iter()
+        .find_map(|output| match output {
+            OutputTerminalSchema::AppRows(schema) => Some(schema),
+            OutputTerminalSchema::Fact(_) => None,
+        })
+        .expect("app rows descriptor");
+    assert_eq!(schema.carrier, AppRowCarrier::CurrentRow);
+
+    let mut projected = collector_request(system_policy_context());
+    let PayloadProjection::Tree(projection) = &mut projected
+        .output
+        .app_rows
+        .as_mut()
+        .expect("app rows")
+        .projection
+    else {
+        panic!("collector request must use a tree projection");
+    };
+    projection.paths.clear();
+    projection.fields =
+        FieldProjection::Fields(BTreeSet::from(["title".to_owned(), "todo".to_owned()]));
+    let program = lower_query_program(projected, &mut InlineCollectorResolver::new(None))
+        .expect("flat projected collector should lower");
+    let ProgramOutputSchemas::RowSet(outputs) = &program.lowered.output;
+    let schema = outputs
+        .iter()
+        .find_map(|output| match output {
+            OutputTerminalSchema::AppRows(schema) => Some(schema),
+            OutputTerminalSchema::Fact(_) => None,
+        })
+        .expect("app rows descriptor");
+    assert_eq!(schema.carrier, AppRowCarrier::Logical);
 }
 
 #[test]
@@ -3424,6 +3478,20 @@ fn equality_filter_param_lowers_to_prepared_binding_join() {
     assert!(graph.contains("BindingSource"), "{graph}");
     assert!(graph.contains("query-binding"), "{graph}");
     assert!(graph.contains("title"), "{graph}");
+    let ProgramOutputSchemas::RowSet(outputs) = &program.lowered.output;
+    let app_rows = outputs
+        .iter()
+        .find_map(|output| match output {
+            OutputTerminalSchema::AppRows(rows) => Some(rows),
+            OutputTerminalSchema::Fact(_) => None,
+        })
+        .expect("app rows schema");
+    let route = route_param_field("title");
+    assert!(app_rows.descriptor.field_index(&route).is_some());
+    assert!(
+        app_rows.hidden_fields.contains(&route),
+        "prepared binding route must remain internal to the flat collector"
+    );
 }
 
 // Internal compiler-boundary test: the public query API cannot expose which

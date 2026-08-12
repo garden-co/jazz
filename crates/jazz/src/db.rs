@@ -2071,6 +2071,7 @@ where
                 updated: Vec::new(),
                 removed: Vec::new(),
                 terminal_operations: Vec::new(),
+                terminal_layout: None,
                 settled,
                 tier: read_tier,
             })
@@ -5758,6 +5759,7 @@ where
                 updated: Vec::new(),
                 removed,
                 terminal_operations: Vec::new(),
+                terminal_layout: None,
                 settled,
                 tier: read_tier,
             };
@@ -6003,6 +6005,9 @@ where
                         )
                     } else {
                         if terminal_rows && !peer_terminal_operations.is_empty() {
+                            let terminal_layout = maintained_subscription
+                                .as_ref()
+                                .and_then(|maintained| maintained.terminal_root_layout().cloned());
                             if let Some(maintained) = maintained_subscription.as_mut() {
                                 // The serving terminal is authoritative for
                                 // structural publication. Advance the local
@@ -6027,6 +6032,7 @@ where
                                 updated: Vec::new(),
                                 removed: Vec::new(),
                                 terminal_operations: peer_terminal_operations,
+                                terminal_layout,
                                 settled,
                                 tier: snapshot_tier,
                             };
@@ -6081,6 +6087,7 @@ where
                                         updated: Vec::new(),
                                         removed: Vec::new(),
                                         terminal_operations: update.terminal_operations,
+                                        terminal_layout: update.terminal_layout,
                                         settled,
                                         tier: snapshot_tier,
                                     };
@@ -11172,6 +11179,51 @@ pub struct SubscriptionOutputRow {
     pub row: CurrentRow,
 }
 
+/// Immutable producer-owned decoding contract for a structured terminal root.
+///
+/// The maintained query compiler creates this alongside its app-row terminal.
+/// Consumers install it before applying operations which name `id`; the
+/// descriptor remains the source of truth for encoded types while these slots
+/// map public fields to their physical record positions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalRootLayout {
+    /// Stable hash of the descriptor, slots, identities and carrier.
+    pub id: String,
+    /// Exact physical root descriptor used to decode packed bytes.
+    pub root_descriptor: RecordDescriptor,
+    /// Descriptor slot containing the stable root UUID.
+    pub root_key_slot: usize,
+    /// Exact descriptor identity of the root UUID slot.
+    pub root_key_field_name: String,
+    /// Public field-to-descriptor slot mappings, in public output order.
+    pub public_fields: Vec<TerminalRootPublicField>,
+    /// Physical representation used for public cells.
+    pub carrier: TerminalRootCarrier,
+}
+
+/// One public root field's immutable physical slot identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalRootPublicField {
+    /// Public column name.
+    pub name: String,
+    /// Physical descriptor field name at `slot`.
+    pub descriptor_field_name: String,
+    /// Physical descriptor slot.
+    pub slot: usize,
+    /// Encoded representation of this individual slot.
+    pub carrier: TerminalRootCarrier,
+}
+
+/// The producer representation applied around declared public column types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalRootCarrier {
+    /// A physical `CurrentRow`: each application cell has one extra nullable
+    /// carrier around its declared storage type.
+    CurrentRow,
+    /// A logical collector/projection record with declared storage types.
+    Logical,
+}
+
 impl std::ops::Deref for SubscriptionOutputRow {
     type Target = CurrentRow;
 
@@ -11197,6 +11249,9 @@ pub enum SubscriptionEvent {
         removed: Vec<RemovedRow>,
         /// Typed structural edits to already hydrated terminal rows.
         terminal_operations: Vec<groove::ivm::TerminalOperation>,
+        /// Immutable root decoding contract for `terminal_operations`, when
+        /// this event carries structured terminal changes.
+        terminal_layout: Option<TerminalRootLayout>,
         /// Whether the result is complete at the requested read tier.
         settled: bool,
         /// Read tier used to materialize the rows.
@@ -11393,6 +11448,7 @@ fn subscription_terminal_delta_event(
         updated,
         removed,
         terminal_operations: Vec::new(),
+        terminal_layout: None,
         settled,
         tier,
     }
@@ -11446,6 +11502,7 @@ fn subscription_delta_event_with_reset(
         updated,
         removed,
         terminal_operations: Vec::new(),
+        terminal_layout: None,
         settled,
         tier,
     }
@@ -11465,6 +11522,7 @@ fn apply_maintained_update_to_snapshot(
         added_edges: update_added_edges,
         removed_edges: update_removed_edges,
         terminal_operations,
+        terminal_layout,
     } = update;
 
     if snapshot.rows.is_empty()
@@ -11493,6 +11551,7 @@ fn apply_maintained_update_to_snapshot(
                 updated: Vec::new(),
                 removed: Vec::new(),
                 terminal_operations: terminal_operations.clone(),
+                terminal_layout: terminal_layout.clone(),
                 settled,
                 tier,
             };
@@ -11543,6 +11602,7 @@ fn apply_maintained_update_to_snapshot(
             updated: Vec::new(),
             removed: Vec::new(),
             terminal_operations: terminal_operations.clone(),
+            terminal_layout: terminal_layout.clone(),
             settled,
             tier,
         };
@@ -11671,6 +11731,7 @@ fn apply_maintained_update_to_snapshot(
         updated,
         removed,
         terminal_operations,
+        terminal_layout,
         settled,
         tier,
     }

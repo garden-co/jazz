@@ -5313,90 +5313,106 @@ fn lowered_terminals(
     // cannot retain any routed binding fields yet.
     if let Some(app_rows) = &request.output.app_rows {
         let projected_output = projected_multisource_terminal(plan, source);
-        let (graph, descriptor, hidden_fields) = match app_rows.projection.clone() {
-            _ if !app_rows.public_terminal => (
-                closure.visible_root.clone(),
-                source.row_shape.descriptor.clone(),
-                hidden_source_fields(&source.row_shape),
-            ),
-            PayloadProjection::Tree(tree) => {
-                let collected = lower_collect_by_app_rows(
+        let (graph, descriptor, hidden_fields, carrier, field_carriers) =
+            match app_rows.projection.clone() {
+                _ if !app_rows.public_terminal => (
                     closure.visible_root.clone(),
-                    &tree,
-                    plan,
-                    source,
-                    resolved_sources,
-                    request,
-                    &root_route_fields,
-                    available_fields,
-                )?;
-                (
-                    collected.graph,
-                    collected.descriptor,
-                    collected.hidden_fields,
-                )
-            }
-            _ if projected_output.is_some() => {
-                let (output_source_id, output_fields, _is_flat) = projected_output
-                    .as_ref()
-                    .expect("guarded projected multi-source output");
-                let output_source = resolved_sources.get(output_source_id).ok_or_else(|| {
-                    single_gap_report(UnsupportedReason::Runtime(format!(
-                        "projected output source {output_source_id:?} was not resolved"
-                    )))
-                })?;
-                let hidden_fields = hidden_source_fields(&output_source.row_shape)
-                    .into_iter()
-                    .chain(
-                        output_fields
-                            .iter()
-                            .filter(|field| field.name.starts_with("__flat_join_row_"))
-                            .map(|field| field.name.clone()),
+                    source.row_shape.descriptor.clone(),
+                    hidden_source_fields(&source.row_shape),
+                    AppRowCarrier::CurrentRow,
+                    BTreeMap::new(),
+                ),
+                PayloadProjection::Tree(tree) => {
+                    let collected = lower_collect_by_app_rows(
+                        closure.visible_root.clone(),
+                        &tree,
+                        plan,
+                        source,
+                        resolved_sources,
+                        request,
+                        &root_route_fields,
+                        available_fields,
+                    )?;
+                    (
+                        collected.graph,
+                        collected.descriptor,
+                        collected.hidden_fields,
+                        collected.carrier,
+                        collected.field_carriers,
                     )
-                    .collect::<BTreeSet<_>>();
-                let public_fields = output_fields
-                    .iter()
-                    .filter(|field| !hidden_fields.contains(&field.name))
-                    .collect::<Vec<_>>();
-                let descriptor = RecordDescriptor::new(
-                    public_fields
+                }
+                _ if projected_output.is_some() => {
+                    let (output_source_id, output_fields, _is_flat) = projected_output
+                        .as_ref()
+                        .expect("guarded projected multi-source output");
+                    let output_source =
+                        resolved_sources.get(output_source_id).ok_or_else(|| {
+                            single_gap_report(UnsupportedReason::Runtime(format!(
+                                "projected output source {output_source_id:?} was not resolved"
+                            )))
+                        })?;
+                    let hidden_fields = hidden_source_fields(&output_source.row_shape)
+                        .into_iter()
+                        .chain(
+                            output_fields
+                                .iter()
+                                .filter(|field| field.name.starts_with("__flat_join_row_"))
+                                .map(|field| field.name.clone()),
+                        )
+                        .collect::<BTreeSet<_>>();
+                    let public_fields = output_fields
                         .iter()
-                        .map(|field| (field.name.clone(), field.ty.clone())),
-                );
-                let graph = graph.clone().project_fields(
-                    public_fields
-                        .iter()
-                        .map(|field| ProjectField::named(&field.name)),
-                );
-                (graph, descriptor, BTreeSet::new())
-            }
-            _ => {
-                let collected = lower_collect_by_app_rows(
-                    closure.visible_root.clone(),
-                    &AppProjectionTree {
-                        fields: FieldProjection::All,
-                        paths: Vec::new(),
-                    },
-                    plan,
-                    source,
-                    resolved_sources,
-                    request,
-                    &root_route_fields,
-                    available_fields,
-                )?;
-                (
-                    collected.graph,
-                    collected.descriptor,
-                    collected.hidden_fields,
-                )
-            }
-        };
+                        .filter(|field| !hidden_fields.contains(&field.name))
+                        .collect::<Vec<_>>();
+                    let descriptor = RecordDescriptor::new(
+                        public_fields
+                            .iter()
+                            .map(|field| (field.name.clone(), field.ty.clone())),
+                    );
+                    let graph = graph.clone().project_fields(
+                        public_fields
+                            .iter()
+                            .map(|field| ProjectField::named(&field.name)),
+                    );
+                    (
+                        graph,
+                        descriptor,
+                        BTreeSet::new(),
+                        AppRowCarrier::Logical,
+                        BTreeMap::new(),
+                    )
+                }
+                _ => {
+                    let collected = lower_collect_by_app_rows(
+                        closure.visible_root.clone(),
+                        &AppProjectionTree {
+                            fields: FieldProjection::All,
+                            paths: Vec::new(),
+                        },
+                        plan,
+                        source,
+                        resolved_sources,
+                        request,
+                        &root_route_fields,
+                        available_fields,
+                    )?;
+                    (
+                        collected.graph,
+                        collected.descriptor,
+                        collected.hidden_fields,
+                        collected.carrier,
+                        collected.field_carriers,
+                    )
+                }
+            };
         terminals.push(LoweredTerminal {
             sink: "app_rows".to_owned(),
             graph,
             output: OutputTerminalSchema::AppRows(AppRowSchema {
                 descriptor,
                 hidden_fields,
+                carrier,
+                field_carriers,
             }),
         });
     }
@@ -5677,6 +5693,8 @@ struct LoweredCollectByAppRows {
     graph: GraphBuilder,
     descriptor: RecordDescriptor,
     hidden_fields: BTreeSet<String>,
+    carrier: AppRowCarrier,
+    field_carriers: BTreeMap<String, AppRowCarrier>,
 }
 
 fn lower_collect_by_app_rows(
@@ -5704,6 +5722,36 @@ fn lower_collect_by_app_rows(
     align_collect_root_window(&mut layout, plan)?;
     align_collect_join_key_types(&mut layout.slots, plan, resolved_sources, request)?;
     if layout.slots.is_empty() {
+        // A collect-all root preserves the source CurrentRow application-cell
+        // wrappers. Explicit projections unwrap those cells to their declared
+        // logical types. Bind that distinction here while both input and
+        // output types are authoritative; consumers must never infer it from
+        // the eventual descriptor's field names.
+        let carrier = if layout
+            .root_fields
+            .iter()
+            .filter(|field| field.is_output && !field.is_row_id)
+            .all(|field| field.value_type == field.output_value_type)
+        {
+            AppRowCarrier::CurrentRow
+        } else {
+            AppRowCarrier::Logical
+        };
+        let field_carriers = layout
+            .root_fields
+            .iter()
+            .filter(|field| field.is_output && !field.is_row_id)
+            .map(|field| {
+                (
+                    field.output.clone(),
+                    if field.value_type == field.output_value_type {
+                        AppRowCarrier::CurrentRow
+                    } else {
+                        AppRowCarrier::Logical
+                    },
+                )
+            })
+            .collect();
         let anchor = collect_anchor_graph(visible_root, &layout)?;
         let has_window = root_linear_steps(plan).is_some_and(|steps| {
             steps
@@ -5754,10 +5802,37 @@ fn lower_collect_by_app_rows(
         return Ok(LoweredCollectByAppRows {
             graph,
             descriptor,
-            hidden_fields: BTreeSet::new(),
+            // Route parameters are retained in the collector record so the
+            // maintained graph can partition results, but they are not part
+            // of the app projection. Nested collectors already apply the same
+            // boundary below.
+            hidden_fields: route_fields.clone(),
+            carrier,
+            field_carriers,
         });
     }
     let root_context = root_collect_context_graph(visible_root.clone(), &layout)?;
+    let mut field_carriers = layout
+        .root_fields
+        .iter()
+        .filter(|field| field.is_output && !field.is_row_id)
+        .map(|field| {
+            (
+                field.output.clone(),
+                if field.value_type == field.output_value_type {
+                    AppRowCarrier::CurrentRow
+                } else {
+                    AppRowCarrier::Logical
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    field_carriers.extend(
+        layout
+            .slots
+            .iter()
+            .map(|slot| (slot.collection_field.clone(), AppRowCarrier::Logical)),
+    );
     let mut association_graphs = Vec::new();
     for slot in &layout.slots {
         let path = find_correlated_path(plan, &slot.path).ok_or_else(|| {
@@ -5823,6 +5898,8 @@ fn lower_collect_by_app_rows(
         graph,
         descriptor,
         hidden_fields,
+        carrier: AppRowCarrier::Logical,
+        field_carriers,
     })
 }
 
@@ -6722,6 +6799,8 @@ fn lowered_aggregate_terminals(
             output: OutputTerminalSchema::AppRows(AppRowSchema {
                 descriptor: aggregate_app_row_descriptor(plan, source)?,
                 hidden_fields: root_route_fields.clone(),
+                carrier: AppRowCarrier::Logical,
+                field_carriers: BTreeMap::new(),
             }),
         });
     }

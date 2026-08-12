@@ -555,7 +555,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     runtime.unsubscribe(handle);
   });
 
-  it("returns raw NAPI subscription payloads as Uint8Array with descriptor-aware terminal operations", async () => {
+  it("returns raw NAPI subscription payloads as Uint8Array with registered terminal layouts", async () => {
     const { NapiDb } = await loadNapiModule();
     const node = deterministicBytes("jazz-napi-native-runtime-raw-subscription:node");
     const author = deterministicBytes("jazz-napi-native-runtime-raw-subscription:author");
@@ -649,11 +649,12 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const rawIncremental = expectRawBinaryPayload(rawDelta);
     expect(rawIncremental.terminalOperations).toHaveLength(1);
     const rawOperation = rawIncremental.terminalOperations[0];
-    expect(rawOperation?.rootDescriptor.length).toBeGreaterThan(0);
+    expect(rawIncremental.terminalLayouts).toHaveLength(1);
+    const rawLayout = rawIncremental.terminalLayouts[0];
+    expect(rawOperation?.rootLayoutId).toBe(rawLayout?.id);
+    expect(rawLayout?.rootDescriptor.length).toBeGreaterThan(0);
     expect(
-      rawOperation?.rootDescriptor.every(
-        (byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255,
-      ),
+      rawLayout?.rootDescriptor.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255),
     ).toBe(true);
     expect(rawOperation?.root_key.length).toBeGreaterThan(0);
     expect(

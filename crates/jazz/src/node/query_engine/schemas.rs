@@ -23,6 +23,18 @@ pub(crate) struct AppRowSchema {
     pub(crate) descriptor: RecordDescriptor,
     /// Hidden fields retained by the graph and stripped before app delivery.
     pub(crate) hidden_fields: BTreeSet<String>,
+    /// Physical value representation emitted by this lowered terminal.
+    pub(crate) carrier: AppRowCarrier,
+    /// Per-field override for mixed collector records, keyed by descriptor name.
+    pub(crate) field_carriers: BTreeMap<String, AppRowCarrier>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppRowCarrier {
+    /// Source CurrentRow cells retain their outer presence wrapper.
+    CurrentRow,
+    /// Collector/projection cells use their declared logical value types.
+    Logical,
 }
 
 /// Typed fact row schema plus the fact identity that requested it.
