@@ -158,6 +158,24 @@ impl RecordDescriptor {
                 })
     }
 
+    /// Whether `next` preserves this descriptor and only appends nullable
+    /// fields. Existing records can then be represented under `next` by
+    /// supplying typed nulls for the appended suffix.
+    pub(crate) fn can_append_nullable_fields_to(&self, next: &Self) -> bool {
+        self.fields.len() < next.fields.len()
+            && self
+                .fields
+                .iter()
+                .zip(next.fields())
+                .all(|(current, next)| {
+                    current.name == next.name
+                        && current.value_type.can_evolve_registry_to(&next.value_type)
+                })
+            && next.fields[self.fields.len()..]
+                .iter()
+                .all(|field| matches!(field.value_type, ValueType::Nullable(_)))
+    }
+
     pub fn field_index(&self, field_name: &str) -> Option<usize> {
         self.fields
             .iter()
