@@ -23,6 +23,7 @@ test("Rust CI uses pinned prebuilt tools without charging Rust-only jobs for was
   assert.doesNotMatch(workflow, /cargo install cargo-nextest/);
   assert.match(rust, /tool: cargo-nextest@0\.9\.143/);
   assert.doesNotMatch(rust, /ensure:rust-toolchain|wasm-pack/);
+  assert.doesNotMatch(rust, /rust-components:/);
   assert.doesNotMatch(lint, /ensure:rust-toolchain|wasm-pack/);
   assert.doesNotMatch(buildIntegration, /ensure:rust-toolchain|wasm-pack/);
   assert.match(typescript, /tool: wasm-pack@0\.13\.1/);
@@ -41,4 +42,15 @@ test("CI runs the workflow contract test through its package script", () => {
     "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs",
   );
   assert.match(lint, /run: pnpm test:ci-workflow/);
+});
+
+test("TypeScript CI overlaps independent Node and browser suites after one artifact build", () => {
+  const typescript = job("test-ts");
+  assert.match(typescript, /name: Build correctness-test artifacts\s+run: pnpm build:test-artifacts/);
+  assert.match(typescript, /name: Run Node and browser test suites in parallel/);
+  assert.match(typescript, /pnpm test .* &\s+node_tests_pid=\$!/);
+  assert.match(typescript, /pnpm --filter jazz-tools test:browser &\s+browser_tests_pid=\$!/);
+  assert.match(typescript, /wait "\$\{node_tests_pid\}"/);
+  assert.match(typescript, /wait "\$\{browser_tests_pid\}"/);
+  assert.doesNotMatch(typescript, /rust-components: clippy,rustfmt/);
 });

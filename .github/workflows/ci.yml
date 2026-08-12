@@ -74,7 +74,6 @@ jobs:
       - uses: ./.github/actions/setup-build
         with:
           rust-targets: wasm32-unknown-unknown
-          rust-components: clippy,rustfmt
           sccache: "true"
 
       - name: Install bounded Rust test runner
@@ -118,7 +117,6 @@ jobs:
       - uses: ./.github/actions/setup-build
         with:
           rust-targets: wasm32-unknown-unknown
-          rust-components: clippy,rustfmt
           sccache: "true"
           sccache-sticky-disk: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'true' || 'false' }}
 
@@ -150,8 +148,20 @@ jobs:
           key: playwright-browsers-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ runner.os }}-v1
           path: /home/runner/.cache/ms-playwright
       - run: pnpm exec playwright install chromium
-      - name: Run Node and browser test suites
+      # Both suites consume the already-built artifacts and do not write shared
+      # outputs. Running them together avoids extending the PR critical path
+      # while retaining the complete Node and browser coverage in this gate.
+      - name: Run Node and browser test suites in parallel
         run: |
-          pnpm test --filter=!moon-lander-react --filter=!@jazz/rust --filter=!auth-simple-chat --filter=!auth-workos-chat --filter=!auth-betterauth-chat --filter=!chat-react --filter=!world-tour --filter=!jazz-rn --concurrency=2 || status=1
-          pnpm --filter jazz-tools test:browser || status=1
-          exit "${status:-0}"
+          set +e
+          pnpm test --filter=!moon-lander-react --filter=!@jazz/rust --filter=!auth-simple-chat --filter=!auth-workos-chat --filter=!auth-betterauth-chat --filter=!chat-react --filter=!world-tour --filter=!jazz-rn --concurrency=2 &
+          node_tests_pid=$!
+          pnpm --filter jazz-tools test:browser &
+          browser_tests_pid=$!
+          wait "${node_tests_pid}"
+          node_tests_status=$?
+          wait "${browser_tests_pid}"
+          browser_tests_status=$?
+          if [ "${node_tests_status}" -ne 0 ] || [ "${browser_tests_status}" -ne 0 ]; then
+            exit 1
+          fi
