@@ -633,6 +633,7 @@ where
     /// Apply a downstream current-row view update.
     pub(super) fn apply_view_update(&mut self, update: ViewUpdateParts) -> Result<(), Error> {
         self.validate_received_view_update_global_seq_durability(&update)?;
+        self.validate_view_update_payloads(std::slice::from_ref(&update))?;
         self.apply_view_update_inner(update, None)
     }
 
@@ -646,6 +647,11 @@ where
         for update in &updates {
             self.validate_received_view_update_global_seq_durability(update)?;
         }
+        // A receiver tick is one atomic protocol frame. Validate every row
+        // descriptor before the first reset can change flush cadence, or a
+        // preceding valid bundle can advance clocks, allocate aliases, or
+        // stage history before a later malformed bundle rejects the frame.
+        self.validate_view_update_payloads(&updates)?;
         if updates.iter().any(|update| update.reset_result_set) {
             self.begin_initial_sync_flush_cadence()?;
         }
@@ -730,6 +736,19 @@ where
         }
         if self.initial_sync_flush_active && self.query.initial_hydration_binding_views.is_empty() {
             self.finish_initial_sync_flush_cadence()?;
+        }
+        Ok(())
+    }
+
+    /// Validate all row bundles carried by a receiver frame without changing
+    /// storage or in-memory receiver state.
+    fn validate_view_update_payloads(&self, updates: &[ViewUpdateParts]) -> Result<(), Error> {
+        for update in updates {
+            for bundle in
+                version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
+            {
+                self.validate_view_payload_versions(bundle.versions)?;
+            }
         }
         Ok(())
     }

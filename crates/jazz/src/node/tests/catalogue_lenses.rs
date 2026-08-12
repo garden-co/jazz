@@ -1528,39 +1528,25 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
         ("body".to_owned(), Value::String(String::new())),
         ("title".to_owned(), Value::String("parked".to_owned())),
     ]);
-    let (_writer_dir, mut writer) = open_node_with_schema(node(0x36), base.clone());
+    // The arriving unit is authored under the as-yet unknown evolved schema.
+    // Its wire record is nevertheless complete in that schema: unknown-schema
+    // parking delays admission; it does not turn an older, short row into an
+    // evolved row by changing only its schema id.
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0x36), evolved.clone());
     let (core_dir, mut core) = open_node_with_schema(node(0x37), base.clone());
     let (_tx_id, unit) = writer
         .commit_mergeable_unit(
-            MergeableCommit::new("todos", row(0x55), 1_000).cells(title_cells("parked")),
+            MergeableCommit::new("todos", row(0x55), 1_000).cells(evolved_cells.clone()),
         )
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("commit unit expected");
     };
-    let rewritten = versions
-        .into_iter()
-        .map(|version| {
-            VersionRecord::from_cells(
-                &base.tables[0],
-                evolved_id,
-                version.row_uuid(),
-                version.parents(),
-                version.created_by(),
-                version.created_at(),
-                version.updated_by(),
-                version.updated_at(),
-                &version_record_cells(&version, &base.tables[0]),
-                version.deletion(),
-            )
-            .unwrap()
-        })
-        .collect::<Vec<_>>();
 
     assert!(
         core.apply_sync_message(SyncMessage::CommitUnit {
             tx: tx.clone(),
-            versions: rewritten,
+            versions,
         })
         .unwrap()
         .is_empty()
@@ -1632,6 +1618,466 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
             .get(&row(0x55)),
         Some(&evolved_cells)
     );
+}
+
+/// An unknown-schema unit may park, but once the catalogue identifies its
+/// schema the authority rejects a record whose wire descriptor belongs to an
+/// older schema instead of inventing a missing evolved column from a lens.
+#[test]
+fn catalogue_arrival_rejects_incomplete_row_claiming_evolved_schema() {
+    let base = schema();
+    let evolved = catalogue_evolved_schema();
+    let evolved_id = evolved.version_id();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0x58), base.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0x59), base.clone());
+    let (_tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0x58), 1_003).cells(title_cells("invalid")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("commit unit expected");
+    };
+    let incomplete = versions
+        .into_iter()
+        .map(|version| {
+            crate::protocol::VersionRecord::from_cells(
+                &base.tables[0],
+                evolved_id,
+                version.row_uuid(),
+                version.parents(),
+                version.created_by(),
+                version.created_at(),
+                version.updated_by(),
+                version.updated_at(),
+                &version_record_cells(&version, &base.tables[0]),
+                version.deletion(),
+            )
+            .unwrap()
+        })
+        .collect();
+
+    assert!(core
+        .apply_sync_message(SyncMessage::CommitUnit {
+            tx: tx.clone(),
+            versions: incomplete,
+        })
+        .unwrap()
+        .is_empty());
+    assert_eq!(core.sync_metrics().parked_catalogue_orphans, 1);
+
+    let updates = publish_schema_lineage(
+        &mut core,
+        SchemaVersion::new(evolved),
+        MigrationLens::new(
+            base.version_id(),
+            evolved_id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String(String::new()),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+
+    assert!(updates.iter().any(|message| matches!(
+        message,
+        SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Rejected(RejectionReason::MalformedCommit(reason)),
+            ..
+        } if *tx_id == tx.tx_id
+            && reason.contains("complete descriptor of its authored schema")
+    )));
+    assert!(core.row_history("todos", row(0x58)).unwrap().is_empty());
+}
+
+/// A relay has no fate authority: when schema arrival proves a parked row
+/// incomplete, it drops that unit without failing the catalogue publication or
+/// inventing a rejected transaction.
+#[test]
+fn catalogue_arrival_drops_incomplete_relay_row_without_failing_publication() {
+    let base = schema();
+    let evolved = catalogue_evolved_schema();
+    let evolved_id = evolved.version_id();
+    let (_writer_dir, mut writer) =
+        open_history_complete_node_with_schema(node(0x6a), base.clone());
+    let (_relay_dir, mut relay) =
+        open_history_complete_node_with_schema(node(0x6b), base.clone());
+    let (_tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0x6a), 1_004).cells(title_cells("invalid relay")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("commit unit expected");
+    };
+    let incomplete = versions
+        .into_iter()
+        .map(|version| {
+            crate::protocol::VersionRecord::from_cells(
+                &base.tables[0],
+                evolved_id,
+                version.row_uuid(),
+                version.parents(),
+                version.created_by(),
+                version.created_at(),
+                version.updated_by(),
+                version.updated_at(),
+                &version_record_cells(&version, &base.tables[0]),
+                version.deletion(),
+            )
+            .unwrap()
+        })
+        .collect();
+
+    relay.ingest_relay_commit_unit(tx.clone(), incomplete).unwrap();
+    assert!(relay.query_transaction(tx.tx_id).unwrap().is_none());
+
+    publish_schema_lineage(
+        &mut relay,
+        SchemaVersion::new(evolved),
+        MigrationLens::new(
+            base.version_id(),
+            evolved_id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String(String::new()),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+
+    assert!(relay.query_transaction(tx.tx_id).unwrap().is_none());
+    assert!(relay.row_history("todos", row(0x6a)).unwrap().is_empty());
+    assert_eq!(relay.sync_metrics().dropped_malformed_relay_commit_units, 1);
+}
+
+fn zero_column_version_claiming_schema(
+    schema: &JazzSchema,
+    version: &crate::protocol::VersionRecord,
+) -> crate::protocol::VersionRecord {
+    crate::protocol::VersionRecord::from_cells(
+        &TableSchema::new("todos", Vec::<ColumnSchema>::new()),
+        schema.version_id(),
+        version.row_uuid(),
+        version.parents(),
+        version.created_by(),
+        version.created_at(),
+        version.updated_by(),
+        version.updated_at(),
+        &BTreeMap::<String, Value>::new(),
+        version.deletion(),
+    )
+    .unwrap()
+}
+
+/// A non-reset ViewUpdate stages its history payload in a shared receiver
+/// batch. A malformed row descriptor must reject the frame before that batch
+/// writes either its transaction or version.
+#[test]
+fn batched_view_update_rejects_incomplete_authored_row_before_storage() {
+    let base = schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(0x6c), base.clone());
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x6c), 1_005).cells(title_cells("view payload")),
+    );
+    let update = PeerState::new()
+        .current_rows_update(&mut core, "todos")
+        .unwrap();
+    let mut bundles = version_bundles_for_update(&update);
+    assert_eq!(bundles.len(), 1);
+    let version = bundles[0].versions[0].clone();
+    bundles[0].versions = vec![zero_column_version_claiming_schema(&base, &version)];
+    let SyncMessage::ViewUpdate {
+        subscription,
+        settled_through,
+        reset_result_set,
+        peer_payload_inventory,
+        result_member_adds,
+        result_member_removes,
+        terminal_operations,
+        program_fact_adds,
+        program_fact_removes,
+        ..
+    } = update
+    else {
+        panic!("expected view update");
+    };
+    assert!(!reset_result_set, "exercise shared non-reset receiver batching");
+
+    let (_reader_dir, mut reader) = open_node_with_schema(node(0x6d), base);
+    let error = reader
+        .apply_view_updates_in_batch(vec![ViewUpdateParts {
+            subscription,
+            settled_through,
+            defer_settlement: false,
+            reset_result_set,
+            version_carriers: Vec::new(),
+            version_bundles: bundles,
+            peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+            authorization_progress: None,
+            result_member_adds,
+            result_member_removes,
+            terminal_operations,
+            program_fact_adds,
+            program_fact_removes,
+        }])
+        .expect_err("malformed ViewUpdate must not stage a row");
+    match error {
+        Error::MalformedViewUpdate(
+            "row version does not carry the complete descriptor of its authored schema",
+        ) => {}
+        other => panic!("expected malformed ViewUpdate, got {other:?}"),
+    }
+    assert!(reader.query_all_versions().unwrap().is_empty());
+}
+
+/// Ordinary ViewUpdate ingestion reaches the shared history boundary even
+/// without receiver batching, so an incomplete record cannot be stored there.
+#[test]
+fn view_update_rejects_incomplete_authored_row_before_storage() {
+    let base = schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(0x6e), base.clone());
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x6e), 1_006).cells(title_cells("ordinary view")),
+    );
+    let update = PeerState::new()
+        .current_rows_update(&mut core, "todos")
+        .unwrap();
+    let mut bundles = version_bundles_for_update(&update);
+    let version = bundles[0].versions[0].clone();
+    bundles[0].versions = vec![zero_column_version_claiming_schema(&base, &version)];
+    let SyncMessage::ViewUpdate {
+        subscription,
+        settled_through,
+        reset_result_set,
+        peer_payload_inventory,
+        result_member_adds,
+        result_member_removes,
+        terminal_operations,
+        program_fact_adds,
+        program_fact_removes,
+        ..
+    } = update
+    else {
+        panic!("expected view update");
+    };
+
+    let (_reader_dir, mut reader) = open_node_with_schema(node(0x6f), base);
+    assert!(matches!(
+        reader.apply_sync_message(SyncMessage::ViewUpdate {
+            subscription,
+            settled_through,
+            reset_result_set,
+            version_carriers: Vec::new(),
+            version_bundles: bundles,
+            peer_payload_inventory,
+            result_member_adds,
+            result_member_removes,
+            terminal_operations,
+            program_fact_adds,
+            program_fact_removes,
+        }),
+        Err(Error::MalformedViewUpdate(
+            "row version does not carry the complete descriptor of its authored schema"
+        ))
+    ));
+    assert!(reader.query_all_versions().unwrap().is_empty());
+}
+
+/// Row-version repair payloads reach the same shared history boundary and
+/// reject an incomplete claimed row before transaction/history storage.
+#[test]
+fn row_version_repair_rejects_incomplete_authored_row_before_storage() {
+    let base = schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(0x70), base.clone());
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x70), 1_007).cells(title_cells("repair payload")),
+    );
+    let mut bundles = version_bundles_for_update(
+        &PeerState::new()
+            .current_rows_update(&mut core, "todos")
+            .unwrap(),
+    );
+    let version = bundles[0].versions[0].clone();
+    let request = crate::protocol::RowVersionRef::new(
+        version.table().to_owned(),
+        version.row_uuid(),
+        bundles[0].tx.tx_id,
+    );
+    bundles[0].versions = vec![zero_column_version_claiming_schema(&base, &version)];
+
+    let (_reader_dir, mut reader) = open_node_with_schema(node(0x71), base);
+    assert!(matches!(
+        reader.apply_row_version_payloads_for_requests(&[request], bundles),
+        Err(Error::MalformedViewUpdate(
+            "row version does not carry the complete descriptor of its authored schema"
+        ))
+    ));
+    assert!(reader.query_all_versions().unwrap().is_empty());
+}
+
+/// A rejected reset frame must not enable the relaxed initial-sync durability
+/// cadence or register a hydration before all of its row payloads are valid.
+#[test]
+fn reset_view_update_rejection_does_not_leave_initial_sync_flush_active() {
+    let base = schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(0x72), base.clone());
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x72), 1_008).cells(title_cells("reset payload")),
+    );
+    let update = PeerState::new()
+        .current_rows_update(&mut core, "todos")
+        .unwrap();
+    let mut bundles = version_bundles_for_update(&update);
+    let version = bundles[0].versions[0].clone();
+    bundles[0].versions = vec![zero_column_version_claiming_schema(&base, &version)];
+    let SyncMessage::ViewUpdate {
+        subscription,
+        settled_through,
+        peer_payload_inventory,
+        result_member_adds,
+        result_member_removes,
+        terminal_operations,
+        program_fact_adds,
+        program_fact_removes,
+        ..
+    } = update
+    else {
+        panic!("expected view update");
+    };
+
+    let (_reader_dir, mut reader) = open_node_with_schema(node(0x73), base);
+    reader.set_initial_sync_flush_cadence(2).unwrap();
+    assert!(!reader.initial_sync_flush_active);
+    assert!(reader.query.initial_hydration_binding_views.is_empty());
+    assert!(matches!(
+        reader.apply_view_updates_in_batch(vec![ViewUpdateParts {
+            subscription,
+            settled_through,
+            defer_settlement: false,
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: bundles,
+            peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+            authorization_progress: None,
+            result_member_adds,
+            result_member_removes,
+            terminal_operations,
+            program_fact_adds,
+            program_fact_removes,
+        }]),
+        Err(Error::MalformedViewUpdate(
+            "row version does not carry the complete descriptor of its authored schema"
+        ))
+    ));
+    assert!(!reader.initial_sync_flush_active);
+    assert!(!reader.initial_sync_flush_completed);
+    assert!(reader.query.initial_hydration_binding_views.is_empty());
+    assert!(reader.query_all_versions().unwrap().is_empty());
+}
+
+/// A receiver frame validates every bundle before the first valid one can
+/// mutate its clock, aliases, catalogue mappings, or durable history.
+#[test]
+fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() {
+    let base = schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(0x74), base.clone());
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x74), 1_009).cells(title_cells("valid first")),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x75), 1_010).cells(title_cells("malformed second")),
+    );
+    let update = PeerState::new()
+        .current_rows_update(&mut core, "todos")
+        .unwrap();
+    let mut bundles = version_bundles_for_update(&update);
+    assert_eq!(bundles.len(), 2, "one complete bundle per accepted write");
+    let malformed = bundles[1].versions[0].clone();
+    bundles[1].versions = vec![zero_column_version_claiming_schema(&base, &malformed)];
+    let valid_tx_id = bundles[0].tx.tx_id;
+    let SyncMessage::ViewUpdate {
+        subscription,
+        settled_through,
+        peer_payload_inventory,
+        result_member_adds,
+        result_member_removes,
+        terminal_operations,
+        program_fact_adds,
+        program_fact_removes,
+        ..
+    } = update
+    else {
+        panic!("expected view update");
+    };
+
+    let (_reader_dir, mut reader) = open_node_with_schema(node(0x76), base);
+    let clock_before = (
+        reader.clock.tx_time,
+        reader.clock.next_global_seq,
+        reader.clock.applied_global_watermark,
+        reader.clock.applied_global_above_watermark.clone(),
+    );
+    let node_aliases_before = reader.node_aliases.clone();
+    let schema_aliases_before = reader.catalogue.schema_version_aliases.clone();
+    let catalogue_schemas_before = reader.catalogue.catalogue_schemas.clone();
+    let history_before = reader.query_all_versions().unwrap();
+    assert!(matches!(
+        reader.apply_view_updates_in_batch(vec![ViewUpdateParts {
+            subscription,
+            settled_through,
+            defer_settlement: false,
+            reset_result_set: false,
+            version_carriers: Vec::new(),
+            version_bundles: bundles,
+            peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+            authorization_progress: None,
+            result_member_adds,
+            result_member_removes,
+            terminal_operations,
+            program_fact_adds,
+            program_fact_removes,
+        }]),
+        Err(Error::MalformedViewUpdate(
+            "row version does not carry the complete descriptor of its authored schema"
+        ))
+    ));
+    assert_eq!(
+        (
+            reader.clock.tx_time,
+            reader.clock.next_global_seq,
+            reader.clock.applied_global_watermark,
+            reader.clock.applied_global_above_watermark.clone(),
+        ),
+        clock_before
+    );
+    assert_eq!(reader.node_aliases, node_aliases_before);
+    assert_eq!(reader.catalogue.schema_version_aliases, schema_aliases_before);
+    assert_eq!(reader.catalogue.catalogue_schemas, catalogue_schemas_before);
+    assert_eq!(reader.query_all_versions().unwrap(), history_before);
+    assert!(reader.query_transaction(valid_tx_id).unwrap().is_none());
+    assert!(!reader.initial_sync_flush_active);
+    assert!(reader.query.initial_hydration_binding_views.is_empty());
 }
 
 #[test]
@@ -1939,7 +2385,7 @@ fn catalogue_arrival_drains_branch_relay_into_branch_partition() {
     let evolved = catalogue_evolved_schema();
     let evolved_id = evolved.version_id();
     let (_writer_dir, mut writer) =
-        open_history_complete_node_with_schema(node(0x38), base.clone());
+        open_history_complete_node_with_schema(node(0x38), evolved.clone());
     let (relay_dir, mut relay) = open_history_complete_node_with_schema(node(0x39), base.clone());
     let branch_id = branch(0x66);
     writer.create_root_branch(branch_id).unwrap();
@@ -1947,33 +2393,18 @@ fn catalogue_arrival_drains_branch_relay_into_branch_partition() {
     let tx_id = writer
         .commit_mergeable_on_branch(
             branch_id,
-            MergeableCommit::new("todos", row(0x56), 1_001).cells(title_cells("relay parked")),
+            MergeableCommit::new("todos", row(0x56), 1_001).cells(BTreeMap::from([
+                ("body".to_owned(), Value::String(String::new())),
+                ("title".to_owned(), Value::String("relay parked".to_owned())),
+            ])),
         )
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = writer.commit_unit_for(tx_id).unwrap() else {
         panic!("commit unit expected");
     };
-    let rewritten = versions
-        .into_iter()
-        .map(|version| {
-            VersionRecord::from_cells(
-                &base.tables[0],
-                evolved_id,
-                version.row_uuid(),
-                version.parents(),
-                version.created_by(),
-                version.created_at(),
-                version.updated_by(),
-                version.updated_at(),
-                &version_record_cells(&version, &base.tables[0]),
-                version.deletion(),
-            )
-            .unwrap()
-        })
-        .collect::<Vec<_>>();
 
     relay
-        .ingest_relay_commit_unit(tx.clone(), rewritten)
+        .ingest_relay_commit_unit(tx.clone(), versions)
         .unwrap();
     assert!(relay.query_transaction(tx.tx_id).unwrap().is_none());
     assert!(
@@ -2056,54 +2487,38 @@ fn parked_branch_ingress_role_keeps_authority_precedence_in_both_orders() {
     let evolved = catalogue_evolved_schema();
     let evolved_id = evolved.version_id();
     let (_writer_dir, mut writer) =
-        open_history_complete_node_with_schema(node(0x3a), base.clone());
+        open_history_complete_node_with_schema(node(0x3a), evolved.clone());
     let branch_id = branch(0x67);
     writer.create_root_branch(branch_id).unwrap();
     let tx_id = writer
         .commit_mergeable_on_branch(
             branch_id,
-            MergeableCommit::new("todos", row(0x57), 1_002).cells(title_cells("one unit")),
+            MergeableCommit::new("todos", row(0x57), 1_002).cells(BTreeMap::from([
+                ("body".to_owned(), Value::String(String::new())),
+                ("title".to_owned(), Value::String("one unit".to_owned())),
+            ])),
         )
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = writer.commit_unit_for(tx_id).unwrap() else {
         panic!("commit unit expected");
     };
-    let rewritten = versions
-        .into_iter()
-        .map(|version| {
-            VersionRecord::from_cells(
-                &base.tables[0],
-                evolved_id,
-                version.row_uuid(),
-                version.parents(),
-                version.created_by(),
-                version.created_at(),
-                version.updated_by(),
-                version.updated_at(),
-                &version_record_cells(&version, &base.tables[0]),
-                version.deletion(),
-            )
-            .unwrap()
-        })
-        .collect::<Vec<_>>();
-
     for (idx, relay_first) in [false, true].into_iter().enumerate() {
         let node_id = node(0x3b + idx as u8);
         let (_dir, mut receiver) = open_history_complete_node_with_schema(node_id, base.clone());
         receiver.create_root_branch(branch_id).unwrap();
         let authority = || SyncMessage::CommitUnit {
             tx: tx.clone(),
-            versions: rewritten.clone(),
+            versions: versions.clone(),
         };
         if relay_first {
             receiver
-                .ingest_relay_commit_unit(tx.clone(), rewritten.clone())
+                .ingest_relay_commit_unit(tx.clone(), versions.clone())
                 .unwrap();
             assert!(receiver.apply_sync_message(authority()).unwrap().is_empty());
         } else {
             assert!(receiver.apply_sync_message(authority()).unwrap().is_empty());
             receiver
-                .ingest_relay_commit_unit(tx.clone(), rewritten.clone())
+                .ingest_relay_commit_unit(tx.clone(), versions.clone())
                 .unwrap();
         }
 

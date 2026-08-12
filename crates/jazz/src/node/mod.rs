@@ -5678,6 +5678,7 @@ where
             if versions.is_empty() {
                 continue;
             }
+            self.validate_view_payload_versions(&versions)?;
             self.ingest_known_transaction(
                 bundle.tx,
                 versions,
@@ -6311,6 +6312,11 @@ pub struct SyncMetrics {
     pub parked_catalogue_orphans: u64,
     /// Catalogue-orphan commit units later resolved.
     pub parked_catalogue_orphans_resolved: u64,
+    /// Relay-only commit units discarded after an unknown authored schema became
+    /// known and proved their row record incomplete for that schema. A relay
+    /// cannot assign a fate, so these are deliberately dropped rather than
+    /// stored as a synthetic rejected transaction.
+    pub dropped_malformed_relay_commit_units: u64,
     /// Shape registrations parked because their schema version was missing.
     pub parked_catalogue_shapes: u64,
     /// Parked shape registrations later resolved by catalogue arrival.

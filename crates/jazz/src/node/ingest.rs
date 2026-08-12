@@ -1482,6 +1482,11 @@ where
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
             return Ok(updates);
         }
+        if commit_unit_write_count_matches(&tx, versions.len())
+            && let Some(reason) = self.malformed_authored_version_reason(&versions)
+        {
+            return self.reject_malformed_commit(tx, reason);
+        }
         self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
         let mut updates = self.ingest_commit_unit_once(tx, versions, now_ms, ingest_context)?;
         updates.extend(self.drain_parked_commit_units()?);
@@ -1502,6 +1507,12 @@ where
     where
         S: ReopenableStorage,
     {
+        if commit_unit_limit_violation(&versions).is_none()
+            && commit_unit_write_count_matches(&tx, versions.len())
+            && let Some(reason) = self.malformed_authored_version_reason(&versions)
+        {
+            return self.reject_malformed_commit(tx, reason);
+        }
         if commit_unit_limit_violation(&versions).is_none()
             && commit_unit_write_count_matches(&tx, versions.len())
         {
@@ -1525,6 +1536,12 @@ where
     where
         S: ReopenableStorage,
     {
+        if commit_unit_limit_violation(&versions).is_none()
+            && commit_unit_write_count_matches(&tx, versions.len())
+            && let Some(reason) = self.malformed_authored_version_reason(&versions)
+        {
+            return self.reject_malformed_commit(tx, reason);
+        }
         if commit_unit_limit_violation(&versions).is_none()
             && commit_unit_write_count_matches(&tx, versions.len())
         {
@@ -1691,6 +1708,9 @@ where
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
             return Ok(updates);
         }
+        if let Some(reason) = self.malformed_authored_version_reason(&versions) {
+            return self.reject_malformed_commit(tx, reason);
+        }
         if let Some(existing) = self.query_transaction(tx.tx_id)? {
             let mut existing_versions = self
                 .query_versions_for_tx(tx.tx_id)?
@@ -1846,6 +1866,9 @@ where
         {
             return Err(Error::UnsupportedCommitUnit("malformed relay commit unit"));
         }
+        if self.malformed_authored_version_reason(&versions).is_some() {
+            return Err(Error::UnsupportedCommitUnit("malformed relay commit unit"));
+        }
         self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
         self.ingest_relay_commit_unit_once(tx, versions)?;
         self.drain_parked_relay_commit_units()?;
@@ -1953,6 +1976,9 @@ where
             }];
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
             return Ok(updates);
+        }
+        if let Some(reason) = self.malformed_authored_version_reason(&versions) {
+            return self.reject_malformed_commit(tx, reason);
         }
         if let Some(existing) = self.query_transaction(tx.tx_id)? {
             if tx.kind == TxKind::Exclusive || matches!(existing.fate, Fate::Rejected(_)) {
@@ -2171,6 +2197,9 @@ where
             updates.extend(self.cascade_rejections_from(tx.tx_id)?);
             return Ok(updates);
         }
+        if let Some(reason) = self.malformed_authored_version_reason(&versions) {
+            return self.reject_malformed_commit(tx, reason);
+        }
         if let Some(existing) = self.query_transaction(tx.tx_id)? {
             let mut existing_versions = self
                 .query_versions_for_tx(tx.tx_id)?
@@ -2363,8 +2392,13 @@ where
             global_seq.is_none() || durability == DurabilityTier::Global,
             "a global sequence requires Global durability"
         );
-        self.merge_tx_time(tx.tx_id.time);
         let versions = canonical_versions(versions);
+        // This is entered by the batched ViewUpdate path, which has no
+        // authority role and therefore cannot synthesize a fate. The caller
+        // validates its entire frame before staging, and this is the central
+        // storage-ingress backstop for other direct callers.
+        self.validate_view_payload_versions(&versions)?;
+        self.merge_tx_time(tx.tx_id.time);
         if self.query_transaction(tx.tx_id)?.is_some() {
             return self.ingest_known_transaction(tx, versions, fate, global_seq, durability);
         }
@@ -3316,12 +3350,23 @@ where
                 break;
             }
             for tx_id in ready {
-                if let Some(unit) = self.parking.parked_commit_units.get(&tx_id).cloned() {
-                    self.prepare_branch_target_partitions_if_ready(&unit.tx, &unit.versions)?;
-                }
                 let Some(unit) = self.parking.parked_commit_units.remove(&tx_id) else {
                     continue;
                 };
+                // A relay has no fate authority. Once its deferred schema is
+                // known, an incomplete row record has a terminal local
+                // disposition: discard it without writing a synthetic rejected
+                // transaction or failing the catalogue publication that made
+                // the violation observable.
+                if self
+                    .malformed_authored_version_reason(&unit.versions)
+                    .is_some()
+                {
+                    self.parking.parked_catalogue_commit_units.remove(&tx_id);
+                    self.sync_metrics.dropped_malformed_relay_commit_units += 1;
+                    continue;
+                }
+                self.prepare_branch_target_partitions_if_ready(&unit.tx, &unit.versions)?;
                 self.sync_metrics.parked_orphans_resolved += 1;
                 if self.parking.parked_catalogue_commit_units.remove(&tx_id) {
                     self.sync_metrics.parked_catalogue_orphans_resolved += 1;
@@ -5727,6 +5772,91 @@ where
         Ok((source, table.to_owned()))
     }
 
+    /// A wire row version is a complete row under the schema id it declares.
+    /// An unknown schema cannot be checked until its catalogue value arrives,
+    /// but a known schema must never accept a descriptor borrowed from another
+    /// version: that would make the omitted trailing columns indistinguishable
+    /// from an authored value and reintroduce partial-row sync semantics.
+    fn malformed_authored_version_reason(&self, versions: &[VersionRecord]) -> Option<String> {
+        for version in versions {
+            let Some(schema) = self
+                .catalogue
+                .catalogue_schemas
+                .get(&version.schema_version())
+            else {
+                continue;
+            };
+            let Some(table) = schema
+                .schema
+                .tables
+                .iter()
+                .find(|table| table.name == version.table())
+            else {
+                return Some(format!(
+                    "row version table '{}' is absent from its authored schema",
+                    version.table()
+                ));
+            };
+            if version.record().descriptor() != &table.wire_record_descriptor() {
+                return Some(format!(
+                    "row version for table '{}' does not carry the complete descriptor of its authored schema",
+                    version.table()
+                ));
+            }
+        }
+        None
+    }
+
+    /// Validate row versions carried by a view or repair payload before that
+    /// payload may advance local receiver state. View payloads cannot park for
+    /// a missing catalogue entry: unlike an authored commit unit, they have no
+    /// protocol disposition that can defer a partial application of the frame.
+    pub(super) fn validate_view_payload_versions(
+        &self,
+        versions: &[VersionRecord],
+    ) -> Result<(), Error> {
+        for version in versions {
+            let schema = self
+                .catalogue
+                .catalogue_schemas
+                .get(&version.schema_version())
+                .ok_or(Error::MalformedViewUpdate(
+                    "row version names an unknown authored schema",
+                ))?;
+            let table = schema
+                .schema
+                .tables
+                .iter()
+                .find(|table| table.name == version.table())
+                .ok_or(Error::MalformedViewUpdate(
+                    "row version table is absent from its authored schema",
+                ))?;
+            if version.record().descriptor() != &table.wire_record_descriptor() {
+                return Err(Error::MalformedViewUpdate(
+                    "row version does not carry the complete descriptor of its authored schema",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn reject_malformed_commit(
+        &mut self,
+        tx: Transaction,
+        reason: String,
+    ) -> Result<Vec<SyncMessage>, Error> {
+        let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
+        self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
+        let mut updates = vec![SyncMessage::FateUpdate {
+            tx_id: tx.tx_id,
+            fate,
+            global_seq: None,
+            durability: None,
+        }];
+        updates.extend(self.cascade_rejections_from(tx.tx_id)?);
+        Ok(updates)
+    }
+
     /// Ensure every known authored schema named by an arriving commit has a
     /// local alias and registered shared-storage variant. Unknown schemas stay
     /// parked until their catalogue lineage arrives and re-enters this path.
@@ -5734,6 +5864,11 @@ where
         &mut self,
         versions: &[VersionRecord],
     ) -> Result<(), Error> {
+        if self.malformed_authored_version_reason(versions).is_some() {
+            return Err(Error::InvalidStoredValue(
+                "wire version record does not match authored schema",
+            ));
+        }
         if versions.iter().any(|version| {
             !self
                 .catalogue
