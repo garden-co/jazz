@@ -137,6 +137,7 @@ interface InternalCacheEntry<T extends { id: string }> {
   key: string;
   query: QueryBuilder<T>;
   options?: QueryOptions;
+  generation: number;
   state: UseAllState<T>;
   promise: TrackedPromise<T[]>;
   resolvefulfilled: (data: T[]) => void;
@@ -317,6 +318,7 @@ export class SubscriptionsOrchestrator {
       key,
       query: queryDef.query,
       options: queryDef.options,
+      generation: 0,
       state: initialState,
       promise: deferred,
       resolvefulfilled: (data) => {
@@ -397,10 +399,12 @@ export class SubscriptionsOrchestrator {
   }
 
   private subscribeEntry<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
+    const generation = entry.generation;
     try {
       entry.unsubscribe = this.db.subscribeAll<T>(
         entry.query,
         (delta) => {
+          if (entry.generation !== generation) return;
           const wasPending = entry.state.status === "pending";
           const data = entry.state.status === "fulfilled" ? [...entry.state.data] : [];
           applySubscriptionDelta(data, delta);
@@ -430,7 +434,7 @@ export class SubscriptionsOrchestrator {
           }
 
           if (wasPending && data.length === 0) {
-            this.scheduleEmptyRefresh(entry);
+            this.scheduleEmptyRefresh(entry, generation, this.session ?? undefined);
           }
         },
         entry.options,
@@ -450,15 +454,19 @@ export class SubscriptionsOrchestrator {
     }
   }
 
-  private scheduleEmptyRefresh<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
+  private scheduleEmptyRefresh<T extends { id: string }>(
+    entry: InternalCacheEntry<T>,
+    generation: number,
+    session: Session | undefined,
+  ): void {
     if (entry.emptyRefreshScheduled || !this.db.all) return;
     entry.emptyRefreshScheduled = true;
     setTimeout(() => {
       entry.emptyRefreshScheduled = false;
-      if (!this.entries.has(entry.key)) return;
-      void Promise.resolve(this.db.all!(entry.query, entry.options, this.session ?? undefined))
+      if (!this.entries.has(entry.key) || entry.generation !== generation) return;
+      void Promise.resolve(this.db.all!(entry.query, entry.options, session))
         .then((snapshot) => {
-          if (!this.entries.has(entry.key)) return;
+          if (!this.entries.has(entry.key) || entry.generation !== generation) return;
           if (entry.state.status === "rejected") return;
           if (entry.state.status === "fulfilled" && entry.state.data.length > 0) return;
           if (snapshot.length === 0) return;
@@ -502,6 +510,8 @@ export class SubscriptionsOrchestrator {
       entry.unsubscribe();
       entry.unsubscribe = undefined;
     }
+    entry.generation += 1;
+    entry.emptyRefreshScheduled = false;
 
     // The prior session's rows are no longer valid. Drop a settled entry back to
     // `pending` and tell listeners to clear, so stale data is nuked with the

@@ -333,6 +333,9 @@ type SubscriptionState = {
   deferredVisiblePublication: boolean;
   deferredVisibleReset: boolean;
   deferredTerminalOperations: NativeTerminalOperation[];
+  deferredPlaceholderChunks: number;
+  deferredPlaceholderRows: number;
+  deferredPlaceholderBytes: number;
   callback?: Function;
   cancelled: boolean;
 };
@@ -367,6 +370,9 @@ type NativeRowFieldPlan = {
 const textDecoder = new TextDecoder();
 const byteHex = Array.from({ length: 256 }, (_, byte) => byte.toString(16).padStart(2, "0"));
 const nativeRowFieldPlanCache = new WeakMap<WasmSchema, Map<string, NativeRowFieldPlan[]>>();
+const MAX_DEFERRED_PLACEHOLDER_CHUNKS = 16;
+const MAX_DEFERRED_PLACEHOLDER_ROWS = 4_096;
+const MAX_DEFERRED_PLACEHOLDER_BYTES = 4 * 1024 * 1024;
 
 function openPersistentDb(
   Runtime: NativeDbConstructor,
@@ -1028,6 +1034,9 @@ export class NativeRuntimeAdapter implements Runtime {
       deferredVisiblePublication: false,
       deferredVisibleReset: false,
       deferredTerminalOperations: [],
+      deferredPlaceholderChunks: 0,
+      deferredPlaceholderRows: 0,
+      deferredPlaceholderBytes: 0,
       cancelled: false,
     });
     return handle;
@@ -1054,9 +1063,8 @@ export class NativeRuntimeAdapter implements Runtime {
     const subscription = this.subscriptions.get(handle);
     if (!subscription) return;
     subscription.cancelled = true;
-    for (const source of subscription.sources) {
-      closeSubscriptionSource(source.source);
-    }
+    clearDeferredPlaceholderBuffer(subscription);
+    closeSubscriptionSourceState(subscription);
     this.subscriptions.delete(handle);
   }
 
@@ -1702,6 +1710,8 @@ export class NativeRuntimeAdapter implements Runtime {
   ): Promise<void> {
     const chunk = normalizeSubscriptionChunk(value);
     if (chunk.type === "closed") {
+      clearDeferredPlaceholderBuffer(subscription);
+      closeSubscriptionSourceState(subscription);
       subscription.cancelled = true;
       return;
     }
@@ -1742,6 +1752,7 @@ export class NativeRuntimeAdapter implements Runtime {
         subscription.rowIndexByKey = new Map();
         subscription.packedResetBatches = null;
         subscription.packedResetRows = null;
+        clearDeferredPlaceholderBuffer(subscription);
       }
       if (plainResetChunkCanStayPacked(subscription, chunk, this.schema)) {
         const packedResetRows = nativeResetDeltaFromBatches(
@@ -1783,6 +1794,11 @@ export class NativeRuntimeAdapter implements Runtime {
               subscription.outputColumns,
             )
           ) {
+            if (chunk.settled === true) {
+              throw new Error(
+                "settled relation subscription chunk retained unresolved placeholder rows",
+              );
+            }
             subscription.rows = buffered.rows;
             subscription.rowIndexByKey = buffered.rowIndexByKey;
             subscription.opened = true;
@@ -1790,6 +1806,7 @@ export class NativeRuntimeAdapter implements Runtime {
               subscription,
               chunk.terminalOperations,
               chunk.reset === true,
+              chunk.delta,
             );
             return;
           }
@@ -1805,7 +1822,17 @@ export class NativeRuntimeAdapter implements Runtime {
             subscription.outputColumns,
           )
         ) {
-          this.deferSubscriptionRows(subscription, chunk.terminalOperations, chunk.reset === true);
+          if (chunk.settled === true) {
+            throw new Error(
+              "settled relation subscription chunk retained unresolved placeholder rows",
+            );
+          }
+          this.deferSubscriptionRows(
+            subscription,
+            chunk.terminalOperations,
+            chunk.reset === true,
+            chunk.delta,
+          );
           return;
         }
         applied.wireDelta.terminalOperations = chunk.terminalOperations;
@@ -1874,9 +1901,7 @@ export class NativeRuntimeAdapter implements Runtime {
       subscription.visiblePackedResetRows = null;
     }
     subscription.visibleOpened = true;
-    subscription.deferredVisiblePublication = false;
-    subscription.deferredVisibleReset = false;
-    subscription.deferredTerminalOperations = [];
+    clearDeferredPlaceholderBuffer(subscription);
   }
 
   private subscriptionCallbacksAreSettledGated(subscription: SubscriptionState): boolean {
@@ -1887,10 +1912,25 @@ export class NativeRuntimeAdapter implements Runtime {
     subscription: SubscriptionState,
     terminalOperations: NativeTerminalOperation[] | undefined,
     reset: boolean,
+    delta: NativeSubscriptionDelta,
   ): void {
     subscription.deferredVisiblePublication = true;
     subscription.deferredVisibleReset ||= reset;
     subscription.deferredTerminalOperations.push(...(terminalOperations ?? []));
+    subscription.deferredPlaceholderChunks = reset ? 1 : subscription.deferredPlaceholderChunks + 1;
+    subscription.deferredPlaceholderRows = subscription.rows.length;
+    subscription.deferredPlaceholderBytes = reset
+      ? subscriptionDeltaPayloadBytes(delta)
+      : subscription.deferredPlaceholderBytes + subscriptionDeltaPayloadBytes(delta);
+    if (
+      subscription.deferredPlaceholderChunks > MAX_DEFERRED_PLACEHOLDER_CHUNKS ||
+      subscription.deferredPlaceholderRows > MAX_DEFERRED_PLACEHOLDER_ROWS ||
+      subscription.deferredPlaceholderBytes > MAX_DEFERRED_PLACEHOLDER_BYTES
+    ) {
+      throw new Error(
+        "relation subscription buffered unresolved placeholder rows beyond bounded limits",
+      );
+    }
   }
 
   private scheduleServerPump(): void {
@@ -1972,9 +2012,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private failSubscription(subscription: SubscriptionState, error: Error): void {
     if (subscription.cancelled) return;
     subscription.cancelled = true;
-    for (const source of subscription.sources) {
-      closeSubscriptionSource(source.source);
-    }
+    clearDeferredPlaceholderBuffer(subscription);
+    closeSubscriptionSourceState(subscription);
     try {
       subscription.callback?.(error, null);
     } catch (callbackError) {
@@ -2074,6 +2113,21 @@ export class NativeRuntimeAdapter implements Runtime {
       if (waiter.active) waiter.resolve();
     }
   }
+}
+
+function closeSubscriptionSourceState(subscription: SubscriptionState): void {
+  for (const source of subscription.sources) {
+    closeSubscriptionSource(source.source);
+  }
+}
+
+function clearDeferredPlaceholderBuffer(subscription: SubscriptionState): void {
+  subscription.deferredVisiblePublication = false;
+  subscription.deferredVisibleReset = false;
+  subscription.deferredTerminalOperations = [];
+  subscription.deferredPlaceholderChunks = 0;
+  subscription.deferredPlaceholderRows = 0;
+  subscription.deferredPlaceholderBytes = 0;
 }
 
 function normalizeTransportFrames(frames: unknown[]): Uint8Array[] {
@@ -4287,6 +4341,17 @@ function materializePackedResetRows(subscription: SubscriptionState, schema: Was
   subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
   subscription.packedResetBatches = null;
   subscription.packedResetRows = null;
+}
+
+function subscriptionDeltaPayloadBytes(delta: NativeSubscriptionDelta): number {
+  return delta.added
+    .concat(delta.updated)
+    .reduce(
+      (sum, batch) =>
+        sum +
+        batch.rows.reduce((rowSum, row) => rowSum + row.raw.byteLength + row.rowId.byteLength, 0),
+      0,
+    );
 }
 
 function nativeDeltaFromChanges(

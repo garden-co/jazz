@@ -4490,6 +4490,168 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.close();
   });
 
+  it("fails loudly when a settled Gather chunk still carries unresolved placeholder rows", async () => {
+    const teamsSchema = {
+      teams: {
+        columns: [
+          { name: "name", column_type: { type: "Text" }, nullable: false },
+          { name: "org_id", column_type: { type: "Uuid" }, nullable: true },
+          { name: "parent_id", column_type: { type: "Uuid" }, nullable: true },
+        ],
+      },
+    } satisfies WasmSchema;
+    const rowId = uuidBytes("00000000-0000-0000-0000-000000000552");
+    const runtime = runtimeWithNativeRelationSubscriptionChunks(
+      [
+        {
+          type: "delta",
+          reset: true,
+          settled: true,
+          delta: encodeTeamGatherSubscriptionDelta({
+            added: [{ rowId, name: null }],
+            addedOccurrenceKeys: [typedOccurrenceKey("settled-unresolved")],
+          }),
+        },
+      ],
+      teamsSchema,
+    );
+    const callbacks: unknown[][] = [];
+    const handle = runtime.createSubscription(
+      JSON.stringify({ table: "teams", relation_ir: { Gather: {} } }),
+      null,
+      null,
+      null,
+    );
+
+    runtime.executeSubscription(handle, (...args: unknown[]) => callbacks.push(args));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(callbacks).toHaveLength(1);
+    expect(callbacks[0]?.[0]).toBeInstanceOf(Error);
+    expect((callbacks[0]?.[0] as Error).message).toContain(
+      "settled relation subscription chunk retained unresolved placeholder rows",
+    );
+    runtime.close();
+  });
+
+  it("silently closes unresolved Gather placeholder buffers before first visible delivery", async () => {
+    const teamsSchema = {
+      teams: {
+        columns: [
+          { name: "name", column_type: { type: "Text" }, nullable: false },
+          { name: "org_id", column_type: { type: "Uuid" }, nullable: true },
+          { name: "parent_id", column_type: { type: "Uuid" }, nullable: true },
+        ],
+      },
+    } satisfies WasmSchema;
+    const rowId = uuidBytes("00000000-0000-0000-0000-000000000553");
+    const runtime = runtimeWithNativeRelationSubscriptionChunks(
+      [
+        {
+          type: "delta",
+          reset: true,
+          settled: false,
+          delta: encodeTeamGatherSubscriptionDelta({
+            added: [{ rowId, name: null }],
+            addedOccurrenceKeys: [typedOccurrenceKey("close-before-visible")],
+          }),
+        },
+        { type: "closed" },
+      ],
+      teamsSchema,
+    );
+    const callbacks: unknown[][] = [];
+    const handle = runtime.createSubscription(
+      JSON.stringify({ table: "teams", relation_ir: { Gather: {} } }),
+      null,
+      null,
+      null,
+    );
+
+    runtime.executeSubscription(handle, (...args: unknown[]) => callbacks.push(args));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(callbacks).toEqual([]);
+    const subscription = (
+      runtime as unknown as {
+        subscriptions: Map<
+          number,
+          {
+            cancelled: boolean;
+            deferredVisiblePublication: boolean;
+            deferredVisibleReset: boolean;
+            deferredTerminalOperations: unknown[];
+            deferredPlaceholderChunks: number;
+            deferredPlaceholderRows: number;
+            deferredPlaceholderBytes: number;
+          }
+        >;
+      }
+    ).subscriptions.get(handle);
+    expect(subscription?.cancelled).toBe(true);
+    expect(subscription?.deferredVisiblePublication).toBe(false);
+    expect(subscription?.deferredVisibleReset).toBe(false);
+    expect(subscription?.deferredTerminalOperations).toEqual([]);
+    expect(subscription?.deferredPlaceholderChunks).toBe(0);
+    expect(subscription?.deferredPlaceholderRows).toBe(0);
+    expect(subscription?.deferredPlaceholderBytes).toBe(0);
+    runtime.close();
+  });
+
+  it("fails loudly when unresolved Gather placeholder buffering exceeds explicit bounds", async () => {
+    const teamsSchema = {
+      teams: {
+        columns: [
+          { name: "name", column_type: { type: "Text" }, nullable: false },
+          { name: "org_id", column_type: { type: "Uuid" }, nullable: true },
+          { name: "parent_id", column_type: { type: "Uuid" }, nullable: true },
+        ],
+      },
+    } satisfies WasmSchema;
+    const rowId = uuidBytes("00000000-0000-0000-0000-000000000554");
+    const resultKey = typedOccurrenceKey("buffer-limit");
+    const chunks = [
+      {
+        type: "delta" as const,
+        reset: true,
+        settled: false,
+        delta: encodeTeamGatherSubscriptionDelta({
+          added: [{ rowId, name: null }],
+          addedOccurrenceKeys: [resultKey],
+        }),
+      },
+      ...Array.from({ length: 16 }, () => ({
+        type: "delta" as const,
+        settled: false,
+        delta: encodeTeamGatherSubscriptionDelta({
+          updated: [{ rowId, name: null }],
+          updatedOccurrenceKeys: [resultKey],
+        }),
+      })),
+    ];
+    const runtime = runtimeWithNativeRelationSubscriptionChunks(chunks, teamsSchema);
+    const callbacks: unknown[][] = [];
+    const handle = runtime.createSubscription(
+      JSON.stringify({ table: "teams", relation_ir: { Gather: {} } }),
+      null,
+      null,
+      null,
+    );
+
+    runtime.executeSubscription(handle, (...args: unknown[]) => callbacks.push(args));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(callbacks).toHaveLength(1);
+    expect(callbacks[0]?.[0]).toBeInstanceOf(Error);
+    expect((callbacks[0]?.[0] as Error).message).toContain(
+      "relation subscription buffered unresolved placeholder rows beyond bounded limits",
+    );
+    runtime.close();
+  });
+
   it("rewraps user field option bytes when packed reset frames filter engine records", () => {
     const schema = {
       notes: {

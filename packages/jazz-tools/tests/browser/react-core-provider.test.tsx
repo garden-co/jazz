@@ -8,6 +8,7 @@ import {
 } from "../../src/react-core/provider.js";
 import { useAll, useAllSuspense } from "../../src/react-core/use-all.js";
 import {
+  SubscriptionsOrchestrator,
   makeDeferred,
   type CacheEntryHandle,
   type QueryEntryCallbacks,
@@ -447,6 +448,112 @@ describe("react-core provider/hooks browser coverage", () => {
     );
 
     await expectText("error", "boom");
+  });
+
+  it("RCB-B12B: stale empty-refresh snapshots do not publish across session resubscribe", async () => {
+    const sessionA = {
+      user_id: "alice",
+      claims: { role: "reader" },
+      authMode: "external",
+    } as Session;
+    const sessionB = {
+      user_id: "bob",
+      claims: { role: "reader" },
+      authMode: "external",
+    } as Session;
+    const listeners = new Set<(state: AuthState) => void>();
+    const refreshes = {
+      alice: makeDeferred<Todo[]>(),
+      bob: makeDeferred<Todo[]>(),
+    };
+    const subscribeCalls: Array<{
+      session: string;
+      callback: (delta: SubscriptionDelta<Todo>) => void;
+    }> = [];
+    let liveSession: Session | null = sessionA;
+    const db = {
+      getAuthState(): AuthState {
+        return { authMode: "external", session: liveSession };
+      },
+      onAuthChanged(listener: (state: AuthState) => void) {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+      subscribeAll(
+        _query: QueryBuilder<Todo>,
+        callback: (delta: SubscriptionDelta<Todo>) => void,
+        _options?: QueryOptions,
+        session?: Session,
+      ) {
+        subscribeCalls.push({
+          session: session?.user_id ?? liveSession?.user_id ?? "anon",
+          callback,
+        });
+        return () => {};
+      },
+      all(_query: QueryBuilder<Todo>, _options?: QueryOptions, session?: Session) {
+        const userId = session?.user_id ?? liveSession?.user_id ?? "anon";
+        if (userId === "alice") return refreshes.alice;
+        if (userId === "bob") return refreshes.bob;
+        return Promise.resolve([]);
+      },
+    };
+    const manager = new SubscriptionsOrchestrator({ appId: "rcb-b12b" }, db, sessionA);
+    const stopSessionSync = db.onAuthChanged(({ session: nextSession }) => {
+      liveSession = nextSession;
+      manager.setSession(nextSession ?? null);
+    });
+    const client = attachSubscriptionStore(
+      {
+        db,
+        get session() {
+          return liveSession;
+        },
+        shutdown: async () => {
+          stopSessionSync();
+          await manager.shutdown();
+        },
+      },
+      manager,
+    );
+
+    render(
+      <JazzProvider client={client}>
+        <UseAllView query={BASE_QUERY} />
+      </JazzProvider>,
+    );
+
+    await waitForCondition(
+      () => subscribeCalls.length === 1,
+      3_000,
+      "expected initial session-A subscription",
+    );
+    subscribeCalls[0]!.callback({ reset: true, all: [], delta: [] });
+
+    liveSession = sessionB;
+    const authState: AuthState = { authMode: "external", session: sessionB };
+    for (const listener of listeners) {
+      listener(authState);
+    }
+
+    await waitForCondition(
+      () => subscribeCalls.length === 2,
+      3_000,
+      "expected session-B resubscribe",
+    );
+
+    refreshes.alice.resolve([{ id: "a", title: "Alice stale" }]);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await expectText("rows", "loading");
+
+    subscribeCalls[1]!.callback({
+      all: [{ id: "b", title: "Bob fresh" }],
+      delta: [{ kind: 0, id: "b", index: 0, item: { id: "b", title: "Bob fresh" } }],
+    });
+
+    await expectText("rows", "Bob fresh");
   });
 
   it("RCB-B13: hook usage outside provider throws expected invariant error", async () => {
