@@ -6,12 +6,13 @@ use crate::db::{CommitUnitTrust, ConnectionSessionContext, DbIdentity, RowCells,
 use crate::groove::records::Value;
 use crate::ids::{AuthorId, BranchId, NodeUuid, RowUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
-use crate::protocol::MigrationLens;
+use crate::protocol::{MigrationLens, SyncMessage};
 use crate::schema::JazzSchema;
 use crate::serving::{
     AbiBytes, InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession,
     StorageConfig,
 };
+use crate::wire::{WireFrame, decode_frame, decode_sync_message};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot, watch};
 
 /// Sendable handle for the thread that owns the in-memory server shell.
@@ -222,11 +223,20 @@ impl ServerShellHandle {
         self.jobs
             .send(Box::new(move |shell| {
                 for frame in frames {
+                    let phase = inbound_frame_phase(&frame);
                     let result = shell
                         .receive_frames(session, [frame])
-                        .and_then(|()| shell.tick())
-                        .and_then(|()| shell.take_frames(session))
-                        .map_err(|error| error.to_string());
+                        .map_err(|error| format!("server receive {phase}: {error}"))
+                        .and_then(|()| {
+                            shell
+                                .tick()
+                                .map_err(|error| format!("server tick after {phase}: {error}"))
+                        })
+                        .and_then(|()| {
+                            shell
+                                .take_frames(session)
+                                .map_err(|error| format!("server drain after {phase}: {error}"))
+                        });
                     let keep_streaming = result.is_ok();
                     if outbound_tx.send(result).is_err() {
                         return;
@@ -310,8 +320,101 @@ impl ServerShellHandle {
     }
 }
 
+fn inbound_frame_phase(frame: &[u8]) -> String {
+    let Ok(frame) = decode_frame(frame) else {
+        return "malformed wire frame".to_owned();
+    };
+    let WireFrame::Message(envelope) = frame else {
+        return match frame {
+            WireFrame::Hello(_) => "wire hello".to_owned(),
+            WireFrame::Error(_) => "wire error".to_owned(),
+            WireFrame::MessageFragment(_) => "wire message fragment".to_owned(),
+            WireFrame::Message(_) => unreachable!("message handled above"),
+        };
+    };
+    match decode_sync_message(&envelope.payload) {
+        Ok(message) => sync_message_name(&message).to_owned(),
+        Err(_) => "malformed SyncMessage".to_owned(),
+    }
+}
+
+fn sync_message_name(message: &SyncMessage) -> &'static str {
+    // This deliberately names only the protocol variant. Never format the
+    // message itself here: claims and row payloads must not escape through a
+    // transport diagnostic.
+    match message {
+        SyncMessage::BranchMetadata(_) => "BranchMetadata",
+        SyncMessage::FetchBranchMetadata { .. } => "FetchBranchMetadata",
+        SyncMessage::SessionClaims { .. } => "SessionClaims",
+        SyncMessage::CommitUnit { .. } => "CommitUnit",
+        SyncMessage::FateUpdate { .. } => "FateUpdate",
+        SyncMessage::RegisterShape { .. } => "RegisterShape",
+        SyncMessage::Subscribe(_) => "Subscribe",
+        SyncMessage::SubscribeRejected { .. } => "SubscribeRejected",
+        SyncMessage::Unsubscribe { .. } => "Unsubscribe",
+        SyncMessage::PublishSchema { .. } => "PublishSchema",
+        SyncMessage::PublishSchemaWithLens { .. } => "PublishSchemaWithLens",
+        SyncMessage::PublishLens { .. } => "PublishLens",
+        SyncMessage::SetCurrentWriteSchema { .. } => "SetCurrentWriteSchema",
+        SyncMessage::CatalogueAck(_) => "CatalogueAck",
+        SyncMessage::ViewUpdate { .. } => "ViewUpdate",
+        SyncMessage::FetchContentExtent { .. } => "FetchContentExtent",
+        SyncMessage::ContentExtents { .. } => "ContentExtents",
+        SyncMessage::FetchRowVersions { .. } => "FetchRowVersions",
+        SyncMessage::RowVersionPayloads { .. } => "RowVersionPayloads",
+        SyncMessage::CatalogueSnapshot(_) => "CatalogueSnapshot",
+        SyncMessage::PermissionAdviceRequest { .. } => "PermissionAdviceRequest",
+        SyncMessage::PermissionAdviceResponse { .. } => "PermissionAdviceResponse",
+        SyncMessage::AuthorizationScopeSubscribe { .. } => "AuthorizationScopeSubscribe",
+        SyncMessage::AuthorizationScopeReceipt { .. } => "AuthorizationScopeReceipt",
+        SyncMessage::AuthorizationScopeIntent { .. } => "AuthorizationScopeIntent",
+        SyncMessage::AuthorizationScopeView { .. } => "AuthorizationScopeView",
+        SyncMessage::AuthorizationScopeAggregateReceipt { .. } => {
+            "AuthorizationScopeAggregateReceipt"
+        }
+        SyncMessage::AuthorizationScopeUnavailable { .. } => "AuthorizationScopeUnavailable",
+        SyncMessage::AuthorizationScopeDecision { .. } => "AuthorizationScopeDecision",
+    }
+}
+
 fn notify_shell_activity(activity_tx: &watch::Sender<u64>) {
     activity_tx.send_modify(|version| {
         *version = version.wrapping_add(1);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{ReadViewKey, Subscribe, SubscriptionKey};
+    use crate::query::{BindingId, ShapeId};
+    use crate::wire::{WireEnvelope, encode_frame, encode_sync_message};
+
+    fn encode_message(message: SyncMessage) -> Vec<u8> {
+        let payload = encode_sync_message(&message).unwrap();
+        encode_frame(&WireFrame::Message(WireEnvelope::new(0, 0, payload))).unwrap()
+    }
+
+    #[test]
+    fn inbound_frame_phase_labels_semantic_transport_work() {
+        let encoded = encode_message(SyncMessage::SessionClaims {
+            identity: AuthorId::from_bytes([7; 16]),
+            claims: BTreeMap::new(),
+        });
+
+        assert_eq!(inbound_frame_phase(&encoded), "SessionClaims");
+        let shape_id = ShapeId(uuid::Uuid::from_bytes([3; 16]));
+        let subscribe = encode_message(SyncMessage::Subscribe(Subscribe {
+            shape_id,
+            subscription: SubscriptionKey {
+                shape_id,
+                binding_id: BindingId(uuid::Uuid::from_bytes([4; 16])),
+                read_view: ReadViewKey::default(),
+            },
+            values: Vec::new(),
+            known_state: None,
+        }));
+        assert_eq!(inbound_frame_phase(&subscribe), "Subscribe");
+        assert_eq!(inbound_frame_phase(&[0xff]), "malformed wire frame");
+    }
 }
