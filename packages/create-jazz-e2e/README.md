@@ -73,7 +73,8 @@ the ~10-minute `build:core` across 12 matrix runners:
 2. `e2e` (matrix) — downloads that artifact, installs Playwright browsers, and
    runs the harness with `--tarball-dir` so it skips the pack step.
 
-Fires on every push to a `changeset-release/*` branch (the release PR that the
-changesets action keeps updated against `main`). Failures block the release.
+Fires for the `changeset-release/*` pull request that the changesets action
+keeps updated against `main`; ordinary pull requests are skipped. Failures block
+the release.
 `workflow_dispatch` is also available for ad-hoc runs and accepts a single
 `starter` input to run just one matrix slot.

@@ -4,8 +4,8 @@ name: Starters E2E
 # changesets release PR if any starter fails to scaffold, install, build, or
 # pass its Playwright suite against the production build.
 #
-# Trigger: any push to the changesets-managed release branch
-# (`changeset-release/main`), plus manual dispatch for ad-hoc runs.
+# Trigger: a changesets-managed release pull request targeting `main`, plus
+# manual dispatch for ad-hoc runs. Ordinary pull requests are skipped.
 #
 # Shape: the `prepare` job builds the workspace once and packs the three
 # workspace tarballs (jazz-tools, jazz-napi, jazz-wasm) plus the runtime
