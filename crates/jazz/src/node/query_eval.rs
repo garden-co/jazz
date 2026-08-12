@@ -10926,10 +10926,15 @@ where
         let mut join_keys = vec!["row_uuid".to_owned()];
         join_keys.extend(authorized.route_fields.iter().cloned());
         if authorized.route_fields.is_empty() {
-            let fields = output_fields
+            let mut fields = output_fields
                 .iter()
                 .map(|field| ProjectField::renamed(left_field(&field), field.clone()))
                 .collect::<Vec<_>>();
+            fields.extend(
+                binding_route_fields
+                    .iter()
+                    .map(|field| ProjectField::renamed(left_field(field), field.clone())),
+            );
             return Ok(PolicyAuthorizationGraph {
                 graph: GraphBuilder::join(base, authorized_graph, join_keys.clone(), join_keys)
                     .project_fields(fields),
