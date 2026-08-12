@@ -14762,6 +14762,34 @@ mod tests {
                     )),
             ))
             .with_write_policy(Policy::public()),
+            TableSchema::new(
+                "profiles",
+                [
+                    ColumnSchema::new("userId", ColumnType::String),
+                    ColumnSchema::new("name", ColumnType::String),
+                    ColumnSchema::new("avatar", ColumnType::String.nullable()),
+                ],
+            )
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+            TableSchema::new(
+                "messages",
+                [
+                    ColumnSchema::new("chatId", ColumnType::Uuid),
+                    ColumnSchema::new("senderId", ColumnType::Uuid),
+                    ColumnSchema::new("text", ColumnType::String),
+                    ColumnSchema::new("createdAt", ColumnType::U64),
+                ],
+            )
+            .with_reference("chatId", "chats")
+            .with_reference("senderId", "profiles")
+            .with_read_policy(Policy::shape(Query::from("messages").join_via_column(
+                "chatMembers",
+                "chatId",
+                "chatId",
+                [eq(col("userId"), claim("user_id"))],
+            )))
+            .with_write_policy(Policy::public()),
         ]);
         let identity = author(0xa9);
         let (_client_dir, mut client) =
@@ -14831,6 +14859,44 @@ mod tests {
             chat_tx,
             Fate::Accepted,
             Some(GlobalSeq(1)),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+        let profile = row(0xac);
+        let profile_tx = node
+            .commit_mergeable(
+                MergeableCommit::new("profiles", profile, 11).cells(BTreeMap::from([
+                    ("userId".to_owned(), Value::String(identity.0.to_string())),
+                    ("name".to_owned(), Value::String("Alice".to_owned())),
+                    ("avatar".to_owned(), Value::Nullable(None)),
+                ])),
+            )
+            .unwrap();
+        node.apply_fate_update(
+            profile_tx,
+            Fate::Accepted,
+            Some(GlobalSeq(2)),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+        let message = row(0xad);
+        let message_tx = node
+            .commit_mergeable(
+                MergeableCommit::new("messages", message, 12).cells(BTreeMap::from([
+                    ("chatId".to_owned(), Value::Uuid(chat.0)),
+                    ("senderId".to_owned(), Value::Uuid(profile.0)),
+                    (
+                        "text".to_owned(),
+                        Value::String("invite-only seed".to_owned()),
+                    ),
+                    ("createdAt".to_owned(), Value::U64(1)),
+                ])),
+            )
+            .unwrap();
+        node.apply_fate_update(
+            message_tx,
+            Fate::Accepted,
+            Some(GlobalSeq(3)),
             Some(DurabilityTier::Global),
         )
         .unwrap();
@@ -15032,12 +15098,290 @@ mod tests {
         node.apply_fate_update(
             member_tx,
             Fate::Accepted,
-            Some(GlobalSeq(2)),
+            Some(GlobalSeq(4)),
             Some(DurabilityTier::Global),
         )
         .expect("a live invite subscription must tolerate its membership CommitUnit");
         edge.query_update(&mut node, &shape, &server_binding)
             .expect("flushing the live invite subscription after membership must preserve its claim route");
+
+        // The invite has now become ordinary membership. A later normal
+        // session must materialize an already-existing private message through
+        // its sender include and timestamp order, not merely discover chat
+        // membership itself.
+        node.set_session_claims(
+            identity,
+            BTreeMap::from([("user_id".to_owned(), Value::String(identity.0.to_string()))]),
+        );
+        let message_shape = Query::from("messages")
+            .filter(eq(col("chatId"), param("chat_id")))
+            .array_subquery(ArraySubquery::new("sender", "profiles", "id", "senderId"))
+            .order_by("createdAt", OrderDirection::Asc)
+            .validate(&schema)
+            .expect("validate normal-member message query");
+        let message_binding = message_shape
+            .bind(BTreeMap::from([(
+                "chat_id".to_owned(),
+                Value::Uuid(chat.0),
+            )]))
+            .expect("bind normal-member message query");
+        let message_rows = node
+            .query_rows_with_prepared_plan_for_identity(
+                &message_shape,
+                &message_binding,
+                DurabilityTier::Edge,
+                None,
+                identity,
+            )
+            .expect("materialize private seed message with sender include and timestamp order");
+        assert_eq!(
+            message_rows
+                .iter()
+                .map(|row| row.row_uuid())
+                .collect::<Vec<_>>(),
+            vec![message],
+            "normal membership reads the seed message after invite acceptance"
+        );
+        node.open_seeded_maintained_subscription_view(
+            &message_shape,
+            &message_binding,
+            identity,
+            DurabilityTier::Edge,
+            &ReadViewSpec::default(),
+        )
+        .expect("prepare and hydrate normal-member message include/order subscription");
+        let (_normal_client_dir, mut normal_client) =
+            open_node_with_uuid(NodeUuid::from_bytes([0xae; 16]), schema.clone());
+        normal_client.set_session_claims(
+            identity,
+            BTreeMap::from([("user_id".to_owned(), Value::String(identity.0.to_string()))]),
+        );
+        let mut normal_membership_peer = PeerState::edge_client(identity);
+        normal_client
+            .apply_sync_message(
+                normal_membership_peer
+                    .current_rows_update(&mut node, "chatMembers")
+                    .expect("serve the accepted membership to the normal client"),
+            )
+            .expect("normal client applies its accepted membership before querying messages");
+        let simple_message_shape = Query::from("messages")
+            .filter(eq(col("chatId"), param("chat_id")))
+            .validate(&schema)
+            .expect("validate normal-member message query without include");
+        let simple_message_binding = simple_message_shape
+            .bind(BTreeMap::from([(
+                "chat_id".to_owned(),
+                Value::Uuid(chat.0),
+            )]))
+            .expect("bind normal-member message query without include");
+        register_query_shape(
+            &mut normal_client,
+            &simple_message_shape,
+            RegisterShapeOptions {
+                tier: DurabilityTier::Edge,
+                ..RegisterShapeOptions::default()
+            },
+        );
+        subscribe_query_binding(
+            &mut normal_client,
+            &simple_message_shape,
+            &simple_message_binding,
+        );
+        let mut normal_simple_peer = PeerState::edge_client(identity);
+        normal_client
+            .apply_sync_message(
+                normal_simple_peer
+                    .rehydrate_query_with_opts(
+                        &mut node,
+                        &simple_message_shape,
+                        &simple_message_binding,
+                        RegisterShapeOptions {
+                            tier: DurabilityTier::Edge,
+                            ..RegisterShapeOptions::default()
+                        },
+                    )
+                    .expect("serve normal-member message snapshot without include"),
+            )
+            .expect("client applies normal-member message snapshot without include");
+        assert_eq!(
+            normal_client
+                .query_rows_for_client(
+                    &simple_message_shape,
+                    &simple_message_binding,
+                    DurabilityTier::Edge,
+                    identity,
+                )
+                .expect("client materializes the private seed message without include")
+                .iter()
+                .map(|row| row.row_uuid())
+                .collect::<Vec<_>>(),
+            vec![message],
+            "the normal client must first materialize the private seed message without include"
+        );
+        register_query_shape(
+            &mut normal_client,
+            &message_shape,
+            RegisterShapeOptions {
+                tier: DurabilityTier::Edge,
+                ..RegisterShapeOptions::default()
+            },
+        );
+        subscribe_query_binding(&mut normal_client, &message_shape, &message_binding);
+        let mut normal_peer = PeerState::edge_client(identity);
+        let normal_update = normal_peer
+            .rehydrate_query_with_opts(
+                &mut node,
+                &message_shape,
+                &message_binding,
+                RegisterShapeOptions {
+                    tier: DurabilityTier::Edge,
+                    ..RegisterShapeOptions::default()
+                },
+            )
+            .expect("serve normal-member message include/order snapshot");
+        let normal_versions = normal_update
+            .expand_version_carriers_for_receive()
+            .expect("expand normal-member message include/order payloads");
+        if let SyncMessage::ViewUpdate {
+            version_bundles, ..
+        } = &normal_versions
+        {
+            let (profile_bundle, profile_version) = version_bundles
+                .iter()
+                .find_map(|bundle| {
+                    bundle
+                        .versions
+                        .iter()
+                        .find(|version| {
+                            version.table() == "profiles" && version.row_uuid() == profile
+                        })
+                        .map(|version| (bundle, version))
+                })
+                .expect("the relation snapshot ships the sender version");
+            assert_eq!(
+                profile_bundle.tx.tx_id, profile_tx,
+                "the sender witness must retain the profile version identity rather than borrow the message anchor"
+            );
+            assert_eq!(
+                profile_version
+                    .record()
+                    .borrowed()
+                    .get_idx(7)
+                    .expect("decode sender wire userId"),
+                Value::Nullable(Some(Box::new(Value::String(identity.0.to_string())))),
+                "the relation sender version ships userId content"
+            );
+        } else {
+            panic!("expected normal-member view update")
+        }
+        let missing = normal_client
+            .missing_known_state_row_version_refs(&normal_versions)
+            .expect("inspect normal-member message include/order repair requirements");
+        assert!(
+            missing.is_empty(),
+            "the server snapshot already carries every visible row-version payload; missing {missing:?}"
+        );
+        if !missing.is_empty() {
+            let messages = normal_peer
+                .handle_row_versions_fetch(
+                    &mut node,
+                    SyncMessage::FetchRowVersions {
+                        requests: missing.clone(),
+                    },
+                )
+                .expect("serve normal-member message include/order repair payloads");
+            let [SyncMessage::RowVersionPayloads { version_bundles }] = messages.as_slice() else {
+                panic!("expected row-version repair payloads")
+            };
+            normal_client
+                .apply_row_version_payloads_for_requests(&missing, version_bundles.clone())
+                .expect("apply normal-member message include/order repair payloads");
+        }
+        normal_client
+            .apply_sync_message(normal_versions)
+            .expect("client applies normal-member message include/order snapshot");
+        assert!(
+            normal_client
+                .current_rows("profiles", DurabilityTier::Local)
+                .expect("inspect locally materialized sender rows")
+                .iter()
+                .any(|row| row.row_uuid() == profile),
+            "the include snapshot must deliver the sender row before local query evaluation"
+        );
+        assert_eq!(
+            normal_client
+                .current_rows("profiles", DurabilityTier::Local)
+                .expect("inspect the local sender table")
+                .iter()
+                .map(|row| row.row_uuid())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([profile]),
+            "the sender table must not receive the message row through relation delivery"
+        );
+        assert_eq!(
+            normal_client
+                .current_rows("profiles", DurabilityTier::Local)
+                .expect("inspect the local sender payload")
+                .into_iter()
+                .next()
+                .and_then(|row| row.cell(normal_client.table("profiles").unwrap(), "userId")),
+            Some(Value::String(identity.0.to_string())),
+            "the delivered sender version retains its required userId"
+        );
+        let (local_shape, local_binding, local_plan) = normal_client
+            .prepare_query_binding_for_link_in_authorization_mode(
+                &message_shape,
+                &message_binding,
+                DurabilityTier::Edge,
+                identity,
+                QueryAuthorizationMode::ClientLocal,
+            )
+            .expect(
+                "prepare the same client-local maintained relation subscription as the browser",
+            );
+        let (_local_subscription, local_snapshot) = normal_client
+            .open_maintained_view_subscription_in_authorization_mode(
+                &local_shape,
+                &local_binding,
+                identity,
+                DurabilityTier::Edge,
+                &ReadViewSpec::default(),
+                Some(local_plan),
+                QueryAuthorizationMode::ClientLocal,
+            )
+            .expect("open the client-local maintained relation subscription");
+        assert_eq!(
+            local_snapshot.root_count, 1,
+            "the maintained client-local relation subscription retains the seed message"
+        );
+        let local_one_shot = normal_client
+            .query_relation_snapshot_for_client(
+                &message_shape,
+                &message_binding,
+                DurabilityTier::Edge,
+                identity,
+                &ReadViewSpec::default(),
+            )
+            .expect("materialize the client-local relation snapshot API used by WASM");
+        assert_eq!(
+            local_one_shot.root_count, 1,
+            "the client-local relation snapshot API retains the seed message"
+        );
+        assert_eq!(
+            normal_client
+                .query_rows_for_client(
+                    &message_shape,
+                    &message_binding,
+                    DurabilityTier::Edge,
+                    identity,
+                )
+                .expect("client materializes normal-member message include/order snapshot")
+                .iter()
+                .map(|row| row.row_uuid())
+                .collect::<Vec<_>>(),
+            vec![message],
+            "the normal client must retain the seed message when the sender include is added"
+        );
     }
 
     fn collect_binding_source_descriptor_fields(
