@@ -17,7 +17,6 @@ const job = (name, nextName) => {
 };
 
 test("Rust CI uses pinned prebuilt tools without charging Rust-only jobs for wasm-pack", () => {
-  const buildIntegration = job("build-integration", "lint");
   const lint = job("lint", "test-rust");
   const rust = job("test-rust", "test-ts");
   const typescript = job("test-ts");
@@ -27,8 +26,25 @@ test("Rust CI uses pinned prebuilt tools without charging Rust-only jobs for was
   assert.doesNotMatch(rust, /ensure:rust-toolchain|wasm-pack/);
   assert.doesNotMatch(rust, /rust-components:/);
   assert.doesNotMatch(lint, /ensure:rust-toolchain|wasm-pack/);
-  assert.doesNotMatch(buildIntegration, /ensure:rust-toolchain|wasm-pack/);
   assert.match(typescript, /tool: wasm-pack@0\.13\.1/);
+});
+
+test("the single trusted-runner job checks the integration workspace before TypeScript artifacts", () => {
+  const typescript = job("test-ts");
+
+  // The dedicated jazz-ci runner has one worker. Splitting these phases into
+  // jobs serializes their checkout/setup work in GitHub's runner queue.
+  assert.doesNotMatch(workflow, /^  build-integration:/m);
+  assert.match(
+    typescript,
+    /name: Check integration workspace\s+run: cargo check --workspace --all-targets/,
+  );
+  assert.ok(
+    typescript.indexOf("name: Check integration workspace") <
+      typescript.indexOf("name: Build correctness-test artifacts"),
+    "workspace check must fail before the expensive correctness artifact build",
+  );
+  assert.match(typescript, /runs-on: \$\{\{ github\.event_name == 'pull_request'.*'jazz-ci' \}\}/);
 });
 
 test("lint keeps its one workspace Clippy invocation inside pnpm lint", () => {

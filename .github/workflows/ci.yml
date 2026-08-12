@@ -17,35 +17,6 @@ env:
   CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
 
 jobs:
-  # Does the integration branch still compile after a merge?
-  #
-  # PR-level checks cannot answer this. Each PR is built against the base as it
-  # was, so two PRs that are individually green can merge cleanly and produce a
-  # tree that does not build. That happened on 2026-07-29: one PR removed
-  # `RecursionBound::iteration_cap`, another kept a call to it, neither
-  # conflicted, and `codex/jazz-core-engine-swap` was left unable to compile —
-  # unnoticed until it broke unrelated work hours later.
-  #
-  # Deliberately narrow. The full suites are not yet green, so gating on them
-  # would force routine overrides and make "red" meaningless. This checks the
-  # one property we can guarantee, and is fast and flake-free. Promote the other
-  # jobs to gates individually as each goes green.
-  build-integration:
-    # Trusted branches use the persistent runner; fork PRs remain isolated on
-    # hosted infrastructure because this job executes repository code.
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'blacksmith-4vcpu-ubuntu-2404' || 'jazz-ci' }}
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: ./.github/actions/setup-build
-        with:
-          rust-targets: wasm32-unknown-unknown
-          sccache: "true"
-          sccache-sticky-disk: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'true' || 'false' }}
-
-      - run: cargo check --workspace --all-targets
-
   lint:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
@@ -119,6 +90,18 @@ jobs:
           rust-targets: wasm32-unknown-unknown
           sccache: "true"
           sccache-sticky-disk: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'true' || 'false' }}
+
+      # Keep the integration-branch compile gate, but run it as the first
+      # phase of the only trusted-runner job. `jazz-ci` currently has one
+      # worker: separate build-integration and test-ts jobs otherwise queue
+      # behind one another, so their setup/checkout overhead is on the PR
+      # critical path rather than overlapping.
+      #
+      # PR-level checks cannot catch two independently green PRs whose merged
+      # tree no longer compiles. This runs on every push to the integration
+      # branch before building the TypeScript correctness artifacts.
+      - name: Check integration workspace
+        run: cargo check --workspace --all-targets
 
       - name: Install WASM packager
         # Only this job builds jazz-wasm. Other Rust jobs receive their target
