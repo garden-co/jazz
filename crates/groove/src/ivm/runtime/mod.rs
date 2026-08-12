@@ -4426,6 +4426,13 @@ impl TerminalDeltas {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct TerminalOperation {
+    /// Exact descriptor of the root terminal record addressed by this edit.
+    ///
+    /// Terminal payload bytes are deliberately self-describing at the wire
+    /// boundary: a query may legitimately produce either the public logical
+    /// record layout or a nullable `CurrentRow` carrier.  Consumers must use
+    /// this descriptor rather than guessing from a query shape or byte prefix.
+    pub root_descriptor: RecordDescriptor,
     pub root_key: Vec<u8>,
     pub path: Vec<TerminalPathSegment>,
     pub edit: TerminalEdit,
@@ -4479,6 +4486,7 @@ fn terminal_deltas_from_record_deltas(
     for key in keys {
         match (before.get(&key), after.get(&key)) {
             (None, Some(record)) => operations.push(TerminalOperation {
+                root_descriptor: deltas.descriptor,
                 root_key: key.clone(),
                 path: Vec::new(),
                 edit: TerminalEdit::Insert {
@@ -4488,13 +4496,19 @@ fn terminal_deltas_from_record_deltas(
                 },
             }),
             (Some(_), None) => operations.push(TerminalOperation {
+                root_descriptor: deltas.descriptor,
                 root_key: key.clone(),
                 path: Vec::new(),
                 edit: TerminalEdit::Remove { key: key.clone() },
             }),
-            (Some(before), Some(after)) => {
-                diff_terminal_record(&key, Vec::new(), before, after, &mut operations)?
-            }
+            (Some(before), Some(after)) => diff_terminal_record(
+                &key,
+                deltas.descriptor,
+                Vec::new(),
+                before,
+                after,
+                &mut operations,
+            )?,
             (None, None) => unreachable!("terminal key came from before or after"),
         }
     }
@@ -4531,6 +4545,7 @@ fn order_terminal_snapshot(
 
 fn diff_terminal_record(
     root_key: &[u8],
+    root_descriptor: RecordDescriptor,
     path: Vec<TerminalPathSegment>,
     before: &OwnedRecord,
     after: &OwnedRecord,
@@ -4563,6 +4578,7 @@ fn diff_terminal_record(
                 child_path.push(TerminalPathSegment::Collection(field));
                 diff_terminal_collection(
                     root_key,
+                    root_descriptor,
                     child_path,
                     before_children,
                     after_children,
@@ -4576,6 +4592,7 @@ fn diff_terminal_record(
     if scalar_changed {
         let key = encoded_record_key_part(*after.descriptor(), after.raw(), &[0])?;
         operations.push(TerminalOperation {
+            root_descriptor,
             root_key: root_key.to_vec(),
             path,
             edit: TerminalEdit::Update {
@@ -4589,6 +4606,7 @@ fn diff_terminal_record(
 
 fn diff_terminal_collection(
     root_key: &[u8],
+    root_descriptor: RecordDescriptor,
     path: Vec<TerminalPathSegment>,
     before_values: &[Value],
     after_values: &[Value],
@@ -4618,6 +4636,7 @@ fn diff_terminal_collection(
     for key in keys {
         match (before.get(&key), after.get(&key)) {
             (None, Some((index, record))) => operations.push(TerminalOperation {
+                root_descriptor,
                 root_key: root_key.to_vec(),
                 path: path.clone(),
                 edit: TerminalEdit::Insert {
@@ -4627,6 +4646,7 @@ fn diff_terminal_collection(
                 },
             }),
             (Some(_), None) => operations.push(TerminalOperation {
+                root_descriptor,
                 root_key: root_key.to_vec(),
                 path: path.clone(),
                 edit: TerminalEdit::Remove { key: key.clone() },
@@ -4634,6 +4654,7 @@ fn diff_terminal_collection(
             (Some((before_index, before_record)), Some((after_index, after_record))) => {
                 if before_index != after_index {
                     operations.push(TerminalOperation {
+                        root_descriptor,
                         root_key: root_key.to_vec(),
                         path: path.clone(),
                         edit: TerminalEdit::Move {
@@ -4646,6 +4667,7 @@ fn diff_terminal_collection(
                 descendant_path.push(TerminalPathSegment::Key(key));
                 diff_terminal_record(
                     root_key,
+                    root_descriptor,
                     descendant_path,
                     before_record,
                     after_record,
@@ -8725,6 +8747,11 @@ fn apply_root_ordering_operations(
             current.remove(existing);
             current.insert(after_index.min(current.len()), key.clone());
             terminal.operations.push(TerminalOperation {
+                root_descriptor: terminal
+                    .operations
+                    .first()
+                    .map(|operation| operation.root_descriptor)
+                    .expect("root ordering only operates on a terminal with payload edits"),
                 root_key: key.clone(),
                 path: Vec::new(),
                 edit: TerminalEdit::Move {
@@ -11502,6 +11529,7 @@ fn update_unbounded_collect_by_terminal_state(
                     )
                 })?;
                 operations.push(TerminalOperation {
+                    root_descriptor: output_desc,
                     root_key: group_key.clone(),
                     path: Vec::new(),
                     edit: TerminalEdit::Insert {
@@ -11512,6 +11540,7 @@ fn update_unbounded_collect_by_terminal_state(
                 });
             } else {
                 operations.push(TerminalOperation {
+                    root_descriptor: output_desc,
                     root_key: group_key.clone(),
                     path: Vec::new(),
                     edit: TerminalEdit::Remove { key: group_key },
@@ -11586,6 +11615,7 @@ fn update_unbounded_collect_by_terminal_state(
                 .filter(|(_, weight)| **weight > 0)
                 .count();
             operations.push(TerminalOperation {
+                root_descriptor: output_desc,
                 root_key: group_key,
                 path,
                 edit: TerminalEdit::Insert {
@@ -11596,6 +11626,7 @@ fn update_unbounded_collect_by_terminal_state(
             });
         } else {
             operations.push(TerminalOperation {
+                root_descriptor: output_desc,
                 root_key: group_key,
                 path,
                 edit: TerminalEdit::Remove { key: child_key },
@@ -11612,6 +11643,7 @@ fn update_unbounded_collect_by_terminal_state(
         });
         for root_key in root_groups_before.difference(&root_groups_after) {
             operations.push(TerminalOperation {
+                root_descriptor: output_desc,
                 root_key: root_key.clone(),
                 path: Vec::new(),
                 edit: TerminalEdit::Remove {
@@ -11637,6 +11669,7 @@ fn update_unbounded_collect_by_terminal_state(
                     })?;
             let index = root_groups_after.range(..root_key.clone()).count();
             operations.push(TerminalOperation {
+                root_descriptor: output_desc,
                 root_key: root_key.clone(),
                 path: Vec::new(),
                 edit: TerminalEdit::Insert {
@@ -11723,6 +11756,7 @@ fn update_collect_by_root_terminal_state(
             (None, None) => continue,
         };
         operations.push(TerminalOperation {
+            root_descriptor: output_desc,
             root_key,
             path: Vec::new(),
             edit,
@@ -12677,6 +12711,7 @@ mod tests {
         let mut terminal = TerminalDeltas {
             operations: vec![
                 TerminalOperation {
+                    root_descriptor: RecordDescriptor::default(),
                     root_key: key(2),
                     path: Vec::new(),
                     edit: TerminalEdit::Update {
@@ -12685,6 +12720,7 @@ mod tests {
                     },
                 },
                 TerminalOperation {
+                    root_descriptor: RecordDescriptor::default(),
                     root_key: key(4),
                     path: Vec::new(),
                     edit: TerminalEdit::Insert {

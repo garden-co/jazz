@@ -5,7 +5,12 @@
 import { describe, it, expect } from "vitest";
 import { SubscriptionManager, applySubscriptionDelta } from "./subscription-manager.js";
 import type { SubscriptionDelta } from "./subscription-manager.js";
-import { encodeNativeRowValues } from "./native-runtime/native-row-codec.js";
+import {
+  encodeNativeRowValues,
+  storageColumnValueType,
+  writeDescriptor,
+} from "./native-runtime/native-row-codec.js";
+import { PostcardWriter } from "./native-runtime/native-codec.js";
 import type {
   ColumnDescriptor,
   NativeRowDelta,
@@ -131,6 +136,22 @@ function currentRowColumns(columns: readonly ColumnDescriptor[]): readonly Colum
   return columns.map((column) => ({ ...column, nullable: true, sparse: undefined }));
 }
 
+function terminalDescriptor(columns: readonly ColumnDescriptor[]): number[] {
+  const writer = new PostcardWriter();
+  writeDescriptor(writer, [
+    { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+    ...columns.map((column) => ({
+      name: column.name,
+      valueType: storageColumnValueType(column),
+    })),
+  ]);
+  return [...writer.finish()];
+}
+
+function currentRowTerminalDescriptor(columns: readonly ColumnDescriptor[]): number[] {
+  return terminalDescriptor(currentRowColumns(columns));
+}
+
 function terminalTextChild(id: string, name: string): Uint8Array {
   return Uint8Array.from([...uuidBytes(id), ...new TextEncoder().encode(name)]);
 }
@@ -233,6 +254,7 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: key,
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
             path: [],
             edit: { Update: { key, value: [...terminalRowData(id, "after", 2)] } },
           },
@@ -281,6 +303,7 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: key,
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
             path: [],
             edit: { Update: { key, value: [...terminalRowData(id, "joined", 7)] } },
           },
@@ -333,6 +356,7 @@ describe("SubscriptionManager", () => {
             terminalOperations: [
               {
                 root_key: key,
+                rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
                 path: [],
                 edit: { Update: { key, value: [...terminalRowData(id, "after", 7)] } },
               },
@@ -398,6 +422,7 @@ describe("SubscriptionManager", () => {
           terminalOperations: [
             {
               root_key: legacyComposite,
+              rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
               path: [],
               edit: { Update: { key: legacyComposite, value: [...terminalRowData(id, "bad", 9)] } },
             },
@@ -535,6 +560,7 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: key,
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
             path: [],
             edit: { Update: { key, value: [...terminalRowData(id, "updated", 2)] } },
           },
@@ -562,6 +588,7 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: key,
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
             path: [],
             edit: { Insert: { key, index: 0, value: [...terminalRowData(id, "reopened", 3)] } },
           },
@@ -605,6 +632,7 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: key,
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
             path: [],
             edit: { Update: { key, value: [...terminalRowData(id, "patched", 2)] } },
           },
@@ -635,6 +663,7 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: key,
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
             path: [],
             edit: { Update: { key, value: [...terminalRowData(id, "stale", 1)] } },
           },
@@ -680,6 +709,7 @@ describe("SubscriptionManager", () => {
           terminalOperations: [
             {
               root_key: key,
+              rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
               path: [],
               edit: { Update: { key, value: [...terminalRowData(other, "corrupt", 2)] } },
             },
@@ -711,6 +741,7 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: key,
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
             path: [],
             edit: { Insert: { index: 0, key, value: [...terminalRowData(id, "root", 1)] } },
           },
@@ -761,6 +792,7 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: key,
+            rootDescriptor: currentRowTerminalDescriptor(columns),
             path: [],
             edit: { Insert: { index: 0, key, value: [...currentRowPayload] } },
           },
@@ -779,6 +811,43 @@ describe("SubscriptionManager", () => {
     );
 
     expect(result.all).toEqual([{ id, title: null, done: false }]);
+  });
+
+  it("uses the producer descriptor for a logical terminal root instead of guessing CurrentRow", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const id = "00000000-0000-4000-8000-000000000001";
+    const key = [10, ...uuidBytes(id)];
+    const logicalPayload = Uint8Array.from([
+      ...uuidBytes(id),
+      ...encodeNativeRowValues(nativeColumns, [
+        { type: "Text", value: "logical" },
+        { type: "Integer", value: 7 },
+      ]),
+    ]);
+
+    const result = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: key,
+            rootDescriptor: terminalDescriptor(nativeColumns),
+            path: [],
+            edit: { Insert: { index: 0, key, value: [...logicalPayload] } },
+          },
+        ],
+      },
+      transform,
+      nativeColumns,
+    );
+
+    expect(result.all).toEqual([{ id, name: "logical", count: 7 }]);
   });
 
   it("applies root insert positions in producer order after earlier removals", () => {
@@ -804,6 +873,7 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: key(ids.b),
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
             path: [],
             edit: {
               Insert: { index: 0, key: key(ids.b), value: [...terminalRowData(ids.b, "B", 2)] },
@@ -811,6 +881,7 @@ describe("SubscriptionManager", () => {
           },
           {
             root_key: key(ids.c),
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
             path: [],
             edit: {
               Insert: { index: 1, key: key(ids.c), value: [...terminalRowData(ids.c, "C", 3)] },
@@ -829,6 +900,7 @@ describe("SubscriptionManager", () => {
           { root_key: key(ids.b), path: [], edit: { Remove: { key: key(ids.b) } } },
           {
             root_key: key(ids.d),
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
             path: [],
             edit: {
               Insert: { index: 1, key: key(ids.d), value: [...terminalRowData(ids.d, "D", 4)] },
@@ -866,6 +938,7 @@ describe("SubscriptionManager", () => {
           terminalOperations: [
             {
               root_key: key,
+              rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
               path: [],
               edit: {
                 Insert: { index: 0, key: otherKey, value: [...terminalRowData(id, "root", 1)] },
@@ -970,6 +1043,7 @@ describe("SubscriptionManager", () => {
           },
           {
             root_key: rootKey,
+            rootDescriptor: currentRowTerminalDescriptor(rootColumns),
             path: [],
             edit: {
               Insert: {
@@ -1067,6 +1141,7 @@ describe("SubscriptionManager", () => {
           },
           {
             root_key: rootKey,
+            rootDescriptor: currentRowTerminalDescriptor(rootColumns),
             path: [],
             edit: {
               Update: {

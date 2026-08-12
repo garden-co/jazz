@@ -18,8 +18,11 @@ import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "./select-projection.js";
 import {
   decodeNativeRow,
   decodeNativeTerminalRow,
+  decodeNativeTerminalRowWithDescriptor,
   logicalStorageColumns,
+  readDescriptor,
 } from "./native-runtime/native-row-codec.js";
+import { PostcardReader } from "./native-runtime/native-codec.js";
 
 const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -368,9 +371,10 @@ export class SubscriptionManager<T extends { id: string }> {
       if (!("Insert" in edit)) throw new Error("terminal root insert partition is invalid");
       this.terminalRows.set(
         rootId,
-        decodeNativeTerminalRow(
+        decodeNativeTerminalRoot(
           rootRowId,
-          rootTerminalCurrentRowColumns(rootColumns),
+          operation,
+          rootColumns,
           Uint8Array.from(edit.Insert.value),
         ),
       );
@@ -394,9 +398,10 @@ export class SubscriptionManager<T extends { id: string }> {
           }
           this.terminalRows.set(
             rootId,
-            decodeNativeTerminalRow(
+            decodeNativeTerminalRoot(
               terminalPayloadRowId(operation.root_key),
-              rootTerminalCurrentRowColumns(rootColumns),
+              operation,
+              rootColumns,
               Uint8Array.from(edit.Update.value),
             ),
           );
@@ -679,6 +684,23 @@ export class SubscriptionManager<T extends { id: string }> {
   }
 }
 
+function decodeNativeTerminalRoot(
+  id: string,
+  operation: NativeTerminalOperation,
+  columns: readonly ColumnDescriptor[],
+  raw: Uint8Array,
+): WasmRow {
+  if (!operation.rootDescriptor) {
+    throw new Error("terminal operation is missing its root descriptor");
+  }
+  return decodeNativeTerminalRowWithDescriptor(
+    id,
+    readDescriptor(new PostcardReader(Uint8Array.from(operation.rootDescriptor))),
+    columns,
+    raw,
+  );
+}
+
 export function isNativeRowDelta(delta: SubscriptionWireDelta): delta is NativeRowDelta {
   return !Array.isArray(delta) && delta.__jazzNativeRowDelta === true;
 }
@@ -908,20 +930,6 @@ function terminalCollection(
     columns = childColumns;
   }
   return undefined;
-}
-
-// Root terminal edit records are encoded as canonical CurrentRow payloads: every
-// application cell has one nullable envelope, including non-nullable public
-// columns. This differs from packed row deltas, which have already been
-// normalized to the public logical layout.
-function rootTerminalCurrentRowColumns(
-  columns: readonly ColumnDescriptor[],
-): readonly ColumnDescriptor[] {
-  return columns.map((column) => ({
-    ...column,
-    nullable: true,
-    sparse: undefined,
-  }));
 }
 
 function readUuid(bytes: Uint8Array, offset: number): string {

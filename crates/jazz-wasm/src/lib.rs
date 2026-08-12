@@ -2755,7 +2755,8 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             set_prop(
                 &object,
                 "terminalOperations",
-                serde_wasm_bindgen::to_value(&terminal_operations).map_err(to_js_error)?,
+                serde_wasm_bindgen::to_value(&terminal_operations_to_json(&terminal_operations)?)
+                    .map_err(to_js_error)?,
             )?;
             set_prop(&object, "reset", JsValue::from_bool(reset))?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;
@@ -2800,6 +2801,31 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
         }
     };
     Ok(object.into())
+}
+
+/// Encode each terminal operation with the exact descriptor of its root
+/// payload.  Terminal bytes may be either logical output rows or nullable
+/// CurrentRow carriers, so consumers must not reconstruct this layout from a
+/// query projection.
+fn terminal_operations_to_json(
+    operations: &[jazz::groove::ivm::TerminalOperation],
+) -> Result<serde_json::Value, JsValue> {
+    let mut encoded = serde_json::to_value(operations).map_err(to_js_error)?;
+    let encoded_operations = encoded
+        .as_array_mut()
+        .expect("terminal operations serialize as an array");
+    for (operation, wire) in operations.iter().zip(encoded_operations) {
+        let serde_json::Value::Object(wire) = wire else {
+            unreachable!("terminal operation serializes as an object");
+        };
+        wire.remove("root_descriptor");
+        let descriptor = postcard::to_allocvec(&operation.root_descriptor).map_err(to_js_error)?;
+        wire.insert(
+            "rootDescriptor".to_owned(),
+            serde_json::to_value(descriptor).map_err(to_js_error)?,
+        );
+    }
+    Ok(encoded)
 }
 
 fn set_prop(object: &js_sys::Object, name: &str, value: JsValue) -> Result<(), JsValue> {

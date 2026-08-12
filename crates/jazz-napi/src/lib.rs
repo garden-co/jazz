@@ -2325,6 +2325,8 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
                 },
             )
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            let terminal_operations = terminal_operations_to_json(terminal_operations)
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
             let payload = serde_json::json!({
                 "type": "delta",
                 "reset": reset,
@@ -2366,6 +2368,34 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
         }
         SubscriptionEvent::Closed => Ok(serde_json::json!({ "type": "closed" })),
     }
+}
+
+/// Serialize terminal edits with their exact root record layout.  The opaque
+/// descriptor bytes use the same postcard schema as packed subscription rows,
+/// which lets TypeScript decode the record layout without recreating it from
+/// the query projection.
+fn terminal_operations_to_json(
+    operations: &[jazz::groove::ivm::TerminalOperation],
+) -> std::result::Result<serde_json::Value, String> {
+    let mut encoded = serde_json::to_value(operations).map_err(|error| error.to_string())?;
+    let encoded_operations = encoded
+        .as_array_mut()
+        .expect("terminal operations serialize as an array");
+    for (operation, wire) in operations.iter().zip(encoded_operations) {
+        let serde_json::Value::Object(wire) = wire else {
+            unreachable!("terminal operation serializes as an object");
+        };
+        wire.remove("root_descriptor");
+        wire.insert(
+            "rootDescriptor".to_owned(),
+            serde_json::to_value(
+                postcard::to_allocvec(&operation.root_descriptor)
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?,
+        );
+    }
+    Ok(encoded)
 }
 
 fn core_relation_query_from_json(query_json: &str) -> napi::Result<CoreRelationQuery> {

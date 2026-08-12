@@ -405,6 +405,41 @@ export function decodeNativeTerminalRow(
 }
 
 /**
+ * Decode a terminal root from the descriptor emitted with its edit.  Terminal
+ * payloads are not all CurrentRow carriers: ordinary roots may be logical
+ * non-nullable records while hop/gather roots retain nullable carriers.  The
+ * producer descriptor is therefore the sole authority for byte layout.
+ */
+export function decodeNativeTerminalRowWithDescriptor(
+  id: string,
+  descriptor: DescriptorField[],
+  columns: readonly ColumnDescriptor[],
+  raw: Uint8Array,
+): WasmRow {
+  if (descriptor.length !== columns.length + 1 || descriptor[0]?.valueType.tag !== 10) {
+    throw new Error("terminal root descriptor does not match the public projection");
+  }
+  const key = decodeRecordValue(descriptor, raw, 0);
+  if (key == null || formatUuid(key) !== id) {
+    throw new Error("terminal record key does not match addressed key");
+  }
+  const values = columns.map((column, index) => {
+    const bytes = decodeRecordValue(descriptor, raw, index + 1);
+    return bytes == null
+      ? ({ type: "Null" } satisfies Value)
+      : decodeTerminalBytes(column.column_type, bytes);
+  });
+  const valuesByColumn = new Map(columns.map((column, index) => [column.name, values[index]!]));
+  const row = { id, values };
+  Object.defineProperty(row, "valuesByColumn", {
+    value: valuesByColumn,
+    enumerable: false,
+    configurable: true,
+  });
+  return row;
+}
+
+/**
  * Groove terminal payloads retain `Record` values for nested relation rows.
  * Ordinary packed transport deliberately represents those rows as byte arrays
  * with an id/length envelope instead. Both outer records have the same layout,
