@@ -52,6 +52,11 @@ pub(crate) struct PolicyAuthorizationPlan {
     /// User params from the enclosing prepared program that must be present in
     /// the shared binding descriptor.
     pub(crate) binding_user_params: BTreeMap<String, ColumnType>,
+    /// Typed claim slots from the enclosing prepared program. Nested policy
+    /// plans share this binding descriptor, so they must retain claims used by
+    /// an ancestor policy branch as claims, rather than reclassifying them as
+    /// ordinary parameters.
+    pub(crate) binding_claim_params: BTreeMap<String, ProgramClaimParam>,
 }
 
 /// Orthogonal source row requirements derived from app output and requested

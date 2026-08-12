@@ -978,6 +978,7 @@ where
                             position,
                             plan.binding_source_shape.clone(),
                             plan.binding_user_params.clone(),
+                            plan.binding_claim_params.clone(),
                         )
                         .map_err(|_| {
                             source_resolution_error(request, SourceGap::HistoricalStorageCut)
@@ -1053,6 +1054,7 @@ where
                             *permission_subject,
                             plan.binding_source_shape.clone(),
                             plan.binding_user_params.clone(),
+                            plan.binding_claim_params.clone(),
                         )
                         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                     let output_fields = descriptor_field_names(&descriptor)
@@ -1153,6 +1155,7 @@ where
                                 graph_tier.expect("visible current source has a tier"),
                                 plan.binding_source_shape.clone(),
                                 plan.binding_user_params.clone(),
+                                plan.binding_claim_params.clone(),
                             )
                             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                         self.node
@@ -1208,6 +1211,7 @@ where
                             tier,
                             plan.binding_source_shape.clone(),
                             plan.binding_user_params.clone(),
+                            plan.binding_claim_params.clone(),
                         )
                         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                     let mut output_fields = current_row_fields(&table);
@@ -1256,6 +1260,7 @@ where
                             tier,
                             plan.binding_source_shape.clone(),
                             plan.binding_user_params.clone(),
+                            plan.binding_claim_params.clone(),
                         )
                         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                     let mut output_fields = current_row_fields(&table);
@@ -2285,6 +2290,7 @@ where
             }
             let binding_source_shape = plan.binding_source_shape.clone();
             let binding_user_params = plan.binding_user_params.clone();
+            let binding_claim_params = plan.binding_claim_params.clone();
             let param_binding_mode = if binding_source_shape.is_some() {
                 ParamBindingMode::RetainAllParams
             } else {
@@ -2298,6 +2304,7 @@ where
                 tier,
                 binding_source_shape.clone(),
                 binding_user_params.clone(),
+                binding_claim_params,
             )?;
             let output_fields = global_current_storage_fields(
                 table,
@@ -4903,6 +4910,7 @@ where
                 );
             }
             program_binding.id = binding_id_for_values(&values);
+            program_binding.values = values;
         }
         Ok(program_binding)
     }
@@ -6475,6 +6483,12 @@ where
                 &input_shape,
                 &mut binding_claim_params,
             )?;
+        }
+        // System reads bypass policy evaluation and have no session from
+        // which a prepared claim can be bound. A policy-derived claim slot
+        // must therefore never survive into their shared descriptor.
+        if matches!(policy, PolicyContext::System) {
+            binding_claim_params.clear();
         }
         let source_shape = use_prepared_binding_source
             .then(|| {
@@ -10823,6 +10837,45 @@ where
     ) -> Result<PolicyAuthorizationGraph, Error> {
         self.query_engine_read_metrics
             .policy_authorized_source_joins += 1;
+        // The protected storage source has no binding fields of its own, but
+        // the authorization proof is routed by the enclosing prepared
+        // binding. Carry that descriptor alongside the source before joining
+        // the proof so a later storage delta has every route field the proof
+        // advertises.
+        let binding_routes = policy_request
+            .input
+            .binding
+            .source_shape
+            .as_ref()
+            .map(|shape| {
+                let descriptor = RecordDescriptor::new(
+                    policy_request
+                        .input
+                        .binding
+                        .param_types
+                        .iter()
+                        .map(|(name, ty)| (name.clone(), ty.clone()))
+                        .chain(
+                            policy_request
+                                .input
+                                .binding
+                                .claim_params
+                                .iter()
+                                .map(|(name, claim)| (name.clone(), claim.ty.clone())),
+                        ),
+                );
+                (
+                    GraphBuilder::binding_source(shape.clone(), descriptor),
+                    policy_request
+                        .input
+                        .binding
+                        .param_types
+                        .keys()
+                        .chain(policy_request.input.binding.claim_params.keys())
+                        .cloned()
+                        .collect::<BTreeSet<_>>(),
+                )
+            });
         let authorized = match self.policy_authorization_row_id_graph(policy_request) {
             Ok(authorized) => authorized,
             Err(Error::QueryCapability(err)) if err.contains("PolicyProofCycle") => {
@@ -10848,15 +10901,44 @@ where
             authorization_keys.clone(),
             authorization_keys,
         );
+        let (base, binding_route_fields) =
+            match binding_routes {
+                Some((binding, route_fields)) => (
+                    GraphBuilder::join(
+                        base,
+                        binding,
+                        std::iter::empty::<String>(),
+                        std::iter::empty::<String>(),
+                    )
+                    .project_fields(
+                        output_fields
+                            .iter()
+                            .map(|field| ProjectField::renamed(left_field(field), field.clone()))
+                            .chain(route_fields.iter().map(|field| {
+                                ProjectField::renamed(right_field(field), field.clone())
+                            }))
+                            .collect::<Vec<_>>(),
+                    ),
+                    route_fields,
+                ),
+                None => (base, BTreeSet::new()),
+            };
+        let mut join_keys = vec!["row_uuid".to_owned()];
+        join_keys.extend(authorized.route_fields.iter().cloned());
         if authorized.route_fields.is_empty() {
-            let fields = output_fields
+            let mut fields = output_fields
                 .iter()
                 .map(|field| ProjectField::renamed(left_field(&field), field.clone()))
                 .collect::<Vec<_>>();
+            fields.extend(
+                binding_route_fields
+                    .iter()
+                    .map(|field| ProjectField::renamed(left_field(field), field.clone())),
+            );
             return Ok(PolicyAuthorizationGraph {
-                graph: GraphBuilder::join(base, authorized_graph, ["row_uuid"], ["row_uuid"])
+                graph: GraphBuilder::join(base, authorized_graph, join_keys.clone(), join_keys)
                     .project_fields(fields),
-                route_fields: authorized.route_fields,
+                route_fields: binding_route_fields,
             });
         }
         let mut fields = output_fields
@@ -10869,10 +10951,16 @@ where
                 .iter()
                 .map(|field| ProjectField::renamed(right_field(field), field.clone())),
         );
+        fields.extend(
+            binding_route_fields
+                .iter()
+                .filter(|field| !authorized.route_fields.contains(*field))
+                .map(|field| ProjectField::renamed(left_field(field), field.clone())),
+        );
         Ok(PolicyAuthorizationGraph {
-            graph: GraphBuilder::join(base, authorized_graph, ["row_uuid"], ["row_uuid"])
+            graph: GraphBuilder::join(base, authorized_graph, join_keys.clone(), join_keys)
                 .project_fields(fields),
-            route_fields: authorized.route_fields,
+            route_fields: binding_route_fields,
         })
     }
 
@@ -10885,6 +10973,7 @@ where
         tier: DurabilityTier,
         binding_source_shape: Option<String>,
         binding_user_params: BTreeMap<String, ColumnType>,
+        binding_claim_params: BTreeMap<String, ProgramClaimParam>,
     ) -> Result<QueryProgramRequest, Error> {
         self.table_read_policy_authorization_request_with_root_visibility(
             policy_schema_version,
@@ -10894,6 +10983,7 @@ where
             tier,
             binding_source_shape,
             binding_user_params,
+            binding_claim_params,
             false,
         )
     }
@@ -10907,6 +10997,7 @@ where
         position: GlobalSeq,
         binding_source_shape: Option<String>,
         binding_user_params: BTreeMap<String, ColumnType>,
+        binding_claim_params: BTreeMap<String, ProgramClaimParam>,
     ) -> Result<QueryProgramRequest, Error> {
         let policy_schema = if policy_schema_version == self.catalogue.current_schema_version_id {
             &self.catalogue.schema
@@ -10947,7 +11038,8 @@ where
         }
         let binding = policy_shape.bind(BTreeMap::new())?;
         let mut input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
-        let mut claim_params = binding_claim_params_for_shape(&input_shape);
+        let mut claim_params = binding_claim_params;
+        claim_params.extend(binding_claim_params_for_shape(&input_shape));
         collect_reachable_seed_claim_params(
             policy_schema,
             policy_shape.query(),
@@ -11006,6 +11098,7 @@ where
         tier: DurabilityTier,
         binding_source_shape: Option<String>,
         binding_user_params: BTreeMap<String, ColumnType>,
+        binding_claim_params: BTreeMap<String, ProgramClaimParam>,
     ) -> Result<QueryProgramRequest, Error> {
         self.table_read_policy_authorization_request_with_root_visibility(
             policy_schema_version,
@@ -11015,6 +11108,7 @@ where
             tier,
             binding_source_shape,
             binding_user_params,
+            binding_claim_params,
             true,
         )
     }
@@ -11028,6 +11122,7 @@ where
         tier: DurabilityTier,
         binding_source_shape: Option<String>,
         binding_user_params: BTreeMap<String, ColumnType>,
+        binding_claim_params: BTreeMap<String, ProgramClaimParam>,
         include_deleted_root: bool,
     ) -> Result<QueryProgramRequest, Error> {
         let cache_key = ReadPolicyAuthorizationRequestCacheKey {
@@ -11038,6 +11133,7 @@ where
             tier,
             binding_source_shape: binding_source_shape.clone(),
             binding_user_params: binding_user_params_cache_key(&binding_user_params),
+            binding_claim_params: binding_claim_params_cache_key(&binding_claim_params),
             include_deleted_root,
         };
         if let Some(request) = self
@@ -11122,7 +11218,8 @@ where
         } else {
             self.normalized_row_set_shape(&policy_shape, &binding)?
         };
-        let mut claim_params = binding_claim_params_for_shape(&input_shape);
+        let mut claim_params = binding_claim_params;
+        claim_params.extend(binding_claim_params_for_shape(&input_shape));
         claim_params.extend(declared_claim_params);
         collect_reachable_seed_claim_params(
             policy_schema,
@@ -11180,6 +11277,7 @@ where
         identity: AuthorId,
         binding_source_shape: Option<String>,
         binding_user_params: BTreeMap<String, ColumnType>,
+        binding_claim_params: BTreeMap<String, ProgramClaimParam>,
     ) -> Result<QueryProgramRequest, Error> {
         let query = authorization_query_from_read_policy(table);
         if !query.includes.is_empty() {
@@ -11203,7 +11301,8 @@ where
         }
         let binding = policy_shape.bind(BTreeMap::new())?;
         let mut input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
-        let mut claim_params = binding_claim_params_for_shape(&input_shape);
+        let mut claim_params = binding_claim_params;
+        claim_params.extend(binding_claim_params_for_shape(&input_shape));
         collect_reachable_seed_claim_params(
             &self.catalogue.schema,
             policy_shape.query(),
@@ -12270,6 +12369,10 @@ impl ParamBindingMode {
 }
 
 fn binding_user_params_cache_key(params: &BTreeMap<String, ColumnType>) -> String {
+    format!("{params:?}")
+}
+
+fn binding_claim_params_cache_key(params: &BTreeMap<String, ProgramClaimParam>) -> String {
     format!("{params:?}")
 }
 
@@ -14165,10 +14268,10 @@ mod tests {
         SchemaVersion, ShapeAst, Subscribe, SyncMessage, TableLens,
     };
     use crate::query::{
-        Aggregate, ArraySubquery, JoinSourceLookup, OrderDirection, Query, claim, col, contains,
-        eq, gt, in_list, lit, lte, param,
+        Aggregate, ArraySubquery, JoinSourceLookup, OrderDirection, PolicyBranch, Query, claim,
+        col, contains, eq, gt, in_list, lit, lte, param,
     };
-    use crate::schema::{JazzSchema, TableSchema};
+    use crate::schema::{JazzSchema, Policy, TableSchema};
 
     use super::*;
 
@@ -14596,6 +14699,789 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from([ClaimPath(vec!["access_level".to_owned()])])
         );
+    }
+
+    #[test]
+    fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
+        // This intentionally exercises the compiler/prepare boundary rather
+        // than a public transport: a JS invite subscription previously failed
+        // while Groove prepared its shared binding descriptor, before any
+        // observable query could run. Keeping the reproducer here makes the
+        // descriptor contract cheap to validate without NAPI or a browser.
+        let schema = JazzSchema::new([
+            TableSchema::new(
+                "chats",
+                [
+                    ColumnSchema::new("name", ColumnType::String.nullable()),
+                    ColumnSchema::new("isPublic", ColumnType::Bool),
+                    ColumnSchema::new("createdBy", ColumnType::String),
+                    ColumnSchema::new("joinCode", ColumnType::String.nullable()),
+                ],
+            )
+            .with_read_policy(Policy::shape(
+                Query::from("chats")
+                    .filter(Predicate::Any(Vec::new()))
+                    .policy_branch(PolicyBranch::single_alternative_from_query(
+                        Query::from("chats").filter(eq(col("isPublic"), lit(true))),
+                    ))
+                    .policy_branch(PolicyBranch::single_alternative_from_query(
+                        Query::from("chats").filter(eq(col("joinCode"), claim("join_code"))),
+                    ))
+                    .policy_branch(PolicyBranch::single_alternative_from_query(
+                        Query::from("chats").join_via_column(
+                            "chatMembers",
+                            "chatId",
+                            "id",
+                            [eq(col("userId"), claim("user_id"))],
+                        ),
+                    )),
+            ))
+            .with_write_policy(Policy::public()),
+            TableSchema::new(
+                "chatMembers",
+                [
+                    ColumnSchema::new("chatId", ColumnType::Uuid),
+                    ColumnSchema::new("userId", ColumnType::String),
+                    ColumnSchema::new("joinCode", ColumnType::String.nullable()),
+                ],
+            )
+            .with_reference("chatId", "chats")
+            .with_read_policy(Policy::shape(
+                Query::from("chatMembers")
+                    .filter(Predicate::Any(Vec::new()))
+                    .policy_branch(PolicyBranch::single_alternative_from_query(
+                        Query::from("chatMembers").filter(eq(col("userId"), claim("user_id"))),
+                    ))
+                    .policy_branch(PolicyBranch::single_alternative_from_query(
+                        Query::from("chatMembers").join_via_column(
+                            "chatMembers",
+                            "chatId",
+                            "chatId",
+                            [eq(col("userId"), claim("user_id"))],
+                        ),
+                    )),
+            ))
+            .with_write_policy(Policy::public()),
+            TableSchema::new(
+                "profiles",
+                [
+                    ColumnSchema::new("userId", ColumnType::String),
+                    ColumnSchema::new("name", ColumnType::String),
+                    ColumnSchema::new("avatar", ColumnType::String.nullable()),
+                ],
+            )
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+            TableSchema::new(
+                "messages",
+                [
+                    ColumnSchema::new("chatId", ColumnType::Uuid),
+                    ColumnSchema::new("senderId", ColumnType::Uuid),
+                    ColumnSchema::new("text", ColumnType::String),
+                    ColumnSchema::new("createdAt", ColumnType::U64),
+                ],
+            )
+            .with_reference("chatId", "chats")
+            .with_reference("senderId", "profiles")
+            .with_read_policy(Policy::shape(Query::from("messages").join_via_column(
+                "chatMembers",
+                "chatId",
+                "chatId",
+                [eq(col("userId"), claim("user_id"))],
+            )))
+            .with_write_policy(Policy::public()),
+        ]);
+        let identity = author(0xa9);
+        let (_client_dir, mut client) =
+            open_node_with_uuid(NodeUuid::from_bytes([0xa7; 16]), schema.clone());
+        client.set_session_claims(
+            identity,
+            BTreeMap::from([(
+                "join_code".to_owned(),
+                Value::String("invite-123".to_owned()),
+            )]),
+        );
+        let client_shape = Query::from("chats")
+            .filter(eq(col("id"), param("id")))
+            .validate(&schema)
+            .unwrap();
+        let client_binding = client_shape
+            .bind(BTreeMap::from([(
+                "id".to_owned(),
+                Value::Uuid(row(0xaa).0),
+            )]))
+            .unwrap();
+        let (shape, binding, _client_plan) = client
+            .prepare_query_binding_for_link(
+                &client_shape,
+                &client_binding,
+                DurabilityTier::Edge,
+                identity,
+            )
+            .expect("prepare retained invite binding on the client before server coverage");
+        register_query_shape(
+            &mut client,
+            &shape,
+            RegisterShapeOptions {
+                tier: DurabilityTier::Edge,
+                ..RegisterShapeOptions::default()
+            },
+        );
+        subscribe_query_binding(&mut client, &shape, &binding);
+
+        let (_server_dir, mut node) =
+            open_node_with_uuid(NodeUuid::from_bytes([0xa8; 16]), schema.clone());
+        node.set_session_claims(
+            identity,
+            BTreeMap::from([(
+                "join_code".to_owned(),
+                Value::String("invite-123".to_owned()),
+            )]),
+        );
+        let chat = row(0xaa);
+        let chat_tx = node
+            .commit_mergeable(
+                MergeableCommit::new("chats", chat, 10).cells(BTreeMap::from([
+                    ("name".to_owned(), Value::Nullable(None)),
+                    ("isPublic".to_owned(), Value::Bool(false)),
+                    (
+                        "createdBy".to_owned(),
+                        Value::String(identity.0.to_string()),
+                    ),
+                    (
+                        "joinCode".to_owned(),
+                        Value::Nullable(Some(Box::new(Value::String("invite-123".to_owned())))),
+                    ),
+                ])),
+            )
+            .unwrap();
+        node.apply_fate_update(
+            chat_tx,
+            Fate::Accepted,
+            Some(GlobalSeq(1)),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+        let profile = row(0xac);
+        let profile_tx = node
+            .commit_mergeable(
+                MergeableCommit::new("profiles", profile, 11).cells(BTreeMap::from([
+                    ("userId".to_owned(), Value::String(identity.0.to_string())),
+                    ("name".to_owned(), Value::String("Alice".to_owned())),
+                    ("avatar".to_owned(), Value::Nullable(None)),
+                ])),
+            )
+            .unwrap();
+        node.apply_fate_update(
+            profile_tx,
+            Fate::Accepted,
+            Some(GlobalSeq(2)),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+        let message = row(0xad);
+        let message_tx = node
+            .commit_mergeable(
+                MergeableCommit::new("messages", message, 12).cells(BTreeMap::from([
+                    ("chatId".to_owned(), Value::Uuid(chat.0)),
+                    ("senderId".to_owned(), Value::Uuid(profile.0)),
+                    (
+                        "text".to_owned(),
+                        Value::String("invite-only seed".to_owned()),
+                    ),
+                    ("createdAt".to_owned(), Value::U64(1)),
+                ])),
+            )
+            .unwrap();
+        node.apply_fate_update(
+            message_tx,
+            Fate::Accepted,
+            Some(GlobalSeq(3)),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+        // Mirror the wire receiver: the server reconstructs the client
+        // binding from RegisterShape + Subscribe before it prepares the
+        // maintained graph under the invite-authenticated identity.
+        register_query_shape(
+            &mut node,
+            &shape,
+            RegisterShapeOptions {
+                tier: DurabilityTier::Edge,
+                ..RegisterShapeOptions::default()
+            },
+        );
+        subscribe_query_binding(&mut node, &shape, &binding);
+        let registered_values = node
+            .query
+            .registered_bindings
+            .get(&shape.shape_id())
+            .and_then(|bindings| bindings.get(&binding.binding_id()))
+            .map(|registered| registered.values.clone())
+            .expect("server reconstructed the subscribed invite binding");
+        let server_binding = shape
+            .bind(
+                shape
+                    .params()
+                    .keys()
+                    .cloned()
+                    .zip(registered_values)
+                    .collect(),
+            )
+            .expect("registered wire values reconstruct the invite binding");
+        let program = node
+            .compile_current_query_program_for_read_view(
+                &shape,
+                &server_binding,
+                DurabilityTier::Edge,
+                identity,
+                CurrentQueryProgramOutput::MaintainedView,
+                &ReadViewSpec::default(),
+            )
+            .expect("compile invite policy topology");
+        let typed_join_code = typed_claim_param_alias(
+            &claim_param_field(&ClaimPath(vec!["join_code".to_owned()])),
+            &ColumnType::String.nullable(),
+        );
+        assert!(
+            program
+                .request
+                .input
+                .binding
+                .values
+                .contains_key(&typed_join_code),
+            "the prepared invite binding must retain its nullable typed join-code slot"
+        );
+        let members = node.table("chatMembers").unwrap().clone();
+        let members_policy = node
+            .table_read_policy_authorization_request(
+                shape.schema_version(),
+                "chatMembers",
+                identity,
+                ParamBindingMode::RetainAllParams,
+                DurabilityTier::Edge,
+                program.request.input.binding.source_shape.clone(),
+                program.request.input.binding.extra_user_params.clone(),
+                program.request.input.binding.claim_params.clone(),
+            )
+            .expect("compile nested chat-members policy against the invite binding");
+        let members_authorized = node
+            .policy_filtered_current_source_graph_via_query_engine(
+                members_policy,
+                node.maintained_view_content_current_with_version(&members, DurabilityTier::Edge)
+                    .expect("compile chat-members storage source"),
+                &global_current_storage_fields(&members, true, true),
+            )
+            .expect("route nested chat-members policy through the invite binding");
+        assert!(
+            members_authorized.route_fields.contains(&typed_join_code),
+            "a nested policy source must carry the outer invite slot even when its own policy only consumes user_id"
+        );
+        let member_fields =
+            crate::node::query_engine::graph_declared_output_fields(&members_authorized.graph)
+                .expect("nested policy graph has a declared descriptor");
+        assert!(
+            member_fields.contains(&typed_join_code),
+            "a membership CommitUnit must reach the live invite subscription with its outer claim route"
+        );
+        let app_program = node
+            .compile_current_query_program_for_read_view(
+                &shape,
+                &server_binding,
+                DurabilityTier::Edge,
+                identity,
+                CurrentQueryProgramOutput::AppRows,
+                &ReadViewSpec::default(),
+            )
+            .expect("compile invite app-row topology");
+        let system_program = node
+            .compile_current_query_program_for_read_view(
+                &shape,
+                &server_binding,
+                DurabilityTier::Edge,
+                AuthorId::SYSTEM,
+                CurrentQueryProgramOutput::MaintainedView,
+                &ReadViewSpec::default(),
+            )
+            .expect("System/asBackend reads must not require invite claim values");
+        assert!(
+            system_program.request.input.binding.claim_params.is_empty(),
+            "System/asBackend prepared descriptors cannot retain session claim slots"
+        );
+        for terminal in &program.lowered.terminals {
+            let expected_routes = match &terminal.output {
+                OutputTerminalSchema::Fact(fact) => output_routing_fields_for_query_eval(fact),
+                OutputTerminalSchema::AppRows(_) => BTreeSet::new(),
+            };
+            let declared = crate::node::query_engine::graph_declared_output_fields(&terminal.graph)
+                .expect("the invite terminal has a statically declared output descriptor");
+            assert!(
+                expected_routes.is_subset(&declared),
+                "every advertised invite route must be produced by its terminal; expected {expected_routes:?}, declared {declared:?}"
+            );
+        }
+        let mut descriptors_by_shape = BTreeMap::new();
+        let mut projected_binding_fields = BTreeMap::new();
+        for terminal in program
+            .lowered
+            .terminals
+            .iter()
+            .chain(app_program.lowered.terminals.iter())
+        {
+            collect_binding_source_descriptor_fields(&terminal.graph, &mut descriptors_by_shape);
+            collect_binding_source_projected_fields(&terminal.graph, &mut projected_binding_fields);
+        }
+        assert!(
+            projected_binding_fields
+                .values()
+                .flatten()
+                .all(|fields| fields.contains(&typed_join_code)),
+            "every nested policy binding projection must preserve the outer nullable invite slot; {projected_binding_fields:?}"
+        );
+        assert!(
+            descriptors_by_shape
+                .values()
+                .all(|descriptors| descriptors.len() == 1),
+            "every binding-source shape must retain one shared descriptor; {descriptors_by_shape:?}"
+        );
+
+        node.open_seeded_maintained_subscription_view(
+            &shape,
+            &server_binding,
+            identity,
+            DurabilityTier::Edge,
+            &ReadViewSpec::default(),
+        )
+        .expect(
+            "nested policy claim routes must prepare and bind against the root binding descriptor",
+        );
+        node.query_rows_with_prepared_plan_for_identity(
+            &shape,
+            &server_binding,
+            DurabilityTier::Edge,
+            None,
+            identity,
+        )
+        .expect("one-shot nested policy claim routes must bind against the root descriptor");
+
+        let mut edge = PeerState::edge_client(identity);
+        let update = edge
+            .rehydrate_query_with_opts(
+                &mut node,
+                &shape,
+                &server_binding,
+                RegisterShapeOptions {
+                    tier: DurabilityTier::Edge,
+                    ..RegisterShapeOptions::default()
+                },
+            )
+            .expect("the serving maintained view must retain the invite claim route");
+        client
+            .apply_sync_message(update)
+            .expect("the client must materialize the invited chat update");
+
+        // The browser failure occurred only after the invite subscription was
+        // live and accepting membership was committed. This must wake the
+        // maintained graph without dropping its outer invite claim route.
+        let member_tx = node
+            .commit_mergeable(MergeableCommit::new("chatMembers", row(0xab), 11).cells(
+                BTreeMap::from([
+                    ("chatId".to_owned(), Value::Uuid(chat.0)),
+                    ("userId".to_owned(), Value::String(identity.0.to_string())),
+                    (
+                        "joinCode".to_owned(),
+                        Value::Nullable(Some(Box::new(Value::String("invite-123".to_owned())))),
+                    ),
+                ]),
+            ))
+            .unwrap();
+        node.apply_fate_update(
+            member_tx,
+            Fate::Accepted,
+            Some(GlobalSeq(4)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("a live invite subscription must tolerate its membership CommitUnit");
+        edge.query_update(&mut node, &shape, &server_binding)
+            .expect("flushing the live invite subscription after membership must preserve its claim route");
+
+        // The invite has now become ordinary membership. A later normal
+        // session must materialize an already-existing private message through
+        // its sender include and timestamp order, not merely discover chat
+        // membership itself.
+        node.set_session_claims(
+            identity,
+            BTreeMap::from([("user_id".to_owned(), Value::String(identity.0.to_string()))]),
+        );
+        let message_shape = Query::from("messages")
+            .filter(eq(col("chatId"), param("chat_id")))
+            .array_subquery(ArraySubquery::new("sender", "profiles", "id", "senderId"))
+            .order_by("createdAt", OrderDirection::Asc)
+            .validate(&schema)
+            .expect("validate normal-member message query");
+        let message_binding = message_shape
+            .bind(BTreeMap::from([(
+                "chat_id".to_owned(),
+                Value::Uuid(chat.0),
+            )]))
+            .expect("bind normal-member message query");
+        let message_rows = node
+            .query_rows_with_prepared_plan_for_identity(
+                &message_shape,
+                &message_binding,
+                DurabilityTier::Edge,
+                None,
+                identity,
+            )
+            .expect("materialize private seed message with sender include and timestamp order");
+        assert_eq!(
+            message_rows
+                .iter()
+                .map(|row| row.row_uuid())
+                .collect::<Vec<_>>(),
+            vec![message],
+            "normal membership reads the seed message after invite acceptance"
+        );
+        node.open_seeded_maintained_subscription_view(
+            &message_shape,
+            &message_binding,
+            identity,
+            DurabilityTier::Edge,
+            &ReadViewSpec::default(),
+        )
+        .expect("prepare and hydrate normal-member message include/order subscription");
+        let (_normal_client_dir, mut normal_client) =
+            open_node_with_uuid(NodeUuid::from_bytes([0xae; 16]), schema.clone());
+        normal_client.set_session_claims(
+            identity,
+            BTreeMap::from([("user_id".to_owned(), Value::String(identity.0.to_string()))]),
+        );
+        let mut normal_membership_peer = PeerState::edge_client(identity);
+        normal_client
+            .apply_sync_message(
+                normal_membership_peer
+                    .current_rows_update(&mut node, "chatMembers")
+                    .expect("serve the accepted membership to the normal client"),
+            )
+            .expect("normal client applies its accepted membership before querying messages");
+        let simple_message_shape = Query::from("messages")
+            .filter(eq(col("chatId"), param("chat_id")))
+            .validate(&schema)
+            .expect("validate normal-member message query without include");
+        let simple_message_binding = simple_message_shape
+            .bind(BTreeMap::from([(
+                "chat_id".to_owned(),
+                Value::Uuid(chat.0),
+            )]))
+            .expect("bind normal-member message query without include");
+        register_query_shape(
+            &mut normal_client,
+            &simple_message_shape,
+            RegisterShapeOptions {
+                tier: DurabilityTier::Edge,
+                ..RegisterShapeOptions::default()
+            },
+        );
+        subscribe_query_binding(
+            &mut normal_client,
+            &simple_message_shape,
+            &simple_message_binding,
+        );
+        let mut normal_simple_peer = PeerState::edge_client(identity);
+        normal_client
+            .apply_sync_message(
+                normal_simple_peer
+                    .rehydrate_query_with_opts(
+                        &mut node,
+                        &simple_message_shape,
+                        &simple_message_binding,
+                        RegisterShapeOptions {
+                            tier: DurabilityTier::Edge,
+                            ..RegisterShapeOptions::default()
+                        },
+                    )
+                    .expect("serve normal-member message snapshot without include"),
+            )
+            .expect("client applies normal-member message snapshot without include");
+        assert_eq!(
+            normal_client
+                .query_rows_for_client(
+                    &simple_message_shape,
+                    &simple_message_binding,
+                    DurabilityTier::Edge,
+                    identity,
+                )
+                .expect("client materializes the private seed message without include")
+                .iter()
+                .map(|row| row.row_uuid())
+                .collect::<Vec<_>>(),
+            vec![message],
+            "the normal client must first materialize the private seed message without include"
+        );
+        register_query_shape(
+            &mut normal_client,
+            &message_shape,
+            RegisterShapeOptions {
+                tier: DurabilityTier::Edge,
+                ..RegisterShapeOptions::default()
+            },
+        );
+        subscribe_query_binding(&mut normal_client, &message_shape, &message_binding);
+        let mut normal_peer = PeerState::edge_client(identity);
+        let normal_update = normal_peer
+            .rehydrate_query_with_opts(
+                &mut node,
+                &message_shape,
+                &message_binding,
+                RegisterShapeOptions {
+                    tier: DurabilityTier::Edge,
+                    ..RegisterShapeOptions::default()
+                },
+            )
+            .expect("serve normal-member message include/order snapshot");
+        let normal_versions = normal_update
+            .expand_version_carriers_for_receive()
+            .expect("expand normal-member message include/order payloads");
+        if let SyncMessage::ViewUpdate {
+            version_bundles, ..
+        } = &normal_versions
+        {
+            let (profile_bundle, profile_version) = version_bundles
+                .iter()
+                .find_map(|bundle| {
+                    bundle
+                        .versions
+                        .iter()
+                        .find(|version| {
+                            version.table() == "profiles" && version.row_uuid() == profile
+                        })
+                        .map(|version| (bundle, version))
+                })
+                .expect("the relation snapshot ships the sender version");
+            assert_eq!(
+                profile_bundle.tx.tx_id, profile_tx,
+                "the sender witness must retain the profile version identity rather than borrow the message anchor"
+            );
+            assert_eq!(
+                profile_version
+                    .record()
+                    .borrowed()
+                    .get_idx(7)
+                    .expect("decode sender wire userId"),
+                Value::Nullable(Some(Box::new(Value::String(identity.0.to_string())))),
+                "the relation sender version ships userId content"
+            );
+        } else {
+            panic!("expected normal-member view update")
+        }
+        let missing = normal_client
+            .missing_known_state_row_version_refs(&normal_versions)
+            .expect("inspect normal-member message include/order repair requirements");
+        assert!(
+            missing.is_empty(),
+            "the server snapshot already carries every visible row-version payload; missing {missing:?}"
+        );
+        if !missing.is_empty() {
+            let messages = normal_peer
+                .handle_row_versions_fetch(
+                    &mut node,
+                    SyncMessage::FetchRowVersions {
+                        requests: missing.clone(),
+                    },
+                )
+                .expect("serve normal-member message include/order repair payloads");
+            let [SyncMessage::RowVersionPayloads { version_bundles }] = messages.as_slice() else {
+                panic!("expected row-version repair payloads")
+            };
+            normal_client
+                .apply_row_version_payloads_for_requests(&missing, version_bundles.clone())
+                .expect("apply normal-member message include/order repair payloads");
+        }
+        normal_client
+            .apply_sync_message(normal_versions)
+            .expect("client applies normal-member message include/order snapshot");
+        assert!(
+            normal_client
+                .current_rows("profiles", DurabilityTier::Local)
+                .expect("inspect locally materialized sender rows")
+                .iter()
+                .any(|row| row.row_uuid() == profile),
+            "the include snapshot must deliver the sender row before local query evaluation"
+        );
+        assert_eq!(
+            normal_client
+                .current_rows("profiles", DurabilityTier::Local)
+                .expect("inspect the local sender table")
+                .iter()
+                .map(|row| row.row_uuid())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([profile]),
+            "the sender table must not receive the message row through relation delivery"
+        );
+        assert_eq!(
+            normal_client
+                .current_rows("profiles", DurabilityTier::Local)
+                .expect("inspect the local sender payload")
+                .into_iter()
+                .next()
+                .and_then(|row| row.cell(normal_client.table("profiles").unwrap(), "userId")),
+            Some(Value::String(identity.0.to_string())),
+            "the delivered sender version retains its required userId"
+        );
+        let (local_shape, local_binding, local_plan) = normal_client
+            .prepare_query_binding_for_link_in_authorization_mode(
+                &message_shape,
+                &message_binding,
+                DurabilityTier::Edge,
+                identity,
+                QueryAuthorizationMode::ClientLocal,
+            )
+            .expect(
+                "prepare the same client-local maintained relation subscription as the browser",
+            );
+        let (_local_subscription, local_snapshot) = normal_client
+            .open_maintained_view_subscription_in_authorization_mode(
+                &local_shape,
+                &local_binding,
+                identity,
+                DurabilityTier::Edge,
+                &ReadViewSpec::default(),
+                Some(local_plan),
+                QueryAuthorizationMode::ClientLocal,
+            )
+            .expect("open the client-local maintained relation subscription");
+        assert_eq!(
+            local_snapshot.root_count, 1,
+            "the maintained client-local relation subscription retains the seed message"
+        );
+        let local_one_shot = normal_client
+            .query_relation_snapshot_for_client(
+                &message_shape,
+                &message_binding,
+                DurabilityTier::Edge,
+                identity,
+                &ReadViewSpec::default(),
+            )
+            .expect("materialize the client-local relation snapshot API used by WASM");
+        assert_eq!(
+            local_one_shot.root_count, 1,
+            "the client-local relation snapshot API retains the seed message"
+        );
+        assert_eq!(
+            normal_client
+                .query_rows_for_client(
+                    &message_shape,
+                    &message_binding,
+                    DurabilityTier::Edge,
+                    identity,
+                )
+                .expect("client materializes normal-member message include/order snapshot")
+                .iter()
+                .map(|row| row.row_uuid())
+                .collect::<Vec<_>>(),
+            vec![message],
+            "the normal client must retain the seed message when the sender include is added"
+        );
+    }
+
+    fn collect_binding_source_descriptor_fields(
+        graph: &GraphBuilder,
+        descriptors_by_shape: &mut BTreeMap<String, BTreeSet<BTreeSet<String>>>,
+    ) {
+        match graph {
+            GraphBuilder::BindingSource { shape, output } => {
+                let fields = output
+                    .fields()
+                    .iter()
+                    .map(|field| field.name.clone().expect("binding fields are named"))
+                    .collect();
+                descriptors_by_shape
+                    .entry(shape.clone())
+                    .or_default()
+                    .insert(fields);
+            }
+            GraphBuilder::Recursive { seed, step, .. } => {
+                collect_binding_source_descriptor_fields(seed, descriptors_by_shape);
+                collect_binding_source_descriptor_fields(step, descriptors_by_shape);
+            }
+            GraphBuilder::Filter { input, .. }
+            | GraphBuilder::UnwrapNullable { input, .. }
+            | GraphBuilder::VariantProject { input, .. }
+            | GraphBuilder::Unnest { input, .. }
+            | GraphBuilder::Project { input, .. }
+            | GraphBuilder::ArgMaxBy { input, .. }
+            | GraphBuilder::ArgMinBy { input, .. }
+            | GraphBuilder::TopBy { input, .. }
+            | GraphBuilder::CollectBy { input, .. }
+            | GraphBuilder::Aggregate { input, .. } => {
+                collect_binding_source_descriptor_fields(input, descriptors_by_shape);
+            }
+            GraphBuilder::Union { inputs } => {
+                for input in inputs {
+                    collect_binding_source_descriptor_fields(input, descriptors_by_shape);
+                }
+            }
+            GraphBuilder::Join { left, right, .. }
+            | GraphBuilder::SemiJoin { left, right, .. }
+            | GraphBuilder::AntiJoin { left, right, .. } => {
+                collect_binding_source_descriptor_fields(left, descriptors_by_shape);
+                collect_binding_source_descriptor_fields(right, descriptors_by_shape);
+            }
+            GraphBuilder::Table { .. }
+            | GraphBuilder::InlineRecords { .. }
+            | GraphBuilder::Index { .. }
+            | GraphBuilder::FrontierSource { .. } => {}
+        }
+    }
+
+    fn collect_binding_source_projected_fields(
+        graph: &GraphBuilder,
+        projected_by_shape: &mut BTreeMap<String, BTreeSet<BTreeSet<String>>>,
+    ) {
+        match graph {
+            GraphBuilder::Project { input, fields } => {
+                if let GraphBuilder::BindingSource { shape, .. } = input.as_ref() {
+                    projected_by_shape.entry(shape.clone()).or_default().insert(
+                        fields
+                            .iter()
+                            .map(|field| field.output_name.clone())
+                            .collect(),
+                    );
+                }
+                collect_binding_source_projected_fields(input, projected_by_shape);
+            }
+            GraphBuilder::Recursive { seed, step, .. } => {
+                collect_binding_source_projected_fields(seed, projected_by_shape);
+                collect_binding_source_projected_fields(step, projected_by_shape);
+            }
+            GraphBuilder::Filter { input, .. }
+            | GraphBuilder::UnwrapNullable { input, .. }
+            | GraphBuilder::VariantProject { input, .. }
+            | GraphBuilder::Unnest { input, .. }
+            | GraphBuilder::ArgMaxBy { input, .. }
+            | GraphBuilder::ArgMinBy { input, .. }
+            | GraphBuilder::TopBy { input, .. }
+            | GraphBuilder::CollectBy { input, .. }
+            | GraphBuilder::Aggregate { input, .. } => {
+                collect_binding_source_projected_fields(input, projected_by_shape);
+            }
+            GraphBuilder::Union { inputs } => {
+                for input in inputs {
+                    collect_binding_source_projected_fields(input, projected_by_shape);
+                }
+            }
+            GraphBuilder::Join { left, right, .. }
+            | GraphBuilder::SemiJoin { left, right, .. }
+            | GraphBuilder::AntiJoin { left, right, .. } => {
+                collect_binding_source_projected_fields(left, projected_by_shape);
+                collect_binding_source_projected_fields(right, projected_by_shape);
+            }
+            GraphBuilder::BindingSource { .. }
+            | GraphBuilder::Table { .. }
+            | GraphBuilder::InlineRecords { .. }
+            | GraphBuilder::Index { .. }
+            | GraphBuilder::FrontierSource { .. } => {}
+        }
     }
 
     fn register_query_shape(

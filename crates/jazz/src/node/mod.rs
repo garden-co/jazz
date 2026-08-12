@@ -757,6 +757,7 @@ struct ReadPolicyAuthorizationRequestCacheKey {
     tier: DurabilityTier,
     binding_source_shape: Option<String>,
     binding_user_params: String,
+    binding_claim_params: String,
     include_deleted_root: bool,
 }
 

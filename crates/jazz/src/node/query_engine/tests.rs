@@ -3600,6 +3600,7 @@ fn identity_policy_context_requests_policy_filtered_sources() {
                 protected_row_field: "row_uuid".to_owned(),
                 binding_source_shape: None,
                 binding_user_params: BTreeMap::new(),
+                binding_claim_params: BTreeMap::new(),
             },
         }
     );
@@ -3691,8 +3692,55 @@ fn binding_descriptor_types_do_not_depend_on_runtime_array_values() {
                     "teams".to_owned(),
                     ColumnType::Array(Box::new(ColumnType::Uuid)),
                 )]),
+                binding_claim_params: BTreeMap::new(),
             },
         }
+    );
+}
+
+#[test]
+fn nested_binding_value_source_keeps_sibling_nullable_claim_route() {
+    let user_id = ClaimPath(vec!["user_id".to_owned()]);
+    let join_code = ClaimPath(vec!["join_code".to_owned()]);
+    let typed_user_id = claim_param_field(&user_id);
+    let typed_join_code = claim_param_field(&join_code);
+    let mut input = row_set_input(0xc5);
+    input.binding.source_shape = Some("test-binding-source".to_owned());
+    input.binding.claim_params = BTreeMap::from([
+        (
+            typed_user_id.clone(),
+            ProgramClaimParam {
+                path: user_id.clone(),
+                ty: ColumnType::String,
+            },
+        ),
+        (
+            typed_join_code.clone(),
+            ProgramClaimParam {
+                path: join_code,
+                ty: ColumnType::String.nullable(),
+            },
+        ),
+    ]);
+    let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
+        reads: QueryReadSet::primary(current_read_view()),
+        policy: policy_context(),
+        input,
+        output: row_set_output(BTreeSet::new()),
+    };
+    let fields = binding_value_source_projection_fields_for_test(
+        &request,
+        &[ValueSourceColumn {
+            name: "userId".to_owned(),
+            value: NormalizedValueRef::Claim(user_id),
+            ty: ColumnType::String,
+        }],
+    )
+    .expect("nested binding source lowers");
+    assert!(
+        fields.contains(&typed_join_code),
+        "a user-id proof source must retain its sibling nullable join-code route"
     );
 }
 

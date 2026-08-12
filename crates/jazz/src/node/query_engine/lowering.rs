@@ -354,6 +354,7 @@ fn source_authorization_for_source(
                 protected_row_field: "row_uuid".to_owned(),
                 binding_source_shape: request.input.binding.source_shape.clone(),
                 binding_user_params: binding_user_param_types(&request.input.binding)?,
+                binding_claim_params: request.input.binding.claim_params.clone(),
             },
         }),
         // Auxiliary closure and payload sources do not establish policy
@@ -3706,12 +3707,17 @@ fn lower_value_source(
                     (!projected.contains(&route_field))
                         .then(|| ProjectField::renamed(param.clone(), route_field))
                 })
-                .chain(domain.claim_params.keys().filter_map(|param| {
-                    source_user_params
-                        .contains(param)
-                        .then(|| (!projected.contains(param)).then(|| ProjectField::named(param)))
-                        .flatten()
-                }))
+                // A nested policy graph can consume an enclosing claim only
+                // in a sibling/ancestor branch. The shared binding descriptor
+                // nevertheless needs that slot to survive this value-source
+                // projection so downstream authorization joins can route it.
+                .chain(
+                    domain
+                        .claim_params
+                        .keys()
+                        .filter(|param| !projected.contains(*param))
+                        .map(ProjectField::named),
+                )
                 .collect::<Vec<_>>();
             Ok(
                 GraphBuilder::binding_source(shape.to_owned(), input_descriptor).project_fields(
@@ -3754,6 +3760,24 @@ fn lower_value_source(
             })
         }
     }
+}
+
+#[cfg(test)]
+pub(super) fn binding_value_source_projection_fields_for_test(
+    request: &QueryProgramRequest,
+    columns: &[ValueSourceColumn],
+) -> Result<BTreeSet<String>, UnsupportedReason> {
+    let graph = lower_value_source(
+        "test-binding-source",
+        columns,
+        &ValueSourceMode::Binding,
+        request,
+    )?;
+    graph_declared_output_fields(&graph).ok_or_else(|| {
+        UnsupportedReason::Runtime(
+            "binding value-source projection must have a named descriptor".to_owned(),
+        )
+    })
 }
 
 fn lower_value_source_column(
@@ -5295,6 +5319,18 @@ fn lowered_terminals(
         &root_route_fields,
         &closure_root_carrier_fields,
     )?;
+    // Correlated include paths can preserve routes in the graph while their
+    // conservative root field set omits them. Use the graph's declared output
+    // after closure lowering when choosing the fields retained by maintained
+    // result-membership facts.
+    let root_route_fields = graph_declared_output_fields(&closure.visible_root)
+        .map(|fields| {
+            routing_param_fields
+                .intersection(&fields)
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or(root_route_fields);
     let visible_root_with_routes = if root_route_fields.is_empty() {
         closure.visible_root.clone()
     } else {
