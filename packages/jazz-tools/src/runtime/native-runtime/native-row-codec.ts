@@ -448,34 +448,56 @@ export function assertTerminalRootDescriptorCompatible(
   descriptor: DescriptorField[],
   columns: readonly ColumnDescriptor[],
 ): void {
-  if (
-    descriptor.length < columns.length + 1 ||
-    descriptor[0]?.name !== "__jazz_terminal_row_key" ||
-    descriptor[0]?.valueType.tag !== 10 ||
-    !isKnownValueType(descriptor[0].valueType)
-  ) {
-    throw new Error("terminal root descriptor does not match the public projection");
-  }
-
   const publicColumns = logicalStorageColumns(columns);
-  const matchesLogical = publicColumns.every(
-    (column, index) =>
-      descriptor[index + 1]?.name === column.name &&
-      terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, false),
+  const matchesLogical = matchesNamedTerminalLayout(
+    descriptor,
+    "__jazz_terminal_row_key",
+    publicColumns,
+    (column) => column.name,
+    false,
   );
-  const matchesPhysical = columns.every(
-    (column, index) =>
-      descriptor[index + 1]?.name === column.name &&
-      terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, false),
+  const matchesPhysical = matchesNamedTerminalLayout(
+    descriptor,
+    "__jazz_terminal_row_key",
+    columns,
+    (column) => column.name,
+    false,
   );
-  const matchesCurrentRow = publicColumns.every(
-    (column, index) =>
-      descriptor[index + 1]?.name === column.name &&
-      terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, true),
+  // CurrentRow is a distinct physical layout. Its row key is named row_uuid
+  // and its nullable application-cell carriers live in the user_ namespace.
+  // Do not accept a nullable logical descriptor here: doing so would make an
+  // arbitrary reordering of same-typed fields indistinguishable from a native
+  // CurrentRow record.
+  const matchesCurrentRow = matchesNamedTerminalLayout(
+    descriptor,
+    "row_uuid",
+    publicColumns,
+    (column) => `user_${column.name}`,
+    true,
   );
   if (!matchesLogical && !matchesPhysical && !matchesCurrentRow) {
     throw new Error("terminal root descriptor does not match the public projection");
   }
+}
+
+function matchesNamedTerminalLayout(
+  descriptor: readonly DescriptorField[],
+  keyName: string,
+  columns: readonly ColumnDescriptor[],
+  fieldName: (column: ColumnDescriptor) => string,
+  forceNullable: boolean,
+): boolean {
+  return (
+    descriptor.length >= columns.length + 1 &&
+    descriptor[0]?.name === keyName &&
+    descriptor[0]?.valueType.tag === 10 &&
+    isKnownValueType(descriptor[0].valueType) &&
+    columns.every(
+      (column, index) =>
+        descriptor[index + 1]?.name === fieldName(column) &&
+        terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, forceNullable),
+    )
+  );
 }
 
 function terminalValueTypeMatchesColumn(

@@ -149,7 +149,15 @@ function terminalDescriptor(columns: readonly ColumnDescriptor[]): number[] {
 }
 
 function currentRowTerminalDescriptor(columns: readonly ColumnDescriptor[]): number[] {
-  return terminalDescriptor(currentRowColumns(columns));
+  const writer = new PostcardWriter();
+  writeDescriptor(writer, [
+    { name: "row_uuid", valueType: { tag: 10 } },
+    ...currentRowColumns(columns).map((column) => ({
+      name: `user_${column.name}`,
+      valueType: storageColumnValueType(column),
+    })),
+  ]);
+  return [...writer.finish()];
 }
 
 function terminalTextChild(id: string, name: string): Uint8Array {

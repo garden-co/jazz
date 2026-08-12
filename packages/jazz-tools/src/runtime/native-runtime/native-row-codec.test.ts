@@ -80,6 +80,33 @@ describe("native row codec", () => {
     );
   });
 
+  it("accepts only the canonical CurrentRow carrier layout", () => {
+    const columns: ColumnDescriptor[] = [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+    ];
+    const currentRow = [
+      { name: "row_uuid", valueType: { tag: 10 } },
+      { name: "user_title", valueType: { tag: 14, inner: { tag: 8 } } },
+      { name: "user_done", valueType: { tag: 14, inner: { tag: 7 } } },
+      { name: "$createdBy", valueType: { tag: 10 } },
+    ];
+    const nullableLogicalNames = [
+      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+      { name: "title", valueType: { tag: 14, inner: { tag: 8 } } },
+      { name: "done", valueType: { tag: 14, inner: { tag: 7 } } },
+    ];
+    const reorderedCarriers = [currentRow[0]!, currentRow[2]!, currentRow[1]!];
+
+    expect(() => assertTerminalRootDescriptorCompatible(currentRow, columns)).not.toThrow();
+    expect(() => assertTerminalRootDescriptorCompatible(nullableLogicalNames, columns)).toThrow(
+      "terminal root descriptor does not match the public projection",
+    );
+    expect(() => assertTerminalRootDescriptorCompatible(reorderedCarriers, columns)).toThrow(
+      "terminal root descriptor does not match the public projection",
+    );
+  });
+
   it("keeps mutation cells byte-for-byte aligned with packed row values", () => {
     const nestedColumns: ColumnDescriptor[] = [
       { name: "label", column_type: { type: "Text" }, nullable: false },
