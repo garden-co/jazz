@@ -2,7 +2,9 @@ name: Latitude CI pilot
 
 on:
   workflow_dispatch:
-  pull_request:
+  push:
+    branches:
+      - perf/latitude-ci-pilot
     paths:
       - .github/workflows/latitude-ci-pilot.yml
 
@@ -16,12 +18,30 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # This runner is dedicated to trusted Jazz branches. Preserve its
+          # Cargo target between pilot runs so we can measure warm builds.
+          clean: false
 
       - uses: ./.github/actions/setup-build
         with:
           rust-targets: wasm32-unknown-unknown
           rust-components: clippy,rustfmt
-          sccache: "true"
+          # Blacksmith's sticky-disk action hard-codes /home/runner. Configure
+          # the persistent runner's compiler cache portably below instead.
+          sccache: "false"
+
+      - name: Install compiler cache
+        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+        with:
+          tool: sccache
+
+      - name: Configure persistent compiler cache
+        run: |
+          mkdir -p "$HOME/.cache/sccache"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "SCCACHE_DIR=$HOME/.cache/sccache" >> "$GITHUB_ENV"
+          echo "SCCACHE_CACHE_SIZE=32G" >> "$GITHUB_ENV"
 
       - name: Install WASM packager
         uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
