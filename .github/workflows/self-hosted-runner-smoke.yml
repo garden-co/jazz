@@ -2,6 +2,9 @@ name: Self-hosted runner smoke test
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/self-hosted-runner-smoke.yml
 
 permissions:
   contents: read
