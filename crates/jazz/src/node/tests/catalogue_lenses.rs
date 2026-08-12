@@ -870,7 +870,11 @@ fn active_history_projection_accepts_a_new_schema_variant_without_rebuild() {
         },
     })
     .unwrap();
-    assert_eq!(core.groove_runtime_token(), runtime);
+    assert_ne!(
+        core.groove_runtime_token(),
+        runtime,
+        "widening a shared current-row descriptor invalidates prepared graphs"
+    );
 
     core.commit_mergeable(
         MergeableCommit::new("todos", row(0x45), 1_000).cells(BTreeMap::from([

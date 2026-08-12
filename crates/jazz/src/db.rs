@@ -5395,6 +5395,15 @@ where
                     }
                 }
             };
+            let (shape, binding, prepared_plan) = node
+                .borrow_mut()
+                .prepare_query_binding_for_link_in_authorization_mode(
+                    &shape,
+                    &binding,
+                    read_tier,
+                    author,
+                    authorization_mode,
+                )?;
             let (maintained, mut snapshot) = node
                 .borrow_mut()
                 .open_maintained_view_subscription_in_authorization_mode(
@@ -5403,7 +5412,7 @@ where
                     author,
                     read_tier,
                     &read_view,
-                    None,
+                    Some(prepared_plan),
                     authorization_mode,
                 )?;
             let delivered_binding_view = BindingViewKey {

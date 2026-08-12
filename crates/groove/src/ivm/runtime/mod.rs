@@ -122,24 +122,8 @@ impl VariantProjectionCase {
                 },
             ) => {
                 current_omit == next_omit
-                    && ((current_project == next_project
-                        && current_source.can_evolve_registry_to(next_source))
-                        || (current_source == next_source
-                            && current_project.mapping == next_project.mapping
-                            && current_project.expressions.len() < next_project.expressions.len()
-                            && current_project
-                                .expressions
-                                .iter()
-                                .zip(&next_project.expressions)
-                                .all(|(current, next)| current == next)
-                            && next_project.expressions[current_project.expressions.len()..]
-                                .iter()
-                                .all(|expression| {
-                                    matches!(
-                                        expression.expression,
-                                        PlanExpr::Literal(LiteralValue::Nullable(None))
-                                    )
-                                })))
+                    && current_project == next_project
+                    && current_source.can_evolve_registry_to(next_source)
             }
             (Self::Ignore { source: current }, Self::Ignore { source: next }) => {
                 current.can_evolve_registry_to(next)
@@ -462,8 +446,7 @@ impl IvmRuntime {
                 });
             }
             std::collections::hash_map::Entry::Occupied(mut entry)
-                if record_descriptors_registry_compatible(&entry.get().output, &output)
-                    || entry.get().output.can_append_nullable_fields_to(&output) =>
+                if record_descriptors_registry_compatible(&entry.get().output, &output) =>
             {
                 entry.get_mut().output = output;
             }
@@ -12619,61 +12602,6 @@ mod tests {
         assert!(
             !current.can_refresh_registries_to(&incompatible_type),
             "registry refresh must reject a field-type mutation"
-        );
-    }
-
-    #[test]
-    fn raw_variant_case_refresh_allows_only_appended_nullable_output_defaults() {
-        let source = RecordDescriptor::new([("id", ValueType::U64)]);
-        let project = |expressions| VariantProjectionCase::Project {
-            source,
-            project: MapProjectOp {
-                expressions,
-                mapping: vec![(0, 0)],
-            },
-            raw_projection: None,
-            omit_unrepresentable_enum_rows: false,
-        };
-        let current = project(vec![ProjectionExpr {
-            expression: PlanExpr::Field("id".to_owned()),
-            output_name: Some("id".to_owned()),
-        }]);
-        let appended_null = project(vec![
-            ProjectionExpr {
-                expression: PlanExpr::Field("id".to_owned()),
-                output_name: Some("id".to_owned()),
-            },
-            ProjectionExpr {
-                expression: PlanExpr::Literal(LiteralValue::Nullable(None)),
-                output_name: Some("later".to_owned()),
-            },
-        ]);
-        assert!(current.can_refresh_registries_to(&appended_null));
-
-        let appended_value = project(vec![
-            ProjectionExpr {
-                expression: PlanExpr::Field("id".to_owned()),
-                output_name: Some("id".to_owned()),
-            },
-            ProjectionExpr {
-                expression: PlanExpr::Literal(LiteralValue::U64(0)),
-                output_name: Some("later".to_owned()),
-            },
-        ]);
-        assert!(
-            !current.can_refresh_registries_to(&appended_value),
-            "only typed null defaults may fill an appended output field"
-        );
-
-        let current_output = RecordDescriptor::new([("id", ValueType::U64)]);
-        let appended_nullable_output = RecordDescriptor::new([
-            ("id", ValueType::U64),
-            ("later", ValueType::Nullable(Box::new(ValueType::String))),
-        ]);
-        assert!(current_output.can_append_nullable_fields_to(&appended_nullable_output));
-        assert!(
-            !appended_nullable_output.can_append_nullable_fields_to(&current_output),
-            "projection output fields cannot be removed during a refresh"
         );
     }
 

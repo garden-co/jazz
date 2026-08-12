@@ -7671,6 +7671,97 @@ fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<RocksDbStorage
 }
 
 #[test]
+fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
+    let base = owner_write_schema();
+    let evolved = evolved_owner_write_schema();
+    let author = AuthorId::from_bytes([0xa1; 16]);
+    let db = open_db(0x5d, author, &base);
+    db.insert("todos", cells("before evolution", false, author))
+        .unwrap();
+
+    let query = Query::from("todos");
+    let mut subscription = prepared_subscribe(
+        &db,
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            local_updates: LocalUpdates::Deferred,
+            propagation: Propagation::LocalOnly,
+            include_deleted: false,
+            ..ReadOpts::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        opened_rows(block_on(subscription.next_event()).unwrap()).len(),
+        1
+    );
+
+    let schema_version = SchemaVersion::new(evolved);
+    let lens = MigrationLens::new(
+        base.version_id(),
+        schema_version.id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "body".to_owned(),
+                default: Value::String(String::new()),
+            }],
+        }],
+    );
+    db.node
+        .node
+        .borrow_mut()
+        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                schema_version.clone(),
+                lens,
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .unwrap();
+    db.node
+        .node
+        .borrow_mut()
+        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: schema_version.id,
+            },
+        })
+        .unwrap();
+
+    db.refresh_subscriptions().unwrap();
+    let reset = subscription
+        .try_next_event()
+        .expect("descriptor widening must rebuild the live subscription");
+    assert!(matches!(
+        reset,
+        SubscriptionEvent::Delta { reset: true, .. }
+    ));
+
+    db.insert("todos", cells("after evolution", true, author))
+        .unwrap();
+    let (added, updated, removed) = delta_rows(
+        subscription
+            .try_next_event()
+            .expect("the rebuilt subscription must receive the next delta"),
+    );
+    assert_eq!(
+        added.len(),
+        1,
+        "the rebuilt graph must accept the next delta"
+    );
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+}
+
+#[test]
 fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
     let alice = AuthorId::from_bytes([0xa1; 16]);
     let bob = AuthorId::from_bytes([0xb2; 16]);

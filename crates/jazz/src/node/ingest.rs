@@ -808,6 +808,27 @@ where
                 staged
             };
 
+            // A new logical column widens the shared physical current-row
+            // descriptor. Existing prepared/maintained graphs embed the old
+            // fixed projection output, so they must be rebuilt after the
+            // activation commits. A pure new variant over the same physical
+            // columns remains safe to refresh in place.
+            let widens_shared_current_descriptor = staged.mapping.tables.values().any(|target| {
+                let existing_columns = self
+                    .catalogue
+                    .physical_mappings
+                    .values()
+                    .flat_map(|mapping| mapping.tables.values())
+                    .filter(|existing| existing.table_id == target.table_id)
+                    .flat_map(|existing| existing.columns.values().copied())
+                    .collect::<BTreeSet<_>>();
+                !existing_columns.is_empty()
+                    && target
+                        .columns
+                        .values()
+                        .any(|column| !existing_columns.contains(column))
+            });
+
             #[cfg(test)]
             if self.catalogue_activation_failpoint
                 == Some(CatalogueActivationFailpoint::AfterStaged)
@@ -845,6 +866,9 @@ where
                 .active_lineages_by_target
                 .insert(staged.publication.schema.id, staged.clone());
             self.catalogue.active_catalogue_seq = next;
+            if widens_shared_current_descriptor {
+                self.groove_runtime_token = next_groove_runtime_token();
+            }
             out.push(SyncMessage::CatalogueAck(CatalogueAck {
                 revision: Some(next),
                 schema: Some(staged.publication.schema.id),

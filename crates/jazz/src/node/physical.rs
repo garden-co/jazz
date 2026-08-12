@@ -419,8 +419,11 @@ pub(super) fn physical_current_projection_target(
 /// A schema-agnostic physical current-row target used only until the
 /// Global/Ahead winner has been selected. Its enum tags retain their durable
 /// physical meaning; authored decoding belongs strictly after that selection.
-fn physical_current_winner_projection_target(table_id: PhysicalTableId) -> String {
-    format!("physical_{}_current_winner", table_id.0)
+fn physical_current_winner_projection_target(
+    table_id: PhysicalTableId,
+    target_schema: SchemaVersionId,
+) -> String {
+    format!("physical_{}_current_winner_{}", table_id.0, target_schema.0)
 }
 
 /// A query-local current-source target.  The ordinary target projects every
@@ -1528,14 +1531,16 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "target current winner physical mapping missing",
             ))?;
-        let projection_target = physical_current_winner_projection_target(target_mapping.table_id);
         let storage_tables = [
             physical_global_current_table_name(target_mapping.table_id),
             physical_ahead_current_table_name(target_mapping.table_id),
         ];
+        let target_table = self.table_in_schema(target_table_name, target_schema)?;
+        let output = physical_current_descriptor(&target_table, &target_mapping)?;
+        let projection_target =
+            physical_current_winner_projection_target(target_mapping.table_id, target_schema);
         let mut output_fields = None;
         for storage_table in &storage_tables {
-            let output = self.database.table_schema(storage_table)?.record_schema();
             let fields = output
                 .fields()
                 .iter()
@@ -1597,7 +1602,6 @@ where
                         .into_iter()
                         .collect::<BTreeSet<_>>();
                 for storage_table in &storage_tables {
-                    let output = self.database.table_schema(storage_table)?.record_schema();
                     let fields = output
                         .fields()
                         .iter()
