@@ -1,0 +1,44 @@
+name: Latitude CI pilot
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/latitude-ci-pilot.yml
+
+permissions:
+  contents: read
+
+jobs:
+  representative-build:
+    name: Representative build on persistent runner
+    runs-on: [self-hosted, linux, x64, jazz-ci]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: wasm32-unknown-unknown
+          rust-components: clippy,rustfmt
+          sccache: "true"
+
+      - name: Install WASM packager
+        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+        with:
+          tool: wasm-pack@0.13.1
+
+      - name: Report warm-cache baseline
+        run: |
+          df -h "$GITHUB_WORKSPACE"
+          sccache --show-stats || true
+
+      - name: Check complete Rust workspace
+        run: cargo check --workspace --all-targets
+
+      - name: Build correctness-test artifacts
+        run: pnpm build:test-artifacts
+
+      - name: Report resulting compiler cache
+        if: always()
+        run: sccache --show-stats || true
