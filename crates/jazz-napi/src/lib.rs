@@ -2545,6 +2545,36 @@ fn core_subscription_event_to_napi(
     }
 }
 
+mod test_fixture_export {
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    #[napi_derive::napi(js_name = "__testSubscriptionEvents", skip_typescript)]
+    pub fn subscription_events() -> napi::Result<Vec<super::SubscriptionEvent>> {
+        use jazz::db::SubscriptionEvent;
+        use jazz::protocol::{SubscribeRejectReason, SubscribeServerFailureCode};
+
+        [
+            SubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::UnsupportedShapeCapability {
+                    detail: "fixture unsupported shape".to_owned(),
+                },
+            },
+            SubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
+            },
+            SubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::ServerFailure {
+                    code: SubscribeServerFailureCode::QueryValidation,
+                },
+            },
+            SubscriptionEvent::Closed,
+        ]
+        .iter()
+        .map(super::core_subscription_event_to_napi)
+        .collect()
+    }
+}
+
 /// Convert terminal edits without serde_json so binary subscription deltas keep
 /// their typed-array representation. Root descriptors retain the upstream
 /// postcard encoding; ordered keys and edit payloads retain their number-array
@@ -3344,6 +3374,18 @@ mod tests {
         ));
     }
 
+    #[test]
+    #[cfg(debug_assertions)]
+    fn debug_subscription_event_fixture_covers_rejection_and_closed_variants() {
+        let events = crate::test_fixture_export::subscription_events()
+            .expect("encode debug subscription event fixture");
+
+        assert_eq!(events.len(), 4);
+        assert!(matches!(events[0], Either3::B(_)));
+        assert!(matches!(events[1], Either3::B(_)));
+        assert!(matches!(events[2], Either3::B(_)));
+        assert!(matches!(events[3], Either3::C(_)));
+    }
     /// A short-lived NAPI schema attachment must not own or abandon the
     /// owner-wide OpenBatch lifetime when its JS wrapper is collected.
     #[test]
