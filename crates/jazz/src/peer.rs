@@ -1976,9 +1976,17 @@ impl PeerState {
                     )
                 } else {
                     let previous_role = self.role;
+                    let previous_permission_identity = self.permission_identity;
                     self.role = PeerRole::ClientLink { identity: writer };
+                    // The support proof must evaluate claims as the commit's
+                    // permission subject. Trusted backend links normally use
+                    // `SYSTEM` for their served reads, so changing only the
+                    // transient client role would still bind policy claims as
+                    // `SYSTEM` here.
+                    self.permission_identity = Some(writer);
                     let update = self.rehydrate_query(node, &shape, &binding);
                     self.role = previous_role;
+                    self.permission_identity = previous_permission_identity;
                     let SyncMessage::ViewUpdate {
                         settled_through, ..
                     } = update?
