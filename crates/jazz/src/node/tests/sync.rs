@@ -705,13 +705,23 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
 
 #[test]
 fn receiver_batch_merges_complementary_projections_for_same_version() {
-    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
-    let (_core_dir, mut core) = open_node_with_uuid(node(2));
-    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let projection_schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("body", ColumnType::String),
+        ],
+    )]);
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), projection_schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(2), projection_schema.clone());
+    let (_reader_dir, mut reader) = open_node_with_schema(node(3), projection_schema.clone());
     let row_uuid = row(1);
     let (tx_id, unit) = writer
         .commit_mergeable_unit(
-            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("visible")),
+            MergeableCommit::new("todos", row_uuid, 10).cells(BTreeMap::from([
+                ("title".to_owned(), Value::String("visible title".to_owned())),
+                ("body".to_owned(), Value::String("visible body".to_owned())),
+            ])),
         )
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = unit else {
@@ -731,20 +741,24 @@ fn receiver_batch_merges_complementary_projections_for_same_version() {
         panic!("expected accepted fate");
     };
     let full = versions.into_iter().next().unwrap();
-    let hidden = VersionRecord::encode(
-        &schema().tables[0],
-        full.schema_version(),
-        full.row_uuid(),
-        full.parents(),
-        full.created_by(),
-        full.created_at(),
-        full.updated_by(),
-        full.updated_at(),
-        &[None],
-        full.deletion(),
-    )
-    .unwrap()
-    .with_authored_columns(full.authored_columns().cloned());
+    let projection = |cells: Vec<Option<Value>>| {
+        VersionRecord::encode(
+            &projection_schema.tables[0],
+            full.schema_version(),
+            full.row_uuid(),
+            full.parents(),
+            full.created_by(),
+            full.created_at(),
+            full.updated_by(),
+            full.updated_at(),
+            &cells,
+            full.deletion(),
+        )
+        .unwrap()
+        .with_authored_columns(full.authored_columns().cloned())
+    };
+    let title_only = projection(vec![full.cell_at(0), None]);
+    let body_only = projection(vec![None, full.cell_at(1)]);
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     let update = |version, result_member_adds| ViewUpdateParts {
         subscription,
@@ -770,9 +784,16 @@ fn receiver_batch_merges_complementary_projections_for_same_version() {
 
     reader
         .apply_view_updates_in_batch(vec![
-            update(hidden, Vec::new()),
             update(
-                full,
+                title_only,
+                vec![ResultMemberEntry::row((
+                    "todos".to_owned().into(),
+                    row_uuid,
+                    tx_id,
+                ))],
+            ),
+            update(
+                body_only,
                 vec![ResultMemberEntry::row((
                     "todos".to_owned().into(),
                     row_uuid,
@@ -789,7 +810,13 @@ fn receiver_batch_merges_complementary_projections_for_same_version() {
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
-        BTreeMap::from([(row_uuid, title_cells("visible"))])
+        BTreeMap::from([(
+            row_uuid,
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("visible title".to_owned())),
+                ("body".to_owned(), Value::String("visible body".to_owned())),
+            ]),
+        )])
     );
     assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 1);
     assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 0);
