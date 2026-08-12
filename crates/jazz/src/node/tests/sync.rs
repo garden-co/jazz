@@ -703,6 +703,125 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
     assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 0);
 }
 
+#[test]
+fn receiver_batch_merges_complementary_projections_for_same_version() {
+    let projection_schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("body", ColumnType::String),
+        ],
+    )]);
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), projection_schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(2), projection_schema.clone());
+    let (_reader_dir, mut reader) = open_node_with_schema(node(3), projection_schema.clone());
+    let row_uuid = row(1);
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 10).cells(BTreeMap::from([
+                ("title".to_owned(), Value::String("visible title".to_owned())),
+                ("body".to_owned(), Value::String("visible body".to_owned())),
+            ])),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected commit unit");
+    };
+    let [fate] = core
+        .ingest_commit_unit(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate {
+        global_seq: Some(global_seq),
+        durability: Some(durability),
+        ..
+    } = fate
+    else {
+        panic!("expected accepted fate");
+    };
+    let full = versions.into_iter().next().unwrap();
+    let projection = |cells: Vec<Option<Value>>| {
+        VersionRecord::encode(
+            &projection_schema.tables[0],
+            full.schema_version(),
+            full.row_uuid(),
+            full.parents(),
+            full.created_by(),
+            full.created_at(),
+            full.updated_by(),
+            full.updated_at(),
+            &cells,
+            full.deletion(),
+        )
+        .unwrap()
+        .with_authored_columns(full.authored_columns().cloned())
+    };
+    let title_only = projection(vec![full.cell_at(0), None]);
+    let body_only = projection(vec![None, full.cell_at(1)]);
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let update = |version, result_member_adds| ViewUpdateParts {
+        subscription,
+        settled_through: global_seq,
+        defer_settlement: false,
+        reset_result_set: false,
+        version_carriers: Vec::new(),
+        version_bundles: vec![VersionBundle {
+            tx: tx.clone(),
+            versions: vec![version],
+            fate: Fate::Accepted,
+            global_seq: Some(global_seq),
+            durability,
+        }],
+        peer_complete_tx_payload_refs: Vec::new(),
+        authorization_progress: None,
+        result_member_adds,
+        result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    };
+
+    reader
+        .apply_view_updates_in_batch(vec![
+            update(
+                title_only,
+                vec![ResultMemberEntry::row((
+                    "todos".to_owned().into(),
+                    row_uuid,
+                    tx_id,
+                ))],
+            ),
+            update(
+                body_only,
+                vec![ResultMemberEntry::row((
+                    "todos".to_owned().into(),
+                    row_uuid,
+                    tx_id,
+                ))],
+            ),
+        ])
+        .unwrap();
+
+    assert_eq!(
+        reader
+            .subscription_current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(
+            row_uuid,
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("visible title".to_owned())),
+                ("body".to_owned(), Value::String("visible body".to_owned())),
+            ]),
+        )])
+    );
+    assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 1);
+    assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 0);
+}
+
 // This stays internal because it directly exercises the protocol receiver's
 // single-message fragment assembly boundary.
 #[test]
