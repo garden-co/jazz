@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
-import { buildTestArtifacts, command, testArtifactTargets } from "../build-test-artifacts.mjs";
+import { join } from "node:path";
+import { buildTestArtifacts, command } from "../build-test-artifacts.mjs";
 
 test("test artifact pipeline overlaps independent bindings and repairs NAPI only after a failed load", async () => {
   const calls = [];
@@ -15,7 +15,7 @@ test("test artifact pipeline overlaps independent bindings and repairs NAPI only
   });
 
   const labels = calls.map((call) => call.label);
-  assert.deepEqual(labels.slice(0, 3), ["CLI", "fast WASM", "release NAPI"]);
+  assert.deepEqual(labels.slice(0, 4), ["release NAPI", "CLI", "fast WASM", "jazz-tools"]);
   assert.equal(labels.filter((label) => label === "release NAPI").length, 1);
   assert.equal(labels.filter((label) => label === "repair release NAPI").length, 1);
   assert.ok(labels.indexOf("jazz-tools") > labels.indexOf("fast WASM"));
@@ -24,17 +24,53 @@ test("test artifact pipeline overlaps independent bindings and repairs NAPI only
   assert.ok(
     labels.indexOf("verify release NAPI provenance") > labels.indexOf("load repaired release NAPI"),
   );
-  assert.equal(calls[1].options.env.CARGO_TARGET_DIR, testArtifactTargets.wasm);
-  assert.equal(calls[2].options.env.CARGO_TARGET_DIR, testArtifactTargets.napi);
-  assert.ok(isAbsolute(calls[1].options.env.CARGO_TARGET_DIR));
-  assert.ok(isAbsolute(calls[2].options.env.CARGO_TARGET_DIR));
+  for (const call of calls.filter(({ label }) =>
+    ["CLI", "fast WASM", "release NAPI", "repair release NAPI"].includes(label),
+  ))
+    assert.equal(call.options.env?.CARGO_TARGET_DIR, undefined, call.label);
 });
 
 test("a failed build aborts its still-running sibling commands", async () => {
   const aborted = [];
+  let resolveCli;
+  let resolveWasm;
+  let resolveTools;
+  const running = buildTestArtifacts((unusedCommand, unusedArgs, label, { signal } = {}) => {
+    if (label === "release NAPI") return Promise.resolve();
+    if (label === "CLI" || label === "fast WASM" || label === "jazz-tools")
+      return new Promise((resolve, reject) => {
+        if (label === "CLI") resolveCli = resolve;
+        else if (label === "fast WASM") resolveWasm = resolve;
+        else resolveTools = resolve;
+        signal.addEventListener(
+          "abort",
+          () => {
+            aborted.push(label);
+            reject(new Error(`${label} aborted`));
+          },
+          { once: true },
+        );
+      });
+    return Promise.resolve();
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(typeof resolveCli, "function");
+  assert.equal(typeof resolveWasm, "function");
+  assert.equal(resolveTools, undefined);
+  resolveCli();
+  resolveWasm();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(typeof resolveTools, "function");
+  resolveTools();
+  await running;
+
   await assert.rejects(
-    buildTestArtifacts((unusedCommand, unusedArgs, label, { signal }) => {
-      if (label === "CLI") return Promise.reject(new Error("simulated CLI failure"));
+    buildTestArtifacts((unusedCommand, unusedArgs, label, { signal } = {}) => {
+      if (label === "release NAPI") return Promise.resolve();
+      if (label === "CLI")
+        return new Promise((unusedResolve, reject) =>
+          setImmediate(() => reject(new Error("simulated CLI failure"))),
+        );
       return new Promise((resolve, reject) => {
         signal.addEventListener(
           "abort",
@@ -48,18 +84,34 @@ test("a failed build aborts its still-running sibling commands", async () => {
     }),
     /simulated CLI failure/,
   );
-  assert.deepEqual(aborted.sort(), ["fast WASM", "release NAPI"]);
+
+  await assert.rejects(
+    buildTestArtifacts((unusedCommand, unusedArgs, label, { signal } = {}) => {
+      if (label === "release NAPI") return Promise.reject(new Error("simulated NAPI failure"));
+      return new Promise((resolve, reject) => {
+        signal.addEventListener(
+          "abort",
+          () => {
+            aborted.push(label);
+            reject(new Error(`${label} aborted`));
+          },
+          { once: true },
+        );
+      });
+    }),
+    /simulated NAPI failure/,
+  );
+  assert.deepEqual(aborted, ["fast WASM"]);
 });
 
-test("real subprocess receives an absolute target directory", async () => {
+test("real subprocess inherits the caller's cache-compatible Cargo target", async () => {
   await command(
     process.execPath,
     [
       "-e",
-      "const {isAbsolute}=require('node:path'); if(!isAbsolute(process.env.CARGO_TARGET_DIR)) process.exit(42)",
+      `if(process.env.CARGO_TARGET_DIR!==${JSON.stringify(process.env.CARGO_TARGET_DIR)}) process.exit(42)`,
     ],
-    "absolute target smoke",
-    { env: { CARGO_TARGET_DIR: testArtifactTargets.wasm } },
+    "default target smoke",
   );
 });
 
@@ -88,12 +140,15 @@ test("CI uses the correctness artifact path while package builds keep release WA
     "utf8",
   );
   const packageJson = readFileSync(new URL("../../../package.json", import.meta.url), "utf8");
+  const pipeline = readFileSync(new URL("../build-test-artifacts.mjs", import.meta.url), "utf8");
   assert.match(workflow, /pnpm build:test-artifacts/);
   assert.match(packageJson, /"build:test-artifacts": "node dev\/gates\/build-test-artifacts\.mjs"/);
   assert.match(
     packageJson,
     /"build:ci": "turbo run build:crates.*jazz-wasm.*jazz-napi.*jazz-tools/,
   );
+  assert.doesNotMatch(workflow, /CARGO_TARGET_DIR/);
+  assert.doesNotMatch(pipeline, /target\/test-artifacts-(?:wasm|napi)/);
 });
 
 test("Turbo invalidates each native artifact only for its Cargo closure", () => {

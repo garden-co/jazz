@@ -133,7 +133,8 @@ jobs:
 
       # Correctness tests use an unoptimised, provenance-checked WASM build.
       # Package/publish workflows continue to use jazz-wasm's release build.
-      # The script starts CLI, WASM and NAPI builds together and only repairs
+      # The script reuses the restored default Cargo target, runs NAPI alone on
+      # the 4-vCPU runner, then overlaps CLI with fast WASM. It only repairs
       # NAPI if its first load check proves the artifact unusable.
       - name: Build correctness-test artifacts
         run: pnpm build:test-artifacts

@@ -14,10 +14,6 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
-export const testArtifactTargets = {
-  napi: resolve(root, "target/test-artifacts-napi"),
-  wasm: resolve(root, "target/test-artifacts-wasm"),
-};
 
 export function command(command, args, label = [command, ...args].join(" "), options = {}) {
   const { env, signal } = options;
@@ -99,27 +95,21 @@ export async function buildTestArtifacts(run = command) {
       throw error;
     });
 
-  // These are independent Cargo invocations. In particular, neither binding
-  // needs the CLI binary, and jazz-tools only needs that binary plus WASM.
+  // Keep every Cargo invocation in the default target directory restored by
+  // Swatinem/rust-cache. On the 4-vCPU CI runner, separate target directories
+  // discarded that cache and made three cold compilers contend for the same
+  // CPUs. NAPI is the long pole and benefits most from running alone. Once it
+  // is complete, CLI and fast WASM can share the remaining compile window;
+  // jazz-tools then consumes both generated prerequisites.
+  await guardedRun("pnpm", ["--filter", "jazz-napi", "build"], "release NAPI");
   const cli = guardedRun("pnpm", ["--filter", "@jazz/rust", "build:crates"], "CLI");
-  // Separate target directories avoid Cargo's artifact-directory lock while
-  // preserving stable per-lane incremental caches. CI's sccache still shares
-  // compiled units across the target directories.
-  const wasm = guardedRun("pnpm", ["--filter", "jazz-wasm", "build:fast"], "fast WASM", {
-    CARGO_TARGET_DIR: testArtifactTargets.wasm,
-  });
-  const napi = guardedRun("pnpm", ["--filter", "jazz-napi", "build"], "release NAPI", {
-    CARGO_TARGET_DIR: testArtifactTargets.napi,
-  });
-
-  const tools = Promise.all([cli, wasm]).then(() =>
-    guardedRun("pnpm", ["--filter", "jazz-tools", "build"], "jazz-tools"),
-  );
+  const wasm = guardedRun("pnpm", ["--filter", "jazz-wasm", "build:fast"], "fast WASM");
   try {
-    await Promise.all([tools, napi]);
+    await Promise.all([cli, wasm]);
   } catch (error) {
     throw firstBuildError ?? error;
   }
+  await guardedRun("pnpm", ["--filter", "jazz-tools", "build"], "jazz-tools");
 
   // A manifest is the contract that makes a cached/generated artifact safe to
   // consume. NAPI is built release because that is the loadable Linux mode;
@@ -145,9 +135,7 @@ export async function buildTestArtifacts(run = command) {
         repairController.abort(repairError);
         throw repairError;
       });
-    await repairRun("pnpm", ["--filter", "jazz-napi", "build"], "repair release NAPI", {
-      CARGO_TARGET_DIR: testArtifactTargets.napi,
-    });
+    await repairRun("pnpm", ["--filter", "jazz-napi", "build"], "repair release NAPI");
     await repairRun("node", ["-e", "require('./crates/jazz-napi')"], "load repaired release NAPI");
   }
   await run(
