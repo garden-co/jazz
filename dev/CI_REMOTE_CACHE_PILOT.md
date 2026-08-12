@@ -112,9 +112,18 @@ cache-poisoning boundary GitHub documents for Actions caches.
 ## Telemetry and acceptance criteria
 
 Add an `always()` CI step that emits `sccache --show-stats` to the job summary
-and a compact receipt (backend, Rust hit/miss count, read/write errors, bytes,
-and elapsed time). Do not report cache "wins" without both a cold baseline and
-two warmed repetitions on the same commit.
+and a compact receipt. The sccache part records its executable/server versions,
+safe configuration identity (never credentials), local `SCCACHE_DIR`, local
+cache size, Rust hit/miss counts, cache read/write errors, and elapsed time.
+Those are compiler/local-disk measurements; neither the displayed cache size
+nor sccache's stats establish R2 requests, bytes transferred, egress, or cost.
+
+The corresponding storage receipt comes from the bucket provider's per-prefix
+metrics and billing/audit exports: stored bytes, object reads/writes/lists,
+download bytes, egress bytes/cost, request cost, and denied/error operations.
+Link its timestamped dashboard/export identifier in the CI receipt rather than
+copying a hand-maintained number. Do not report cache "wins" without both a
+cold baseline and two warmed repetitions on the same commit.
 
 Run this experiment only for the Linux/x64 Rust/artifact build path using the
 pinned Rust 1.93.1 toolchain first. Other toolchains and macOS/Windows release
@@ -133,9 +142,13 @@ independent cache. The pilot passes only if all of the following hold:
    prefix; an isolated PR job cannot read or connect to the protected user's
    local cache/socket (verify both with deliberately denied probes outside the
    normal workflow).
-5. Storage, requests, and egress stay under the agreed monthly alert/budget for
-   two weeks. If remote reads are slower than compilation for common misses,
-   remove the helper and retain the runner-local cache.
+5. Before enabling writes, Infrastructure records a numeric monthly pilot
+   budget in the provider receipt. Stop remote writes immediately if the
+   provider's month-to-date cost plus its documented remaining-month forecast
+   exceeds that budget, or if per-prefix request/transfer/egress metrics are
+   unavailable. Storage, requests, and egress remain below budget for two
+   weeks. If remote reads are slower than compilation for common misses, remove
+   the helper and retain the runner-local cache.
 
 ## Why not the other backends?
 
