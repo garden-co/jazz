@@ -3762,6 +3762,24 @@ fn lower_value_source(
     }
 }
 
+#[cfg(test)]
+pub(super) fn binding_value_source_projection_fields_for_test(
+    request: &QueryProgramRequest,
+    columns: &[ValueSourceColumn],
+) -> Result<BTreeSet<String>, UnsupportedReason> {
+    let graph = lower_value_source(
+        "test-binding-source",
+        columns,
+        &ValueSourceMode::Binding,
+        request,
+    )?;
+    graph_declared_output_fields(&graph).ok_or_else(|| {
+        UnsupportedReason::Runtime(
+            "binding value-source projection must have a named descriptor".to_owned(),
+        )
+    })
+}
+
 fn lower_value_source_column(
     column: &ValueSourceColumn,
     request: &QueryProgramRequest,
