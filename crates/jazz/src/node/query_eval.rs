@@ -1358,6 +1358,23 @@ where
         request: &SourceRequest,
         table: &TableSchema,
     ) -> BTreeSet<String> {
+        // The public query may select a subset of columns, but a maintained
+        // version witness feeds `VersionRecord` serialization. A row version
+        // is a complete replicated commit unit, so its source must retain all
+        // logical user columns before the terminal applies app projection
+        // (INV-DATA-18 and INV-SYNC-16). Policy and relation facts have their
+        // own typed terminals; they never express omitted VersionRecord cells.
+        if request
+            .requirements
+            .metadata
+            .contains(&SourceMetadataRequirement::VersionWitnesses)
+        {
+            return table
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect();
+        }
         match &request.requirements.app_fields {
             // `All` still goes through the query-local boundary. The durable
             // all-fields projection predates compatibility-sensitive reads and
@@ -9273,8 +9290,8 @@ where
         kind: LargeValueKind,
         cache: &mut LocalMaintainedMaterializationCache,
     ) -> Result<Vec<u8>, Error> {
-        let canonical = self.canonical_maintained_view_witness(version)?;
-        let version = canonical.as_ref().unwrap_or(version);
+        let canonical = self.canonical_history_version_for_maintained_witness(version)?;
+        let version = &canonical;
         let authored_schema = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue(
