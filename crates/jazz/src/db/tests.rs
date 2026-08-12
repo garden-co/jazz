@@ -1121,9 +1121,14 @@ fn relation_hop_schema() -> JazzSchema {
             [
                 ColumnSchema::new("name", ColumnType::String),
                 ColumnSchema::new("org_id", ColumnType::Nullable(Box::new(ColumnType::Uuid))),
+                ColumnSchema::new(
+                    "parent_id",
+                    ColumnType::Nullable(Box::new(ColumnType::Uuid)),
+                ),
             ],
         )
         .with_reference("org_id", "orgs")
+        .with_reference("parent_id", "teams")
         .with_read_policy(Policy::public())
         .with_write_policy(Policy::public()),
         TableSchema::new(
@@ -2239,6 +2244,153 @@ fn relation_query_subscription_hop_uses_unified_query_path() {
     let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
     let opened = opened_rows(stream.try_next_event().expect("opened event"));
     assert_eq!(row_ids(&opened), vec![row(0x11)]);
+}
+
+#[test]
+fn relation_query_subscription_hop_preserves_projected_self_reference_cells() {
+    let schema = relation_hop_schema();
+    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let parent = row(0x10);
+    let team = row(0x11);
+    let user = row(0x21);
+    db.insert_with_id(
+        "teams",
+        parent,
+        BTreeMap::from([("name".to_owned(), Value::String("Parent".to_owned()))]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "teams",
+        team,
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("Team A".to_owned())),
+            (
+                "parent_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(parent.0)))),
+            ),
+        ]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "users",
+        user,
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("User A".to_owned())),
+            (
+                "team_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(team.0)))),
+            ),
+        ]),
+    )
+    .unwrap();
+
+    let query = users_to_teams_relation_query();
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![team]);
+    assert_eq!(
+        snapshot.rows[0].cell(&schema.tables[1], "name"),
+        Some(Value::String("Team A".to_owned()))
+    );
+    assert_eq!(
+        snapshot.rows[0].cell(&schema.tables[1], "parent_id"),
+        Some(Value::Nullable(Some(Box::new(Value::Uuid(parent.0)))))
+    );
+
+    let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    let opened = opened_rows(stream.try_next_event().expect("opened event"));
+    let opened_team = opened
+        .iter()
+        .find(|row| row.row_uuid() == team)
+        .expect("joined team row");
+    assert_eq!(
+        opened_team.cell(&schema.tables[1], "name"),
+        Some(Value::String("Team A".to_owned()))
+    );
+    assert_eq!(
+        opened_team.cell(&schema.tables[1], "parent_id"),
+        Some(Value::Nullable(Some(Box::new(Value::Uuid(parent.0)))))
+    );
+
+    db.update(
+        "teams",
+        team,
+        BTreeMap::from([("name".to_owned(), Value::String("Team B".to_owned()))]),
+    )
+    .unwrap();
+    let (_, changed, removed) = delta_rows(stream.try_next_event().expect("updated event"));
+    assert!(removed.is_empty());
+    assert_eq!(row_ids(&changed), vec![team]);
+    assert_eq!(
+        changed[0].cell(&schema.tables[1], "name"),
+        Some(Value::String("Team B".to_owned()))
+    );
+    assert_eq!(
+        changed[0].cell(&schema.tables[1], "parent_id"),
+        Some(Value::Nullable(Some(Box::new(Value::Uuid(parent.0)))))
+    );
+}
+
+fn users_to_teams_relation_query() -> RelationQuery {
+    RelationQuery {
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::Filter {
+                    input: Box::new(RelationExpr::TableScan {
+                        table: "users".to_owned(),
+                        alias: None,
+                    }),
+                    predicate: RelationPredicate::Cmp {
+                        left: RelationColumnRef {
+                            scope: Some("users".to_owned()),
+                            column: "name".to_owned(),
+                        },
+                        op: RelationCmpOp::Eq,
+                        right: RelationValueRef::Literal(serde_json::Value::String(
+                            "User A".to_owned(),
+                        )),
+                    },
+                }),
+                right: Box::new(RelationExpr::TableScan {
+                    table: "teams".to_owned(),
+                    alias: Some("__hop_0".to_owned()),
+                }),
+                on: vec![crate::query::RelationJoinCondition {
+                    left: RelationColumnRef {
+                        scope: Some("users".to_owned()),
+                        column: "team_id".to_owned(),
+                    },
+                    right: RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "id".to_owned(),
+                    },
+                }],
+                join_kind: RelationJoinKind::Inner,
+            }),
+            columns: vec![
+                crate::query::RelationProjectColumn {
+                    alias: "id".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "id".to_owned(),
+                    }),
+                },
+                crate::query::RelationProjectColumn {
+                    alias: "name".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "name".to_owned(),
+                    }),
+                },
+                crate::query::RelationProjectColumn {
+                    alias: "parent_id".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "parent_id".to_owned(),
+                    }),
+                },
+            ],
+        },
+    }
 }
 
 #[test]
