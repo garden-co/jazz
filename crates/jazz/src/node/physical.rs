@@ -421,9 +421,13 @@ pub(super) fn physical_current_projection_target(
 /// physical meaning; authored decoding belongs strictly after that selection.
 fn physical_current_winner_projection_target(
     table_id: PhysicalTableId,
-    target_schema: SchemaVersionId,
+    physical_fields: &[String],
 ) -> String {
-    format!("physical_{}_current_winner_{}", table_id.0, target_schema.0)
+    format!(
+        "physical_{}_current_winner_{}",
+        table_id.0,
+        physical_fields.join("_")
+    )
 }
 
 /// A query-local current-source target.  The ordinary target projects every
@@ -1536,9 +1540,27 @@ where
             physical_ahead_current_table_name(target_mapping.table_id),
         ];
         let target_table = self.table_in_schema(target_table_name, target_schema)?;
-        let output = physical_current_descriptor(&target_table, &target_mapping)?;
+        let authored_output = physical_current_descriptor(&target_table, &target_mapping)?;
+        let physical_fields = authored_output
+            .fields()
+            .iter()
+            .map(|field| {
+                field.name.clone().ok_or(Error::InvalidStoredValue(
+                    "physical current winner field unnamed",
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Winner selection operates on raw physical data. Keep the target
+        // layout fixed, but take enum registries from the actual evolved
+        // storage descriptor so later tags can reach the logical omission
+        // boundary without being decoded against an old registry.
+        let output = physical_write_descriptor(
+            &authored_output,
+            &physical_fields,
+            self.database.table_schema(&storage_tables[0])?,
+        )?;
         let projection_target =
-            physical_current_winner_projection_target(target_mapping.table_id, target_schema);
+            physical_current_winner_projection_target(target_mapping.table_id, &physical_fields);
         let mut output_fields = None;
         for storage_table in &storage_tables {
             let fields = output

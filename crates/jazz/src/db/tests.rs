@@ -7762,6 +7762,164 @@ fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
 }
 
 #[test]
+fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
+    let schema = |statuses: &[&str], with_body: bool| {
+        let mut columns = vec![
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new(
+                "status",
+                ColumnType::EnumTag(
+                    groove::records::ScalarEnumSchema::new("status", statuses.iter().copied())
+                        .unwrap(),
+                ),
+            ),
+        ];
+        if with_body {
+            columns.push(ColumnSchema::new("body", ColumnType::String));
+        }
+        JazzSchema::new([TableSchema::new("items", columns)])
+    };
+    let base = schema(&["open"], false);
+    let middle = SchemaVersion::new(schema(&["open", "archived"], false));
+    let latest = SchemaVersion::new(schema(&["open", "archived"], true));
+    let author = AuthorId::from_bytes([0xa2; 16]);
+    let db = open_db(0x5c, author, &base);
+    let _before = db
+        .insert(
+            "items",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("before".to_owned())),
+                ("status".to_owned(), Value::EnumTag(0)),
+            ]),
+        )
+        .unwrap();
+    let query = Query::from("items");
+    let mut subscription = prepared_subscribe(
+        &db,
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            local_updates: LocalUpdates::Deferred,
+            propagation: Propagation::LocalOnly,
+            include_deleted: false,
+            ..ReadOpts::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        opened_rows(block_on(subscription.next_event()).unwrap()).len(),
+        1
+    );
+
+    let enum_lens = MigrationLens::new(
+        base.version_id(),
+        middle.id,
+        vec![TableLens {
+            source_table: "items".to_owned(),
+            target_table: "items".to_owned(),
+            ops: vec![LensOp::TransformColumn {
+                column: "status".to_owned(),
+                transform: "jazz.identity".to_owned(),
+            }],
+        }],
+    );
+    db.node
+        .node
+        .borrow_mut()
+        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                middle.clone(),
+                enum_lens,
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .unwrap();
+    db.node
+        .node
+        .borrow_mut()
+        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: middle.id,
+            },
+        })
+        .unwrap();
+    assert_eq!(
+        db.refresh_subscriptions().unwrap(),
+        0,
+        "enum registry growth alone refreshes the raw target in place"
+    );
+
+    let column_lens = MigrationLens::new(
+        middle.id,
+        latest.id,
+        vec![TableLens {
+            source_table: "items".to_owned(),
+            target_table: "items".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "body".to_owned(),
+                default: Value::String(String::new()),
+            }],
+        }],
+    );
+    db.node
+        .node
+        .borrow_mut()
+        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 2,
+            publication: Box::new(SchemaLineagePublication::new(
+                latest.clone(),
+                column_lens,
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .unwrap();
+    db.node
+        .node
+        .borrow_mut()
+        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 2,
+                schema: latest.id,
+            },
+        })
+        .unwrap();
+    db.refresh_subscriptions().unwrap();
+    assert!(matches!(
+        subscription.try_next_event(),
+        Some(SubscriptionEvent::Delta { reset: true, .. })
+    ));
+
+    db.node
+        .node
+        .borrow_mut()
+        .commit_mergeable(
+            MergeableCommit::new("items", row(0x5c), 10).cells(BTreeMap::from([
+                ("title".to_owned(), Value::String("after".to_owned())),
+                ("status".to_owned(), Value::EnumTag(0)),
+                ("body".to_owned(), Value::String("new body".to_owned())),
+            ])),
+        )
+        .unwrap();
+    db.refresh_subscriptions().unwrap();
+    let (added, updated, removed) = delta_rows(
+        subscription
+            .try_next_event()
+            .expect("rebuilt old-enum subscription receives the next compatible delta"),
+    );
+    assert_eq!(added.len(), 1);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+}
+
+#[test]
 fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
     let alice = AuthorId::from_bytes([0xa1; 16]);
     let bob = AuthorId::from_bytes([0xb2; 16]);

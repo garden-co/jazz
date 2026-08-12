@@ -5395,6 +5395,25 @@ where
                     }
                 }
             };
+            let stale_subscription_id = {
+                let state = state.borrow();
+                match &state.kind {
+                    SubscriptionKind::Prepared {
+                        maintained_subscription,
+                        ..
+                    } => maintained_subscription
+                        .as_ref()
+                        .map(LocalMaintainedViewSubscription::subscription_id),
+                }
+            };
+            // The Jazz runtime token invalidates prepared plans, while the
+            // Groove runtime itself remains alive. Retire the old maintained
+            // handle before installing its replacement so two descriptor
+            // generations cannot consume the next physical delta.
+            if let Some(subscription_id) = stale_subscription_id {
+                node.borrow_mut()
+                    .unsubscribe_groove_subscription(subscription_id);
+            }
             let (shape, binding, prepared_plan) = node
                 .borrow_mut()
                 .prepare_query_binding_for_link_in_authorization_mode(
