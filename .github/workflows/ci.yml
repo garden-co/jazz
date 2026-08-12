@@ -131,18 +131,12 @@ jobs:
           key: turbo-cache-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ runner.os }}-v1
           path: ${{ github.workspace }}/.turbo/cache
 
-      - run: pnpm build:ci
-      # Turbo cache hits have reproducibly restored jazz-napi without a loadable
-      # .node binding (CI rounds 9/9-rerun, 2026-07-19); verify and force-rebuild
-      # if needed. See dev/CI_NOTES.md.
-      # Cached jazz-napi archives have restored .node files that fail dlopen
-      # (likely sticky-disk corruption across concurrent runs); build the
-      # binding fresh and verify it loads. Tests then run with --only so no
-      # turbo build dependency can restore a cached artifact over it.
-      - name: Rebuild and verify jazz-napi native binding
-        run: |
-          pnpm turbo run build --filter=jazz-napi --force
-          node -e "require('./crates/jazz-napi')"
+      # Correctness tests use an unoptimised, provenance-checked WASM build.
+      # Package/publish workflows continue to use jazz-wasm's release build.
+      # The script starts CLI, WASM and NAPI builds together and only repairs
+      # NAPI if its first load check proves the artifact unusable.
+      - name: Build correctness-test artifacts
+        run: pnpm build:test-artifacts
       - name: Mount Playwright sticky disk
         uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:

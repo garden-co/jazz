@@ -15,6 +15,7 @@
     "build": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=!jazz-wasm --only",
     "build:core": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=./packages/** --filter=jazz-napi --only",
     "build:ci": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=jazz-napi --filter=jazz-tools --only",
+    "build:test-artifacts": "node dev/gates/build-test-artifacts.mjs",
     "build:all": "pnpm build",
     "release:version": "changeset version",
     "release:version:alpha": "changeset version --snapshot alpha",
