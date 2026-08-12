@@ -22,6 +22,13 @@ function listedStarters(source) {
   return [...source.matchAll(/^\s+- ([-a-z]+)$/gm)].map((match) => match[1]);
 }
 
+const expectedReleaseCondition =
+  "github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/main'";
+
+function releaseCondition(jobSource) {
+  return jobSource.match(/^    if: \$\{\{ (.*) \}\}$/m)?.[1];
+}
+
 test("release starter gate covers the canonical scaffold catalogue and no ordinary PR", () => {
   const canonical = starters.match(/export const KNOWN_STARTERS = \[([\s\S]*?)\] as const;/)?.[1];
   assert.ok(canonical, "could not find the canonical starter catalogue");
@@ -34,14 +41,23 @@ test("release starter gate covers the canonical scaffold catalogue and no ordina
 
   const prepare = job("prepare", "e2e");
   const e2e = job("e2e");
-  const releaseOnly =
-    /github\.event_name == 'workflow_dispatch' \|\| startsWith\(github\.head_ref, 'changeset-release\/'\)/;
-  assert.match(prepare, releaseOnly);
-  assert.match(e2e, releaseOnly);
+  assert.equal(releaseCondition(prepare), expectedReleaseCondition);
+  assert.equal(releaseCondition(e2e), expectedReleaseCondition);
 
   const matrix = e2e.match(/matrix:\n        starter:\n([\s\S]*?)\n    steps:/)?.[1];
   assert.ok(matrix, "could not find the starter E2E matrix");
   assert.deepEqual(listedStarters(matrix), expected);
+});
+
+test("release starter gate rejects prefix and unconditional trigger broadening", () => {
+  for (const broadened of [
+    "github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'changeset-release/')",
+    "github.event_name == 'workflow_dispatch' || true",
+  ]) {
+    assert.notEqual(broadened, expectedReleaseCondition);
+  }
+  assert.doesNotMatch(workflow, /startsWith\(github\.head_ref, 'changeset-release\/'/);
+  assert.doesNotMatch(workflow, /github\.event_name == 'workflow_dispatch' \|\| true/);
 });
 
 test("release starter gate exercises packaged artifacts through create-jazz-e2e", () => {

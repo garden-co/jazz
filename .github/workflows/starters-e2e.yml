@@ -38,7 +38,7 @@ jobs:
   prepare:
     # On PR events, only fire on the changesets release PR. Manual dispatch is
     # always allowed (handy for testing a starter in isolation).
-    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'changeset-release/') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/main' }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     steps:
@@ -109,7 +109,7 @@ jobs:
 
   e2e:
     needs: prepare
-    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'changeset-release/') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/main' }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     strategy:
