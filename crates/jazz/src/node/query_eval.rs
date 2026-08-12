@@ -976,21 +976,16 @@ where
                             SourceGap::HistoricalStorageCut,
                         ));
                     }
-                    let policy_request = self
-                        .node
-                        .table_read_policy_authorization_request_at(
-                            self.read_view.policy_schema,
-                            &table.name,
-                            *permission_subject,
-                            ParamBindingMode::InlineAllReachableSeeds,
-                            position,
-                            plan.binding_source_shape.clone(),
-                            plan.binding_user_params.clone(),
-                            plan.binding_claim_params.clone(),
-                        )
-                        .map_err(|_| {
-                            source_resolution_error(request, SourceGap::HistoricalStorageCut)
-                        })?;
+                    let policy_request = self.node.table_read_policy_authorization_request_at(
+                        self.read_view.policy_schema,
+                        &table.name,
+                        *permission_subject,
+                        ParamBindingMode::InlineAllReachableSeeds,
+                        position,
+                        plan.binding_source_shape.clone(),
+                        plan.binding_user_params.clone(),
+                        plan.binding_claim_params.clone(),
+                    );
                     self.node
                         .policy_filtered_current_source_graph_via_query_engine(
                             policy_request,
@@ -1054,17 +1049,14 @@ where
                     {
                         return Err(source_resolution_error(request, SourceGap::Coverage));
                     }
-                    let policy_request = self
-                        .node
-                        .branch_table_read_policy_authorization_request(
-                            branch_id,
-                            &table,
-                            *permission_subject,
-                            plan.binding_source_shape.clone(),
-                            plan.binding_user_params.clone(),
-                            plan.binding_claim_params.clone(),
-                        )
-                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                    let policy_request = self.node.branch_table_read_policy_authorization_request(
+                        branch_id,
+                        &table,
+                        *permission_subject,
+                        plan.binding_source_shape.clone(),
+                        plan.binding_user_params.clone(),
+                        plan.binding_claim_params.clone(),
+                    );
                     let output_fields = descriptor_field_names(&descriptor)
                         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                     self.node
@@ -1153,19 +1145,16 @@ where
                         {
                             return Err(source_resolution_error(request, SourceGap::Coverage));
                         }
-                        let policy_request = self
-                            .node
-                            .table_read_policy_authorization_request(
-                                self.read_view.policy_schema,
-                                &table.name,
-                                *permission_subject,
-                                ParamBindingMode::InlineAllReachableSeeds,
-                                graph_tier.expect("visible current source has a tier"),
-                                plan.binding_source_shape.clone(),
-                                plan.binding_user_params.clone(),
-                                plan.binding_claim_params.clone(),
-                            )
-                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                        let policy_request = self.node.table_read_policy_authorization_request(
+                            self.read_view.policy_schema,
+                            &table.name,
+                            *permission_subject,
+                            ParamBindingMode::InlineAllReachableSeeds,
+                            graph_tier.expect("visible current source has a tier"),
+                            plan.binding_source_shape.clone(),
+                            plan.binding_user_params.clone(),
+                            plan.binding_claim_params.clone(),
+                        );
                         self.node
                             .policy_filtered_current_source_graph_via_query_engine(
                                 policy_request,
@@ -1220,8 +1209,7 @@ where
                             plan.binding_source_shape.clone(),
                             plan.binding_user_params.clone(),
                             plan.binding_claim_params.clone(),
-                        )
-                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                        );
                     let mut output_fields = current_row_fields(&table);
                     output_fields.push("__jazz_deleted".to_owned());
                     self.node
@@ -1269,8 +1257,7 @@ where
                             plan.binding_source_shape.clone(),
                             plan.binding_user_params.clone(),
                             plan.binding_claim_params.clone(),
-                        )
-                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                        );
                     let mut output_fields = current_row_fields(&table);
                     output_fields.push("__jazz_deleted".to_owned());
                     self.node
@@ -2375,7 +2362,7 @@ where
                 binding_source_shape.clone(),
                 binding_user_params.clone(),
                 binding_claim_params,
-            )?;
+            );
             let output_fields = global_current_storage_fields(
                 table,
                 needs_version_witnesses,
@@ -4973,7 +4960,20 @@ where
         if !claim_params.is_empty() {
             let mut values = binding.values().clone();
             for (name, claim) in &claim_params {
-                let value = prepared_claim_value(&claim.path, policy)?;
+                let Some(value) = prepared_claim_value(&claim.path, policy)? else {
+                    // An absent claim cannot establish a policy proof. Leave
+                    // it as a capability gap so the policy source resolver
+                    // lowers the proof to an empty authorization graph.
+                    if matches!(policy, PolicyContext::AuthorizationSubplan { .. }) {
+                        return Err(Error::QueryCapability(format!(
+                            "policy authorization requires unbound claim {}",
+                            claim.path.0.join(".")
+                        )));
+                    }
+                    return Err(Error::InvalidStoredValue(
+                        "claim prepared param is not bound",
+                    ));
+                };
                 values.insert(
                     name.clone(),
                     coerce_prepared_binding_value(value, &claim.ty),
@@ -10873,12 +10873,25 @@ where
 
     fn policy_filtered_current_source_graph_via_query_engine(
         &mut self,
-        policy_request: QueryProgramRequest,
+        policy_request: Result<QueryProgramRequest, Error>,
         base: GraphBuilder,
         output_fields: &[String],
     ) -> Result<PolicyAuthorizationGraph, Error> {
         self.query_engine_read_metrics
             .policy_authorized_source_joins += 1;
+        let policy_request = match policy_request {
+            Ok(policy_request) => policy_request,
+            Err(Error::QueryCapability(err)) if err.contains("PolicyProofCycle") => {
+                return Err(Error::QueryCapability(err));
+            }
+            Err(Error::QueryCapability(_)) => {
+                return Ok(empty_policy_filtered_current_source_graph(
+                    base,
+                    output_fields,
+                ));
+            }
+            Err(err) => return Err(err),
+        };
         // The protected storage source has no binding fields of its own, but
         // the authorization proof is routed by the enclosing prepared
         // binding. Carry that descriptor alongside the source before joining
@@ -11546,6 +11559,23 @@ where
             options,
             subscriptions,
         })
+    }
+}
+
+fn empty_policy_filtered_current_source_graph(
+    base: GraphBuilder,
+    output_fields: &[String],
+) -> PolicyAuthorizationGraph {
+    let keys = ["row_uuid".to_owned()];
+    PolicyAuthorizationGraph {
+        graph: GraphBuilder::join(base, empty_authorized_row_id_graph(), keys.clone(), keys)
+            .project_fields(
+                output_fields
+                    .iter()
+                    .map(|field| ProjectField::renamed(left_field(field), field.clone()))
+                    .collect::<Vec<_>>(),
+            ),
+        route_fields: BTreeSet::new(),
     }
 }
 
@@ -13146,14 +13176,16 @@ fn binding_values_for_plan(
                 Ok::<_, Error>(coerce_prepared_binding_value(value, &param.ty))
             }
             PreparedQueryParamSource::Claim(ref path) => {
-                let value = prepared_claim_value(path, policy)?;
+                let value = prepared_claim_value(path, policy)?.ok_or(
+                    Error::InvalidStoredValue("claim prepared param is not bound"),
+                )?;
                 Ok::<_, Error>(coerce_prepared_binding_value(value, &param.ty))
             }
         })
         .collect()
 }
 
-fn prepared_claim_value(path: &ClaimPath, policy: &PolicyContext) -> Result<Value, Error> {
+fn prepared_claim_value(path: &ClaimPath, policy: &PolicyContext) -> Result<Option<Value>, Error> {
     let (permission_subject, claims) = match policy {
         PolicyContext::Identity {
             permission_subject,
@@ -13177,14 +13209,12 @@ fn prepared_claim_value(path: &ClaimPath, policy: &PolicyContext) -> Result<Valu
         ));
     };
     if let Some(value) = claims.get(name) {
-        return Ok(value.clone());
+        return Ok(Some(value.clone()));
     }
     if let Some(value) = default_policy_claim_values(*permission_subject).get(name) {
-        return Ok(value.clone());
+        return Ok(Some(value.clone()));
     }
-    Err(Error::InvalidStoredValue(
-        "claim prepared param is not bound",
-    ))
+    Ok(None)
 }
 
 fn coerce_prepared_binding_value(value: Value, column_type: &groove::schema::ColumnType) -> Value {
@@ -15034,7 +15064,7 @@ mod tests {
             .expect("compile nested chat-members policy against the invite binding");
         let members_authorized = node
             .policy_filtered_current_source_graph_via_query_engine(
-                members_policy,
+                Ok(members_policy),
                 node.maintained_view_content_current_with_version(&members, DurabilityTier::Edge)
                     .expect("compile chat-members storage source"),
                 &global_current_storage_fields(&members, true, true),
@@ -15970,10 +16000,149 @@ mod tests {
         open_node_with_uuid(NodeUuid::from_bytes([9; 16]), recursive_schema())
     }
 
+    fn missing_session_seed_policy_schema() -> JazzSchema {
+        let mut policy = Query::from("resources").reachable_via(
+            "resourceAccess",
+            "resource",
+            "team",
+            lit("seeded-by-session"),
+            "teamMemberships",
+            "member",
+            "parent",
+            [],
+        );
+        policy.reachable[0].seed = Some(crate::query::ReachableSeed {
+            table: "teamSeeds".to_owned(),
+            user_column: Some("user".to_owned()),
+            user_claim: Some("session_id".to_owned()),
+            team_column: "team".to_owned(),
+            filters: Vec::new(),
+        });
+        JazzSchema::new([
+            TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
+            TableSchema::new("resources", [ColumnSchema::new("name", ColumnType::String)])
+                .with_read_policy(policy),
+            TableSchema::new(
+                "teamSeeds",
+                [
+                    ColumnSchema::new("team", ColumnType::Uuid),
+                    ColumnSchema::new("user", ColumnType::Uuid),
+                ],
+            )
+            .with_reference("team", "teams"),
+            TableSchema::new(
+                "resourceAccess",
+                [
+                    ColumnSchema::new("resource", ColumnType::Uuid),
+                    ColumnSchema::new("team", ColumnType::Uuid),
+                ],
+            )
+            .with_reference("resource", "resources")
+            .with_reference("team", "teams"),
+            TableSchema::new(
+                "teamMemberships",
+                [
+                    ColumnSchema::new("member", ColumnType::Uuid),
+                    ColumnSchema::new("parent", ColumnType::Uuid),
+                ],
+            )
+            .with_reference("member", "teams")
+            .with_reference("parent", "teams"),
+        ])
+    }
+
     fn row(idx: usize) -> RowUuid {
         let mut bytes = [0_u8; 16];
         bytes[0..8].copy_from_slice(&(idx as u64 + 1).to_be_bytes());
         RowUuid::from_bytes(bytes)
+    }
+
+    #[test]
+    fn missing_policy_relation_seed_claim_fails_closed_without_breaking_prepared_bindings() {
+        // This reproduces the server-side shape of a SessionRef policy graph:
+        // the outer query is prepared first, then the protected source builds
+        // a nested authorization subplan whose reachable seed needs a custom
+        // session claim. An absent claim is a denied proof, not malformed
+        // stored state or an unavailable source.
+        let schema = missing_session_seed_policy_schema();
+        let (_dir, mut node) =
+            open_node_with_uuid(NodeUuid::from_bytes([0xc1; 16]), schema.clone());
+        let reader = author(0xc2);
+        let team = row(0xc3);
+        let resource = row(0xc4);
+        commit_global_cells(
+            &mut node,
+            "resources",
+            resource,
+            BTreeMap::from([("name".to_owned(), Value::String("secret".to_owned()))]),
+            1,
+            1,
+        );
+        commit_global_cells(
+            &mut node,
+            "resourceAccess",
+            row(0xc5),
+            BTreeMap::from([
+                ("resource".to_owned(), Value::Uuid(resource.0)),
+                ("team".to_owned(), Value::Uuid(team.0)),
+            ]),
+            2,
+            2,
+        );
+        commit_global_cells(
+            &mut node,
+            "teamSeeds",
+            row(0xc6),
+            BTreeMap::from([
+                ("team".to_owned(), Value::Uuid(team.0)),
+                ("user".to_owned(), Value::Uuid(reader.0)),
+            ]),
+            3,
+            3,
+        );
+
+        let shape = Query::from("resources").validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let missing_rows = node
+            .query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
+            .expect("an absent policy seed claim must compile to a denied proof")
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            missing_rows.is_empty(),
+            "missing custom claim must deny access"
+        );
+
+        let ordinary_error = node
+            .program_binding_for_shape_and_policy(
+                &shape,
+                &binding,
+                None,
+                BTreeMap::new(),
+                BTreeMap::from([(
+                    claim_param_field(&ClaimPath(vec!["session_id".to_owned()])),
+                    ProgramClaimParam {
+                        path: ClaimPath(vec!["session_id".to_owned()]),
+                        ty: ColumnType::Uuid,
+                    },
+                )]),
+                &node.query_program_policy_context(reader),
+            )
+            .expect_err("ordinary prepared bindings must still reject missing claims");
+        assert!(matches!(ordinary_error, Error::InvalidStoredValue(_)));
+
+        node.set_session_claims(
+            reader,
+            BTreeMap::from([("session_id".to_owned(), Value::Uuid(reader.0))]),
+        );
+        let allowed_rows = node
+            .query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
+            .expect("bound policy seed claim must compile")
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(allowed_rows, BTreeSet::from([resource]));
     }
 
     fn commit_global_cells(
