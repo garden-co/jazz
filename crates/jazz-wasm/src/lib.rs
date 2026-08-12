@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::rc::Rc;
 
@@ -1540,7 +1540,7 @@ impl WasmDb {
             .inner
             .subscribe(&query.inner, opts)
             .map_err(to_js_error)?;
-        readable_stream_from_stream(stream.map(subscription_chunk_to_js))
+        subscription_stream_to_js(stream)
     }
 
     #[wasm_bindgen(js_name = subscribeForIdentity)]
@@ -1556,7 +1556,7 @@ impl WasmDb {
             .inner
             .subscribe_for_identity(&query.inner, opts, author)
             .map_err(to_js_error)?;
-        readable_stream_from_stream(stream.map(subscription_chunk_to_js))
+        subscription_stream_to_js(stream)
     }
 
     #[wasm_bindgen(js_name = subscribeRelationQuery)]
@@ -1571,7 +1571,7 @@ impl WasmDb {
             .inner
             .subscribe_relation_query(&query, opts)
             .map_err(to_js_error)?;
-        readable_stream_from_stream(stream.map(subscription_chunk_to_js))
+        subscription_stream_to_js(stream)
     }
 
     #[wasm_bindgen(js_name = subscribeRelationQueryForIdentity)]
@@ -1588,7 +1588,7 @@ impl WasmDb {
             .inner
             .subscribe_relation_query_for_identity(&query, opts, author)
             .map_err(to_js_error)?;
-        readable_stream_from_stream(stream.map(subscription_chunk_to_js))
+        subscription_stream_to_js(stream)
     }
 
     #[wasm_bindgen(js_name = attachQuery)]
@@ -2719,7 +2719,18 @@ fn wasm_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> WasmRow<'a> {
     }
 }
 
-fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue> {
+fn subscription_stream_to_js(
+    stream: impl Stream<Item = SubscriptionEvent> + 'static,
+) -> Result<JsValue, JsValue> {
+    readable_stream_from_stream(stream.scan(HashSet::new(), |layouts, event| {
+        std::future::ready(Some(subscription_chunk_to_js(event, layouts)))
+    }))
+}
+
+fn subscription_chunk_to_js(
+    event: SubscriptionEvent,
+    published_terminal_layouts: &mut HashSet<String>,
+) -> Result<JsValue, JsValue> {
     let object = js_sys::Object::new();
     match event {
         SubscriptionEvent::Delta {
@@ -2728,6 +2739,7 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             updated,
             removed,
             terminal_operations,
+            terminal_layout,
             settled,
             tier,
             ..
@@ -2739,6 +2751,16 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             };
             let delta =
                 encode_subscription_delta(&added, &updated, &removed).map_err(to_js_error)?;
+            if let Some(layout) = terminal_layout.as_ref() {
+                if terminal_operations
+                    .iter()
+                    .any(|operation| operation.root_descriptor != layout.root_descriptor)
+                {
+                    return Err(JsValue::from_str(
+                        "terminal operation descriptor disagrees with its prepared root layout",
+                    ));
+                }
+            }
             set_prop(&object, "type", JsValue::from_str("delta"))?;
             set_prop(
                 &object,
@@ -2748,7 +2770,30 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             set_prop(
                 &object,
                 "terminalOperations",
-                terminal_operations_to_json(&terminal_operations)?
+                terminal_operations_to_json(
+                    &terminal_operations,
+                    terminal_layout.as_ref().map(|layout| layout.id.as_str()),
+                )?
+                .serialize(&serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true))
+                .map_err(to_js_error)?,
+            )?;
+            let terminal_layouts = if terminal_operations.is_empty() {
+                Vec::new()
+            } else {
+                let layout = terminal_layout.as_ref().ok_or_else(|| {
+                    JsValue::from_str("terminal operation arrived without a prepared root layout")
+                })?;
+                published_terminal_layouts
+                    .insert(layout.id.clone())
+                    .then(|| terminal_layout_to_json(layout))
+                    .transpose()?
+                    .into_iter()
+                    .collect()
+            };
+            set_prop(
+                &object,
+                "terminalLayouts",
+                serde_json::Value::Array(terminal_layouts)
                     .serialize(
                         &serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true),
                     )
@@ -2805,23 +2850,54 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
 /// query projection.
 fn terminal_operations_to_json(
     operations: &[jazz::groove::ivm::TerminalOperation],
+    root_layout_id: Option<&str>,
 ) -> Result<serde_json::Value, JsValue> {
     let mut encoded = serde_json::to_value(operations).map_err(to_js_error)?;
+    if operations.is_empty() {
+        return Ok(encoded);
+    }
+    let root_layout_id = root_layout_id.ok_or_else(|| {
+        JsValue::from_str("terminal operation arrived without a prepared root layout")
+    })?;
     let encoded_operations = encoded
         .as_array_mut()
         .expect("terminal operations serialize as an array");
-    for (operation, wire) in operations.iter().zip(encoded_operations) {
+    for wire in encoded_operations {
         let serde_json::Value::Object(wire) = wire else {
             unreachable!("terminal operation serializes as an object");
         };
         wire.remove("root_descriptor");
-        let descriptor = postcard::to_allocvec(&operation.root_descriptor).map_err(to_js_error)?;
         wire.insert(
-            "rootDescriptor".to_owned(),
-            serde_json::to_value(descriptor).map_err(to_js_error)?,
+            "rootLayoutId".to_owned(),
+            serde_json::Value::String(root_layout_id.to_owned()),
         );
     }
     Ok(encoded)
+}
+
+fn terminal_layout_to_json(
+    layout: &jazz::db::TerminalRootLayout,
+) -> Result<serde_json::Value, JsValue> {
+    let descriptor = postcard::to_allocvec(&layout.root_descriptor).map_err(to_js_error)?;
+    Ok(serde_json::json!({
+        "id": layout.id,
+        "rootDescriptor": descriptor,
+        "rootKeySlot": layout.root_key_slot,
+        "rootKeyFieldName": layout.root_key_field_name,
+        "publicFields": layout.public_fields.iter().map(|field| serde_json::json!({
+            "name": field.name,
+            "descriptorFieldName": field.descriptor_field_name,
+            "slot": field.slot,
+            "carrier": match field.carrier {
+                jazz::db::TerminalRootCarrier::CurrentRow => "CurrentRow",
+                jazz::db::TerminalRootCarrier::Logical => "Logical",
+            },
+        })).collect::<Vec<_>>(),
+        "carrier": match layout.carrier {
+            jazz::db::TerminalRootCarrier::CurrentRow => "CurrentRow",
+            jazz::db::TerminalRootCarrier::Logical => "Logical",
+        },
+    }))
 }
 
 fn set_prop(object: &js_sys::Object, name: &str, value: JsValue) -> Result<(), JsValue> {

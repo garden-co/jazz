@@ -75,8 +75,8 @@ export declare class QueryAttachment {
 }
 
 export declare class Subscription {
-  readAll(): Array<any>
-  drain(): Array<any>
+  readAll(): Array<SubscriptionEvent>
+  drain(): Array<SubscriptionEvent>
   close(): boolean
 }
 
@@ -108,12 +108,129 @@ export declare class Tx {
 export declare class Write {
   get batchId(): string
   get payload(): Uint8Array
-  wait(tier: string): Promise<undefined>
   writeState(): any
+  wait(tier: string): Promise<undefined>
   close(): boolean
 }
 
 export declare function mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
+
+export interface SubscriptionClosedEvent {
+  type: 'closed'
+}
+
+export interface SubscriptionDeltaEvent {
+  type: 'delta'
+  reset: boolean
+  delta: Uint8Array
+  terminalOperations: Array<SubscriptionTerminalOperation>
+  terminalLayouts: Array<SubscriptionTerminalLayout>
+  settled: boolean
+  tier: 'None' | 'Local' | 'Edge' | 'Global'
+}
+
+export type SubscriptionEvent =
+  SubscriptionDeltaEvent | SubscriptionRejectedEvent | SubscriptionClosedEvent
+
+export interface SubscriptionRejectedEvent {
+  type: 'rejected'
+  reason: SubscriptionRejectionReason
+}
+
+export type SubscriptionRejectionReason =
+  SubscriptionUnsupportedShapeCapabilityReason | SubscriptionShapeRegistrationPendingReason | SubscriptionServerFailureReason
+
+export interface SubscriptionServerFailureReason {
+  type: 'ServerFailure'
+  code: 'TableNotFound' | 'SchemaResolution' | 'QueryValidation' | 'QueryLowering' | 'PolicyEvaluation' | 'Internal'
+}
+
+export interface SubscriptionShapeRegistrationPendingReason {
+  type: 'ShapeRegistrationPendingCatalogueAdmission'
+}
+
+export interface SubscriptionTerminalCollectionPathSegment {
+  Collection: string
+}
+
+export type SubscriptionTerminalEdit =
+  SubscriptionTerminalInsertEdit | SubscriptionTerminalUpdateEdit | SubscriptionTerminalRemoveEdit | SubscriptionTerminalMoveEdit
+
+export interface SubscriptionTerminalInsert {
+  index: number
+  key: Array<number>
+  value: Array<number>
+}
+
+export interface SubscriptionTerminalInsertEdit {
+  Insert: SubscriptionTerminalInsert
+}
+
+export interface SubscriptionTerminalKeyPathSegment {
+  Key: Array<number>
+}
+
+/**
+ * Immutable producer-owned root record contract.  The descriptor and public
+ * slots are published once per NAPI subscription, before an operation may
+ * reference `id`; TypeScript never has to infer a CurrentRow/layout family.
+ */
+export interface SubscriptionTerminalLayout {
+  id: string
+  rootDescriptor: Array<number>
+  rootKeySlot: number
+  rootKeyFieldName: string
+  publicFields: Array<SubscriptionTerminalPublicField>
+  carrier: string
+}
+
+export interface SubscriptionTerminalMove {
+  key: Array<number>
+  index: number
+}
+
+export interface SubscriptionTerminalMoveEdit {
+  Move: SubscriptionTerminalMove
+}
+
+export interface SubscriptionTerminalOperation {
+  rootLayoutId: string
+  root_key: Array<number>
+  path: Array<SubscriptionTerminalPathSegment>
+  edit: SubscriptionTerminalEdit
+}
+
+export type SubscriptionTerminalPathSegment =
+  SubscriptionTerminalCollectionPathSegment | SubscriptionTerminalKeyPathSegment
+
+export interface SubscriptionTerminalPublicField {
+  name: string
+  descriptorFieldName: string
+  slot: number
+  carrier: string
+}
+
+export interface SubscriptionTerminalRemove {
+  key: Array<number>
+}
+
+export interface SubscriptionTerminalRemoveEdit {
+  Remove: SubscriptionTerminalRemove
+}
+
+export interface SubscriptionTerminalUpdate {
+  key: Array<number>
+  value: Array<number>
+}
+
+export interface SubscriptionTerminalUpdateEdit {
+  Update: SubscriptionTerminalUpdate
+}
+
+export interface SubscriptionUnsupportedShapeCapabilityReason {
+  type: 'UnsupportedShapeCapability'
+  detail: string
+}
 
 export declare function verifyLocalFirstIdentityProof(token: string | undefined | null, expectedAudience: string): VerifyTokenResult
 

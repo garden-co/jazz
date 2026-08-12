@@ -1,4 +1,10 @@
-import type { ColumnDescriptor, ColumnType, Value, WasmRow } from "../../drivers/types.js";
+import type {
+  ColumnDescriptor,
+  ColumnType,
+  NativeTerminalRootLayout,
+  Value,
+  WasmRow,
+} from "../../drivers/types.js";
 import { isProvenanceMagicTimestampColumn } from "../../magic-columns.js";
 
 const textDecoder = new TextDecoder();
@@ -439,6 +445,106 @@ export function decodeNativeTerminalRowWithDescriptor(
 }
 
 /**
+ * Compile the hot terminal-root decoder from an immutable producer-owned
+ * layout. The descriptor's field identities and slots are checked once; each
+ * operation thereafter carries only the layout ID and packed edit bytes.
+ */
+export function compileNativeTerminalRootDecoder(
+  layout: NativeTerminalRootLayout,
+  descriptor: DescriptorField[],
+  columns: readonly ColumnDescriptor[],
+): (id: string, raw: Uint8Array) => WasmRow {
+  assertTerminalRootLayoutCompatible(descriptor, columns, layout);
+  const slots = layout.publicFields.map((field) => field.slot);
+  return (id, raw) => {
+    assertRecordLayoutIsComplete(descriptor, raw);
+    const key = decodeRecordValue(descriptor, raw, layout.rootKeySlot);
+    if (key == null || formatUuid(key) !== id) {
+      throw new Error("terminal record key does not match addressed key");
+    }
+    const values = columns.map((column, index) => {
+      const bytes = decodeRecordValue(descriptor, raw, slots[index]!);
+      return bytes == null
+        ? ({ type: "Null" } satisfies Value)
+        : decodeTerminalBytes(column.column_type, bytes);
+    });
+    const valuesByColumn = new Map(columns.map((column, index) => [column.name, values[index]!]));
+    const row = { id, values };
+    Object.defineProperty(row, "valuesByColumn", {
+      value: valuesByColumn,
+      enumerable: false,
+      configurable: true,
+    });
+    return row;
+  };
+}
+
+function assertTerminalRootLayoutCompatible(
+  descriptor: readonly DescriptorField[],
+  columns: readonly ColumnDescriptor[],
+  layout: NativeTerminalRootLayout,
+): void {
+  if (layout.carrier !== "CurrentRow" && layout.carrier !== "Logical") {
+    throw new Error(`unsupported terminal root carrier ${String(layout.carrier)}`);
+  }
+  const root = descriptor[layout.rootKeySlot];
+  if (
+    !Number.isSafeInteger(layout.rootKeySlot) ||
+    root?.name !== layout.rootKeyFieldName ||
+    root.valueType.tag !== 10 ||
+    !isKnownValueType(root.valueType)
+  ) {
+    throw new Error("terminal root layout key slot does not match its descriptor");
+  }
+  if (layout.publicFields.length !== columns.length) {
+    throw new Error("terminal root layout does not match the public projection");
+  }
+  const seenSlots = new Set<number>([layout.rootKeySlot]);
+  for (let index = 0; index < columns.length; index++) {
+    const column = columns[index]!;
+    const field = layout.publicFields[index]!;
+    const descriptorField = descriptor[field.slot];
+    if (
+      field.name !== column.name ||
+      !Number.isSafeInteger(field.slot) ||
+      seenSlots.has(field.slot) ||
+      descriptorField?.name !== field.descriptorFieldName ||
+      !terminalLayoutValueTypeMatchesColumn(
+        descriptorField?.valueType,
+        column,
+        field.carrier ?? layout.carrier,
+      )
+    ) {
+      throw new Error(
+        `terminal root layout does not match the public projection at ${index}: ` +
+          `${field.name}/${field.descriptorFieldName}@${field.slot} vs ${column.name}/` +
+          `${descriptorField?.name ?? "<missing>"} (descriptor tag ${descriptorField?.valueType.tag ?? "?"}, ` +
+          `nullable ${String(column.nullable)}, sparse ${String(column.sparse)})`,
+      );
+    }
+    seenSlots.add(field.slot);
+  }
+}
+
+function terminalLayoutValueTypeMatchesColumn(
+  valueType: ValueType | undefined,
+  column: ColumnDescriptor,
+  carrier: NativeTerminalRootLayout["carrier"],
+): boolean {
+  // `sparse` describes the TS wildcard/storage carrier, not the declared
+  // public value. Rust collector descriptors have already removed it.
+  const logicalColumn = logicalStorageColumns([column])[0]!;
+  if (carrier === "Logical") {
+    return terminalValueTypeMatchesColumn(valueType, logicalColumn, false);
+  }
+  return (
+    valueType?.tag === 14 &&
+    valueType.inner !== undefined &&
+    terminalValueTypeMatchesColumn(valueType.inner, logicalColumn, false)
+  );
+}
+
+/**
  * Verify that an operation-supplied terminal descriptor can describe this
  * public projection.  This is intentionally stricter than layout matching:
  * a same-width scalar of the wrong type can otherwise be decoded as a valid,
@@ -448,27 +554,56 @@ export function assertTerminalRootDescriptorCompatible(
   descriptor: DescriptorField[],
   columns: readonly ColumnDescriptor[],
 ): void {
-  if (
-    descriptor.length !== columns.length + 1 ||
-    descriptor[0]?.valueType.tag !== 10 ||
-    !isKnownValueType(descriptor[0].valueType)
-  ) {
-    throw new Error("terminal root descriptor does not match the public projection");
-  }
-
   const publicColumns = logicalStorageColumns(columns);
-  const matchesLogical = publicColumns.every((column, index) =>
-    terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, false),
+  const matchesLogical = matchesNamedTerminalLayout(
+    descriptor,
+    "__jazz_terminal_row_key",
+    publicColumns,
+    (column) => column.name,
+    false,
   );
-  const matchesPhysical = columns.every((column, index) =>
-    terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, false),
+  const matchesPhysical = matchesNamedTerminalLayout(
+    descriptor,
+    "__jazz_terminal_row_key",
+    columns,
+    (column) => column.name,
+    false,
   );
-  const matchesCurrentRow = publicColumns.every((column, index) =>
-    terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, true),
+  // CurrentRow is a distinct physical layout. Its row key is named row_uuid
+  // and its nullable application-cell carriers live in the user_ namespace.
+  // Do not accept a nullable logical descriptor here: doing so would make an
+  // arbitrary reordering of same-typed fields indistinguishable from a native
+  // CurrentRow record.
+  const matchesCurrentRow = matchesNamedTerminalLayout(
+    descriptor,
+    "row_uuid",
+    publicColumns,
+    (column) => `user_${column.name}`,
+    true,
   );
   if (!matchesLogical && !matchesPhysical && !matchesCurrentRow) {
     throw new Error("terminal root descriptor does not match the public projection");
   }
+}
+
+function matchesNamedTerminalLayout(
+  descriptor: readonly DescriptorField[],
+  keyName: string,
+  columns: readonly ColumnDescriptor[],
+  fieldName: (column: ColumnDescriptor) => string,
+  forceNullable: boolean,
+): boolean {
+  return (
+    descriptor.length >= columns.length + 1 &&
+    descriptor[0]?.name === keyName &&
+    descriptor[0]?.valueType.tag === 10 &&
+    isKnownValueType(descriptor[0].valueType) &&
+    columns.every(
+      (column, index) =>
+        descriptor[index + 1]?.name === fieldName(column) &&
+        terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, forceNullable),
+    )
+  );
 }
 
 function terminalValueTypeMatchesColumn(

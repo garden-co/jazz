@@ -156,6 +156,12 @@ pub(crate) struct LocalMaintainedViewSubscription {
     root_occurrence_ids: Vec<OutputOccurrenceId>,
 }
 
+impl LocalMaintainedViewSubscription {
+    pub(crate) fn terminal_root_layout(&self) -> Option<&crate::db::TerminalRootLayout> {
+        self.terminal_schemas.terminal_root_layout()
+    }
+}
+
 /// A plan retained solely to keep a maintained subscription graph alive.
 /// Its provenance is established by the compiler path that produced it, so a
 /// caller cannot relabel a ClientLocal plan as TrustedServing after the fact.
@@ -682,6 +688,7 @@ pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
     pub(crate) added_edges: Vec<(RelationEdge, Option<CurrentRow>)>,
     pub(crate) removed_edges: Vec<RelationEdge>,
     pub(crate) terminal_operations: Vec<groove::ivm::TerminalOperation>,
+    pub(crate) terminal_layout: Option<crate::db::TerminalRootLayout>,
 }
 
 pub(crate) struct LocalMaintainedRelationSnapshot {
@@ -8726,6 +8733,9 @@ where
         let structured_output = !local.result_query.array_subqueries.is_empty();
         let structured_app_row_changes = transitions.structured_app_row_changes.clone();
         let terminal_operations = transitions.terminal_operations.clone();
+        let terminal_layout = (!terminal_operations.is_empty())
+            .then(|| local.terminal_schemas.terminal_root_layout().cloned())
+            .flatten();
         let aggregate_replacements = transitions
             .adds
             .iter()
@@ -8875,6 +8885,7 @@ where
             added_edges,
             removed_edges,
             terminal_operations,
+            terminal_layout,
         })
     }
 

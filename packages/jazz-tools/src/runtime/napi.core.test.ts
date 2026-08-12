@@ -1,8 +1,10 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "undici";
 import { afterEach, describe, expect, it } from "vitest";
+import type { SubscriptionEvent as NapiSubscriptionEvent } from "jazz-napi";
 import type { ColumnType, Value, WasmSchema } from "../drivers/types.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
 import { webSocketUrl } from "./native-runtime/websocket.js";
@@ -13,6 +15,15 @@ import { hasJazzNapiBuild, loadNapiModule } from "./testing/napi-runtime-test-ut
 import { SubscriptionManager } from "./subscription-manager.js";
 import type { WasmRow } from "../drivers/types.js";
 import { createOpenBatchId, type BatchId, type OpenBatchId, type WriteReceipt } from "./client.js";
+
+const require = createRequire(import.meta.url);
+const debugSubscriptionEventFixture = hasJazzNapiBuild()
+  ? (
+      require("jazz-napi") as typeof import("jazz-napi") & {
+        __testSubscriptionEvents?: () => NapiSubscriptionEvent[];
+      }
+    ).__testSubscriptionEvents
+  : undefined;
 
 function beginTestBatch(runtime: NativeRuntimeAdapter): OpenBatchId {
   const id = createOpenBatchId();
@@ -49,6 +60,12 @@ const DEFAULTS_SCHEMA: WasmSchema = {
         default: { type: "BigInt", value: 9007199254740993n },
       },
     ],
+  },
+};
+
+const BYTEA_SCHEMA: WasmSchema = {
+  blobs: {
+    columns: [{ name: "data", column_type: { type: "Bytea" }, nullable: false }],
   },
 };
 
@@ -537,6 +554,283 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     runtime.unsubscribe(handle);
   });
+
+  it("returns raw NAPI subscription payloads as Uint8Array with registered terminal layouts", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const node = deterministicBytes("jazz-napi-native-runtime-raw-subscription:node");
+    const author = deterministicBytes("jazz-napi-native-runtime-raw-subscription:author");
+    const rawEvents: NapiSubscriptionEvent[] = [];
+    const expectRawBinaryPayload = (event: (typeof rawEvents)[number] | undefined) => {
+      expect(event).toBeDefined();
+      if (!event) throw new Error("expected a raw subscription event");
+      expect(event.type).toBe("delta");
+      if (event.type !== "delta") throw new Error(`expected a delta event, received ${event.type}`);
+      expect(event.delta).toBeInstanceOf(Uint8Array);
+      expect(Array.isArray(event.delta)).toBe(false);
+      expect(Buffer.isBuffer(event.delta)).toBe(false);
+      expect((event.delta as Uint8Array).byteLength).toBeGreaterThan(0);
+      expect(Array.isArray(event.terminalOperations)).toBe(true);
+      return event;
+    };
+
+    const observeDb = (nativeDb: ReturnType<typeof NapiDb.openMemory>) =>
+      new Proxy(nativeDb, {
+        get(target, property) {
+          const value = Reflect.get(target, property, target) as unknown;
+          if (property === "subscribe" && typeof value === "function") {
+            return (...args: unknown[]) => {
+              const source = Reflect.apply(value, target, args) as object;
+              return new Proxy(source, {
+                get(sourceTarget, sourceProperty) {
+                  const sourceValue = Reflect.get(
+                    sourceTarget,
+                    sourceProperty,
+                    sourceTarget,
+                  ) as unknown;
+                  if (sourceProperty === "readAll" && typeof sourceValue === "function") {
+                    return () => {
+                      const events = Reflect.apply(
+                        sourceValue,
+                        sourceTarget,
+                        [],
+                      ) as NapiSubscriptionEvent[];
+                      rawEvents.push(...events);
+                      return events;
+                    };
+                  }
+                  return typeof sourceValue === "function"
+                    ? sourceValue.bind(sourceTarget)
+                    : sourceValue;
+                },
+              });
+            };
+          }
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: (schema, config) => observeDb(NapiDb.openMemory(schema, config)) as never,
+      },
+      BYTEA_SCHEMA,
+      node,
+      author,
+      23,
+      true,
+    );
+    runtimes.push(runtime);
+
+    const manager = new SubscriptionManager<WasmRow>();
+    const updates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
+    const handle = runtime.createSubscription(JSON.stringify({ table: "blobs" }), null, "local");
+    runtime.executeSubscription(handle, (delta: unknown) => {
+      updates.push(
+        manager.handleDelta(
+          delta as Parameters<SubscriptionManager<WasmRow>["handleDelta"]>[0],
+          (row) => row,
+          BYTEA_SCHEMA.blobs.columns,
+        ),
+      );
+    });
+
+    const initialReset = rawEvents.find((event) => event.type === "delta" && event.reset === true);
+    const rawReset = expectRawBinaryPayload(initialReset);
+    expect(rawReset.terminalOperations).toEqual([]);
+
+    const eventsBeforeInsert = rawEvents.length;
+    const fullByteRange = Uint8Array.from(Array.from({ length: 256 }, (_, index) => index));
+    const inserted = runtime.insert("blobs", {
+      data: { type: "Bytea", value: fullByteRange },
+    });
+    const rawDelta = rawEvents
+      .slice(eventsBeforeInsert)
+      .find((event) => event.type === "delta" && event.reset === false);
+
+    const rawIncremental = expectRawBinaryPayload(rawDelta);
+    expect(rawIncremental.terminalOperations).toHaveLength(1);
+    const rawOperation = rawIncremental.terminalOperations[0];
+    expect(rawIncremental.terminalLayouts).toHaveLength(1);
+    const rawLayout = rawIncremental.terminalLayouts[0];
+    expect(rawOperation?.rootLayoutId).toBe(rawLayout?.id);
+    expect(rawLayout?.rootDescriptor.length).toBeGreaterThan(0);
+    expect(
+      rawLayout?.rootDescriptor.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255),
+    ).toBe(true);
+    expect(rawOperation?.root_key.length).toBeGreaterThan(0);
+    expect(
+      rawOperation?.root_key.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255),
+    ).toBe(true);
+    expect(rawOperation?.path).toEqual([]);
+    if (!rawOperation || !("Insert" in rawOperation.edit)) {
+      throw new Error("expected an inserted terminal operation");
+    }
+    const rawTerminalValue = rawOperation.edit.Insert.value;
+    expect(rawOperation.edit.Insert.key).toEqual(rawOperation.root_key);
+    expect(rawTerminalValue.slice(-fullByteRange.byteLength)).toEqual(Array.from(fullByteRange));
+
+    const delivered = updates[1]?.delta[0];
+    expect(delivered?.id).toBe(inserted.id);
+    if (!delivered || !("item" in delivered)) {
+      throw new Error("expected a delivered row item");
+    }
+    const deliveredValue = delivered.item?.values[0];
+    expect(deliveredValue?.type).toBe("Bytea");
+    if (deliveredValue?.type !== "Bytea") throw new Error("expected a delivered Bytea value");
+    expect(deliveredValue.value).toBeInstanceOf(Uint8Array);
+    expect(deliveredValue.value).toEqual(fullByteRange);
+
+    runtime.unsubscribe(handle);
+  });
+
+  // The fixture is deliberately absent from release addons. These complementary
+  // tests report that profile boundary explicitly instead of silently returning.
+  it.skipIf(debugSubscriptionEventFixture !== undefined)(
+    "release addons omit the debug-only subscription event fixture",
+    () => {
+      expect(debugSubscriptionEventFixture).toBeUndefined();
+    },
+  );
+
+  it.skipIf(debugSubscriptionEventFixture === undefined)(
+    "debug addons normalize real Rust rejection and closed subscription events",
+    async () => {
+      const { NapiDb } = await loadNapiModule();
+      const fixture = debugSubscriptionEventFixture!;
+      const [unsupportedEvent, pendingEvent, serverFailureEvent, closedEvent] = fixture();
+      expect([unsupportedEvent, pendingEvent, serverFailureEvent, closedEvent]).toStrictEqual([
+        {
+          type: "rejected",
+          reason: {
+            type: "UnsupportedShapeCapability",
+            detail: "fixture unsupported shape",
+          },
+        },
+        {
+          type: "rejected",
+          reason: { type: "ShapeRegistrationPendingCatalogueAdmission" },
+        },
+        {
+          type: "rejected",
+          reason: { type: "ServerFailure", code: "QueryValidation" },
+        },
+        { type: "closed" },
+      ]);
+      if (!unsupportedEvent || !pendingEvent || !serverFailureEvent || !closedEvent) {
+        throw new Error("jazz-napi test fixture returned incomplete events");
+      }
+
+      const openHarness = (label: string) => {
+        const injectedEvents: NapiSubscriptionEvent[] = [];
+        const observedEvents: NapiSubscriptionEvent[] = [];
+        const observeDb = (nativeDb: ReturnType<typeof NapiDb.openMemory>) =>
+          new Proxy(nativeDb, {
+            get(target, property) {
+              const value = Reflect.get(target, property, target) as unknown;
+              if (property === "subscribe" && typeof value === "function") {
+                return (...args: unknown[]) => {
+                  const source = Reflect.apply(value, target, args) as object;
+                  return new Proxy(source, {
+                    get(sourceTarget, sourceProperty) {
+                      const sourceValue = Reflect.get(
+                        sourceTarget,
+                        sourceProperty,
+                        sourceTarget,
+                      ) as unknown;
+                      if (sourceProperty === "readAll" && typeof sourceValue === "function") {
+                        return () => {
+                          const events = Reflect.apply(
+                            sourceValue,
+                            sourceTarget,
+                            [],
+                          ) as NapiSubscriptionEvent[];
+                          const injected = injectedEvents.splice(0);
+                          observedEvents.push(...injected, ...events);
+                          return [...injected, ...events];
+                        };
+                      }
+                      return typeof sourceValue === "function"
+                        ? sourceValue.bind(sourceTarget)
+                        : sourceValue;
+                    },
+                  });
+                };
+              }
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+        const runtime = new NativeRuntimeAdapter(
+          {
+            openMemory: (schema, config) => observeDb(NapiDb.openMemory(schema, config)) as never,
+          },
+          TEST_SCHEMA,
+          deterministicBytes(`jazz-napi-native-runtime-event-variants:${label}:node`),
+          deterministicBytes(`jazz-napi-native-runtime-event-variants:${label}:author`),
+          24,
+          true,
+        );
+        runtimes.push(runtime);
+        const notifications: unknown[][] = [];
+        const handle = runtime.createSubscription(
+          JSON.stringify({ table: "todos" }),
+          null,
+          "local",
+        );
+        runtime.executeSubscription(handle, (...args: unknown[]) => notifications.push(args));
+        expect(notifications).toHaveLength(1);
+        return { runtime, injectedEvents, observedEvents, notifications };
+      };
+
+      const pending = openHarness("pending");
+      pending.injectedEvents.push(pendingEvent);
+      expect(pending.notifications).toHaveLength(1);
+      pending.runtime.insert("todos", {
+        title: { type: "Text", value: "still subscribed after pending admission" },
+        done: { type: "Boolean", value: false },
+      });
+      expect(pending.observedEvents).toContainEqual({
+        type: "rejected",
+        reason: { type: "ShapeRegistrationPendingCatalogueAdmission" },
+      });
+      expect(pending.notifications).toHaveLength(2);
+
+      const unsupported = openHarness("unsupported");
+      unsupported.injectedEvents.push(unsupportedEvent);
+      unsupported.runtime.insert("todos", {
+        title: { type: "Text", value: "unsupported before delivery" },
+        done: { type: "Boolean", value: false },
+      });
+      expect(unsupported.notifications).toHaveLength(2);
+      expect(unsupported.notifications[1]?.[0]).toBeInstanceOf(Error);
+      expect(String(unsupported.notifications[1]?.[0])).toContain(
+        "UnsupportedShapeCapability: fixture unsupported shape",
+      );
+      expect(unsupported.notifications[1]?.[1]).toBeNull();
+
+      const rejected = openHarness("rejected");
+      rejected.injectedEvents.push(serverFailureEvent);
+      rejected.runtime.insert("todos", {
+        title: { type: "Text", value: "rejected before delivery" },
+        done: { type: "Boolean", value: false },
+      });
+      expect(rejected.observedEvents).toContainEqual({
+        type: "rejected",
+        reason: { type: "ServerFailure", code: "QueryValidation" },
+      });
+      expect(rejected.notifications).toHaveLength(2);
+      expect(rejected.notifications[1]?.[0]).toBeInstanceOf(Error);
+      expect(String(rejected.notifications[1]?.[0])).toContain("ServerFailure: QueryValidation");
+      expect(rejected.notifications[1]?.[1]).toBeNull();
+
+      const closed = openHarness("closed");
+      closed.injectedEvents.push(closedEvent);
+      closed.runtime.insert("todos", {
+        title: { type: "Text", value: "not delivered after close" },
+        done: { type: "Boolean", value: false },
+      });
+      expect(closed.observedEvents).toContainEqual({ type: "closed" });
+      expect(closed.notifications).toHaveLength(1);
+    },
+  );
 
   it("delivers a multi-write mergeable transaction as one subscription delta", async () => {
     const { NapiDb } = await loadNapiModule();

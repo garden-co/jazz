@@ -66,8 +66,24 @@ export type NativeTerminalEdit =
   | { Update: { key: number[]; value: number[] } }
   | { Remove: { key: number[] } }
   | { Move: { key: number[]; index: number } };
+/** Immutable producer-owned root descriptor contract, registered before use. */
+export interface NativeTerminalRootLayout {
+  id: string;
+  rootDescriptor: number[];
+  rootKeySlot: number;
+  rootKeyFieldName: string;
+  publicFields: Array<{
+    name: string;
+    descriptorFieldName: string;
+    slot: number;
+    carrier?: "CurrentRow" | "Logical";
+  }>;
+  carrier: "CurrentRow" | "Logical";
+}
 export interface NativeTerminalOperation {
-  /** Postcard-encoded Groove root record descriptor for this terminal tree. */
+  /** Stable ID of a layout published in the same or an earlier delta. */
+  rootLayoutId?: string;
+  /** Legacy self-describing operation; new native producers must not send it. */
   rootDescriptor?: number[];
   root_key: number[];
   path: NativeTerminalPathSegment[];
@@ -86,6 +102,7 @@ export interface NativeRowDelta {
   addedOccurrenceKeys?: Uint8Array[];
   updatedOccurrenceKeys?: Uint8Array[];
   removedOccurrenceKeys?: Uint8Array[];
+  terminalLayouts?: NativeTerminalRootLayout[];
   terminalOperations?: NativeTerminalOperation[];
 }
 

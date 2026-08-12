@@ -4,6 +4,7 @@ import type {
   InsertValues,
   NativeRowDelta,
   NativeTerminalOperation,
+  NativeTerminalRootLayout,
   TablePolicies,
   Value,
   WasmSchema,
@@ -334,6 +335,7 @@ type SubscriptionState = {
   deferredVisiblePublication: boolean;
   deferredVisibleReset: boolean;
   deferredTerminalOperations: NativeTerminalOperation[];
+  deferredTerminalLayouts: NativeTerminalRootLayout[];
   deferredPlaceholderChunks: number;
   deferredPlaceholderRows: number;
   deferredPlaceholderBytes: number;
@@ -1014,6 +1016,7 @@ export class NativeRuntimeAdapter implements Runtime {
       deferredVisiblePublication: false,
       deferredVisibleReset: false,
       deferredTerminalOperations: [],
+      deferredTerminalLayouts: [],
       deferredPlaceholderChunks: 0,
       deferredPlaceholderRows: 0,
       deferredPlaceholderBytes: 0,
@@ -1696,6 +1699,7 @@ export class NativeRuntimeAdapter implements Runtime {
         subscription.packedResetRows = packedResetRows;
         subscription.opened = true;
         packedResetRows.terminalOperations = chunk.terminalOperations;
+        packedResetRows.terminalLayouts = chunk.terminalLayouts;
         this.publishSubscriptionRows(subscription, packedResetRows, chunk.settled, true);
       } else {
         materializePackedResetRows(subscription, this.schema);
@@ -1736,6 +1740,7 @@ export class NativeRuntimeAdapter implements Runtime {
             this.deferSubscriptionRows(
               subscription,
               chunk.terminalOperations,
+              chunk.terminalLayouts,
               chunk.reset === true,
               chunk.delta,
             );
@@ -1761,12 +1766,14 @@ export class NativeRuntimeAdapter implements Runtime {
           this.deferSubscriptionRows(
             subscription,
             chunk.terminalOperations,
+            chunk.terminalLayouts,
             chunk.reset === true,
             chunk.delta,
           );
           return;
         }
         applied.wireDelta.terminalOperations = chunk.terminalOperations;
+        applied.wireDelta.terminalLayouts = chunk.terminalLayouts;
         this.publishSubscriptionRows(
           subscription,
           applied.wireDelta,
@@ -1787,6 +1794,7 @@ export class NativeRuntimeAdapter implements Runtime {
       subscription.deferredVisiblePublication = true;
       subscription.deferredVisibleReset ||= reset;
       subscription.deferredTerminalOperations.push(...(wireDelta.terminalOperations ?? []));
+      subscription.deferredTerminalLayouts.push(...(wireDelta.terminalLayouts ?? []));
       return;
     }
 
@@ -1819,9 +1827,14 @@ export class NativeRuntimeAdapter implements Runtime {
       ...subscription.deferredTerminalOperations,
       ...(wireDelta.terminalOperations ?? []),
     ];
+    const terminalLayouts = [
+      ...subscription.deferredTerminalLayouts,
+      ...(wireDelta.terminalLayouts ?? []),
+    ];
     if (terminalOperations.length > 0) {
       visibleDelta.terminalOperations = terminalOperations;
     }
+    if (terminalLayouts.length > 0) visibleDelta.terminalLayouts = terminalLayouts;
 
     subscription.callback?.(visibleDelta);
     if (visibleDelta === subscription.packedResetRows) {
@@ -1842,12 +1855,14 @@ export class NativeRuntimeAdapter implements Runtime {
   private deferSubscriptionRows(
     subscription: SubscriptionState,
     terminalOperations: NativeTerminalOperation[] | undefined,
+    terminalLayouts: NativeTerminalRootLayout[] | undefined,
     reset: boolean,
     delta: NativeSubscriptionDelta,
   ): void {
     subscription.deferredVisiblePublication = true;
     subscription.deferredVisibleReset ||= reset;
     subscription.deferredTerminalOperations.push(...(terminalOperations ?? []));
+    subscription.deferredTerminalLayouts.push(...(terminalLayouts ?? []));
     subscription.deferredPlaceholderChunks = reset ? 1 : subscription.deferredPlaceholderChunks + 1;
     subscription.deferredPlaceholderRows = subscription.rows.length;
     subscription.deferredPlaceholderBytes = reset
@@ -2057,6 +2072,7 @@ function clearDeferredPlaceholderBuffer(subscription: SubscriptionState): void {
   subscription.deferredVisiblePublication = false;
   subscription.deferredVisibleReset = false;
   subscription.deferredTerminalOperations = [];
+  subscription.deferredTerminalLayouts = [];
   subscription.deferredPlaceholderChunks = 0;
   subscription.deferredPlaceholderRows = 0;
   subscription.deferredPlaceholderBytes = 0;
@@ -3978,6 +3994,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
       reset?: boolean;
       delta: NativeSubscriptionDelta;
       terminalOperations?: NativeTerminalOperation[];
+      terminalLayouts?: NativeTerminalRootLayout[];
       settled?: boolean;
     }
   | {
@@ -3997,6 +4014,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
     reset?: unknown;
     settled?: unknown;
     terminalOperations?: unknown;
+    terminalLayouts?: unknown;
   };
   if (record.type === "closed" || record.type === "Closed") {
     return { type: "closed" };
@@ -4017,6 +4035,9 @@ function normalizeSubscriptionChunk(chunk: unknown):
       ),
       terminalOperations: Array.isArray(record.terminalOperations)
         ? (record.terminalOperations as NativeTerminalOperation[])
+        : undefined,
+      terminalLayouts: Array.isArray(record.terminalLayouts)
+        ? (record.terminalLayouts as NativeTerminalRootLayout[])
         : undefined,
       settled: typeof record.settled === "boolean" ? record.settled : undefined,
     };
@@ -4290,7 +4311,7 @@ function subscriptionDeltaPayloadBytes(
 }
 
 function nativeTerminalOperationBytes(operation: NativeTerminalOperation): number {
-  const descriptorBytes = operation.rootDescriptor?.length ?? 0;
+  const layoutIdBytes = operation.rootLayoutId?.length ?? operation.rootDescriptor?.length ?? 0;
   const rootKeyBytes = operation.root_key.length;
   const pathBytes = operation.path.reduce((sum, segment) => {
     if ("Collection" in segment) {
@@ -4306,7 +4327,7 @@ function nativeTerminalOperationBytes(operation: NativeTerminalOperation): numbe
         : "Remove" in operation.edit
           ? operation.edit.Remove.key.length
           : operation.edit.Move.key.length;
-  return descriptorBytes + rootKeyBytes + pathBytes + editBytes;
+  return layoutIdBytes + rootKeyBytes + pathBytes + editBytes;
 }
 
 function utf8ByteLength(value: string): number {

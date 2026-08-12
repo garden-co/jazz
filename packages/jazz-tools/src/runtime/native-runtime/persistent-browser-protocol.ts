@@ -175,6 +175,7 @@ export type PersistentBrowserSubscriptionFrame = {
   addedCount: number;
   removedCount: number;
   updatedCount: number;
+  terminalLayouts?: NativeRowDelta["terminalLayouts"];
   terminalOperations?: NativeRowDelta["terminalOperations"];
 };
 
