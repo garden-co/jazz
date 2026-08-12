@@ -1,9 +1,294 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import test from "node:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildTestArtifacts, command } from "../build-test-artifacts.mjs";
+import {
+  acquireArtifactBuildLock,
+  buildTestArtifacts,
+  command,
+  unlockArtifactBuildLock,
+  withArtifactBuildLock,
+} from "../build-test-artifacts.mjs";
+
+const pipelineUrl = new URL("../build-test-artifacts.mjs", import.meta.url).href;
+
+function childWithLock(lockPath, body) {
+  const child = spawn(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `import fs from 'node:fs'; import { buildTestArtifacts, command, withArtifactBuildLock } from ${JSON.stringify(pipelineUrl)}; ${body}`,
+    ],
+    {
+      env: { ...process.env, JAZZ_TEST_ARTIFACT_LOCK_PATH: lockPath },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let output = "";
+  child.stdout.on("data", (chunk) => (output += chunk));
+  child.stderr.on("data", (chunk) => (output += chunk));
+  return {
+    child,
+    output: () => output,
+    closed: new Promise((resolve) =>
+      child.once("close", (code, signal) => resolve({ code, signal })),
+    ),
+  };
+}
+
+async function waitFor(condition, message) {
+  for (let attempts = 0; attempts < 100; attempts++) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+}
+
+test("artifact lock rejects a concurrent real subprocess with actionable ownership", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "jazz-test-artifact-lock-"));
+  const lockPath = join(fixture, "lock");
+  const holder = childWithLock(
+    lockPath,
+    "await withArtifactBuildLock(() => new Promise(() => setInterval(() => {}, 1000)));",
+  );
+  try {
+    await waitFor(() => existsSync(lockPath), "holder did not acquire lock");
+    const contender = childWithLock(lockPath, "await withArtifactBuildLock(async () => {});");
+    const result = await contender.closed;
+    assert.equal(result.code, 1);
+    assert.match(contender.output(), /active artifact lock \(pid \d+, cwd .+, started .+\)/);
+    const message = contender.output().match(/Error: ([^\n]+)/)?.[1] ?? "";
+    assert.doesNotMatch(message, /Lock:|\/tmp\/|\/work\//);
+  } finally {
+    holder.child.kill("SIGTERM");
+    await holder.closed;
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("artifact lock refuses stale owners until explicit verified unlock", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "jazz-test-artifact-stale-"));
+  const lockPath = join(fixture, "lock");
+  writeFileSync(
+    lockPath,
+    JSON.stringify({
+      pid: 999_999_999,
+      cwd: "stale-checkout",
+      startedAt: "2000-01-01T00:00:00.000Z",
+      token: "dead",
+    }),
+  );
+  assert.throws(() => acquireArtifactBuildLock(lockPath), /stale artifact lock.*artifacts:unlock/);
+  assert.equal(existsSync(lockPath), true);
+  unlockArtifactBuildLock(lockPath);
+  const lock = acquireArtifactBuildLock(lockPath);
+  lock.release();
+  assert.equal(existsSync(lockPath), false);
+  rmSync(fixture, { recursive: true, force: true });
+});
+
+test("80 simultaneous stale contenders never auto-steal; unlock permits exactly one next owner", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "jazz-test-artifact-stale-race-"));
+  const lockPath = join(fixture, "lock");
+  writeFileSync(
+    lockPath,
+    JSON.stringify({
+      pid: 999_999_999,
+      cwd: "stale-checkout",
+      startedAt: "2000-01-01T00:00:00.000Z",
+      token: "dead",
+    }),
+  );
+  const contenders = Array.from({ length: 80 }, () =>
+    childWithLock(
+      lockPath,
+      "await withArtifactBuildLock(() => new Promise(() => setInterval(() => {}, 1000)));",
+    ),
+  );
+  try {
+    for (const contender of contenders) {
+      const result = await contender.closed;
+      assert.equal(result.code, 1);
+      assert.match(contender.output(), /stale artifact lock.*artifacts:unlock/);
+    }
+    assert.equal(existsSync(lockPath), true);
+    unlockArtifactBuildLock(lockPath);
+    const winner = childWithLock(
+      lockPath,
+      "await withArtifactBuildLock(() => new Promise(() => setInterval(() => {}, 1000)));",
+    );
+    await waitFor(() => existsSync(lockPath), "next contender did not acquire lock");
+    assert.equal(winner.child.exitCode, null);
+    winner.child.kill("SIGTERM");
+    await winner.closed;
+  } finally {
+    for (const contender of contenders) contender.child.kill("SIGTERM");
+    await Promise.all(contenders.map((contender) => contender.closed));
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("artifact lock refuses an unowned directory instead of deleting a possibly live lock", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "jazz-test-artifact-unowned-"));
+  const lockPath = join(fixture, "lock");
+  writeFileSync(lockPath, "not a receipt");
+  assert.throws(() => acquireArtifactBuildLock(lockPath), /read lock receipt failed/);
+  assert.equal(existsSync(lockPath), true);
+  rmSync(fixture, { recursive: true, force: true });
+});
+
+test("lock filesystem failures redact missing absolute paths", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "jazz-test-artifact-path-redaction-"));
+  const missingParent = join(fixture, "missing-parent");
+  const lockPath = join(missingParent, "lock");
+  // This planted raw filesystem call proves the underlying diagnostic would
+  // disclose the absolute path if the lock layer ever rethrows it directly.
+  assert.throws(() => writeFileSync(lockPath, "raw"), new RegExp(missingParent));
+  assert.throws(
+    () => acquireArtifactBuildLock(lockPath),
+    (error) =>
+      /create lock receipt failed \(ENOENT\)/.test(error.message) &&
+      !error.message.includes(fixture) &&
+      !error.message.includes(lockPath),
+  );
+  rmSync(fixture, { recursive: true, force: true });
+});
+
+test("artifact lock cleans up after a real failure and termination signal", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "jazz-test-artifact-cleanup-"));
+  const failingLock = join(fixture, "failure-lock");
+  const failure = childWithLock(
+    failingLock,
+    "await withArtifactBuildLock(async () => { throw new Error('deliberate failure'); });",
+  );
+  assert.equal((await failure.closed).code, 1);
+  assert.equal(existsSync(failingLock), false);
+
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    const signalLock = join(fixture, `signal-lock-${signal}`);
+    const running = childWithLock(
+      signalLock,
+      "await withArtifactBuildLock(() => new Promise(() => setInterval(() => {}, 1000)));",
+    );
+    await waitFor(() => existsSync(signalLock), "signal child did not acquire lock");
+    // The receipt is written just before the signal listeners; give the
+    // subprocess one event-loop turn to install them before injecting a signal.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    running.child.kill(signal);
+    const terminated = await running.closed;
+    assert.equal(terminated.signal, signal);
+    assert.equal(existsSync(signalLock), false);
+  }
+  rmSync(fixture, { recursive: true, force: true });
+});
+
+test("signal keeps the lock until its delayed child has exited", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "jazz-test-artifact-signal-drain-"));
+  const lockPath = join(fixture, "lock");
+  const received = join(fixture, "received");
+  const ready = join(fixture, "ready");
+  const delayedChild = `
+    const fs = require('node:fs');
+    fs.writeFileSync(${JSON.stringify(ready)}, 'ready');
+    process.on('SIGTERM', () => {
+      fs.writeFileSync(${JSON.stringify(received)}, 'received');
+      setTimeout(() => process.exit(0), 180);
+    });
+    setInterval(() => {}, 1000);
+  `;
+  const holder = childWithLock(
+    lockPath,
+    `await withArtifactBuildLock(async (scope) => scope.track(command(process.execPath, ['-e', ${JSON.stringify(delayedChild)}], 'delayed child', { signal: scope.signal })));`,
+  );
+  try {
+    await waitFor(() => existsSync(lockPath), "holder did not acquire lock");
+    await waitFor(() => existsSync(ready), "delayed child did not start");
+    holder.child.kill("SIGTERM");
+    await waitFor(() => existsSync(received), "child did not receive SIGTERM");
+    assert.equal(existsSync(lockPath), true, "lock released before child exit");
+    const contender = childWithLock(lockPath, "await withArtifactBuildLock(async () => {});");
+    assert.equal((await contender.closed).code, 1);
+    assert.match(contender.output(), /active artifact lock/);
+    assert.equal((await holder.closed).signal, "SIGTERM");
+    assert.equal(existsSync(lockPath), false);
+  } finally {
+    holder.child.kill("SIGKILL");
+    await holder.closed;
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("signal during NAPI repair drains the parent scope before unlock", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "jazz-test-artifact-repair-signal-"));
+  const lockPath = join(fixture, "lock");
+  const repairing = join(fixture, "repairing");
+  const received = join(fixture, "received");
+  const stopped = join(fixture, "stopped");
+  const holder = childWithLock(
+    lockPath,
+    `await withArtifactBuildLock((scope) => buildTestArtifacts((command, args, label, { signal }) => {
+      if (label === 'load release NAPI') return Promise.reject(new Error('load failed'));
+      if (label === 'repair release NAPI') return new Promise((resolve) => {
+        fs.writeFileSync(${JSON.stringify(repairing)}, 'repairing');
+        const timer = setInterval(() => {}, 1000);
+        signal.addEventListener('abort', () => { fs.writeFileSync(${JSON.stringify(received)}, 'received'); setTimeout(() => { clearInterval(timer); fs.writeFileSync(${JSON.stringify(stopped)}, 'stopped'); resolve(); }, 150); }, { once: true });
+      });
+      return Promise.resolve();
+    }, scope));`,
+  );
+  try {
+    await waitFor(() => existsSync(repairing), "repair did not start");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    holder.child.kill("SIGTERM");
+    await waitFor(() => existsSync(received), "repair did not receive shutdown");
+    assert.equal(existsSync(lockPath), true, "lock released during repair shutdown");
+    assert.equal((await holder.closed).signal, "SIGTERM");
+    assert.equal(existsSync(stopped), true);
+    assert.equal(existsSync(lockPath), false);
+  } finally {
+    holder.child.kill("SIGKILL");
+    await holder.closed;
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("parallel build failure drains an aborting sibling before leaving the lock", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "jazz-test-artifact-failure-drain-"));
+  const lockPath = join(fixture, "lock");
+  let siblingExited = false;
+  const started = Date.now();
+  await assert.rejects(
+    withArtifactBuildLock(
+      (scope) =>
+        buildTestArtifacts((unusedCommand, unusedArgs, label, { signal }) => {
+          if (label === "release NAPI") return Promise.resolve();
+          if (label === "CLI") return Promise.reject(new Error("expected failure"));
+          if (label === "fast WASM")
+            return new Promise((unusedResolve, reject) =>
+              signal.addEventListener(
+                "abort",
+                () =>
+                  setTimeout(() => {
+                    siblingExited = true;
+                    reject(new Error("slow sibling stopped"));
+                  }, 100),
+                { once: true },
+              ),
+            );
+          return Promise.resolve();
+        }, scope),
+      lockPath,
+    ),
+    /expected failure/,
+  );
+  assert.equal(siblingExited, true);
+  assert.ok(Date.now() - started >= 90);
+  assert.equal(existsSync(lockPath), false);
+  rmSync(fixture, { recursive: true, force: true });
+});
 
 test("test artifact pipeline overlaps independent bindings and repairs NAPI only after a failed load", async () => {
   const calls = [];
@@ -143,6 +428,10 @@ test("CI uses the correctness artifact path while package builds keep release WA
   const pipeline = readFileSync(new URL("../build-test-artifacts.mjs", import.meta.url), "utf8");
   assert.match(workflow, /pnpm build:test-artifacts/);
   assert.match(packageJson, /"build:test-artifacts": "node dev\/gates\/build-test-artifacts\.mjs"/);
+  assert.match(
+    packageJson,
+    /"artifacts:unlock": "node dev\/gates\/build-test-artifacts\.mjs unlock"/,
+  );
   assert.match(
     packageJson,
     /"build:ci": "turbo run build:crates.*jazz-wasm.*jazz-napi.*jazz-tools/,
