@@ -7670,6 +7670,43 @@ fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<RocksDbStorage
     .unwrap()
 }
 
+/// Client writes stage locally before the authority evaluates their policy.
+/// Keep this assertion at the sync boundary so tests do not accidentally
+/// reintroduce synchronous local policy enforcement for ordinary writes.
+fn assert_authority_rejects_staged_write(
+    client: &Db<RocksDbStorage>,
+    server: &CoreDb,
+    write: &WriteHandle<RocksDbStorage>,
+) {
+    assert_eq!(
+        write.write_state().unwrap(),
+        WriteState {
+            fate: Fate::Pending,
+            durability: DurabilityTier::Local,
+        },
+        "the client must stage the write locally until the authority assigns its fate"
+    );
+    assert_eq!(
+        block_on(write.wait(DurabilityTier::Local)).unwrap(),
+        write.mergeable_tx_id()
+    );
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    assert_eq!(
+        write.write_state().unwrap(),
+        WriteState {
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            durability: DurabilityTier::Local,
+        },
+        "only the authority may reject a staged write for policy authorization"
+    );
+    let error = block_on(write.wait(DurabilityTier::Global)).unwrap_err();
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+}
+
 #[test]
 fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
     let base = owner_write_schema();
@@ -11861,29 +11898,13 @@ fn db_sync_surface_blob_values_follow_ordinary_row_permissions() {
     let mallory = AuthorId::from_bytes([0xc3; 16]);
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let alice_db = open_db(0xa1, alice, &schema);
+    let alice_observer_db = open_db(0xa2, alice, &schema);
     let bob_db = open_db(0xb2, bob, &schema);
     let mallory_db = open_db(0xc3, mallory, &schema);
-
-    let spoof = mallory_db.insert(
-        "assets",
-        BTreeMap::from([
-            ("owner".to_owned(), Value::Uuid(alice.0)),
-            (
-                "mime_type".to_owned(),
-                Value::String("application/octet-stream".to_owned()),
-            ),
-            ("data".to_owned(), Value::Bytes(b"spoofed".to_vec())),
-        ]),
-    );
-    match spoof {
-        Ok(_) => panic!("foreign owner blob insert should be rejected locally"),
-        Err(error) => assert_eq!(error.code, ErrorCode::WriteRejected),
-    }
 
     let (alice_transport, server_alice_transport) = duplex();
     let _alice_upstream = alice_db.connect_upstream(alice_transport);
     let _alice_subscriber = server.accept_subscriber(server_alice_transport, alice);
-
     let payload = b"file-like payload stored as an ordinary row value"
         .repeat(64)
         .to_vec();
@@ -11908,7 +11929,7 @@ fn db_sync_surface_blob_values_follow_ordinary_row_permissions() {
 
     let query = Query::from("assets");
     let table = &schema.tables[0];
-    let alice_rows = prepared_all(&alice_db, &query, global_subscribe_opts());
+    let alice_rows = prepared_read(&alice_db, &query);
     assert_eq!(alice_rows.len(), 1);
     assert_eq!(alice_rows[0].row_uuid(), asset);
     let Some(Value::Bytes(handle)) = alice_rows[0].cell(table, "data") else {
@@ -11925,6 +11946,50 @@ fn db_sync_surface_blob_values_follow_ordinary_row_permissions() {
     let mut subscription = prepared_subscribe(&bob_db, &query, edge_subscribe_opts()).unwrap();
     assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
     assert!(prepared_all(&bob_db, &query, edge_subscribe_opts()).is_empty());
+
+    let (observer_transport, server_observer_transport) = duplex();
+    let _observer_upstream = alice_observer_db.connect_upstream(observer_transport);
+    let _observer_subscriber = server.accept_subscriber(server_observer_transport, alice);
+    let mut observer_subscription =
+        prepared_subscribe(&alice_observer_db, &query, edge_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(observer_subscription.next_event()).unwrap()).is_empty());
+    alice_observer_db.tick().unwrap();
+    server.tick().unwrap();
+    alice_observer_db.tick().unwrap();
+    let (added, updated, removed) =
+        delta_rows(block_on(observer_subscription.next_event()).unwrap());
+    assert_eq!(row_ids(&added), vec![asset]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+
+    let (mallory_transport, server_mallory_transport) = duplex();
+    let _mallory_upstream = mallory_db.connect_upstream(mallory_transport);
+    let _mallory_subscriber = server.accept_subscriber(server_mallory_transport, mallory);
+    let spoof = mallory_db
+        .insert(
+            "assets",
+            BTreeMap::from([
+                ("owner".to_owned(), Value::Uuid(alice.0)),
+                (
+                    "mime_type".to_owned(),
+                    Value::String("application/octet-stream".to_owned()),
+                ),
+                ("data".to_owned(), Value::Bytes(b"spoofed".to_vec())),
+            ]),
+        )
+        .unwrap();
+    assert_authority_rejects_staged_write(&mallory_db, &server, &spoof);
+    assert!(
+        prepared_read(&mallory_db, &query).is_empty(),
+        "the rejected asset must not remain visible in Mallory's local view"
+    );
+    alice_observer_db.tick().unwrap();
+    let observer_rows = prepared_read(&alice_observer_db, &query);
+    assert_eq!(observer_rows.len(), 1);
+    assert_eq!(observer_rows[0].row_uuid(), asset);
+    let server_rows = server.read(&query).unwrap();
+    assert_eq!(server_rows.len(), 1);
+    assert_eq!(server_rows[0].row_uuid(), asset);
 }
 
 #[test]
@@ -13828,9 +13893,10 @@ fn inherited_child_insert_uses_parent_update_where_old_only() {
     let schema = inherited_insert_policy_schema();
     let member = AuthorId::from_bytes([0x21; 16]);
     let other = AuthorId::from_bytes([0x22; 16]);
+    let server = open_core(0x65, AuthorId::SYSTEM, &schema);
     let member_db = open_db(0x66, member, &schema);
     let parent = row(0xf1);
-    member_db
+    server
         .insert_with_id(
             "parents",
             parent,
@@ -13841,30 +13907,40 @@ fn inherited_child_insert_uses_parent_update_where_old_only() {
         )
         .unwrap();
 
-    member_db
+    let (member_transport, server_member_transport) = duplex();
+    let _member_upstream = member_db.connect_upstream(member_transport);
+    let _member_subscriber = server.accept_subscriber(server_member_transport, member);
+    let allowed = member_db
         .insert_with_id("children", row(0xf2), child_insert_cells(parent, "allowed"))
         .unwrap();
+    member_db.tick().unwrap();
+    server.tick().unwrap();
+    member_db.tick().unwrap();
+    assert_eq!(
+        block_on(allowed.wait(DurabilityTier::Global)).unwrap(),
+        allowed.mergeable_tx_id()
+    );
+    assert_eq!(
+        prepared_read(&member_db, &Query::from("children"))[0].row_uuid(),
+        allowed.row_uuid()
+    );
 
     let other_db = open_db(0x67, other, &schema);
-    other_db
-        .insert_with_id(
-            "parents",
-            parent,
-            BTreeMap::from([
-                ("owner".to_owned(), Value::Uuid(member.0)),
-                ("locked".to_owned(), Value::Bool(true)),
-            ]),
-        )
+    let (other_transport, server_other_transport) = duplex();
+    let _other_upstream = other_db.connect_upstream(other_transport);
+    let _other_subscriber = server.accept_subscriber(server_other_transport, other);
+    let denied = other_db
+        .insert_with_id("children", row(0xf3), child_insert_cells(parent, "denied"))
         .unwrap();
-    let err = match other_db.insert_with_id(
-        "children",
-        row(0xf3),
-        child_insert_cells(parent, "denied"),
-    ) {
-        Ok(_) => panic!("child insert should be rejected when parent update_using denies"),
-        Err(err) => err,
-    };
-    assert_eq!(err.code, ErrorCode::WriteRejected);
+    assert_authority_rejects_staged_write(&other_db, &server, &denied);
+    let other_rows = prepared_read(&other_db, &Query::from("children"));
+    assert!(
+        other_rows.is_empty(),
+        "the rejected child must roll back locally"
+    );
+    let rows = server.read(&Query::from("children")).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), allowed.row_uuid());
 }
 
 fn seed_customer_resource_base(server: &CoreDb) {
@@ -14996,11 +15072,16 @@ fn session_delete_uses_current_row_for_owner_write_policy() {
     client.tick().unwrap();
     block_on(write.wait(DurabilityTier::Global)).unwrap();
 
-    let bad_delete = match client.delete_for_identity(other_author, "todos", row) {
-        Ok(_) => panic!("foreign owner delete should be rejected locally"),
-        Err(error) => error,
-    };
-    assert_eq!(bad_delete.code, ErrorCode::WriteRejected);
+    let bad_delete = client
+        .delete_for_identity(other_author, "todos", row)
+        .unwrap();
+    assert_authority_rejects_staged_write(&client, &server, &bad_delete);
+    let client_rows = prepared_read(&client, &Query::from("todos"));
+    assert_eq!(client_rows.len(), 1);
+    assert_eq!(client_rows[0].row_uuid(), row);
+    let rows = server.read(&Query::from("todos")).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), row);
 
     let delete = client
         .delete_for_identity(session_author, "todos", row)
