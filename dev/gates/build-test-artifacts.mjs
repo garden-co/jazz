@@ -9,8 +9,8 @@
  * future package build cannot silently change test semantics.
  */
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { linkSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, isAbsolute, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
@@ -24,9 +24,26 @@ function sharedGitDirectory(cwd = root) {
   return isAbsolute(directory) ? directory : resolve(cwd, directory);
 }
 
-function ownerIsAlive(pid) {
+function processStartIdentity(pid = process.pid) {
+  // Linux supplies a monotonic process-start tick, making PID reuse
+  // distinguishable. Other platforms deliberately fall back to conservative
+  // live-PID handling rather than guessing from locale-specific tooling.
+  if (process.platform !== "linux") return undefined;
   try {
-    process.kill(pid, 0);
+    return readFileSync(`/proc/${pid}/stat`, "utf8").trim().split(" ")[21];
+  } catch (error) {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function ownerIsAlive(owner) {
+  try {
+    process.kill(owner.pid, 0);
+    if (owner.processStartIdentity) {
+      const actual = processStartIdentity(owner.pid);
+      if (actual && actual !== owner.processStartIdentity) return false;
+    }
     return true;
   } catch (error) {
     // EPERM means the process exists but belongs to another user. This is
@@ -39,9 +56,10 @@ function ownerIsAlive(pid) {
 
 /**
  * The common Git directory is shared by every linked worktree in a clone.
- * Put the lock there rather than in a checkout so separately checked-out
- * branches serialize only when they can share Cargo/package state. A test
- * hook overrides the exact path without exposing a real checkout in receipts.
+ * Put the lock there rather than in a checkout: linked worktrees share this
+ * clone's default Cargo target and generated package outputs. Separate clones
+ * do not share those resources and intentionally do not contend. A test hook
+ * overrides the exact path without exposing a real checkout in receipts.
  */
 export function artifactLockPath(cwd = root) {
   return (
@@ -52,21 +70,19 @@ export function artifactLockPath(cwd = root) {
 
 function readLockOwner(lockPath) {
   try {
-    return JSON.parse(readFileSync(resolve(lockPath, "owner.json"), "utf8"));
+    return JSON.parse(readFileSync(lockPath, "utf8"));
   } catch (error) {
     if (error.code === "ENOENT") return undefined;
-    throw new Error(
-      `test-artifacts: lock at ${lockPath} has unreadable owner metadata: ${error.message}`,
-    );
+    throw new Error(`test-artifacts: lock has unreadable owner metadata: ${error.message}`);
   }
 }
 
 function lockError(lockPath, owner) {
   const started = typeof owner.startedAt === "string" ? owner.startedAt : "unknown";
-  const cwd = typeof owner.cwd === "string" ? owner.cwd : "unknown";
+  const cwd = typeof owner.cwd === "string" ? basename(owner.cwd) : "unknown";
   return new Error(
     `test-artifacts: another artifact build is active (pid ${owner.pid}, cwd ${cwd}, started ${started}). ` +
-      `Wait for it to finish, or if it is no longer running retry to recover its stale lock. Lock: ${lockPath}`,
+      "Wait for it to finish, or if it is no longer running retry to recover its stale lock.",
   );
 }
 
@@ -76,41 +92,62 @@ export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
     pid: process.pid,
     cwd: process.cwd(),
     startedAt: new Date().toISOString(),
+    processStartIdentity: processStartIdentity(),
     token: `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   };
+  const staging = `${lockPath}.acquiring-${owner.token}`;
   try {
-    mkdirSync(lockPath);
+    writeFileSync(staging, `${JSON.stringify(owner)}\n`, { mode: 0o600, flag: "wx" });
   } catch (error) {
-    if (error.code !== "EEXIST") throw error;
-    const existing = readLockOwner(lockPath);
-    if (!existing || !Number.isInteger(existing.pid) || existing.pid <= 0)
-      throw new Error(
-        `test-artifacts: lock at ${lockPath} has no usable owner metadata; refusing to delete it.`,
-      );
-    if (ownerIsAlive(existing.pid)) throw lockError(lockPath, existing);
-    // Only a positively dead owner is safe to recover. Compare the metadata
-    // again before removal so a newly acquired lock can never be deleted.
-    const unchanged = readLockOwner(lockPath);
-    if (unchanged?.token !== existing.token)
-      throw new Error(
-        `test-artifacts: lock at ${lockPath} changed while checking it; retry safely.`,
-      );
-    rmSync(lockPath, { recursive: true, force: false });
-    try {
-      mkdirSync(lockPath);
-    } catch (retryError) {
-      if (retryError.code === "EEXIST") {
-        const retryOwner = readLockOwner(lockPath);
-        if (retryOwner) throw lockError(lockPath, retryOwner);
-      }
-      throw retryError;
-    }
-  }
-  try {
-    writeFileSync(resolve(lockPath, "owner.json"), `${JSON.stringify(owner)}\n`, { mode: 0o600 });
-  } catch (error) {
-    rmSync(lockPath, { recursive: true, force: true });
+    rmSync(staging, { force: true });
     throw error;
+  }
+  for (;;) {
+    try {
+      // Hard-linking the fully-written receipt is atomic and unlike rename
+      // never replaces an existing live or malformed lock on POSIX/Windows.
+      linkSync(staging, lockPath);
+      rmSync(staging, { force: true });
+      break;
+    } catch (error) {
+      if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") {
+        rmSync(staging, { force: true });
+        throw error;
+      }
+    }
+    const existing = readLockOwner(lockPath);
+    if (!existing || !Number.isInteger(existing.pid) || existing.pid <= 0) {
+      rmSync(staging, { force: true });
+      throw new Error("test-artifacts: lock has no usable owner metadata; refusing to delete it.");
+    }
+    if (ownerIsAlive(existing)) {
+      rmSync(staging, { force: true });
+      throw lockError(lockPath, existing);
+    }
+    // rename is atomic on all supported local filesystems. Exactly one stale
+    // recovery contender can quarantine the observed directory; it never
+    // recursively removes the canonical name after observing it.
+    const quarantine = `${lockPath}.stale-${owner.token}`;
+    try {
+      renameSync(lockPath, quarantine);
+    } catch (renameError) {
+      if (renameError.code === "ENOENT" || renameError.code === "EEXIST") continue;
+      rmSync(staging, { force: true });
+      throw renameError;
+    }
+    try {
+      const quarantined = readLockOwner(quarantine);
+      if (quarantined?.token !== existing.token || ownerIsAlive(quarantined))
+        throw new Error(
+          "test-artifacts: stale lock changed while quarantining it; refusing to remove it.",
+        );
+      rmSync(quarantine, { force: false });
+    } catch (quarantineError) {
+      // Preserve an ambiguous quarantine for inspection. Its distinct name
+      // cannot block a fresh canonical acquisition.
+      rmSync(staging, { force: true });
+      throw quarantineError;
+    }
   }
   console.log(`test-artifacts: acquired shared artifact lock (pid ${owner.pid})`);
   let released = false;
@@ -121,7 +158,7 @@ export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
       const current = readLockOwner(lockPath);
       if (current?.token !== owner.token)
         throw new Error(`test-artifacts: lock ownership changed before release at ${lockPath}`);
-      rmSync(lockPath, { recursive: true, force: false });
+      rmSync(lockPath, { force: false });
       console.log("test-artifacts: released shared artifact lock");
     },
   };
@@ -129,28 +166,56 @@ export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
 
 export async function withArtifactBuildLock(run, lockPath = artifactLockPath()) {
   const lock = acquireArtifactBuildLock(lockPath);
-  let signal;
+  const scope = createBuildScope();
+  let receivedSignal;
+  let signalShutdown;
   const releaseForSignal = (received) => {
-    signal = received;
-    try {
+    if (signalShutdown) return;
+    receivedSignal = received;
+    signalShutdown = (async () => {
+      scope.abort(new Error(`received ${received}`));
+      await scope.drain();
       lock.release();
-    } finally {
-      // Let command()'s handler stop child process groups first, then restore
-      // normal signal semantics after the lock has been made available.
-      setImmediate(() => process.kill(process.pid, received));
-    }
+      process.kill(process.pid, received);
+    })().catch((error) => {
+      console.error(`test-artifacts: failed to shut down cleanly: ${error.message}`);
+      process.exitCode = 1;
+    });
   };
   const onSigint = () => releaseForSignal("SIGINT");
   const onSigterm = () => releaseForSignal("SIGTERM");
   process.once("SIGINT", onSigint);
   process.once("SIGTERM", onSigterm);
   try {
-    return await run();
+    return await run(scope);
   } finally {
     process.removeListener("SIGINT", onSigint);
     process.removeListener("SIGTERM", onSigterm);
-    if (!signal) lock.release();
+    if (receivedSignal) await signalShutdown;
+    else {
+      await scope.drain();
+      lock.release();
+    }
   }
+}
+
+export function createBuildScope() {
+  const controller = new AbortController();
+  const active = new Set();
+  return {
+    signal: controller.signal,
+    abort(reason) {
+      if (!controller.signal.aborted) controller.abort(reason);
+    },
+    track(promise) {
+      active.add(promise);
+      promise.finally(() => active.delete(promise)).catch(() => {});
+      return promise;
+    },
+    async drain() {
+      while (active.size) await Promise.allSettled([...active]);
+    },
+  };
 }
 
 export function command(command, args, label = [command, ...args].join(" "), options = {}) {
@@ -175,8 +240,6 @@ export function command(command, args, label = [command, ...args].join(" "), opt
       settled = true;
       clearTimeout(forceKillTimer);
       signal?.removeEventListener("abort", abort);
-      process.removeListener("SIGINT", abort);
-      process.removeListener("SIGTERM", abort);
       callback();
     };
     const abort = () => {
@@ -201,8 +264,6 @@ export function command(command, args, label = [command, ...args].join(" "), opt
       }
     };
     signal?.addEventListener("abort", abort, { once: true });
-    process.once("SIGINT", abort);
-    process.once("SIGTERM", abort);
     if (signal?.aborted) abort();
     child.once("error", (error) => finish(() => reject(error)));
     child.once("exit", (status, signal) => {
@@ -221,14 +282,13 @@ export function command(command, args, label = [command, ...args].join(" "), opt
   });
 }
 
-export async function buildTestArtifacts(run = command) {
-  const controller = new AbortController();
+export async function buildTestArtifacts(run = command, scope = createBuildScope()) {
   let firstBuildError;
   const guardedRun = (command, args, label, env) =>
-    run(command, args, label, { env, signal: controller.signal }).catch((error) => {
+    scope.track(run(command, args, label, { env, signal: scope.signal })).catch((error) => {
       if (!firstBuildError) {
         firstBuildError = error;
-        controller.abort(error);
+        scope.abort(error);
       }
       throw error;
     });
@@ -245,6 +305,7 @@ export async function buildTestArtifacts(run = command) {
   try {
     await Promise.all([cli, wasm]);
   } catch (error) {
+    await scope.drain();
     throw firstBuildError ?? error;
   }
   await guardedRun("pnpm", ["--filter", "jazz-tools", "build"], "jazz-tools");
@@ -266,7 +327,7 @@ export async function buildTestArtifacts(run = command) {
     console.warn(`test-artifacts: release NAPI did not load; repairing (${error.message})`);
     // The first load failure aborts only the already-completed first phase.
     // Use a fresh controller for the bounded repair and its validation.
-    controller.abort(error);
+    scope.abort(error);
     const repairController = new AbortController();
     const repairRun = (command, args, label, env) =>
       run(command, args, label, { env, signal: repairController.signal }).catch((repairError) => {
@@ -284,7 +345,7 @@ export async function buildTestArtifacts(run = command) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  withArtifactBuildLock(buildTestArtifacts).catch((error) => {
+  withArtifactBuildLock((scope) => buildTestArtifacts(command, scope)).catch((error) => {
     console.error(`test-artifacts: ${error.message}`);
     process.exitCode = 1;
   });
