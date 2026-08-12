@@ -4956,6 +4956,15 @@ where
                     nested_payload,
                 )?;
             }
+            // Registry entries belong to a live physical column.  Leaving an
+            // entry behind for a dropped column makes otherwise identical
+            // cross-lens mappings compare unequal solely because one path had
+            // an intermediate column epoch.
+            let live_columns = columns.values().copied().collect::<BTreeSet<_>>();
+            scalar_enum_cases.retain(|column, _| live_columns.contains(column));
+            payload_enum_cases.retain(|column, _| live_columns.contains(column));
+            nested_scalar_enum_cases.retain(|column, _| live_columns.contains(column));
+            nested_payload_enum_cases.retain(|column, _| live_columns.contains(column));
             target_mapping.tables.insert(
                 table_lens.target_table.clone(),
                 TablePhysicalMapping {
