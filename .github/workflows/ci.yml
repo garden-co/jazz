@@ -130,6 +130,7 @@ jobs:
           tool: wasm-pack@0.13.1
 
       - name: Mount Turbo sticky disk
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
         uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:
           key: turbo-cache-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ runner.os }}-v1
@@ -143,6 +144,7 @@ jobs:
       - name: Build correctness-test artifacts
         run: pnpm build:test-artifacts
       - name: Mount Playwright sticky disk
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
         uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:
           key: playwright-browsers-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ runner.os }}-v1
