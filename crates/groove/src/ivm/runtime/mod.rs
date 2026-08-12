@@ -28,13 +28,13 @@ use crate::ivm::{
     FrontierSourceOp, GraphBuilder, IndexByOp, IndexSourceOp, InlineRecordsOp, IvmGraph, JoinOp,
     JoinOpKind, LiteralValue, MAX_COLLECT_BY_TREE_DEPTH, MapProjectOp, NodeDescriptor,
     NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField,
-    ProjectionExpr, RecursiveOp, Retainer, StaticScanSpec, TableSourceOp, TopByDirection,
-    TopByLimit, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp, ValueComparison,
-    VariantProjectionTarget,
+    ProjectionExpr, RecursiveEnumRemaps, RecursiveOp, Retainer, StaticScanSpec, TableSourceOp,
+    TopByDirection, TopByLimit, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp,
+    ValueComparison, VariantProjectOp, VariantProjectionTarget,
 };
 use crate::records::{
-    self, BorrowedRecord, OwnedRecord, RawProjectionField, RawProjectionScratch, RecordDescriptor,
-    Value, ValueType,
+    self, BorrowedRecord, EnumSchema, EnumValue, OwnedRecord, RawProjectionField,
+    RawProjectionScratch, RecordDescriptor, Value, ValueType,
 };
 use crate::schema::{DatabaseSchema, IndexSchema, TableSchema};
 use crate::storage::{
@@ -66,7 +66,7 @@ pub(super) struct VariantProjectionKey {
 #[derive(Clone, Debug)]
 pub(super) struct VariantProjection {
     output: RecordDescriptor,
-    cases: HashMap<u64, VariantProjectionCase>,
+    cases: HashMap<u32, VariantProjectionCase>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,16 +75,60 @@ enum VariantProjectionCase {
         source: RecordDescriptor,
         project: MapProjectOp,
         raw_projection: Option<Arc<[RawProjectionField]>>,
+        /// A Jazz schema-read boundary may exclude rows containing a case the
+        /// target schema cannot represent. This is deliberately narrower than
+        /// a general projection error: malformed values still fail loudly.
+        omit_unrepresentable_enum_rows: bool,
     },
     Ignore {
         source: RecordDescriptor,
+    },
+    Enum {
+        source: RecordDescriptor,
+        tag: u32,
+        payload: RecordDescriptor,
+        project: MapProjectOp,
+        raw_projection: Option<Arc<[RawProjectionField]>>,
     },
 }
 
 impl VariantProjectionCase {
     fn source(&self) -> RecordDescriptor {
         match self {
-            Self::Project { source, .. } | Self::Ignore { source } => *source,
+            Self::Project { source, .. } | Self::Ignore { source } | Self::Enum { source, .. } => {
+                *source
+            }
+        }
+    }
+
+    /// A raw source case may refresh after live registry evolution only when
+    /// its projection program is unchanged and its input descriptor advances
+    /// append-only. In particular, this rejects a replacement mapping, a
+    /// dropped/renamed field, and an enum payload/type mutation.
+    fn can_refresh_registries_to(&self, next: &Self) -> bool {
+        match (self, next) {
+            (
+                Self::Project {
+                    source: current_source,
+                    project: current_project,
+                    omit_unrepresentable_enum_rows: current_omit,
+                    ..
+                },
+                Self::Project {
+                    source: next_source,
+                    project: next_project,
+                    omit_unrepresentable_enum_rows: next_omit,
+                    ..
+                },
+            ) => {
+                current_omit == next_omit
+                    && current_project == next_project
+                    && current_source.can_evolve_registry_to(next_source)
+            }
+            (Self::Ignore { source: current }, Self::Ignore { source: next }) => {
+                current.can_evolve_registry_to(next)
+            }
+            _ => false,
         }
     }
 }
@@ -143,7 +187,7 @@ impl IvmRuntime {
         let table_descriptors = schema
             .tables
             .iter()
-            .filter(|table| !table.has_schema_variants())
+            .filter(|table| !table.has_variants())
             .map(|table| (table.name.clone(), table.record_schema()))
             .collect();
         let mut runtime = Self {
@@ -207,7 +251,7 @@ impl IvmRuntime {
         if self.schema.table(&table.name).is_some() {
             return Err(IvmRuntimeError::TableAlreadyExists(table.name));
         }
-        if !table.has_schema_variants() {
+        if !table.has_variants() {
             self.table_descriptors
                 .insert(table.name.clone(), table.record_schema());
         }
@@ -217,11 +261,11 @@ impl IvmRuntime {
         Ok(())
     }
 
-    pub(crate) fn register_table_schema_version_with_columns(
+    pub(crate) fn register_table_variant_with_columns(
         &mut self,
         table: &str,
         columns: Vec<crate::schema::ColumnSchema>,
-        schema_version: crate::schema::TableSchemaVersion,
+        variant_tag: crate::schema::TableVariant,
     ) -> Result<(), IvmRuntimeError> {
         let table_schema = self
             .schema
@@ -229,13 +273,10 @@ impl IvmRuntime {
             .iter_mut()
             .find(|candidate| candidate.name == table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(table.to_owned()))?;
-        if table_schema
-            .schema_version(schema_version.version)
-            .is_some()
-        {
-            return Err(IvmRuntimeError::DuplicateTableSchemaVersion {
+        if table_schema.variant(variant_tag.tag).is_some() {
+            return Err(IvmRuntimeError::DuplicateTableVariant {
                 table: table.to_owned(),
-                version: schema_version.version,
+                version: u64::from(variant_tag.tag),
             });
         }
         for column in columns {
@@ -251,11 +292,85 @@ impl IvmRuntime {
             }
             table_schema.columns.push(column);
         }
-        let version = schema_version.version;
-        table_schema.schema_versions.push(schema_version);
+        let version = variant_tag.tag;
+        for field in &variant_tag.payload_fields {
+            field
+                .value_type
+                .collect_variant_registries(&mut table_schema.value_variant_registries);
+        }
+        table_schema.variants.push(variant_tag);
         let table_schema = table_schema.clone();
         for index in &table_schema.indices {
             self.register_schema_index_variant_case(&table_schema, index, version)?;
+        }
+        self.invalidate_table_inputs(table);
+        Ok(())
+    }
+
+    pub(crate) fn evolve_table_variant_registries(
+        &mut self,
+        table: &str,
+        columns: &[crate::schema::ColumnSchema],
+    ) -> Result<(), IvmRuntimeError> {
+        let table_schema = self
+            .schema
+            .tables
+            .iter_mut()
+            .find(|candidate| candidate.name == table)
+            .ok_or_else(|| IvmRuntimeError::TableNotFound(table.to_owned()))?;
+        for desired in columns {
+            let Some(existing) = table_schema
+                .columns
+                .iter()
+                .find(|column| column.name == desired.name)
+            else {
+                continue;
+            };
+            if !existing
+                .column_type
+                .can_evolve_registry_to(&desired.column_type)
+            {
+                return Err(IvmRuntimeError::TableFieldAlreadyExists {
+                    table: table.to_owned(),
+                    field: desired.name.clone(),
+                });
+            }
+            for variant in &table_schema.variants {
+                for field in &variant.payload_fields {
+                    if field.shared_column.as_deref() != Some(desired.name.as_str()) {
+                        continue;
+                    }
+                    if !field
+                        .value_type
+                        .can_evolve_registry_to(&desired.column_type)
+                    {
+                        return Err(IvmRuntimeError::TableFieldAlreadyExists {
+                            table: table.to_owned(),
+                            field: desired.name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        for desired in columns {
+            let Some(existing) = table_schema
+                .columns
+                .iter_mut()
+                .find(|column| column.name == desired.name)
+            else {
+                continue;
+            };
+            existing.column_type = desired.column_type.clone();
+            for variant in &mut table_schema.variants {
+                for field in &mut variant.payload_fields {
+                    if field.shared_column.as_deref() == Some(desired.name.as_str()) {
+                        field.value_type = desired.column_type.clone();
+                    }
+                }
+            }
+            desired
+                .column_type
+                .collect_variant_registries(&mut table_schema.value_variant_registries);
         }
         self.invalidate_table_inputs(table);
         Ok(())
@@ -280,24 +395,20 @@ impl IvmRuntime {
             .indices
             .push(index.clone());
         let table_schema = self.schema.tables[table_position].clone();
-        if table_schema.has_schema_variants() {
+        if table_schema.has_variants() {
             let target = VariantProjectionTarget::SchemaIndex(index.name.clone());
             self.define_variant_projection_target(
                 table,
                 target,
                 schema_index_input_descriptor(&table_schema, &index)?,
             )?;
-            for schema_version in &table_schema.schema_versions {
-                self.register_schema_index_variant_case(
-                    &table_schema,
-                    &index,
-                    schema_version.version,
-                )?;
+            for variant_tag in &table_schema.variants {
+                self.register_schema_index_variant_case(&table_schema, &index, variant_tag.tag)?;
             }
         }
         let persist = self.add_dedup_schema_index(&table_schema, &index)?;
         self.invalidate_table_inputs(table);
-        self.hydration_snapshot(persist, storage)?;
+        self.hydration_snapshot(persist, storage, HydrationMode::Ordinary)?;
         Ok(())
     }
 
@@ -334,7 +445,11 @@ impl IvmRuntime {
                     cases: HashMap::default(),
                 });
             }
-            std::collections::hash_map::Entry::Occupied(entry) if entry.get().output == output => {}
+            std::collections::hash_map::Entry::Occupied(mut entry)
+                if record_descriptors_registry_compatible(&entry.get().output, &output) =>
+            {
+                entry.get_mut().output = output;
+            }
             std::collections::hash_map::Entry::Occupied(_) => {
                 return Err(IvmRuntimeError::VariantProjectionOutputMismatch {
                     table: table.to_owned(),
@@ -349,28 +464,190 @@ impl IvmRuntime {
         &mut self,
         table: &str,
         target: &str,
-        schema_version: u64,
+        variant_tag: u32,
         fields: &[ProjectField],
     ) -> Result<(), IvmRuntimeError> {
         self.register_variant_projection_target_case(
             table,
             VariantProjectionTarget::Named(target.to_owned()),
-            schema_version,
+            variant_tag,
             Some(fields),
+            false,
+            false,
         )
+    }
+
+    /// Refresh a raw variant source descriptor after append-only enum registry
+    /// evolution. The existing mapping must remain byte-for-byte identical.
+    pub(crate) fn refresh_variant_projection_case_for_registry_evolution(
+        &mut self,
+        table: &str,
+        target: &str,
+        variant_tag: u32,
+        fields: &[ProjectField],
+    ) -> Result<(), IvmRuntimeError> {
+        self.register_variant_projection_target_case(
+            table,
+            VariantProjectionTarget::Named(target.to_owned()),
+            variant_tag,
+            Some(fields),
+            false,
+            true,
+        )
+    }
+
+    /// Register a schema-read case whose unrepresentable enum values are
+    /// source-local row exclusions. This keeps old-client compatibility at
+    /// the source boundary rather than swallowing errors downstream.
+    pub(crate) fn register_variant_projection_case_omitting_unrepresentable_enums(
+        &mut self,
+        table: &str,
+        target: &str,
+        variant_tag: u32,
+        fields: &[ProjectField],
+    ) -> Result<(), IvmRuntimeError> {
+        self.register_variant_projection_target_case(
+            table,
+            VariantProjectionTarget::Named(target.to_owned()),
+            variant_tag,
+            Some(fields),
+            true,
+            false,
+        )
+    }
+
+    /// Append a physical source case that constructs one stable logical enum
+    /// value. The outer projection descriptor stays fixed; the selected enum
+    /// case owns the dense payload descriptor used for this source layout.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn register_variant_projection_enum_case(
+        &mut self,
+        table: &str,
+        target: &str,
+        variant_tag: u32,
+        enum_field: &str,
+        enum_schema: &EnumSchema,
+        enum_case: &str,
+        fields: &[ProjectField],
+    ) -> Result<(), IvmRuntimeError> {
+        let source = self
+            .schema
+            .table(table)
+            .ok_or_else(|| IvmRuntimeError::TableNotFound(table.to_owned()))?
+            .record_schema_for_variant(variant_tag)
+            .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
+                table: table.to_owned(),
+                version: u64::from(variant_tag),
+            })?;
+        let key = VariantProjectionKey {
+            table: table.to_owned(),
+            target: VariantProjectionTarget::Named(target.to_owned()),
+        };
+        let projection = self.variant_projections.get_mut(&key).ok_or_else(|| {
+            IvmRuntimeError::VariantProjectionNotFound {
+                table: table.to_owned(),
+                target: target.to_owned(),
+            }
+        })?;
+        let output_fields = projection.output.fields();
+        let Some(union_idx) = projection.output.field_index(enum_field) else {
+            return Err(IvmRuntimeError::VariantProjectionEnumFieldNotFound {
+                table: table.to_owned(),
+                target: target.to_owned(),
+                field: enum_field.to_owned(),
+            });
+        };
+        if output_fields.len() != 1 {
+            return Err(
+                IvmRuntimeError::VariantProjectionEnumOutputMustBeSingleField {
+                    table: table.to_owned(),
+                    target: target.to_owned(),
+                },
+            );
+        }
+        let ValueType::Enum(output_schema) = &output_fields[union_idx].value_type else {
+            return Err(IvmRuntimeError::VariantProjectionEnumFieldTypeMismatch {
+                table: table.to_owned(),
+                target: target.to_owned(),
+                field: enum_field.to_owned(),
+            });
+        };
+        if output_schema.as_ref() != enum_schema {
+            return Err(IvmRuntimeError::VariantProjectionEnumSchemaMismatch {
+                table: table.to_owned(),
+                target: target.to_owned(),
+                field: enum_field.to_owned(),
+            });
+        }
+        let tag = enum_schema.tag(enum_case)?;
+        let payload = enum_schema.case(tag)?.payload;
+        let projected = project_descriptor(&source, fields)?;
+        if projected != payload {
+            return Err(IvmRuntimeError::VariantProjectionEnumPayloadMismatch {
+                table: table.to_owned(),
+                target: target.to_owned(),
+                case: enum_case.to_owned(),
+            });
+        }
+        let mapping = fields
+            .iter()
+            .filter_map(|field| {
+                field.source().map(|source_field| {
+                    resolve_field_ref(&source, source_field).map(|idx| (0, idx))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let project = MapProjectOp {
+            expressions: fields
+                .iter()
+                .map(|field| {
+                    project_field_expr(&source, field).map(|expression| ProjectionExpr {
+                        expression,
+                        output_name: Some(field.output_name.clone()),
+                    })
+                })
+                .collect::<Result<Vec<_>, IvmRuntimeError>>()?,
+            mapping,
+        };
+        let raw_projection = raw_projection_fields(&project, &source, payload)?
+            .map(Arc::<[RawProjectionField]>::from);
+        let case = VariantProjectionCase::Enum {
+            source,
+            tag,
+            payload,
+            project,
+            raw_projection,
+        };
+        match projection.cases.entry(variant_tag) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(case);
+            }
+            std::collections::hash_map::Entry::Occupied(entry) if entry.get() == &case => {}
+            std::collections::hash_map::Entry::Occupied(_) => {
+                return Err(IvmRuntimeError::VariantProjectionCaseAlreadyRegistered {
+                    table: table.to_owned(),
+                    target: target.to_owned(),
+                    version: u64::from(variant_tag),
+                });
+            }
+        }
+        self.invalidate_table_inputs(table);
+        Ok(())
     }
 
     pub(crate) fn register_variant_projection_ignore_case(
         &mut self,
         table: &str,
         target: &str,
-        schema_version: u64,
+        variant_tag: u32,
     ) -> Result<(), IvmRuntimeError> {
         self.register_variant_projection_target_case(
             table,
             VariantProjectionTarget::Named(target.to_owned()),
-            schema_version,
+            variant_tag,
             None,
+            false,
+            false,
         )
     }
 
@@ -378,7 +655,7 @@ impl IvmRuntime {
         &self,
         table: &str,
         target: &str,
-        record: &records::VersionedRecord,
+        record: &records::VariantRecord,
     ) -> Result<Option<OwnedRecord>, IvmRuntimeError> {
         let key = VariantProjectionKey {
             table: table.to_owned(),
@@ -390,29 +667,23 @@ impl IvmRuntime {
                 target: target.to_owned(),
             }
         })?;
-        let case = projection
-            .cases
-            .get(&record.schema_version())
-            .ok_or_else(|| IvmRuntimeError::VariantProjectionCaseNotFound {
+        let case = projection.cases.get(&record.variant_tag()).ok_or_else(|| {
+            IvmRuntimeError::VariantProjectionCaseNotFound {
                 table: table.to_owned(),
                 target: target.to_owned(),
-                version: record.schema_version(),
-            })?;
-        if case.source() != *record.record().descriptor() {
+                version: u64::from(record.variant_tag()),
+            }
+        })?;
+        if !case
+            .source()
+            .registry_compatible_with(record.record().descriptor())
+        {
             return Err(IvmRuntimeError::VariantProjectionSourceMismatch {
                 table: table.to_owned(),
                 target: target.to_owned(),
-                version: record.schema_version(),
+                version: u64::from(record.variant_tag()),
             });
         }
-        let VariantProjectionCase::Project {
-            project,
-            raw_projection,
-            ..
-        } = case
-        else {
-            return Ok(None);
-        };
         let input = RecordDeltas {
             descriptor: *record.record().descriptor(),
             deltas: vec![RecordDelta {
@@ -420,17 +691,38 @@ impl IvmRuntime {
                 weight: 1,
             }],
         };
-        let projected = NodeState::update_map_project(
-            project,
-            projection.output,
-            &input,
-            raw_projection.as_deref(),
-        )?;
-        let record = projected
-            .deltas
-            .into_iter()
-            .next()
-            .ok_or(IvmRuntimeError::GraphOutputMismatch)?;
+        let projected = match case {
+            VariantProjectionCase::Project {
+                project,
+                raw_projection,
+                omit_unrepresentable_enum_rows,
+                ..
+            } => NodeState::update_map_project(
+                project,
+                projection.output,
+                &input,
+                raw_projection.as_deref(),
+                *omit_unrepresentable_enum_rows,
+            )?,
+            VariantProjectionCase::Enum {
+                tag,
+                payload,
+                project,
+                raw_projection,
+                ..
+            } => NodeState::update_variant_enum_project(
+                *tag,
+                *payload,
+                project,
+                projection.output,
+                &input,
+                raw_projection.as_deref(),
+            )?,
+            VariantProjectionCase::Ignore { .. } => return Ok(None),
+        };
+        let Some(record) = projected.deltas.into_iter().next() else {
+            return Ok(None);
+        };
         Ok(Some(OwnedRecord::new(
             record.record.to_vec(),
             projection.output,
@@ -441,17 +733,19 @@ impl IvmRuntime {
         &mut self,
         table: &str,
         target: VariantProjectionTarget,
-        schema_version: u64,
+        variant_tag: u32,
         fields: Option<&[ProjectField]>,
+        omit_unrepresentable_enum_rows: bool,
+        allow_registry_refresh: bool,
     ) -> Result<(), IvmRuntimeError> {
         let source = self
             .schema
             .table(table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(table.to_owned()))?
-            .record_schema_for_version(schema_version)
-            .ok_or_else(|| IvmRuntimeError::UnknownTableSchemaVersion {
+            .record_schema_for_variant(variant_tag)
+            .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
                 table: table.to_owned(),
-                version: schema_version,
+                version: u64::from(variant_tag),
             })?;
         let key = VariantProjectionKey {
             table: table.to_owned(),
@@ -463,9 +757,28 @@ impl IvmRuntime {
                 target: variant_projection_target_name(&target).to_owned(),
             }
         })?;
+        // An explicitly typed literal is also a descriptor boundary: it does
+        // not copy the source cell at all, so a physical enum registry in the
+        // input cannot leak through it.  Jazz uses this for requirement-none
+        // auxiliary sources, whose enum cells are deliberately typed-null.
+        let allow_recursive_replacement = fields.is_some_and(|fields| {
+            fields.iter().any(|field| {
+                matches!(
+                    field.expression,
+                    ProjectExpr::RecursiveEnumRemap { .. } | ProjectExpr::TypedLiteral { .. }
+                )
+            })
+        });
         let case = if let Some(fields) = fields {
             let projected = project_descriptor(&source, fields)?;
-            if projected != projection.output {
+            // A recursive enum projector is an explicit descriptor boundary:
+            // its source and output may intentionally name different enum
+            // registries. The operation validates and re-encodes the values
+            // against the fixed output descriptor at execution time, so the
+            // usual raw-descriptor compatibility shortcut is inapplicable.
+            if !allow_recursive_replacement
+                && !record_descriptors_registry_compatible(&projected, &projection.output)
+            {
                 return Err(IvmRuntimeError::VariantProjectionOutputMismatch {
                     table: table.to_owned(),
                     target: variant_projection_target_name(&target).to_owned(),
@@ -497,30 +810,48 @@ impl IvmRuntime {
                 source,
                 project,
                 raw_projection,
+                omit_unrepresentable_enum_rows,
             }
         } else {
             VariantProjectionCase::Ignore { source }
         };
-        match projection.cases.entry(schema_version) {
+        let changed = match projection.cases.entry(variant_tag) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(case);
+                true
             }
-            std::collections::hash_map::Entry::Occupied(entry) if entry.get() == &case => {}
+            std::collections::hash_map::Entry::Occupied(entry) if entry.get() == &case => false,
+            std::collections::hash_map::Entry::Occupied(mut entry)
+                if allow_recursive_replacement =>
+            {
+                // The physical registry can append while this authored target
+                // stays fixed. Refresh its non-total tag map in place.
+                entry.insert(case);
+                true
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry)
+                if allow_registry_refresh && entry.get().can_refresh_registries_to(&case) =>
+            {
+                entry.insert(case);
+                true
+            }
             std::collections::hash_map::Entry::Occupied(_) => {
                 return Err(IvmRuntimeError::VariantProjectionCaseAlreadyRegistered {
                     table: table.to_owned(),
                     target: variant_projection_target_name(&target).to_owned(),
-                    version: schema_version,
+                    version: u64::from(variant_tag),
                 });
             }
+        };
+        if changed {
+            self.invalidate_table_inputs(table);
         }
-        self.invalidate_table_inputs(table);
         Ok(())
     }
 
     fn define_schema_index_variant_projections(&mut self) -> Result<(), IvmRuntimeError> {
         for table in self.schema.tables.clone() {
-            if !table.has_schema_variants() {
+            if !table.has_variants() {
                 continue;
             }
             for index in &table.indices {
@@ -530,8 +861,8 @@ impl IvmRuntime {
                     target,
                     schema_index_input_descriptor(&table, index)?,
                 )?;
-                for schema_version in &table.schema_versions {
-                    self.register_schema_index_variant_case(&table, index, schema_version.version)?;
+                for variant_tag in &table.variants {
+                    self.register_schema_index_variant_case(&table, index, variant_tag.tag)?;
                 }
             }
         }
@@ -542,32 +873,30 @@ impl IvmRuntime {
         &mut self,
         table: &TableSchema,
         index: &IndexSchema,
-        schema_version: u64,
+        variant_tag: u32,
     ) -> Result<(), IvmRuntimeError> {
-        let version = table.schema_version(schema_version).ok_or_else(|| {
-            IvmRuntimeError::UnknownTableSchemaVersion {
-                table: table.name.clone(),
-                version: schema_version,
-            }
-        })?;
-        let fields = index
-            .columns
-            .iter()
-            .all(|indexed| version.fields.contains(indexed))
-            .then(|| {
-                schema_index_input_fields(table, index).map(|fields| {
-                    fields
-                        .into_iter()
-                        .map(ProjectField::named)
-                        .collect::<Vec<_>>()
-                })
+        let version =
+            table
+                .variant(variant_tag)
+                .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
+                    table: table.name.clone(),
+                    version: u64::from(variant_tag),
+                })?;
+        let fields = schema_index_input_fields(table, index)?
+            .into_iter()
+            .map(|shared| {
+                version
+                    .payload_name_for_shared(&shared)
+                    .map(|local| ProjectField::renamed(local, shared))
             })
-            .transpose()?;
+            .collect::<Option<Vec<_>>>();
         self.register_variant_projection_target_case(
             &table.name,
             VariantProjectionTarget::SchemaIndex(index.name.clone()),
-            schema_version,
+            variant_tag,
             fields.as_deref(),
+            false,
+            false,
         )
     }
 
@@ -620,13 +949,13 @@ impl IvmRuntime {
             node: output_node,
             ..
         } = self.add_dedup_graph(&graph)?;
-        let records = self.hydration_snapshot(output_node, storage);
+        let records = self.hydration_snapshot(output_node, storage, HydrationMode::Ordinary);
         for node in self.gc_ephemeral_nodes(0) {
             self.remove_node_runtime(node);
         }
         self.prune_unreferenced_arrangements();
         let records = records?;
-        if records.descriptor != output {
+        if !records.descriptor.registry_compatible_with(&output) {
             return Err(IvmRuntimeError::GraphOutputMismatch);
         }
         Ok(records)
@@ -667,7 +996,7 @@ impl IvmRuntime {
         for (sink, graph) in sinks {
             outputs.insert(sink, self.add_dedup_graph(&graph)?);
         }
-        let snapshots = self.hydration_snapshots(&outputs, storage);
+        let snapshots = self.hydration_snapshots(&outputs, storage, HydrationMode::Ordinary);
         for node in self.gc_ephemeral_nodes(0) {
             self.remove_node_runtime(node);
         }
@@ -786,7 +1115,9 @@ impl IvmRuntime {
             let mut terminal_sinks = BTreeMap::new();
             for (sink, output) in &subscription.outputs {
                 let records = evaluator.update_node(output.node)?;
-                if !records.deltas.is_empty() && records.descriptor != output.output {
+                if !records.deltas.is_empty()
+                    && !records.descriptor.registry_compatible_with(&output.output)
+                {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
                 let structured = evaluator.output_is_structured_collect_by(output.node)?;
@@ -984,12 +1315,24 @@ impl IvmRuntime {
         &mut self,
         output_node: NodeId,
         storage: &S,
+        mode: HydrationMode,
     ) -> Result<RecordDeltas, IvmRuntimeError>
     where
         S: OrderedKvStorage,
     {
         let table_deltas = snapshot_table_deltas(&self.schema, &self.graph, storage, output_node)?;
         let binding_snapshots = self.binding_snapshot_deltas();
+        let context = match mode {
+            HydrationMode::Ordinary => EvalContext::root_snapshot(),
+            // Subscription hydration must rebuild arrangements for aggregate
+            // outputs, while ordinary snapshot hydration intentionally only
+            // probes them. Keep that distinction at this policy boundary so
+            // both paths share the same frontier and memo lifecycle.
+            HydrationMode::Subscription if self.output_depends_on_aggregate(output_node)? => {
+                EvalContext::root_subscription_snapshot()
+            }
+            HydrationMode::Subscription => EvalContext::root_snapshot(),
+        };
         let mut metrics = TickMetrics::default();
         let mut evaluator = TickEvaluator {
             schema: &self.schema,
@@ -1014,7 +1357,7 @@ impl IvmRuntime {
             memo_use_clock: &mut self.memo_use_clock,
             node_meta: &mut self.node_meta,
             storage: Some(storage),
-            context: EvalContext::root_snapshot(),
+            context,
             metrics: &mut metrics,
             terminal_deltas: HashMap::default(),
             root_ordering_windows: HashMap::default(),
@@ -1031,6 +1374,7 @@ impl IvmRuntime {
         &mut self,
         outputs: &BTreeMap<String, CompiledNode>,
         storage: &S,
+        mode: HydrationMode,
     ) -> Result<MultisinkDeltas, IvmRuntimeError>
     where
         S: OrderedKvStorage,
@@ -1039,85 +1383,10 @@ impl IvmRuntime {
         for (sink, output) in outputs {
             let ordering = output
                 .root_ordering_node
-                .map(|node| self.hydration_snapshot(node, storage))
+                .map(|node| self.hydration_snapshot(node, storage, mode))
                 .transpose()?;
-            let mut records = self.hydration_snapshot(output.node, storage)?;
-            if records.descriptor != output.output {
-                return Err(IvmRuntimeError::GraphOutputMismatch);
-            }
-            if let Some(ordering) = &ordering {
-                order_terminal_snapshot(&mut records, ordering)?;
-            }
-            sinks.insert(sink.clone(), records);
-        }
-        Ok(MultisinkDeltas {
-            sinks,
-            terminal_sinks: BTreeMap::new(),
-        })
-    }
-
-    fn subscription_hydration_snapshot<S>(
-        &mut self,
-        output_node: NodeId,
-        storage: &S,
-    ) -> Result<RecordDeltas, IvmRuntimeError>
-    where
-        S: OrderedKvStorage,
-    {
-        let table_deltas = snapshot_table_deltas(&self.schema, &self.graph, storage, output_node)?;
-        let binding_snapshots = self.binding_snapshot_deltas();
-        let hydrate_arrangements = self.output_depends_on_aggregate(output_node)?;
-        let mut metrics = TickMetrics::default();
-        let mut evaluator = TickEvaluator {
-            schema: &self.schema,
-            graph: &self.graph,
-            variant_projections: &self.variant_projections,
-            table_deltas: &table_deltas,
-            binding_deltas: &[],
-            binding_snapshots: &binding_snapshots,
-            current_tick: self.current_tick,
-            operator_states: &mut self.operator_states,
-            arrangement_states: &mut self.arrangement_states,
-            eval_memo: &mut self.eval_memo,
-            eval_memo_bytes: &mut self.eval_memo_bytes,
-            table_frontiers: &self.table_frontiers,
-            binding_frontiers: &self.binding_frontiers,
-            memo_use_clock: &mut self.memo_use_clock,
-            node_meta: &mut self.node_meta,
-            storage: Some(storage),
-            context: if hydrate_arrangements {
-                EvalContext::root_subscription_snapshot()
-            } else {
-                EvalContext::root_snapshot()
-            },
-            metrics: &mut metrics,
-            terminal_deltas: HashMap::default(),
-            root_ordering_windows: HashMap::default(),
-        };
-        let records = evaluator
-            .update_node(output_node)
-            .map(|records| records.as_ref().clone());
-        self.record_hydration_memo_metrics(&metrics);
-        self.evict_eval_memo();
-        records
-    }
-
-    fn subscription_hydration_snapshots<S>(
-        &mut self,
-        outputs: &BTreeMap<String, CompiledNode>,
-        storage: &S,
-    ) -> Result<MultisinkDeltas, IvmRuntimeError>
-    where
-        S: OrderedKvStorage,
-    {
-        let mut sinks = BTreeMap::new();
-        for (sink, output) in outputs {
-            let ordering = output
-                .root_ordering_node
-                .map(|node| self.subscription_hydration_snapshot(node, storage))
-                .transpose()?;
-            let mut records = self.subscription_hydration_snapshot(output.node, storage)?;
-            if records.descriptor != output.output {
+            let mut records = self.hydration_snapshot(output.node, storage, mode)?;
+            if !records.descriptor.registry_compatible_with(&output.output) {
                 return Err(IvmRuntimeError::GraphOutputMismatch);
             }
             if let Some(ordering) = &ordering {
@@ -1139,13 +1408,7 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        if outputs.values().try_fold(false, |depends, output| {
-            Ok::<_, IvmRuntimeError>(depends || self.output_depends_on_aggregate(output.node)?)
-        })? {
-            self.subscription_hydration_snapshots(outputs, storage)
-        } else {
-            self.hydration_snapshots(outputs, storage)
-        }
+        self.hydration_snapshots(outputs, storage, HydrationMode::Subscription)
     }
 
     fn output_depends_on_aggregate(&self, output_node: NodeId) -> Result<bool, IvmRuntimeError> {
@@ -1819,7 +2082,7 @@ impl IvmRuntime {
                     .schema
                     .table(table)
                     .ok_or_else(|| IvmRuntimeError::TableNotFound(table.clone()))?;
-                if table_schema.has_schema_variants() {
+                if table_schema.has_variants() {
                     return Err(IvmRuntimeError::VariantProjectionRequired(table.clone()));
                 }
                 Ok(table_schema.record_schema())
@@ -1879,16 +2142,20 @@ impl IvmRuntime {
                 let field_idx = resolve_field_ref(&input, array_field)?;
                 unnest_descriptor(&input, field_idx, element_field)
             }
+            GraphBuilder::VariantProject { input, field, case } => {
+                let input = self.infer_builder_output_cached(input, output_memo)?;
+                variant_project_descriptor(&input, field, case)
+            }
             GraphBuilder::Project { input, fields } => {
                 let input = self.infer_builder_output_cached(input, output_memo)?;
                 project_descriptor(&input, fields)
             }
             GraphBuilder::Union { inputs } => {
-                let mut output = None;
+                let mut output: Option<RecordDescriptor> = None;
                 for input in inputs {
                     let next = self.infer_builder_output_cached(input, output_memo)?;
                     if let Some(output) = output {
-                        if output != next {
+                        if !output.registry_compatible_with(&next) {
                             return Err(IvmRuntimeError::GraphOutputMismatch);
                         }
                     } else {
@@ -1911,7 +2178,7 @@ impl IvmRuntime {
             GraphBuilder::Recursive { seed, step, .. } => {
                 let seed = self.infer_builder_output_cached(seed, output_memo)?;
                 let step = self.infer_builder_output_cached(step, output_memo)?;
-                if seed != step {
+                if !seed.registry_compatible_with(&step) {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
                 Ok(seed)
@@ -2387,6 +2654,7 @@ impl IvmRuntime {
             | GraphBuilder::Project { .. }
             | GraphBuilder::UnwrapNullable { .. }
             | GraphBuilder::Unnest { .. }
+            | GraphBuilder::VariantProject { .. }
             | GraphBuilder::Union { .. } => {
                 self.add_dedup_unary_graph(graph, inferred_output, output_memo)
             }
@@ -2434,7 +2702,7 @@ impl IvmRuntime {
                 })
             }
             GraphBuilder::InlineRecords { output, records } => {
-                if inferred_output != *output {
+                if !inferred_output.registry_compatible_with(output) {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
                 let node = self.graph.dedup_node(
@@ -2526,8 +2794,12 @@ impl IvmRuntime {
                 }
                 let compiled_seed = self.add_dedup_graph_cached(seed, output_memo)?;
                 let compiled_step = self.add_dedup_graph_cached(step, output_memo)?;
-                if compiled_seed.output != compiled_step.output
-                    || compiled_seed.output != inferred_output
+                if !compiled_seed
+                    .output
+                    .registry_compatible_with(&compiled_step.output)
+                    || !compiled_seed
+                        .output
+                        .registry_compatible_with(&inferred_output)
                 {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
@@ -2975,6 +3247,37 @@ impl IvmRuntime {
                     root_ordering_node: compiled_input.root_ordering_node,
                 })
             }
+            GraphBuilder::VariantProject { input, field, case } => {
+                let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
+                let input_node = compiled_input.node;
+                let input_output = compiled_input.output;
+                let field_idx = resolve_field_ref(&input_output, field)?;
+                let ValueType::Enum(schema) = &input_output.fields()[field_idx].value_type else {
+                    return Err(IvmRuntimeError::VariantProjectFieldTypeMismatch {
+                        field: field_ref_name(&input_output, field)?,
+                    });
+                };
+                let tag = schema.tag(case)?;
+                let output = inferred_output;
+                let node = self.graph.dedup_node(
+                    NodeDescriptor::new(
+                        OpType::VariantProject(VariantProjectOp {
+                            field: field_ref_name(&input_output, field)?,
+                            field_idx,
+                            tag,
+                        }),
+                        [input_node],
+                        output,
+                    ),
+                    NodeDurability::Ephemeral,
+                );
+                self.initialize_node_runtime(node);
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: compiled_input.root_ordering_node,
+                })
+            }
             GraphBuilder::Union { inputs } => {
                 let mut input_nodes = Vec::with_capacity(inputs.len());
                 let mut public_root_ordering = None;
@@ -2988,7 +3291,7 @@ impl IvmRuntime {
                     }
                     let input_node = compiled_input.node;
                     let input_output = compiled_input.output;
-                    if inferred_output != input_output {
+                    if !inferred_output.registry_compatible_with(&input_output) {
                         return Err(IvmRuntimeError::GraphOutputMismatch);
                     }
                     input_nodes.push(input_node);
@@ -3402,7 +3705,7 @@ impl IvmRuntime {
         index: &IndexSchema,
     ) -> Result<NodeId, IvmRuntimeError> {
         self.logical_nodes_requested += 3;
-        let (table_descriptor, variant_projection) = if table.has_schema_variants() {
+        let (table_descriptor, variant_projection) = if table.has_variants() {
             (
                 schema_index_input_descriptor(table, index)?,
                 Some(VariantProjectionTarget::SchemaIndex(index.name.clone())),
@@ -3462,7 +3765,7 @@ impl IvmRuntime {
         index: &IndexSchema,
         scan: Option<StaticScanSpec>,
     ) -> Result<IndexSourceOp, IvmRuntimeError> {
-        let (table_descriptor, variant_projection) = if table.has_schema_variants() {
+        let (table_descriptor, variant_projection) = if table.has_variants() {
             (
                 schema_index_input_descriptor(table, index)?,
                 Some(VariantProjectionTarget::SchemaIndex(index.name.clone())),
@@ -3580,6 +3883,13 @@ impl IvmRuntime {
             root_ordering_node: None,
         })
     }
+}
+
+fn record_descriptors_registry_compatible(
+    left: &RecordDescriptor,
+    right: &RecordDescriptor,
+) -> bool {
+    left.registry_compatible_with(right)
 }
 
 /// Point-in-time runtime counters for benchmark and diagnostics reporting.
@@ -3778,6 +4088,14 @@ pub(super) enum EvalMode {
     #[default]
     Tick,
     Hydrate,
+}
+
+/// Hydration consumers that need aggregate arrangements rebuilt opt into the
+/// subscription policy; all other snapshot consumers retain probe semantics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HydrationMode {
+    Ordinary,
+    Subscription,
 }
 
 /// Key for one cached node evaluation within a logical tick.
@@ -4108,6 +4426,13 @@ impl TerminalDeltas {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct TerminalOperation {
+    /// Exact descriptor of the root terminal record addressed by this edit.
+    ///
+    /// Terminal payload bytes are deliberately self-describing at the wire
+    /// boundary: a query may legitimately produce either the public logical
+    /// record layout or a nullable `CurrentRow` carrier.  Consumers must use
+    /// this descriptor rather than guessing from a query shape or byte prefix.
+    pub root_descriptor: RecordDescriptor,
     pub root_key: Vec<u8>,
     pub path: Vec<TerminalPathSegment>,
     pub edit: TerminalEdit,
@@ -4161,6 +4486,7 @@ fn terminal_deltas_from_record_deltas(
     for key in keys {
         match (before.get(&key), after.get(&key)) {
             (None, Some(record)) => operations.push(TerminalOperation {
+                root_descriptor: deltas.descriptor,
                 root_key: key.clone(),
                 path: Vec::new(),
                 edit: TerminalEdit::Insert {
@@ -4170,13 +4496,19 @@ fn terminal_deltas_from_record_deltas(
                 },
             }),
             (Some(_), None) => operations.push(TerminalOperation {
+                root_descriptor: deltas.descriptor,
                 root_key: key.clone(),
                 path: Vec::new(),
                 edit: TerminalEdit::Remove { key: key.clone() },
             }),
-            (Some(before), Some(after)) => {
-                diff_terminal_record(&key, Vec::new(), before, after, &mut operations)?
-            }
+            (Some(before), Some(after)) => diff_terminal_record(
+                &key,
+                deltas.descriptor,
+                Vec::new(),
+                before,
+                after,
+                &mut operations,
+            )?,
             (None, None) => unreachable!("terminal key came from before or after"),
         }
     }
@@ -4213,6 +4545,7 @@ fn order_terminal_snapshot(
 
 fn diff_terminal_record(
     root_key: &[u8],
+    root_descriptor: RecordDescriptor,
     path: Vec<TerminalPathSegment>,
     before: &OwnedRecord,
     after: &OwnedRecord,
@@ -4245,6 +4578,7 @@ fn diff_terminal_record(
                 child_path.push(TerminalPathSegment::Collection(field));
                 diff_terminal_collection(
                     root_key,
+                    root_descriptor,
                     child_path,
                     before_children,
                     after_children,
@@ -4258,6 +4592,7 @@ fn diff_terminal_record(
     if scalar_changed {
         let key = encoded_record_key_part(*after.descriptor(), after.raw(), &[0])?;
         operations.push(TerminalOperation {
+            root_descriptor,
             root_key: root_key.to_vec(),
             path,
             edit: TerminalEdit::Update {
@@ -4271,6 +4606,7 @@ fn diff_terminal_record(
 
 fn diff_terminal_collection(
     root_key: &[u8],
+    root_descriptor: RecordDescriptor,
     path: Vec<TerminalPathSegment>,
     before_values: &[Value],
     after_values: &[Value],
@@ -4300,6 +4636,7 @@ fn diff_terminal_collection(
     for key in keys {
         match (before.get(&key), after.get(&key)) {
             (None, Some((index, record))) => operations.push(TerminalOperation {
+                root_descriptor,
                 root_key: root_key.to_vec(),
                 path: path.clone(),
                 edit: TerminalEdit::Insert {
@@ -4309,6 +4646,7 @@ fn diff_terminal_collection(
                 },
             }),
             (Some(_), None) => operations.push(TerminalOperation {
+                root_descriptor,
                 root_key: root_key.to_vec(),
                 path: path.clone(),
                 edit: TerminalEdit::Remove { key: key.clone() },
@@ -4316,6 +4654,7 @@ fn diff_terminal_collection(
             (Some((before_index, before_record)), Some((after_index, after_record))) => {
                 if before_index != after_index {
                     operations.push(TerminalOperation {
+                        root_descriptor,
                         root_key: root_key.to_vec(),
                         path: path.clone(),
                         edit: TerminalEdit::Move {
@@ -4328,6 +4667,7 @@ fn diff_terminal_collection(
                 descendant_path.push(TerminalPathSegment::Key(key));
                 diff_terminal_record(
                     root_key,
+                    root_descriptor,
                     descendant_path,
                     before_record,
                     after_record,
@@ -4419,7 +4759,7 @@ pub struct TableDelta {
     pub table: String,
     /// Table-local discriminator selecting the descriptor for every encoded
     /// payload in this homogeneous delta group.
-    pub schema_version: u64,
+    pub variant_tag: u32,
     pub descriptor: RecordDescriptor,
     pub deltas: Vec<RecordDelta>,
 }
@@ -4606,7 +4946,10 @@ fn validate_public_output_fields(
             .fields()
             .get(index)
             .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(index))?;
-        if source_field.value_type != field.value_type {
+        if !source_field
+            .value_type
+            .registry_compatible_with(&field.value_type)
+        {
             return Err(IvmRuntimeError::GraphOutputMismatch);
         }
     }
@@ -4686,6 +5029,7 @@ fn count_builder_nodes(graph: &GraphBuilder) -> usize {
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
+        | GraphBuilder::VariantProject { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
@@ -4710,6 +5054,7 @@ fn builder_contains_binding_source(graph: &GraphBuilder) -> bool {
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
+        | GraphBuilder::VariantProject { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
@@ -4779,6 +5124,7 @@ fn collect_builder_field_names(
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
+        | GraphBuilder::VariantProject { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
@@ -4949,6 +5295,48 @@ fn lift_literal_filter(
                                 field.output_name.clone(),
                             ))
                         }
+                        ProjectExpr::EnumTagRemap { source, tags } => {
+                            let source =
+                                project_source_from_joined_filter_input(&input_output, source)?;
+                            Ok(ProjectField::enum_tag_remap(
+                                source,
+                                field.output_name.clone(),
+                                tags.clone(),
+                            ))
+                        }
+                        ProjectExpr::EnumRemap { source, tags } => {
+                            let source =
+                                project_source_from_joined_filter_input(&input_output, source)?;
+                            Ok(ProjectField::enum_remap(
+                                source,
+                                field.output_name.clone(),
+                                tags.clone(),
+                            ))
+                        }
+                        ProjectExpr::RecursiveEnumRemap {
+                            source,
+                            target,
+                            remaps,
+                            omit_unrepresentable,
+                        } => {
+                            let source =
+                                project_source_from_joined_filter_input(&input_output, source)?;
+                            Ok(if *omit_unrepresentable {
+                                ProjectField::recursive_enum_remap_omitting_unrepresentable(
+                                    source,
+                                    field.output_name.clone(),
+                                    target.clone(),
+                                    remaps.clone(),
+                                )
+                            } else {
+                                ProjectField::recursive_enum_remap(
+                                    source,
+                                    field.output_name.clone(),
+                                    target.clone(),
+                                    remaps.clone(),
+                                )
+                            })
+                        }
                     })
                     .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
                 fields.push(ProjectField::renamed(
@@ -5067,7 +5455,7 @@ fn lift_literal_filter(
             }))
         }
         GraphBuilder::Recursive { .. } => Ok(None),
-        GraphBuilder::Union { .. } => Ok(None),
+        GraphBuilder::Union { .. } | GraphBuilder::VariantProject { .. } => Ok(None),
         GraphBuilder::UnwrapNullable { input, field } => {
             let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? else {
                 return Ok(None);
@@ -5231,6 +5619,54 @@ fn project_fields_against_rewritten_input(
                 ProjectExpr::Field(field_ref) => (field_ref, None),
                 ProjectExpr::Nullable(field_ref) => (field_ref, Some(false)),
                 ProjectExpr::NullableFlat(field_ref) => (field_ref, Some(true)),
+                ProjectExpr::EnumTagRemap { source, tags } => {
+                    let source = field_ref_name(&original_output, source)?;
+                    if rewritten_output.field_index(&source).is_none() {
+                        return Err(IvmRuntimeError::GraphFieldNotFound(source));
+                    }
+                    return Ok(ProjectField::enum_tag_remap(
+                        source,
+                        field.output_name.clone(),
+                        tags.clone(),
+                    ));
+                }
+                ProjectExpr::EnumRemap { source, tags } => {
+                    let source = field_ref_name(&original_output, source)?;
+                    if rewritten_output.field_index(&source).is_none() {
+                        return Err(IvmRuntimeError::GraphFieldNotFound(source));
+                    }
+                    return Ok(ProjectField::enum_remap(
+                        source,
+                        field.output_name.clone(),
+                        tags.clone(),
+                    ));
+                }
+                ProjectExpr::RecursiveEnumRemap {
+                    source,
+                    target,
+                    remaps,
+                    omit_unrepresentable,
+                } => {
+                    let source = field_ref_name(&original_output, source)?;
+                    if rewritten_output.field_index(&source).is_none() {
+                        return Err(IvmRuntimeError::GraphFieldNotFound(source));
+                    }
+                    return Ok(if *omit_unrepresentable {
+                        ProjectField::recursive_enum_remap_omitting_unrepresentable(
+                            source,
+                            field.output_name.clone(),
+                            target.clone(),
+                            remaps.clone(),
+                        )
+                    } else {
+                        ProjectField::recursive_enum_remap(
+                            source,
+                            field.output_name.clone(),
+                            target.clone(),
+                            remaps.clone(),
+                        )
+                    });
+                }
                 ProjectExpr::Literal(_)
                 | ProjectExpr::TypedLiteral { .. }
                 | ProjectExpr::Null(_) => return Ok(field.clone()),
@@ -5339,7 +5775,9 @@ fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
         GraphBuilder::Union { inputs } => inputs
             .iter()
             .any(|input| graph_outputs_binding(input, binding_field)),
-        GraphBuilder::Table { .. } | GraphBuilder::Index { .. } => false,
+        GraphBuilder::Table { .. }
+        | GraphBuilder::Index { .. }
+        | GraphBuilder::VariantProject { .. } => false,
     }
 }
 
@@ -5486,7 +5924,8 @@ fn propagate_binding_through_frontier(
         | GraphBuilder::TopBy { .. }
         | GraphBuilder::CollectBy { .. }
         | GraphBuilder::Aggregate { .. }
-        | GraphBuilder::Union { .. } => None,
+        | GraphBuilder::Union { .. }
+        | GraphBuilder::VariantProject { .. } => None,
     }
 }
 
@@ -5650,7 +6089,12 @@ impl NodeState {
         let table_schema = schema
             .table(&input.table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(input.table.clone()))?;
-        let primary_key_fields = primary_key_field_indices(table_schema, output_desc)?;
+        let primary_key_fields = input
+            .scan
+            .as_ref()
+            .map(|_| primary_key_field_indices(table_schema, output_desc))
+            .transpose()?
+            .unwrap_or_default();
         let mut deltas = Vec::new();
         let projection = input
             .variant_projection
@@ -5673,10 +6117,10 @@ impl NodeState {
         {
             let projected;
             let source_deltas = if let Some(projection) = projection {
-                if projection.output != *output_desc {
+                if !projection.output.registry_compatible_with(output_desc) {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
-                let case = projection.cases.get(&delta.schema_version).ok_or_else(|| {
+                let case = projection.cases.get(&delta.variant_tag).ok_or_else(|| {
                     IvmRuntimeError::VariantProjectionCaseNotFound {
                         table: input.table.clone(),
                         target: input
@@ -5685,10 +6129,10 @@ impl NodeState {
                             .map(variant_projection_target_name)
                             .unwrap_or_default()
                             .to_owned(),
-                        version: delta.schema_version,
+                        version: u64::from(delta.variant_tag),
                     }
                 })?;
-                if case.source() != delta.descriptor {
+                if !case.source().registry_compatible_with(&delta.descriptor) {
                     return Err(IvmRuntimeError::VariantProjectionSourceMismatch {
                         table: input.table.clone(),
                         target: input
@@ -5697,16 +6141,38 @@ impl NodeState {
                             .map(variant_projection_target_name)
                             .unwrap_or_default()
                             .to_owned(),
-                        version: delta.schema_version,
+                        version: u64::from(delta.variant_tag),
                     });
                 }
                 match case {
                     VariantProjectionCase::Project {
                         project,
                         raw_projection,
+                        omit_unrepresentable_enum_rows,
                         ..
                     } => {
                         projected = Self::update_map_project(
+                            project,
+                            *output_desc,
+                            &RecordDeltas {
+                                descriptor: delta.descriptor,
+                                deltas: delta.deltas.clone(),
+                            },
+                            raw_projection.as_deref(),
+                            *omit_unrepresentable_enum_rows,
+                        )?;
+                        &projected.deltas
+                    }
+                    VariantProjectionCase::Enum {
+                        tag,
+                        payload,
+                        project,
+                        raw_projection,
+                        ..
+                    } => {
+                        projected = Self::update_variant_enum_project(
+                            *tag,
+                            *payload,
                             project,
                             *output_desc,
                             &RecordDeltas {
@@ -5720,7 +6186,7 @@ impl NodeState {
                     VariantProjectionCase::Ignore { .. } => continue,
                 }
             } else {
-                if delta.descriptor != *output_desc {
+                if !delta.descriptor.registry_compatible_with(output_desc) {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
                 &delta.deltas
@@ -5869,7 +6335,18 @@ impl NodeState {
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
         raw_projection: Option<&[RawProjectionField]>,
+        omit_unrepresentable_enum_rows: bool,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
+        let omit_unrepresentable_enum_rows = omit_unrepresentable_enum_rows
+            || project.expressions.iter().any(|expression| {
+                matches!(
+                    expression.expression,
+                    PlanExpr::RecursiveEnumRemap {
+                        omit_unrepresentable: true,
+                        ..
+                    }
+                )
+            });
         let estimated_output_bytes = input
             .deltas
             .iter()
@@ -5891,26 +6368,93 @@ impl NodeState {
                     .map_err(IvmRuntimeError::RecordEncoding)?
             } else {
                 let start = output.len();
-                let record = project_record(
+                let record = match project_record(
                     &project.expressions,
                     &project.mapping,
                     output_desc,
                     &input.descriptor,
                     delta.raw(),
-                )?;
+                ) {
+                    Ok(record) => record,
+                    Err(
+                        IvmRuntimeError::EnumTagProjectionAbsent { .. }
+                        | IvmRuntimeError::EnumProjectionAbsent { .. },
+                    ) if omit_unrepresentable_enum_rows => continue,
+                    Err(error) => return Err(error),
+                };
                 output.extend_from_slice(&record);
                 start..output.len()
             };
             spans.push((span, delta.weight));
         }
         let output = output.freeze();
-        let deltas = spans
+        let deltas: Vec<_> = spans
             .into_iter()
             .map(|(span, weight)| RecordDelta {
                 record: output.slice(span),
                 weight,
             })
             .collect();
+        Ok(RecordDeltas {
+            descriptor: output_desc,
+            deltas,
+        })
+    }
+
+    fn update_variant_enum_project(
+        tag: u32,
+        payload_desc: RecordDescriptor,
+        project: &MapProjectOp,
+        output_desc: RecordDescriptor,
+        input: &RecordDeltas,
+        raw_projection: Option<&[RawProjectionField]>,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
+        let payloads =
+            Self::update_map_project(project, payload_desc, input, raw_projection, false)?;
+        let mut deltas = Vec::with_capacity(payloads.deltas.len());
+        for payload in payloads.deltas {
+            let value = Value::Enum(EnumValue::new(
+                tag,
+                OwnedRecord::new(payload.record.to_vec(), payload_desc),
+            ));
+            deltas.push(RecordDelta {
+                record: output_desc.create(&[value])?.into(),
+                weight: payload.weight,
+            });
+        }
+        Ok(RecordDeltas {
+            descriptor: output_desc,
+            deltas,
+        })
+    }
+
+    fn update_variant_project(
+        variant_project: &VariantProjectOp,
+        output_desc: RecordDescriptor,
+        input: &RecordDeltas,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
+        let mut deltas = Vec::new();
+        for delta in &input.deltas {
+            let value = delta
+                .borrowed(&input.descriptor)
+                .get_idx(variant_project.field_idx)?;
+            let Value::Enum(value) = value else {
+                return Err(IvmRuntimeError::VariantProjectFieldTypeMismatch {
+                    field: variant_project.field.clone(),
+                });
+            };
+            if value.tag() == variant_project.tag {
+                if *value.record().descriptor() != output_desc {
+                    return Err(IvmRuntimeError::VariantProjectPayloadMismatch {
+                        field: variant_project.field.clone(),
+                    });
+                }
+                deltas.push(RecordDelta {
+                    record: Bytes::copy_from_slice(value.record().raw()),
+                    weight: delta.weight,
+                });
+            }
+        }
         Ok(RecordDeltas {
             descriptor: output_desc,
             deltas,
@@ -6001,7 +6545,7 @@ impl NodeState {
             if input.deltas.is_empty() {
                 continue;
             }
-            if output_desc != input.descriptor {
+            if !output_desc.registry_compatible_with(&input.descriptor) {
                 return Err(IvmRuntimeError::GraphOutputMismatch);
             }
             deltas.extend(input.deltas.iter().cloned());
@@ -6091,9 +6635,12 @@ fn plan_expr_names(expressions: &[PlanExpr]) -> Vec<String> {
     expressions
         .iter()
         .filter_map(|expr| match expr {
-            PlanExpr::Field(name) | PlanExpr::Nullable(name) | PlanExpr::NullableFlat(name) => {
-                Some(name.clone())
-            }
+            PlanExpr::Field(name)
+            | PlanExpr::Nullable(name)
+            | PlanExpr::NullableFlat(name)
+            | PlanExpr::EnumTagRemap { field: name, .. }
+            | PlanExpr::EnumRemap { field: name, .. }
+            | PlanExpr::RecursiveEnumRemap { field: name, .. } => Some(name.clone()),
             PlanExpr::Literal(_) | PlanExpr::Null(_) => None,
         })
         .collect()
@@ -6116,6 +6663,7 @@ fn builder_contains_recursive(graph: &GraphBuilder) -> bool {
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
+        | GraphBuilder::VariantProject { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
@@ -6644,6 +7192,7 @@ where
                     output_desc,
                     &input,
                     raw_projection.as_deref(),
+                    false,
                 );
                 #[cfg(feature = "cold-settle-attribution")]
                 if let Ok(output) = &result {
@@ -6663,6 +7212,10 @@ where
             OpType::Unnest(unnest) => {
                 let input = self.update_unary_input(graph_node, node)?;
                 NodeState::update_unnest(unnest, output_desc, &input)
+            }
+            OpType::VariantProject(variant_project) => {
+                let input = self.update_unary_input(graph_node, node)?;
+                NodeState::update_variant_project(variant_project, output_desc, &input)
             }
             OpType::ArgMaxBy(arg_max_by) => {
                 let input = self.update_unary_input(graph_node, node)?;
@@ -7002,7 +7555,7 @@ where
             .get(&frontier_source.binding)
             .cloned()
             .unwrap_or_else(|| RecordDeltas::empty(*output));
-        if deltas.descriptor != *output {
+        if !deltas.descriptor.registry_compatible_with(output) {
             return Err(IvmRuntimeError::GraphOutputMismatch);
         }
         Ok(deltas)
@@ -8194,6 +8747,11 @@ fn apply_root_ordering_operations(
             current.remove(existing);
             current.insert(after_index.min(current.len()), key.clone());
             terminal.operations.push(TerminalOperation {
+                root_descriptor: terminal
+                    .operations
+                    .first()
+                    .map(|operation| operation.root_descriptor)
+                    .expect("root ordering only operates on a terminal with payload edits"),
                 root_key: key.clone(),
                 path: Vec::new(),
                 edit: TerminalEdit::Move {
@@ -8250,6 +8808,25 @@ fn project_descriptor(
                         other => ValueType::Nullable(Box::new(other)),
                     }
                 }
+                ProjectExpr::EnumTagRemap { source, .. } => {
+                    let source_idx = resolve_field_ref(input, source)?;
+                    input
+                        .fields()
+                        .get(source_idx)
+                        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(source_idx))?
+                        .value_type
+                        .clone()
+                }
+                ProjectExpr::EnumRemap { source, .. } => {
+                    let source_idx = resolve_field_ref(input, source)?;
+                    input
+                        .fields()
+                        .get(source_idx)
+                        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(source_idx))?
+                        .value_type
+                        .clone()
+                }
+                ProjectExpr::RecursiveEnumRemap { target, .. } => target.clone(),
             };
             Ok((project_field.output_name.clone(), value_type))
         })
@@ -8615,7 +9192,7 @@ fn validate_collect_by_key_types(
             | ValueType::String
             | ValueType::Bytes
             | ValueType::Uuid
-            | ValueType::Enum(_) => true,
+            | ValueType::EnumTag(_) => true,
             _ => false,
         }
     }
@@ -8646,6 +9223,7 @@ fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<(), IvmRuntim
             | GraphBuilder::Project { input, .. }
             | GraphBuilder::UnwrapNullable { input, .. }
             | GraphBuilder::Unnest { input, .. }
+            | GraphBuilder::VariantProject { input, .. }
             | GraphBuilder::ArgMaxBy { input, .. }
             | GraphBuilder::ArgMinBy { input, .. }
             | GraphBuilder::TopBy { input, .. }
@@ -8683,6 +9261,7 @@ fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<(), IvmRuntim
         }
         GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
+        | GraphBuilder::VariantProject { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
@@ -8731,6 +9310,24 @@ fn project_field_expr(
         ProjectExpr::NullableFlat(source) => {
             Ok(PlanExpr::nullable_flat(field_ref_name(input, source)?))
         }
+        ProjectExpr::EnumTagRemap { source, tags } => Ok(PlanExpr::EnumTagRemap {
+            field: field_ref_name(input, source)?,
+            tags: tags.clone(),
+        }),
+        ProjectExpr::EnumRemap { source, tags } => Ok(PlanExpr::EnumRemap {
+            field: field_ref_name(input, source)?,
+            tags: tags.clone(),
+        }),
+        ProjectExpr::RecursiveEnumRemap {
+            source,
+            remaps,
+            omit_unrepresentable,
+            ..
+        } => Ok(PlanExpr::RecursiveEnumRemap {
+            field: field_ref_name(input, source)?,
+            remaps: remaps.clone(),
+            omit_unrepresentable: *omit_unrepresentable,
+        }),
     }
 }
 
@@ -8765,9 +9362,252 @@ fn project_record(
                     Value::Nullable(Some(Box::new(value)))
                 }
             }
+            PlanExpr::EnumTagRemap { field, tags } => {
+                remap_enum_tag(input.get(field)?.clone(), tags)?
+            }
+            PlanExpr::EnumRemap { field, tags } => remap_enum(input.get(field)?.clone(), tags)?,
+            PlanExpr::RecursiveEnumRemap { field, remaps, .. } => {
+                let source_idx = input_desc
+                    .field_index(field)
+                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
+                let output_idx = output_desc
+                    .field_index(expr.output_name.as_deref().ok_or_else(|| {
+                        IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned())
+                    })?)
+                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
+                remap_recursive_enum_value(
+                    input.get(field)?.clone(),
+                    &input_desc.fields()[source_idx].value_type,
+                    &output_desc.fields()[output_idx].value_type,
+                    remaps,
+                    "root",
+                )?
+            }
         });
     }
     Ok(output_desc.create(&values)?)
+}
+
+fn remap_enum_tag(value: Value, tags: &[Option<u8>]) -> Result<Value, IvmRuntimeError> {
+    match value {
+        Value::EnumTag(tag) => tags
+            .get(usize::from(tag))
+            .and_then(|tag| *tag)
+            .map(Value::EnumTag)
+            .ok_or(IvmRuntimeError::EnumTagProjectionAbsent { tag }),
+        Value::Nullable(None) => Ok(Value::Nullable(None)),
+        Value::Nullable(Some(value)) => Ok(Value::Nullable(Some(Box::new(remap_enum_tag(
+            *value, tags,
+        )?)))),
+        _ => Err(IvmRuntimeError::EnumTagProjectionNonEnum),
+    }
+}
+
+fn remap_enum(value: Value, tags: &[Option<u32>]) -> Result<Value, IvmRuntimeError> {
+    match value {
+        Value::Enum(value) => {
+            let tag = value.tag();
+            let mapped = tags
+                .get(
+                    usize::try_from(tag)
+                        .map_err(|_| IvmRuntimeError::EnumProjectionAbsent { tag })?,
+                )
+                .and_then(|tag| *tag)
+                .ok_or(IvmRuntimeError::EnumProjectionAbsent { tag })?;
+            Ok(Value::Enum(crate::records::EnumValue::new(
+                mapped,
+                value.into_record(),
+            )))
+        }
+        Value::Nullable(None) => Ok(Value::Nullable(None)),
+        Value::Nullable(Some(value)) => {
+            Ok(Value::Nullable(Some(Box::new(remap_enum(*value, tags)?))))
+        }
+        _ => Err(IvmRuntimeError::EnumProjectionNonEnum),
+    }
+}
+
+/// Re-encode an arbitrary user value across two descriptors whose enum
+/// registries use different compact tags.  This is intentionally a value
+/// operation rather than a byte splice: descriptor equality does not imply
+/// that a physical enum tag has the same meaning in the authored descriptor.
+fn remap_recursive_enum_value(
+    value: Value,
+    source: &ValueType,
+    target: &ValueType,
+    remaps: &RecursiveEnumRemaps,
+    path: &str,
+) -> Result<Value, IvmRuntimeError> {
+    match (value, source, target) {
+        (Value::EnumTag(tag), ValueType::EnumTag(_), ValueType::EnumTag(_)) => remaps
+            .scalar
+            .get(path)
+            .and_then(|tags| tags.get(usize::from(tag)))
+            .and_then(|tag| *tag)
+            .map(Value::EnumTag)
+            .ok_or(IvmRuntimeError::EnumTagProjectionAbsent { tag }),
+        (Value::Nullable(None), ValueType::Nullable(_), ValueType::Nullable(_)) => {
+            Ok(Value::Nullable(None))
+        }
+        (
+            Value::Nullable(Some(value)),
+            ValueType::Nullable(source),
+            ValueType::Nullable(target),
+        ) => {
+            // Jazz storage adds one nullable carrier around every user cell.
+            // That carrier is not an authored enum occurrence, so a direct
+            // enum stored in a nullable cell remains rooted at `path`. An
+            // authored nullable enum *does* have a `path/nullable` occurrence
+            // entry. Prefer that structural child whenever it exists.
+            let nullable_path = format!("{path}/nullable");
+            let child_path = if remap_path_with_enum_occurrence_below(remaps, &nullable_path) {
+                nullable_path.as_str()
+            } else {
+                path
+            };
+            Ok(Value::Nullable(Some(Box::new(remap_recursive_enum_value(
+                *value, source, target, remaps, child_path,
+            )?))))
+        }
+        (Value::Array(values), ValueType::Array(source), ValueType::Array(target)) => {
+            Ok(Value::Array(
+                values
+                    .into_iter()
+                    .map(|value| {
+                        remap_recursive_enum_value(
+                            value,
+                            source,
+                            target,
+                            remaps,
+                            &format!("{path}/array"),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))
+        }
+        (Value::Tuple(values), ValueType::Tuple(source), ValueType::Tuple(target))
+            if values.len() == source.len() && source.len() == target.len() =>
+        {
+            Ok(Value::Tuple(
+                values
+                    .into_iter()
+                    .zip(source.iter().zip(target))
+                    .enumerate()
+                    .map(|(index, (value, (source, target)))| {
+                        remap_recursive_enum_value(
+                            value,
+                            source,
+                            target,
+                            remaps,
+                            &format!("{path}/tuple/{index}"),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))
+        }
+        (Value::Record(record), ValueType::Record(source), ValueType::Record(target))
+            if source.fields().len() == target.fields().len() =>
+        {
+            let values = record.to_values()?;
+            let values = values
+                .into_iter()
+                .zip(source.fields().iter().zip(target.fields()))
+                .map(|(value, (source, target))| {
+                    let name = source.name.as_deref().ok_or_else(|| {
+                        IvmRuntimeError::RecursiveEnumProjectionDescriptorMismatch {
+                            path: path.to_owned(),
+                        }
+                    })?;
+                    remap_recursive_enum_value(
+                        value,
+                        &source.value_type,
+                        &target.value_type,
+                        remaps,
+                        &format!("{path}/record/{name}"),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::Record(OwnedRecord::new(
+                target.create(&values)?,
+                **target,
+            )))
+        }
+        (Value::Enum(value), ValueType::Enum(source), ValueType::Enum(target)) => {
+            let source_tag = value.tag();
+            let target_tag = remaps
+                .payload
+                .get(path)
+                .and_then(|tags| tags.get(usize::try_from(source_tag).ok()?))
+                .and_then(|tag| *tag)
+                .ok_or(IvmRuntimeError::EnumProjectionAbsent { tag: source_tag })?;
+            let source_case = source.case(source_tag)?;
+            let target_case = target.case(target_tag)?;
+            if source_case.payload.fields().len() != target_case.payload.fields().len() {
+                return Err(IvmRuntimeError::RecursiveEnumProjectionDescriptorMismatch {
+                    path: path.to_owned(),
+                });
+            }
+            let semantic_child_root = remaps
+                .payload_children
+                .get(path)
+                .and_then(|paths| paths.get(usize::try_from(source_tag).ok()?))
+                .and_then(|path| path.as_deref());
+            let child_root = semantic_child_root
+                // Older callers which have no nested payload occurrence keep
+                // the historic local-tag spelling. Schema lowering supplies
+                // a semantic GlobalCaseId-rooted path whenever descendants
+                // are present.
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{path}/case/{source_tag}"));
+            let values = value.record().to_values()?;
+            let values = values
+                .into_iter()
+                .zip(
+                    source_case
+                        .payload
+                        .fields()
+                        .iter()
+                        .zip(target_case.payload.fields()),
+                )
+                .map(|(value, (source, target))| {
+                    let name = source.name.as_deref().ok_or_else(|| {
+                        IvmRuntimeError::RecursiveEnumProjectionDescriptorMismatch {
+                            path: path.to_owned(),
+                        }
+                    })?;
+                    remap_recursive_enum_value(
+                        value,
+                        &source.value_type,
+                        &target.value_type,
+                        remaps,
+                        &if semantic_child_root.is_some() {
+                            format!("{child_root}/record/{name}")
+                        } else {
+                            format!("{child_root}/{name}")
+                        },
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::Enum(EnumValue::new(
+                target_tag,
+                OwnedRecord::new(target_case.payload.create(&values)?, target_case.payload),
+            )))
+        }
+        (value, source, target) if source == target => Ok(value),
+        _ => Err(IvmRuntimeError::RecursiveEnumProjectionDescriptorMismatch {
+            path: path.to_owned(),
+        }),
+    }
+}
+
+fn remap_path_with_enum_occurrence_below(remaps: &RecursiveEnumRemaps, path: &str) -> bool {
+    let below = format!("{path}/");
+    remaps
+        .scalar
+        .keys()
+        .chain(remaps.payload.keys())
+        .chain(remaps.payload_children.keys())
+        .any(|candidate| candidate == path || candidate.starts_with(&below))
 }
 
 fn projection_uses_raw_copy(
@@ -8824,6 +9664,9 @@ fn raw_projection_fields(
                 )
                 .ok()?,
             }),
+            PlanExpr::EnumTagRemap { .. }
+            | PlanExpr::EnumRemap { .. }
+            | PlanExpr::RecursiveEnumRemap { .. } => None,
         })
         .collect::<Option<Vec<_>>>();
     Ok(fields)
@@ -8936,6 +9779,24 @@ fn unnest_descriptor(
     Ok(RecordDescriptor::new(fields))
 }
 
+fn variant_project_descriptor(
+    input: &RecordDescriptor,
+    field: &FieldRef,
+    case: &str,
+) -> Result<RecordDescriptor, IvmRuntimeError> {
+    let field_idx = resolve_field_ref(input, field)?;
+    let enum_field = input
+        .fields()
+        .get(field_idx)
+        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?;
+    let ValueType::Enum(schema) = &enum_field.value_type else {
+        return Err(IvmRuntimeError::VariantProjectFieldTypeMismatch {
+            field: field_ref_name(input, field)?,
+        });
+    };
+    Ok(schema.case(schema.tag(case)?)?.payload)
+}
+
 fn aggregate_descriptor(
     input: &RecordDescriptor,
     group_cols: &[FieldRef],
@@ -8995,7 +9856,12 @@ fn aggregate_expr_value_type(
         return Err(IvmRuntimeError::UnsupportedOperator);
     };
     match expr {
-        PlanExpr::Field(field) | PlanExpr::Nullable(field) | PlanExpr::NullableFlat(field) => {
+        PlanExpr::Field(field)
+        | PlanExpr::Nullable(field)
+        | PlanExpr::NullableFlat(field)
+        | PlanExpr::EnumTagRemap { field, .. }
+        | PlanExpr::EnumRemap { field, .. }
+        | PlanExpr::RecursiveEnumRemap { field, .. } => {
             let field_idx = input
                 .field_index(field)
                 .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
@@ -9375,7 +10241,7 @@ fn encode_record_field_key_part(
             key.extend_from_slice(borrowed.get_uuid(field_idx)?.as_bytes());
             Ok(())
         }
-        ValueType::Enum(_) => {
+        ValueType::EnumTag(_) => {
             let value = borrowed.get_enum(field_idx)?;
             encode_key_part(key, &Value::U8(value))
         }
@@ -9461,7 +10327,7 @@ fn encode_record_field_key_part(
             }
             Ok(())
         }
-        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::Enum(_)) => {
+        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::EnumTag(_)) => {
             match borrowed.get_nullable_enum(field_idx)? {
                 Some(value) => {
                     encode_key_part(key, &Value::Nullable(Some(Box::new(Value::U8(value)))))
@@ -9620,7 +10486,7 @@ fn record_field_literal_ordering(
             .partial_cmp(expected.as_bytes())
             .map(FieldLiteralOrdering::Compared)
             .unwrap_or(FieldLiteralOrdering::SqlNull)),
-        (ValueType::Enum(_), LiteralValue::Enum(expected)) => {
+        (ValueType::EnumTag(_), LiteralValue::EnumTag(expected)) => {
             Ok(ordering(&record.get_enum(field_idx)?, expected))
         }
         (ValueType::Nullable(inner), LiteralValue::Nullable(Some(expected))) => {
@@ -9671,7 +10537,7 @@ fn nullable_record_field_literal_ordering(
             .and_then(|actual| actual.as_bytes().partial_cmp(expected.as_bytes()))
             .map(FieldLiteralOrdering::Compared)
             .unwrap_or(FieldLiteralOrdering::SqlNull)),
-        (ValueType::Enum(_), LiteralValue::Enum(expected)) => Ok(record
+        (ValueType::EnumTag(_), LiteralValue::EnumTag(expected)) => Ok(record
             .get_nullable_enum(field_idx)?
             .map(|actual| ordering(&actual, expected))
             .unwrap_or(FieldLiteralOrdering::SqlNull)),
@@ -9776,7 +10642,7 @@ fn compare_values(
         (Value::I64(left), Value::I64(right)) => left.partial_cmp(right),
         (Value::F64(left), Value::F64(right)) => left.partial_cmp(right),
         (Value::Bool(left), Value::Bool(right)) => left.partial_cmp(right),
-        (Value::Enum(left), Value::Enum(right)) => left.partial_cmp(right),
+        (Value::EnumTag(left), Value::EnumTag(right)) => left.partial_cmp(right),
         (Value::String(left), Value::String(right)) => left.partial_cmp(right),
         (Value::Bytes(left), Value::Bytes(right)) => left.partial_cmp(right),
         (Value::Uuid(left), Value::Uuid(right)) => left.as_bytes().partial_cmp(right.as_bytes()),
@@ -9888,7 +10754,7 @@ pub(crate) fn encode_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Iv
                 encode_key_part(key, value)?;
             }
         }
-        Value::Enum(value) => {
+        Value::EnumTag(value) => {
             key.push(0);
             key.push(*value);
         }
@@ -9899,7 +10765,9 @@ pub(crate) fn encode_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Iv
             key.push(9);
             encode_key_part(key, value)?;
         }
-        Value::Array(_) | Value::Record(_) => return Err(IvmRuntimeError::UnsupportedJoinKey),
+        Value::Array(_) | Value::Record(_) | Value::Enum(_) => {
+            return Err(IvmRuntimeError::UnsupportedJoinKey);
+        }
     }
     Ok(())
 }
@@ -10013,6 +10881,23 @@ fn resolve_aggregate_expr(
         Some(PlanExpr::NullableFlat(field)) => {
             Some(PlanExpr::NullableFlat(resolve_field_name(input, field)?))
         }
+        Some(PlanExpr::EnumTagRemap { field, tags }) => Some(PlanExpr::EnumTagRemap {
+            field: resolve_field_name(input, field)?,
+            tags: tags.clone(),
+        }),
+        Some(PlanExpr::EnumRemap { field, tags }) => Some(PlanExpr::EnumRemap {
+            field: resolve_field_name(input, field)?,
+            tags: tags.clone(),
+        }),
+        Some(PlanExpr::RecursiveEnumRemap {
+            field,
+            remaps,
+            omit_unrepresentable,
+        }) => Some(PlanExpr::RecursiveEnumRemap {
+            field: resolve_field_name(input, field)?,
+            remaps: remaps.clone(),
+            omit_unrepresentable: *omit_unrepresentable,
+        }),
         Some(PlanExpr::Literal(_)) | Some(PlanExpr::Null(_)) | None => aggregate.expression.clone(),
     };
     Ok(AggregateExpr {
@@ -10330,6 +11215,11 @@ fn evaluate_aggregate_expr(
         PlanExpr::Field(field) | PlanExpr::Nullable(field) | PlanExpr::NullableFlat(field) => {
             record.get(field).map_err(IvmRuntimeError::RecordEncoding)
         }
+        PlanExpr::EnumTagRemap { field, tags } => remap_enum_tag(record.get(field)?, tags),
+        PlanExpr::EnumRemap { field, tags } => remap_enum(record.get(field)?, tags),
+        // Aggregates do not carry an output descriptor, so there is no
+        // well-defined target boundary for a recursive re-encoding.
+        PlanExpr::RecursiveEnumRemap { .. } => Err(IvmRuntimeError::UnsupportedOperator),
         PlanExpr::Literal(literal) => Ok(literal.to_value()),
         PlanExpr::Null(value_type) => Ok(Value::Nullable(match value_type {
             ValueType::Nullable(_) => None,
@@ -10639,6 +11529,7 @@ fn update_unbounded_collect_by_terminal_state(
                     )
                 })?;
                 operations.push(TerminalOperation {
+                    root_descriptor: output_desc,
                     root_key: group_key.clone(),
                     path: Vec::new(),
                     edit: TerminalEdit::Insert {
@@ -10649,6 +11540,7 @@ fn update_unbounded_collect_by_terminal_state(
                 });
             } else {
                 operations.push(TerminalOperation {
+                    root_descriptor: output_desc,
                     root_key: group_key.clone(),
                     path: Vec::new(),
                     edit: TerminalEdit::Remove { key: group_key },
@@ -10723,6 +11615,7 @@ fn update_unbounded_collect_by_terminal_state(
                 .filter(|(_, weight)| **weight > 0)
                 .count();
             operations.push(TerminalOperation {
+                root_descriptor: output_desc,
                 root_key: group_key,
                 path,
                 edit: TerminalEdit::Insert {
@@ -10733,6 +11626,7 @@ fn update_unbounded_collect_by_terminal_state(
             });
         } else {
             operations.push(TerminalOperation {
+                root_descriptor: output_desc,
                 root_key: group_key,
                 path,
                 edit: TerminalEdit::Remove { key: child_key },
@@ -10749,6 +11643,7 @@ fn update_unbounded_collect_by_terminal_state(
         });
         for root_key in root_groups_before.difference(&root_groups_after) {
             operations.push(TerminalOperation {
+                root_descriptor: output_desc,
                 root_key: root_key.clone(),
                 path: Vec::new(),
                 edit: TerminalEdit::Remove {
@@ -10774,6 +11669,7 @@ fn update_unbounded_collect_by_terminal_state(
                     })?;
             let index = root_groups_after.range(..root_key.clone()).count();
             operations.push(TerminalOperation {
+                root_descriptor: output_desc,
                 root_key: root_key.clone(),
                 path: Vec::new(),
                 edit: TerminalEdit::Insert {
@@ -10860,6 +11756,7 @@ fn update_collect_by_root_terminal_state(
             (None, None) => continue,
         };
         operations.push(TerminalOperation {
+            root_descriptor: output_desc,
             root_key,
             path: Vec::new(),
             edit,
@@ -11327,7 +12224,7 @@ fn encode_runtime_primary_key_part(
             key.push(6);
             encode_runtime_ordered_bytes(key, value.as_bytes());
         }
-        Value::Enum(value) => {
+        Value::EnumTag(value) => {
             key.push(0);
             key.push(*value);
         }
@@ -11354,7 +12251,9 @@ fn encode_runtime_primary_key_part(
             key.push(1);
             encode_runtime_primary_key_part(key, value)?;
         }
-        Value::Array(_) | Value::Record(_) => return Err(IvmRuntimeError::UnsupportedJoinKey),
+        Value::Array(_) | Value::Record(_) | Value::Enum(_) => {
+            return Err(IvmRuntimeError::UnsupportedJoinKey);
+        }
     }
     Ok(())
 }
@@ -11396,6 +12295,14 @@ pub enum IvmRuntimeError {
     GraphNodeNotFound(NodeId),
     #[error("graph output descriptors do not match")]
     GraphOutputMismatch,
+    #[error("enum tag {tag} is absent from this projection target")]
+    EnumTagProjectionAbsent { tag: u8 },
+    #[error("enum tag projection requires an enum value")]
+    EnumTagProjectionNonEnum,
+    #[error("payload enum tag {tag} is absent from this projection target")]
+    EnumProjectionAbsent { tag: u32 },
+    #[error("payload enum projection requires an enum value")]
+    EnumProjectionNonEnum,
     #[error("index not found: {0}")]
     IndexNotFound(String),
     #[error("join key arity mismatch: left={left}, right={right}")]
@@ -11431,7 +12338,7 @@ pub enum IvmRuntimeError {
     #[error("binding source descriptor mismatch: {0}")]
     BindingSourceDescriptorMismatch(String),
     #[error("duplicate schema version {version} for table {table}")]
-    DuplicateTableSchemaVersion { table: String, version: u64 },
+    DuplicateTableVariant { table: String, version: u64 },
     #[error(transparent)]
     RecordEncoding(#[from] records::Error),
     #[error("recursive node {node:?} exceeded iteration limit {max_iters}")]
@@ -11454,7 +12361,7 @@ pub enum IvmRuntimeError {
     #[error("field already exists in the live catalogue: {table}.{field}")]
     TableFieldAlreadyExists { table: String, field: String },
     #[error("unknown schema version {version} for table {table}")]
-    UnknownTableSchemaVersion { table: String, version: u64 },
+    UnknownTableVariant { table: String, version: u64 },
     #[error("variant projection not found: {table}.{target}")]
     VariantProjectionNotFound { table: String, target: String },
     #[error("schema-variant table requires a fixed-output projection: {0}")]
@@ -11481,6 +12388,38 @@ pub enum IvmRuntimeError {
         target: String,
         version: u64,
     },
+    #[error("variant projection enum field not found: {table}.{target}.{field}")]
+    VariantProjectionEnumFieldNotFound {
+        table: String,
+        target: String,
+        field: String,
+    },
+    #[error("variant projection enum output must contain exactly one field: {table}.{target}")]
+    VariantProjectionEnumOutputMustBeSingleField { table: String, target: String },
+    #[error("variant projection field is not an enum: {table}.{target}.{field}")]
+    VariantProjectionEnumFieldTypeMismatch {
+        table: String,
+        target: String,
+        field: String,
+    },
+    #[error("variant projection enum schema does not match fixed output: {table}.{target}.{field}")]
+    VariantProjectionEnumSchemaMismatch {
+        table: String,
+        target: String,
+        field: String,
+    },
+    #[error("variant projection payload does not match enum case: {table}.{target}.{case}")]
+    VariantProjectionEnumPayloadMismatch {
+        table: String,
+        target: String,
+        case: String,
+    },
+    #[error("recursive enum projection descriptor mismatch at {path}")]
+    RecursiveEnumProjectionDescriptorMismatch { path: String },
+    #[error("enum match field is not an enum: {field}")]
+    VariantProjectFieldTypeMismatch { field: String },
+    #[error("enum match payload descriptor does not match its declared case: {field}")]
+    VariantProjectPayloadMismatch { field: String },
     #[error("unique index violation: {index}")]
     UniqueIndexViolation { index: String },
     #[error("unsupported join key")]
@@ -11508,6 +12447,231 @@ mod tests {
         ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey,
     };
     use crate::storage::{RecordStore, RocksDbStorage};
+
+    #[test]
+    fn raw_variant_case_registry_refresh_rejects_projection_replacement() {
+        // A live physical registry may append a case, but refreshing its raw
+        // source descriptor must not become a back door for changing how an
+        // already-installed case maps its fields.
+        let descriptor = |variants: &[&str]| {
+            RecordDescriptor::new([(
+                "status",
+                ValueType::EnumTag(
+                    records::ScalarEnumSchema::new("status", variants.iter().copied())
+                        .unwrap()
+                        .with_registry_id(0x71),
+                ),
+            )])
+        };
+        let case = |source, mapping| VariantProjectionCase::Project {
+            source,
+            project: MapProjectOp {
+                expressions: Vec::new(),
+                mapping,
+            },
+            raw_projection: None,
+            omit_unrepresentable_enum_rows: false,
+        };
+        let current = case(descriptor(&["open"]), vec![(0, 0)]);
+        let appended = case(descriptor(&["open", "closed"]), vec![(0, 0)]);
+        assert!(current.can_refresh_registries_to(&appended));
+
+        let replaced_mapping = case(descriptor(&["open", "closed"]), Vec::new());
+        assert!(
+            !current.can_refresh_registries_to(&replaced_mapping),
+            "registry refresh must not replace an existing projection mapping"
+        );
+        let incompatible_type = case(
+            RecordDescriptor::new([("status", ValueType::String)]),
+            vec![(0, 0)],
+        );
+        assert!(
+            !current.can_refresh_registries_to(&incompatible_type),
+            "registry refresh must reject a field-type mutation"
+        );
+    }
+
+    #[test]
+    fn payload_enum_remap_changes_only_the_case_tag() {
+        let descriptor = RecordDescriptor::new([("value", ValueType::String)]);
+        let value = Value::Enum(
+            EnumValue::create(2, descriptor, &[Value::String("later".to_owned())]).unwrap(),
+        );
+        let remapped = remap_enum(value, &[Some(0), Some(1), Some(3)]).unwrap();
+        let Value::Enum(remapped) = remapped else {
+            panic!("expected payload enum");
+        };
+        assert_eq!(remapped.tag(), 3);
+        assert_eq!(
+            remapped.record().to_values().unwrap(),
+            vec![Value::String("later".to_owned())]
+        );
+    }
+
+    #[test]
+    fn recursive_enum_projection_reencodes_nullable_array_tuple_and_record_occurrences() {
+        let physical = ValueType::EnumTag(
+            records::ScalarEnumSchema::new("physical", ["draft", "snoozed", "archived"]).unwrap(),
+        );
+        let authored = ValueType::EnumTag(
+            records::ScalarEnumSchema::new("authored", ["draft", "archived"]).unwrap(),
+        );
+        let source = ValueType::Tuple(vec![
+            ValueType::Nullable(Box::new(ValueType::Array(Box::new(physical.clone())))),
+            ValueType::Record(Box::new(RecordDescriptor::new([("state", physical)]))),
+        ]);
+        let target = ValueType::Tuple(vec![
+            ValueType::Nullable(Box::new(ValueType::Array(Box::new(authored.clone())))),
+            ValueType::Record(Box::new(RecordDescriptor::new([("state", authored)]))),
+        ]);
+        let remaps = RecursiveEnumRemaps {
+            scalar: BTreeMap::from([
+                (
+                    "root/tuple/0/nullable/array".to_owned(),
+                    vec![Some(0), None, Some(1)],
+                ),
+                (
+                    "root/tuple/1/record/state".to_owned(),
+                    vec![Some(0), None, Some(1)],
+                ),
+            ]),
+            payload: BTreeMap::new(),
+            payload_children: BTreeMap::new(),
+        };
+        let record = RecordDescriptor::new([(
+            "state",
+            ValueType::EnumTag(
+                records::ScalarEnumSchema::new("physical", ["draft", "snoozed", "archived"])
+                    .unwrap(),
+            ),
+        )]);
+        let value = Value::Tuple(vec![
+            Value::Nullable(Some(Box::new(Value::Array(vec![Value::EnumTag(2)])))),
+            Value::Record(OwnedRecord::new(
+                record.create(&[Value::EnumTag(2)]).unwrap(),
+                record,
+            )),
+        ]);
+        let projected =
+            remap_recursive_enum_value(value, &source, &target, &remaps, "root").unwrap();
+        let Value::Tuple(values) = projected else {
+            panic!("tuple expected")
+        };
+        assert_eq!(
+            values[0],
+            Value::Nullable(Some(Box::new(Value::Array(vec![Value::EnumTag(1)]))))
+        );
+        let Value::Record(record) = &values[1] else {
+            panic!("record expected")
+        };
+        assert_eq!(record.to_values().unwrap(), vec![Value::EnumTag(1)]);
+    }
+
+    #[test]
+    fn recursive_enum_projection_remaps_payload_cases_and_nested_payload_enums() {
+        let physical_scalar = ValueType::EnumTag(
+            records::ScalarEnumSchema::new("physical", ["draft", "snoozed", "archived"]).unwrap(),
+        );
+        let authored_scalar = ValueType::EnumTag(
+            records::ScalarEnumSchema::new("authored", ["draft", "archived"]).unwrap(),
+        );
+        let physical_payload = ValueType::Enum(Box::new(
+            EnumSchema::new(
+                "physical-payload",
+                [
+                    records::EnumCase::new(
+                        "case-a",
+                        RecordDescriptor::new([("state", physical_scalar.clone())]),
+                    ),
+                    records::EnumCase::new(
+                        "case-b",
+                        RecordDescriptor::new(Vec::<(String, ValueType)>::new()),
+                    ),
+                ],
+            )
+            .unwrap(),
+        ));
+        let authored_payload = ValueType::Enum(Box::new(
+            EnumSchema::new(
+                "authored-payload",
+                [records::EnumCase::new(
+                    "case-a",
+                    RecordDescriptor::new([("state", authored_scalar)]),
+                )],
+            )
+            .unwrap(),
+        ));
+        let source = ValueType::Record(Box::new(RecordDescriptor::new([(
+            "nested",
+            physical_payload.clone(),
+        )])));
+        let target = ValueType::Record(Box::new(RecordDescriptor::new([(
+            "nested",
+            authored_payload.clone(),
+        )])));
+        let remaps = RecursiveEnumRemaps {
+            scalar: BTreeMap::from([(
+                "root/record/nested/case/introduced-a/0/record/state".to_owned(),
+                vec![Some(0), None, Some(1)],
+            )]),
+            payload: BTreeMap::from([("root/record/nested".to_owned(), vec![Some(0), None])]),
+            // The payload's physical tag is an interned local value.  Its
+            // descendant path must instead remain rooted in the durable case
+            // identity, so a concurrent schema may use the same local tag for
+            // an unrelated case without redirecting this scalar remap.
+            payload_children: BTreeMap::from([(
+                "root/record/nested".to_owned(),
+                vec![
+                    Some("root/record/nested/case/introduced-a/0".to_owned()),
+                    None,
+                ],
+            )]),
+        };
+        let ValueType::Enum(payload_schema) = physical_payload else {
+            panic!("payload expected")
+        };
+        let payload = payload_schema.case(0).unwrap().payload.clone();
+        let nested = Value::Enum(EnumValue::create(0, payload, &[Value::EnumTag(2)]).unwrap());
+        let ValueType::Record(source_record) = &source else {
+            panic!("record expected")
+        };
+        let value = Value::Record(OwnedRecord::new(
+            source_record.create(&[nested]).unwrap(),
+            (**source_record).clone(),
+        ));
+        let projected =
+            remap_recursive_enum_value(value, &source, &target, &remaps, "root").unwrap();
+        let Value::Record(record) = projected else {
+            panic!("record expected")
+        };
+        let Value::Enum(nested) = record.to_values().unwrap().pop().unwrap() else {
+            panic!("enum expected")
+        };
+        assert_eq!(nested.tag(), 0);
+        assert_eq!(
+            nested.record().to_values().unwrap(),
+            vec![Value::EnumTag(1)]
+        );
+
+        // A physical case which the target schema cannot name must fail rather
+        // than becoming a default case or silently removing the row.
+        let unknown = Value::Enum(
+            EnumValue::create(
+                1,
+                RecordDescriptor::new(Vec::<(String, ValueType)>::new()),
+                &[],
+            )
+            .unwrap(),
+        );
+        let value = Value::Record(OwnedRecord::new(
+            source_record.create(&[unknown]).unwrap(),
+            (**source_record).clone(),
+        ));
+        assert!(matches!(
+            remap_recursive_enum_value(value, &source, &target, &remaps, "root"),
+            Err(IvmRuntimeError::EnumProjectionAbsent { tag: 1 })
+        ));
+    }
 
     #[test]
     fn collect_by_terminal_records_preserve_nullable_descriptor_wrappers() {
@@ -11547,6 +12711,7 @@ mod tests {
         let mut terminal = TerminalDeltas {
             operations: vec![
                 TerminalOperation {
+                    root_descriptor: RecordDescriptor::default(),
                     root_key: key(2),
                     path: Vec::new(),
                     edit: TerminalEdit::Update {
@@ -11555,6 +12720,7 @@ mod tests {
                     },
                 },
                 TerminalOperation {
+                    root_descriptor: RecordDescriptor::default(),
                     root_key: key(4),
                     path: Vec::new(),
                     edit: TerminalEdit::Insert {
@@ -11865,7 +13031,7 @@ mod tests {
         runtime
             .tick(
                 vec![TableDelta {
-                    schema_version: 0,
+                    variant_tag: 0,
                     table: "albums".to_owned(),
                     descriptor: albums,
                     deltas: vec![
@@ -11921,7 +13087,7 @@ mod tests {
         runtime
             .tick(
                 vec![TableDelta {
-                    schema_version: 0,
+                    variant_tag: 0,
                     table: "albums".to_owned(),
                     descriptor: albums,
                     deltas: vec![RecordDelta {
@@ -11946,8 +13112,8 @@ mod tests {
         let second = albums
             .create(&[Value::U64(2), Value::String("two".to_owned())])
             .unwrap();
-        let first = crate::records::encode_versioned_record(0, &first);
-        let second = crate::records::encode_versioned_record(0, &second);
+        let first = crate::records::encode_variant_record(0, &first);
+        let second = crate::records::encode_variant_record(0, &second);
         store
             .write_many(&[store.set(b"1", &first), store.set(b"2", &second)])
             .unwrap();
@@ -12062,7 +13228,7 @@ mod tests {
             runtime
                 .tick(
                     vec![TableDelta {
-                        schema_version: 0,
+                        variant_tag: 0,
                         table: "albums".to_owned(),
                         descriptor: albums,
                         deltas: vec![RecordDelta {
@@ -12166,7 +13332,7 @@ mod tests {
         runtime
             .tick(
                 vec![TableDelta {
-                    schema_version: 0,
+                    variant_tag: 0,
                     table: "albums".to_owned(),
                     descriptor: albums,
                     deltas: vec![
@@ -12239,7 +13405,7 @@ mod tests {
         runtime
             .tick(
                 vec![TableDelta {
-                    schema_version: 0,
+                    variant_tag: 0,
                     table: "albums".to_owned(),
                     descriptor: albums,
                     deltas: vec![RecordDelta {
@@ -12279,8 +13445,8 @@ mod tests {
         let second = albums
             .create(&[Value::U64(2), Value::String("two".to_owned())])
             .unwrap();
-        let first = crate::records::encode_versioned_record(0, &first);
-        let second = crate::records::encode_versioned_record(0, &second);
+        let first = crate::records::encode_variant_record(0, &first);
+        let second = crate::records::encode_variant_record(0, &second);
 
         store
             .write_many(&[store.set(b"1", &first), store.set(b"2", &second)])
@@ -12392,7 +13558,7 @@ mod tests {
         runtime
             .tick(
                 vec![TableDelta {
-                    schema_version: 0,
+                    variant_tag: 0,
                     table: "records".to_owned(),
                     descriptor,
                     deltas: vec![
@@ -12488,7 +13654,7 @@ mod tests {
         let labels = schema.table("labels").unwrap().record_schema();
         let deltas = vec![
             TableDelta {
-                schema_version: 0,
+                variant_tag: 0,
                 table: "artists".to_owned(),
                 descriptor: artists,
                 deltas: vec![RecordDelta {
@@ -12500,7 +13666,7 @@ mod tests {
                 }],
             },
             TableDelta {
-                schema_version: 0,
+                variant_tag: 0,
                 table: "labels".to_owned(),
                 descriptor: labels,
                 deltas: vec![RecordDelta {
@@ -12516,7 +13682,7 @@ mod tests {
                 }],
             },
             TableDelta {
-                schema_version: 0,
+                variant_tag: 0,
                 table: "albums".to_owned(),
                 descriptor: albums,
                 deltas: vec![RecordDelta {
@@ -12548,7 +13714,7 @@ mod tests {
         let schema = edges_schema();
         let edges = schema.table("edges").unwrap().record_schema();
         let deltas = vec![TableDelta {
-            schema_version: 0,
+            variant_tag: 0,
             table: "edges".to_owned(),
             descriptor: edges,
             deltas: vec![
@@ -12609,7 +13775,7 @@ mod tests {
         };
         let scores = schema.table("scores").unwrap().record_schema();
         let deltas = vec![TableDelta {
-            schema_version: 0,
+            variant_tag: 0,
             table: "scores".to_owned(),
             descriptor: scores,
             deltas: vec![
@@ -12807,7 +13973,7 @@ mod tests {
                 NodeDurability::Ephemeral,
             );
             assert!(matches!(
-                runtime.hydration_snapshot(node, &storage),
+                runtime.hydration_snapshot(node, &storage, HydrationMode::Ordinary),
                 Err(IvmRuntimeError::UnsupportedOperator)
             ));
         }
@@ -12890,7 +14056,7 @@ mod tests {
             .tick(
                 vec![
                     TableDelta {
-                        schema_version: 0,
+                        variant_tag: 0,
                         table: "albums".to_owned(),
                         descriptor: albums,
                         deltas: vec![RecordDelta {
@@ -12906,7 +14072,7 @@ mod tests {
                         }],
                     },
                     TableDelta {
-                        schema_version: 0,
+                        variant_tag: 0,
                         table: "artists".to_owned(),
                         descriptor: artists,
                         deltas: vec![RecordDelta {
@@ -12964,7 +14130,7 @@ mod tests {
 
         let edges = schema.table("edges").unwrap().record_schema();
         let table_delta = TableDelta {
-            schema_version: 0,
+            variant_tag: 0,
             table: "edges".to_owned(),
             descriptor: edges,
             deltas: vec![

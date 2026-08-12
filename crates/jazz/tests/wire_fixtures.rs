@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
-use groove::records::Value;
+use groove::records::{RecordDescriptor, Value, ValueType};
 use groove::schema::ColumnType;
 use jazz::ids::{AuthorId, BranchId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
 use jazz::node::content_store::Extent;
@@ -295,6 +295,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
                 terminal_operations: vec![TerminalOperation {
+                    root_descriptor: RecordDescriptor::new([("enabled", ValueType::Bool)]),
                     root_key: vec![10; 17],
                     path: vec![TerminalPathSegment::Collection("children".to_owned())],
                     edit: TerminalEdit::Move {
@@ -562,7 +563,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v6",
+        fixture_set: "jazz-wire-message-frames-v7",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,
@@ -814,9 +815,9 @@ fn exhaustive_native_row_codec_case() -> (
     groove::records::RecordDescriptor,
     Vec<groove::records::Value>,
 ) {
-    use groove::records::{EnumSchema, OwnedRecord, RecordDescriptor, Value, ValueType};
+    use groove::records::{OwnedRecord, RecordDescriptor, ScalarEnumSchema, Value, ValueType};
 
-    let mode = EnumSchema::new("mode", ["low", "high"]).expect("enum schema is valid");
+    let mode = ScalarEnumSchema::new("mode", ["low", "high"]).expect("enum schema is valid");
     let child = RecordDescriptor::new([
         ("child_count", ValueType::I32),
         (
@@ -845,7 +846,7 @@ fn exhaustive_native_row_codec_case() -> (
         ("string_value", ValueType::String),
         ("bytes_value", ValueType::Bytes),
         ("uuid_value", ValueType::Uuid),
-        ("enum_value", ValueType::Enum(mode)),
+        ("enum_value", ValueType::EnumTag(mode)),
         (
             "mixed_tuple",
             ValueType::Tuple(vec![
@@ -909,7 +910,7 @@ fn exhaustive_native_row_codec_case() -> (
         Value::String("synthetic".to_owned()),
         Value::Bytes(vec![0xde, 0xad]),
         Value::Uuid(uuid::Uuid::from_bytes([0x11; 16])),
-        Value::Enum(1),
+        Value::EnumTag(1),
         Value::Tuple(vec![
             Value::U8(9),
             Value::I64(-3),

@@ -16,8 +16,9 @@ use crate::protocol::{
     SubscribeServerFailureCode, TableLens,
 };
 use crate::protocol_limits::{
-    MAX_CONTENT_EXTENT_BYTES, MAX_FETCH_ROW_VERSIONS, MAX_KNOWN_STATE_EXACT_REFS,
-    MAX_LOGICAL_MESSAGE_BYTES, MAX_SHAPE_AST_BYTES, MAX_WIRE_FRAME_BYTES,
+    MAX_CONTENT_EXTENT_BYTES, MAX_FETCH_ROW_VERSIONS, MAX_INFLIGHT_LOGICAL_MESSAGES,
+    MAX_KNOWN_STATE_EXACT_REFS, MAX_LOGICAL_MESSAGE_BYTES, MAX_SHAPE_AST_BYTES,
+    MAX_WIRE_FRAME_BYTES,
 };
 use crate::query::{
     ArraySubquery, BindingId, Include, JoinMode, OrderDirection, PolicyBranch, Predicate,
@@ -27,10 +28,11 @@ use crate::query::{
 use crate::schema::{Policy, TableSchema, WritePolicies};
 use crate::time::{GlobalSeq, TxTime};
 use crate::tx::TxId;
-use crate::wire::decode_sync_message;
 use crate::wire::{
     FEATURE_MESSAGE_FRAGMENTATION, FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD,
-    WireStreamDecoder, current_wire_features,
+    WIRE_PROTOCOL_VERSION, WireEnvelope, WireError, WireErrorCode, WireFrame, WireMessageFragment,
+    WireRetry, WireSession, WireStreamDecoder, WireTransport, current_wire_features, decode_frame,
+    decode_sync_message, encode_frame,
 };
 
 fn block_on<F: Future>(future: F) -> F::Output {
@@ -1583,6 +1585,49 @@ fn local_subscription_emits_removed_row_for_fire_and_forget_delete() {
             .collect::<Vec<_>>(),
         vec![row_id]
     );
+}
+
+#[test]
+fn one_shot_and_subscription_rows_keep_identical_record_descriptors() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("done", ColumnType::Bool),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public())]);
+    let owner = AuthorId::from_bytes([0x32; 16]);
+    let db = open_db(0x32, owner, &schema);
+    let query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let _ = block_on(subscription.next_event()).unwrap();
+
+    let row_id = row(0x32);
+    db.insert_with_id(
+        "todos",
+        row_id,
+        BTreeMap::from([
+            (
+                "title".to_owned(),
+                Value::String("descriptor parity".to_owned()),
+            ),
+            ("done".to_owned(), Value::Bool(false)),
+        ]),
+    )
+    .unwrap();
+    let (added, _, _) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let one_shot = prepared_all(&db, &query, ReadOpts::default());
+    assert_eq!(added.len(), 1);
+    assert_eq!(one_shot.len(), 1);
+    let table = &schema.tables[0];
+    assert_eq!(
+        added[0].cell(&table, "title"),
+        Some(Value::String("descriptor parity".to_owned()))
+    );
+    assert_eq!(added[0].cell(&table, "done"), Some(Value::Bool(false)));
+    assert_eq!(added[0].encoded_record(), one_shot[0].encoded_record());
 }
 
 #[test]

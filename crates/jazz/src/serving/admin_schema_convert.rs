@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::groove::records::EnumSchema;
+use crate::groove::records::ScalarEnumSchema;
 use crate::groove::schema::ColumnType;
 use crate::schema::{ColumnSchema, JazzSchema, LargeValueKind, MergeStrategy, TableSchema};
 use serde_json::Value;
@@ -222,8 +222,8 @@ fn convert_column(
     }
     if let Some(variants) = object.get("enum") {
         let variants = string_array(variants, format!("{path}.enum"))?;
-        column.column_type = ColumnType::Enum(
-            EnumSchema::new(format!("{table}_{name}"), variants)
+        column.column_type = ColumnType::EnumTag(
+            ScalarEnumSchema::new(format!("{table}_{name}"), variants)
                 .map_err(|error| err(format!("{path}.enum"), error.to_string()))?,
         );
     }
@@ -431,7 +431,10 @@ mod tests {
         assert!(table.global_current_indexed_columns().contains("owner"));
         assert_eq!(table.columns[1].column_type, ColumnType::Bool.nullable());
         assert_eq!(table.columns[3].column_type, ColumnType::String.array_of());
-        assert!(matches!(table.columns[4].column_type, ColumnType::Enum(_)));
+        assert!(matches!(
+            table.columns[4].column_type,
+            ColumnType::EnumTag(_)
+        ));
     }
 
     #[test]

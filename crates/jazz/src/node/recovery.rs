@@ -29,7 +29,7 @@ where
                 if node_id != alias.0 || time != tx_id.time.0 {
                     continue;
                 }
-                let schema_alias = SchemaVersionAlias(raw.schema_version());
+                let schema_alias = SchemaVersionAlias(u64::from(raw.variant_tag()));
                 let schema_version = self.schema_version_for_alias(schema_alias).ok_or(
                     Error::InvalidStoredValue("rejected row schema version alias missing"),
                 )?;

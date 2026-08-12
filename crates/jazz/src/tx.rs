@@ -839,8 +839,8 @@ fn deletion_from_value(value: Value) -> Result<Option<DeletionEvent>, &'static s
     match value {
         Value::Nullable(None) => Ok(None),
         Value::Nullable(Some(value)) => deletion_from_value(*value),
-        Value::Enum(0) => Ok(Some(DeletionEvent::Deleted)),
-        Value::Enum(1) => Ok(Some(DeletionEvent::Restored)),
+        Value::EnumTag(0) => Ok(Some(DeletionEvent::Deleted)),
+        Value::EnumTag(1) => Ok(Some(DeletionEvent::Restored)),
         Value::U8(0) => Ok(Some(DeletionEvent::Deleted)),
         Value::U8(1) => Ok(Some(DeletionEvent::Restored)),
         _ => Err("deletion"),

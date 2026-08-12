@@ -30,12 +30,11 @@ For ordinary Rust/core work, the full gate set is:
 1. `cargo test -p jazz`
 2. `cargo test -p groove`
 3. `cargo test -p jazz --no-default-features --features test`
-4. `cargo test -p jazz-server`
-5. `cargo check -p jazz-sim --benches`
-6. `dev/gates/ts-wire-codec.sh`
-7. `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
-8. `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact`
-9. the sensitive-data guard from `jazz-private/dev/gates/`, normally reached
+4. `cargo check -p jazz-sim --benches`
+5. `dev/gates/ts-wire-codec.sh`
+6. `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
+7. `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact`
+8. the sensitive-data guard from `jazz-private/dev/gates/`, normally reached
    through the optional lefthook hook
 
 Run `dev/benchmarks/smoke.sh` for any change touching protocol, engine,
@@ -47,8 +46,7 @@ replacing the former fixed `-j 2` guidance.
 
 ### D.2 The tiers
 
-- **Crate tests** — integration and crate tests for `jazz`, `groove`,
-  `jazz-tools` with its `test` feature, and `jazz-server`.
+- **Crate tests** — integration and crate tests for `jazz` and `groove`.
 - **Bench API compilation** — `cargo check -p jazz-sim --benches` is always in
   the ordinary gate set because benchmark API rot has previously hidden until
   late in a lane.
@@ -69,15 +67,9 @@ replacing the former fixed `-j 2` guidance.
   protocol, engine, storage, or benchmark harnesses.
 - **Public type changes** — changes to public `jazz` types additionally gate the
   full workspace, including examples.
-- **Server shell** — `cargo test -p jazz-server` exercises the in-memory Rust
-  server shell over the public frame pump, including subscriber accept, detach
-  for resume, resume-token rejection, drain/health transitions, and metrics. It
-  also starts the loopback HTTP byte-frame listener on `127.0.0.1:0` and covers
-  health, metrics, session creation, and newline-separated hex frame request
-  plumbing into `InMemoryServerShell`. The loopback WebSocket listener is also
-  covered with real ABI clients: each binary message is a postcard batch of raw
-  `WireFrame` bytes, and the test proves writer-to-reader sync through the
-  socket boundary.
+- **Server shell** — the server-shell tests are included in the `jazz` package
+  gates above. They exercise the in-memory Rust server shell over the public
+  frame pump, loopback HTTP and WebSocket listeners, and real ABI clients.
 
 ### D.3 Simulation-first discipline
 

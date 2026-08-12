@@ -2325,6 +2325,8 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
                 },
             )
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            let terminal_operations = terminal_operations_to_json(terminal_operations)
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
             let payload = serde_json::json!({
                 "type": "delta",
                 "reset": reset,
@@ -2366,6 +2368,34 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
         }
         SubscriptionEvent::Closed => Ok(serde_json::json!({ "type": "closed" })),
     }
+}
+
+/// Serialize terminal edits with their exact root record layout.  The opaque
+/// descriptor bytes use the same postcard schema as packed subscription rows,
+/// which lets TypeScript decode the record layout without recreating it from
+/// the query projection.
+fn terminal_operations_to_json(
+    operations: &[jazz::groove::ivm::TerminalOperation],
+) -> std::result::Result<serde_json::Value, String> {
+    let mut encoded = serde_json::to_value(operations).map_err(|error| error.to_string())?;
+    let encoded_operations = encoded
+        .as_array_mut()
+        .expect("terminal operations serialize as an array");
+    for (operation, wire) in operations.iter().zip(encoded_operations) {
+        let serde_json::Value::Object(wire) = wire else {
+            unreachable!("terminal operation serializes as an object");
+        };
+        wire.remove("root_descriptor");
+        wire.insert(
+            "rootDescriptor".to_owned(),
+            serde_json::to_value(
+                postcard::to_allocvec(&operation.root_descriptor)
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?,
+        );
+    }
+    Ok(encoded)
 }
 
 fn core_relation_query_from_json(query_json: &str) -> napi::Result<CoreRelationQuery> {
@@ -2758,7 +2788,9 @@ mod tests {
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
         MergeableTxOps, Propagation as CorePropagation, SubscriptionEvent,
     };
+    use jazz::groove::ivm::{TerminalEdit, TerminalOperation};
     use jazz::groove::records::Value as CoreValue;
+    use jazz::groove::records::{RecordDescriptor, ValueType};
     use jazz::groove::schema::ColumnType as GrooveColumnType;
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
     use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
@@ -2935,6 +2967,38 @@ mod tests {
 
         assert!(payload.get("relation_delta").is_none());
         assert!(payload.get("output_mode").is_none());
+    }
+
+    #[test]
+    fn terminal_operations_use_json_objects_with_descriptor_bytes() {
+        let payload = super::terminal_operations_to_json(&[TerminalOperation {
+            root_descriptor: RecordDescriptor::new([
+                ("__jazz_terminal_row_key", ValueType::Uuid),
+                ("title", ValueType::String),
+            ]),
+            root_key: vec![10; 17],
+            path: Vec::new(),
+            edit: TerminalEdit::Insert {
+                index: 0,
+                key: vec![10; 17],
+                value: vec![0; 16],
+            },
+        }])
+        .expect("terminal operations serialize");
+
+        let operation = payload
+            .as_array()
+            .and_then(|operations| operations.first())
+            .and_then(serde_json::Value::as_object)
+            .expect("terminal operation is a JSON object");
+        assert!(operation.get("path").is_some());
+        assert!(operation.get("edit").is_some());
+        assert!(
+            operation
+                .get("rootDescriptor")
+                .is_some_and(serde_json::Value::is_array)
+        );
+        assert!(operation.get("root_descriptor").is_none());
     }
     /// A short-lived NAPI schema attachment must not own or abandon the
     /// owner-wide OpenBatch lifetime when its JS wrapper is collected.

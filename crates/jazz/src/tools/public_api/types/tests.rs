@@ -21,6 +21,16 @@ fn column_type_fixed_sizes() {
 }
 
 #[test]
+fn public_enum_schema_rejects_internal_registry_identity() {
+    let error = serde_json::from_str::<ColumnType>(
+        r#"{"type":"Enum","variants":["open","done"],"registry_id":9223372036854775808}"#,
+    )
+    .expect_err("public enum schema must not admit an internal registry identity");
+
+    assert!(error.to_string().contains("registry_id"));
+}
+
+#[test]
 fn column_descriptor_builder() {
     let col = ColumnDescriptor::new("email", ColumnType::Text)
         .nullable()

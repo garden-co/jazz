@@ -1945,7 +1945,7 @@ fn build_fixture(config: &Config) -> Fixture {
         .iter_mut()
         .filter(|commit| commit.table == ISSUES)
     {
-        if let Some(Value::Enum(discriminant)) = commit.cells.remove("state") {
+        if let Some(Value::EnumTag(discriminant)) = commit.cells.remove("state") {
             commit
                 .cells
                 .insert("state".to_owned(), Value::U8(discriminant));

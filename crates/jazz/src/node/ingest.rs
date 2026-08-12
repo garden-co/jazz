@@ -1156,6 +1156,26 @@ where
                     }
                     LensOp::TransformColumn { column, transform } => {
                         validate_transform_column(columns.get(column), transform)?;
+                        let source_column =
+                            columns.get(column).ok_or(Error::InvalidCatalogueUpdate(
+                                "transformed column is absent from source",
+                            ))?;
+                        let target_column = target_table
+                            .columns
+                            .iter()
+                            .find(|candidate| candidate.name == *column)
+                            .ok_or(Error::InvalidCatalogueUpdate(
+                                "transformed column is absent from target",
+                            ))?;
+                        if !physical_value_epoch_is_compatible(
+                            &source_column.column_type,
+                            &target_column.column_type,
+                        ) {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "column transform changes variant registry non-additively",
+                            ));
+                        }
+                        columns.insert(column.clone(), target_column.clone());
                     }
                     LensOp::RejectSourceDelta { .. } => {}
                 }
@@ -5065,12 +5085,37 @@ where
                     self.public_current_values(&table, version, Some(global_seq))?,
                 )
                 .expect("valid global current row");
+                let mapping = self
+                    .catalogue
+                    .physical_mappings
+                    .get(&schema_version)
+                    .and_then(|mapping| mapping.tables.get(version.table()))
+                    .cloned()
+                    .ok_or(Error::InvalidStoredValue(
+                        "physical global-current table mapping missing",
+                    ))?;
+                let physical_table = self.database.table_schema(&binding.storage_table)?.clone();
+                let descriptor = physical_write_descriptor(
+                    &table.global_current_storage_tables()[0].record_schema(),
+                    &physical_current_field_names(&table, &mapping)?,
+                    &physical_table,
+                )?;
+                let mut values = logical.to_values()?;
+                self.remap_authored_enum_cells_for_physical(
+                    &mut values,
+                    &table,
+                    &mapping,
+                    &physical_table,
+                    GlobalCurrentRowRecord::USER_CELLS,
+                )?;
+                let physical = OwnedRecord::new(descriptor.create(&values)?, descriptor);
                 batch.update_raw(
                     binding.storage_table,
                     global_current_primary_key(version.row_uuid()),
-                    groove::records::VersionedRecord::new(
-                        version.schema_version_alias().0,
-                        OwnedRecord::new(logical.raw().to_vec(), binding.descriptor),
+                    groove::records::VariantRecord::new(
+                        u32::try_from(version.schema_version_alias().0)
+                            .expect("schema aliases are allocated in Groove's variant-tag space"),
+                        physical,
                     ),
                 );
             }
@@ -5127,12 +5172,37 @@ where
                     self.public_current_values(&table, version, None)?,
                 )
                 .expect("valid ahead current row");
+                let mapping = self
+                    .catalogue
+                    .physical_mappings
+                    .get(&schema_version)
+                    .and_then(|mapping| mapping.tables.get(version.table()))
+                    .cloned()
+                    .ok_or(Error::InvalidStoredValue(
+                        "physical ahead-current table mapping missing",
+                    ))?;
+                let physical_table = self.database.table_schema(&binding.storage_table)?.clone();
+                let descriptor = physical_write_descriptor(
+                    &table.ahead_current_storage_tables()[0].record_schema(),
+                    &physical_current_field_names(&table, &mapping)?,
+                    &physical_table,
+                )?;
+                let mut values = logical.to_values()?;
+                self.remap_authored_enum_cells_for_physical(
+                    &mut values,
+                    &table,
+                    &mapping,
+                    &physical_table,
+                    GlobalCurrentRowRecord::USER_CELLS,
+                )?;
+                let physical = OwnedRecord::new(descriptor.create(&values)?, descriptor);
                 batch.insert_raw(
                     binding.storage_table,
                     history_primary_key(version),
-                    groove::records::VersionedRecord::new(
-                        version.schema_version_alias().0,
-                        OwnedRecord::new(logical.raw().to_vec(), binding.descriptor),
+                    groove::records::VariantRecord::new(
+                        u32::try_from(version.schema_version_alias().0)
+                            .expect("schema aliases are allocated in Groove's variant-tag space"),
+                        physical,
                     ),
                 );
             }

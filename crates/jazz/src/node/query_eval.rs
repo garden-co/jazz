@@ -26,15 +26,15 @@ use super::query_engine::{
     AppProjectionTree, AppRowOutputRequest, AppRowSchema, CapabilityReport, ClaimPath, ClosurePath,
     ClosurePathSegment, ClosureRootGate, ComparisonOp as NormalizedComparisonOp,
     ContentVersionSource, CorrelationRequirement, DataSource, DeletionRegisterSource,
-    FieldProjection, FrontierId, JoinContribution, JoinMode as NormalizedJoinMode, LensSelection,
-    NormalizedRowSetShape, NormalizedShapeIdentity, NormalizedValueRef,
-    OrderKey as NormalizedOrderKey, OutputTerminalSchema, OverlayRef, OverlayStack,
-    PathCardinality, PathHolePolicy, PayloadProjection, PolicyContext, PolicyDecisionRole,
-    PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr, ProgramBinding,
-    ProgramClaimParam, ProgramFactKey, ProgramOutputSchemas, ProgramPathId, ProvenanceField,
-    QueryAuthorizationMode, QueryProgram, QueryProgramRequest, QueryReadSet, ReachableContribution,
-    ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource, ResultId,
-    ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
+    FieldProjection, FieldRequirement, FrontierId, JoinContribution,
+    JoinMode as NormalizedJoinMode, LensSelection, NormalizedRowSetShape, NormalizedShapeIdentity,
+    NormalizedValueRef, OrderKey as NormalizedOrderKey, OutputTerminalSchema, OverlayRef,
+    OverlayStack, PathCardinality, PathHolePolicy, PayloadProjection, PolicyContext,
+    PolicyDecisionRole, PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr,
+    ProgramBinding, ProgramClaimParam, ProgramFactKey, ProgramOutputSchemas, ProgramPathId,
+    ProvenanceField, QueryAuthorizationMode, QueryProgram, QueryProgramRequest, QueryReadSet,
+    ReachableContribution, ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource,
+    ResultId, ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
     RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
     RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
     SortDirection as NormalizedSortDirection, SourceAuthorizationRequest, SourceExpr, SourceGap,
@@ -702,6 +702,10 @@ struct CurrentQuerySourceResolver<'a, S> {
     read_view: &'a ReadView<RequestedSourceStage>,
     inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
     access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+    /// Query-local enum boundary targets, keyed by logical source.  Defining
+    /// a variant target invalidates table inputs, so reuse it across the main
+    /// source, access path, and metadata sidecars of one compiled program.
+    current_projection_targets: BTreeMap<SourceId, String>,
 }
 
 struct CurrentSourceGraph {
@@ -1327,6 +1331,48 @@ impl<S> CurrentQuerySourceResolver<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn current_projection_target(
+        &mut self,
+        request: &SourceRequest,
+        table: &TableSchema,
+    ) -> Result<String, SourceResolutionError> {
+        if let Some(target) = self.current_projection_targets.get(&request.source) {
+            return Ok(target.clone());
+        }
+        let required_fields = self.current_projection_required_fields(request, table);
+        let target = self
+            .node
+            .ensure_physical_current_projection_for_enum_columns(
+                self.read_view.read_schema,
+                &table.name,
+                &required_fields,
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        self.current_projection_targets
+            .insert(request.source.clone(), target.clone());
+        Ok(target)
+    }
+
+    fn current_projection_required_fields(
+        &self,
+        request: &SourceRequest,
+        table: &TableSchema,
+    ) -> BTreeSet<String> {
+        match &request.requirements.app_fields {
+            // `All` still goes through the query-local boundary. The durable
+            // all-fields projection predates compatibility-sensitive reads and
+            // reports a non-total enum remap as an execution error; a read
+            // must instead omit precisely that row before its query graph.
+            FieldRequirement::All => table
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
+            FieldRequirement::None => BTreeSet::new(),
+            FieldRequirement::Fields(fields) => fields.clone(),
+        }
+    }
+
     fn selected_global_current_source_graph(
         &mut self,
         request: &SourceRequest,
@@ -1347,6 +1393,7 @@ where
                 if tier != DurabilityTier::Global {
                     return Ok(None);
                 }
+                let projection_target = self.current_projection_target(request, table)?;
                 let rows = self
                     .node
                     .physical_global_current_source_for_index_scan(
@@ -1354,6 +1401,7 @@ where
                         self.read_view.read_schema,
                         &column,
                         &prefix,
+                        &projection_target,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 self.node.query_engine_read_metrics.source_index_probes += 1;
@@ -1488,44 +1536,15 @@ where
         table: &TableSchema,
         tier: DurabilityTier,
     ) -> Result<CurrentSourceGraph, SourceResolutionError> {
-        // Keep the schema-aware projected payload as the row source. Version
-        // witnesses are joined alongside it solely to provide authoritative
-        // provenance/version metadata; using the physical witness graph as
-        // the payload source would bypass lenses and large-value projection.
+        // The schema-aware projection already retains the complete current
+        // version witness tuple.  Joining it to the generic physical witness
+        // graph would independently decode every enum cell, defeating a
+        // title-only old-schema subscription before its narrowed source has a
+        // chance to replace unused enum values with typed nulls.
         let projected =
             self.projected_content_current_source_graph(request, table, tier, true, true)?;
-        let witnesses = self
-            .node
-            .maintained_view_content_current_with_version_in_schema(
-                table,
-                tier,
-                self.read_view.read_schema,
-            )
-            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-        let mut fields = vec![ProjectField::renamed(left_field("row_uuid"), "row_uuid")];
-        fields.extend(table.columns.iter().map(|column| {
-            let field = user_column_field(&column.name);
-            ProjectField::renamed(left_field(&field), field)
-        }));
-        fields.extend(
-            [
-                "schema_version",
-                "parents",
-                "authored_columns",
-                "created_by",
-                "created_at",
-                "updated_by",
-                "updated_at",
-                "tx_time",
-                "tx_node_id",
-                "global_seq",
-            ]
-            .into_iter()
-            .map(|field| ProjectField::renamed(right_field(field), field)),
-        );
         Ok(CurrentSourceGraph {
-            graph: GraphBuilder::join(projected, witnesses, ["row_uuid"], ["row_uuid"])
-                .project_fields(fields),
+            graph: projected,
             descriptor: current_row_descriptor(table),
             metadata: BTreeMap::new(),
         })
@@ -1540,37 +1559,71 @@ where
         exclude_deleted: bool,
     ) -> Result<GraphBuilder, SourceResolutionError> {
         let fields = global_current_storage_fields(read_table, true, include_global_seq);
+        let required_fields = self.current_projection_required_fields(request, read_table);
+        let (projection_target, physical_fields) = self
+            .node
+            .ensure_physical_current_winner_projection(
+                self.read_view.read_schema,
+                &request.source.table,
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let post_winner_fields = self
+            .node
+            .physical_current_post_winner_projection_fields(
+                self.read_view.read_schema,
+                &request.source.table,
+                &required_fields,
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let raw_global_output = self
+            .node
+            .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
+            .and_then(|table_id| {
+                self.node
+                    .database
+                    .table_schema(&physical_global_current_table_name(table_id))
+                    .map(|schema| schema.record_schema())
+                    .map_err(Error::Groove)
+            })
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         let access_path = self.access_paths.get(&request.source).cloned();
         let global = match &access_path {
             Some(CurrentAccessPath::PrimaryKey(prefix)) => {
                 self.node.query_engine_read_metrics.source_primary_key_scans += 1;
                 self.node
-                    .physical_current_source_scan_graph(
+                    .physical_current_source_scan_graph_with_projection_target(
                         self.read_view.read_schema,
                         &request.source.table,
                         PhysicalCurrentClass::Global,
+                        projection_target.clone(),
                         static_scan_for_prefix(prefix.clone(), 1),
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
             }
             Some(CurrentAccessPath::Index { column, prefix }) if tier == DurabilityTier::Global => {
+                // A Global index already selects from the canonical settled
+                // winner relation. Project those raw physical rows first, then
+                // apply the compatibility boundary below.
                 self.node.query_engine_read_metrics.source_index_probes += 1;
                 self.node
-                    .physical_global_current_source_for_index_scan(
+                    .physical_global_current_source_for_index_scan_with_output(
                         read_table,
                         self.read_view.read_schema,
                         column,
                         prefix,
+                        &projection_target,
+                        raw_global_output.clone(),
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
             }
             _ => {
                 self.node.query_engine_read_metrics.source_full_scans += 1;
                 self.node
-                    .physical_current_source_graph(
+                    .physical_current_source_graph_with_projection_target(
                         self.read_view.read_schema,
                         &request.source.table,
                         PhysicalCurrentClass::Global,
+                        projection_target.clone(),
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
             }
@@ -1578,41 +1631,46 @@ where
         let content = if tier == DurabilityTier::Global {
             global
         } else {
-            let global = global.project(fields.clone());
+            let global = global.project(physical_fields.clone());
             let ahead = match &access_path {
-                Some(CurrentAccessPath::PrimaryKey(prefix)) => {
-                    self.node.physical_current_source_scan_graph(
+                Some(CurrentAccessPath::PrimaryKey(prefix)) => self
+                    .node
+                    .physical_current_source_scan_graph_with_projection_target(
                         self.read_view.read_schema,
                         &request.source.table,
                         PhysicalCurrentClass::Ahead,
+                        projection_target.clone(),
                         static_scan_for_prefix(prefix.clone(), 3),
-                    )
-                }
-                _ => self.node.physical_current_source_graph(
-                    self.read_view.read_schema,
-                    &request.source.table,
-                    PhysicalCurrentClass::Ahead,
-                ),
+                    ),
+                _ => self
+                    .node
+                    .physical_current_source_graph_with_projection_target(
+                        self.read_view.read_schema,
+                        &request.source.table,
+                        PhysicalCurrentClass::Ahead,
+                        projection_target,
+                    ),
             }
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
             let ahead = if tier == DurabilityTier::Edge {
-                edge_visible_ahead_current_source_graph(ahead, fields.clone())
+                edge_visible_ahead_current_source_graph(ahead, physical_fields.clone())
             } else {
-                ahead.project(fields.clone())
+                ahead.project(physical_fields.clone())
             };
             GraphBuilder::arg_max_by(
                 GraphBuilder::union([global, ahead]),
                 ["row_uuid"],
                 ["tx_time", "tx_node_id"],
             )
-            .project(fields.clone())
+            .project(physical_fields)
         };
+        let content = content.project_fields(post_winner_fields);
         if !exclude_deleted {
             return Ok(content.project(fields));
         }
         let deleted_winners = self
             .projected_deletion_register_current_source_graph(request, tier)?
-            .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
             .project(["row_uuid"]);
         Ok(GraphBuilder::anti_join(
             content,
@@ -1714,10 +1772,10 @@ fn edge_visible_ahead_current_source_graph(
         GraphBuilder::table("jazz_transactions")
             .filter(
                 PredicateExpr::And(vec![
-                    PredicateExpr::eq("fate", Value::Enum(FateTag::Accepted as u8)),
+                    PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
                     PredicateExpr::Or(vec![
-                        PredicateExpr::eq("durability", Value::Enum(2)),
-                        PredicateExpr::eq("durability", Value::Enum(3)),
+                        PredicateExpr::eq("durability", Value::EnumTag(2)),
+                        PredicateExpr::eq("durability", Value::EnumTag(3)),
                     ])
                     .canonicalize(),
                 ])
@@ -1752,8 +1810,8 @@ fn content_version_current_source_graph(
             GraphBuilder::table("jazz_transactions")
                 .filter(
                     PredicateExpr::Or(vec![
-                        PredicateExpr::eq("durability", Value::Enum(2)),
-                        PredicateExpr::eq("durability", Value::Enum(3)),
+                        PredicateExpr::eq("durability", Value::EnumTag(2)),
+                        PredicateExpr::eq("durability", Value::EnumTag(3)),
                     ])
                     .canonicalize(),
                 )
@@ -1792,8 +1850,8 @@ fn deletion_register_current_keys_graph(table: &str, tier: DurabilityTier) -> Gr
             GraphBuilder::table("jazz_transactions")
                 .filter(
                     PredicateExpr::Or(vec![
-                        PredicateExpr::eq("durability", Value::Enum(2)),
-                        PredicateExpr::eq("durability", Value::Enum(3)),
+                        PredicateExpr::eq("durability", Value::EnumTag(2)),
+                        PredicateExpr::eq("durability", Value::EnumTag(3)),
                     ])
                     .canonicalize(),
                 )
@@ -1853,10 +1911,10 @@ fn selected_visible_current_primary_key_graph(
             GraphBuilder::table("jazz_transactions")
                 .filter(
                     PredicateExpr::And(vec![
-                        PredicateExpr::eq("fate", Value::Enum(FateTag::Accepted as u8)),
+                        PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
                         PredicateExpr::Or(vec![
-                            PredicateExpr::eq("durability", Value::Enum(2)),
-                            PredicateExpr::eq("durability", Value::Enum(3)),
+                            PredicateExpr::eq("durability", Value::EnumTag(2)),
+                            PredicateExpr::eq("durability", Value::EnumTag(3)),
                         ])
                         .canonicalize(),
                     ])
@@ -1880,7 +1938,7 @@ fn selected_visible_current_primary_key_graph(
                 register_global_current_table_name(&table.name),
                 deletion_scan,
             )
-            .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
             .project(["row_uuid"]),
         )
     } else {
@@ -1940,7 +1998,7 @@ fn selected_visible_current_primary_key_graph(
                 ["row_uuid"],
                 ["tx_time", "tx_node_id"],
             )
-            .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
             .project(["row_uuid"]),
         )
     };
@@ -5846,6 +5904,26 @@ where
         schema_version: SchemaVersionId,
         column: &str,
         prefix: &[Value],
+        projection_target: &str,
+    ) -> Result<GraphBuilder, Error> {
+        self.physical_global_current_source_for_index_scan_with_output(
+            table,
+            schema_version,
+            column,
+            prefix,
+            projection_target,
+            table.global_current_storage_tables()[0].record_schema(),
+        )
+    }
+
+    fn physical_global_current_source_for_index_scan_with_output(
+        &self,
+        table: &TableSchema,
+        schema_version: SchemaVersionId,
+        column: &str,
+        prefix: &[Value],
+        projection_target: &str,
+        output: RecordDescriptor,
     ) -> Result<GraphBuilder, Error> {
         let mapping = self
             .catalogue
@@ -5863,15 +5941,6 @@ where
                 "physical current index column mapping missing",
             ))?;
         let storage_table = physical_global_current_table_name(mapping.table_id);
-        let alias = self
-            .catalogue
-            .schema_version_aliases
-            .get(&schema_version)
-            .copied()
-            .ok_or(Error::InvalidStoredValue(
-                "physical current index schema alias missing",
-            ))?;
-        let target = physical_current_projection_target(alias, &table.name);
         let indexed = self.database.index_scan_raw(
             &storage_table,
             &physical_current_index_name(column_id),
@@ -5879,19 +5948,16 @@ where
         )?;
         let mut records = Vec::with_capacity(indexed.len());
         for raw in indexed {
-            let schema_version = raw.schema_version();
-            let record = groove::records::VersionedRecord::new(schema_version, raw.owned_record());
+            let variant_tag = raw.variant_tag();
+            let record = groove::records::VariantRecord::new(variant_tag, raw.owned_record());
             if let Some(projected) =
                 self.database
-                    .project_variant_record(&storage_table, &target, &record)?
+                    .project_variant_record(&storage_table, projection_target, &record)?
             {
                 records.push(projected.raw().to_vec());
             }
         }
-        Ok(GraphBuilder::inline_records(
-            table.global_current_storage_tables()[0].record_schema(),
-            records,
-        ))
+        Ok(GraphBuilder::inline_records(output, records))
     }
 
     fn compile_historical_query_program(
@@ -6163,6 +6229,7 @@ where
             read_view: &read_view,
             inline_sources,
             access_paths,
+            current_projection_targets: BTreeMap::new(),
         };
         let node_uuid = resolver.node.node_uuid;
         let node_alias = resolver.node.self_node_alias;
@@ -7454,6 +7521,15 @@ where
             }
             rows
         };
+        // The graph used for synchronous materialization intentionally retains
+        // physical provenance fields so large values and policy witnesses can
+        // be resolved above.  Do not let that internal descriptor cross the
+        // public CurrentRow boundary: subscriptions use the public terminal
+        // shape, and native/WASM consumers must see the same layout from both
+        // read paths.
+        if shape.query().flat_join.is_none() {
+            normalize_public_current_rows(&table_schema, &mut rows)?;
+        }
         let query = shape.query();
         self.finish_engine_query_rows(query, &mut rows)?;
         if query.flat_join.is_none() && query.array_subqueries.is_empty() {
@@ -8047,7 +8123,7 @@ where
             let tx_node = NodeAlias(record.get_u64(GlobalChangeRowRecord::FIELD_TX_NODE_ID_IDX)?);
             let deletion = record
                 .get_nullable_enum(GlobalChangeRowRecord::FIELD__DELETION_IDX)?
-                .map(|value| deletion_event_from_value(Value::Enum(value)))
+                .map(|value| deletion_event_from_value(Value::EnumTag(value)))
                 .transpose()?;
             let entry = rows_by_uuid.entry(row_uuid).or_insert((None, None));
             if layer == version_layer_string(VersionLayer::Content).as_bytes() {
@@ -11196,7 +11272,7 @@ where
             )
         };
         let deleted = deletion
-            .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
             .project(["row_uuid"]);
         Ok(GraphBuilder::anti_join(
             content,
@@ -13034,6 +13110,25 @@ fn sort_query_default_rows(rows: &mut [CurrentRow]) {
     rows.sort_by(default_query_row_order);
 }
 
+/// Convert materializer-only rows back to the canonical application row
+/// descriptor before exposing them through a one-shot query.  The materializer
+/// may retain physical schema/provenance fields while resolving a row, whereas
+/// subscriptions are emitted from the public app-row terminal directly.
+fn normalize_public_current_rows(
+    table: &TableSchema,
+    rows: &mut [CurrentRow],
+) -> Result<(), Error> {
+    let columns = table
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    for row in rows {
+        *row = row.project(table, &columns)?;
+    }
+    Ok(())
+}
+
 fn default_query_row_order(left: &CurrentRow, right: &CurrentRow) -> Ordering {
     left.row_uuid()
         .to_bytes()
@@ -13160,7 +13255,7 @@ fn compare_order_values(left: &Value, right: &Value) -> Ordering {
         (Value::String(left), Value::String(right)) => left.cmp(right),
         (Value::Bytes(left), Value::Bytes(right)) => left.cmp(right),
         (Value::Uuid(left), Value::Uuid(right)) => left.as_bytes().cmp(right.as_bytes()),
-        (Value::Enum(left), Value::Enum(right)) => left.cmp(right),
+        (Value::EnumTag(left), Value::EnumTag(right)) => left.cmp(right),
         (Value::Tuple(left), Value::Tuple(right)) | (Value::Array(left), Value::Array(right)) => {
             compare_order_value_slices(left, right)
         }
@@ -13707,9 +13802,10 @@ fn historical_current_graph_full_scan(
             .canonicalize(),
         )
     };
-    let nullable_deletion_type = ValueType::Nullable(Box::new(ValueType::Enum(
-        groove::records::EnumSchema::new("jazz_deletion", ["deleted", "restored"])
-            .expect("valid deletion enum"),
+    let nullable_deletion_type = ValueType::Nullable(Box::new(ValueType::EnumTag(
+        groove::records::ScalarEnumSchema::new("jazz_deletion", ["deleted", "restored"])
+            .expect("valid deletion enum")
+            .with_system_registry(groove::records::SystemVariantRegistry::deletion_state()),
     )));
     let content_events = changes_for_layer("content").project_fields([
         ProjectField::named("row_uuid"),
@@ -13776,7 +13872,10 @@ fn historical_current_graph_full_scan(
     let latest_restore = latest_event.filter(
         PredicateExpr::And(vec![
             PredicateExpr::eq("event_layer", Value::String("deletion".to_owned())),
-            PredicateExpr::eq("deletion", Value::Nullable(Some(Box::new(Value::Enum(1))))),
+            PredicateExpr::eq(
+                "deletion",
+                Value::Nullable(Some(Box::new(Value::EnumTag(1)))),
+            ),
         ])
         .canonicalize(),
     );
@@ -13852,8 +13951,8 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
             GraphBuilder::table("jazz_transactions")
                 .filter(
                     PredicateExpr::Or(vec![
-                        PredicateExpr::eq("durability", Value::Enum(2)),
-                        PredicateExpr::eq("durability", Value::Enum(3)),
+                        PredicateExpr::eq("durability", Value::EnumTag(2)),
+                        PredicateExpr::eq("durability", Value::EnumTag(3)),
                     ])
                     .canonicalize(),
                 )
@@ -13931,7 +14030,7 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
         )
     };
     let deleted_winners = deletion_current
-        .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+        .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
         .project_fields([
             ProjectField::named("row_uuid"),
             ProjectField::named("tx_time"),
@@ -14347,6 +14446,7 @@ mod tests {
             read_view: &read_view,
             inline_sources: BTreeMap::new(),
             access_paths: BTreeMap::new(),
+            current_projection_targets: BTreeMap::new(),
         };
 
         assert!(resolver.needs_projected_current_source("users"));

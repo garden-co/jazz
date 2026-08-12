@@ -8,6 +8,8 @@
 //! first, then stateless operators, then stateful join/recursive operators,
 //! then aggregate descriptors.
 
+use std::collections::BTreeMap;
+
 use crate::ivm::graph::DurableStorage;
 use crate::records::{RecordDescriptor, Value, ValueType};
 use crate::schema::IndexSchema;
@@ -15,7 +17,7 @@ use crate::schema::IndexSchema;
 // Operator categories:
 // - Sources: TableSourceOp, InlineRecordsOp, FrontierSourceOp, BindingSourceOp.
 // - Stateless transformations: PersistOp, FilterOp, MapProjectOp,
-//   UnwrapNullableOp, UnnestOp, IndexByOp.
+//   UnwrapNullableOp, UnnestOp, VariantProjectOp, IndexByOp.
 // - Stateful transformations: JoinOp (join/semi-join/anti-join), RecursiveOp.
 // - Aggregate/window: ArgMaxByOp, ArgMinByOp, TopByOp, AggregateOp.
 
@@ -136,6 +138,24 @@ pub struct MapProjectOp {
     pub mapping: Vec<(usize, usize)>,
 }
 
+/// Per-occurrence enum tag translation at a descriptor boundary.
+///
+/// The paths name an enum occurrence relative to one projected field: `root`,
+/// `root/nullable`, `root/array`, `root/tuple/<n>`, `root/record/<field>`,
+/// and payload children beneath a stable case path.  The tag vectors map the
+/// compact source tag to a target tag; `None` deliberately makes that mapping
+/// non-total. `payload_children` maps each source payload tag to its semantic
+/// child root.  It is distinct from the target tag because two schemas can use
+/// the same local ordinal for different concurrently introduced cases.
+/// This keeps a node-local physical enum registry an optimization, rather
+/// than allowing its raw tags to escape as user semantics.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct RecursiveEnumRemaps {
+    pub scalar: BTreeMap<String, Vec<Option<u8>>>,
+    pub payload: BTreeMap<String, Vec<Option<u32>>>,
+    pub payload_children: BTreeMap<String, Vec<Option<String>>>,
+}
+
 /// One projected expression and optional output name.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ProjectionExpr {
@@ -161,6 +181,17 @@ pub struct UnnestOp {
     pub array_field_idx: usize,
     /// Output field carrying the current array element.
     pub element_field: String,
+}
+
+/// Select one named case from an enum field and emit its fixed payload record.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct VariantProjectOp {
+    /// Field containing `Enum(schema)` values.
+    pub field: String,
+    /// Resolved logical field index.
+    pub field_idx: usize,
+    /// Stable declaration-order tag of the selected case.
+    pub tag: u32,
 }
 
 /// In-memory or schema-backed index construction descriptor.
@@ -401,6 +432,19 @@ pub enum PlanExpr {
     Null(ValueType),
     Nullable(String),
     NullableFlat(String),
+    EnumTagRemap {
+        field: String,
+        tags: Vec<Option<u8>>,
+    },
+    EnumRemap {
+        field: String,
+        tags: Vec<Option<u32>>,
+    },
+    RecursiveEnumRemap {
+        field: String,
+        remaps: RecursiveEnumRemaps,
+        omit_unrepresentable: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -432,7 +476,7 @@ pub enum LiteralValue {
     /// Stored as raw bits so predicates remain `Eq + Hash + Ord`.
     F64(u64),
     Bool(bool),
-    Enum(u8),
+    EnumTag(u8),
     String(String),
     Bytes(Vec<u8>),
     Uuid(uuid::Uuid),
@@ -454,14 +498,15 @@ impl From<Value> for LiteralValue {
             Value::I32(value) => Self::I32(value),
             Value::F64(value) => Self::F64(value.to_bits()),
             Value::Bool(value) => Self::Bool(value),
-            Value::Enum(value) => Self::Enum(value),
+            Value::EnumTag(value) => Self::EnumTag(value),
             Value::String(value) => Self::String(value),
             Value::Bytes(value) => Self::Bytes(value),
             Value::Uuid(value) => Self::Uuid(value),
             Value::Tuple(values) => Self::Tuple(values.into_iter().map(Into::into).collect()),
             Value::Array(values) => Self::Array(values.into_iter().map(Into::into).collect()),
             Value::Nullable(value) => Self::Nullable(value.map(|value| Box::new((*value).into()))),
-            Value::Record(_) => Self::Record,
+            // Neither records nor tagged payload unions are supported predicate literals.
+            Value::Record(_) | Value::Enum(_) => Self::Record,
         }
     }
 }
@@ -477,7 +522,7 @@ impl LiteralValue {
             Self::I32(_) => Some(ValueType::I32),
             Self::F64(_) => Some(ValueType::F64),
             Self::Bool(_) => Some(ValueType::Bool),
-            Self::Enum(_) => Some(ValueType::U8),
+            Self::EnumTag(_) => Some(ValueType::U8),
             Self::String(_) => Some(ValueType::String),
             Self::Bytes(_) => Some(ValueType::Bytes),
             Self::Uuid(_) => Some(ValueType::Uuid),
@@ -508,7 +553,7 @@ impl LiteralValue {
             Self::I32(value) => Value::I32(*value),
             Self::F64(value) => Value::F64(f64::from_bits(*value)),
             Self::Bool(value) => Value::Bool(*value),
-            Self::Enum(value) => Value::Enum(*value),
+            Self::EnumTag(value) => Value::EnumTag(*value),
             Self::String(value) => Value::String(value.clone()),
             Self::Bytes(value) => Value::Bytes(value.clone()),
             Self::Uuid(value) => Value::Uuid(*value),

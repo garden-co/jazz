@@ -1540,12 +1540,18 @@ pub enum Error {
     #[error("invalid storage delta: {0}")]
     InvalidStorageDelta(String),
     #[error("record error: {0}")]
-    Record(#[from] crate::records::Error),
+    Record(#[source] Box<crate::records::Error>),
     #[cfg(feature = "rocksdb")]
     #[error(transparent)]
     RocksDb(#[from] ::rocksdb::Error),
     #[error(transparent)]
     Opfs(#[from] opfs_btree::BTreeError),
+}
+
+impl From<crate::records::Error> for Error {
+    fn from(error: crate::records::Error) -> Self {
+        Self::Record(Box::new(error))
+    }
 }
 
 #[cfg(test)]
@@ -1695,8 +1701,21 @@ pub(crate) mod conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::records::{EnumSchema, Value, ValueType};
+    use crate::records::{ScalarEnumSchema, Value, ValueType};
     use std::cell::Cell;
+    use std::error::Error as _;
+
+    #[test]
+    fn record_errors_keep_display_and_source_after_storage_conversion() {
+        let error = Error::from(crate::records::Error::InvalidOffset);
+
+        assert_eq!(error.to_string(), "record error: invalid offset");
+        assert_eq!(error.source().unwrap().to_string(), "invalid offset");
+        assert!(matches!(
+            error,
+            Error::Record(source) if *source == crate::records::Error::InvalidOffset
+        ));
+    }
 
     fn reverse_prefix_values<S: OrderedKvStorage>(
         storage: &S,
@@ -1712,7 +1731,7 @@ mod tests {
     }
 
     fn complex_record_descriptor_and_values() -> (RecordDescriptor, Vec<Value>) {
-        let status = EnumSchema::new("status", ["draft", "ready", "done"]).unwrap();
+        let status = ScalarEnumSchema::new("status", ["draft", "ready", "done"]).unwrap();
         let row = uuid::Uuid::from_bytes([0x54; 16]);
         let ref_row = uuid::Uuid::from_bytes([0x75; 16]);
         (
@@ -1726,7 +1745,7 @@ mod tests {
                 ("text", ValueType::String),
                 ("bytes", ValueType::Bytes),
                 ("uuid", ValueType::Uuid),
-                ("enum", ValueType::Enum(status)),
+                ("enum", ValueType::EnumTag(status)),
                 (
                     "nullable_tuple",
                     ValueType::Nullable(Box::new(ValueType::Tuple(vec![
@@ -1749,7 +1768,7 @@ mod tests {
                 Value::String("stored value".to_owned()),
                 Value::Bytes(vec![9, 8, 7, 6]),
                 Value::Uuid(row),
-                Value::Enum(1),
+                Value::EnumTag(1),
                 Value::Nullable(Some(Box::new(Value::Tuple(vec![
                     Value::Uuid(ref_row),
                     Value::U64(u64::MAX - 7),

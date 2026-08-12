@@ -44,6 +44,10 @@ inputs:
     description: "Blacksmith sticky-disk key used when sccache is enabled."
     required: false
     default: ""
+  sccache-sticky-disk:
+    description: "Mount Blacksmith's sticky disk for sccache. Disable on persistent self-hosted runners."
+    required: false
+    default: "true"
 
 runs:
   using: "composite"
@@ -105,16 +109,24 @@ runs:
         tool: sccache
 
     - name: Mount sccache sticky disk
-      if: inputs.sccache == 'true' && runner.os == 'Linux'
+      if: inputs.sccache == 'true' && inputs.sccache-sticky-disk == 'true' && runner.os == 'Linux'
       uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
       with:
         key: ${{ inputs.sccache-key != '' && inputs.sccache-key || format('sccache-{0}-{1}-v1', env.CACHE_SCOPE_REPOSITORY_ID, runner.os) }}
-        path: /home/runner/.cache/sccache
+        path: ${{ runner.temp }}/sccache
 
     - name: Export sccache environment
       if: inputs.sccache == 'true' && runner.os == 'Linux'
       shell: bash
+      env:
+        SCCACHE_STICKY_DISK: ${{ inputs.sccache-sticky-disk }}
       run: |
+        if [[ "${SCCACHE_STICKY_DISK}" == "true" ]]; then
+          sccache_dir="${RUNNER_TEMP}/sccache"
+        else
+          sccache_dir="${HOME}/.cache/sccache"
+        fi
+        mkdir -p "${sccache_dir}"
         echo "RUSTC_WRAPPER=sccache" >> "${GITHUB_ENV}"
-        echo "SCCACHE_DIR=/home/runner/.cache/sccache" >> "${GITHUB_ENV}"
-        echo "SCCACHE_CACHE_SIZE=8G" >> "${GITHUB_ENV}"
+        echo "SCCACHE_DIR=${sccache_dir}" >> "${GITHUB_ENV}"
+        echo "SCCACHE_CACHE_SIZE=${SCCACHE_CACHE_SIZE:-8G}" >> "${GITHUB_ENV}"

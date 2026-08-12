@@ -3341,7 +3341,7 @@ mod tests {
         // they cannot be observed through a higher-level client API.
         let file = MemoryFile::new();
         let options = small_options();
-        let mut tree = OpfsBTree::open(file, options.clone()).expect("open tree");
+        let mut tree = OpfsBTree::open(file, options).expect("open tree");
         let checkpointed_pages = tree.checkpoint_state().total_pages;
 
         // One root page plus 500 blob pages produces 501 WAL frames. WAL

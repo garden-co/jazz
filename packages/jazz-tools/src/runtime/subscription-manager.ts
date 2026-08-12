@@ -18,8 +18,11 @@ import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "./select-projection.js";
 import {
   decodeNativeRow,
   decodeNativeTerminalRow,
+  decodeNativeTerminalRowWithDescriptor,
   logicalStorageColumns,
+  readDescriptor,
 } from "./native-runtime/native-row-codec.js";
+import { PostcardReader } from "./native-runtime/native-codec.js";
 
 const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -355,15 +358,12 @@ export class SubscriptionManager<T extends { id: string }> {
   ): SubscriptionDelta<T> {
     const beforeIndices = new Map(this.orderedIdIndex);
     const affectedRoots = new Set<string>();
-    const rootInserts = operations.filter(
-      (operation) => operation.path.length === 0 && "Insert" in operation.edit,
-    );
-
     // Pre-establish only newly inserted root payloads so child-before-root
     // batches are addressable. Positional insertion remains in producer order:
     // applying its index before an earlier root Remove makes the outcome depend
     // on operation-key ordering.
-    for (const operation of rootInserts) {
+    for (const operation of operations) {
+      if (operation.path.length !== 0 || !("Insert" in operation.edit)) continue;
       const rootId = this.terminalAddress(operation.root_key);
       const rootRowId = terminalPayloadRowId(operation.root_key);
       const edit = operation.edit;
@@ -371,7 +371,12 @@ export class SubscriptionManager<T extends { id: string }> {
       if (!("Insert" in edit)) throw new Error("terminal root insert partition is invalid");
       this.terminalRows.set(
         rootId,
-        decodeNativeTerminalRow(rootRowId, rootColumns, Uint8Array.from(edit.Insert.value)),
+        decodeNativeTerminalRoot(
+          rootRowId,
+          operation,
+          rootColumns,
+          Uint8Array.from(edit.Insert.value),
+        ),
       );
     }
 
@@ -393,8 +398,9 @@ export class SubscriptionManager<T extends { id: string }> {
           }
           this.terminalRows.set(
             rootId,
-            decodeNativeTerminalRow(
+            decodeNativeTerminalRoot(
               terminalPayloadRowId(operation.root_key),
+              operation,
               rootColumns,
               Uint8Array.from(edit.Update.value),
             ),
@@ -676,6 +682,23 @@ export class SubscriptionManager<T extends { id: string }> {
   get size(): number {
     return this.currentResults.size;
   }
+}
+
+function decodeNativeTerminalRoot(
+  id: string,
+  operation: NativeTerminalOperation,
+  columns: readonly ColumnDescriptor[],
+  raw: Uint8Array,
+): WasmRow {
+  if (!operation.rootDescriptor) {
+    throw new Error("terminal operation is missing its root descriptor");
+  }
+  const reader = new PostcardReader(Uint8Array.from(operation.rootDescriptor));
+  const descriptor = readDescriptor(reader);
+  if (!reader.done()) {
+    throw new Error("terminal root descriptor has trailing bytes");
+  }
+  return decodeNativeTerminalRowWithDescriptor(id, descriptor, columns, raw);
 }
 
 export function isNativeRowDelta(delta: SubscriptionWireDelta): delta is NativeRowDelta {

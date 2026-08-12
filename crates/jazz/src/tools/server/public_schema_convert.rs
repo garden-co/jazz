@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::groove::records::{EnumSchema, Value as GrooveValue};
+use crate::groove::records::{ScalarEnumSchema, Value as GrooveValue};
 use crate::groove::schema::ColumnType as GrooveColumnType;
 use crate::query::{
     InheritsOperation, JoinCorrelation, JoinSourceLookup, JoinTarget, JoinVia, Operand,
@@ -264,7 +264,7 @@ fn coerce_operand_pair_typed_literal(
     if let Some(discriminant) =
         column_enum_literal_discriminant(table, column, literal_operand, column_types)
     {
-        *literal_operand = Operand::Literal(GrooveValue::Enum(discriminant));
+        *literal_operand = Operand::Literal(GrooveValue::EnumTag(discriminant));
         return false;
     }
     if column_is_enum(table, column, column_types) {
@@ -380,7 +380,7 @@ fn column_enum_schema<'a>(
     table: &str,
     column: &str,
     column_types: &'a BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
-) -> Option<&'a EnumSchema> {
+) -> Option<&'a ScalarEnumSchema> {
     let column_type = match column_types
         .get(table)
         .and_then(|columns| columns.get(column))?
@@ -391,9 +391,9 @@ fn column_enum_schema<'a>(
     groove_column_type_enum_schema(column_type)
 }
 
-fn groove_column_type_enum_schema(column_type: &GrooveColumnType) -> Option<&EnumSchema> {
+fn groove_column_type_enum_schema(column_type: &GrooveColumnType) -> Option<&ScalarEnumSchema> {
     match column_type {
-        GrooveColumnType::Enum(schema) => Some(schema),
+        GrooveColumnType::EnumTag(schema) => Some(schema),
         GrooveColumnType::Nullable(inner) => groove_column_type_enum_schema(inner),
         _ => None,
     }
@@ -1874,74 +1874,6 @@ fn append_inherited_policy_expanded_fallback(
     }
 }
 
-#[allow(dead_code)]
-fn policy_select_expansion_requires_native_inherits(
-    schema: &Schema,
-    table_schema: &TableSchema,
-    table: &TableName,
-    expr: &PolicyExpr,
-) -> bool {
-    fn inner(
-        schema: &Schema,
-        table_schema: &TableSchema,
-        expr: &PolicyExpr,
-        visited: &mut Vec<TableName>,
-    ) -> bool {
-        match expr {
-            PolicyExpr::ExistsRel { .. } => true,
-            PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => exprs
-                .iter()
-                .any(|expr| inner(schema, table_schema, expr, visited)),
-            PolicyExpr::Not(expr) => inner(schema, table_schema, expr, visited),
-            PolicyExpr::Inherits {
-                operation: Operation::Select,
-                via_column,
-                ..
-            } => table_schema
-                .columns
-                .columns
-                .iter()
-                .find(|column| column.name.as_str() == via_column)
-                .and_then(|column| column.references.as_ref())
-                .and_then(|parent_table| {
-                    if visited.contains(parent_table) {
-                        return None;
-                    }
-                    let parent_schema = schema.get(parent_table)?;
-                    let parent_policy = parent_schema.policies.select.using.as_ref()?;
-                    visited.push(*parent_table);
-                    let requires_native = inner(schema, parent_schema, parent_policy, visited);
-                    visited.pop();
-                    Some(requires_native)
-                })
-                .unwrap_or(false),
-            PolicyExpr::InheritsReferencing {
-                operation: Operation::Select,
-                source_table,
-                ..
-            } => {
-                let source_table = TableName::new(source_table);
-                if visited.contains(&source_table) {
-                    return false;
-                }
-                schema
-                    .get(&source_table)
-                    .and_then(|source_schema| {
-                        let source_policy = source_schema.policies.select.using.as_ref()?;
-                        visited.push(source_table);
-                        let requires_native = inner(schema, source_schema, source_policy, visited);
-                        visited.pop();
-                        Some(requires_native)
-                    })
-                    .unwrap_or(false)
-            }
-            _ => false,
-        }
-    }
-
-    inner(schema, table_schema, expr, &mut vec![*table])
-}
-
 fn append_inherited_policy_branches(
     table: &TableName,
     path: &str,
@@ -2532,7 +2464,7 @@ mod tests {
             crate::groove::records::ValueType::String => GrooveValue::String("value".to_owned()),
             crate::groove::records::ValueType::Bytes => GrooveValue::Bytes(vec![8]),
             crate::groove::records::ValueType::Uuid => GrooveValue::Uuid(Uuid::from_bytes([9; 16])),
-            crate::groove::records::ValueType::Enum(_) => GrooveValue::Enum(0),
+            crate::groove::records::ValueType::EnumTag(_) => GrooveValue::EnumTag(0),
             crate::groove::records::ValueType::Tuple(members) => {
                 GrooveValue::Tuple(members.iter().map(sample_groove_value).collect::<Vec<_>>())
             }
@@ -2553,6 +2485,9 @@ mod tests {
                         .unwrap(),
                     **descriptor,
                 ))
+            }
+            crate::groove::records::ValueType::Enum(_) => {
+                panic!("Jazz public schema conversion must not receive whole-row Groove enums")
             }
         }
     }

@@ -12,7 +12,12 @@ export type ValueType = {
   enumSchema?: EnumSchema;
 };
 export type DescriptorField = { name?: string; valueType: ValueType };
-export type EnumSchema = { name: string; variants: string[] };
+export type EnumSchema = {
+  registryId?: number;
+  name: string;
+  variants?: string[];
+  cases?: { name: string; payload: DescriptorField[] }[];
+};
 export type NativeRow = { rowId: Uint8Array; deleted: boolean; raw: Uint8Array };
 export type NativeRowBatch = { table: string; descriptor: DescriptorField[]; rows: NativeRow[] };
 export type NativeRemovedRow = { table: string; rowId: Uint8Array };
@@ -39,6 +44,7 @@ type PostcardReaderLike = {
 };
 
 type PostcardWriterLike = {
+  u64(value: number): void;
   vec(writeItem: (writer: PostcardWriterLike, index: number) => void, length: number): void;
   some(writeValue: (writer: PostcardWriterLike) => void): void;
   string(value: string): void;
@@ -174,18 +180,18 @@ export function readDescriptor(reader: PostcardReaderLike): DescriptorField[] {
 export function writeValueType(writer: PostcardWriterLike, valueType: ValueType): void {
   writer.enumUnit(valueType.tag);
   if (valueType.tag === 11) {
-    if (!valueType.enumSchema) throw new Error("missing enum schema for ValueType::Enum");
-    writer.string(valueType.enumSchema.name);
-    writer.vec(
-      (variantWriter, index) => variantWriter.string(valueType.enumSchema!.variants[index]!),
-      valueType.enumSchema.variants.length,
-    );
+    const enumSchema = valueType.enumSchema;
+    const variants = enumSchema?.variants;
+    if (!enumSchema || !variants) throw new Error("missing enum schema for ValueType::Enum");
+    writer.u64(enumSchema.registryId ?? 0);
+    writer.string(enumSchema.name);
+    writer.vec((variantWriter, index) => variantWriter.string(variants[index]!), variants.length);
     return;
   }
   if (valueType.tag === 12) {
     const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
     writer.vec(
-      (memberWriter, index) => writeValueType(memberWriter, members[index]),
+      (memberWriter, index) => writeValueType(memberWriter, members[index]!),
       members.length,
     );
     return;
@@ -198,6 +204,19 @@ export function writeValueType(writer: PostcardWriterLike, valueType: ValueType)
   if (valueType.tag === 15) {
     if (!valueType.record) throw new Error("missing inline record descriptor for tag 15");
     writeDescriptor(writer, valueType.record);
+    return;
+  }
+  if (valueType.tag === 16) {
+    const enumSchema = valueType.enumSchema;
+    const cases = enumSchema?.cases;
+    if (!enumSchema || !cases) throw new Error("missing cases for ValueType::Enum");
+    writer.u64(enumSchema.registryId ?? 0);
+    writer.string(enumSchema.name);
+    writer.vec((caseWriter, index) => {
+      const enumCase = cases[index]!;
+      caseWriter.string(enumCase.name);
+      writeDescriptor(caseWriter, enumCase.payload);
+    }, cases.length);
   }
 }
 
@@ -207,6 +226,7 @@ export function readValueType(reader: PostcardReaderLike): ValueType {
     return {
       tag,
       enumSchema: {
+        registryId: reader.u64(),
         name: reader.string(),
         variants: reader.readVec((variantReader) => variantReader.string()),
       },
@@ -221,6 +241,19 @@ export function readValueType(reader: PostcardReaderLike): ValueType {
   }
   if (tag === 15) {
     return { tag, record: readDescriptor(reader) };
+  }
+  if (tag === 16) {
+    return {
+      tag,
+      enumSchema: {
+        registryId: reader.u64(),
+        name: reader.string(),
+        cases: reader.readVec((caseReader) => ({
+          name: caseReader.string(),
+          payload: readDescriptor(caseReader),
+        })),
+      },
+    };
   }
   return { tag };
 }
@@ -372,6 +405,199 @@ export function decodeNativeTerminalRow(
 }
 
 /**
+ * Decode a terminal root from the descriptor emitted with its edit.  Terminal
+ * payloads are not all CurrentRow carriers: ordinary roots may be logical
+ * non-nullable records while hop/gather roots retain nullable carriers.  The
+ * producer descriptor is therefore the sole authority for byte layout.
+ */
+export function decodeNativeTerminalRowWithDescriptor(
+  id: string,
+  descriptor: DescriptorField[],
+  columns: readonly ColumnDescriptor[],
+  raw: Uint8Array,
+): WasmRow {
+  assertTerminalRootDescriptorCompatible(descriptor, columns);
+  assertRecordLayoutIsComplete(descriptor, raw);
+  const key = decodeRecordValue(descriptor, raw, 0);
+  if (key == null || formatUuid(key) !== id) {
+    throw new Error("terminal record key does not match addressed key");
+  }
+  const values = columns.map((column, index) => {
+    const bytes = decodeRecordValue(descriptor, raw, index + 1);
+    return bytes == null
+      ? ({ type: "Null" } satisfies Value)
+      : decodeTerminalBytes(column.column_type, bytes);
+  });
+  const valuesByColumn = new Map(columns.map((column, index) => [column.name, values[index]!]));
+  const row = { id, values };
+  Object.defineProperty(row, "valuesByColumn", {
+    value: valuesByColumn,
+    enumerable: false,
+    configurable: true,
+  });
+  return row;
+}
+
+/**
+ * Verify that an operation-supplied terminal descriptor can describe this
+ * public projection.  This is intentionally stricter than layout matching:
+ * a same-width scalar of the wrong type can otherwise be decoded as a valid,
+ * but corrupt, public value.
+ */
+export function assertTerminalRootDescriptorCompatible(
+  descriptor: DescriptorField[],
+  columns: readonly ColumnDescriptor[],
+): void {
+  if (
+    descriptor.length !== columns.length + 1 ||
+    descriptor[0]?.valueType.tag !== 10 ||
+    !isKnownValueType(descriptor[0].valueType)
+  ) {
+    throw new Error("terminal root descriptor does not match the public projection");
+  }
+
+  const publicColumns = logicalStorageColumns(columns);
+  const matchesLogical = publicColumns.every((column, index) =>
+    terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, false),
+  );
+  const matchesPhysical = columns.every((column, index) =>
+    terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, false),
+  );
+  const matchesCurrentRow = publicColumns.every((column, index) =>
+    terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, true),
+  );
+  if (!matchesLogical && !matchesPhysical && !matchesCurrentRow) {
+    throw new Error("terminal root descriptor does not match the public projection");
+  }
+}
+
+function terminalValueTypeMatchesColumn(
+  valueType: ValueType | undefined,
+  column: ColumnDescriptor,
+  forceNullable: boolean,
+): boolean {
+  if (!valueType || !isKnownValueType(valueType)) return false;
+  if (column.sparse) {
+    return (
+      valueType.tag === 14 &&
+      valueType.inner !== undefined &&
+      terminalValueTypeMatchesColumn(
+        valueType.inner,
+        { ...column, sparse: undefined },
+        forceNullable,
+      )
+    );
+  }
+  if (forceNullable || column.nullable) {
+    return (
+      valueType.tag === 14 &&
+      valueType.inner !== undefined &&
+      terminalValueTypeMatchesColumn(valueType.inner, { ...column, nullable: false }, false)
+    );
+  }
+  switch (column.column_type.type) {
+    case "Boolean":
+      return valueType.tag === 7;
+    case "Integer":
+      return valueType.tag === 4;
+    case "BigInt":
+      return valueType.tag === 5;
+    case "Timestamp":
+      return valueType.tag === 3;
+    case "Double":
+      return valueType.tag === 6;
+    case "Text":
+    case "Json":
+    case "Enum":
+      return valueType.tag === 8;
+    case "Uuid":
+      return valueType.tag === 10;
+    case "Bytea":
+      return valueType.tag === 9;
+    case "Array":
+      return (
+        valueType.tag === 13 &&
+        valueType.inner !== undefined &&
+        terminalValueTypeMatchesColumn(
+          valueType.inner,
+          { name: column.name, column_type: column.column_type.element, nullable: false },
+          false,
+        )
+      );
+    case "Row":
+      // Terminal trees retain nested records, while ordinary packed rows use
+      // an opaque byte envelope. Both are sanctioned producer representations;
+      // any other variable-width type is not.
+      return (
+        valueType.tag === 9 ||
+        (valueType.tag === 15 &&
+          valueType.record !== undefined &&
+          valueType.record.length === column.column_type.columns.length + 1 &&
+          valueType.record[0]?.valueType.tag === 10 &&
+          column.column_type.columns.every((nested, index) =>
+            terminalValueTypeMatchesColumn(valueType.record?.[index + 1]?.valueType, nested, false),
+          ))
+      );
+  }
+}
+
+function isKnownValueType(valueType: ValueType): boolean {
+  switch (valueType.tag) {
+    case 0:
+    case 1:
+    case 2:
+    case 3:
+    case 4:
+    case 5:
+    case 6:
+    case 7:
+    case 8:
+    case 9:
+    case 10:
+      return true;
+    case 11:
+      return valueType.enumSchema?.variants !== undefined;
+    case 12:
+      return valueType.members !== undefined && valueType.members.every(isKnownValueType);
+    case 13:
+    case 14:
+      return valueType.inner !== undefined && isKnownValueType(valueType.inner);
+    case 15:
+      return (
+        valueType.record !== undefined &&
+        valueType.record.every((field) => isKnownValueType(field.valueType))
+      );
+    case 16:
+      return (
+        valueType.enumSchema?.cases !== undefined &&
+        valueType.enumSchema.cases.every((enumCase) =>
+          enumCase.payload.every((field) => isKnownValueType(field.valueType)),
+        )
+      );
+    default:
+      return false;
+  }
+}
+
+function assertRecordLayoutIsComplete(descriptor: DescriptorField[], raw: Uint8Array): void {
+  const layout = recordLayout(descriptor);
+  const variableCount = layout.variable.length;
+  const offsetTableLength = Math.max(0, variableCount - 1) * 4;
+  const variableStart = layout.fixedSize + offsetTableLength;
+  if (raw.length < variableStart || (variableCount === 0 && raw.length !== layout.fixedSize)) {
+    throw new Error("terminal record has trailing or truncated bytes");
+  }
+  let previous = variableStart;
+  for (let index = 0; index < variableCount - 1; index++) {
+    const next = readU32Le(raw, layout.fixedSize + index * 4);
+    if (next < previous || next > raw.length) {
+      throw new Error("terminal record has invalid variable-field offsets");
+    }
+    previous = next;
+  }
+}
+
+/**
  * Groove terminal payloads retain `Record` values for nested relation rows.
  * Ordinary packed transport deliberately represents those rows as byte arrays
  * with an id/length envelope instead. Both outer records have the same layout,
@@ -426,7 +652,7 @@ export function createNativeRowValueEncoder(
     const encoded: Uint8Array[] = [];
     encoded.length = columns.length;
     for (let index = 0; index < columns.length; index += 1) {
-      encoded[index] = encodeValueForColumn(columns[index], values[index]);
+      encoded[index] = encodeNativeColumnValue(columns[index], values[index]);
     }
     return createRecordWithLayout(layout, encoded);
   };
@@ -578,31 +804,42 @@ function descriptorFromColumns(columns: readonly ColumnDescriptor[]): Descriptor
   }));
 }
 
-function encodeValueForColumn(column: ColumnDescriptor, value: Value | undefined): Uint8Array {
+/**
+ * Encode a physical storage value for a declared column.
+ *
+ * This is the single authority for the value bytes shared by packed rows and
+ * mutation-cell records. Callers retain responsibility for their distinct
+ * omission/default policies, but a present value must always use this path so
+ * nullable and sparse carrier layers remain part of the descriptor contract.
+ */
+export function encodeNativeColumnValue(
+  column: ColumnDescriptor,
+  value: Value | undefined,
+): Uint8Array {
   const logicalType = storageColumnTypeToValueType(column.column_type);
   const nullableType: ValueType = column.nullable ? { tag: 14, inner: logicalType } : logicalType;
 
   if (!value) {
-    if (column.sparse) return encodeNullValue({ tag: 14, inner: nullableType });
+    if (column.sparse) return encodeNativeNullValue({ tag: 14, inner: nullableType });
     if (!column.nullable) {
       throw new Error(`missing non-nullable value for ${column.name}`);
     }
-    return encodeNullValue(nullableType);
+    return encodeNativeNullValue(nullableType);
   }
   if (value.type === "Null") {
     if (!column.nullable) {
       throw new Error(`missing non-nullable value for ${column.name}`);
     }
-    const encodedNull = encodeNullValue(nullableType);
-    return column.sparse ? encodePresentValue(encodedNull, nullableType) : encodedNull;
+    const encodedNull = encodeNativeNullValue(nullableType);
+    return column.sparse ? encodeNativePresentValue(encodedNull, nullableType) : encodedNull;
   }
-  let encoded = encodeNonNullValue(column.column_type, value);
-  if (column.nullable) encoded = encodePresentValue(encoded, logicalType);
-  return column.sparse ? encodePresentValue(encoded, nullableType) : encoded;
+  let encoded = encodeNativeNonNullValue(column.column_type, value);
+  if (column.nullable) encoded = encodeNativePresentValue(encoded, logicalType);
+  return column.sparse ? encodeNativePresentValue(encoded, nullableType) : encoded;
 }
 
-function encodePresentValue(encoded: Uint8Array, inner: ValueType): Uint8Array {
-  if (fixedSize(inner) == null) {
+function encodeNativePresentValue(encoded: Uint8Array, inner: ValueType): Uint8Array {
+  if (nativeFixedValueSize(inner) == null) {
     return concatBytes([Uint8Array.of(1), encoded]);
   }
   const output = new Uint8Array(1 + encoded.length);
@@ -611,12 +848,12 @@ function encodePresentValue(encoded: Uint8Array, inner: ValueType): Uint8Array {
   return output;
 }
 
-function encodeNullValue(valueType: ValueType): Uint8Array {
-  const width = fixedSize(valueType);
+export function encodeNativeNullValue(valueType: ValueType): Uint8Array {
+  const width = nativeFixedValueSize(valueType);
   return width == null ? Uint8Array.of(0) : new Uint8Array(width);
 }
 
-function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
+function encodeNativeNonNullValue(type: ColumnType, value: Value): Uint8Array {
   switch (type.type) {
     case "Boolean":
       if (value.type !== "Boolean") throw new Error("expected Boolean value");
@@ -660,14 +897,14 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
       return value.value;
     case "Array":
       if (value.type !== "Array") throw new Error("expected Array value");
-      return encodeArrayValue(type.element, value.value);
+      return encodeNativeArrayValue(type.element, value.value);
     case "Row":
       if (value.type !== "Row") throw new Error("expected Row value");
-      return encodeRowValue(type.columns, value.value);
+      return encodeNativeRowValue(type.columns, value.value);
   }
 }
 
-function encodeRowValue(
+function encodeNativeRowValue(
   columns: readonly ColumnDescriptor[],
   value: { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> },
 ): Uint8Array {
@@ -685,14 +922,14 @@ function encodeRowValue(
   return concatBytes([
     Uint8Array.of(value.id ? 1 : 0),
     idBytes,
-    u32Le(encodedValues.byteLength),
+    encodeU32Le(encodedValues.byteLength),
     encodedValues,
   ]);
 }
 
-function encodeArrayValue(elementType: ColumnType, values: readonly Value[]): Uint8Array {
-  const encoded = values.map((value) => encodeNonNullValue(elementType, value));
-  const elementWidth = fixedSize(storageColumnTypeToValueType(elementType));
+function encodeNativeArrayValue(elementType: ColumnType, values: readonly Value[]): Uint8Array {
+  const encoded = values.map((value) => encodeNativeNonNullValue(elementType, value));
+  const elementWidth = nativeFixedValueSize(storageColumnTypeToValueType(elementType));
   if (elementWidth != null) return concatBytes(encoded);
 
   const offsets = new Uint8Array(Math.max(0, values.length - 1) * 4);
@@ -702,10 +939,10 @@ function encodeArrayValue(elementType: ColumnType, values: readonly Value[]): Ui
     nextOffset += chunk.length;
     view.setUint32(index * 4, nextOffset, true);
   });
-  return concatBytes([u32Le(values.length), offsets, ...encoded]);
+  return concatBytes([encodeU32Le(values.length), offsets, ...encoded]);
 }
 
-function u32Le(value: number): Uint8Array {
+export function encodeU32Le(value: number): Uint8Array {
   const bytes = new Uint8Array(4);
   new DataView(bytes.buffer).setUint32(0, value, true);
   return bytes;
@@ -872,7 +1109,7 @@ function decodeArrayElements<T>(
   bytes: Uint8Array,
   decodeElement: (bytes: Uint8Array) => T,
 ): T[] {
-  const elementWidth = fixedSize(storageColumnTypeToValueType(elementType));
+  const elementWidth = nativeFixedValueSize(storageColumnTypeToValueType(elementType));
   if (elementWidth != null) {
     if (elementWidth === 0) return [];
     if (bytes.length % elementWidth !== 0) {
@@ -924,7 +1161,7 @@ function formatUuid(bytes: Uint8Array): string {
   )}-${hex.slice(20)}`;
 }
 
-function fixedSize(valueType: ValueType): number | undefined {
+export function nativeFixedValueSize(valueType: ValueType): number | undefined {
   switch (valueType.tag) {
     case 0:
     case 7:
@@ -945,14 +1182,14 @@ function fixedSize(valueType: ValueType): number | undefined {
       const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
       return members.reduce<number | undefined>((total, member) => {
         if (total == null) return undefined;
-        const memberSize = fixedSize(member);
+        const memberSize = nativeFixedValueSize(member);
         return memberSize == null ? undefined : total + memberSize;
       }, 0);
     }
     case 13:
       return undefined;
     case 14: {
-      const innerSize = valueType.inner ? fixedSize(valueType.inner) : undefined;
+      const innerSize = valueType.inner ? nativeFixedValueSize(valueType.inner) : undefined;
       return innerSize == null ? undefined : innerSize + 1;
     }
     default:
@@ -986,7 +1223,7 @@ function recordLayout(descriptor: DescriptorField[]): {
   let fixedOffset = 0;
 
   for (let logicalIndex = 0; logicalIndex < descriptor.length; logicalIndex += 1) {
-    const size = fixedSize(descriptor[logicalIndex].valueType);
+    const size = nativeFixedValueSize(descriptor[logicalIndex].valueType);
     if (size == null) continue;
     const layout = { kind: "fixed" as const, logicalIndex, offset: fixedOffset, size };
     fields[logicalIndex] = layout;
@@ -995,7 +1232,7 @@ function recordLayout(descriptor: DescriptorField[]): {
   }
 
   for (let logicalIndex = 0; logicalIndex < descriptor.length; logicalIndex += 1) {
-    if (fixedSize(descriptor[logicalIndex].valueType) != null) continue;
+    if (nativeFixedValueSize(descriptor[logicalIndex].valueType) != null) continue;
     const layout = {
       kind: "variable" as const,
       logicalIndex,

@@ -67,6 +67,8 @@ export type NativeTerminalEdit =
   | { Remove: { key: number[] } }
   | { Move: { key: number[]; index: number } };
 export interface NativeTerminalOperation {
+  /** Postcard-encoded Groove root record descriptor for this terminal tree. */
+  rootDescriptor?: number[];
   root_key: number[];
   path: NativeTerminalPathSegment[];
   edit: NativeTerminalEdit;

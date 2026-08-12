@@ -31,7 +31,9 @@ jobs:
   # one property we can guarantee, and is fast and flake-free. Promote the other
   # jobs to gates individually as each goes green.
   build-integration:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Trusted branches use the persistent runner; fork PRs remain isolated on
+    # hosted infrastructure because this job executes repository code.
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'blacksmith-4vcpu-ubuntu-2404' || 'jazz-ci' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -40,9 +42,7 @@ jobs:
         with:
           rust-targets: wasm32-unknown-unknown
           sccache: "true"
-
-      - name: Install Rust prerequisites
-        run: pnpm run ensure:rust-toolchain
+          sccache-sticky-disk: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'true' || 'false' }}
 
       - run: cargo check --workspace --all-targets
 
@@ -58,12 +58,12 @@ jobs:
           rust-components: clippy,rustfmt
           sccache: "true"
 
-      - name: Install Rust prerequisites
-        run: pnpm run ensure:rust-toolchain
-
       - run: pnpm format:check
       - run: pnpm lint
-      - run: cargo clippy --workspace -- -D warnings
+      # Keep workflow assertions required without adding another Rust build.
+      - run: pnpm test:ci-workflow
+      - name: Verify Turbo artifact cache inputs
+        run: pnpm test:turbo-cache-inputs
 
   test-rust:
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -77,11 +77,12 @@ jobs:
           rust-components: clippy,rustfmt
           sccache: "true"
 
-      - name: Install Rust prerequisites
-        run: pnpm run ensure:rust-toolchain
-
       - name: Install bounded Rust test runner
-        run: cargo install cargo-nextest --locked
+        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+        with:
+          # Download the release asset rather than compiling the runner in
+          # every job. Keep this explicit so test selection is reproducible.
+          tool: cargo-nextest@0.9.143
       - name: Workspace Rust tests (bounded, sharded, receipted)
         run: node dev/gates/run-rust-tests.mjs --timeout-seconds 780 -- --workspace --lib --bins --tests --features test
       - name: Verify Nextest partition coverage
@@ -105,7 +106,7 @@ jobs:
           JAZZ_SEED_COUNT=50 cargo test -p jazz m3_maintained_one_shot_differential_oracle
 
   test-ts:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'blacksmith-4vcpu-ubuntu-2404' || 'jazz-ci' }}
     timeout-minutes: 20
     # JAZZ_NAPI_RELEASE=0 (debug builds) removed 2026-07-19: debug-profile
     # jazz-napi .node files fail dlopen on the Linux runners deterministically
@@ -119,29 +120,31 @@ jobs:
           rust-targets: wasm32-unknown-unknown
           rust-components: clippy,rustfmt
           sccache: "true"
+          sccache-sticky-disk: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'true' || 'false' }}
 
-      - name: Install Rust prerequisites
-        run: pnpm run ensure:rust-toolchain
+      - name: Install WASM packager
+        # Only this job builds jazz-wasm. Other Rust jobs receive their target
+        # through setup-build but do not pay to install the packager.
+        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+        with:
+          tool: wasm-pack@0.13.1
 
       - name: Mount Turbo sticky disk
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
         uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:
           key: turbo-cache-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ runner.os }}-v1
           path: ${{ github.workspace }}/.turbo/cache
 
-      - run: pnpm build:ci
-      # Turbo cache hits have reproducibly restored jazz-napi without a loadable
-      # .node binding (CI rounds 9/9-rerun, 2026-07-19); verify and force-rebuild
-      # if needed. See dev/CI_NOTES.md.
-      # Cached jazz-napi archives have restored .node files that fail dlopen
-      # (likely sticky-disk corruption across concurrent runs); build the
-      # binding fresh and verify it loads. Tests then run with --only so no
-      # turbo build dependency can restore a cached artifact over it.
-      - name: Rebuild and verify jazz-napi native binding
-        run: |
-          pnpm turbo run build --filter=jazz-napi --force
-          node -e "require('./crates/jazz-napi')"
+      # Correctness tests use an unoptimised, provenance-checked WASM build.
+      # Package/publish workflows continue to use jazz-wasm's release build.
+      # The script reuses the restored default Cargo target, runs NAPI alone on
+      # the 4-vCPU runner, then overlaps CLI with fast WASM. It only repairs
+      # NAPI if its first load check proves the artifact unusable.
+      - name: Build correctness-test artifacts
+        run: pnpm build:test-artifacts
       - name: Mount Playwright sticky disk
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
         uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:
           key: playwright-browsers-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ runner.os }}-v1

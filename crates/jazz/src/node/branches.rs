@@ -1113,11 +1113,11 @@ where
             if projected_table.as_deref() != Some(table) {
                 continue;
             }
-            rows.push(current_row_from_materialized_cells(
-                table_schema,
-                &content,
-                &cells,
-            )?);
+            match current_row_from_materialized_cells(table_schema, &content, &cells) {
+                Ok(row) => rows.push(row),
+                Err(error) if is_unrepresentable_enum_projection(&error) => {}
+                Err(error) => return Err(error),
+            }
         }
         sort_current_rows(&mut rows);
         Ok(rows)
@@ -1647,7 +1647,12 @@ where
             .database
             .primary_key_scan_raw(&storage_table, &[Value::Uuid(row_uuid.0)])?
             .into_iter()
-            .map(|raw| (SchemaVersionAlias(raw.schema_version()), raw.raw().to_vec()))
+            .map(|raw| {
+                (
+                    SchemaVersionAlias(u64::from(raw.variant_tag())),
+                    raw.raw().to_vec(),
+                )
+            })
             .collect::<Vec<_>>();
         let mut versions = Vec::with_capacity(raws.len());
         for (schema_alias, raw) in raws {

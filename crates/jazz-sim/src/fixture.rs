@@ -318,7 +318,7 @@ impl CellValueGen {
                 assert!(start <= end, "invalid u64 range");
                 Value::U64(*start + (rng.next_u64() % (*end - *start + 1)))
             }
-            Self::EnumWeighted { weights } => Value::Enum(rng.weighted_index(weights) as u8),
+            Self::EnumWeighted { weights } => Value::EnumTag(rng.weighted_index(weights) as u8),
             Self::UuidRef { set, distribution } => {
                 let rows = fixture
                     .rows_by_set

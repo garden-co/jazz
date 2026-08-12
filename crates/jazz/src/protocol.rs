@@ -591,7 +591,7 @@ impl VersionRecord {
             Value::Uuid(updated_by.0),
             Value::U64(updated_at.0),
             Value::Nullable(deletion.map(|deletion| {
-                Box::new(Value::Enum(match deletion {
+                Box::new(Value::EnumTag(match deletion {
                     DeletionEvent::Deleted => 0,
                     DeletionEvent::Restored => 1,
                 }))
@@ -862,8 +862,8 @@ fn deletion_from_value(value: Value) -> Result<Option<DeletionEvent>, &'static s
     match value {
         Value::Nullable(None) => Ok(None),
         Value::Nullable(Some(value)) => match *value {
-            Value::Enum(0) => Ok(Some(DeletionEvent::Deleted)),
-            Value::Enum(1) => Ok(Some(DeletionEvent::Restored)),
+            Value::EnumTag(0) => Ok(Some(DeletionEvent::Deleted)),
+            Value::EnumTag(1) => Ok(Some(DeletionEvent::Restored)),
             _ => Err("deletion"),
         },
         _ => Err("deletion"),
@@ -2758,7 +2758,7 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             bytes.push(8);
             bytes.extend_from_slice(value.as_bytes());
         }
-        Value::Enum(value) => {
+        Value::EnumTag(value) => {
             bytes.push(9);
             bytes.push(*value);
         }
@@ -2782,6 +2782,11 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
         }
         Value::Record(_) => {
             panic!("record-valued values have no v3 protocol encoding")
+        }
+        Value::Enum(_) => {
+            panic!(
+                "union-valued values are an internal Groove representation, not a Jazz protocol value"
+            )
         }
     }
 }
