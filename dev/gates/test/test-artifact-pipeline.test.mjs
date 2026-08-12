@@ -1,9 +1,124 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import test from "node:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildTestArtifacts, command } from "../build-test-artifacts.mjs";
+import { acquireArtifactBuildLock, buildTestArtifacts, command } from "../build-test-artifacts.mjs";
+
+const pipelineUrl = new URL("../build-test-artifacts.mjs", import.meta.url).href;
+
+function childWithLock(lockPath, body) {
+  const child = spawn(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `import { withArtifactBuildLock } from ${JSON.stringify(pipelineUrl)}; ${body}`,
+    ],
+    {
+      env: { ...process.env, JAZZ_TEST_ARTIFACT_LOCK_PATH: lockPath },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let output = "";
+  child.stdout.on("data", (chunk) => (output += chunk));
+  child.stderr.on("data", (chunk) => (output += chunk));
+  return {
+    child,
+    output: () => output,
+    closed: new Promise((resolve) =>
+      child.once("close", (code, signal) => resolve({ code, signal })),
+    ),
+  };
+}
+
+async function waitFor(condition, message) {
+  for (let attempts = 0; attempts < 100; attempts++) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+}
+
+test("artifact lock rejects a concurrent real subprocess with actionable ownership", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "jazz-test-artifact-lock-"));
+  const lockPath = join(fixture, "lock");
+  const holder = childWithLock(
+    lockPath,
+    "await withArtifactBuildLock(() => new Promise(() => setInterval(() => {}, 1000)));",
+  );
+  try {
+    await waitFor(() => existsSync(join(lockPath, "owner.json")), "holder did not acquire lock");
+    const contender = childWithLock(lockPath, "await withArtifactBuildLock(async () => {});");
+    const result = await contender.closed;
+    assert.equal(result.code, 1);
+    assert.match(
+      contender.output(),
+      /another artifact build is active \(pid \d+, cwd .+, started .+\)/,
+    );
+    assert.match(contender.output(), /Lock:/);
+  } finally {
+    holder.child.kill("SIGTERM");
+    await holder.closed;
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("artifact lock recovers only a positively stale owner", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "jazz-test-artifact-stale-"));
+  const lockPath = join(fixture, "lock");
+  mkdirSync(lockPath);
+  writeFileSync(
+    join(lockPath, "owner.json"),
+    JSON.stringify({
+      pid: 999_999_999,
+      cwd: "stale-checkout",
+      startedAt: "2000-01-01T00:00:00.000Z",
+      token: "dead",
+    }),
+  );
+  const lock = acquireArtifactBuildLock(lockPath);
+  assert.equal(existsSync(join(lockPath, "owner.json")), true);
+  lock.release();
+  assert.equal(existsSync(lockPath), false);
+  rmSync(fixture, { recursive: true, force: true });
+});
+
+test("artifact lock refuses an unowned directory instead of deleting a possibly live lock", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "jazz-test-artifact-unowned-"));
+  const lockPath = join(fixture, "lock");
+  mkdirSync(lockPath);
+  assert.throws(() => acquireArtifactBuildLock(lockPath), /no usable owner metadata/);
+  assert.equal(existsSync(lockPath), true);
+  rmSync(fixture, { recursive: true, force: true });
+});
+
+test("artifact lock cleans up after a real failure and termination signal", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "jazz-test-artifact-cleanup-"));
+  const failingLock = join(fixture, "failure-lock");
+  const failure = childWithLock(
+    failingLock,
+    "await withArtifactBuildLock(async () => { throw new Error('deliberate failure'); });",
+  );
+  assert.equal((await failure.closed).code, 1);
+  assert.equal(existsSync(failingLock), false);
+
+  const signalLock = join(fixture, "signal-lock");
+  const running = childWithLock(
+    signalLock,
+    "await withArtifactBuildLock(() => new Promise(() => setInterval(() => {}, 1000)));",
+  );
+  await waitFor(
+    () => existsSync(join(signalLock, "owner.json")),
+    "signal child did not acquire lock",
+  );
+  running.child.kill("SIGTERM");
+  const terminated = await running.closed;
+  assert.equal(terminated.signal, "SIGTERM");
+  assert.equal(existsSync(signalLock), false);
+  rmSync(fixture, { recursive: true, force: true });
+});
 
 test("test artifact pipeline overlaps independent bindings and repairs NAPI only after a failed load", async () => {
   const calls = [];
