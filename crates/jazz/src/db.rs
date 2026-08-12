@@ -7657,24 +7657,23 @@ where
                             if let Some((tx_id, fate)) = routed_fate {
                                 let authority = *expected_scope_authority;
                                 let mut routes = self.edge_fate_routes.borrow_mut();
-                                let Some(pending) = routes.get_mut(&tx_id) else {
-                                    continue;
-                                };
-                                let mut remaining = Vec::new();
-                                for route in std::mem::take(pending) {
-                                    if Some(route.authority) == authority {
-                                        if let Some(queue) = route.queue.upgrade() {
-                                            queue.borrow_mut().push(fate.clone());
+                                if let Some(pending) = routes.get_mut(&tx_id) {
+                                    let mut remaining = Vec::new();
+                                    for route in std::mem::take(pending) {
+                                        if Some(route.authority) == authority {
+                                            if let Some(queue) = route.queue.upgrade() {
+                                                queue.borrow_mut().push(fate.clone());
+                                            }
+                                        } else {
+                                            remaining.push(route);
                                         }
-                                    } else {
-                                        remaining.push(route);
                                     }
-                                }
-                                if remaining.is_empty() {
-                                    routes.remove(&tx_id);
-                                } else {
-                                    *routes.get_mut(&tx_id).expect("route remains present") =
-                                        remaining;
+                                    if remaining.is_empty() {
+                                        routes.remove(&tx_id);
+                                    } else {
+                                        *routes.get_mut(&tx_id).expect("route remains present") =
+                                            remaining;
+                                    }
                                 }
                             }
                         }

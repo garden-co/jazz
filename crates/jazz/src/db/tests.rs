@@ -14626,7 +14626,9 @@ fn db_sync_surface_returns_exclusive_conflict_fate_to_client() {
 }
 
 /// An authority rejection with no application waiter is delivered once through
-/// the mutation-error callback on the following scheduled database tick.
+/// the mutation-error callback on the following scheduled database tick. This
+/// is an ordinary client connection, so the fate has no edge-forwarding route
+/// and must still run the local write-state handler.
 #[test]
 fn unhandled_rejection_is_delivered_as_mutation_error() {
     let schema = schema();
@@ -14658,6 +14660,13 @@ fn unhandled_rejection_is_delivered_as_mutation_error() {
 
     let events = events.borrow();
     assert_eq!(events.len(), 1);
+    assert_eq!(
+        client.write_state(write.mergeable_tx_id()).unwrap(),
+        WriteState {
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            durability: DurabilityTier::Edge,
+        }
+    );
     assert_eq!(events[0].code, "permission_denied");
     assert_eq!(
         events[0].transaction.batch_id,
@@ -14667,7 +14676,8 @@ fn unhandled_rejection_is_delivered_as_mutation_error() {
 }
 
 /// A live application waiter consumes an authority rejection and prevents the
-/// fallback mutation-error callback from firing.
+/// fallback mutation-error callback from firing, including when the fate has
+/// no edge-forwarding route and only the ordinary local handler can notify it.
 #[test]
 fn waited_rejection_is_not_delivered_as_mutation_error() {
     let schema = schema();
